@@ -174,6 +174,8 @@ export function renderDashboardPage(): string {
     .goal-dot.cancelled { background: #666; }
     .goal-info { flex: 1; min-width: 0; }
     .goal-title { font-size: 13px; color: #ddd; margin-bottom: 4px; }
+    .goal-item.done .goal-title { text-decoration: line-through; color: #555; }
+    .goal-item.done { opacity: 0.5; }
     .goal-meta { font-size: 11px; color: #555; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
     /* Task items */
@@ -482,13 +484,15 @@ export function renderDashboardPage(): string {
       document.getElementById('goalsCount').textContent = goals.length;
       if (!goals.length) { el.innerHTML = '<div class="panel-empty">No goals yet</div>'; return; }
       el.innerHTML = goals.map(g => {
+        const isDone = g.status === 'completed' || g.status === 'cancelled';
         const tags = (g.tags || []).map(t => '<span class="tag">' + escapeHtml(t) + '</span>').join('');
-        const dl = g.deadline ? '<span>' + deadlineText(g.deadline) + '</span>' : '';
-        return '<div class="goal-item">' +
+        const dl = g.deadline && !isDone ? '<span>' + deadlineText(g.deadline) + '</span>' : '';
+        const statusLabel = isDone ? '<span>' + g.status + '</span>' : '';
+        return '<div class="goal-item' + (isDone ? ' done' : '') + '">' +
           '<div class="goal-dot ' + g.status + '"></div>' +
           '<div class="goal-info">' +
             '<div class="goal-title">' + escapeHtml(g.title) + '</div>' +
-            '<div class="goal-meta">' + dl + tags + '</div>' +
+            '<div class="goal-meta">' + statusLabel + dl + tags + '</div>' +
           '</div></div>';
       }).join('');
     }

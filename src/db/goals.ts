@@ -95,6 +95,7 @@ export async function getAllGoals(): Promise<Goal[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT * FROM goals
+    WHERE NOT (status IN ('completed', 'cancelled') AND updated_at < now() - interval '7 days')
     ORDER BY
       CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
       deadline ASC NULLS LAST,
