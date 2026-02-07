@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: javrvis-postgres
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: javrvis
+      POSTGRES_PASSWORD: javrvis
+      POSTGRES_DB: javrvis
+    volumes:
+      - javrvis-pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U javrvis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  javrvis-pgdata:

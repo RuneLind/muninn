@@ -119,7 +119,7 @@ Personal AI assistant — Telegram bot backed by Claude CLI, with a live Hono da
 ### Running
 
 ```bash
-supabase start              # Start local Postgres (requires Docker)
+bun run db:up               # Start Postgres (requires Docker)
 bun run dev                 # Dev with --watch
 bun run start               # Production
 ```
@@ -149,11 +149,12 @@ Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
 
 ### Database
 
-Local Supabase (PostgreSQL + pgvector) via Docker.
+PostgreSQL + pgvector via Docker (single container).
 
-- URL: `postgresql://postgres:postgres@127.0.0.1:54322/postgres`
-- Migrations: `supabase/migrations/`
-- Apply: `bunx supabase db reset` or `bunx supabase migration up --local`
+- URL: `postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis`
+- Schema: `db/init.sql` (runs automatically on first `docker compose up`)
+- Start: `bun run db:up` / Stop: `bun run db:down`
+- Backup: `bun run db:backup` / Restore: `bun run db:restore`
 - Tables: `messages`, `activity_log`, `memories` (with vector embeddings), `goals`, `scheduled_tasks`
 
 ### Configuration (.env)

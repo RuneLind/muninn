@@ -33,5 +33,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Whisper models
 models/
 
+# Database backups
+backups/
+
 # Finder (MacOS) folder config
 .DS_Store
