@@ -52,10 +52,33 @@ export function formatTelegramHtml(text: string): string {
   result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)]);
   result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)]);
 
+  // Escape any HTML tags that Telegram doesn't support
+  // Telegram allows: b, i, u, s, code, pre, a, tg-spoiler, tg-emoji, blockquote
+  const allowedTags = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
+  result = result.replace(/<([^>]+)>/g, (match, inner) => {
+    if (allowedTags.test(inner)) return match;
+    return `&lt;${inner}&gt;`;
+  });
+
   // Clean up excessive blank lines
   result = result.replace(/\n{3,}/g, "\n\n");
 
   return result.trim();
+}
+
+/**
+ * Strip all HTML tags for plain-text fallback when Telegram rejects the HTML.
+ */
+export function stripHtml(text: string): string {
+  return text
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function escapeHtml(text: string): string {

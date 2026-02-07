@@ -6,8 +6,10 @@ import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
+import { extractGoalAsync } from "../goals/detector.ts";
+import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { splitMessage } from "./handler.ts";
-import { formatTelegramHtml } from "./telegram-format.ts";
+import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
 import { Timing } from "../utils/timing.ts";
@@ -58,7 +60,7 @@ export function createVoiceHandler(config: Config) {
 
     // Build context-aware prompt and run through Claude
     t.start("prompt_build");
-    const { prompt, meta: promptMeta } = await buildPrompt(userId, text);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
     t.end("prompt_build");
 
     const typingInterval = setInterval(() => {
@@ -68,7 +70,7 @@ export function createVoiceHandler(config: Config) {
 
     try {
       t.start("claude");
-      const result = await executeClaudePrompt(prompt, config);
+      const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
       clearInterval(typingInterval);
 
@@ -87,13 +89,30 @@ export function createVoiceHandler(config: Config) {
       });
       t.end("db_save_response");
 
-      // Extract memories async
+      // Extract memories and goals async
       extractMemoryAsync(
         {
           userId,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
+        },
+        config,
+      );
+      extractGoalAsync(
+        {
+          userId,
+          userMessage: text,
+          assistantResponse: result.result,
+          sourceMessageId: messageId,
+        },
+        config,
+      );
+      extractScheduleAsync(
+        {
+          userId,
+          userMessage: text,
+          assistantResponse: result.result,
         },
         config,
       );
@@ -114,7 +133,7 @@ export function createVoiceHandler(config: Config) {
       t.start("telegram_send");
       if (fullHtml.length <= 4096) {
         await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
-          await ctx.reply(result.result);
+          await ctx.reply(stripHtml(result.result));
         });
       } else {
         const chunks = splitMessage(html, 4096 - footer.length);
@@ -122,7 +141,7 @@ export function createVoiceHandler(config: Config) {
           const raw = chunks[i]!;
           const chunk = i === chunks.length - 1 ? raw + footer : raw;
           await ctx.reply(chunk, { parse_mode: "HTML" }).catch(async () => {
-            await ctx.reply(raw);
+            await ctx.reply(stripHtml(raw));
           });
         }
       }

@@ -3,6 +3,8 @@ import { streamSSE } from "hono/streaming";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { getRecentMessages } from "../db/messages.ts";
+import { getActiveGoals } from "../db/goals.ts";
+import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 
 export function createDashboardRoutes(): Hono {
   const app = new Hono();
@@ -26,6 +28,24 @@ export function createDashboardRoutes(): Hono {
     const limit = parseInt(c.req.query("limit") ?? "50", 10);
     const messages = await getRecentMessages(userId, limit);
     return c.json({ messages });
+  });
+
+  app.get("/api/goals/:userId", async (c) => {
+    const userId = parseInt(c.req.param("userId"), 10);
+    if (isNaN(userId)) {
+      return c.json({ error: "Invalid userId" }, 400);
+    }
+    const goals = await getActiveGoals(userId);
+    return c.json({ goals });
+  });
+
+  app.get("/api/scheduled-tasks/:userId", async (c) => {
+    const userId = parseInt(c.req.param("userId"), 10);
+    if (isNaN(userId)) {
+      return c.json({ error: "Invalid userId" }, 400);
+    }
+    const tasks = await getScheduledTasksForUser(userId);
+    return c.json({ tasks });
   });
 
   app.get("/api/events", (c) => {

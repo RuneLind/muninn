@@ -5,7 +5,9 @@ import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
-import { formatTelegramHtml } from "./telegram-format.ts";
+import { extractGoalAsync } from "../goals/detector.ts";
+import { extractScheduleAsync } from "../scheduler/detector.ts";
+import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { Timing } from "../utils/timing.ts";
 
 export function createMessageHandler(config: Config) {
@@ -28,7 +30,7 @@ export function createMessageHandler(config: Config) {
 
     // Build context-aware prompt
     t.start("prompt_build");
-    const { prompt, meta: promptMeta } = await buildPrompt(userId, text);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
     t.end("prompt_build");
 
     // Keep typing indicator alive while Claude processes
@@ -41,7 +43,7 @@ export function createMessageHandler(config: Config) {
 
     try {
       t.start("claude");
-      const result = await executeClaudePrompt(prompt, config);
+      const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
 
       clearInterval(typingInterval);
@@ -61,13 +63,30 @@ export function createMessageHandler(config: Config) {
       });
       t.end("db_save_response");
 
-      // Extract memories async (don't block response)
+      // Extract memories and goals async (don't block response)
       extractMemoryAsync(
         {
           userId,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
+        },
+        config,
+      );
+      extractGoalAsync(
+        {
+          userId,
+          userMessage: text,
+          assistantResponse: result.result,
+          sourceMessageId: messageId,
+        },
+        config,
+      );
+      extractScheduleAsync(
+        {
+          userId,
+          userMessage: text,
+          assistantResponse: result.result,
         },
         config,
       );
@@ -90,7 +109,7 @@ export function createMessageHandler(config: Config) {
       t.start("telegram_send");
       if (fullHtml.length <= 4096) {
         await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
-          await ctx.reply(result.result);
+          await ctx.reply(stripHtml(result.result));
         });
       } else {
         // Split main content, add footer to last chunk
@@ -99,7 +118,7 @@ export function createMessageHandler(config: Config) {
           const raw = chunks[i]!;
           const chunk = i === chunks.length - 1 ? raw + footer : raw;
           await ctx.reply(chunk, { parse_mode: "HTML" }).catch(async () => {
-            await ctx.reply(raw);
+            await ctx.reply(stripHtml(raw));
           });
         }
       }

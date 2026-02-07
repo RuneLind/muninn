@@ -109,3 +109,74 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+---
+
+## Jarvis Project
+
+Personal AI assistant — Telegram bot backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, and voice support.
+
+### Running
+
+```bash
+supabase start              # Start local Postgres (requires Docker)
+bun run dev                 # Dev with --watch
+bun run start               # Production
+```
+
+### Architecture
+
+```
+Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
+                ↓                                      ↓
+          Save to DB                  Extract memories + goals + schedules (async)
+                ↓                                      ↓
+        Hono dashboard (SSE)          Unified scheduler (tasks + goal reminders)
+```
+
+### Key Modules
+
+| Module | Path | Purpose |
+|---|---|---|
+| Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
+| AI | `src/ai/` | Claude executor, prompt builder (memories + goals + tasks + history), embeddings |
+| Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories from conversations |
+| Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
+| Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders), task detector, shared Haiku executor |
+| DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks |
+| Dashboard | `src/dashboard/` | Hono server with SSE activity feed + REST APIs |
+| Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
+
+### Database
+
+Local Supabase (PostgreSQL + pgvector) via Docker.
+
+- URL: `postgresql://postgres:postgres@127.0.0.1:54322/postgres`
+- Migrations: `supabase/migrations/`
+- Apply: `bunx supabase db reset` or `bunx supabase migration up --local`
+- Tables: `messages`, `activity_log`, `memories` (with vector embeddings), `goals`, `scheduled_tasks`
+
+### Configuration (.env)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather |
+| `TELEGRAM_ALLOWED_USER_IDS` | Yes | — | Comma-separated Telegram user IDs |
+| `DATABASE_URL` | Yes | — | Postgres connection string |
+| `DASHBOARD_PORT` | No | `3000` | Web dashboard port |
+| `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout (ms) |
+| `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
+| `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | whisper-cpp model file |
+| `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval (ms, default 1min) |
+| `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler (tasks + goal reminders) |
+| `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
+| `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
+
+### Conventions
+
+- DB access: `postgres` npm package (not Supabase client, not Bun.sql)
+- Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
+- Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
+- Prompt assembly: system prompt + memories + goals + scheduled tasks + conversation history
+- Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
+- All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript

@@ -1,0 +1,113 @@
+import { getDb } from "./client.ts";
+import type { Goal, GoalStatus } from "../types.ts";
+
+interface SaveGoalParams {
+  userId: number;
+  title: string;
+  description?: string | null;
+  deadline?: Date | null;
+  tags?: string[];
+  sourceMessageId?: string | null;
+}
+
+export async function saveGoal(params: SaveGoalParams): Promise<string> {
+  const sql = getDb();
+  const [row] = await sql`
+    INSERT INTO goals (user_id, title, description, deadline, tags, source_message_id)
+    VALUES (
+      ${params.userId},
+      ${params.title},
+      ${params.description ?? null},
+      ${params.deadline ?? null},
+      ${params.tags ?? []},
+      ${params.sourceMessageId ?? null}
+    )
+    RETURNING id
+  `;
+  return row!.id;
+}
+
+export async function getActiveGoals(userId: number): Promise<Goal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM goals
+    WHERE user_id = ${userId} AND status = 'active'
+    ORDER BY deadline ASC NULLS LAST, created_at DESC
+  `;
+  return rows.map(mapRow);
+}
+
+export async function getGoalById(id: string): Promise<Goal | null> {
+  const sql = getDb();
+  const rows = await sql`SELECT * FROM goals WHERE id = ${id}`;
+  return rows.length > 0 ? mapRow(rows[0]!) : null;
+}
+
+export async function updateGoalStatus(
+  id: string,
+  status: GoalStatus,
+): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE goals SET status = ${status} WHERE id = ${id}`;
+}
+
+export async function updateGoalCheckedAt(id: string): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE goals SET last_checked_at = now() WHERE id = ${id}`;
+}
+
+export async function updateGoalReminderSentAt(id: string): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE goals SET reminder_sent_at = now() WHERE id = ${id}`;
+}
+
+export async function getGoalsNeedingReminder(
+  hoursAhead: number,
+): Promise<Goal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM goals
+    WHERE status = 'active'
+      AND deadline IS NOT NULL
+      AND deadline <= now() + ${hoursAhead + " hours"}::interval
+      AND deadline > now()
+      AND (reminder_sent_at IS NULL OR reminder_sent_at < now() - interval '12 hours')
+    ORDER BY deadline ASC
+  `;
+  return rows.map(mapRow);
+}
+
+export async function getGoalsNeedingCheckin(
+  daysSinceCheckin: number,
+): Promise<Goal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM goals
+    WHERE status = 'active'
+      AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
+    ORDER BY last_checked_at ASC NULLS FIRST
+    LIMIT 5
+  `;
+  return rows.map(mapRow);
+}
+
+function mapRow(r: Record<string, any>): Goal {
+  return {
+    id: r.id,
+    userId: Number(r.user_id),
+    title: r.title,
+    description: r.description ?? null,
+    status: r.status as GoalStatus,
+    deadline: r.deadline ? new Date(r.deadline).getTime() : null,
+    tags: r.tags ?? [],
+    sourceMessageId: r.source_message_id ?? null,
+    lastCheckedAt: r.last_checked_at
+      ? new Date(r.last_checked_at).getTime()
+      : null,
+    reminderSentAt: r.reminder_sent_at
+      ? new Date(r.reminder_sent_at).getTime()
+      : null,
+    createdAt: new Date(r.created_at).getTime(),
+    updatedAt: new Date(r.updated_at).getTime(),
+  };
+}

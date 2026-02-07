@@ -10,16 +10,23 @@ export interface ClaudeExecResult extends ClaudeResult {
 export async function executeClaudePrompt(
   prompt: string,
   config: Config,
+  systemPrompt?: string,
 ): Promise<ClaudeExecResult> {
   const wallStart = performance.now();
 
+  const args = [
+    "claude",
+    "-p", prompt,
+    "--output-format", "json",
+    "--model", config.claudeModel,
+  ];
+
+  if (systemPrompt) {
+    args.push("--system-prompt", systemPrompt);
+  }
+
   const proc = Bun.spawn(
-    [
-      "claude",
-      "-p", prompt,
-      "--output-format", "json",
-      "--model", config.claudeModel,
-    ],
+    args,
     {
       env: {
         ...process.env,

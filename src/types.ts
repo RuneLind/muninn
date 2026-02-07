@@ -60,3 +60,40 @@ export interface Memory {
   createdAt: number;
   similarity?: number;
 }
+
+export type TaskType = "reminder" | "briefing" | "custom";
+
+export interface ScheduledTask {
+  id: string;
+  userId: number;
+  title: string;
+  taskType: TaskType;
+  prompt: string | null;
+  scheduleHour: number;
+  scheduleMinute: number;
+  scheduleDays: number[] | null; // 0=Sun..6=Sat, null=every day
+  scheduleIntervalMs: number | null; // alternative: repeat every N ms
+  timezone: string;
+  enabled: boolean;
+  lastRunAt: number | null; // epoch ms
+  nextRunAt: number | null; // epoch ms
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type GoalStatus = "active" | "completed" | "cancelled";
+
+export interface Goal {
+  id: string;
+  userId: number;
+  title: string;
+  description: string | null;
+  status: GoalStatus;
+  deadline: number | null; // epoch ms
+  tags: string[];
+  sourceMessageId: string | null;
+  lastCheckedAt: number | null;
+  reminderSentAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}

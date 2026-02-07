@@ -3,6 +3,7 @@ import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
+import { startScheduler, stopScheduler } from "./scheduler/runner.ts";
 
 const config = loadConfig();
 
@@ -35,12 +36,18 @@ bot.start({
   onStart: (botInfo) => {
     activityLog.push("system", `Telegram bot connected as @${botInfo.username}`);
     console.log(`Jarvis is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+
+    // Start unified scheduler after bot is connected (10s delay for stability)
+    setTimeout(() => {
+      startScheduler(bot.api, config);
+    }, 10_000);
   },
 });
 
 // Graceful shutdown
 async function shutdown() {
   console.log("\nShutting down...");
+  stopScheduler();
   bot.stop();
   server.stop();
   await closeDb();
