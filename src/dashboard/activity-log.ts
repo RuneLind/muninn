@@ -1,4 +1,5 @@
 import type { ActivityEvent, ActivityEventType } from "../types.ts";
+import { saveActivity, getRecentActivity } from "../db/activity.ts";
 
 type Subscriber = (event: ActivityEvent) => void;
 
@@ -7,6 +8,19 @@ const MAX_EVENTS = 500;
 class ActivityLog {
   private events: ActivityEvent[] = [];
   private subscribers = new Set<Subscriber>();
+  private dbReady = false;
+
+  /** Call after DB is initialized to load persisted events */
+  async loadFromDb(): Promise<void> {
+    try {
+      const persisted = await getRecentActivity(MAX_EVENTS);
+      this.events = persisted;
+      this.dbReady = true;
+    } catch (err) {
+      console.error("Failed to load activity from DB:", err);
+      this.dbReady = true; // still allow writes
+    }
+  }
 
   push(type: ActivityEventType, text: string, extra?: Partial<ActivityEvent>) {
     const event: ActivityEvent = {
@@ -24,6 +38,20 @@ class ActivityLog {
 
     for (const sub of this.subscribers) {
       sub(event);
+    }
+
+    // Write-through to DB (fire and forget)
+    if (this.dbReady) {
+      saveActivity({
+        type: event.type,
+        userId: event.userId,
+        username: event.username,
+        text: event.text,
+        durationMs: event.durationMs,
+        costUsd: event.costUsd,
+      }).catch((err) => {
+        console.error("Failed to persist activity event:", err);
+      });
     }
 
     return event;

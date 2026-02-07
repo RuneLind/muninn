@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "grammy": "^1.39.3",
-    "hono": "^4.11.8"
+    "hono": "^4.11.8",
+    "postgres": "^3.4.8"
   }
 }

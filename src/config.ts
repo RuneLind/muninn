@@ -20,6 +20,7 @@ export function loadConfig() {
     dashboardPort: parseInt(optionalEnv("DASHBOARD_PORT", "3000"), 10),
     claudeTimeoutMs: parseInt(optionalEnv("CLAUDE_TIMEOUT_MS", "120000"), 10),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),
+    databaseUrl: requireEnv("DATABASE_URL"),
   } as const;
 }
 

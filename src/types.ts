@@ -26,3 +26,20 @@ export interface JarvisMessage {
   timestamp: number;
   userId?: number;
 }
+
+export interface ConversationMessage extends JarvisMessage {
+  id: string;
+  username?: string;
+  costUsd?: number;
+  durationMs?: number;
+  model?: string;
+}
+
+export interface Memory {
+  id: string;
+  userId: number;
+  content: string;
+  summary: string;
+  tags: string[];
+  createdAt: number;
+}

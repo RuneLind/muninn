@@ -1,8 +1,15 @@
 import { loadConfig } from "./config.ts";
+import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 
 const config = loadConfig();
+
+// Initialize database
+initDb(config);
+
+// Load persisted activity events from DB
+await activityLog.loadFromDb();
 
 // Start dashboard
 const dashboard = createDashboardRoutes();
@@ -28,15 +35,13 @@ bot.start({
 });
 
 // Graceful shutdown
-process.on("SIGINT", () => {
+async function shutdown() {
   console.log("\nShutting down...");
   bot.stop();
   server.stop();
+  await closeDb();
   process.exit(0);
-});
+}
 
-process.on("SIGTERM", () => {
-  bot.stop();
-  server.stop();
-  process.exit(0);
-});
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

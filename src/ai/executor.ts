@@ -2,8 +2,6 @@ import type { Config } from "../config.ts";
 import type { ClaudeResult } from "../types.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 
-const SYSTEM_PROMPT = `You are Jarvis, a personal AI assistant. Professional, calm, composed — executive-assistant energy. You are concise but thorough. You anticipate needs and provide actionable answers. You speak with quiet confidence, never fawning or over-eager. When you don't know something, you say so directly.`;
-
 export async function executeClaudePrompt(
   prompt: string,
   config: Config,
