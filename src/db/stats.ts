@@ -1,0 +1,84 @@
+import { getDb } from "./client.ts";
+
+export interface DashboardStats {
+  messagesToday: number;
+  totalMessages: number;
+  memoriesCount: number;
+  activeGoalsCount: number;
+  completedGoalsCount: number;
+  scheduledTasksCount: number;
+  totalTokens: number;
+  tokensToday: number;
+  avgResponseMs: number;
+  messagesByDay: { date: string; count: number }[];
+  tokensByDay: { date: string; tokens: number }[];
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  const sql = getDb();
+
+  const [counts] = await sql`
+    WITH msg_stats AS (
+      SELECT
+        count(*) AS total_messages,
+        count(*) FILTER (WHERE created_at >= CURRENT_DATE) AS messages_today,
+        coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0) AS total_tokens,
+        coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS tokens_today,
+        coalesce(avg(duration_ms) FILTER (WHERE role = 'assistant' AND duration_ms IS NOT NULL), 0) AS avg_response_ms
+      FROM messages
+    ),
+    mem_stats AS (
+      SELECT count(*) AS memories_count FROM memories
+    ),
+    goal_stats AS (
+      SELECT
+        count(*) FILTER (WHERE status = 'active') AS active_goals,
+        count(*) FILTER (WHERE status = 'completed') AS completed_goals
+      FROM goals
+    ),
+    task_stats AS (
+      SELECT count(*) FILTER (WHERE enabled = true) AS scheduled_tasks FROM scheduled_tasks
+    )
+    SELECT
+      msg_stats.*,
+      mem_stats.memories_count,
+      goal_stats.active_goals,
+      goal_stats.completed_goals,
+      task_stats.scheduled_tasks
+    FROM msg_stats, mem_stats, goal_stats, task_stats
+  `;
+
+  const messagesByDay = await sql`
+    SELECT
+      to_char(d.day, 'YYYY-MM-DD') AS date,
+      coalesce(count(m.id), 0)::int AS count
+    FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+    LEFT JOIN messages m ON m.created_at::date = d.day
+    GROUP BY d.day
+    ORDER BY d.day
+  `;
+
+  const tokensByDay = await sql`
+    SELECT
+      to_char(d.day, 'YYYY-MM-DD') AS date,
+      coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS tokens
+    FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+    LEFT JOIN messages m ON m.created_at::date = d.day
+    GROUP BY d.day
+    ORDER BY d.day
+  `;
+
+  return {
+    messagesToday: Number(counts!.messages_today),
+    totalMessages: Number(counts!.total_messages),
+    memoriesCount: Number(counts!.memories_count),
+    activeGoalsCount: Number(counts!.active_goals),
+    completedGoalsCount: Number(counts!.completed_goals),
+    scheduledTasksCount: Number(counts!.scheduled_tasks),
+    totalTokens: Number(counts!.total_tokens),
+    tokensToday: Number(counts!.tokens_today),
+    avgResponseMs: Number(counts!.avg_response_ms),
+    messagesByDay: messagesByDay.map((r) => ({ date: r.date, count: Number(r.count) })),
+    tokensByDay: tokensByDay.map((r) => ({ date: r.date, tokens: Number(r.tokens) })),
+  };
+}

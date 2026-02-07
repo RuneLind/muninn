@@ -5,6 +5,7 @@ export function renderDashboardPage(): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Jarvis Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -13,6 +14,8 @@ export function renderDashboardPage(): string {
       color: #e0e0e0;
       min-height: 100vh;
     }
+
+    /* Header */
     header {
       background: #12121a;
       border-bottom: 1px solid #1e1e2e;
@@ -21,11 +24,7 @@ export function renderDashboardPage(): string {
       align-items: center;
       justify-content: space-between;
     }
-    header h1 {
-      font-size: 20px;
-      font-weight: 600;
-      color: #fff;
-    }
+    header h1 { font-size: 20px; font-weight: 600; color: #fff; }
     header h1 span { color: #6c63ff; }
     .status {
       display: flex;
@@ -35,34 +34,230 @@ export function renderDashboardPage(): string {
       color: #888;
     }
     .status-dot {
-      width: 8px;
-      height: 8px;
+      width: 8px; height: 8px;
       border-radius: 50%;
       background: #444;
     }
     .status-dot.connected { background: #4ade80; }
+    .header-left { display: flex; align-items: center; gap: 16px; }
+
+    /* Agent Status */
+    .agent-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #555;
+      padding: 4px 10px;
+      border-radius: 6px;
+      background: transparent;
+      transition: all 0.3s ease;
+    }
+    .agent-status.working {
+      background: rgba(108, 99, 255, 0.1);
+      border: 1px solid rgba(108, 99, 255, 0.2);
+      color: #a5a0ff;
+    }
+    .agent-spinner {
+      width: 14px; height: 14px;
+      border: 2px solid transparent;
+      border-top-color: #6c63ff;
+      border-radius: 50%;
+      display: none;
+    }
+    .agent-status.working .agent-spinner {
+      display: block;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .agent-phase { font-weight: 500; }
+    .agent-user { color: #666; }
+
+    /* Stats Bar */
     .stats-bar {
-      display: flex;
-      gap: 24px;
-      padding: 12px 24px;
-      background: #12121a;
-      border-bottom: 1px solid #1e1e2e;
-      font-size: 13px;
-    }
-    .stat {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat-value { color: #fff; font-weight: 600; font-size: 16px; }
-    .feed {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
       padding: 16px 24px;
+      background: #0a0a0f;
+    }
+    .stat-card {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
+      border: 1px solid #1e1e2e;
+      border-radius: 10px;
+      padding: 16px;
       display: flex;
       flex-direction: column;
       gap: 4px;
-      max-width: 900px;
+      transition: box-shadow 0.2s;
     }
+    .stat-card:hover {
+      box-shadow: 0 0 20px rgba(108, 99, 255, 0.15);
+    }
+    .stat-icon { font-size: 18px; margin-bottom: 4px; }
+    .stat-value { color: #fff; font-weight: 700; font-size: 24px; line-height: 1; }
+    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* Main Grid */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 16px;
+      padding: 0 24px 24px;
+      min-height: calc(100vh - 200px);
+    }
+
+    /* Panels */
+    .panel {
+      background: #12121a;
+      border: 1px solid #1e1e2e;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 600;
+      color: #ccc;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .panel-header .count {
+      background: #1e1e2e;
+      color: #888;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .panel-body {
+      padding: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .panel-body::-webkit-scrollbar { width: 4px; }
+    .panel-body::-webkit-scrollbar-track { background: transparent; }
+    .panel-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .panel-empty {
+      padding: 24px;
+      text-align: center;
+      color: #444;
+      font-size: 13px;
+    }
+
+    /* Left column stacking */
+    .left-col { display: flex; flex-direction: column; gap: 16px; }
+    .right-col { display: flex; flex-direction: column; gap: 16px; }
+
+    /* Goal items */
+    .goal-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+    .goal-item:hover { background: #ffffff06; }
+    .goal-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-top: 5px;
+      flex-shrink: 0;
+    }
+    .goal-dot.active { background: #4ade80; }
+    .goal-dot.completed { background: #6c63ff; }
+    .goal-dot.cancelled { background: #666; }
+    .goal-info { flex: 1; min-width: 0; }
+    .goal-title { font-size: 13px; color: #ddd; margin-bottom: 4px; }
+    .goal-meta { font-size: 11px; color: #555; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* Task items */
+    .task-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+    .task-item:hover { background: #ffffff06; }
+    .task-badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+      text-transform: uppercase;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+    .task-badge.reminder { background: #1e3a5f; color: #60a5fa; }
+    .task-badge.briefing { background: #2a1a3a; color: #c084fc; }
+    .task-badge.custom { background: #2a2a1a; color: #facc15; }
+    .task-badge.disabled { background: #1a1a1a; color: #555; }
+    .task-info { flex: 1; min-width: 0; }
+    .task-title { font-size: 13px; color: #ddd; margin-bottom: 4px; }
+    .task-schedule { font-size: 11px; color: #555; }
+
+    /* Memory items */
+    .memory-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      transition: background 0.15s;
+    }
+    .memory-item:hover { background: #ffffff06; }
+    .memory-summary { font-size: 13px; color: #ccc; margin-bottom: 6px; line-height: 1.4; }
+    .memory-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+    /* Tags */
+    .tag {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: #1a1a2e;
+      color: #8b8bcd;
+      border: 1px solid #2a2a3e;
+    }
+    .time-ago { font-size: 10px; color: #444; }
+
+    /* Chart */
+    .chart-container {
+      padding: 16px;
+      height: 260px;
+    }
+
+    /* Activity Feed */
+    .feed-panel .panel-body {
+      max-height: none;
+      flex: 1;
+      min-height: 300px;
+    }
+    .feed-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .live-badge {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: #4ade80; font-weight: 500;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .live-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #4ade80;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.4); }
+      50% { opacity: 0.6; box-shadow: 0 0 0 4px rgba(74, 222, 128, 0); }
+    }
+
+    /* Feed events */
     .event {
       padding: 8px 12px;
       border-radius: 6px;
@@ -89,11 +284,7 @@ export function renderDashboardPage(): string {
       min-width: 36px;
       text-align: center;
     }
-    .event-text {
-      flex: 1;
-      word-break: break-word;
-      white-space: pre-wrap;
-    }
+    .event-text { flex: 1; word-break: break-word; white-space: pre-wrap; }
     .type-message_in .event-badge { background: #1e3a5f; color: #60a5fa; }
     .type-message_out .event-badge { background: #1a3a2a; color: #4ade80; }
     .type-error .event-badge { background: #3a1a1a; color: #f87171; }
@@ -104,8 +295,7 @@ export function renderDashboardPage(): string {
       white-space: nowrap;
     }
     .event-timing {
-      grid-column: 2 / -1;
-      margin-left: 48px;
+      margin-left: 79px;
       padding: 4px 8px;
       font-size: 11px;
       font-family: monospace;
@@ -114,43 +304,305 @@ export function renderDashboardPage(): string {
       border-radius: 3px;
       line-height: 1.4;
     }
-    .event-timing span { color: #888; }
     .event-timing .t-label { color: #555; }
     .event-timing .t-val { color: #8b8bcd; }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .stats-bar { grid-template-columns: repeat(3, 1fr); }
+      .main-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 500px) {
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    }
   </style>
 </head>
 <body>
   <header>
-    <h1><span>J</span>arvis</h1>
+    <div class="header-left">
+      <h1><span>J</span>arvis</h1>
+      <div class="agent-status" id="agentStatus">
+        <div class="agent-spinner"></div>
+        <span class="agent-phase" id="agentPhase">Idle</span>
+        <span class="agent-user" id="agentUser"></span>
+      </div>
+    </div>
     <div class="status">
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">Connecting...</span>
     </div>
   </header>
+
   <div class="stats-bar">
-    <div class="stat">
-      <span class="stat-label">Messages Today</span>
-      <span class="stat-value" id="messagesToday">0</span>
+    <div class="stat-card">
+      <div class="stat-icon">💬</div>
+      <div class="stat-value" id="statMsgsToday">-</div>
+      <div class="stat-label">Messages Today</div>
     </div>
-    <div class="stat">
-      <span class="stat-label">Avg Response</span>
-      <span class="stat-value" id="avgResponse">—</span>
+    <div class="stat-card">
+      <div class="stat-icon">📊</div>
+      <div class="stat-value" id="statTotalMsgs">-</div>
+      <div class="stat-label">Total Messages</div>
     </div>
-    <div class="stat">
-      <span class="stat-label">Total Cost</span>
-      <span class="stat-value" id="totalCost">$0.00</span>
+    <div class="stat-card">
+      <div class="stat-icon">🧠</div>
+      <div class="stat-value" id="statMemories">-</div>
+      <div class="stat-label">Memories</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">🎯</div>
+      <div class="stat-value" id="statGoals">-</div>
+      <div class="stat-label">Active Goals</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">⏰</div>
+      <div class="stat-value" id="statTasks">-</div>
+      <div class="stat-label">Scheduled Tasks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-icon">🔢</div>
+      <div class="stat-value" id="statTokens">-</div>
+      <div class="stat-label">Total Tokens</div>
     </div>
   </div>
-  <div class="feed" id="feed"></div>
+
+  <div class="main-grid">
+    <div class="left-col">
+      <div class="panel" id="goalsPanel">
+        <div class="panel-header">
+          Goals <span class="count" id="goalsCount">0</span>
+        </div>
+        <div class="panel-body" id="goalsList"></div>
+      </div>
+
+      <div class="panel" id="tasksPanel">
+        <div class="panel-header">
+          Scheduled Tasks <span class="count" id="tasksCount">0</span>
+        </div>
+        <div class="panel-body" id="tasksList"></div>
+      </div>
+
+      <div class="panel" id="memoriesPanel">
+        <div class="panel-header">
+          Recent Memories <span class="count" id="memoriesCount">0</span>
+        </div>
+        <div class="panel-body" id="memoriesList"></div>
+      </div>
+    </div>
+
+    <div class="right-col">
+      <div class="panel">
+        <div class="panel-header">Usage (7 Days)</div>
+        <div class="chart-container">
+          <canvas id="usageChart"></canvas>
+        </div>
+      </div>
+
+      <div class="panel feed-panel">
+        <div class="panel-header">
+          Activity Feed
+          <div class="live-badge"><div class="live-dot"></div> Live</div>
+        </div>
+        <div class="panel-body" id="feed"></div>
+      </div>
+    </div>
+  </div>
 
   <script>
-    const feed = document.getElementById('feed');
-    const statusDot = document.getElementById('statusDot');
-    const statusText = document.getElementById('statusText');
+    // --- Helpers ---
+    function escapeHtml(text) {
+      const d = document.createElement('div');
+      d.textContent = text;
+      return d.innerHTML;
+    }
 
     function formatTime(ts) {
       return new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
+
+    function timeAgo(ts) {
+      const diff = Date.now() - ts;
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      const days = Math.floor(hrs / 24);
+      if (days < 30) return days + 'd ago';
+      return new Date(ts).toLocaleDateString();
+    }
+
+    function deadlineText(ts) {
+      if (!ts) return '';
+      const diff = ts - Date.now();
+      const days = Math.floor(diff / 86400000);
+      if (days < 0) return Math.abs(days) + 'd overdue';
+      if (days === 0) return 'due today';
+      if (days === 1) return 'due tomorrow';
+      return 'in ' + days + 'd';
+    }
+
+    function fmtMs(ms) {
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+    }
+
+    function fmtTokens(n) {
+      return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : '' + n;
+    }
+
+    function formatSchedule(task) {
+      if (task.scheduleIntervalMs) {
+        const mins = Math.round(task.scheduleIntervalMs / 60000);
+        if (mins < 60) return 'Every ' + mins + 'min';
+        return 'Every ' + (mins / 60).toFixed(1) + 'h';
+      }
+      const h = String(task.scheduleHour).padStart(2, '0');
+      const m = String(task.scheduleMinute).padStart(2, '0');
+      const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      let days = '';
+      if (task.scheduleDays && task.scheduleDays.length < 7) {
+        days = ' on ' + task.scheduleDays.map(d => dayNames[d]).join(', ');
+      }
+      return h + ':' + m + days;
+    }
+
+    // --- Stat Cards ---
+    function updateStatCards(stats) {
+      document.getElementById('statMsgsToday').textContent = stats.messagesToday;
+      document.getElementById('statTotalMsgs').textContent = stats.totalMessages;
+      document.getElementById('statMemories').textContent = stats.memoriesCount;
+      document.getElementById('statGoals').textContent = stats.activeGoalsCount;
+      document.getElementById('statTasks').textContent = stats.scheduledTasksCount;
+      document.getElementById('statTokens').textContent = fmtTokens(stats.totalTokens);
+    }
+
+    // --- Goals Panel ---
+    function renderGoals(goals) {
+      const el = document.getElementById('goalsList');
+      document.getElementById('goalsCount').textContent = goals.length;
+      if (!goals.length) { el.innerHTML = '<div class="panel-empty">No goals yet</div>'; return; }
+      el.innerHTML = goals.map(g => {
+        const tags = (g.tags || []).map(t => '<span class="tag">' + escapeHtml(t) + '</span>').join('');
+        const dl = g.deadline ? '<span>' + deadlineText(g.deadline) + '</span>' : '';
+        return '<div class="goal-item">' +
+          '<div class="goal-dot ' + g.status + '"></div>' +
+          '<div class="goal-info">' +
+            '<div class="goal-title">' + escapeHtml(g.title) + '</div>' +
+            '<div class="goal-meta">' + dl + tags + '</div>' +
+          '</div></div>';
+      }).join('');
+    }
+
+    // --- Tasks Panel ---
+    function renderTasks(tasks) {
+      const el = document.getElementById('tasksList');
+      document.getElementById('tasksCount').textContent = tasks.length;
+      if (!tasks.length) { el.innerHTML = '<div class="panel-empty">No scheduled tasks</div>'; return; }
+      el.innerHTML = tasks.map(t => {
+        const badgeClass = t.enabled ? t.taskType : 'disabled';
+        const nextRun = t.nextRunAt ? timeAgo(t.nextRunAt).replace(' ago', '').replace('just now', 'now') : '';
+        const nextLabel = t.nextRunAt && t.nextRunAt > Date.now() ? 'next: ' + new Date(t.nextRunAt).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
+        return '<div class="task-item">' +
+          '<span class="task-badge ' + badgeClass + '">' + t.taskType + '</span>' +
+          '<div class="task-info">' +
+            '<div class="task-title">' + escapeHtml(t.title) + (!t.enabled ? ' <span style="color:#555">(disabled)</span>' : '') + '</div>' +
+            '<div class="task-schedule">' + formatSchedule(t) + (nextLabel ? ' &middot; ' + nextLabel : '') + '</div>' +
+          '</div></div>';
+      }).join('');
+    }
+
+    // --- Memories Panel ---
+    function renderMemories(memories) {
+      const el = document.getElementById('memoriesList');
+      document.getElementById('memoriesCount').textContent = memories.length;
+      if (!memories.length) { el.innerHTML = '<div class="panel-empty">No memories yet</div>'; return; }
+      el.innerHTML = memories.map(m => {
+        const tags = (m.tags || []).map(t => '<span class="tag">' + escapeHtml(t) + '</span>').join('');
+        return '<div class="memory-item">' +
+          '<div class="memory-summary">' + escapeHtml(m.summary) + '</div>' +
+          '<div class="memory-meta">' +
+            '<span class="time-ago">' + timeAgo(m.createdAt) + '</span>' + tags +
+          '</div></div>';
+      }).join('');
+    }
+
+    // --- Chart ---
+    let usageChart = null;
+    function initChart(messagesByDay, tokensByDay) {
+      if (typeof Chart === 'undefined') return;
+      const ctx = document.getElementById('usageChart');
+      if (!ctx) return;
+
+      const labels = messagesByDay.map(d => {
+        const date = new Date(d.date + 'T00:00:00');
+        return date.toLocaleDateString('en-US', { weekday: 'short' });
+      });
+
+      if (usageChart) usageChart.destroy();
+      usageChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Messages',
+              data: messagesByDay.map(d => d.count),
+              backgroundColor: 'rgba(108, 99, 255, 0.6)',
+              borderColor: 'rgba(108, 99, 255, 1)',
+              borderWidth: 1,
+              borderRadius: 4,
+              yAxisID: 'y',
+              order: 2,
+            },
+            {
+              label: 'Tokens',
+              data: tokensByDay.map(d => d.tokens),
+              type: 'line',
+              borderColor: 'rgba(74, 222, 128, 0.8)',
+              backgroundColor: 'rgba(74, 222, 128, 0.1)',
+              borderWidth: 2,
+              pointRadius: 3,
+              pointBackgroundColor: 'rgba(74, 222, 128, 1)',
+              tension: 0.3,
+              fill: true,
+              yAxisID: 'y1',
+              order: 1,
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: {
+              labels: { color: '#888', font: { size: 11 }, boxWidth: 12 }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: '#555' },
+              grid: { color: '#1e1e2e' }
+            },
+            y: {
+              position: 'left',
+              ticks: { color: '#6c63ff', stepSize: 1 },
+              grid: { color: '#1e1e2e' },
+              title: { display: true, text: 'Messages', color: '#555', font: { size: 11 } }
+            },
+            y1: {
+              position: 'right',
+              ticks: { color: '#4ade80', callback: v => fmtTokens(v) },
+              grid: { drawOnChartArea: false },
+              title: { display: true, text: 'Tokens', color: '#555', font: { size: 11 } }
+            }
+          }
+        }
+      });
+    }
+
+    // --- Activity Feed ---
+    const feed = document.getElementById('feed');
 
     function badgeLabel(type) {
       switch (type) {
@@ -162,14 +614,6 @@ export function renderDashboardPage(): string {
       }
     }
 
-    function fmtMs(ms) {
-      return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
-    }
-
-    function fmtTokens(n) {
-      return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : '' + n;
-    }
-
     function renderTiming(m) {
       const parts = [];
       if (m.startupMs > 500) parts.push('<span class="t-label">mcp:</span> <span class="t-val">' + fmtMs(m.startupMs) + '</span>');
@@ -179,7 +623,7 @@ export function renderDashboardPage(): string {
       if (m.ttsMs) parts.push('<span class="t-label">tts:</span> <span class="t-val">' + fmtMs(m.ttsMs) + '</span>');
       if (m.inputTokens || m.outputTokens) parts.push('<span class="t-label">tok:</span> <span class="t-val">' + fmtTokens(m.inputTokens || 0) + ' in / ' + fmtTokens(m.outputTokens || 0) + ' out</span>');
       if (m.model) parts.push('<span class="t-label">' + m.model + '</span>');
-      return parts.join(' &nbsp;·&nbsp; ');
+      return parts.join(' &nbsp;&middot;&nbsp; ');
     }
 
     function addEvent(ev) {
@@ -188,8 +632,11 @@ export function renderDashboardPage(): string {
 
       let meta = '';
       if (ev.durationMs) meta += fmtMs(ev.durationMs);
-      if (ev.costUsd) meta += (meta ? ' · ' : '') + '$' + ev.costUsd.toFixed(4);
-      if (ev.username) meta += (meta ? ' · ' : '') + '@' + ev.username;
+      if (ev.metadata && (ev.metadata.inputTokens || ev.metadata.outputTokens)) {
+        const total = (ev.metadata.inputTokens || 0) + (ev.metadata.outputTokens || 0);
+        meta += (meta ? ' &middot; ' : '') + fmtTokens(total) + ' tok';
+      }
+      if (ev.username) meta += (meta ? ' &middot; ' : '') + '@' + ev.username;
 
       div.innerHTML =
         '<span class="event-time">' + formatTime(ev.timestamp) + '</span>' +
@@ -206,24 +653,42 @@ export function renderDashboardPage(): string {
         feed.appendChild(timingDiv);
       }
 
-      window.scrollTo(0, document.body.scrollHeight);
+      feed.scrollTop = feed.scrollHeight;
     }
 
-    function escapeHtml(text) {
-      const d = document.createElement('div');
-      d.textContent = text;
-      return d.innerHTML;
+    // --- Agent Status ---
+    const phaseLabels = {
+      idle: 'Idle',
+      receiving: 'Receiving message',
+      transcribing: 'Transcribing voice',
+      building_prompt: 'Building prompt',
+      calling_claude: 'Calling Claude',
+      saving_response: 'Saving response',
+      sending_telegram: 'Sending to Telegram',
+      synthesizing_voice: 'Synthesizing voice',
+    };
+
+    function updateAgentStatus(status) {
+      const el = document.getElementById('agentStatus');
+      const phaseEl = document.getElementById('agentPhase');
+      const userEl = document.getElementById('agentUser');
+
+      if (status.phase === 'idle') {
+        el.classList.remove('working');
+        phaseEl.textContent = 'Idle';
+        userEl.textContent = '';
+      } else {
+        el.classList.add('working');
+        phaseEl.textContent = phaseLabels[status.phase] || status.phase;
+        userEl.textContent = status.username ? '(@' + status.username + ')' : '';
+      }
     }
 
-    function updateStats(stats) {
-      document.getElementById('messagesToday').textContent = stats.messagesToday;
-      document.getElementById('avgResponse').textContent =
-        stats.avgResponseTime > 0 ? (stats.avgResponseTime / 1000).toFixed(1) + 's' : '—';
-      document.getElementById('totalCost').textContent = '$' + stats.totalCost.toFixed(4);
-    }
-
+    // --- SSE Connection ---
     function connect() {
       const es = new EventSource('/api/events');
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
 
       es.onopen = () => {
         statusDot.className = 'status-dot connected';
@@ -231,13 +696,16 @@ export function renderDashboardPage(): string {
       };
 
       es.addEventListener('activity', (e) => {
-        const data = JSON.parse(e.data);
-        addEvent(data);
+        addEvent(JSON.parse(e.data));
       });
 
       es.addEventListener('stats', (e) => {
         const data = JSON.parse(e.data);
-        updateStats(data);
+        document.getElementById('statMsgsToday').textContent = data.messagesToday;
+      });
+
+      es.addEventListener('agent_status', (e) => {
+        updateAgentStatus(JSON.parse(e.data));
       });
 
       es.onerror = () => {
@@ -248,7 +716,41 @@ export function renderDashboardPage(): string {
       };
     }
 
+    // --- Data Loading ---
+    async function loadDashboard() {
+      try {
+        const [statsRes, goalsRes, tasksRes, memoriesRes] = await Promise.all([
+          fetch('/api/stats').then(r => r.json()),
+          fetch('/api/goals').then(r => r.json()),
+          fetch('/api/tasks').then(r => r.json()),
+          fetch('/api/memories').then(r => r.json()),
+        ]);
+
+        updateStatCards(statsRes);
+        renderGoals(goalsRes.goals || []);
+        renderTasks(tasksRes.tasks || []);
+        renderMemories(memoriesRes.memories || []);
+        initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []);
+      } catch (err) {
+        console.error('Failed to load dashboard data:', err);
+      }
+    }
+
+    // --- Periodic Refresh ---
+    async function refreshStats() {
+      try {
+        const stats = await fetch('/api/stats').then(r => r.json());
+        updateStatCards(stats);
+        initChart(stats.messagesByDay || [], stats.tokensByDay || []);
+      } catch (err) {
+        console.error('Failed to refresh stats:', err);
+      }
+    }
+
+    // --- Init ---
+    loadDashboard();
     connect();
+    setInterval(refreshStats, 60000);
   </script>
 </body>
 </html>`;

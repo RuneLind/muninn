@@ -4,7 +4,12 @@ import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
+import { getAllGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
+import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
+import { getRecentMemories } from "../db/memories.ts";
+import { getDashboardStats } from "../db/stats.ts";
+import { agentStatus } from "./agent-status.ts";
 
 export function createDashboardRoutes(): Hono {
   const app = new Hono();
@@ -12,6 +17,51 @@ export function createDashboardRoutes(): Hono {
   app.get("/", (c) => {
     return c.html(renderDashboardPage());
   });
+
+  // --- Aggregate endpoints (single-user, no userId needed) ---
+
+  app.get("/api/stats", async (c) => {
+    try {
+      const stats = await getDashboardStats();
+      return c.json(stats);
+    } catch (err) {
+      console.error("Failed to fetch dashboard stats:", err);
+      return c.json({ error: "Failed to fetch stats" }, 500);
+    }
+  });
+
+  app.get("/api/memories", async (c) => {
+    try {
+      const limit = parseInt(c.req.query("limit") ?? "20", 10);
+      const memories = await getRecentMemories(limit);
+      return c.json({ memories });
+    } catch (err) {
+      console.error("Failed to fetch memories:", err);
+      return c.json({ error: "Failed to fetch memories" }, 500);
+    }
+  });
+
+  app.get("/api/goals", async (c) => {
+    try {
+      const goals = await getAllGoals();
+      return c.json({ goals });
+    } catch (err) {
+      console.error("Failed to fetch goals:", err);
+      return c.json({ error: "Failed to fetch goals" }, 500);
+    }
+  });
+
+  app.get("/api/tasks", async (c) => {
+    try {
+      const tasks = await getAllScheduledTasks();
+      return c.json({ tasks });
+    } catch (err) {
+      console.error("Failed to fetch tasks:", err);
+      return c.json({ error: "Failed to fetch tasks" }, 500);
+    }
+  });
+
+  // --- Per-user endpoints (backward compat) ---
 
   app.get("/api/activity", (c) => {
     return c.json({
@@ -48,6 +98,8 @@ export function createDashboardRoutes(): Hono {
     return c.json({ tasks });
   });
 
+  // --- SSE stream ---
+
   app.get("/api/events", (c) => {
     return streamSSE(c, async (stream) => {
       // Send recent history
@@ -56,11 +108,20 @@ export function createDashboardRoutes(): Hono {
         await stream.writeSSE({ event: "activity", data: JSON.stringify(event) });
       }
 
-      // Send current stats
+      // Send current stats and agent status
       await stream.writeSSE({ event: "stats", data: JSON.stringify(activityLog.stats) });
+      await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get()) });
 
       // Subscribe to live updates
       let alive = true;
+      const unsubscribeStatus = agentStatus.subscribe(async (status) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "agent_status", data: JSON.stringify(status) });
+        } catch {
+          alive = false;
+        }
+      });
       const unsubscribe = activityLog.subscribe(async (event) => {
         if (!alive) return;
         try {
@@ -85,6 +146,7 @@ export function createDashboardRoutes(): Hono {
       stream.onAbort(() => {
         alive = false;
         unsubscribe();
+        unsubscribeStatus();
         clearInterval(heartbeat);
       });
 
@@ -94,6 +156,7 @@ export function createDashboardRoutes(): Hono {
       }
 
       unsubscribe();
+      unsubscribeStatus();
       clearInterval(heartbeat);
     });
   });

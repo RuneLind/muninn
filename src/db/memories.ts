@@ -134,6 +134,24 @@ export async function updateMemoryEmbedding(
   );
 }
 
+export async function getRecentMemories(limit = 20): Promise<Memory[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, user_id, content, summary, tags, created_at
+    FROM memories
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    userId: Number(r.user_id),
+    content: r.content,
+    summary: r.summary,
+    tags: r.tags,
+    createdAt: new Date(r.created_at).getTime(),
+  }));
+}
+
 export async function getMemoriesWithoutEmbeddings(): Promise<
   { id: string; summary: string }[]
 > {

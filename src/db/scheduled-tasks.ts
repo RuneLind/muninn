@@ -76,6 +76,15 @@ export async function updateTaskLastRun(task: ScheduledTask): Promise<void> {
   `;
 }
 
+export async function getAllScheduledTasks(): Promise<ScheduledTask[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM scheduled_tasks
+    ORDER BY enabled DESC, schedule_hour, schedule_minute
+  `;
+  return rows.map(mapRow);
+}
+
 export async function disableTask(id: string): Promise<void> {
   const sql = getDb();
   await sql`UPDATE scheduled_tasks SET enabled = false WHERE id = ${id}`;

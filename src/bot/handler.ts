@@ -9,6 +9,7 @@ import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { Timing } from "../utils/timing.ts";
+import { agentStatus } from "../dashboard/agent-status.ts";
 
 export function createMessageHandler(config: Config) {
   return async (ctx: Context) => {
@@ -22,6 +23,7 @@ export function createMessageHandler(config: Config) {
     const t = new Timing();
 
     activityLog.push("message_in", text, { userId, username });
+    agentStatus.set("receiving", username);
 
     // Save user message to DB
     t.start("db_save_user");
@@ -29,6 +31,7 @@ export function createMessageHandler(config: Config) {
     t.end("db_save_user");
 
     // Build context-aware prompt
+    agentStatus.set("building_prompt", username);
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
     t.end("prompt_build");
@@ -42,6 +45,7 @@ export function createMessageHandler(config: Config) {
     await ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
+      agentStatus.set("calling_claude", username);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
@@ -49,6 +53,7 @@ export function createMessageHandler(config: Config) {
       clearInterval(typingInterval);
 
       // Save assistant response to DB
+      agentStatus.set("saving_response", username);
       t.start("db_save_response");
       const messageId = await saveMessage({
         userId,
@@ -106,6 +111,7 @@ export function createMessageHandler(config: Config) {
       const fullHtml = html + footer;
 
       // Telegram has a 4096 char limit per message
+      agentStatus.set("sending_telegram", username);
       t.start("telegram_send");
       if (fullHtml.length <= 4096) {
         await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
@@ -142,6 +148,8 @@ export function createMessageHandler(config: Config) {
         },
       });
 
+      agentStatus.set("idle");
+
       // Console timing breakdown
       const s = t.summary();
       console.log(
@@ -155,6 +163,7 @@ export function createMessageHandler(config: Config) {
       );
     } catch (error) {
       clearInterval(typingInterval);
+      agentStatus.set("idle");
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       activityLog.push("error", errorMessage, { userId, username });

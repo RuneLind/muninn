@@ -13,6 +13,7 @@ import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
 import { Timing } from "../utils/timing.ts";
+import { agentStatus } from "../dashboard/agent-status.ts";
 
 export function createVoiceHandler(config: Config) {
   return async (ctx: Context) => {
@@ -26,6 +27,7 @@ export function createVoiceHandler(config: Config) {
     const t = new Timing();
 
     // Download voice message from Telegram
+    agentStatus.set("receiving", username);
     t.start("voice_download");
     const file = await ctx.api.getFile(voice.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
@@ -38,6 +40,7 @@ export function createVoiceHandler(config: Config) {
     t.end("voice_download");
 
     // Transcribe voice → text
+    agentStatus.set("transcribing", username);
     t.start("stt");
     let text: string;
     try {
@@ -59,6 +62,7 @@ export function createVoiceHandler(config: Config) {
     t.end("db_save_user");
 
     // Build context-aware prompt and run through Claude
+    agentStatus.set("building_prompt", username);
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
     t.end("prompt_build");
@@ -69,12 +73,14 @@ export function createVoiceHandler(config: Config) {
     await ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
+      agentStatus.set("calling_claude", username);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
       clearInterval(typingInterval);
 
       // Save assistant response
+      agentStatus.set("saving_response", username);
       t.start("db_save_response");
       const messageId = await saveMessage({
         userId,
@@ -130,6 +136,7 @@ export function createVoiceHandler(config: Config) {
 
       const fullHtml = html + footer;
 
+      agentStatus.set("sending_telegram", username);
       t.start("telegram_send");
       if (fullHtml.length <= 4096) {
         await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
@@ -148,6 +155,7 @@ export function createVoiceHandler(config: Config) {
       t.end("telegram_send");
 
       // Mirror mode: also send voice reply
+      agentStatus.set("synthesizing_voice", username);
       t.start("tts");
       try {
         const voiceBuffer = await synthesizeVoice(result.result);
@@ -162,6 +170,8 @@ export function createVoiceHandler(config: Config) {
         console.error(`[Voice] TTS failed: ${msg}`);
         activityLog.push("error", `[Voice] TTS failed: ${msg}`, { userId, username });
       }
+
+      agentStatus.set("idle");
 
       // Push activity with timing metadata
       const s = t.summary();
@@ -199,6 +209,7 @@ export function createVoiceHandler(config: Config) {
       );
     } catch (error) {
       clearInterval(typingInterval);
+      agentStatus.set("idle");
       const errorMessage = error instanceof Error ? error.message : String(error);
       activityLog.push("error", errorMessage, { userId, username });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
