@@ -1,5 +1,18 @@
 export type ActivityEventType = "message_in" | "message_out" | "error" | "system";
 
+export interface TimingMetadata {
+  totalMs: number;
+  startupMs?: number;
+  apiMs?: number;
+  promptBuildMs?: number;
+  sttMs?: number;
+  ttsMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  model?: string;
+  numTurns?: number;
+}
+
 export interface ActivityEvent {
   id: string;
   type: ActivityEventType;
@@ -9,12 +22,15 @@ export interface ActivityEvent {
   text: string;
   durationMs?: number;
   costUsd?: number;
+  metadata?: TimingMetadata;
 }
 
 export interface ClaudeResult {
   result: string;
   costUsd: number;
   durationMs: number;
+  durationApiMs: number;
+  numTurns: number;
   model: string;
   inputTokens: number;
   outputTokens: number;

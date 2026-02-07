@@ -49,6 +49,7 @@ class ActivityLog {
         text: event.text,
         durationMs: event.durationMs,
         costUsd: event.costUsd,
+        metadata: event.metadata,
       }).catch((err) => {
         console.error("Failed to persist activity event:", err);
       });

@@ -16,20 +16,50 @@ FORMATTING: Your responses are displayed in Telegram, which only supports HTML f
 - For lists, use plain bullet characters like • or numbered lines (1. 2. 3.)
 - Keep messages concise — Telegram is a chat app, not a document viewer`;
 
+export interface PromptBuildResult {
+  prompt: string;
+  meta: {
+    dbHistoryMs: number;
+    embeddingMs: number;
+    memorySearchMs: number;
+    messagesCount: number;
+    memoriesCount: number;
+  };
+}
+
 export async function buildPrompt(
   userId: number,
   currentMessage: string,
-): Promise<string> {
+): Promise<PromptBuildResult> {
+  const t0 = performance.now();
+  let dbHistoryMs = 0;
+  let embeddingMs = 0;
+
   const [recentMessages, queryEmbedding] = await Promise.all([
-    getRecentMessages(userId, 20),
-    generateEmbedding(currentMessage),
+    getRecentMessages(userId, 20).then((r) => {
+      dbHistoryMs = performance.now() - t0;
+      return r;
+    }),
+    generateEmbedding(currentMessage).then((r) => {
+      embeddingMs = performance.now() - t0;
+      return r;
+    }),
   ]);
 
+  const searchStart = performance.now();
   const relevantMemories = await searchMemoriesHybrid(
     userId,
     currentMessage,
     queryEmbedding,
     5,
+  );
+  const memorySearchMs = performance.now() - searchStart;
+
+  const totalMs = performance.now() - t0;
+  console.log(
+    `[Jarvis] prompt_build: ${Math.round(totalMs)}ms` +
+      ` (db: ${Math.round(dbHistoryMs)}ms, embed: ${Math.round(embeddingMs)}ms, search: ${Math.round(memorySearchMs)}ms` +
+      ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories)`,
   );
 
   const parts: string[] = [SYSTEM_PROMPT];
@@ -44,7 +74,16 @@ export async function buildPrompt(
 
   parts.push(`User: ${currentMessage}`);
 
-  return parts.join("\n\n");
+  return {
+    prompt: parts.join("\n\n"),
+    meta: {
+      dbHistoryMs,
+      embeddingMs,
+      memorySearchMs,
+      messagesCount: recentMessages.length,
+      memoriesCount: relevantMemories.length,
+    },
+  };
 }
 
 function formatMemories(memories: Memory[]): string {

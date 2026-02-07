@@ -2,10 +2,17 @@ import type { Config } from "../config.ts";
 import type { ClaudeResult } from "../types.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 
+export interface ClaudeExecResult extends ClaudeResult {
+  wallClockMs: number;
+  startupMs: number;
+}
+
 export async function executeClaudePrompt(
   prompt: string,
   config: Config,
-): Promise<ClaudeResult> {
+): Promise<ClaudeExecResult> {
+  const wallStart = performance.now();
+
   const proc = Bun.spawn(
     [
       "claude",
@@ -43,7 +50,11 @@ export async function executeClaudePrompt(
       throw new Error(`Claude exited with code ${exitCode}: ${stderr}`);
     }
 
-    return parseClaudeOutput(stdout);
+    const wallClockMs = performance.now() - wallStart;
+    const parsed = parseClaudeOutput(stdout);
+    const startupMs = wallClockMs - parsed.durationMs;
+
+    return { ...parsed, wallClockMs, startupMs };
   })();
 
   return Promise.race([resultPromise, timeoutPromise]);

@@ -6,6 +6,7 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
 import { formatTelegramHtml } from "./telegram-format.ts";
+import { Timing } from "../utils/timing.ts";
 
 export function createMessageHandler(config: Config) {
   return async (ctx: Context) => {
@@ -16,13 +17,19 @@ export function createMessageHandler(config: Config) {
     const userId = ctx.from?.id;
     if (!userId) return;
 
+    const t = new Timing();
+
     activityLog.push("message_in", text, { userId, username });
 
     // Save user message to DB
+    t.start("db_save_user");
     await saveMessage({ userId, username, role: "user", content: text });
+    t.end("db_save_user");
 
     // Build context-aware prompt
-    const prompt = await buildPrompt(userId, text);
+    t.start("prompt_build");
+    const { prompt, meta: promptMeta } = await buildPrompt(userId, text);
+    t.end("prompt_build");
 
     // Keep typing indicator alive while Claude processes
     const typingInterval = setInterval(() => {
@@ -33,11 +40,14 @@ export function createMessageHandler(config: Config) {
     await ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
+      t.start("claude");
       const result = await executeClaudePrompt(prompt, config);
+      t.end("claude");
 
       clearInterval(typingInterval);
 
       // Save assistant response to DB
+      t.start("db_save_response");
       const messageId = await saveMessage({
         userId,
         username,
@@ -49,13 +59,7 @@ export function createMessageHandler(config: Config) {
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
       });
-
-      activityLog.push("message_out", result.result, {
-        userId,
-        username,
-        durationMs: result.durationMs,
-        costUsd: result.costUsd,
-      });
+      t.end("db_save_response");
 
       // Extract memories async (don't block response)
       extractMemoryAsync(
@@ -71,21 +75,65 @@ export function createMessageHandler(config: Config) {
       // Convert to Telegram-safe HTML
       const html = formatTelegramHtml(result.result);
 
+      // Build timing footer
+      const footer = `\n\n<i>⏱ ${t.formatTelegram({
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+        startupMs: result.startupMs,
+        apiMs: result.durationApiMs,
+      })}</i>`;
+
+      const fullHtml = html + footer;
+
       // Telegram has a 4096 char limit per message
-      if (html.length <= 4096) {
-        await ctx.reply(html, { parse_mode: "HTML" }).catch(async () => {
-          // Fallback to plain text if HTML parsing fails
+      t.start("telegram_send");
+      if (fullHtml.length <= 4096) {
+        await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
           await ctx.reply(result.result);
         });
       } else {
-        // Split into chunks
-        const chunks = splitMessage(html, 4096);
-        for (const chunk of chunks) {
+        // Split main content, add footer to last chunk
+        const chunks = splitMessage(html, 4096 - footer.length);
+        for (let i = 0; i < chunks.length; i++) {
+          const raw = chunks[i]!;
+          const chunk = i === chunks.length - 1 ? raw + footer : raw;
           await ctx.reply(chunk, { parse_mode: "HTML" }).catch(async () => {
-            await ctx.reply(chunk);
+            await ctx.reply(raw);
           });
         }
       }
+      t.end("telegram_send");
+
+      // Push activity with timing metadata
+      activityLog.push("message_out", result.result, {
+        userId,
+        username,
+        durationMs: Math.round(t.totalMs()),
+        costUsd: result.costUsd,
+        metadata: {
+          totalMs: t.totalMs(),
+          startupMs: result.startupMs,
+          apiMs: result.durationApiMs,
+          promptBuildMs: t.summary().prompt_build ?? 0,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          model: result.model,
+          numTurns: result.numTurns,
+        },
+      });
+
+      // Console timing breakdown
+      const s = t.summary();
+      console.log(
+        `[Jarvis] 📊 Request timing breakdown:\n` +
+          `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
+          `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
+          `  db_save:        ${pad((s.db_save_user ?? 0) + (s.db_save_response ?? 0))}\n` +
+          `  format+send:    ${pad(s.telegram_send)}\n` +
+          `  ─────────────────────\n` +
+          `  total:         ${pad(t.totalMs())}  ($${(result.costUsd ?? 0).toFixed(4)})`,
+      );
     } catch (error) {
       clearInterval(typingInterval);
 
@@ -94,6 +142,14 @@ export function createMessageHandler(config: Config) {
       await ctx.reply(`Something went wrong: ${errorMessage}`);
     }
   };
+}
+
+function pad(ms: number | undefined): string {
+  return `${Math.round(ms ?? 0)}ms`.padEnd(7);
+}
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
 export function splitMessage(text: string, maxLength: number): string[] {

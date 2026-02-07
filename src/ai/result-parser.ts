@@ -22,10 +22,12 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
 
   return {
     result: parsed.result,
-    costUsd: parsed.cost_usd,
-    durationMs: parsed.duration_ms,
-    model: parsed.model,
-    inputTokens: parsed.input_tokens,
-    outputTokens: parsed.output_tokens,
+    costUsd: parsed.cost_usd ?? 0,
+    durationMs: parsed.duration_ms ?? 0,
+    durationApiMs: parsed.duration_api_ms ?? 0,
+    numTurns: parsed.num_turns ?? 1,
+    model: parsed.model ?? "unknown",
+    inputTokens: parsed.input_tokens ?? 0,
+    outputTokens: parsed.output_tokens ?? 0,
   };
 }

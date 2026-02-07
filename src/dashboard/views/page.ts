@@ -103,6 +103,20 @@ export function renderDashboardPage(): string {
       font-size: 11px;
       white-space: nowrap;
     }
+    .event-timing {
+      grid-column: 2 / -1;
+      margin-left: 48px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-family: monospace;
+      color: #666;
+      background: #ffffff04;
+      border-radius: 3px;
+      line-height: 1.4;
+    }
+    .event-timing span { color: #888; }
+    .event-timing .t-label { color: #555; }
+    .event-timing .t-val { color: #8b8bcd; }
   </style>
 </head>
 <body>
@@ -148,12 +162,32 @@ export function renderDashboardPage(): string {
       }
     }
 
+    function fmtMs(ms) {
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+    }
+
+    function fmtTokens(n) {
+      return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : '' + n;
+    }
+
+    function renderTiming(m) {
+      const parts = [];
+      if (m.startupMs > 500) parts.push('<span class="t-label">mcp:</span> <span class="t-val">' + fmtMs(m.startupMs) + '</span>');
+      if (m.apiMs) parts.push('<span class="t-label">api:</span> <span class="t-val">' + fmtMs(m.apiMs) + '</span>');
+      if (m.promptBuildMs > 50) parts.push('<span class="t-label">prompt:</span> <span class="t-val">' + fmtMs(m.promptBuildMs) + '</span>');
+      if (m.sttMs) parts.push('<span class="t-label">stt:</span> <span class="t-val">' + fmtMs(m.sttMs) + '</span>');
+      if (m.ttsMs) parts.push('<span class="t-label">tts:</span> <span class="t-val">' + fmtMs(m.ttsMs) + '</span>');
+      if (m.inputTokens || m.outputTokens) parts.push('<span class="t-label">tok:</span> <span class="t-val">' + fmtTokens(m.inputTokens || 0) + ' in / ' + fmtTokens(m.outputTokens || 0) + ' out</span>');
+      if (m.model) parts.push('<span class="t-label">' + m.model + '</span>');
+      return parts.join(' &nbsp;·&nbsp; ');
+    }
+
     function addEvent(ev) {
       const div = document.createElement('div');
       div.className = 'event type-' + ev.type;
 
       let meta = '';
-      if (ev.durationMs) meta += (ev.durationMs / 1000).toFixed(1) + 's';
+      if (ev.durationMs) meta += fmtMs(ev.durationMs);
       if (ev.costUsd) meta += (meta ? ' · ' : '') + '$' + ev.costUsd.toFixed(4);
       if (ev.username) meta += (meta ? ' · ' : '') + '@' + ev.username;
 
@@ -164,6 +198,14 @@ export function renderDashboardPage(): string {
         (meta ? '<span class="event-meta">' + meta + '</span>' : '');
 
       feed.appendChild(div);
+
+      if (ev.metadata && ev.type === 'message_out') {
+        const timingDiv = document.createElement('div');
+        timingDiv.className = 'event-timing';
+        timingDiv.innerHTML = renderTiming(ev.metadata);
+        feed.appendChild(timingDiv);
+      }
+
       window.scrollTo(0, document.body.scrollHeight);
     }
 
