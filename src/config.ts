@@ -21,6 +21,7 @@ export function loadConfig() {
     claudeTimeoutMs: parseInt(optionalEnv("CLAUDE_TIMEOUT_MS", "120000"), 10),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),
     databaseUrl: requireEnv("DATABASE_URL"),
+    whisperModelPath: optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin"),
   } as const;
 }
 

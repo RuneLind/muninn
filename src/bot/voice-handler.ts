@@ -1,3 +1,4 @@
+import { InputFile } from "grammy";
 import type { Context } from "grammy";
 import type { Config } from "../config.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
@@ -5,38 +6,58 @@ import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
+import { splitMessage } from "./handler.ts";
+import { transcribeVoice } from "../voice/stt.ts";
+import { synthesizeVoice } from "../voice/tts.ts";
 
-export function createMessageHandler(config: Config) {
+export function createVoiceHandler(config: Config) {
   return async (ctx: Context) => {
-    const text = ctx.message?.text;
-    if (!text) return;
+    const voice = ctx.message?.voice;
+    if (!voice) return;
 
     const username = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
     const userId = ctx.from?.id;
     if (!userId) return;
 
-    activityLog.push("message_in", text, { userId, username });
+    // Download voice message from Telegram
+    const file = await ctx.api.getFile(voice.file_id);
+    const fileUrl = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
+    const response = await fetch(fileUrl);
+    if (!response.ok) {
+      await ctx.reply("Failed to download voice message.");
+      return;
+    }
+    const oggBuffer = new Uint8Array(await response.arrayBuffer());
 
-    // Save user message to DB
+    // Transcribe voice → text
+    let text: string;
+    try {
+      text = await transcribeVoice(oggBuffer, config);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      activityLog.push("error", `[Voice] Transcription failed: ${msg}`, { userId, username });
+      await ctx.reply(`Couldn't transcribe voice: ${msg}`);
+      return;
+    }
+
+    activityLog.push("message_in", `[Voice] ${text}`, { userId, username });
+
+    // Save transcribed message to DB
     await saveMessage({ userId, username, role: "user", content: text });
 
-    // Build context-aware prompt
+    // Build context-aware prompt and run through Claude
     const prompt = await buildPrompt(userId, text);
 
-    // Keep typing indicator alive while Claude processes
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
     }, 4_000);
-
-    // Send initial typing
     await ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
       const result = await executeClaudePrompt(prompt, config);
-
       clearInterval(typingInterval);
 
-      // Save assistant response to DB
+      // Save assistant response
       const messageId = await saveMessage({
         userId,
         username,
@@ -56,7 +77,7 @@ export function createMessageHandler(config: Config) {
         costUsd: result.costUsd,
       });
 
-      // Extract memories async (don't block response)
+      // Extract memories async
       extractMemoryAsync(
         {
           userId,
@@ -67,14 +88,12 @@ export function createMessageHandler(config: Config) {
         config,
       );
 
-      // Telegram has a 4096 char limit per message
+      // Send text reply first (guaranteed delivery)
       if (result.result.length <= 4096) {
         await ctx.reply(result.result, { parse_mode: "Markdown" }).catch(async () => {
-          // Fallback to plain text if markdown parsing fails
           await ctx.reply(result.result);
         });
       } else {
-        // Split into chunks
         const chunks = splitMessage(result.result, 4096);
         for (const chunk of chunks) {
           await ctx.reply(chunk, { parse_mode: "Markdown" }).catch(async () => {
@@ -82,39 +101,22 @@ export function createMessageHandler(config: Config) {
           });
         }
       }
+
+      // Mirror mode: also send voice reply
+      try {
+        const voiceBuffer = await synthesizeVoice(result.result);
+        await ctx.replyWithVoice(new InputFile(voiceBuffer, "response.ogg"));
+      } catch (ttsError) {
+        // Graceful fallback — text already sent, just log the TTS failure
+        const msg = ttsError instanceof Error ? ttsError.message : String(ttsError);
+        console.error(`[Voice] TTS failed: ${msg}`);
+        activityLog.push("error", `[Voice] TTS failed: ${msg}`, { userId, username });
+      }
     } catch (error) {
       clearInterval(typingInterval);
-
       const errorMessage = error instanceof Error ? error.message : String(error);
       activityLog.push("error", errorMessage, { userId, username });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
     }
   };
-}
-
-export function splitMessage(text: string, maxLength: number): string[] {
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLength) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Try to split at a newline
-    let splitIndex = remaining.lastIndexOf("\n", maxLength);
-    if (splitIndex === -1 || splitIndex < maxLength / 2) {
-      // Fall back to splitting at a space
-      splitIndex = remaining.lastIndexOf(" ", maxLength);
-    }
-    if (splitIndex === -1 || splitIndex < maxLength / 2) {
-      splitIndex = maxLength;
-    }
-
-    chunks.push(remaining.slice(0, splitIndex));
-    remaining = remaining.slice(splitIndex).trimStart();
-  }
-
-  return chunks;
 }

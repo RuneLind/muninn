@@ -2,6 +2,7 @@ import { Bot } from "grammy";
 import type { Config } from "../config.ts";
 import { createAuthMiddleware } from "./middleware.ts";
 import { createMessageHandler } from "./handler.ts";
+import { createVoiceHandler } from "./voice-handler.ts";
 
 export function createBot(config: Config): Bot {
   const bot = new Bot(config.telegramBotToken);
@@ -13,6 +14,7 @@ export function createBot(config: Config): Bot {
   });
 
   bot.on("message:text", createMessageHandler(config));
+  bot.on("message:voice", createVoiceHandler(config));
 
   bot.catch((err) => {
     console.error("Bot error:", err.message);
