@@ -2,11 +2,15 @@ import { loadConfig } from "./config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
+import { warmupEmbeddings } from "./ai/embeddings.ts";
 
 const config = loadConfig();
 
 // Initialize database
 initDb(config);
+
+// Pre-load embedding model (fire-and-forget)
+warmupEmbeddings();
 
 // Load persisted activity events from DB
 await activityLog.loadFromDb();

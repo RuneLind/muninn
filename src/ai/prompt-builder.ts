@@ -1,5 +1,6 @@
 import { getRecentMessages } from "../db/messages.ts";
-import { searchMemories } from "../db/memories.ts";
+import { searchMemoriesHybrid } from "../db/memories.ts";
+import { generateEmbedding } from "./embeddings.ts";
 import type { ConversationMessage, Memory } from "../types.ts";
 
 const SYSTEM_PROMPT = `You are Jarvis, a personal AI assistant. Professional, calm, composed — executive-assistant energy. You are concise but thorough. You anticipate needs and provide actionable answers. You speak with quiet confidence, never fawning or over-eager. When you don't know something, you say so directly.
@@ -19,10 +20,17 @@ export async function buildPrompt(
   userId: number,
   currentMessage: string,
 ): Promise<string> {
-  const [recentMessages, relevantMemories] = await Promise.all([
+  const [recentMessages, queryEmbedding] = await Promise.all([
     getRecentMessages(userId, 20),
-    searchMemories(userId, currentMessage, 5),
+    generateEmbedding(currentMessage),
   ]);
+
+  const relevantMemories = await searchMemoriesHybrid(
+    userId,
+    currentMessage,
+    queryEmbedding,
+    5,
+  );
 
   const parts: string[] = [SYSTEM_PROMPT];
 

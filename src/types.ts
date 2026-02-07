@@ -42,4 +42,5 @@ export interface Memory {
   summary: string;
   tags: string[];
   createdAt: number;
+  similarity?: number;
 }

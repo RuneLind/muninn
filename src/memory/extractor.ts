@@ -1,5 +1,6 @@
 import type { Config } from "../config.ts";
 import { saveMemory } from "../db/memories.ts";
+import { generateEmbedding } from "../ai/embeddings.ts";
 
 interface ExtractionInput {
   userId: number;
@@ -81,7 +82,9 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
 
   let result: ExtractionResult;
   try {
-    result = JSON.parse(claudeOutput.result);
+    // Strip markdown fences if Haiku wraps the JSON in ```json ... ```
+    const cleaned = claudeOutput.result.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/,"");
+    result = JSON.parse(cleaned);
   } catch {
     console.error("Memory extraction: failed to parse extraction result:", claudeOutput.result);
     return;
@@ -91,11 +94,14 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     return;
   }
 
+  const embedding = await generateEmbedding(result.summary);
+
   await saveMemory({
     userId: input.userId,
     content: `User: ${input.userMessage}\nAssistant: ${input.assistantResponse}`,
     summary: result.summary,
     tags: result.tags,
     sourceMessageId: input.sourceMessageId,
+    embedding,
   });
 }
