@@ -142,50 +142,60 @@ function computeNextCronRun(
   days: number[] | null,
   timezone: string,
 ): Date {
-  // Get current time in the task's timezone
+  // Get current date parts in the task's timezone
   const now = new Date();
-  const nowInTz = new Date(
-    now.toLocaleString("en-US", { timeZone: timezone }),
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(now).map((p) => [p.type, p.value]),
   );
+  const nowHour = Number(parts.hour);
+  const nowMinute = Number(parts.minute);
 
-  // Build candidate: today at hour:minute in task's timezone
-  const candidate = new Date(nowInTz);
-  candidate.setHours(hour, minute, 0, 0);
+  // Start with today's date in the target timezone
+  let year = Number(parts.year);
+  let month = Number(parts.month);
+  let day = Number(parts.day);
 
-  // If candidate is in the past (already passed today), start from tomorrow
-  if (candidate <= nowInTz) {
-    candidate.setDate(candidate.getDate() + 1);
+  // If the target time already passed today, move to tomorrow
+  if (nowHour > hour || (nowHour === hour && nowMinute >= minute)) {
+    const tmp = new Date(year, month - 1, day + 1);
+    year = tmp.getFullYear();
+    month = tmp.getMonth() + 1;
+    day = tmp.getDate();
   }
 
   // If days filter is set, find the next matching day
   if (days && days.length > 0) {
     for (let i = 0; i < 7; i++) {
-      const dayOfWeek = candidate.getDay();
-      if (days.includes(dayOfWeek)) break;
-      candidate.setDate(candidate.getDate() + 1);
+      const tmp = new Date(year, month - 1, day);
+      if (days.includes(tmp.getDay())) break;
+      const next = new Date(year, month - 1, day + 1);
+      year = next.getFullYear();
+      month = next.getMonth() + 1;
+      day = next.getDate();
     }
   }
 
-  // Convert back from timezone-local to UTC
-  // We construct a date string and parse it as the target timezone
-  const tzOffset = getTimezoneOffsetMs(candidate, timezone);
-  return new Date(candidate.getTime() + tzOffset);
-}
+  // Build an ISO-like string and parse it as the target timezone
+  // Format: "YYYY-MM-DDTHH:MM:00" interpreted in the given timezone
+  const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
 
-/**
- * Get the offset in ms needed to convert a "fake local" Date
- * (one constructed from toLocaleString) back to real UTC.
- */
-function getTimezoneOffsetMs(fakeLocal: Date, timezone: string): number {
-  // Get what UTC thinks this time is
-  const utcStr = fakeLocal.toLocaleString("en-US", { timeZone: "UTC" });
-  const utcDate = new Date(utcStr);
+  // Use a reliable method: compute UTC offset for the target date/timezone
+  // by comparing the formatted date in UTC vs the target timezone
+  const candidateApprox = new Date(dateStr + "Z"); // treat as UTC initially
+  const utcStr = candidateApprox.toLocaleString("en-US", { timeZone: "UTC" });
+  const tzStr = candidateApprox.toLocaleString("en-US", { timeZone: timezone });
+  const offsetMs = new Date(utcStr).getTime() - new Date(tzStr).getTime();
 
-  // Get what the target timezone thinks this time is
-  const tzStr = fakeLocal.toLocaleString("en-US", { timeZone: timezone });
-  const tzDate = new Date(tzStr);
-
-  return utcDate.getTime() - tzDate.getTime();
+  return new Date(candidateApprox.getTime() + offsetMs);
 }
 
 function mapRow(r: Record<string, any>): ScheduledTask {

@@ -13,6 +13,7 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { callHaiku } from "./executor.ts";
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
+let tickRunning = false;
 
 export function startScheduler(api: Api, config: Config): void {
   if (!config.schedulerEnabled) {
@@ -26,9 +27,15 @@ export function startScheduler(api: Api, config: Config): void {
   );
 
   intervalId = setInterval(() => {
-    runSchedulerTick(api, config).catch((err) => {
-      console.error("[Jarvis] Scheduler tick failed:", err);
-    });
+    if (tickRunning) return;
+    tickRunning = true;
+    runSchedulerTick(api, config)
+      .catch((err) => {
+        console.error("[Jarvis] Scheduler tick failed:", err);
+      })
+      .finally(() => {
+        tickRunning = false;
+      });
   }, intervalMs);
 }
 
@@ -57,9 +64,11 @@ async function runScheduledTasks(api: Api): Promise<void> {
   const dueTasks = await getTasksDueNow();
   for (const task of dueTasks) {
     try {
+      // Update next_run_at FIRST to prevent re-firing on overlapping ticks
+      await updateTaskLastRun(task);
+
       const message = await executeTask(task);
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
-      await updateTaskLastRun(task);
       activityLog.push(
         "system",
         `Scheduled task fired: ${task.title} (${task.taskType})`,
