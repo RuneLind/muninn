@@ -7,6 +7,7 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
 import { splitMessage } from "./handler.ts";
+import { formatTelegramHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
 
@@ -88,15 +89,16 @@ export function createVoiceHandler(config: Config) {
         config,
       );
 
-      // Send text reply first (guaranteed delivery)
-      if (result.result.length <= 4096) {
-        await ctx.reply(result.result, { parse_mode: "Markdown" }).catch(async () => {
+      // Convert to Telegram-safe HTML and send text reply first
+      const html = formatTelegramHtml(result.result);
+      if (html.length <= 4096) {
+        await ctx.reply(html, { parse_mode: "HTML" }).catch(async () => {
           await ctx.reply(result.result);
         });
       } else {
-        const chunks = splitMessage(result.result, 4096);
+        const chunks = splitMessage(html, 4096);
         for (const chunk of chunks) {
-          await ctx.reply(chunk, { parse_mode: "Markdown" }).catch(async () => {
+          await ctx.reply(chunk, { parse_mode: "HTML" }).catch(async () => {
             await ctx.reply(chunk);
           });
         }

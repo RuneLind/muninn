@@ -5,6 +5,7 @@ import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
+import { formatTelegramHtml } from "./telegram-format.ts";
 
 export function createMessageHandler(config: Config) {
   return async (ctx: Context) => {
@@ -67,17 +68,20 @@ export function createMessageHandler(config: Config) {
         config,
       );
 
+      // Convert to Telegram-safe HTML
+      const html = formatTelegramHtml(result.result);
+
       // Telegram has a 4096 char limit per message
-      if (result.result.length <= 4096) {
-        await ctx.reply(result.result, { parse_mode: "Markdown" }).catch(async () => {
-          // Fallback to plain text if markdown parsing fails
+      if (html.length <= 4096) {
+        await ctx.reply(html, { parse_mode: "HTML" }).catch(async () => {
+          // Fallback to plain text if HTML parsing fails
           await ctx.reply(result.result);
         });
       } else {
         // Split into chunks
-        const chunks = splitMessage(result.result, 4096);
+        const chunks = splitMessage(html, 4096);
         for (const chunk of chunks) {
-          await ctx.reply(chunk, { parse_mode: "Markdown" }).catch(async () => {
+          await ctx.reply(chunk, { parse_mode: "HTML" }).catch(async () => {
             await ctx.reply(chunk);
           });
         }
