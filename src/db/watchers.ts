@@ -3,6 +3,7 @@ import type { Watcher, WatcherType } from "../types.ts";
 
 interface SaveWatcherParams {
   userId: number;
+  botName: string;
   name: string;
   type: WatcherType;
   config?: Record<string, unknown>;
@@ -12,9 +13,10 @@ interface SaveWatcherParams {
 export async function saveWatcher(params: SaveWatcherParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO watchers (user_id, name, type, config, interval_ms)
+    INSERT INTO watchers (user_id, bot_name, name, type, config, interval_ms)
     VALUES (
       ${params.userId},
+      ${params.botName},
       ${params.name},
       ${params.type},
       ${JSON.stringify(params.config ?? {})},
@@ -25,14 +27,21 @@ export async function saveWatcher(params: SaveWatcherParams): Promise<string> {
   return row!.id;
 }
 
-export async function getWatchersDueNow(): Promise<Watcher[]> {
+export async function getWatchersDueNow(botName?: string): Promise<Watcher[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM watchers
-    WHERE enabled = true
-      AND (last_run_at IS NULL OR last_run_at + (interval_ms || ' milliseconds')::interval <= now())
-    ORDER BY last_run_at ASC NULLS FIRST
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM watchers
+      WHERE bot_name = ${botName} AND enabled = true
+        AND (last_run_at IS NULL OR last_run_at + (interval_ms || ' milliseconds')::interval <= now())
+      ORDER BY last_run_at ASC NULLS FIRST
+    `
+    : await sql`
+      SELECT * FROM watchers
+      WHERE enabled = true
+        AND (last_run_at IS NULL OR last_run_at + (interval_ms || ' milliseconds')::interval <= now())
+      ORDER BY last_run_at ASC NULLS FIRST
+    `;
   return rows.map(mapRow);
 }
 
@@ -49,22 +58,34 @@ export async function updateWatcherLastRun(
   `;
 }
 
-export async function getAllWatchers(): Promise<Watcher[]> {
+export async function getAllWatchers(botName?: string): Promise<Watcher[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM watchers
-    ORDER BY enabled DESC, name
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM watchers
+      WHERE bot_name = ${botName}
+      ORDER BY enabled DESC, name
+    `
+    : await sql`
+      SELECT * FROM watchers
+      ORDER BY enabled DESC, name
+    `;
   return rows.map(mapRow);
 }
 
-export async function getWatchersForUser(userId: number): Promise<Watcher[]> {
+export async function getWatchersForUser(userId: number, botName?: string): Promise<Watcher[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM watchers
-    WHERE user_id = ${userId}
-    ORDER BY enabled DESC, name
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM watchers
+      WHERE user_id = ${userId} AND bot_name = ${botName}
+      ORDER BY enabled DESC, name
+    `
+    : await sql`
+      SELECT * FROM watchers
+      WHERE user_id = ${userId}
+      ORDER BY enabled DESC, name
+    `;
   return rows.map(mapRow);
 }
 
@@ -85,6 +106,7 @@ function mapRow(r: Record<string, any>): Watcher {
   return {
     id: r.id,
     userId: Number(r.user_id),
+    botName: r.bot_name ?? "jarvis",
     name: r.name,
     type: r.type as WatcherType,
     config: typeof r.config === "string" ? JSON.parse(r.config) : r.config ?? {},

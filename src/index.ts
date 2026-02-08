@@ -52,13 +52,13 @@ for (const botConfig of botConfigs) {
   });
 }
 
-// Start unified scheduler after bots are connected (10s delay for stability)
-// Use the first bot's API for sending messages, and its dir as cwd for watchers
-const primaryBot = bots[0]!;
-const primaryBotConfig = botConfigs[0]!;
-
+// Start per-bot schedulers after bots are connected (10s delay for stability)
 setTimeout(() => {
-  startScheduler(primaryBot.api, config, primaryBotConfig.dir);
+  for (let i = 0; i < bots.length; i++) {
+    const bot = bots[i]!;
+    const botCfg = botConfigs[i]!;
+    startScheduler(bot.api, config, botCfg);
+  }
 }, 10_000);
 
 // Graceful shutdown

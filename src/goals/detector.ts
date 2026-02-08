@@ -4,6 +4,7 @@ import { spawnHaiku } from "../scheduler/executor.ts";
 
 interface DetectionInput {
   userId: number;
+  botName: string;
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
@@ -31,7 +32,7 @@ async function doExtract(
   // Load active goals so the detector can match completions
   let activeGoalsList = "";
   try {
-    const goals = await getActiveGoals(input.userId);
+    const goals = await getActiveGoals(input.userId, input.botName);
     if (goals.length > 0) {
       activeGoalsList = goals
         .map((g) => `- "${g.title}" (id: ${g.id})`)
@@ -64,7 +65,7 @@ async function doExtract(
   }
 
   if (result.action === "completed" && result.completed_goal_title) {
-    await handleCompletion(input.userId, result.completed_goal_title);
+    await handleCompletion(input.userId, result.completed_goal_title, input.botName);
     return;
   }
 
@@ -73,6 +74,7 @@ async function doExtract(
 
     const goalId = await saveGoal({
       userId: input.userId,
+      botName: input.botName,
       title: result.title,
       description: result.description ?? null,
       deadline: deadline && !isNaN(deadline.getTime()) ? deadline : null,
@@ -87,8 +89,9 @@ async function doExtract(
 async function handleCompletion(
   userId: number,
   completedTitle: string,
+  botName: string,
 ): Promise<void> {
-  const goals = await getActiveGoals(userId);
+  const goals = await getActiveGoals(userId, botName);
   const titleLower = completedTitle.toLowerCase();
 
   // Fuzzy match: find the goal whose title best matches

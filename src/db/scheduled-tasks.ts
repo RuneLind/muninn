@@ -3,6 +3,7 @@ import type { ScheduledTask, TaskType } from "../types.ts";
 
 interface SaveScheduledTaskParams {
   userId: number;
+  botName: string;
   title: string;
   taskType: TaskType;
   prompt?: string | null;
@@ -21,12 +22,13 @@ export async function saveScheduledTask(
 
   const [row] = await sql`
     INSERT INTO scheduled_tasks (
-      user_id, title, task_type, prompt,
+      user_id, bot_name, title, task_type, prompt,
       schedule_hour, schedule_minute, schedule_days,
       schedule_interval_ms, timezone, next_run_at
     )
     VALUES (
       ${params.userId},
+      ${params.botName},
       ${params.title},
       ${params.taskType},
       ${params.prompt ?? null},
@@ -44,25 +46,40 @@ export async function saveScheduledTask(
 
 export async function getScheduledTasksForUser(
   userId: number,
+  botName?: string,
 ): Promise<ScheduledTask[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM scheduled_tasks
-    WHERE user_id = ${userId} AND enabled = true
-    ORDER BY schedule_hour, schedule_minute
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM scheduled_tasks
+      WHERE user_id = ${userId} AND bot_name = ${botName} AND enabled = true
+      ORDER BY schedule_hour, schedule_minute
+    `
+    : await sql`
+      SELECT * FROM scheduled_tasks
+      WHERE user_id = ${userId} AND enabled = true
+      ORDER BY schedule_hour, schedule_minute
+    `;
   return rows.map(mapRow);
 }
 
-export async function getTasksDueNow(): Promise<ScheduledTask[]> {
+export async function getTasksDueNow(botName?: string): Promise<ScheduledTask[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM scheduled_tasks
-    WHERE enabled = true
-      AND next_run_at IS NOT NULL
-      AND next_run_at <= now()
-    ORDER BY next_run_at ASC
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM scheduled_tasks
+      WHERE bot_name = ${botName} AND enabled = true
+        AND next_run_at IS NOT NULL
+        AND next_run_at <= now()
+      ORDER BY next_run_at ASC
+    `
+    : await sql`
+      SELECT * FROM scheduled_tasks
+      WHERE enabled = true
+        AND next_run_at IS NOT NULL
+        AND next_run_at <= now()
+      ORDER BY next_run_at ASC
+    `;
   return rows.map(mapRow);
 }
 
@@ -76,12 +93,18 @@ export async function updateTaskLastRun(task: ScheduledTask): Promise<void> {
   `;
 }
 
-export async function getAllScheduledTasks(): Promise<ScheduledTask[]> {
+export async function getAllScheduledTasks(botName?: string): Promise<ScheduledTask[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM scheduled_tasks
-    ORDER BY enabled DESC, schedule_hour, schedule_minute
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM scheduled_tasks
+      WHERE bot_name = ${botName}
+      ORDER BY enabled DESC, schedule_hour, schedule_minute
+    `
+    : await sql`
+      SELECT * FROM scheduled_tasks
+      ORDER BY enabled DESC, schedule_hour, schedule_minute
+    `;
   return rows.map(mapRow);
 }
 
@@ -202,6 +225,7 @@ function mapRow(r: Record<string, any>): ScheduledTask {
   return {
     id: r.id,
     userId: Number(r.user_id),
+    botName: r.bot_name ?? "jarvis",
     title: r.title,
     taskType: r.task_type as TaskType,
     prompt: r.prompt ?? null,

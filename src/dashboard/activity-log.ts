@@ -46,6 +46,7 @@ class ActivityLog {
         type: event.type,
         userId: event.userId,
         username: event.username,
+        botName: event.botName,
         text: event.text,
         durationMs: event.durationMs,
         costUsd: event.costUsd,

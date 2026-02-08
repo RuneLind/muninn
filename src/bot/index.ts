@@ -15,7 +15,7 @@ export function createBot(config: Config, botConfig: BotConfig): Bot {
     await ctx.reply(`${botConfig.name} online. How can I help you?`);
   });
 
-  registerWatcherCommands(bot);
+  registerWatcherCommands(bot, botConfig);
 
   bot.on("message:text", createMessageHandler(config, botConfig));
   bot.on("message:voice", createVoiceHandler(config, botConfig));

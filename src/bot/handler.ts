@@ -25,19 +25,19 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
 
     const t = new Timing();
 
-    activityLog.push("message_in", text, { userId, username });
+    activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
     agentStatus.set("receiving", username);
     console.log(`${tag} Message from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     // Save user message to DB
     t.start("db_save_user");
-    await saveMessage({ userId, username, role: "user", content: text });
+    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text });
     t.end("db_save_user");
 
     // Build context-aware prompt
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name);
     t.end("prompt_build");
     console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
@@ -64,6 +64,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       t.start("db_save_response");
       const messageId = await saveMessage({
         userId,
+        botName: botConfig.name,
         username,
         role: "assistant",
         content: result.result,
@@ -79,6 +80,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       extractMemoryAsync(
         {
           userId,
+          botName: botConfig.name,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
@@ -88,6 +90,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       extractGoalAsync(
         {
           userId,
+          botName: botConfig.name,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
@@ -97,6 +100,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       extractScheduleAsync(
         {
           userId,
+          botName: botConfig.name,
           userMessage: text,
           assistantResponse: result.result,
         },
@@ -141,6 +145,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       activityLog.push("message_out", result.result, {
         userId,
         username,
+        botName: botConfig.name,
         durationMs: Math.round(t.totalMs()),
         costUsd: result.costUsd,
         metadata: {
@@ -184,7 +189,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           `  Error: ${errorMessage}\n` +
           `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
       );
-      activityLog.push("error", errorMessage, { userId, username });
+      activityLog.push("error", errorMessage, { userId, username, botName: botConfig.name });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
     }
   };

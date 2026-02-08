@@ -5,6 +5,7 @@ import { spawnHaiku } from "../scheduler/executor.ts";
 
 interface ExtractionInput {
   userId: number;
+  botName: string;
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
@@ -66,6 +67,7 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
 
   await saveMemory({
     userId: input.userId,
+    botName: input.botName,
     content: `User: ${input.userMessage}\nAssistant: ${input.assistantResponse}`,
     summary: result.summary,
     tags: result.tags,

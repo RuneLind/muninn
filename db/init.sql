@@ -10,6 +10,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id BIGINT NOT NULL,
+  bot_name TEXT NOT NULL DEFAULT 'jarvis',
   username TEXT,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
   content TEXT NOT NULL,
@@ -22,6 +23,7 @@ CREATE TABLE messages (
 );
 
 CREATE INDEX idx_messages_user_created ON messages(user_id, created_at DESC);
+CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, created_at DESC);
 
 -- ============================================================================
 -- Activity log: persisted version of the in-memory ring buffer
@@ -30,6 +32,7 @@ CREATE TABLE activity_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type TEXT NOT NULL CHECK (type IN ('message_in', 'message_out', 'error', 'system')),
   user_id BIGINT,
+  bot_name TEXT,
   username TEXT,
   text TEXT NOT NULL,
   duration_ms INTEGER,
@@ -46,6 +49,7 @@ CREATE INDEX idx_activity_log_created ON activity_log(created_at DESC);
 CREATE TABLE memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id BIGINT NOT NULL,
+  bot_name TEXT NOT NULL DEFAULT 'jarvis',
   content TEXT NOT NULL,
   summary TEXT NOT NULL,
   tags TEXT[] NOT NULL DEFAULT '{}',
@@ -57,6 +61,7 @@ CREATE TABLE memories (
 
 CREATE INDEX idx_memories_search ON memories USING GIN(search_vector);
 CREATE INDEX idx_memories_user ON memories(user_id, created_at DESC);
+CREATE INDEX idx_memories_bot_user ON memories(bot_name, user_id, created_at DESC);
 CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);
 
 -- Trigger to auto-update search_vector on insert/update
@@ -79,6 +84,7 @@ CREATE TRIGGER memories_search_vector_trigger
 CREATE TABLE goals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id BIGINT NOT NULL,
+  bot_name TEXT NOT NULL DEFAULT 'jarvis',
   title TEXT NOT NULL,
   description TEXT,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'cancelled')),
@@ -105,6 +111,7 @@ CREATE TRIGGER goals_updated_at
   EXECUTE FUNCTION update_goals_updated_at();
 
 CREATE INDEX idx_goals_user_status ON goals (user_id, status);
+CREATE INDEX idx_goals_bot_user_status ON goals (bot_name, user_id, status);
 CREATE INDEX idx_goals_active_deadline ON goals (deadline)
   WHERE status = 'active' AND deadline IS NOT NULL;
 CREATE INDEX idx_goals_active_last_checked ON goals (last_checked_at)
@@ -116,6 +123,7 @@ CREATE INDEX idx_goals_active_last_checked ON goals (last_checked_at)
 CREATE TABLE scheduled_tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id BIGINT NOT NULL,
+  bot_name TEXT NOT NULL DEFAULT 'jarvis',
   title TEXT NOT NULL,
   task_type TEXT NOT NULL CHECK (task_type IN ('reminder', 'briefing', 'custom')),
   prompt TEXT,
@@ -146,6 +154,8 @@ CREATE TRIGGER scheduled_tasks_updated_at
 
 CREATE INDEX idx_scheduled_tasks_due ON scheduled_tasks (enabled, next_run_at)
   WHERE enabled = true;
+CREATE INDEX idx_scheduled_tasks_bot_due ON scheduled_tasks (bot_name, enabled, next_run_at)
+  WHERE enabled = true;
 CREATE INDEX idx_scheduled_tasks_user ON scheduled_tasks (user_id, enabled);
 
 -- ============================================================================
@@ -154,6 +164,7 @@ CREATE INDEX idx_scheduled_tasks_user ON scheduled_tasks (user_id, enabled);
 CREATE TABLE haiku_usage (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   source TEXT NOT NULL, -- 'memory', 'goals', 'schedule', 'task', 'briefing', 'reminder', 'checkin'
+  bot_name TEXT,
   model TEXT,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -168,6 +179,7 @@ CREATE INDEX idx_haiku_usage_created ON haiku_usage(created_at DESC);
 CREATE TABLE watchers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id BIGINT NOT NULL,
+  bot_name TEXT NOT NULL DEFAULT 'jarvis',
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal')),
   config JSONB NOT NULL DEFAULT '{}',
@@ -193,6 +205,8 @@ CREATE TRIGGER watchers_updated_at
   EXECUTE FUNCTION update_watchers_updated_at();
 
 CREATE INDEX idx_watchers_due ON watchers (enabled, last_run_at)
+  WHERE enabled = true;
+CREATE INDEX idx_watchers_bot_due ON watchers (bot_name, enabled, last_run_at)
   WHERE enabled = true;
 CREATE INDEX idx_watchers_user ON watchers (user_id, enabled);
 

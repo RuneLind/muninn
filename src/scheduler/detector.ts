@@ -5,6 +5,7 @@ import { spawnHaiku } from "./executor.ts";
 
 interface DetectionInput {
   userId: number;
+  botName: string;
   userMessage: string;
   assistantResponse: string;
 }
@@ -90,6 +91,7 @@ async function doExtract(
 
   const taskId = await saveScheduledTask({
     userId: input.userId,
+    botName: input.botName,
     title: result.title,
     taskType: result.task_type ?? "reminder",
     prompt: result.prompt ?? null,

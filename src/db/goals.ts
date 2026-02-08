@@ -3,6 +3,7 @@ import type { Goal, GoalStatus } from "../types.ts";
 
 interface SaveGoalParams {
   userId: number;
+  botName: string;
   title: string;
   description?: string | null;
   deadline?: Date | null;
@@ -13,9 +14,10 @@ interface SaveGoalParams {
 export async function saveGoal(params: SaveGoalParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO goals (user_id, title, description, deadline, tags, source_message_id)
+    INSERT INTO goals (user_id, bot_name, title, description, deadline, tags, source_message_id)
     VALUES (
       ${params.userId},
+      ${params.botName},
       ${params.title},
       ${params.description ?? null},
       ${params.deadline ?? null},
@@ -27,13 +29,19 @@ export async function saveGoal(params: SaveGoalParams): Promise<string> {
   return row!.id;
 }
 
-export async function getActiveGoals(userId: number): Promise<Goal[]> {
+export async function getActiveGoals(userId: number, botName?: string): Promise<Goal[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM goals
-    WHERE user_id = ${userId} AND status = 'active'
-    ORDER BY deadline ASC NULLS LAST, created_at DESC
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM goals
+      WHERE user_id = ${userId} AND bot_name = ${botName} AND status = 'active'
+      ORDER BY deadline ASC NULLS LAST, created_at DESC
+    `
+    : await sql`
+      SELECT * FROM goals
+      WHERE user_id = ${userId} AND status = 'active'
+      ORDER BY deadline ASC NULLS LAST, created_at DESC
+    `;
   return rows.map(mapRow);
 }
 
@@ -63,44 +71,74 @@ export async function updateGoalReminderSentAt(id: string): Promise<void> {
 
 export async function getGoalsNeedingReminder(
   hoursAhead: number,
+  botName?: string,
 ): Promise<Goal[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM goals
-    WHERE status = 'active'
-      AND deadline IS NOT NULL
-      AND deadline <= now() + ${hoursAhead + " hours"}::interval
-      AND deadline > now()
-      AND (reminder_sent_at IS NULL OR reminder_sent_at < now() - interval '12 hours')
-    ORDER BY deadline ASC
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM goals
+      WHERE status = 'active' AND bot_name = ${botName}
+        AND deadline IS NOT NULL
+        AND deadline <= now() + ${hoursAhead + " hours"}::interval
+        AND deadline > now()
+        AND (reminder_sent_at IS NULL OR reminder_sent_at < now() - interval '12 hours')
+      ORDER BY deadline ASC
+    `
+    : await sql`
+      SELECT * FROM goals
+      WHERE status = 'active'
+        AND deadline IS NOT NULL
+        AND deadline <= now() + ${hoursAhead + " hours"}::interval
+        AND deadline > now()
+        AND (reminder_sent_at IS NULL OR reminder_sent_at < now() - interval '12 hours')
+      ORDER BY deadline ASC
+    `;
   return rows.map(mapRow);
 }
 
 export async function getGoalsNeedingCheckin(
   daysSinceCheckin: number,
+  botName?: string,
 ): Promise<Goal[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM goals
-    WHERE status = 'active'
-      AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
-    ORDER BY last_checked_at ASC NULLS FIRST
-    LIMIT 5
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM goals
+      WHERE status = 'active' AND bot_name = ${botName}
+        AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
+      ORDER BY last_checked_at ASC NULLS FIRST
+      LIMIT 5
+    `
+    : await sql`
+      SELECT * FROM goals
+      WHERE status = 'active'
+        AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
+      ORDER BY last_checked_at ASC NULLS FIRST
+      LIMIT 5
+    `;
   return rows.map(mapRow);
 }
 
-export async function getAllGoals(): Promise<Goal[]> {
+export async function getAllGoals(botName?: string): Promise<Goal[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT * FROM goals
-    WHERE NOT (status IN ('completed', 'cancelled') AND updated_at < now() - interval '7 days')
-    ORDER BY
-      CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
-      deadline ASC NULLS LAST,
-      created_at DESC
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT * FROM goals
+      WHERE bot_name = ${botName}
+        AND NOT (status IN ('completed', 'cancelled') AND updated_at < now() - interval '7 days')
+      ORDER BY
+        CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
+        deadline ASC NULLS LAST,
+        created_at DESC
+    `
+    : await sql`
+      SELECT * FROM goals
+      WHERE NOT (status IN ('completed', 'cancelled') AND updated_at < now() - interval '7 days')
+      ORDER BY
+        CASE status WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END,
+        deadline ASC NULLS LAST,
+        created_at DESC
+    `;
   return rows.map(mapRow);
 }
 
@@ -108,6 +146,7 @@ function mapRow(r: Record<string, any>): Goal {
   return {
     id: r.id,
     userId: Number(r.user_id),
+    botName: r.bot_name ?? "jarvis",
     title: r.title,
     description: r.description ?? null,
     status: r.status as GoalStatus,

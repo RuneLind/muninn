@@ -14,10 +14,15 @@ export interface DashboardStats {
   tokensByDay: { date: string; mainTokens: number; haikuTokens: number }[];
 }
 
-export async function getDashboardStats(): Promise<DashboardStats> {
+export async function getDashboardStats(botName?: string): Promise<DashboardStats> {
   const sql = getDb();
 
-  const [counts] = await sql`
+  // For optional bot_name filtering, use parameterized query with $1
+  const botFilter = botName ? "WHERE bot_name = $1" : "";
+  const haikuBotFilter = botName ? "WHERE bot_name = $1" : "";
+  const params = botName ? [botName] : [];
+
+  const [counts] = await sql.unsafe(`
     WITH msg_stats AS (
       SELECT
         count(*) AS total_messages,
@@ -26,24 +31,27 @@ export async function getDashboardStats(): Promise<DashboardStats> {
         coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS tokens_today,
         coalesce(avg(duration_ms) FILTER (WHERE role = 'assistant' AND duration_ms IS NOT NULL), 0) AS avg_response_ms
       FROM messages
+      ${botFilter}
     ),
     haiku_stats AS (
       SELECT
         coalesce(sum(input_tokens + output_tokens), 0) AS haiku_total_tokens,
         coalesce(sum(input_tokens + output_tokens) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS haiku_tokens_today
       FROM haiku_usage
+      ${haikuBotFilter}
     ),
     mem_stats AS (
-      SELECT count(*) AS memories_count FROM memories
+      SELECT count(*) AS memories_count FROM memories ${botFilter}
     ),
     goal_stats AS (
       SELECT
         count(*) FILTER (WHERE status = 'active') AS active_goals,
         count(*) FILTER (WHERE status = 'completed') AS completed_goals
       FROM goals
+      ${botFilter}
     ),
     task_stats AS (
-      SELECT count(*) FILTER (WHERE enabled = true) AS scheduled_tasks FROM scheduled_tasks
+      SELECT count(*) FILTER (WHERE enabled = true) AS scheduled_tasks FROM scheduled_tasks ${botFilter}
     )
     SELECT
       msg_stats.*,
@@ -53,28 +61,49 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       goal_stats.completed_goals,
       task_stats.scheduled_tasks
     FROM msg_stats, haiku_stats, mem_stats, goal_stats, task_stats
-  `;
+  `, params);
 
-  const messagesByDay = await sql`
-    SELECT
-      to_char(d.day, 'YYYY-MM-DD') AS date,
-      coalesce(count(m.id), 0)::int AS count
-    FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
-    LEFT JOIN messages m ON m.created_at::date = d.day
-    GROUP BY d.day
-    ORDER BY d.day
-  `;
+  const messagesByDay = botName
+    ? await sql`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(count(m.id), 0)::int AS count
+      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day AND m.bot_name = ${botName}
+      GROUP BY d.day
+      ORDER BY d.day
+    `
+    : await sql`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(count(m.id), 0)::int AS count
+      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day
+      GROUP BY d.day
+      ORDER BY d.day
+    `;
 
-  const tokensByDay = await sql`
-    SELECT
-      to_char(d.day, 'YYYY-MM-DD') AS date,
-      coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
-      coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day), 0)::int AS haiku_tokens
-    FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
-    LEFT JOIN messages m ON m.created_at::date = d.day
-    GROUP BY d.day
-    ORDER BY d.day
-  `;
+  const tokensByDay = botName
+    ? await sql`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName}), 0)::int AS haiku_tokens
+      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day AND m.bot_name = ${botName}
+      GROUP BY d.day
+      ORDER BY d.day
+    `
+    : await sql`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day), 0)::int AS haiku_tokens
+      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day
+      GROUP BY d.day
+      ORDER BY d.day
+    `;
 
   return {
     messagesToday: Number(counts!.messages_today),

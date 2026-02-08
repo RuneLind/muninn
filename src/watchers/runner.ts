@@ -1,4 +1,5 @@
 import type { Api } from "grammy";
+import type { BotConfig } from "../bots/config.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
@@ -8,10 +9,11 @@ import { agentStatus } from "../dashboard/agent-status.ts";
 
 const MAX_NOTIFIED_IDS = 200;
 
-export async function runWatchers(api: Api, cwd?: string): Promise<void> {
-  const dueWatchers = await getWatchersDueNow();
+export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void> {
+  const tag = botConfig.name;
+  const dueWatchers = await getWatchersDueNow(tag);
   if (dueWatchers.length > 0) {
-    console.log(`[Jarvis] Running ${dueWatchers.length} due watcher(s)`);
+    console.log(`[${tag}] Running ${dueWatchers.length} due watcher(s)`);
   }
 
   for (const watcher of dueWatchers) {
@@ -25,7 +27,7 @@ export async function runWatchers(api: Api, cwd?: string): Promise<void> {
 
       agentStatus.set("running_watcher", watcher.name);
 
-      const alerts = await runChecker(watcher, cwd);
+      const alerts = await runChecker(watcher, botConfig.dir);
 
       // Filter out already-notified IDs
       const newAlerts = alerts.filter(
@@ -40,10 +42,10 @@ export async function runWatchers(api: Api, cwd?: string): Promise<void> {
         activityLog.push(
           "system",
           `Watcher "${watcher.name}" sent ${newAlerts.length} alert(s)`,
-          { userId: watcher.userId, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
+          { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
         );
         console.log(
-          `[Jarvis] Watcher "${watcher.name}" sent ${newAlerts.length} alert(s) to user ${watcher.userId}`,
+          `[${tag}] Watcher "${watcher.name}" sent ${newAlerts.length} alert(s) to user ${watcher.userId}`,
         );
       }
 
@@ -58,7 +60,7 @@ export async function runWatchers(api: Api, cwd?: string): Promise<void> {
     } catch (err) {
       agentStatus.set("idle");
       console.error(
-        `[Jarvis] Watcher "${watcher.name}" (${watcher.id}) failed:`,
+        `[${tag}] Watcher "${watcher.name}" (${watcher.id}) failed:`,
         err,
       );
     }
@@ -70,7 +72,7 @@ async function runChecker(watcher: Watcher, cwd?: string): Promise<WatcherAlert[
     case "email":
       return await checkEmail(watcher, cwd);
     default:
-      console.log(`[Jarvis] Watcher type "${watcher.type}" not yet implemented`);
+      console.log(`Watcher type "${watcher.type}" not yet implemented`);
       return [];
   }
 }

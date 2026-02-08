@@ -23,6 +23,7 @@ export async function buildPrompt(
   userId: number,
   currentMessage: string,
   persona: string,
+  botName: string,
 ): Promise<PromptBuildResult> {
   const t0 = performance.now();
   let dbHistoryMs = 0;
@@ -30,7 +31,7 @@ export async function buildPrompt(
 
   const [recentMessages, queryEmbedding, activeGoals, scheduledTasks] =
     await Promise.all([
-      getRecentMessages(userId, 20).then((r) => {
+      getRecentMessages(userId, 20, botName).then((r) => {
         dbHistoryMs = performance.now() - t0;
         return r;
       }),
@@ -38,8 +39,8 @@ export async function buildPrompt(
         embeddingMs = performance.now() - t0;
         return r;
       }),
-      getActiveGoals(userId),
-      getScheduledTasksForUser(userId),
+      getActiveGoals(userId, botName),
+      getScheduledTasksForUser(userId, botName),
     ]);
 
   const searchStart = performance.now();
@@ -48,6 +49,7 @@ export async function buildPrompt(
     currentMessage,
     queryEmbedding,
     5,
+    botName,
   );
   const memorySearchMs = performance.now() - searchStart;
 

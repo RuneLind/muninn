@@ -19,6 +19,7 @@ export interface ActivityEvent {
   timestamp: number;
   userId?: number;
   username?: string;
+  botName?: string;
   text: string;
   durationMs?: number;
   costUsd?: number;
@@ -66,6 +67,7 @@ export type TaskType = "reminder" | "briefing" | "custom";
 export interface ScheduledTask {
   id: string;
   userId: number;
+  botName: string;
   title: string;
   taskType: TaskType;
   prompt: string | null;
@@ -86,6 +88,7 @@ export type WatcherType = "email" | "calendar" | "github" | "news" | "goal";
 export interface Watcher {
   id: string;
   userId: number;
+  botName: string;
   name: string;
   type: WatcherType;
   config: Record<string, unknown>;
@@ -116,6 +119,7 @@ export type GoalStatus = "active" | "completed" | "cancelled";
 export interface Goal {
   id: string;
   userId: number;
+  botName: string;
   title: string;
   description: string | null;
   status: GoalStatus;

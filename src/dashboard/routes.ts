@@ -23,7 +23,8 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/stats", async (c) => {
     try {
-      const stats = await getDashboardStats();
+      const botName = c.req.query("bot") || undefined;
+      const stats = await getDashboardStats(botName);
       return c.json(stats);
     } catch (err) {
       console.error("Failed to fetch dashboard stats:", err);
@@ -34,7 +35,8 @@ export function createDashboardRoutes(): Hono {
   app.get("/api/memories", async (c) => {
     try {
       const limit = parseInt(c.req.query("limit") ?? "20", 10);
-      const memories = await getRecentMemories(limit);
+      const botName = c.req.query("bot") || undefined;
+      const memories = await getRecentMemories(limit, botName);
       return c.json({ memories });
     } catch (err) {
       console.error("Failed to fetch memories:", err);
@@ -44,7 +46,8 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/goals", async (c) => {
     try {
-      const goals = await getAllGoals();
+      const botName = c.req.query("bot") || undefined;
+      const goals = await getAllGoals(botName);
       return c.json({ goals });
     } catch (err) {
       console.error("Failed to fetch goals:", err);
@@ -54,7 +57,8 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/tasks", async (c) => {
     try {
-      const tasks = await getAllScheduledTasks();
+      const botName = c.req.query("bot") || undefined;
+      const tasks = await getAllScheduledTasks(botName);
       return c.json({ tasks });
     } catch (err) {
       console.error("Failed to fetch tasks:", err);
@@ -64,7 +68,8 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/watchers", async (c) => {
     try {
-      const watchers = await getAllWatchers();
+      const botName = c.req.query("bot") || undefined;
+      const watchers = await getAllWatchers(botName);
       return c.json({ watchers });
     } catch (err) {
       console.error("Failed to fetch watchers:", err);

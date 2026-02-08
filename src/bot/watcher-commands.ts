@@ -1,4 +1,5 @@
 import type { Bot } from "grammy";
+import type { BotConfig } from "../bots/config.ts";
 import {
   saveWatcher,
   getWatchersForUser,
@@ -10,10 +11,10 @@ import type { WatcherType } from "../types.ts";
 
 const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal"];
 
-export function registerWatcherCommands(bot: Bot): void {
+export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   bot.command("watchers", async (ctx) => {
     const userId = ctx.from!.id;
-    const watchers = await getWatchersForUser(userId);
+    const watchers = await getWatchersForUser(userId, botConfig.name);
 
     if (watchers.length === 0) {
       await ctx.reply(
@@ -68,6 +69,7 @@ export function registerWatcherCommands(bot: Bot): void {
 
     const id = await saveWatcher({
       userId,
+      botName: botConfig.name,
       name,
       type: normalizedType,
       config: filter ? { filter } : {},
@@ -91,7 +93,7 @@ export function registerWatcherCommands(bot: Bot): void {
       return;
     }
 
-    const watchers = await getWatchersForUser(userId);
+    const watchers = await getWatchersForUser(userId, botConfig.name);
     const match = watchers.find(
       (w) =>
         w.id.startsWith(arg) ||

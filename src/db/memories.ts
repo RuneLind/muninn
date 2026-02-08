@@ -3,6 +3,7 @@ import type { Memory } from "../types.ts";
 
 interface SaveMemoryParams {
   userId: number;
+  botName: string;
   content: string;
   summary: string;
   tags: string[];
@@ -16,11 +17,12 @@ export async function saveMemory(params: SaveMemoryParams): Promise<string> {
   if (params.embedding) {
     const embeddingStr = `[${params.embedding.join(",")}]`;
     const [row] = await sql.unsafe(
-      `INSERT INTO memories (user_id, content, summary, tags, source_message_id, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6::vector)
+      `INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id, embedding)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
        RETURNING id`,
       [
         params.userId,
+        params.botName,
         params.content,
         params.summary,
         params.tags,
@@ -32,8 +34,8 @@ export async function saveMemory(params: SaveMemoryParams): Promise<string> {
   }
 
   const [row] = await sql`
-    INSERT INTO memories (user_id, content, summary, tags, source_message_id)
-    VALUES (${params.userId}, ${params.content}, ${params.summary}, ${params.tags}, ${params.sourceMessageId ?? null})
+    INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id)
+    VALUES (${params.userId}, ${params.botName}, ${params.content}, ${params.summary}, ${params.tags}, ${params.sourceMessageId ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -43,17 +45,28 @@ export async function searchMemories(
   userId: number,
   query: string,
   limit = 5,
+  botName?: string,
 ): Promise<Memory[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT id, user_id, content, summary, tags, created_at,
-           ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
-    FROM memories
-    WHERE user_id = ${userId}
-      AND search_vector @@ plainto_tsquery('english', ${query})
-    ORDER BY rank DESC
-    LIMIT ${limit}
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT id, user_id, content, summary, tags, created_at,
+             ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
+      FROM memories
+      WHERE user_id = ${userId} AND bot_name = ${botName}
+        AND search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit}
+    `
+    : await sql`
+      SELECT id, user_id, content, summary, tags, created_at,
+             ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
+      FROM memories
+      WHERE user_id = ${userId}
+        AND search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit}
+    `;
 
   return rows.map((r) => ({
     id: r.id,
@@ -70,15 +83,21 @@ export async function searchMemoriesHybrid(
   query: string,
   embedding: number[] | null,
   limit = 5,
+  botName?: string,
 ): Promise<Memory[]> {
   if (!embedding) {
-    return searchMemories(userId, query, limit);
+    return searchMemories(userId, query, limit, botName);
   }
 
   const sql = getDb();
   const embeddingStr = `[${embedding.join(",")}]`;
 
   // Reciprocal Rank Fusion: combine FTS + vector rankings
+  const botFilter = botName ? `AND bot_name = $5` : "";
+  const params = botName
+    ? [userId, query, embeddingStr, limit, botName]
+    : [userId, query, embeddingStr, limit];
+
   const rows = await sql.unsafe(
     `WITH fts AS (
       SELECT id, user_id, content, summary, tags, created_at,
@@ -86,6 +105,7 @@ export async function searchMemoriesHybrid(
       FROM memories
       WHERE user_id = $1
         AND search_vector @@ plainto_tsquery('english', $2)
+        ${botFilter}
       LIMIT 20
     ),
     vec AS (
@@ -94,6 +114,7 @@ export async function searchMemoriesHybrid(
       FROM memories
       WHERE user_id = $1
         AND embedding IS NOT NULL
+        ${botFilter}
       LIMIT 20
     )
     SELECT
@@ -108,7 +129,7 @@ export async function searchMemoriesHybrid(
     FULL OUTER JOIN vec v ON f.id = v.id
     ORDER BY rrf_score DESC
     LIMIT $4`,
-    [userId, query, embeddingStr, limit],
+    params,
   );
 
   return rows.map((r: any) => ({
@@ -134,14 +155,22 @@ export async function updateMemoryEmbedding(
   );
 }
 
-export async function getRecentMemories(limit = 20): Promise<Memory[]> {
+export async function getRecentMemories(limit = 20, botName?: string): Promise<Memory[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT id, user_id, content, summary, tags, created_at
-    FROM memories
-    ORDER BY created_at DESC
-    LIMIT ${limit}
-  `;
+  const rows = botName
+    ? await sql`
+      SELECT id, user_id, content, summary, tags, created_at
+      FROM memories
+      WHERE bot_name = ${botName}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `
+    : await sql`
+      SELECT id, user_id, content, summary, tags, created_at
+      FROM memories
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
   return rows.map((r) => ({
     id: r.id,
     userId: Number(r.user_id),
