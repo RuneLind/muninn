@@ -12,13 +12,14 @@ interface SaveMessageParams {
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
+  source?: string;
 }
 
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, source)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.source ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -57,6 +58,40 @@ export async function getRecentMessages(
       costUsd: r.cost_usd ?? undefined,
       durationMs: r.duration_ms ?? undefined,
       model: r.model ?? undefined,
+    }))
+    .reverse(); // chronological order
+}
+
+export interface AlertMessage {
+  id: string;
+  source: string;
+  content: string;
+  timestamp: number;
+}
+
+export async function getRecentAlerts(
+  userId: number,
+  botName: string,
+  hours = 24,
+  limit = 10,
+): Promise<AlertMessage[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, source, content, created_at
+    FROM messages
+    WHERE user_id = ${userId}
+      AND bot_name = ${botName}
+      AND source IS NOT NULL
+      AND created_at > now() - make_interval(hours => ${hours})
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows
+    .map((r) => ({
+      id: r.id,
+      source: r.source,
+      content: r.content,
+      timestamp: new Date(r.created_at).getTime(),
     }))
     .reverse(); // chronological order
 }

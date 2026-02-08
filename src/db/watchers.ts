@@ -6,12 +6,18 @@ interface SaveWatcherParams {
   botName: string;
   name: string;
   type: WatcherType;
-  config?: Record<string, unknown>;
+  config?: Record<string, string | number | boolean | null>;
   intervalMs?: number;
 }
 
+const DEFAULT_INTERVALS: Record<string, number> = {
+  news: 3600000,    // 1 hour — news changes slower
+};
+const DEFAULT_INTERVAL_MS = 300000; // 5 minutes
+
 export async function saveWatcher(params: SaveWatcherParams): Promise<string> {
   const sql = getDb();
+  const intervalMs = params.intervalMs ?? DEFAULT_INTERVALS[params.type] ?? DEFAULT_INTERVAL_MS;
   const [row] = await sql`
     INSERT INTO watchers (user_id, bot_name, name, type, config, interval_ms)
     VALUES (
@@ -20,7 +26,7 @@ export async function saveWatcher(params: SaveWatcherParams): Promise<string> {
       ${params.name},
       ${params.type},
       ${sql.json(params.config ?? {})},
-      ${params.intervalMs ?? 300000}
+      ${intervalMs}
     )
     RETURNING id
   `;

@@ -43,7 +43,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     if (!args) {
       await ctx.reply(
-        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal\n\nExample: <code>/watch email from:github.com</code>",
+        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>",
         { parse_mode: "HTML" },
       );
       return;
@@ -51,8 +51,8 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     const parts = args.split(/\s+/);
     const type = parts[0]!.toLowerCase();
-    // Allow "emails" → "email"
-    const normalizedType = type.replace(/s$/, "") as WatcherType;
+    // Allow "emails" → "email", "goals" → "goal" etc.
+    const normalizedType = (VALID_TYPES.includes(type as WatcherType) ? type : type.replace(/s$/, "")) as WatcherType;
 
     if (!VALID_TYPES.includes(normalizedType)) {
       await ctx.reply(
@@ -75,8 +75,9 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
       config: filter ? { filter } : {},
     });
 
+    const interval = normalizedType === "news" ? "60 minutes" : "5 minutes";
     await ctx.reply(
-      `\u{2705} Watcher created: <b>${name}</b>\nChecks every 5 minutes.\nID: <code>${id.slice(0, 8)}</code>`,
+      `\u{2705} Watcher created: <b>${name}</b>\nChecks every ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },
     );
   });

@@ -4,8 +4,10 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { checkEmail } from "./email.ts";
+import { checkNews } from "./news.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
+import { saveMessage } from "../db/messages.ts";
 
 const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
 
@@ -92,6 +94,15 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
         agentStatus.set("sending_telegram", watcher.name);
         await api.sendMessage(watcher.userId, message, { parse_mode: "HTML" });
 
+        // Persist alert in messages so Claude can reference it in conversation
+        await saveMessage({
+          userId: watcher.userId,
+          botName: tag,
+          role: "assistant",
+          content: message,
+          source: `watcher:${watcher.type}`,
+        });
+
         activityLog.push(
           "system",
           `Watcher "${watcher.name}" sent ${newAlerts.length} alert(s)`,
@@ -128,6 +139,8 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
   switch (watcher.type) {
     case "email":
       return await checkEmail(watcher, cwd, botName);
+    case "news":
+      return await checkNews(watcher);
     default:
       console.log(`Watcher type "${watcher.type}" not yet implemented`);
       return [];
@@ -135,7 +148,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 }
 
 function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : "\u{1F514}";
   const header = `${icon} <b>${watcher.name}</b>\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

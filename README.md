@@ -154,6 +154,18 @@ bots/
 
 5. Restart — the bot is auto-discovered and connects to Telegram
 
+## Telegram Commands
+
+| Command | Description |
+|---|---|
+| `/start` | Confirms the bot is online |
+| `/watchers` | List all active watchers with status, interval, last run, and filter |
+| `/watch <type> [filter]` | Create a new watcher. Types: `email`, `calendar`, `github`, `news`, `goal`. Example: `/watch email from:github.com` |
+| `/unwatch <name\|id>` | Remove a watcher by name or short ID |
+| `/quiet [start-end\|off]` | View, set, or disable quiet hours (e.g. `/quiet 22-08`) |
+
+Any other text or voice message is forwarded to Claude for a conversational response.
+
 ## Dashboard API
 
 - `GET /` — Live activity dashboard (HTML)

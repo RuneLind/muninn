@@ -19,6 +19,7 @@ CREATE TABLE messages (
   model TEXT,
   input_tokens INTEGER,
   output_tokens INTEGER,
+  source TEXT DEFAULT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -1,4 +1,4 @@
-import { getRecentMessages } from "../db/messages.ts";
+import { getRecentMessages, getRecentAlerts, type AlertMessage } from "../db/messages.ts";
 import { searchMemoriesHybrid } from "../db/memories.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
@@ -16,6 +16,7 @@ export interface PromptBuildResult {
     memoriesCount: number;
     goalsCount: number;
     scheduledTasksCount: number;
+    alertsCount: number;
   };
 }
 
@@ -29,7 +30,7 @@ export async function buildPrompt(
   let dbHistoryMs = 0;
   let embeddingMs = 0;
 
-  const [recentMessages, queryEmbedding, activeGoals, scheduledTasks] =
+  const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts] =
     await Promise.all([
       getRecentMessages(userId, 20, botName).then((r) => {
         dbHistoryMs = performance.now() - t0;
@@ -41,6 +42,7 @@ export async function buildPrompt(
       }),
       getActiveGoals(userId, botName),
       getScheduledTasksForUser(userId, botName),
+      getRecentAlerts(userId, botName, 24, 5),
     ]);
 
   const searchStart = performance.now();
@@ -57,7 +59,7 @@ export async function buildPrompt(
   console.log(
     `[Jarvis] prompt_build: ${Math.round(totalMs)}ms` +
       ` (db: ${Math.round(dbHistoryMs)}ms, embed: ${Math.round(embeddingMs)}ms, search: ${Math.round(memorySearchMs)}ms` +
-      ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks)`,
+      ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts)`,
   );
 
   // System prompt: persona + context (memories, goals)
@@ -73,6 +75,10 @@ export async function buildPrompt(
 
   if (scheduledTasks.length > 0) {
     systemParts.push(formatScheduledTasks(scheduledTasks));
+  }
+
+  if (recentAlerts.length > 0) {
+    systemParts.push(formatAlerts(recentAlerts));
   }
 
   // User prompt: conversation history + current message
@@ -95,6 +101,7 @@ export async function buildPrompt(
       memoriesCount: relevantMemories.length,
       goalsCount: activeGoals.length,
       scheduledTasksCount: scheduledTasks.length,
+      alertsCount: recentAlerts.length,
     },
   };
 }
@@ -142,6 +149,22 @@ function formatScheduledTasks(tasks: ScheduledTask[]): string {
     })
     .join("\n");
   return `User's scheduled tasks:\n${items}`;
+}
+
+function formatAlerts(alerts: AlertMessage[]): string {
+  const items = alerts
+    .map((a) => {
+      const time = new Date(a.timestamp).toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+        timeZone: "Europe/Oslo",
+      });
+      const type = a.source.replace("watcher:", "");
+      return `- [${time}] ${type}: ${a.content}`;
+    })
+    .join("\n");
+  return `Recent watcher alerts sent to user (last 24h):\n${items}`;
 }
 
 function formatConversationHistory(messages: ConversationMessage[]): string {

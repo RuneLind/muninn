@@ -49,8 +49,8 @@ export function formatTelegramHtml(text: string): string {
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
   // Restore code blocks and inline codes
-  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)]);
-  result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)]);
+  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)] ?? "");
+  result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)] ?? "");
 
   // Escape any HTML tags that Telegram doesn't support
   // Telegram allows: b, i, u, s, code, pre, a, tg-spoiler, tg-emoji, blockquote
