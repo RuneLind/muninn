@@ -19,7 +19,7 @@ export async function saveWatcher(params: SaveWatcherParams): Promise<string> {
       ${params.botName},
       ${params.name},
       ${params.type},
-      ${JSON.stringify(params.config ?? {})},
+      ${sql.json(params.config ?? {})},
       ${params.intervalMs ?? 300000}
     )
     RETURNING id
@@ -53,7 +53,7 @@ export async function updateWatcherLastRun(
   await sql`
     UPDATE watchers
     SET last_run_at = now(),
-        last_notified_ids = ${JSON.stringify(notifiedIds)}
+        last_notified_ids = ${sql.json(notifiedIds)}
     WHERE id = ${id}
   `;
 }

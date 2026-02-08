@@ -105,6 +105,8 @@ export interface WatcherAlert {
   source: string;
   summary: string;
   urgency: "low" | "medium" | "high";
+  sender?: string;
+  subject?: string;
 }
 
 export interface UserSettings {

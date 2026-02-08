@@ -7,7 +7,49 @@ import { checkEmail } from "./email.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 
-const MAX_NOTIFIED_IDS = 200;
+const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
+
+/**
+ * Content-based dedup hash, extracted from the summary text itself.
+ * Extracts sender name (from "Fra/From: X —" pattern) + proper nouns.
+ * These survive Haiku's translation between runs.
+ * Prefixed with "h:" to distinguish from message IDs in the shared array.
+ */
+function contentHash(alert: WatcherAlert): string | null {
+  const text = alert.summary;
+  if (!text) return null;
+
+  // Extract sender from summary: "<b>Fra:</b> Sender Name — ..." or "From: Sender — ..."
+  const senderMatch = text.match(/(?:Fra|From)[:\s<b>/]*\s*(.+?)\s*[—\-–]/i);
+  const sender = senderMatch?.[1]?.replace(/<[^>]+>/g, "").trim().toLowerCase() ?? "";
+
+  // Extract proper nouns from the rest (after the —)
+  const afterDash = text.split(/[—\-–]/).slice(1).join(" ");
+  const nouns = extractProperNouns(afterDash);
+
+  const fingerprint = `${sender}|${nouns.join(",")}`;
+  if (!sender && nouns.length === 0) return null;
+  return `h:${Bun.hash(fingerprint)}`;
+}
+
+/** Extract proper nouns: ALL-CAPS words, mid-sentence capitalized words, long numbers */
+function extractProperNouns(text: string): string[] {
+  const clean = text.replace(/<[^>]+>/g, "");
+  const words = clean.split(/[\s,;:—–\-\(\)\/]+/).filter((w) => w.length > 1);
+  const tokens: string[] = [];
+  let skippedFirst = false;
+  for (const word of words) {
+    if (/^[A-ZÆØÅÜ]{2,}$/.test(word)) {
+      tokens.push(word.toLowerCase());             // ALL CAPS: AS, AB, NASA
+    } else if (/^[A-ZÆØÅÜ][a-zæøåü]{2,}/.test(word)) {
+      if (!skippedFirst) { skippedFirst = true; continue; } // Skip sentence-initial cap
+      tokens.push(word.toLowerCase());
+    } else if (/^\d{3,}$/.test(word)) {
+      tokens.push(word);                           // Order IDs, numbers
+    }
+  }
+  return tokens.sort();
+}
 
 export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void> {
   const tag = botConfig.name;
@@ -29,10 +71,21 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
 
       const alerts = await runChecker(watcher, botConfig.dir);
 
-      // Filter out already-notified IDs
-      const newAlerts = alerts.filter(
-        (a) => !watcher.lastNotifiedIds.includes(a.id),
-      );
+      // Filter out already-notified: by message ID and by content hash
+      const known = watcher.lastNotifiedIds;
+      const newAlerts = alerts.filter((a) => {
+        if (known.includes(a.id)) {
+          console.log(`[${tag}] Dedup: skipped by ID "${a.id}"`);
+          return false;
+        }
+        const hash = contentHash(a);
+        if (hash && known.includes(hash)) {
+          console.log(`[${tag}] Dedup: skipped by content hash ${hash} — "${a.summary.slice(0, 60)}"`);
+          return false;
+        }
+        console.log(`[${tag}] Dedup: NEW alert id="${a.id}" hash=${hash} — "${a.summary.slice(0, 60)}"`);
+        return true;
+      });
 
       if (newAlerts.length > 0) {
         const message = formatAlerts(watcher, newAlerts);
@@ -49,10 +102,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
         );
       }
 
-      // Update last_run_at and keep a rolling window of notified IDs
+      // Update last_run_at and keep a rolling window of IDs + content hashes
+      const newEntries = newAlerts.flatMap((a) => {
+        const hash = contentHash(a);
+        return hash ? [a.id, hash] : [a.id];
+      });
       const updatedIds = [
         ...watcher.lastNotifiedIds,
-        ...newAlerts.map((a) => a.id),
+        ...newEntries,
       ].slice(-MAX_NOTIFIED_IDS);
 
       await updateWatcherLastRun(watcher.id, updatedIds);
