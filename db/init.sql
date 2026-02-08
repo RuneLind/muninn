@@ -147,3 +147,17 @@ CREATE TRIGGER scheduled_tasks_updated_at
 CREATE INDEX idx_scheduled_tasks_due ON scheduled_tasks (enabled, next_run_at)
   WHERE enabled = true;
 CREATE INDEX idx_scheduled_tasks_user ON scheduled_tasks (user_id, enabled);
+
+-- ============================================================================
+-- Haiku usage: token tracking for async background calls
+-- ============================================================================
+CREATE TABLE haiku_usage (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source TEXT NOT NULL, -- 'memory', 'goals', 'schedule', 'task', 'briefing', 'reminder', 'checkin'
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_haiku_usage_created ON haiku_usage(created_at DESC);

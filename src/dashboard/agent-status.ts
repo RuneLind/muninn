@@ -6,7 +6,9 @@ export type AgentPhase =
   | "calling_claude"
   | "saving_response"
   | "sending_telegram"
-  | "synthesizing_voice";
+  | "synthesizing_voice"
+  | "running_task"
+  | "checking_goals";
 
 export interface AgentStatus {
   phase: AgentPhase;

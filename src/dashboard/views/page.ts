@@ -243,6 +243,26 @@ export function renderDashboardPage(): string {
       display: flex;
       flex-direction: column;
     }
+    .feed-hidden { display: none !important; }
+    .feed-show-more {
+      padding: 8px 16px;
+      text-align: center;
+      border-top: 1px solid #1e1e2e;
+    }
+    .feed-show-more button {
+      background: none;
+      border: 1px solid #2a2a3a;
+      color: #888;
+      padding: 6px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    .feed-show-more button:hover {
+      border-color: #6c63ff;
+      color: #ccc;
+    }
     .live-badge {
       display: flex; align-items: center; gap: 6px;
       font-size: 11px; color: #4ade80; font-weight: 500;
@@ -406,6 +426,9 @@ export function renderDashboardPage(): string {
           <div class="live-badge"><div class="live-dot"></div> Live</div>
         </div>
         <div class="panel-body" id="feed"></div>
+        <div class="feed-show-more" id="feedShowMore" style="display:none">
+          <button id="feedToggleBtn" onclick="toggleFeed()">Show all</button>
+        </div>
       </div>
     </div>
   </div>
@@ -559,8 +582,8 @@ export function renderDashboardPage(): string {
               order: 2,
             },
             {
-              label: 'Tokens',
-              data: tokensByDay.map(d => d.tokens),
+              label: 'Claude Tokens',
+              data: tokensByDay.map(d => d.mainTokens),
               type: 'line',
               borderColor: 'rgba(74, 222, 128, 0.8)',
               backgroundColor: 'rgba(74, 222, 128, 0.1)',
@@ -571,6 +594,20 @@ export function renderDashboardPage(): string {
               fill: true,
               yAxisID: 'y1',
               order: 1,
+            },
+            {
+              label: 'Haiku Tokens',
+              data: tokensByDay.map(d => d.haikuTokens),
+              type: 'line',
+              borderColor: 'rgba(250, 204, 21, 0.8)',
+              backgroundColor: 'rgba(250, 204, 21, 0.08)',
+              borderWidth: 2,
+              pointRadius: 3,
+              pointBackgroundColor: 'rgba(250, 204, 21, 1)',
+              tension: 0.3,
+              fill: true,
+              yAxisID: 'y1',
+              order: 0,
             }
           ]
         },
@@ -607,6 +644,9 @@ export function renderDashboardPage(): string {
 
     // --- Activity Feed ---
     const feed = document.getElementById('feed');
+    const FEED_LIMIT = 10;
+    let feedExpanded = false;
+    let feedEventCount = 0;
 
     function badgeLabel(type) {
       switch (type) {
@@ -631,8 +671,11 @@ export function renderDashboardPage(): string {
     }
 
     function addEvent(ev) {
+      const fragment = document.createDocumentFragment();
+
       const div = document.createElement('div');
       div.className = 'event type-' + ev.type;
+      div.dataset.feedEvent = 'true';
 
       let meta = '';
       if (ev.durationMs) meta += fmtMs(ev.durationMs);
@@ -648,16 +691,52 @@ export function renderDashboardPage(): string {
         '<span class="event-text">' + escapeHtml(ev.text) + '</span>' +
         (meta ? '<span class="event-meta">' + meta + '</span>' : '');
 
-      feed.appendChild(div);
+      fragment.appendChild(div);
 
       if (ev.metadata && ev.type === 'message_out') {
         const timingDiv = document.createElement('div');
         timingDiv.className = 'event-timing';
         timingDiv.innerHTML = renderTiming(ev.metadata);
-        feed.appendChild(timingDiv);
+        fragment.appendChild(timingDiv);
       }
 
-      feed.scrollTop = feed.scrollHeight;
+      feed.prepend(fragment);
+      feedEventCount++;
+      updateFeedVisibility();
+    }
+
+    function updateFeedVisibility() {
+      if (feedExpanded || feedEventCount <= FEED_LIMIT) {
+        document.getElementById('feedShowMore').style.display = 'none';
+        for (const child of feed.children) child.classList.remove('feed-hidden');
+        return;
+      }
+
+      let count = 0;
+      for (const child of feed.children) {
+        if (child.dataset.feedEvent) count++;
+        if (count > FEED_LIMIT) {
+          child.classList.add('feed-hidden');
+        } else {
+          child.classList.remove('feed-hidden');
+        }
+      }
+
+      const showMore = document.getElementById('feedShowMore');
+      const hidden = feedEventCount - FEED_LIMIT;
+      showMore.style.display = '';
+      document.getElementById('feedToggleBtn').textContent = 'Show all (' + feedEventCount + ' events)';
+    }
+
+    function toggleFeed() {
+      feedExpanded = !feedExpanded;
+      if (feedExpanded) {
+        for (const child of feed.children) child.classList.remove('feed-hidden');
+        document.getElementById('feedToggleBtn').textContent = 'Show less';
+        document.getElementById('feedShowMore').style.display = '';
+      } else {
+        updateFeedVisibility();
+      }
     }
 
     // --- Agent Status ---
@@ -670,6 +749,8 @@ export function renderDashboardPage(): string {
       saving_response: 'Saving response',
       sending_telegram: 'Sending to Telegram',
       synthesizing_voice: 'Synthesizing voice',
+      running_task: 'Running scheduled task',
+      checking_goals: 'Checking goals',
     };
 
     function updateAgentStatus(status) {

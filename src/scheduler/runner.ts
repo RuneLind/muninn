@@ -10,6 +10,7 @@ import {
 } from "../db/goals.ts";
 import { getTasksDueNow, updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
+import { agentStatus } from "../dashboard/agent-status.ts";
 import { callHaiku } from "./executor.ts";
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -67,8 +68,11 @@ async function runScheduledTasks(api: Api): Promise<void> {
       // Update next_run_at FIRST to prevent re-firing on overlapping ticks
       await updateTaskLastRun(task);
 
+      agentStatus.set("running_task", task.title);
       const message = await executeTask(task);
+      agentStatus.set("sending_telegram", task.title);
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
+      agentStatus.set("idle");
       activityLog.push(
         "system",
         `Scheduled task fired: ${task.title} (${task.taskType})`,
@@ -78,6 +82,7 @@ async function runScheduledTasks(api: Api): Promise<void> {
         `[Jarvis] Scheduled task fired: "${task.title}" (${task.taskType}) to user ${task.userId}`,
       );
     } catch (err) {
+      agentStatus.set("idle");
       console.error(
         `[Jarvis] Failed to execute scheduled task ${task.id}:`,
         err,
@@ -92,6 +97,7 @@ async function executeTask(task: ScheduledTask): Promise<string> {
       return await callHaiku(
         `Generate a brief, natural Telegram reminder message (2-3 sentences max). Use Telegram HTML formatting (<b>, <i> only). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
         `<b>Reminder:</b> ${task.title}`,
+        "reminder",
       );
 
     case "briefing":
@@ -102,6 +108,7 @@ async function executeTask(task: ScheduledTask): Promise<string> {
       return await callHaiku(
         `${task.prompt}\n\nRespond using Telegram HTML formatting (<b>, <i> only). Keep it concise.`,
         `<b>${task.title}</b>`,
+        "task",
       );
   }
 }
@@ -135,6 +142,7 @@ async function generateBriefing(task: ScheduledTask): Promise<string> {
   return await callHaiku(
     prompt,
     `<b>Good ${timeOfDay}!</b>\nHere's your briefing. You have ${goalsContext ? "active goals to work on" : "no active goals"} today.`,
+    "briefing",
   );
 }
 
@@ -150,8 +158,11 @@ async function runGoalReminders(api: Api): Promise<void> {
   const reminders = await getGoalsNeedingReminder(24);
   for (const goal of reminders) {
     try {
+      agentStatus.set("checking_goals", goal.title);
       const message = await generateReminderMessage(goal);
+      agentStatus.set("sending_telegram", goal.title);
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      agentStatus.set("idle");
       await updateGoalReminderSentAt(goal.id);
       activityLog.push(
         "system",
@@ -162,6 +173,7 @@ async function runGoalReminders(api: Api): Promise<void> {
         `[Jarvis] Deadline reminder sent: "${goal.title}" to user ${goal.userId}`,
       );
     } catch (err) {
+      agentStatus.set("idle");
       console.error(
         `[Jarvis] Failed to send reminder for goal ${goal.id}:`,
         err,
@@ -175,8 +187,11 @@ async function runGoalCheckins(api: Api): Promise<void> {
   if (staleGoals.length > 0) {
     const goal = staleGoals[0]!;
     try {
+      agentStatus.set("checking_goals", goal.title);
       const message = await generateCheckinMessage(goal);
+      agentStatus.set("sending_telegram", goal.title);
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      agentStatus.set("idle");
       await updateGoalCheckedAt(goal.id);
       activityLog.push(
         "system",
@@ -187,6 +202,7 @@ async function runGoalCheckins(api: Api): Promise<void> {
         `[Jarvis] Check-in sent: "${goal.title}" to user ${goal.userId}`,
       );
     } catch (err) {
+      agentStatus.set("idle");
       console.error(
         `[Jarvis] Failed to send check-in for goal ${goal.id}:`,
         err,
@@ -209,6 +225,7 @@ async function generateReminderMessage(goal: Goal): Promise<string> {
   return await callHaiku(
     `Generate a brief, natural Telegram reminder message (2-3 sentences max) about an approaching deadline. Use Telegram HTML formatting (<b>, <i> only). Be helpful and motivating, not pushy. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nDeadline: ${deadlineStr}\nTags: ${goal.tags.join(", ") || "none"}`,
     `⏰ <b>Deadline approaching:</b> ${goal.title}\nDue: ${deadlineStr}`,
+    "checkin",
   );
 }
 
@@ -221,5 +238,6 @@ async function generateCheckinMessage(goal: Goal): Promise<string> {
   return await callHaiku(
     `Generate a brief, natural Telegram check-in message (2-3 sentences max) asking about progress on a goal. Use Telegram HTML formatting (<b>, <i> only). Be conversational and supportive, not nagging. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nSet on: ${createdStr}\nTags: ${goal.tags.join(", ") || "none"}`,
     `📋 <b>Goal check-in:</b> ${goal.title}\nHow's this going?`,
+    "checkin",
   );
 }

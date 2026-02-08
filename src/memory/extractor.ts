@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import { saveMemory } from "../db/memories.ts";
 import { generateEmbedding } from "../ai/embeddings.ts";
+import { spawnHaiku } from "../scheduler/executor.ts";
 
 interface ExtractionInput {
   userId: number;
@@ -45,48 +46,15 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     .replace("{USER_MESSAGE}", input.userMessage)
     .replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
 
-  const proc = Bun.spawn(
-    [
-      "claude",
-      "-p", prompt,
-      "--output-format", "json",
-      "--model", "claude-haiku-4-5-20251001",
-    ],
-    {
-      env: {
-        ...process.env,
-        CLAUDE_CODE_ENTRYPOINT: "jarvis-memory",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-    },
-  );
-
-  const stdout = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    console.error("Memory extraction claude error:", stderr);
-    return;
-  }
-
-  let claudeOutput: { result: string };
-  try {
-    claudeOutput = JSON.parse(stdout);
-  } catch {
-    console.error("Memory extraction: failed to parse claude JSON output");
-    return;
-  }
+  const haiku = await spawnHaiku(prompt, "memory", "jarvis-memory");
 
   let result: ExtractionResult;
   try {
     // Strip markdown fences if Haiku wraps the JSON in ```json ... ```
-    const cleaned = claudeOutput.result.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/,"");
+    const cleaned = haiku.result.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/,"");
     result = JSON.parse(cleaned);
   } catch {
-    console.error("Memory extraction: failed to parse extraction result:", claudeOutput.result);
+    console.error("Memory extraction: failed to parse extraction result:", haiku.result);
     return;
   }
 

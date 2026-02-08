@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import { saveScheduledTask } from "../db/scheduled-tasks.ts";
 import type { TaskType } from "../types.ts";
+import { spawnHaiku } from "./executor.ts";
 
 interface DetectionInput {
   userId: number;
@@ -67,56 +68,18 @@ async function doExtract(
     input.userMessage,
   ).replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
 
-  const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
-      prompt,
-      "--output-format",
-      "json",
-      "--model",
-      "claude-haiku-4-5-20251001",
-    ],
-    {
-      env: {
-        ...process.env,
-        CLAUDE_CODE_ENTRYPOINT: "jarvis-schedule-detector",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-    },
-  );
-
-  const stdout = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
-
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    console.error("[Jarvis] Schedule detection claude error:", stderr);
-    return;
-  }
-
-  let claudeOutput: { result: string };
-  try {
-    claudeOutput = JSON.parse(stdout);
-  } catch {
-    console.error(
-      "[Jarvis] Schedule detection: failed to parse claude JSON output",
-    );
-    return;
-  }
+  const haiku = await spawnHaiku(prompt, "schedule", "jarvis-schedule-detector");
 
   let result: DetectionResult;
   try {
-    const cleaned = claudeOutput.result
+    const cleaned = haiku.result
       .replace(/^```(?:json)?\s*\n?/i, "")
       .replace(/\n?```\s*$/, "");
     result = JSON.parse(cleaned);
   } catch {
     console.error(
       "[Jarvis] Schedule detection: failed to parse result:",
-      claudeOutput.result,
+      haiku.result,
     );
     return;
   }
