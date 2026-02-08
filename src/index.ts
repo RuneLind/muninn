@@ -1,11 +1,19 @@
 import { loadConfig } from "./config.ts";
+import { discoverBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler } from "./scheduler/runner.ts";
+import type { Bot } from "grammy";
 
 const config = loadConfig();
+const botConfigs = discoverBots();
+
+if (botConfigs.length === 0) {
+  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists and TELEGRAM_BOT_TOKEN_<NAME> is set.");
+  process.exit(1);
+}
 
 // Initialize database
 initDb(config);
@@ -27,28 +35,39 @@ const server = Bun.serve({
 
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
-// Start Telegram bot
-const bot = createBot(config);
+// Start all discovered bots
+const bots: Bot[] = [];
 
-activityLog.push("system", "Starting Telegram bot...");
+for (const botConfig of botConfigs) {
+  const bot = createBot(config, botConfig);
+  bots.push(bot);
 
-bot.start({
-  onStart: (botInfo) => {
-    activityLog.push("system", `Telegram bot connected as @${botInfo.username}`);
-    console.log(`Jarvis is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+  activityLog.push("system", `Starting ${botConfig.name} bot...`);
 
-    // Start unified scheduler after bot is connected (10s delay for stability)
-    setTimeout(() => {
-      startScheduler(bot.api, config);
-    }, 10_000);
-  },
-});
+  bot.start({
+    onStart: (botInfo) => {
+      activityLog.push("system", `${botConfig.name} connected as @${botInfo.username}`);
+      console.log(`${botConfig.name} is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+    },
+  });
+}
+
+// Start unified scheduler after bots are connected (10s delay for stability)
+// Use the first bot's API for sending messages, and its dir as cwd for watchers
+const primaryBot = bots[0]!;
+const primaryBotConfig = botConfigs[0]!;
+
+setTimeout(() => {
+  startScheduler(primaryBot.api, config, primaryBotConfig.dir);
+}, 10_000);
 
 // Graceful shutdown
 async function shutdown() {
   console.log("\nShutting down...");
   stopScheduler();
-  bot.stop();
+  for (const bot of bots) {
+    bot.stop();
+  }
   server.stop();
   await closeDb();
   process.exit(0);

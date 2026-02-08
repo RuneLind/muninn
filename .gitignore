@@ -36,5 +36,8 @@ models/
 # Database backups
 backups/
 
+# Bot-level env files
+bots/*/.env
+
 # Finder (MacOS) folder config
 .DS_Store

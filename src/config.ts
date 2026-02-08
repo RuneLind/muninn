@@ -12,11 +12,6 @@ function optionalEnv(name: string, defaultValue: string): string {
 
 export function loadConfig() {
   return {
-    telegramBotToken: requireEnv("TELEGRAM_BOT_TOKEN"),
-    allowedUserIds: requireEnv("TELEGRAM_ALLOWED_USER_IDS")
-      .split(",")
-      .map((id) => parseInt(id.trim(), 10))
-      .filter((id) => !isNaN(id)),
     dashboardPort: parseInt(optionalEnv("DASHBOARD_PORT", "3000"), 10),
     claudeTimeoutMs: parseInt(optionalEnv("CLAUDE_TIMEOUT_MS", "120000"), 10),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),

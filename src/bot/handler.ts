@@ -1,5 +1,6 @@
 import type { Context } from "grammy";
 import type { Config } from "../config.ts";
+import type { BotConfig } from "../bots/config.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
@@ -11,7 +12,9 @@ import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { Timing } from "../utils/timing.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 
-export function createMessageHandler(config: Config) {
+export function createMessageHandler(config: Config, botConfig: BotConfig) {
+  const tag = `[${botConfig.name}]`;
+
   return async (ctx: Context) => {
     const text = ctx.message?.text;
     if (!text) return;
@@ -24,7 +27,7 @@ export function createMessageHandler(config: Config) {
 
     activityLog.push("message_in", text, { userId, username });
     agentStatus.set("receiving", username);
-    console.log(`[Jarvis] Message from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    console.log(`${tag} Message from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     // Save user message to DB
     t.start("db_save_user");
@@ -34,9 +37,9 @@ export function createMessageHandler(config: Config) {
     // Build context-aware prompt
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona);
     t.end("prompt_build");
-    console.log(`[Jarvis] Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
+    console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
     // Keep typing indicator alive while Claude processes
     const typingInterval = setInterval(() => {
@@ -48,11 +51,11 @@ export function createMessageHandler(config: Config) {
 
     try {
       agentStatus.set("calling_claude", username);
-      console.log(`[Jarvis] Calling Claude (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
+      console.log(`${tag} Calling Claude (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
       t.start("claude");
-      const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
+      const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
       t.end("claude");
-      console.log(`[Jarvis] Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
+      console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
 
       clearInterval(typingInterval);
 
@@ -157,7 +160,7 @@ export function createMessageHandler(config: Config) {
       // Console timing breakdown
       const s = t.summary();
       console.log(
-        `[Jarvis] 📊 Request timing breakdown:\n` +
+        `${tag} Request timing breakdown:\n` +
           `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
           `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
           `  db_save:        ${pad((s.db_save_user ?? 0) + (s.db_save_response ?? 0))}\n` +
@@ -177,7 +180,7 @@ export function createMessageHandler(config: Config) {
         .map(([k]) => k)
         .pop() ?? "unknown";
       console.error(
-        `[Jarvis] Request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+        `${tag} Request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
           `  Error: ${errorMessage}\n` +
           `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
       );

@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__gmail__search_emails",
+      "mcp__gmail__read_email",
+      "mcp__gmail__send_email",
+      "mcp__gmail__draft_email",
+      "mcp__gmail__modify_email",
+      "mcp__gmail__delete_email",
+      "mcp__gmail__list_email_labels",
+      "mcp__gmail__batch_modify_emails",
+      "mcp__gmail__batch_delete_emails",
+      "mcp__gmail__create_label",
+      "mcp__gmail__update_label",
+      "mcp__gmail__delete_label",
+      "mcp__gmail__get_or_create_label",
+      "mcp__gmail__create_filter",
+      "mcp__gmail__list_filters",
+      "mcp__gmail__get_filter",
+      "mcp__gmail__delete_filter",
+      "mcp__gmail__create_filter_from_template",
+      "mcp__gmail__download_attachment",
+      "WebFetch",
+      "Read",
+      "mcp__google-calendar__list-calendars",
+      "mcp__google-calendar__list-events",
+      "mcp__google-calendar__search-events",
+      "mcp__google-calendar__get-event",
+      "mcp__google-calendar__list-colors",
+      "mcp__google-calendar__create-event",
+      "mcp__google-calendar__update-event",
+      "mcp__google-calendar__delete-event",
+      "mcp__google-calendar__get-freebusy",
+      "mcp__google-calendar__get-current-time",
+      "mcp__google-calendar__respond-to-event",
+      "mcp__google-calendar__manage-accounts",
+      "mcp__jetbrains__list_directory_tree"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "gmail"
+  ]
+}

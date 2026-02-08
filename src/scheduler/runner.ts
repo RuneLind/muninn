@@ -17,7 +17,7 @@ import { runWatchers } from "../watchers/runner.ts";
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let tickRunning = false;
 
-export function startScheduler(api: Api, config: Config): void {
+export function startScheduler(api: Api, config: Config, cwd?: string): void {
   if (!config.schedulerEnabled) {
     console.log("[Jarvis] Scheduler disabled");
     return;
@@ -31,7 +31,7 @@ export function startScheduler(api: Api, config: Config): void {
   intervalId = setInterval(() => {
     if (tickRunning) return;
     tickRunning = true;
-    runSchedulerTick(api, config)
+    runSchedulerTick(api, config, cwd)
       .catch((err) => {
         console.error("[Jarvis] Scheduler tick failed:", err);
       })
@@ -49,7 +49,7 @@ export function stopScheduler(): void {
   }
 }
 
-async function runSchedulerTick(api: Api, config: Config): Promise<void> {
+async function runSchedulerTick(api: Api, config: Config, cwd?: string): Promise<void> {
   // 1. Run due scheduled tasks
   await runScheduledTasks(api);
 
@@ -60,7 +60,7 @@ async function runSchedulerTick(api: Api, config: Config): Promise<void> {
   await runGoalCheckins(api);
 
   // 4. Watchers (email, calendar, etc.)
-  await runWatchers(api);
+  await runWatchers(api, cwd);
 }
 
 // --- Scheduled Tasks ---

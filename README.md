@@ -1,23 +1,23 @@
 # Jarvis
 
-Personal AI assistant — Telegram bot backed by Claude CLI, with semantic memory, goal tracking, scheduled tasks, voice support, and a live web dashboard.
+Multi-bot Telegram platform backed by Claude CLI — each bot gets its own persona, MCP tools, and permissions, all running in a single process with shared DB, dashboard, and scheduler.
 
 ## Features
 
-- **Telegram Bot** — Text and voice message handling via Grammy
-- **Claude AI** — Responses powered by Claude Code headless mode (`claude -p`)
+- **Multi-Bot Architecture** — Multiple Telegram bots in one process, each with isolated persona, MCP tools, and Claude CLI history
+- **Claude AI** — Responses powered by Claude Code headless mode (`claude -p`) with per-bot `cwd` isolation
 - **Semantic Memory** — Automatically extracts and recalls facts from conversations using local embeddings (Transformers.js) and hybrid search (FTS + pgvector)
 - **Goal Tracking** — Detects goals/commitments/deadlines from conversations, injects them into prompt context, and proactively sends reminders and check-ins
 - **Scheduled Tasks** — Cron-style or interval-based recurring tasks detected from conversation ("remind me every morning at 8") — supports reminders, AI-generated briefings, and custom prompts
+- **Proactive Watchers** — Background monitors (email via Gmail MCP) with quiet hours and dedup
 - **Voice** — Speech-to-text (whisper-cli) and text-to-speech (macOS say + ffmpeg) with mirror mode (voice in → voice + text out)
-- **Live Dashboard** — Hono web server with SSE real-time activity feed
-- **Local-first** — All data stays on your machine (Supabase local, local embeddings, no cloud dependencies beyond Telegram and Claude API)
+- **Live Dashboard** — Hono web server with SSE real-time activity feed, stats, goals, tasks, and memories panels
+- **Local-first** — All data stays on your machine (PostgreSQL via Docker, local embeddings, no cloud dependencies beyond Telegram and Claude API)
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) runtime
-- [Docker](https://docker.com) (for local Supabase/PostgreSQL)
-- [Supabase CLI](https://supabase.com/docs/guides/cli) (`brew install supabase/tap/supabase`)
+- [Docker](https://docker.com) (for PostgreSQL)
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - [whisper-cpp](https://github.com/ggerganov/whisper.cpp) (optional, for voice: `brew install whisper-cpp`)
 - [ffmpeg](https://ffmpeg.org) (optional, for voice: `brew install ffmpeg`)
@@ -31,7 +31,7 @@ Personal AI assistant — Telegram bot backed by Claude CLI, with semantic memor
 
 2. Start local database:
    ```bash
-   supabase start
+   bun run db:up
    ```
 
 3. Configure environment:
@@ -40,12 +40,14 @@ Personal AI assistant — Telegram bot backed by Claude CLI, with semantic memor
    ```
    Edit `.env` with your values (see [Configuration](#configuration) below).
 
-4. Apply database migrations:
+4. Set up your first bot:
    ```bash
-   bunx supabase migration up --local
+   mkdir -p bots/jarvis/.claude
    ```
+   - Create `bots/jarvis/CLAUDE.md` with the bot's persona
+   - Optionally add `bots/jarvis/.mcp.json` (MCP tools) and `bots/jarvis/.claude/settings.local.json` (permissions)
 
-5. Start Jarvis:
+5. Start:
    ```bash
    bun run dev    # Development with file watching
    bun run start  # Production
@@ -53,44 +55,104 @@ Personal AI assistant — Telegram bot backed by Claude CLI, with semantic memor
 
 ## Configuration
 
+### Shared (.env)
+
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_ALLOWED_USER_IDS` | Yes | — | Comma-separated Telegram user IDs allowed to use the bot |
-| `DATABASE_URL` | Yes | — | Postgres connection string (default local: `postgresql://postgres:postgres@127.0.0.1:54322/postgres`) |
+| `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3000` | Web dashboard port |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout in ms |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | Path to whisper-cpp model file |
-| `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval in ms (default 1min) |
-| `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler (tasks + goal reminders) |
-| `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
-| `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
+| `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval in ms |
+| `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler |
+
+### Per-Bot (.env)
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN_<NAME>` | Yes | Bot token from @BotFather (e.g. `TELEGRAM_BOT_TOKEN_JARVIS`) |
+| `TELEGRAM_ALLOWED_USER_IDS_<NAME>` | Yes | Comma-separated Telegram user IDs (e.g. `TELEGRAM_ALLOWED_USER_IDS_JARVIS`) |
 
 ## Architecture
 
+### Multi-Bot Process
+
 ```
-Telegram → Grammy bot → Claude CLI (Bun.spawn) → Response → Telegram
-                ↓                                      ↓
-          Save to DB                Extract memories + goals + schedules (async Haiku)
-                ↓                                      ↓
-      Hono dashboard (SSE)          Unified scheduler (tasks + goal reminders)
+                    ┌─────────────────────────────────┐
+                    │        Single javrvis process    │
+                    │                                  │
+Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
+                    │    → Claude CLI (cwd: bots/jarvis)│
+                    │                                  │
+Telegram user B ───►│  Grammy Bot 2 (Capra)            │
+                    │    → Claude CLI (cwd: bots/capra) │
+                    │                                  │
+                    │  Shared: DB, Dashboard, Scheduler │
+                    └─────────────────────────────────┘
 ```
 
-### Key paths
+### Bot Isolation via `cwd`
+
+Each bot folder is set as `cwd` when spawning Claude CLI. This means Claude CLI automatically:
+- Reads `CLAUDE.md` as project instructions (persona)
+- Discovers `.mcp.json` (MCP tool servers)
+- Discovers `.claude/settings.local.json` (tool permissions)
+- Stores conversation history in `.claude/` within the bot folder
+
+This keeps bot sessions completely isolated from each other and from interactive dev sessions in the project root.
+
+### Bot Folder Structure
+
+```
+bots/
+├── jarvis/
+│   ├── CLAUDE.md                ← persona + rules
+│   ├── .mcp.json                ← Gmail, Calendar MCPs
+│   └── .claude/
+│       └── settings.local.json  ← tool permissions
+├── capra/                        ← future bot
+│   ├── CLAUDE.md
+│   ├── .mcp.json
+│   └── .claude/
+│       └── settings.local.json
+```
+
+### Key Paths
 
 | Path | Purpose |
 |---|---|
-| `src/index.ts` | Entrypoint — inits DB, starts bot + dashboard + scheduler |
+| `bots/<name>/` | Per-bot config: persona, MCP, permissions, CLI history |
+| `src/bots/config.ts` | Bot auto-discovery from `bots/` directory |
+| `src/index.ts` | Entrypoint — inits DB, discovers bots, starts all + dashboard + scheduler |
 | `src/bot/` | Telegram handlers (text, voice), auth middleware, HTML formatting |
-| `src/ai/` | Claude executor, prompt builder, local embeddings |
+| `src/ai/` | Claude executor (cwd-based isolation), prompt builder, local embeddings |
 | `src/memory/` | Async memory extraction from conversations |
 | `src/goals/` | Goal detection (async Claude Haiku) |
-| `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders), task detector, shared Haiku executor |
-| `src/db/` | Postgres CRUD — messages, memories, goals, scheduled tasks, activity |
+| `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), shared Haiku executor |
+| `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours |
+| `src/db/` | Postgres CRUD — messages, memories, goals, scheduled tasks, activity, watchers |
 | `src/dashboard/` | Hono web server with SSE + REST APIs |
 | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
-| `supabase/migrations/` | Database schema migrations |
+
+## Adding a New Bot
+
+1. Create the bot folder:
+   ```bash
+   mkdir -p bots/mybot/.claude
+   ```
+
+2. Write the persona in `bots/mybot/CLAUDE.md`
+
+3. Optionally add MCP tools in `bots/mybot/.mcp.json` and permissions in `bots/mybot/.claude/settings.local.json`
+
+4. Add env vars to `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN_MYBOT=<token from @BotFather>
+   TELEGRAM_ALLOWED_USER_IDS_MYBOT=123456
+   ```
+
+5. Restart — the bot is auto-discovered and connects to Telegram
 
 ## Dashboard API
 
@@ -104,32 +166,33 @@ Telegram → Grammy bot → Claude CLI (Bun.spawn) → Response → Telegram
 ## How It Works
 
 ### Memory
-After each conversation exchange, Jarvis asynchronously asks Claude Haiku whether the exchange contains facts worth remembering (preferences, decisions, project details). If so, it stores a summary with tags and a vector embedding for later semantic retrieval.
+After each conversation exchange, the bot asynchronously asks Claude Haiku whether the exchange contains facts worth remembering (preferences, decisions, project details). If so, it stores a summary with tags and a vector embedding for later semantic retrieval.
 
 ### Goals
-Similarly, Jarvis detects goals, commitments, and deadlines from conversations. Active goals are injected into the prompt context so Jarvis is always aware of what you're working toward. A unified background scheduler sends:
+Similarly, goals, commitments, and deadlines are detected from conversations. Active goals are injected into the prompt context. A unified background scheduler sends:
 - **Deadline reminders** — 24 hours before a deadline (max once per 12h)
 - **Check-ins** — When a goal hasn't been discussed in 3+ days (max 1 per scheduler tick)
 
 ### Scheduled Tasks
-Jarvis detects recurring task requests from conversation (e.g. "remind me every morning at 8 to review my goals"). Three task types:
-- **reminder** — Simple recurring messages ("stretch every 2 hours")
-- **briefing** — AI-generated summaries with goals and context ("morning briefing at 8am")
-- **custom** — Arbitrary prompts run through Claude Haiku ("every Friday summarize my week")
+Recurring task requests are detected from conversation (e.g. "remind me every morning at 8 to review my goals"). Three task types:
+- **reminder** — Simple recurring messages
+- **briefing** — AI-generated summaries with goals and context
+- **custom** — Arbitrary prompts run through Claude Haiku
 
-Tasks support two scheduling modes:
-- **Cron-style** — Specific hour/minute + optional day-of-week filter (e.g. weekdays at 08:00)
-- **Interval-style** — Repeat every N milliseconds (e.g. every 2 hours)
-
-All schedules are timezone-aware (default: Europe/Oslo). The unified scheduler ticks every 60 seconds and handles both scheduled tasks and goal reminders.
+### Watchers
+Background monitors that check external services at intervals:
+- **Email** — Spawns Haiku with the bot's Gmail MCP to search and evaluate unread emails
+- Quiet hours support (per-user, timezone-aware)
+- Dedup via rolling window of notified IDs
 
 ### Voice
-Send a voice message and Jarvis will transcribe it (whisper-cli), process it through Claude, and reply with both text and a voice message (mirror mode).
+Send a voice message and the bot will transcribe it (whisper-cli), process it through Claude, and reply with both text and a voice message (mirror mode).
 
 ## Security
 
 - No public ports — local Telegram relay only
-- Telegram user ID whitelist enforcement
+- Per-bot Telegram user ID whitelist enforcement
 - All API keys via environment variables
 - Database runs locally via Docker
 - Embeddings computed locally via Transformers.js
+- Bot sessions isolated from dev sessions via separate `cwd`

@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "gmail": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@gongrzhe/server-gmail-autoauth-mcp"
+      ],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS": "/Users/rune/.gmail-mcp/gcp-oauth.keys.json"
+      }
+    },
+    "google-calendar": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@cocal/google-calendar-mcp"
+      ],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS": "/Users/rune/.gmail-mcp/gcp-oauth.keys.json"
+      }
+    }
+  }
+}

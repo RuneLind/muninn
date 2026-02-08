@@ -114,7 +114,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## Jarvis Project
 
-Personal AI assistant — Telegram bot backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
+Personal AI assistant — multi-bot Telegram platform backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
 
 ### Running
 
@@ -124,22 +124,38 @@ bun run dev                 # Dev with --watch
 bun run start               # Production
 ```
 
-### Architecture
+### Multi-Bot Architecture
 
 ```
-Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
-                ↓                                      ↓
-          Save to DB                  Extract memories + goals + schedules (async)
-                ↓                                      ↓
-        Hono dashboard (SSE)          Unified scheduler (tasks + goals + watchers)
+                    ┌─────────────────────────────────┐
+                    │        Single javrvis process    │
+                    │                                  │
+Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
+                    │    → Claude CLI (cwd: bots/jarvis)│
+                    │                                  │
+Telegram user B ───►│  Grammy Bot 2 (Capra)            │
+                    │    → Claude CLI (cwd: bots/capra) │
+                    │                                  │
+                    │  Shared: DB, Dashboard, Scheduler │
+                    └─────────────────────────────────┘
 ```
+
+Each bot lives in `bots/<name>/` with its own:
+- `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
+- `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
+- `.claude/settings.local.json` — tool permissions
+
+Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately from the dev project root.
+
+A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOKEN_<NAME>` env var.
 
 ### Key Modules
 
 | Module | Path | Purpose |
 |---|---|---|
+| Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
-| AI | `src/ai/` | Claude executor, prompt builder (memories + goals + tasks + history), embeddings |
+| AI | `src/ai/` | Claude executor (cwd-based isolation), prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories from conversations |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
@@ -147,6 +163,22 @@ Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
 | DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, user settings |
 | Dashboard | `src/dashboard/` | Hono server with SSE activity feed + REST APIs |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
+
+### Bot Folder Structure
+
+```
+bots/
+├── jarvis/
+│   ├── CLAUDE.md                ← persona + rules
+│   ├── .mcp.json                ← Gmail, Calendar MCPs
+│   └── .claude/
+│       └── settings.local.json  ← tool permissions
+├── capra/                        ← future bot
+│   ├── CLAUDE.md
+│   ├── .mcp.json
+│   └── .claude/
+│       └── settings.local.json
+```
 
 ### Database
 
@@ -162,8 +194,8 @@ PostgreSQL + pgvector via Docker (single container).
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather |
-| `TELEGRAM_ALLOWED_USER_IDS` | Yes | — | Comma-separated Telegram user IDs |
+| `TELEGRAM_BOT_TOKEN_<NAME>` | Yes (per bot) | — | From @BotFather (e.g. `TELEGRAM_BOT_TOKEN_JARVIS`) |
+| `TELEGRAM_ALLOWED_USER_IDS_<NAME>` | Yes (per bot) | — | Comma-separated Telegram user IDs (e.g. `TELEGRAM_ALLOWED_USER_IDS_JARVIS`) |
 | `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3000` | Web dashboard port |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout (ms) |
@@ -174,14 +206,22 @@ PostgreSQL + pgvector via Docker (single container).
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 
+### Adding a New Bot
+
+1. Create `bots/<name>/CLAUDE.md` with the bot's persona
+2. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.local.json`
+3. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
+4. Restart — the bot is auto-discovered
+
 ### Conventions
 
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
 - Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
-- Prompt assembly: system prompt + memories + goals + scheduled tasks + conversation history
+- Prompt assembly: persona (from CLAUDE.md) + memories + goals + scheduled tasks + conversation history
+- Claude CLI isolation: each bot spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
-- Watcher email checking: Haiku spawned with Gmail MCP tools — fetches AND evaluates in one call, zero new deps
+- Watcher email checking: Haiku spawned with bot's cwd for Gmail MCP access
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript

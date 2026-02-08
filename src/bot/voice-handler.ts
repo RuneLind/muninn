@@ -1,6 +1,7 @@
 import { InputFile } from "grammy";
 import type { Context } from "grammy";
 import type { Config } from "../config.ts";
+import type { BotConfig } from "../bots/config.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
@@ -15,7 +16,9 @@ import { synthesizeVoice } from "../voice/tts.ts";
 import { Timing } from "../utils/timing.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 
-export function createVoiceHandler(config: Config) {
+export function createVoiceHandler(config: Config, botConfig: BotConfig) {
+  const tag = `[${botConfig.name}]`;
+
   return async (ctx: Context) => {
     const voice = ctx.message?.voice;
     if (!voice) return;
@@ -30,7 +33,7 @@ export function createVoiceHandler(config: Config) {
     agentStatus.set("receiving", username);
     t.start("voice_download");
     const file = await ctx.api.getFile(voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
+    const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken}/${file.file_path}`;
     const response = await fetch(fileUrl);
     if (!response.ok) {
       await ctx.reply("Failed to download voice message.");
@@ -55,7 +58,7 @@ export function createVoiceHandler(config: Config) {
     t.end("stt");
 
     activityLog.push("message_in", `[Voice] ${text}`, { userId, username });
-    console.log(`[Jarvis] Voice from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" (STT: ${Math.round(t.summary().stt ?? 0)}ms)`);
+    console.log(`${tag} Voice from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" (STT: ${Math.round(t.summary().stt ?? 0)}ms)`);
 
     // Save transcribed message to DB
     t.start("db_save_user");
@@ -65,7 +68,7 @@ export function createVoiceHandler(config: Config) {
     // Build context-aware prompt and run through Claude
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona);
     t.end("prompt_build");
 
     const typingInterval = setInterval(() => {
@@ -75,11 +78,11 @@ export function createVoiceHandler(config: Config) {
 
     try {
       agentStatus.set("calling_claude", username);
-      console.log(`[Jarvis] Calling Claude for voice (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
+      console.log(`${tag} Calling Claude for voice (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
       t.start("claude");
-      const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
+      const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
       t.end("claude");
-      console.log(`[Jarvis] Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
+      console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
       clearInterval(typingInterval);
 
       // Save assistant response
@@ -199,7 +202,7 @@ export function createVoiceHandler(config: Config) {
 
       // Console timing breakdown
       console.log(
-        `[Jarvis] 📊 Voice request timing breakdown:\n` +
+        `${tag} Voice request timing breakdown:\n` +
           `  voice_download: ${pad(s.voice_download)}\n` +
           `  stt:           ${pad(s.stt)}\n` +
           `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
@@ -221,7 +224,7 @@ export function createVoiceHandler(config: Config) {
         .map(([k]) => k)
         .pop() ?? "unknown";
       console.error(
-        `[Jarvis] Voice request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+        `${tag} Voice request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
           `  Error: ${errorMessage}\n` +
           `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
       );

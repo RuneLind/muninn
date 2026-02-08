@@ -8,7 +8,7 @@ import { agentStatus } from "../dashboard/agent-status.ts";
 
 const MAX_NOTIFIED_IDS = 200;
 
-export async function runWatchers(api: Api): Promise<void> {
+export async function runWatchers(api: Api, cwd?: string): Promise<void> {
   const dueWatchers = await getWatchersDueNow();
   if (dueWatchers.length > 0) {
     console.log(`[Jarvis] Running ${dueWatchers.length} due watcher(s)`);
@@ -25,7 +25,7 @@ export async function runWatchers(api: Api): Promise<void> {
 
       agentStatus.set("running_watcher", watcher.name);
 
-      const alerts = await runChecker(watcher);
+      const alerts = await runChecker(watcher, cwd);
 
       // Filter out already-notified IDs
       const newAlerts = alerts.filter(
@@ -65,10 +65,10 @@ export async function runWatchers(api: Api): Promise<void> {
   }
 }
 
-async function runChecker(watcher: Watcher): Promise<WatcherAlert[]> {
+async function runChecker(watcher: Watcher, cwd?: string): Promise<WatcherAlert[]> {
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher);
+      return await checkEmail(watcher, cwd);
     default:
       console.log(`[Jarvis] Watcher type "${watcher.type}" not yet implemented`);
       return [];

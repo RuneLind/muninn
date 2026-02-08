@@ -10,23 +10,31 @@ export interface HaikuResult {
 /**
  * Low-level Haiku spawn: runs Claude Haiku and returns result + token usage.
  * All async Haiku calls should use this to get token tracking.
+ *
+ * When cwd is provided, Claude CLI auto-discovers .mcp.json and
+ * .claude/settings.local.json from that directory, keeping bot
+ * sessions isolated from the dev project root.
  */
 export async function spawnHaiku(
   prompt: string,
   source: string,
   entrypoint = "jarvis-scheduler",
+  cwd?: string,
 ): Promise<HaikuResult> {
+  const args = [
+    "claude",
+    "-p",
+    prompt,
+    "--output-format",
+    "json",
+    "--model",
+    "claude-haiku-4-5-20251001",
+  ];
+
   const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
-      prompt,
-      "--output-format",
-      "json",
-      "--model",
-      "claude-haiku-4-5-20251001",
-    ],
+    args,
     {
+      cwd,
       env: {
         ...process.env,
         CLAUDE_CODE_ENTRYPOINT: entrypoint,
@@ -75,9 +83,10 @@ export async function callHaiku(
   prompt: string,
   fallback: string,
   source = "task",
+  cwd?: string,
 ): Promise<string> {
   try {
-    const { result } = await spawnHaiku(prompt, source);
+    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd);
     return result.trim();
   } catch {
     return fallback;
