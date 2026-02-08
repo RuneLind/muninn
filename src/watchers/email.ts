@@ -20,7 +20,7 @@ Return ONLY a JSON array (no markdown fences):
 If nothing worth notifying, return: []`;
 
   const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd);
-  return JSON.parse(stripMarkdownFences(result));
+  return JSON.parse(extractJsonArray(result));
 }
 
 function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
@@ -36,6 +36,17 @@ function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): 
   return parts.join(" ");
 }
 
-function stripMarkdownFences(text: string): string {
-  return text.replace(/^```(?:json)?\s*/m, "").replace(/\s*```$/m, "").trim();
+function extractJsonArray(text: string): string {
+  // Strip markdown fences first
+  const stripped = text.replace(/^```(?:json)?\s*/m, "").replace(/\s*```$/m, "").trim();
+
+  // Find the JSON array in the response — Haiku sometimes wraps it in prose
+  const start = stripped.indexOf("[");
+  const end = stripped.lastIndexOf("]");
+  if (start !== -1 && end > start) {
+    return stripped.slice(start, end + 1);
+  }
+
+  // No array found — assume empty
+  return "[]";
 }
