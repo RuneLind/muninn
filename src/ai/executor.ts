@@ -41,6 +41,7 @@ export async function executeClaudePrompt(
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(
       () => {
+        console.error(`[Jarvis] Claude process timed out after ${config.claudeTimeoutMs}ms — killing PID ${proc.pid}`);
         proc.kill();
         reject(new Error(`Claude timed out after ${config.claudeTimeoutMs}ms`));
       },
@@ -54,6 +55,7 @@ export async function executeClaudePrompt(
 
     if (exitCode !== 0) {
       const stderr = await new Response(proc.stderr).text();
+      console.error(`[Jarvis] Claude process exited with code ${exitCode} (PID ${proc.pid})\n  stderr: ${stderr.slice(0, 500)}`);
       throw new Error(`Claude exited with code ${exitCode}: ${stderr}`);
     }
 

@@ -8,7 +8,8 @@ export type AgentPhase =
   | "sending_telegram"
   | "synthesizing_voice"
   | "running_task"
-  | "checking_goals";
+  | "checking_goals"
+  | "running_watcher";
 
 export interface AgentStatus {
   phase: AgentPhase;

@@ -9,6 +9,7 @@ import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getRecentMemories } from "../db/memories.ts";
 import { getDashboardStats } from "../db/stats.ts";
+import { getAllWatchers } from "../db/watchers.ts";
 import { agentStatus } from "./agent-status.ts";
 
 export function createDashboardRoutes(): Hono {
@@ -58,6 +59,16 @@ export function createDashboardRoutes(): Hono {
     } catch (err) {
       console.error("Failed to fetch tasks:", err);
       return c.json({ error: "Failed to fetch tasks" }, 500);
+    }
+  });
+
+  app.get("/api/watchers", async (c) => {
+    try {
+      const watchers = await getAllWatchers();
+      return c.json({ watchers });
+    } catch (err) {
+      console.error("Failed to fetch watchers:", err);
+      return c.json({ error: "Failed to fetch watchers" }, 500);
     }
   });
 

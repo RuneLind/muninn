@@ -114,7 +114,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## Jarvis Project
 
-Personal AI assistant — Telegram bot backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, and voice support.
+Personal AI assistant — Telegram bot backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
 
 ### Running
 
@@ -131,7 +131,7 @@ Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
                 ↓                                      ↓
           Save to DB                  Extract memories + goals + schedules (async)
                 ↓                                      ↓
-        Hono dashboard (SSE)          Unified scheduler (tasks + goal reminders)
+        Hono dashboard (SSE)          Unified scheduler (tasks + goals + watchers)
 ```
 
 ### Key Modules
@@ -142,8 +142,9 @@ Telegram → grammy bot → claude CLI (Bun.spawn) → response → Telegram
 | AI | `src/ai/` | Claude executor, prompt builder (memories + goals + tasks + history), embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories from conversations |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
-| Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders), task detector, shared Haiku executor |
-| DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks |
+| Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
+| Watchers | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours, runner |
+| DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, user settings |
 | Dashboard | `src/dashboard/` | Hono server with SSE activity feed + REST APIs |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
 
@@ -155,7 +156,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `messages`, `activity_log`, `memories` (with vector embeddings), `goals`, `scheduled_tasks`
+- Tables: `messages`, `activity_log`, `memories` (with vector embeddings), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`
 
 ### Configuration (.env)
 
@@ -180,4 +181,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
 - Prompt assembly: system prompt + memories + goals + scheduled tasks + conversation history
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
+- Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
+- Watcher email checking: Haiku spawned with Gmail MCP tools — fetches AND evaluates in one call, zero new deps
+- Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript

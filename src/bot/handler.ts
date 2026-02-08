@@ -24,6 +24,7 @@ export function createMessageHandler(config: Config) {
 
     activityLog.push("message_in", text, { userId, username });
     agentStatus.set("receiving", username);
+    console.log(`[Jarvis] Message from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     // Save user message to DB
     t.start("db_save_user");
@@ -35,6 +36,7 @@ export function createMessageHandler(config: Config) {
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text);
     t.end("prompt_build");
+    console.log(`[Jarvis] Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
     // Keep typing indicator alive while Claude processes
     const typingInterval = setInterval(() => {
@@ -46,9 +48,11 @@ export function createMessageHandler(config: Config) {
 
     try {
       agentStatus.set("calling_claude", username);
+      console.log(`[Jarvis] Calling Claude (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
+      console.log(`[Jarvis] Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
 
       clearInterval(typingInterval);
 
@@ -166,6 +170,17 @@ export function createMessageHandler(config: Config) {
       agentStatus.set("idle");
 
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const s = t.summary();
+      const elapsed = Math.round(t.totalMs());
+      const lastPhase = Object.entries(s)
+        .filter(([, v]) => v != null)
+        .map(([k]) => k)
+        .pop() ?? "unknown";
+      console.error(
+        `[Jarvis] Request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+          `  Error: ${errorMessage}\n` +
+          `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
+      );
       activityLog.push("error", errorMessage, { userId, username });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
     }

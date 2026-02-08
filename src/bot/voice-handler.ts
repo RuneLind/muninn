@@ -55,6 +55,7 @@ export function createVoiceHandler(config: Config) {
     t.end("stt");
 
     activityLog.push("message_in", `[Voice] ${text}`, { userId, username });
+    console.log(`[Jarvis] Voice from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" (STT: ${Math.round(t.summary().stt ?? 0)}ms)`);
 
     // Save transcribed message to DB
     t.start("db_save_user");
@@ -74,9 +75,11 @@ export function createVoiceHandler(config: Config) {
 
     try {
       agentStatus.set("calling_claude", username);
+      console.log(`[Jarvis] Calling Claude for voice (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, systemPrompt);
       t.end("claude");
+      console.log(`[Jarvis] Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
       clearInterval(typingInterval);
 
       // Save assistant response
@@ -211,6 +214,17 @@ export function createVoiceHandler(config: Config) {
       clearInterval(typingInterval);
       agentStatus.set("idle");
       const errorMessage = error instanceof Error ? error.message : String(error);
+      const s = t.summary();
+      const elapsed = Math.round(t.totalMs());
+      const lastPhase = Object.entries(s)
+        .filter(([, v]) => v != null)
+        .map(([k]) => k)
+        .pop() ?? "unknown";
+      console.error(
+        `[Jarvis] Voice request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+          `  Error: ${errorMessage}\n` +
+          `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
+      );
       activityLog.push("error", errorMessage, { userId, username });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
     }

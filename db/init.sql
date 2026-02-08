@@ -161,3 +161,62 @@ CREATE TABLE haiku_usage (
 );
 
 CREATE INDEX idx_haiku_usage_created ON haiku_usage(created_at DESC);
+
+-- ============================================================================
+-- Watchers: registered background monitors (email, calendar, etc.)
+-- ============================================================================
+CREATE TABLE watchers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id BIGINT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal')),
+  config JSONB NOT NULL DEFAULT '{}',
+  interval_ms INTEGER NOT NULL DEFAULT 300000,  -- 5 min default
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  last_run_at TIMESTAMPTZ,
+  last_notified_ids JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION update_watchers_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER watchers_updated_at
+  BEFORE UPDATE ON watchers
+  FOR EACH ROW
+  EXECUTE FUNCTION update_watchers_updated_at();
+
+CREATE INDEX idx_watchers_due ON watchers (enabled, last_run_at)
+  WHERE enabled = true;
+CREATE INDEX idx_watchers_user ON watchers (user_id, enabled);
+
+-- ============================================================================
+-- User settings: quiet hours, timezone preferences
+-- ============================================================================
+CREATE TABLE user_settings (
+  user_id BIGINT PRIMARY KEY,
+  quiet_start INTEGER CHECK (quiet_start >= 0 AND quiet_start <= 23),
+  quiet_end INTEGER CHECK (quiet_end >= 0 AND quiet_end <= 23),
+  timezone TEXT NOT NULL DEFAULT 'Europe/Oslo',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION update_user_settings_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER user_settings_updated_at
+  BEFORE UPDATE ON user_settings
+  FOR EACH ROW
+  EXECUTE FUNCTION update_user_settings_updated_at();

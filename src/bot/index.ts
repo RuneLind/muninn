@@ -3,6 +3,7 @@ import type { Config } from "../config.ts";
 import { createAuthMiddleware } from "./middleware.ts";
 import { createMessageHandler } from "./handler.ts";
 import { createVoiceHandler } from "./voice-handler.ts";
+import { registerWatcherCommands } from "./watcher-commands.ts";
 
 export function createBot(config: Config): Bot {
   const bot = new Bot(config.telegramBotToken);
@@ -12,6 +13,8 @@ export function createBot(config: Config): Bot {
   bot.command("start", async (ctx) => {
     await ctx.reply("Jarvis online. How can I help you?");
   });
+
+  registerWatcherCommands(bot);
 
   bot.on("message:text", createMessageHandler(config));
   bot.on("message:voice", createVoiceHandler(config));

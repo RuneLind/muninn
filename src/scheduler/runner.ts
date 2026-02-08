@@ -12,6 +12,7 @@ import { getTasksDueNow, updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { callHaiku } from "./executor.ts";
+import { runWatchers } from "../watchers/runner.ts";
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let tickRunning = false;
@@ -57,6 +58,9 @@ async function runSchedulerTick(api: Api, config: Config): Promise<void> {
 
   // 3. Goal check-ins (stale goals, max 1 per tick)
   await runGoalCheckins(api);
+
+  // 4. Watchers (email, calendar, etc.)
+  await runWatchers(api);
 }
 
 // --- Scheduled Tasks ---

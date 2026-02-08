@@ -81,6 +81,36 @@ export interface ScheduledTask {
   updatedAt: number;
 }
 
+export type WatcherType = "email" | "calendar" | "github" | "news" | "goal";
+
+export interface Watcher {
+  id: string;
+  userId: number;
+  name: string;
+  type: WatcherType;
+  config: Record<string, unknown>;
+  intervalMs: number;
+  enabled: boolean;
+  lastRunAt: number | null;
+  lastNotifiedIds: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WatcherAlert {
+  id: string;
+  source: string;
+  summary: string;
+  urgency: "low" | "medium" | "high";
+}
+
+export interface UserSettings {
+  userId: number;
+  quietStart: number | null;
+  quietEnd: number | null;
+  timezone: string;
+}
+
 export type GoalStatus = "active" | "completed" | "cancelled";
 
 export interface Goal {
