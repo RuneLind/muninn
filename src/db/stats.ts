@@ -9,9 +9,11 @@ export interface DashboardStats {
   scheduledTasksCount: number;
   totalTokens: number;
   tokensToday: number;
+  watcherTokensToday: number;
+  watcherTokensTotal: number;
   avgResponseMs: number;
   messagesByDay: { date: string; count: number }[];
-  tokensByDay: { date: string; mainTokens: number; haikuTokens: number }[];
+  tokensByDay: { date: string; mainTokens: number; haikuTokens: number; watcherTokens: number }[];
 }
 
 export async function getDashboardStats(botName?: string): Promise<DashboardStats> {
@@ -36,7 +38,9 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
     haiku_stats AS (
       SELECT
         coalesce(sum(input_tokens + output_tokens), 0) AS haiku_total_tokens,
-        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS haiku_tokens_today
+        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS haiku_tokens_today,
+        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE source LIKE 'watcher-%'), 0) AS watcher_total_tokens,
+        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE source LIKE 'watcher-%' AND created_at >= CURRENT_DATE), 0) AS watcher_tokens_today
       FROM haiku_usage
       ${haikuBotFilter}
     ),
@@ -88,7 +92,8 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
       SELECT
         to_char(d.day, 'YYYY-MM-DD') AS date,
         coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName}), 0)::int AS haiku_tokens
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName}), 0)::int AS haiku_tokens,
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName} AND source LIKE 'watcher-%'), 0)::int AS watcher_tokens
       FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
       LEFT JOIN messages m ON m.created_at::date = d.day AND m.bot_name = ${botName}
       GROUP BY d.day
@@ -98,7 +103,8 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
       SELECT
         to_char(d.day, 'YYYY-MM-DD') AS date,
         coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day), 0)::int AS haiku_tokens
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day), 0)::int AS haiku_tokens,
+        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND source LIKE 'watcher-%'), 0)::int AS watcher_tokens
       FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
       LEFT JOIN messages m ON m.created_at::date = d.day
       GROUP BY d.day
@@ -114,8 +120,10 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
     scheduledTasksCount: Number(counts!.scheduled_tasks),
     totalTokens: Number(counts!.total_tokens) + Number(counts!.haiku_total_tokens),
     tokensToday: Number(counts!.tokens_today) + Number(counts!.haiku_tokens_today),
+    watcherTokensToday: Number(counts!.watcher_tokens_today),
+    watcherTokensTotal: Number(counts!.watcher_total_tokens),
     avgResponseMs: Number(counts!.avg_response_ms),
     messagesByDay: messagesByDay.map((r) => ({ date: r.date, count: Number(r.count) })),
-    tokensByDay: tokensByDay.map((r) => ({ date: r.date, mainTokens: Number(r.main_tokens), haikuTokens: Number(r.haiku_tokens) })),
+    tokensByDay: tokensByDay.map((r) => ({ date: r.date, mainTokens: Number(r.main_tokens), haikuTokens: Number(r.haiku_tokens), watcherTokens: Number(r.watcher_tokens) })),
   };
 }

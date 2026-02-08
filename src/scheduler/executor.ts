@@ -20,6 +20,7 @@ export async function spawnHaiku(
   source: string,
   entrypoint = "jarvis-scheduler",
   cwd?: string,
+  botName?: string,
 ): Promise<HaikuResult> {
   const args = [
     "claude",
@@ -66,7 +67,7 @@ export async function spawnHaiku(
     : "claude-haiku-4-5-20251001";
 
   // Track usage async — don't block the caller
-  trackUsage(source, model, inputTokens, outputTokens);
+  trackUsage(source, model, inputTokens, outputTokens, botName);
 
   return {
     result: parsed.result,
@@ -84,9 +85,10 @@ export async function callHaiku(
   fallback: string,
   source = "task",
   cwd?: string,
+  botName?: string,
 ): Promise<string> {
   try {
-    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd);
+    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd, botName);
     return result.trim();
   } catch {
     return fallback;
@@ -98,13 +100,14 @@ function trackUsage(
   model: string,
   inputTokens: number,
   outputTokens: number,
+  botName?: string,
 ): void {
   if (inputTokens === 0 && outputTokens === 0) return;
 
   const sql = getDb();
   sql`
-    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens)
-    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens})
+    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name)
+    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null})
   `.catch((err) => {
     console.error("[Jarvis] Failed to track Haiku usage:", err);
   });

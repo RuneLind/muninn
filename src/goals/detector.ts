@@ -48,7 +48,7 @@ async function doExtract(
     activeGoalsList,
   );
 
-  const haiku = await spawnHaiku(prompt, "goals", "jarvis-goals");
+  const haiku = await spawnHaiku(prompt, "goals", "jarvis-goals", undefined, input.botName);
 
   let result: DetectionResult;
   try {

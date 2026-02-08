@@ -69,7 +69,7 @@ async function doExtract(
     input.userMessage,
   ).replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
 
-  const haiku = await spawnHaiku(prompt, "schedule", "jarvis-schedule-detector");
+  const haiku = await spawnHaiku(prompt, "schedule", "jarvis-schedule-detector", undefined, input.botName);
 
   let result: DetectionResult;
   try {

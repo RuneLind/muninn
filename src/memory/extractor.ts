@@ -47,7 +47,7 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     .replace("{USER_MESSAGE}", input.userMessage)
     .replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
 
-  const haiku = await spawnHaiku(prompt, "memory", "jarvis-memory");
+  const haiku = await spawnHaiku(prompt, "memory", "jarvis-memory", undefined, input.botName);
 
   let result: ExtractionResult;
   try {

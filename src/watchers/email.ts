@@ -1,7 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 
-export async function checkEmail(watcher: Watcher, cwd?: string): Promise<WatcherAlert[]> {
+export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string };
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
 
@@ -23,7 +23,7 @@ Return ONLY a JSON array (no markdown fences):
 [{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"<b>Fra:</b> sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
 
-  const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd);
+  const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName);
   return JSON.parse(extractJsonArray(result));
 }
 

@@ -112,6 +112,7 @@ async function executeTask(task: ScheduledTask, botConfig: BotConfig): Promise<s
         `<b>Reminder:</b> ${task.title}`,
         "reminder",
         cwd,
+        botConfig.name,
       );
 
     case "briefing":
@@ -124,6 +125,7 @@ async function executeTask(task: ScheduledTask, botConfig: BotConfig): Promise<s
         `<b>${task.title}</b>`,
         "task",
         cwd,
+        botConfig.name,
       );
   }
 }
@@ -159,6 +161,7 @@ async function generateBriefing(task: ScheduledTask, botConfig: BotConfig): Prom
     `<b>Good ${timeOfDay}!</b>\nHere's your briefing. You have ${goalsContext ? "active goals to work on" : "no active goals"} today.`,
     "briefing",
     botConfig.dir,
+    botConfig.name,
   );
 }
 
@@ -245,6 +248,7 @@ async function generateReminderMessage(goal: Goal, botConfig: BotConfig): Promis
     `⏰ <b>Deadline approaching:</b> ${goal.title}\nDue: ${deadlineStr}`,
     "checkin",
     botConfig.dir,
+    botConfig.name,
   );
 }
 
@@ -259,5 +263,6 @@ async function generateCheckinMessage(goal: Goal, botConfig: BotConfig): Promise
     `📋 <b>Goal check-in:</b> ${goal.title}\nHow's this going?`,
     "checkin",
     botConfig.dir,
+    botConfig.name,
   );
 }

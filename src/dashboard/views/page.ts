@@ -492,6 +492,7 @@ export function renderDashboardPage(): string {
       <div class="panel" id="watchersPanel">
         <div class="panel-header">
           Watchers <span class="count" id="watchersCount">0</span>
+          <span id="watcherTokensBadge" style="font-size:10px;color:#facc15;font-weight:400;text-transform:none;letter-spacing:0"></span>
         </div>
         <div class="panel-body" id="watchersList"></div>
       </div>
@@ -595,6 +596,16 @@ export function renderDashboardPage(): string {
       document.getElementById('statGoals').textContent = stats.activeGoalsCount;
       document.getElementById('statTasks').textContent = stats.scheduledTasksCount;
       document.getElementById('statTokens').textContent = fmtTokens(stats.totalTokens);
+
+      // Watcher tokens badge
+      const wb = document.getElementById('watcherTokensBadge');
+      if (wb && stats.watcherTokensToday > 0) {
+        wb.textContent = fmtTokens(stats.watcherTokensToday) + ' tok today';
+      } else if (wb && stats.watcherTokensTotal > 0) {
+        wb.textContent = fmtTokens(stats.watcherTokensTotal) + ' tok total';
+      } else if (wb) {
+        wb.textContent = '';
+      }
     }
 
     // --- Goals Panel ---
@@ -794,6 +805,21 @@ export function renderDashboardPage(): string {
               fill: true,
               yAxisID: 'y1',
               order: 0,
+            },
+            {
+              label: 'Watcher Tokens',
+              data: tokensByDay.map(d => d.watcherTokens),
+              type: 'line',
+              borderColor: 'rgba(248, 113, 113, 0.8)',
+              backgroundColor: 'rgba(248, 113, 113, 0.08)',
+              borderWidth: 2,
+              borderDash: [4, 3],
+              pointRadius: 3,
+              pointBackgroundColor: 'rgba(248, 113, 113, 1)',
+              tension: 0.3,
+              fill: false,
+              yAxisID: 'y1',
+              order: -1,
             }
           ]
         },

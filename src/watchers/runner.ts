@@ -69,7 +69,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
 
       agentStatus.set("running_watcher", watcher.name);
 
-      const alerts = await runChecker(watcher, botConfig.dir);
+      const alerts = await runChecker(watcher, botConfig.dir, tag);
 
       // Filter out already-notified: by message ID and by content hash
       const known = watcher.lastNotifiedIds;
@@ -124,10 +124,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
   }
 }
 
-async function runChecker(watcher: Watcher, cwd?: string): Promise<WatcherAlert[]> {
+async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher, cwd);
+      return await checkEmail(watcher, cwd, botName);
     default:
       console.log(`Watcher type "${watcher.type}" not yet implemented`);
       return [];
