@@ -21,7 +21,7 @@ export interface PromptBuildResult {
 }
 
 export async function buildPrompt(
-  userId: number,
+  userId: string,
   currentMessage: string,
   persona: string,
   botName: string,
@@ -82,10 +82,15 @@ export async function buildPrompt(
   }
 
   // User prompt: conversation history + current message
+  // Drop the last message if it's the current user message (already saved to DB before buildPrompt)
+  const history = recentMessages.at(-1)?.role === "user" && recentMessages.at(-1)?.text === currentMessage
+    ? recentMessages.slice(0, -1)
+    : recentMessages;
+
   const userParts: string[] = [];
 
-  if (recentMessages.length > 0) {
-    userParts.push(formatConversationHistory(recentMessages));
+  if (history.length > 0) {
+    userParts.push(formatConversationHistory(history));
   }
 
   userParts.push(currentMessage);
@@ -107,10 +112,20 @@ export async function buildPrompt(
 }
 
 function formatMemories(memories: Memory[]): string {
-  const items = memories
-    .map((m) => `- ${m.summary} [${m.tags.join(", ")}]`)
-    .join("\n");
-  return `Relevant memories from past conversations:\n${items}`;
+  const personal = memories.filter((m) => m.scope !== "shared");
+  const shared = memories.filter((m) => m.scope === "shared");
+  const parts: string[] = [];
+  if (personal.length > 0) {
+    parts.push(
+      `Your memories about this user:\n${personal.map((m) => `- ${m.summary} [${m.tags.join(", ")}]`).join("\n")}`,
+    );
+  }
+  if (shared.length > 0) {
+    parts.push(
+      `Shared team knowledge:\n${shared.map((m) => `- ${m.summary} [${m.tags.join(", ")}]`).join("\n")}`,
+    );
+  }
+  return parts.join("\n\n");
 }
 
 function formatGoals(goals: Goal[]): string {
@@ -169,7 +184,7 @@ function formatAlerts(alerts: AlertMessage[]): string {
 
 function formatConversationHistory(messages: ConversationMessage[]): string {
   const items = messages
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)
-    .join("\n");
-  return `Recent conversation history:\n${items}`;
+    .map((m) => `[${m.role}] ${m.text}`)
+    .join("\n\n");
+  return `<conversation_history>\n${items}\n</conversation_history>`;
 }

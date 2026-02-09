@@ -4,7 +4,7 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 
 interface ExtractionInput {
-  userId: number;
+  userId: string;
   botName: string;
   userMessage: string;
   assistantResponse: string;
@@ -15,17 +15,22 @@ interface ExtractionResult {
   worth_remembering: boolean;
   summary?: string;
   tags?: string[];
+  scope?: 'personal' | 'shared';
 }
 
 const EXTRACTION_PROMPT = `You are a memory extraction system. Analyze this conversation exchange and decide if it contains information worth remembering for future conversations.
 
-Worth remembering: facts about the user, preferences, decisions, project details, important context, recurring topics.
+Worth remembering: facts about the user, preferences, decisions, project details, important context, recurring topics, team processes, organizational knowledge.
 NOT worth remembering: greetings, thanks, simple factual lookups, small talk.
+
+If worth remembering, also classify the scope:
+- "personal": About this specific user — their preferences, projects, schedule, opinions, personal context.
+- "shared": General knowledge useful to anyone — company processes, team decisions, technical standards, organizational facts.
 
 Respond with ONLY valid JSON (no markdown fences):
 {"worth_remembering": false}
 or
-{"worth_remembering": true, "summary": "Brief 1-sentence summary", "tags": ["tag1", "tag2"]}
+{"worth_remembering": true, "summary": "Brief 1-sentence summary", "tags": ["tag1", "tag2"], "scope": "personal"}
 
 User said: """
 {USER_MESSAGE}
@@ -73,5 +78,6 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     tags: result.tags,
     sourceMessageId: input.sourceMessageId,
     embedding,
+    scope: result.scope === 'shared' ? 'shared' : 'personal',
   });
 }

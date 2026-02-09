@@ -3,7 +3,7 @@ import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 
 interface DetectionInput {
-  userId: number;
+  userId: string;
   botName: string;
   userMessage: string;
   assistantResponse: string;
@@ -87,7 +87,7 @@ async function doExtract(
 }
 
 async function handleCompletion(
-  userId: number,
+  userId: string,
   completedTitle: string,
   botName: string,
 ): Promise<void> {

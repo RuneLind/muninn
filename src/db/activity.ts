@@ -3,7 +3,7 @@ import type { ActivityEvent, ActivityEventType, TimingMetadata } from "../types.
 
 interface SaveActivityParams {
   type: ActivityEventType;
-  userId?: number;
+  userId?: string;
   username?: string;
   botName?: string;
   text: string;
@@ -42,7 +42,7 @@ export async function getRecentActivity(limit = 50, botName?: string): Promise<A
       id: r.id,
       type: r.type as ActivityEventType,
       timestamp: new Date(r.created_at).getTime(),
-      userId: r.user_id ? Number(r.user_id) : undefined,
+      userId: r.user_id ?? undefined,
       username: r.username ?? undefined,
       botName: r.bot_name ?? undefined,
       text: r.text,

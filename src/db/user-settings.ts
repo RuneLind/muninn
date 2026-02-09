@@ -7,7 +7,7 @@ const DEFAULT_SETTINGS: Omit<UserSettings, "userId"> = {
   timezone: "Europe/Oslo",
 };
 
-export async function getUserSettings(userId: number): Promise<UserSettings> {
+export async function getUserSettings(userId: string): Promise<UserSettings> {
   const sql = getDb();
   const [row] = await sql`
     SELECT * FROM user_settings WHERE user_id = ${userId}
@@ -19,7 +19,7 @@ export async function getUserSettings(userId: number): Promise<UserSettings> {
 }
 
 export async function upsertUserSettings(
-  userId: number,
+  userId: string,
   settings: { quietStart?: number | null; quietEnd?: number | null; timezone?: string },
 ): Promise<void> {
   const sql = getDb();
@@ -38,7 +38,7 @@ export async function upsertUserSettings(
 
 function mapRow(r: Record<string, any>): UserSettings {
   return {
-    userId: Number(r.user_id),
+    userId: r.user_id,
     quietStart: r.quiet_start ?? null,
     quietEnd: r.quiet_end ?? null,
     timezone: r.timezone,

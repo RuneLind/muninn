@@ -2,16 +2,18 @@ import { loadConfig } from "./config.ts";
 import { discoverBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
+import { createSlackApp } from "./slack/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler } from "./scheduler/runner.ts";
 import type { Bot } from "grammy";
+import type { App as SlackApp } from "@slack/bolt";
 
 const config = loadConfig();
 const botConfigs = discoverBots();
 
 if (botConfigs.length === 0) {
-  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists and TELEGRAM_BOT_TOKEN_<NAME> is set.");
+  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists and at least one platform token is set.");
   process.exit(1);
 }
 
@@ -36,28 +38,59 @@ const server = Bun.serve({
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
 // Start all discovered bots
-const bots: Bot[] = [];
+const telegramBots: Bot[] = [];
+const slackApps: SlackApp[] = [];
 
 for (const botConfig of botConfigs) {
-  const bot = createBot(config, botConfig);
-  bots.push(bot);
+  // Start Telegram if token is available
+  if (botConfig.telegramBotToken) {
+    const bot = createBot(config, botConfig);
+    telegramBots.push(bot);
 
-  activityLog.push("system", `Starting ${botConfig.name} bot...`);
+    activityLog.push("system", `Starting ${botConfig.name} Telegram bot...`);
 
-  bot.start({
-    onStart: (botInfo) => {
-      activityLog.push("system", `${botConfig.name} connected as @${botInfo.username}`);
-      console.log(`${botConfig.name} is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
-    },
-  });
+    bot.start({
+      onStart: (botInfo) => {
+        activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
+        console.log(`${botConfig.name} Telegram is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+      },
+    });
+  }
+
+  // Start Slack if tokens are available
+  if (botConfig.slackBotToken && botConfig.slackAppToken) {
+    activityLog.push("system", `Starting ${botConfig.name} Slack app...`);
+
+    createSlackApp(config, botConfig)
+      .then((app) => {
+        slackApps.push(app);
+        activityLog.push("system", `${botConfig.name} Slack app connected`);
+      })
+      .catch((err) => {
+        console.error(`[${botConfig.name}] Failed to start Slack app:`, err);
+        activityLog.push("error", `${botConfig.name} Slack app failed: ${err.message}`);
+      });
+  }
 }
 
 // Start per-bot schedulers after bots are connected (10s delay for stability)
+// Scheduler uses Telegram API — only start for bots with Telegram tokens
 setTimeout(() => {
-  for (let i = 0; i < bots.length; i++) {
-    const bot = bots[i]!;
+  for (let i = 0; i < botConfigs.length; i++) {
     const botCfg = botConfigs[i]!;
-    startScheduler(bot.api, config, botCfg);
+    if (!botCfg.telegramBotToken) continue;
+
+    const bot = telegramBots.find((b) =>
+      // Match by token — Grammy bots don't expose config directly,
+      // but we push them in order, so find the matching one
+      true
+    );
+    // Find the telegram bot for this config — they're pushed in order for telegram-enabled bots
+    const telegramIndex = botConfigs.slice(0, i + 1).filter((c) => c.telegramBotToken).length - 1;
+    const telegramBot = telegramBots[telegramIndex];
+    if (telegramBot) {
+      startScheduler(telegramBot.api, config, botCfg);
+    }
   }
 }, 10_000);
 
@@ -65,8 +98,11 @@ setTimeout(() => {
 async function shutdown() {
   console.log("\nShutting down...");
   stopScheduler();
-  for (const bot of bots) {
+  for (const bot of telegramBots) {
     bot.stop();
+  }
+  for (const app of slackApps) {
+    await app.stop().catch(() => {});
   }
   server.stop();
   await closeDb();

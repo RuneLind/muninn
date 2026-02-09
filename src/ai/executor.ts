@@ -16,25 +16,33 @@ export async function executeClaudePrompt(
 ): Promise<ClaudeExecResult> {
   const wallStart = performance.now();
 
+  const model = botConfig.model ?? config.claudeModel;
+  const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
+
   const args = [
     "claude",
     "-p", prompt,
     "--output-format", "json",
-    "--model", config.claudeModel,
+    "--model", model,
   ];
 
   if (systemPrompt) {
     args.push("--system-prompt", systemPrompt);
   }
 
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_CODE_ENTRYPOINT: `${botConfig.name}-bot`,
+  };
+  if (botConfig.thinkingMaxTokens !== undefined) {
+    env.MAX_THINKING_TOKENS = String(botConfig.thinkingMaxTokens);
+  }
+
   const proc = Bun.spawn(
     args,
     {
       cwd: botConfig.dir,
-      env: {
-        ...process.env,
-        CLAUDE_CODE_ENTRYPOINT: `${botConfig.name}-bot`,
-      },
+      env,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
@@ -44,11 +52,11 @@ export async function executeClaudePrompt(
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(
       () => {
-        console.error(`[${botConfig.name}] Claude process timed out after ${config.claudeTimeoutMs}ms — killing PID ${proc.pid}`);
+        console.error(`[${botConfig.name}] Claude process timed out after ${timeoutMs}ms — killing PID ${proc.pid}`);
         proc.kill();
-        reject(new Error(`Claude timed out after ${config.claudeTimeoutMs}ms`));
+        reject(new Error(`Claude timed out after ${timeoutMs}ms`));
       },
-      config.claudeTimeoutMs,
+      timeoutMs,
     );
   });
 

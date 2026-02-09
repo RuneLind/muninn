@@ -1,6 +1,6 @@
 import { getUserSettings } from "../db/user-settings.ts";
 
-export async function isQuietHours(userId: number): Promise<boolean> {
+export async function isQuietHours(userId: string): Promise<boolean> {
   const settings = await getUserSettings(userId);
   if (settings.quietStart == null || settings.quietEnd == null) return false;
 

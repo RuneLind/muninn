@@ -4,7 +4,7 @@ import type { TaskType } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
 
 interface DetectionInput {
-  userId: number;
+  userId: string;
   botName: string;
   userMessage: string;
   assistantResponse: string;

@@ -142,6 +142,7 @@ Telegram user B ───►│  Grammy Bot 2 (Capra)            │
 
 Each bot lives in `bots/<name>/` with its own:
 - `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
+- `config.json` — per-bot overrides (model, thinking tokens, timeout)
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.local.json` — tool permissions
 
@@ -156,7 +157,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
 | AI | `src/ai/` | Claude executor (cwd-based isolation), prompt builder, embeddings |
-| Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories from conversations |
+| Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
 | Watchers | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours, runner |
@@ -170,15 +171,35 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 bots/
 ├── jarvis/
 │   ├── CLAUDE.md                ← persona + rules
+│   ├── config.json              ← model, thinking, timeout overrides
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.local.json  ← tool permissions
-├── capra/                        ← future bot
+├── capra/
 │   ├── CLAUDE.md
+│   ├── config.json
 │   ├── .mcp.json
 │   └── .claude/
 │       └── settings.local.json
 ```
+
+#### Per-bot config.json
+
+All fields are optional — falls back to global `.env` values:
+
+```json
+{
+  "model": "sonnet",
+  "thinkingMaxTokens": 16000,
+  "timeoutMs": 180000
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | `CLAUDE_MODEL` env | Claude model (e.g. "opus", "sonnet") |
+| `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking) |
+| `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 
 ### Database
 
@@ -188,7 +209,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `messages`, `activity_log`, `memories` (with vector embeddings), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`
+- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`
 
 ### Configuration (.env)
 
@@ -209,16 +230,18 @@ PostgreSQL + pgvector via Docker (single container).
 ### Adding a New Bot
 
 1. Create `bots/<name>/CLAUDE.md` with the bot's persona
-2. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.local.json`
-3. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
-4. Restart — the bot is auto-discovered
+2. Optionally add `bots/<name>/config.json` (model, thinking, timeout overrides)
+3. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.local.json`
+4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
+5. Restart — the bot is auto-discovered
 
 ### Conventions
 
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
 - Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
+- Memory scope: `personal` (per-user) or `shared` (visible to all users of a bot) — Haiku auto-classifies during extraction
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
-- Prompt assembly: persona (from CLAUDE.md) + memories + goals + scheduled tasks + conversation history
+- Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + conversation history
 - Claude CLI isolation: each bot spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`

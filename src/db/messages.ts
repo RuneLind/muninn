@@ -2,7 +2,7 @@ import { getDb } from "./client.ts";
 import type { ConversationMessage } from "../types.ts";
 
 interface SaveMessageParams {
-  userId: number;
+  userId: string;
   botName: string;
   username?: string;
   role: "user" | "assistant";
@@ -26,7 +26,7 @@ export async function saveMessage(msg: SaveMessageParams): Promise<string> {
 }
 
 export async function getRecentMessages(
-  userId: number,
+  userId: string,
   limit = 20,
   botName?: string,
 ): Promise<ConversationMessage[]> {
@@ -53,7 +53,7 @@ export async function getRecentMessages(
       role: r.role as "user" | "assistant",
       text: r.content,
       timestamp: new Date(r.created_at).getTime(),
-      userId: Number(r.user_id),
+      userId: r.user_id,
       username: r.username ?? undefined,
       costUsd: r.cost_usd ?? undefined,
       durationMs: r.duration_ms ?? undefined,
@@ -70,7 +70,7 @@ export interface AlertMessage {
 }
 
 export async function getRecentAlerts(
-  userId: number,
+  userId: string,
   botName: string,
   hours = 24,
   limit = 10,

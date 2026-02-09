@@ -2,7 +2,7 @@ import { getDb } from "./client.ts";
 import type { ScheduledTask, TaskType } from "../types.ts";
 
 interface SaveScheduledTaskParams {
-  userId: number;
+  userId: string;
   botName: string;
   title: string;
   taskType: TaskType;
@@ -45,7 +45,7 @@ export async function saveScheduledTask(
 }
 
 export async function getScheduledTasksForUser(
-  userId: number,
+  userId: string,
   botName?: string,
 ): Promise<ScheduledTask[]> {
   const sql = getDb();
@@ -224,7 +224,7 @@ function computeNextCronRun(
 function mapRow(r: Record<string, any>): ScheduledTask {
   return {
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     botName: r.bot_name ?? "jarvis",
     title: r.title,
     taskType: r.task_type as TaskType,

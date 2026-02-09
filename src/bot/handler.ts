@@ -20,8 +20,8 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     if (!text) return;
 
     const username = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-    const userId = ctx.from?.id;
-    if (!userId) return;
+    if (!ctx.from?.id) return;
+    const userId = String(ctx.from.id);
 
     const t = new Timing();
 
@@ -51,7 +51,9 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
 
     try {
       agentStatus.set("calling_claude", username);
-      console.log(`${tag} Calling Claude (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
+      const effectiveModel = botConfig.model ?? config.claudeModel;
+      const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
+      console.log(`${tag} Calling Claude (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
       t.end("claude");

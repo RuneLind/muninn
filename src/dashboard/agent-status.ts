@@ -6,6 +6,7 @@ export type AgentPhase =
   | "calling_claude"
   | "saving_response"
   | "sending_telegram"
+  | "sending_slack"
   | "synthesizing_voice"
   | "running_task"
   | "checking_goals"

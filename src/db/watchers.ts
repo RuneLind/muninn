@@ -2,7 +2,7 @@ import { getDb } from "./client.ts";
 import type { Watcher, WatcherType } from "../types.ts";
 
 interface SaveWatcherParams {
-  userId: number;
+  userId: string;
   botName: string;
   name: string;
   type: WatcherType;
@@ -79,7 +79,7 @@ export async function getAllWatchers(botName?: string): Promise<Watcher[]> {
   return rows.map(mapRow);
 }
 
-export async function getWatchersForUser(userId: number, botName?: string): Promise<Watcher[]> {
+export async function getWatchersForUser(userId: string, botName?: string): Promise<Watcher[]> {
   const sql = getDb();
   const rows = botName
     ? await sql`
@@ -111,7 +111,7 @@ export async function toggleWatcher(
 function mapRow(r: Record<string, any>): Watcher {
   return {
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     botName: r.bot_name ?? "jarvis",
     name: r.name,
     type: r.type as WatcherType,

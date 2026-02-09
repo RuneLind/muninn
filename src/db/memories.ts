@@ -1,24 +1,27 @@
 import { getDb } from "./client.ts";
-import type { Memory } from "../types.ts";
+import type { Memory, MemoryScope } from "../types.ts";
 
 interface SaveMemoryParams {
-  userId: number;
+  userId: string;
   botName: string;
   content: string;
   summary: string;
   tags: string[];
   sourceMessageId?: string;
   embedding?: number[] | null;
+  scope?: MemoryScope;
 }
 
 export async function saveMemory(params: SaveMemoryParams): Promise<string> {
   const sql = getDb();
 
+  const scope = params.scope ?? 'personal';
+
   if (params.embedding) {
     const embeddingStr = `[${params.embedding.join(",")}]`;
     const [row] = await sql.unsafe(
-      `INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
+      `INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id, embedding, scope)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8)
        RETURNING id`,
       [
         params.userId,
@@ -28,21 +31,22 @@ export async function saveMemory(params: SaveMemoryParams): Promise<string> {
         params.tags,
         params.sourceMessageId ?? null,
         embeddingStr,
+        scope,
       ],
     );
     return row!.id;
   }
 
   const [row] = await sql`
-    INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id)
-    VALUES (${params.userId}, ${params.botName}, ${params.content}, ${params.summary}, ${params.tags}, ${params.sourceMessageId ?? null})
+    INSERT INTO memories (user_id, bot_name, content, summary, tags, source_message_id, scope)
+    VALUES (${params.userId}, ${params.botName}, ${params.content}, ${params.summary}, ${params.tags}, ${params.sourceMessageId ?? null}, ${scope})
     RETURNING id
   `;
   return row!.id;
 }
 
 export async function searchMemories(
-  userId: number,
+  userId: string,
   query: string,
   limit = 5,
   botName?: string,
@@ -50,16 +54,17 @@ export async function searchMemories(
   const sql = getDb();
   const rows = botName
     ? await sql`
-      SELECT id, user_id, content, summary, tags, created_at,
+      SELECT id, user_id, content, summary, tags, scope, created_at,
              ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
       FROM memories
-      WHERE user_id = ${userId} AND bot_name = ${botName}
+      WHERE bot_name = ${botName}
+        AND ((scope = 'personal' AND user_id = ${userId}) OR scope = 'shared')
         AND search_vector @@ plainto_tsquery('english', ${query})
       ORDER BY rank DESC
       LIMIT ${limit}
     `
     : await sql`
-      SELECT id, user_id, content, summary, tags, created_at,
+      SELECT id, user_id, content, summary, tags, scope, created_at,
              ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
       FROM memories
       WHERE user_id = ${userId}
@@ -70,16 +75,17 @@ export async function searchMemories(
 
   return rows.map((r) => ({
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     content: r.content,
     summary: r.summary,
     tags: r.tags,
+    scope: r.scope,
     createdAt: new Date(r.created_at).getTime(),
   }));
 }
 
 export async function searchMemoriesHybrid(
-  userId: number,
+  userId: string,
   query: string,
   embedding: number[] | null,
   limit = 5,
@@ -93,28 +99,29 @@ export async function searchMemoriesHybrid(
   const embeddingStr = `[${embedding.join(",")}]`;
 
   // Reciprocal Rank Fusion: combine FTS + vector rankings
-  const botFilter = botName ? `AND bot_name = $5` : "";
+  // When botName is provided, include both personal (for this user) and shared memories
+  const scopeFilter = botName
+    ? `bot_name = $5 AND ((scope = 'personal' AND user_id = $1) OR scope = 'shared')`
+    : `user_id = $1`;
   const params = botName
     ? [userId, query, embeddingStr, limit, botName]
     : [userId, query, embeddingStr, limit];
 
   const rows = await sql.unsafe(
     `WITH fts AS (
-      SELECT id, user_id, content, summary, tags, created_at,
+      SELECT id, user_id, content, summary, tags, scope, created_at,
              ROW_NUMBER() OVER (ORDER BY ts_rank(search_vector, plainto_tsquery('english', $2)) DESC) AS rank
       FROM memories
-      WHERE user_id = $1
+      WHERE ${scopeFilter}
         AND search_vector @@ plainto_tsquery('english', $2)
-        ${botFilter}
       LIMIT 20
     ),
     vec AS (
-      SELECT id, user_id, content, summary, tags, created_at,
+      SELECT id, user_id, content, summary, tags, scope, created_at,
              ROW_NUMBER() OVER (ORDER BY embedding <=> $3::vector) AS rank
       FROM memories
-      WHERE user_id = $1
+      WHERE ${scopeFilter}
         AND embedding IS NOT NULL
-        ${botFilter}
       LIMIT 20
     )
     SELECT
@@ -123,6 +130,7 @@ export async function searchMemoriesHybrid(
       COALESCE(f.content, v.content) AS content,
       COALESCE(f.summary, v.summary) AS summary,
       COALESCE(f.tags, v.tags) AS tags,
+      COALESCE(f.scope, v.scope) AS scope,
       COALESCE(f.created_at, v.created_at) AS created_at,
       COALESCE(1.0 / (60 + f.rank), 0) + COALESCE(1.0 / (60 + v.rank), 0) AS rrf_score
     FROM fts f
@@ -134,10 +142,11 @@ export async function searchMemoriesHybrid(
 
   return rows.map((r: any) => ({
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     content: r.content,
     summary: r.summary,
     tags: r.tags,
+    scope: r.scope,
     createdAt: new Date(r.created_at).getTime(),
     similarity: Number(r.rrf_score),
   }));
@@ -159,24 +168,25 @@ export async function getRecentMemories(limit = 20, botName?: string): Promise<M
   const sql = getDb();
   const rows = botName
     ? await sql`
-      SELECT id, user_id, content, summary, tags, created_at
+      SELECT id, user_id, content, summary, tags, scope, created_at
       FROM memories
       WHERE bot_name = ${botName}
       ORDER BY created_at DESC
       LIMIT ${limit}
     `
     : await sql`
-      SELECT id, user_id, content, summary, tags, created_at
+      SELECT id, user_id, content, summary, tags, scope, created_at
       FROM memories
       ORDER BY created_at DESC
       LIMIT ${limit}
     `;
   return rows.map((r) => ({
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     content: r.content,
     summary: r.summary,
     tags: r.tags,
+    scope: r.scope,
     createdAt: new Date(r.created_at).getTime(),
   }));
 }

@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@slack/bolt": "^4.6.0",
     "grammy": "^1.39.3",
     "hono": "^4.11.8",
     "postgres": "^3.4.8"

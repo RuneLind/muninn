@@ -24,8 +24,8 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     if (!voice) return;
 
     const username = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
-    const userId = ctx.from?.id;
-    if (!userId) return;
+    if (!ctx.from?.id) return;
+    const userId = String(ctx.from.id);
 
     const t = new Timing();
 
@@ -33,7 +33,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     agentStatus.set("receiving", username);
     t.start("voice_download");
     const file = await ctx.api.getFile(voice.file_id);
-    const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken}/${file.file_path}`;
+    const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
     const response = await fetch(fileUrl);
     if (!response.ok) {
       await ctx.reply("Failed to download voice message.");
@@ -78,7 +78,9 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
     try {
       agentStatus.set("calling_claude", username);
-      console.log(`${tag} Calling Claude for voice (model: ${config.claudeModel}, timeout: ${config.claudeTimeoutMs}ms)...`);
+      const effectiveModel = botConfig.model ?? config.claudeModel;
+      const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
+      console.log(`${tag} Calling Claude for voice (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
       t.end("claude");

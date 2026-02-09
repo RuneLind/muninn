@@ -5,15 +5,24 @@ export interface BotConfig {
   name: string;
   /** Absolute path to the bot folder — used as cwd for Claude CLI spawns */
   dir: string;
-  telegramBotToken: string;
   persona: string;
-  allowedUserIds: number[];
+  telegramBotToken?: string;
+  telegramAllowedUserIds: string[];
+  slackBotToken?: string;
+  slackAppToken?: string;
+  slackAllowedUserIds: string[];
+  /** Claude model override (e.g. "opus", "sonnet") — falls back to global CLAUDE_MODEL */
+  model?: string;
+  /** Max thinking tokens for extended thinking — set 0 to disable, undefined = CLI default */
+  thinkingMaxTokens?: number;
+  /** Claude timeout override in ms — falls back to global CLAUDE_TIMEOUT_MS */
+  timeoutMs?: number;
 }
 
 /**
  * Scans bots/ directory and returns configs for bots that have:
  * 1. A CLAUDE.md file (persona)
- * 2. A matching TELEGRAM_BOT_TOKEN_<NAME> env var
+ * 2. At least one platform token (Telegram or Slack)
  *
  * Claude CLI auto-discovers .mcp.json and .claude/settings.local.json
  * from the bot's dir (set as cwd), so we don't need explicit paths.
@@ -39,36 +48,77 @@ export function discoverBots(): BotConfig[] {
     if (!existsSync(claudeMdPath)) continue;
 
     const envName = name.toUpperCase();
-    const token = process.env[`TELEGRAM_BOT_TOKEN_${envName}`];
+    const telegramToken = process.env[`TELEGRAM_BOT_TOKEN_${envName}`];
+    const slackBotToken = process.env[`SLACK_BOT_TOKEN_${envName}`];
+    const slackAppToken = process.env[`SLACK_APP_TOKEN_${envName}`];
 
-    if (!token) {
-      console.log(`[Jarvis] Skipping bot "${name}" — no TELEGRAM_BOT_TOKEN_${envName} env var`);
+    // Bot needs at least one platform token
+    const hasTelegram = !!telegramToken;
+    const hasSlack = !!slackBotToken && !!slackAppToken;
+
+    if (!hasTelegram && !hasSlack) {
+      console.log(`[Jarvis] Skipping bot "${name}" — no platform tokens found (need TELEGRAM_BOT_TOKEN_${envName} or SLACK_BOT_TOKEN_${envName} + SLACK_APP_TOKEN_${envName})`);
       continue;
     }
 
-    const allowedIdsEnv = process.env[`TELEGRAM_ALLOWED_USER_IDS_${envName}`] ?? "";
-    const allowedUserIds = allowedIdsEnv
+    const telegramAllowedIdsEnv = process.env[`TELEGRAM_ALLOWED_USER_IDS_${envName}`] ?? "";
+    const telegramAllowedUserIds = telegramAllowedIdsEnv
       .split(",")
-      .map((id) => parseInt(id.trim(), 10))
-      .filter((id) => !isNaN(id));
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+
+    const slackAllowedIdsEnv = process.env[`SLACK_ALLOWED_USER_IDS_${envName}`] ?? "";
+    const slackAllowedUserIds = slackAllowedIdsEnv
+      .split(",")
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
 
     const persona = readFileSync(claudeMdPath, "utf-8");
+
+    // Read optional per-bot config.json
+    const configJsonPath = join(dir, "config.json");
+    let botSettings: Record<string, unknown> = {};
+    const hasConfigJson = existsSync(configJsonPath);
+    if (hasConfigJson) {
+      try {
+        botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
+      } catch (e) {
+        console.warn(`[Jarvis] Failed to parse ${configJsonPath}: ${e}`);
+      }
+    }
 
     const hasMcp = existsSync(join(dir, ".mcp.json"));
     const hasSettings = existsSync(join(dir, ".claude", "settings.local.json"));
 
+    const platforms: string[] = [];
+    if (hasTelegram) platforms.push("telegram");
+    if (hasSlack) platforms.push("slack");
+
     bots.push({
       name,
       dir,
-      telegramBotToken: token,
       persona,
-      allowedUserIds,
+      telegramBotToken: telegramToken,
+      telegramAllowedUserIds,
+      slackBotToken,
+      slackAppToken,
+      slackAllowedUserIds,
+      model: botSettings.model as string | undefined,
+      thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
+      timeoutMs: botSettings.timeoutMs as number | undefined,
     });
 
+    const configParts: string[] = [];
+    if (botSettings.model) configParts.push(`model: ${botSettings.model}`);
+    if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
+    if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
+
     console.log(
-      `[Jarvis] Discovered bot "${name}" (${allowedUserIds.length} allowed users, ` +
+      `[Jarvis] Discovered bot "${name}" (platforms: ${platforms.join("+")}, ` +
+        `telegram users: ${telegramAllowedUserIds.length}, slack users: ${slackAllowedUserIds.length}, ` +
         `MCP: ${hasMcp ? "yes" : "no"}, ` +
         `settings: ${hasSettings ? "yes" : "no"}, ` +
+        `config.json: ${hasConfigJson ? `yes (${configParts.join(", ") || "empty"})` : "no"}, ` +
         `dir: ${dir})`,
     );
   }

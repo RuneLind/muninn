@@ -2,7 +2,7 @@ import { getDb } from "./client.ts";
 import type { Goal, GoalStatus } from "../types.ts";
 
 interface SaveGoalParams {
-  userId: number;
+  userId: string;
   botName: string;
   title: string;
   description?: string | null;
@@ -29,7 +29,7 @@ export async function saveGoal(params: SaveGoalParams): Promise<string> {
   return row!.id;
 }
 
-export async function getActiveGoals(userId: number, botName?: string): Promise<Goal[]> {
+export async function getActiveGoals(userId: string, botName?: string): Promise<Goal[]> {
   const sql = getDb();
   const rows = botName
     ? await sql`
@@ -145,7 +145,7 @@ export async function getAllGoals(botName?: string): Promise<Goal[]> {
 function mapRow(r: Record<string, any>): Goal {
   return {
     id: r.id,
-    userId: Number(r.user_id),
+    userId: r.user_id,
     botName: r.bot_name ?? "jarvis",
     title: r.title,
     description: r.description ?? null,

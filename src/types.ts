@@ -17,7 +17,7 @@ export interface ActivityEvent {
   id: string;
   type: ActivityEventType;
   timestamp: number;
-  userId?: number;
+  userId?: string;
   username?: string;
   botName?: string;
   text: string;
@@ -41,7 +41,7 @@ export interface JarvisMessage {
   role: "user" | "assistant";
   text: string;
   timestamp: number;
-  userId?: number;
+  userId?: string;
 }
 
 export interface ConversationMessage extends JarvisMessage {
@@ -52,12 +52,15 @@ export interface ConversationMessage extends JarvisMessage {
   model?: string;
 }
 
+export type MemoryScope = 'personal' | 'shared';
+
 export interface Memory {
   id: string;
-  userId: number;
+  userId: string;
   content: string;
   summary: string;
   tags: string[];
+  scope?: MemoryScope;
   createdAt: number;
   similarity?: number;
 }
@@ -66,7 +69,7 @@ export type TaskType = "reminder" | "briefing" | "custom";
 
 export interface ScheduledTask {
   id: string;
-  userId: number;
+  userId: string;
   botName: string;
   title: string;
   taskType: TaskType;
@@ -87,7 +90,7 @@ export type WatcherType = "email" | "calendar" | "github" | "news" | "goal";
 
 export interface Watcher {
   id: string;
-  userId: number;
+  userId: string;
   botName: string;
   name: string;
   type: WatcherType;
@@ -110,7 +113,7 @@ export interface WatcherAlert {
 }
 
 export interface UserSettings {
-  userId: number;
+  userId: string;
   quietStart: number | null;
   quietEnd: number | null;
   timezone: string;
@@ -120,7 +123,7 @@ export type GoalStatus = "active" | "completed" | "cancelled";
 
 export interface Goal {
   id: string;
-  userId: number;
+  userId: string;
   botName: string;
   title: string;
   description: string | null;

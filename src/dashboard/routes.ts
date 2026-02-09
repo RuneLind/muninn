@@ -87,8 +87,8 @@ export function createDashboardRoutes(): Hono {
   });
 
   app.get("/api/messages/:userId", async (c) => {
-    const userId = parseInt(c.req.param("userId"), 10);
-    if (isNaN(userId)) {
+    const userId = c.req.param("userId");
+    if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
     const limit = parseInt(c.req.query("limit") ?? "50", 10);
@@ -97,8 +97,8 @@ export function createDashboardRoutes(): Hono {
   });
 
   app.get("/api/goals/:userId", async (c) => {
-    const userId = parseInt(c.req.param("userId"), 10);
-    if (isNaN(userId)) {
+    const userId = c.req.param("userId");
+    if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
     const goals = await getActiveGoals(userId);
@@ -106,8 +106,8 @@ export function createDashboardRoutes(): Hono {
   });
 
   app.get("/api/scheduled-tasks/:userId", async (c) => {
-    const userId = parseInt(c.req.param("userId"), 10);
-    if (isNaN(userId)) {
+    const userId = c.req.param("userId");
+    if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
     const tasks = await getScheduledTasksForUser(userId);

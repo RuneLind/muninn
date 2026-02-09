@@ -7,9 +7,9 @@ import { createVoiceHandler } from "./voice-handler.ts";
 import { registerWatcherCommands } from "./watcher-commands.ts";
 
 export function createBot(config: Config, botConfig: BotConfig): Bot {
-  const bot = new Bot(botConfig.telegramBotToken);
+  const bot = new Bot(botConfig.telegramBotToken!);
 
-  bot.use(createAuthMiddleware(botConfig.allowedUserIds));
+  bot.use(createAuthMiddleware(botConfig.telegramAllowedUserIds));
 
   bot.command("start", async (ctx) => {
     await ctx.reply(`${botConfig.name} online. How can I help you?`);

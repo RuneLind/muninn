@@ -9,7 +9,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ============================================================================
 CREATE TABLE messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id BIGINT NOT NULL,
+  user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   username TEXT,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
@@ -20,6 +20,7 @@ CREATE TABLE messages (
   input_tokens INTEGER,
   output_tokens INTEGER,
   source TEXT DEFAULT NULL,
+  platform TEXT DEFAULT 'telegram',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -32,7 +33,7 @@ CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, create
 CREATE TABLE activity_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type TEXT NOT NULL CHECK (type IN ('message_in', 'message_out', 'error', 'system')),
-  user_id BIGINT,
+  user_id TEXT,
   bot_name TEXT,
   username TEXT,
   text TEXT NOT NULL,
@@ -49,7 +50,7 @@ CREATE INDEX idx_activity_log_created ON activity_log(created_at DESC);
 -- ============================================================================
 CREATE TABLE memories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id BIGINT NOT NULL,
+  user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   content TEXT NOT NULL,
   summary TEXT NOT NULL,
@@ -57,6 +58,7 @@ CREATE TABLE memories (
   search_vector TSVECTOR,
   embedding vector(384),
   source_message_id UUID REFERENCES messages(id),
+  scope TEXT NOT NULL DEFAULT 'personal' CHECK (scope IN ('personal', 'shared')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -64,6 +66,8 @@ CREATE INDEX idx_memories_search ON memories USING GIN(search_vector);
 CREATE INDEX idx_memories_user ON memories(user_id, created_at DESC);
 CREATE INDEX idx_memories_bot_user ON memories(bot_name, user_id, created_at DESC);
 CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_memories_bot_shared ON memories(bot_name, created_at DESC)
+  WHERE scope = 'shared';
 
 -- Trigger to auto-update search_vector on insert/update
 CREATE OR REPLACE FUNCTION memories_search_vector_update() RETURNS trigger AS $$
@@ -84,7 +88,7 @@ CREATE TRIGGER memories_search_vector_trigger
 -- ============================================================================
 CREATE TABLE goals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id BIGINT NOT NULL,
+  user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   title TEXT NOT NULL,
   description TEXT,
@@ -123,7 +127,7 @@ CREATE INDEX idx_goals_active_last_checked ON goals (last_checked_at)
 -- ============================================================================
 CREATE TABLE scheduled_tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id BIGINT NOT NULL,
+  user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   title TEXT NOT NULL,
   task_type TEXT NOT NULL CHECK (task_type IN ('reminder', 'briefing', 'custom')),
@@ -179,7 +183,7 @@ CREATE INDEX idx_haiku_usage_created ON haiku_usage(created_at DESC);
 -- ============================================================================
 CREATE TABLE watchers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id BIGINT NOT NULL,
+  user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal')),
@@ -215,7 +219,7 @@ CREATE INDEX idx_watchers_user ON watchers (user_id, enabled);
 -- User settings: quiet hours, timezone preferences
 -- ============================================================================
 CREATE TABLE user_settings (
-  user_id BIGINT PRIMARY KEY,
+  user_id TEXT PRIMARY KEY,
   quiet_start INTEGER CHECK (quiet_start >= 0 AND quiet_start <= 23),
   quiet_end INTEGER CHECK (quiet_end >= 0 AND quiet_end <= 23),
   timezone TEXT NOT NULL DEFAULT 'Europe/Oslo',

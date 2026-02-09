@@ -13,7 +13,7 @@ const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal
 
 export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   bot.command("watchers", async (ctx) => {
-    const userId = ctx.from!.id;
+    const userId = String(ctx.from!.id);
     const watchers = await getWatchersForUser(userId, botConfig.name);
 
     if (watchers.length === 0) {
@@ -38,7 +38,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   });
 
   bot.command("watch", async (ctx) => {
-    const userId = ctx.from!.id;
+    const userId = String(ctx.from!.id);
     const args = ctx.match?.trim() ?? "";
 
     if (!args) {
@@ -83,7 +83,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   });
 
   bot.command("unwatch", async (ctx) => {
-    const userId = ctx.from!.id;
+    const userId = String(ctx.from!.id);
     const arg = ctx.match?.trim() ?? "";
 
     if (!arg) {
@@ -115,7 +115,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   });
 
   bot.command("quiet", async (ctx) => {
-    const userId = ctx.from!.id;
+    const userId = String(ctx.from!.id);
     const arg = ctx.match?.trim() ?? "";
 
     if (!arg) {
