@@ -24,7 +24,12 @@ Return ONLY a JSON array (no markdown fences):
 If nothing worth notifying, return: []`;
 
   const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName);
-  return JSON.parse(extractJsonArray(result));
+  try {
+    return JSON.parse(extractJsonArray(result));
+  } catch {
+    console.warn(`[watcher-email] Failed to parse Haiku response as JSON, skipping. Raw:\n${result.slice(0, 300)}`);
+    return [];
+  }
 }
 
 function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
