@@ -1,7 +1,7 @@
-export type ActivityEventType = "message_in" | "message_out" | "error" | "system";
+export type ActivityEventType = "message_in" | "message_out" | "error" | "system" | "slack_channel_post";
 
 export interface TimingMetadata {
-  totalMs: number;
+  totalMs?: number;
   startupMs?: number;
   apiMs?: number;
   promptBuildMs?: number;
@@ -11,6 +11,8 @@ export interface TimingMetadata {
   outputTokens?: number;
   model?: string;
   numTurns?: number;
+  /** Extra metadata (e.g. Slack channel name) */
+  [key: string]: unknown;
 }
 
 export interface ActivityEvent {

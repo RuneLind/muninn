@@ -3,6 +3,8 @@ import { searchMemoriesHybrid } from "../db/memories.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { generateEmbedding } from "./embeddings.ts";
+import type { RestrictedTools } from "../bots/config.ts";
+import { getRestrictedToolsForUser, buildToolRestrictionPrompt } from "./tool-restrictions.ts";
 import type { ConversationMessage, Goal, Memory, ScheduledTask } from "../types.ts";
 
 export interface PromptBuildResult {
@@ -25,6 +27,7 @@ export async function buildPrompt(
   currentMessage: string,
   persona: string,
   botName: string,
+  restrictedTools?: RestrictedTools,
 ): Promise<PromptBuildResult> {
   const t0 = performance.now();
   let dbHistoryMs = 0;
@@ -62,8 +65,14 @@ export async function buildPrompt(
       ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts)`,
   );
 
-  // System prompt: persona + context (memories, goals)
+  // System prompt: persona + tool restrictions + context (memories, goals)
   const systemParts: string[] = [persona];
+
+  const deniedGroups = getRestrictedToolsForUser(userId, restrictedTools);
+  const restrictionPrompt = buildToolRestrictionPrompt(deniedGroups);
+  if (restrictionPrompt) {
+    systemParts.push(restrictionPrompt);
+  }
 
   if (relevantMemories.length > 0) {
     systemParts.push(formatMemories(relevantMemories));

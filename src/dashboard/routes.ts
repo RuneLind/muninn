@@ -8,7 +8,7 @@ import { getAllGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getRecentMemories } from "../db/memories.ts";
-import { getDashboardStats } from "../db/stats.ts";
+import { getDashboardStats, getSlackAnalytics } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { agentStatus } from "./agent-status.ts";
 
@@ -63,6 +63,17 @@ export function createDashboardRoutes(): Hono {
     } catch (err) {
       console.error("Failed to fetch tasks:", err);
       return c.json({ error: "Failed to fetch tasks" }, 500);
+    }
+  });
+
+  app.get("/api/slack-analytics", async (c) => {
+    try {
+      const botName = c.req.query("bot") || undefined;
+      const analytics = await getSlackAnalytics(botName);
+      return c.json(analytics);
+    } catch (err) {
+      console.error("Failed to fetch Slack analytics:", err);
+      return c.json({ error: "Failed to fetch Slack analytics" }, 500);
     }
   });
 

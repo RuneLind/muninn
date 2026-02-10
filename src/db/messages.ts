@@ -13,13 +13,14 @@ interface SaveMessageParams {
   inputTokens?: number;
   outputTokens?: number;
   source?: string;
+  platform?: string;
 }
 
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, source)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.source ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, source, platform)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null})
     RETURNING id
   `;
   return row!.id;

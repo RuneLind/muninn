@@ -8,6 +8,7 @@ import { extractMemoryAsync } from "../memory/extractor.ts";
 import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { formatSlackMrkdwn } from "./slack-format.ts";
+import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
 import { Timing } from "../utils/timing.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 
@@ -33,16 +34,20 @@ interface HandleSlackMessageParams {
   postToChannel?: PostToChannel;
   /** Channel name/context for the current conversation (e.g. "#general") */
   channelContext?: string;
+  /** Platform identifier for analytics (e.g. 'slack_dm', 'slack_channel', 'slack_assistant') */
+  platform?: string;
 }
 
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}/slack]`;
 
-  return async ({ text, userId, username, say, setStatus, postToChannel, channelContext }: HandleSlackMessageParams) => {
+  return async ({ text, userId, username, say, setStatus, postToChannel, channelContext, platform }: HandleSlackMessageParams) => {
     if (!text) return;
 
-    // Auth check
-    if (botConfig.slackAllowedUserIds.length > 0 && !botConfig.slackAllowedUserIds.includes(userId)) {
+    // Auth check — skip for passive channel listening (anyone in the channel can trigger)
+    if (platform !== "slack_channel_listen" &&
+        botConfig.slackAllowedUserIds.length > 0 &&
+        !botConfig.slackAllowedUserIds.includes(userId)) {
       activityLog.push("error", `Unauthorized Slack access attempt from user ${userId} (@${username})`);
       await say("Unauthorized.");
       return;
@@ -56,19 +61,32 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
 
     // Save user message to DB
     t.start("db_save_user");
-    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text });
+    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform });
     t.end("db_save_user");
+
+    // Log tool restrictions for debugging
+    if (botConfig.restrictedTools) {
+      const denied = getRestrictedToolsForUser(userId, botConfig.restrictedTools);
+      if (denied.length > 0) {
+        console.log(`${tag} User ${username} (${userId}) has restricted tools: ${denied.map((d) => d.name).join(", ")}`);
+      }
+    }
 
     // Build context-aware prompt
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools);
     t.end("prompt_build");
 
     // Append Slack channel posting capability to system prompt if available
-    const fullSystemPrompt = postToChannel
+    let fullSystemPrompt = postToChannel
       ? systemPrompt + SLACK_POST_CAPABILITY(channelContext)
       : systemPrompt;
+
+    // Add proactive context guidance for passive channel listening
+    if (platform === "slack_channel_listen") {
+      fullSystemPrompt += CHANNEL_LISTEN_CONTEXT;
+    }
     console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
     await setStatus("Thinking...").catch(() => {});
@@ -97,6 +115,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
         model: result.model,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
+        platform,
       });
       t.end("db_save_response");
 
@@ -234,6 +253,13 @@ interface ChannelPost {
   channel: string;
   message: string;
 }
+
+const CHANNEL_LISTEN_CONTEXT = `
+
+## Channel Listening Mode
+You are responding to a message in a public Slack channel that was deemed relevant to your expertise.
+You were NOT directly asked — keep your response helpful but concise. Don't be intrusive.
+If you're not confident you can add value, it's better to stay silent (respond with an empty message).`;
 
 /** Parse <slack-post channel="#name">content</slack-post> from Claude's response */
 function extractChannelPosts(text: string): { cleanText: string; posts: ChannelPost[] } {
