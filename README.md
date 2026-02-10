@@ -200,6 +200,36 @@ Background monitors that check external services at intervals:
 ### Voice
 Send a voice message and the bot will transcribe it (whisper-cli), process it through Claude, and reply with both text and a voice message (mirror mode).
 
+## Testing
+
+Tests require the local Postgres container running (`bun run db:up`). A separate `javrvis_test` database is used automatically.
+
+```bash
+bun run test              # Run all tests (220 tests across 22 files)
+bun run test:unit         # Unit tests only (pure functions, no DB)
+bun run test:db           # DB integration tests only
+bun run test:handlers     # Handler/integration tests (with mocks)
+bun run test:coverage     # Run with coverage report
+```
+
+Tests are split into two `bun` invocations because `bun:test` runs all files in the same process, and `mock.module()` calls leak between files. Group 1 (unit + DB) runs first, then group 2 (mock-based handler tests).
+
+### Test structure
+
+- `src/test/setup-db.ts` — Shared DB setup (connects to `javrvis_test`, truncates tables between tests)
+- `src/test/fixtures.ts` — Test data factories (`makeMessage()`, `makeMemory()`, `makeGoal()`, etc.)
+- `src/test/mock-grammy.ts` — Grammy test helpers (fake bot with API transformer, fake updates)
+- `*.test.ts` — Test files co-located with their source files
+
+## Database Backup & Restore
+
+```bash
+bun run db:backup    # Saves to backups/javrvis_backup_<timestamp>.sql
+bun run db:restore   # Restores from latest backup in backups/
+```
+
+Backups are full `pg_dump` exports stored in the `backups/` directory.
+
 ## Security
 
 - No public ports — local Telegram relay only

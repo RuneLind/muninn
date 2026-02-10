@@ -33,7 +33,7 @@ async function resolveChannelId(client: WebClient, channelName: string): Promise
   if (/^[CG][A-Z0-9]+$/.test(name)) return name;
 
   try {
-    let cursor: string | undefined;
+    let cursor: string | undefined = undefined;
     do {
       const result = await client.conversations.list({ limit: 200, cursor, types: "public_channel,private_channel" });
       for (const ch of result.channels ?? []) {
@@ -52,8 +52,9 @@ async function resolveChannelId(client: WebClient, channelName: string): Promise
 function makePostToChannel(client: WebClient, tag: string) {
   return async (channel: string, message: string) => {
     const channelId = await resolveChannelId(client, channel);
-    await client.chat.postMessage({ channel: channelId, text: message });
-    console.log(`${tag} Posted to channel ${channel} (${channelId})`);
+    console.log(`${tag} postToChannel: channel="${channel}" → resolved="${channelId}", message="${message.slice(0, 100)}..."`);
+    const result = await client.chat.postMessage({ channel: channelId, text: message });
+    console.log(`${tag} postToChannel: success, ts=${result.ts}, channel=${result.channel}`);
   };
 }
 
@@ -142,6 +143,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         username,
         say: async (msg: string) => { await say(msg); },
         setStatus: async (status: string) => { await setStatus(status); },
+        postToChannel: makePostToChannel(app.client, tag),
         platform: "slack_assistant",
       });
     },
@@ -156,7 +158,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     const username = await resolveSlackUsername(app, userId);
     // Strip the bot mention tag(s) like <@U12345> from the text
     const rawText = event.text ?? "";
-    const text = rawText.replace(/<@[A-Z0-9]+>/g, "").trim();
+    const text = rawText.replaceAll(/<@[A-Z0-9]+>/g, "").trim();
 
     if (!text) return;
 
@@ -223,7 +225,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
     const text = "text" in message ? (message.text ?? "") : "";
     const userId = "user" in message ? (message.user ?? "unknown") : "unknown";
-    const channel = "channel" in message ? (message.channel as string) : "";
+    const channel = "channel" in message ? message.channel : "";
     const threadTs = "thread_ts" in message ? (message.thread_ts as string) : "";
     const isDM = channel.startsWith("D");
 
@@ -234,7 +236,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     if (tracked) {
       const username = await resolveSlackUsername(app, userId);
       // Strip any bot mentions (user might still @mention out of habit)
-      const cleanText = text.replace(/<@[A-Z0-9]+>/g, "").trim();
+      const cleanText = text.replaceAll(/<@[A-Z0-9]+>/g, "").trim();
       if (!cleanText) return;
 
       // Resolve channel name for context
@@ -288,7 +290,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
     // Regular DM or standalone channel message
     const username = await resolveSlackUsername(app, userId);
-    const messageTs = "ts" in message ? (message.ts as string) : "";
+    const messageTs = "ts" in message ? message.ts : "";
 
     console.log(`${tag} ${isDM ? "DM" : "Channel message"} from ${username} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 

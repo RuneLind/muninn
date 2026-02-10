@@ -41,8 +41,14 @@ interface HandleSlackMessageParams {
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}/slack]`;
 
-  return async ({ text, userId, username, say, setStatus, postToChannel, channelContext, platform }: HandleSlackMessageParams) => {
-    if (!text) return;
+  return async ({ text: rawText, userId, username, say, setStatus, postToChannel, channelContext, platform }: HandleSlackMessageParams) => {
+    if (!rawText) return;
+
+    // Convert Slack channel/user references to readable names
+    // Slack sends <#C0ADMP9CYG7|heidrun-agent-testing> and <@U12345|username>
+    const text = rawText
+      .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
+      .replace(/<#([A-Z0-9]+)>/g, "#$1");
 
     // Auth check — skip for passive channel listening (anyone in the channel can trigger)
     if (platform !== "slack_channel_listen" &&
@@ -154,6 +160,11 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       let responseText = result.result;
       if (postToChannel) {
         const { cleanText, posts } = extractChannelPosts(responseText);
+        console.log(`${tag} extractChannelPosts: found ${posts.length} post(s), cleanText length=${cleanText.length}, raw length=${responseText.length}`);
+        if (posts.length === 0 && responseText.includes("<slack-post")) {
+          console.warn(`${tag} WARNING: response contains "<slack-post" but no posts were extracted! Raw response:\n${responseText.slice(0, 500)}`);
+        }
+        const failedPosts: string[] = [];
         for (const post of posts) {
           try {
             console.log(`${tag} Posting to channel ${post.channel}: "${post.message.slice(0, 80)}..."`);
@@ -165,9 +176,13 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
             console.error(`${tag} Failed to post to ${post.channel}: ${errMsg}`);
+            failedPosts.push(`${post.channel}: ${errMsg}`);
           }
         }
         responseText = cleanText;
+        if (failedPosts.length > 0) {
+          responseText += `\n\n_Klarte ikke poste til kanal:_\n${failedPosts.map(f => `• ${f}`).join("\n")}`;
+        }
       }
 
       // Convert to Slack mrkdwn
@@ -181,7 +196,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       t.end("slack_send");
 
       // Push activity with timing metadata
-      activityLog.push("message_out", result.result, {
+      activityLog.push("message_out", responseText, {
         userId,
         username,
         botName: botConfig.name,
@@ -261,15 +276,28 @@ You are responding to a message in a public Slack channel that was deemed releva
 You were NOT directly asked — keep your response helpful but concise. Don't be intrusive.
 If you're not confident you can add value, it's better to stay silent (respond with an empty message).`;
 
-/** Parse <slack-post channel="#name">content</slack-post> from Claude's response */
-function extractChannelPosts(text: string): { cleanText: string; posts: ChannelPost[] } {
+/** Parse <slack-post channel="#name">content</slack-post> from Claude's response.
+ *  Also handles incomplete tags (missing closing tag, e.g. from interrupted responses). */
+export function extractChannelPosts(text: string): { cleanText: string; posts: ChannelPost[] } {
   const posts: ChannelPost[] = [];
-  const cleanText = text.replace(
+  // First pass: complete tags
+  let cleanText = text.replace(
     /<slack-post\s+channel="([^"]+)">([\s\S]*?)<\/slack-post>/g,
     (_match, channel: string, message: string) => {
       posts.push({ channel: channel.trim(), message: message.trim() });
       return "";
     },
-  ).trim();
-  return { cleanText, posts };
+  );
+  // Second pass: incomplete tags (no closing tag — use rest of text as message)
+  cleanText = cleanText.replace(
+    /<slack-post\s+channel="([^"]+)">([\s\S]*)$/g,
+    (_match, channel: string, message: string) => {
+      const trimmed = message.trim();
+      if (trimmed) {
+        posts.push({ channel: channel.trim(), message: trimmed });
+      }
+      return "";
+    },
+  );
+  return { cleanText: cleanText.trim(), posts };
 }

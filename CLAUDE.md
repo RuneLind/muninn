@@ -235,6 +235,19 @@ PostgreSQL + pgvector via Docker (single container).
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
 
+### Testing
+
+Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into two groups to avoid `mock.module()` leakage between files:
+
+```bash
+bun run test              # All tests
+bun run test:unit         # Unit tests only
+bun run test:db           # DB integration tests
+bun run test:handlers     # Handler tests (with mocks)
+```
+
+DB tests require the local Postgres container (`bun run db:up`) and use a separate `javrvis_test` database. Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
+
 ### Conventions
 
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
