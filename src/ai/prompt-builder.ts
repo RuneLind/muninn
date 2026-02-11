@@ -120,7 +120,7 @@ export async function buildPrompt(
   };
 }
 
-function formatMemories(memories: Memory[]): string {
+export function formatMemories(memories: Memory[]): string {
   const personal = memories.filter((m) => m.scope !== "shared");
   const shared = memories.filter((m) => m.scope === "shared");
   const parts: string[] = [];
@@ -137,7 +137,7 @@ function formatMemories(memories: Memory[]): string {
   return parts.join("\n\n");
 }
 
-function formatGoals(goals: Goal[]): string {
+export function formatGoals(goals: Goal[]): string {
   const items = goals
     .map((g) => {
       let line = `- ${g.title}`;
@@ -154,7 +154,7 @@ function formatGoals(goals: Goal[]): string {
   return `User's active goals:\n${items}`;
 }
 
-function formatScheduledTasks(tasks: ScheduledTask[]): string {
+export function formatScheduledTasks(tasks: ScheduledTask[]): string {
   const items = tasks
     .map((t) => {
       const time = `${String(t.scheduleHour).padStart(2, "0")}:${String(t.scheduleMinute).padStart(2, "0")}`;
@@ -175,7 +175,7 @@ function formatScheduledTasks(tasks: ScheduledTask[]): string {
   return `User's scheduled tasks:\n${items}`;
 }
 
-function formatAlerts(alerts: AlertMessage[]): string {
+export function formatAlerts(alerts: AlertMessage[]): string {
   const items = alerts
     .map((a) => {
       const time = new Date(a.timestamp).toLocaleTimeString("en-US", {

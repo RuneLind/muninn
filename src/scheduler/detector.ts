@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import { saveScheduledTask } from "../db/scheduled-tasks.ts";
+import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
 import type { TaskType } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
 
@@ -90,11 +90,37 @@ async function doExtract(
     return;
   }
 
+  const taskType = result.task_type ?? "reminder";
+
+  // Check for existing similar task to avoid duplicates
+  const existing = await findSimilarTask(
+    input.userId,
+    input.botName,
+    result.title,
+    taskType,
+  );
+
+  if (existing) {
+    // Update prompt if it changed, otherwise skip
+    const newPrompt = result.prompt ?? null;
+    if (newPrompt !== existing.prompt) {
+      await updateTaskPrompt(existing.id, newPrompt);
+      console.log(
+        `[Jarvis] Scheduled task updated (duplicate detected): "${result.title}" (${taskType}, id: ${existing.id})`,
+      );
+    } else {
+      console.log(
+        `[Jarvis] Scheduled task skipped (duplicate): "${result.title}" (${taskType}, id: ${existing.id})`,
+      );
+    }
+    return;
+  }
+
   const taskId = await saveScheduledTask({
     userId: input.userId,
     botName: input.botName,
     title: result.title,
-    taskType: result.task_type ?? "reminder",
+    taskType: taskType,
     prompt: result.prompt ?? null,
     scheduleHour: result.hour,
     scheduleMinute: result.minute ?? 0,
@@ -105,6 +131,6 @@ async function doExtract(
   });
 
   console.log(
-    `[Jarvis] Scheduled task detected: "${result.title}" (${result.task_type}, id: ${taskId})`,
+    `[Jarvis] Scheduled task detected: "${result.title}" (${taskType}, id: ${taskId})`,
   );
 }

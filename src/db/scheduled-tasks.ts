@@ -127,6 +127,30 @@ export async function deleteTask(id: string): Promise<void> {
   await sql`DELETE FROM scheduled_tasks WHERE id = ${id}`;
 }
 
+export async function findSimilarTask(
+  userId: string,
+  botName: string,
+  title: string,
+  taskType: TaskType,
+): Promise<ScheduledTask | null> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM scheduled_tasks
+    WHERE user_id = ${userId}
+      AND bot_name = ${botName}
+      AND LOWER(title) = LOWER(${title})
+      AND task_type = ${taskType}
+      AND enabled = true
+    LIMIT 1
+  `;
+  return rows.length > 0 ? mapRow(rows[0]!) : null;
+}
+
+export async function updateTaskPrompt(id: string, prompt: string | null): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE scheduled_tasks SET prompt = ${prompt}, updated_at = now() WHERE id = ${id}`;
+}
+
 /**
  * Compute the next run time for a task.
  * Two modes:

@@ -8,6 +8,8 @@ const mockSpawnHaiku = mock(() => Promise.resolve({
 }));
 
 const mockSaveScheduledTask = mock(() => Promise.resolve("task-1"));
+const mockFindSimilarTask = mock(() => Promise.resolve(null as any));
+const mockUpdateTaskPrompt = mock(() => Promise.resolve());
 
 mock.module("./executor.ts", () => ({
   spawnHaiku: mockSpawnHaiku,
@@ -16,6 +18,8 @@ mock.module("./executor.ts", () => ({
 
 mock.module("../db/scheduled-tasks.ts", () => ({
   saveScheduledTask: mockSaveScheduledTask,
+  findSimilarTask: mockFindSimilarTask,
+  updateTaskPrompt: mockUpdateTaskPrompt,
   getScheduledTasksForUser: mock(() => Promise.resolve([])),
   getTasksDueNow: mock(() => Promise.resolve([])),
   updateTaskLastRun: mock(() => Promise.resolve()),
@@ -33,6 +37,8 @@ const config = { databaseUrl: "test" } as any;
 beforeEach(() => {
   mockSpawnHaiku.mockClear();
   mockSaveScheduledTask.mockClear();
+  mockFindSimilarTask.mockClear();
+  mockUpdateTaskPrompt.mockClear();
 });
 
 describe("extractScheduleAsync", () => {
@@ -85,6 +91,7 @@ describe("extractScheduleAsync", () => {
 
     await new Promise((r) => setTimeout(r, 100));
 
+    expect(mockFindSimilarTask).toHaveBeenCalledWith("u1", "testbot", "Morning briefing", "briefing");
     expect(mockSaveScheduledTask).toHaveBeenCalledTimes(1);
     const saveCall = (mockSaveScheduledTask.mock.calls[0] as any[])[0];
     expect(saveCall.userId).toBe("u1");
@@ -208,5 +215,101 @@ describe("extractScheduleAsync", () => {
     expect(mockSaveScheduledTask).toHaveBeenCalledTimes(1);
     const saveCall = (mockSaveScheduledTask.mock.calls[0] as any[])[0];
     expect(saveCall.taskType).toBe("reminder");
+  });
+
+  test("skips duplicate task with same prompt", async () => {
+    mockFindSimilarTask.mockResolvedValueOnce({
+      id: "existing-1",
+      userId: "u1",
+      botName: "testbot",
+      title: "Morning briefing",
+      taskType: "briefing",
+      prompt: "Summarize goals",
+      scheduleHour: 8,
+      scheduleMinute: 0,
+      scheduleDays: [1, 2, 3, 4, 5],
+      scheduleIntervalMs: null,
+      timezone: "Europe/Oslo",
+      enabled: true,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    mockSpawnHaiku.mockResolvedValueOnce({
+      result: JSON.stringify({
+        has_schedule: true,
+        title: "Morning briefing",
+        task_type: "briefing",
+        hour: 8,
+        minute: 0,
+        prompt: "Summarize goals",
+      }),
+      inputTokens: 50,
+      outputTokens: 20,
+      model: "haiku",
+    });
+
+    extractScheduleAsync({
+      userId: "u1",
+      botName: "testbot",
+      userMessage: "give me a morning briefing",
+      assistantResponse: "Done!",
+    }, config);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockFindSimilarTask).toHaveBeenCalledTimes(1);
+    expect(mockSaveScheduledTask).not.toHaveBeenCalled();
+    expect(mockUpdateTaskPrompt).not.toHaveBeenCalled();
+  });
+
+  test("updates prompt when duplicate has different prompt", async () => {
+    mockFindSimilarTask.mockResolvedValueOnce({
+      id: "existing-1",
+      userId: "u1",
+      botName: "testbot",
+      title: "Morning briefing",
+      taskType: "briefing",
+      prompt: "Old prompt",
+      scheduleHour: 8,
+      scheduleMinute: 0,
+      scheduleDays: [1, 2, 3, 4, 5],
+      scheduleIntervalMs: null,
+      timezone: "Europe/Oslo",
+      enabled: true,
+      lastRunAt: null,
+      nextRunAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    mockSpawnHaiku.mockResolvedValueOnce({
+      result: JSON.stringify({
+        has_schedule: true,
+        title: "Morning briefing",
+        task_type: "briefing",
+        hour: 8,
+        minute: 0,
+        prompt: "New improved prompt with news",
+      }),
+      inputTokens: 50,
+      outputTokens: 20,
+      model: "haiku",
+    });
+
+    extractScheduleAsync({
+      userId: "u1",
+      botName: "testbot",
+      userMessage: "update my morning briefing to include news",
+      assistantResponse: "Updated!",
+    }, config);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockFindSimilarTask).toHaveBeenCalledTimes(1);
+    expect(mockSaveScheduledTask).not.toHaveBeenCalled();
+    expect(mockUpdateTaskPrompt).toHaveBeenCalledWith("existing-1", "New improved prompt with news");
   });
 });

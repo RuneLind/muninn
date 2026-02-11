@@ -24,6 +24,9 @@ Default to using Bun instead of Node.js.
 - Prefer `Bun.file` over `node:fs`'s readFile/writeFile
 - Bun.$`ls` instead of execa.
 
+## Debugging
+When debugging issues, exhaust the most likely root cause hypothesis thoroughly before moving to the next. Avoid shotgun debugging — form a clear hypothesis, test it, and only move on when it's definitively ruled out. Especially for Slack bot issues, check app configuration and permissions before assuming code bugs.
+
 ## Testing
 
 Use `bun test` to run tests.
@@ -235,6 +238,9 @@ PostgreSQL + pgvector via Docker (single container).
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
 
+## Slack Bot
+When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.
+
 ### Testing
 
 Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into two groups to avoid `mock.module()` leakage between files:
@@ -261,3 +267,10 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - Watcher email checking: Haiku spawned with bot's cwd for Gmail MCP access
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript
+
+## Database & Migrations 
+After creating database migrations, always remind the user to run them against the target database. When modifying data models, check if existing data needs to be backfilled or updated — don't assume only new records matter.
+
+## Code Quality 
+This project is primarily TypeScript. Always ensure code compiles cleanly (`tsc --noEmit` or equivalent) before committing. When fixing TypeScript errors, fix all of them — don't leave partial fixes.
+

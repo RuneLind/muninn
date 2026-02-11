@@ -7,12 +7,13 @@ import {
   getGoalsNeedingCheckin,
   updateGoalReminderSentAt,
   updateGoalCheckedAt,
-  getActiveGoals,
 } from "../db/goals.ts";
 import { getTasksDueNow, updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { callHaiku } from "./executor.ts";
+import { executeClaudePrompt } from "../ai/executor.ts";
+import { buildBriefingPrompt } from "./briefing-prompt.ts";
 import { runWatchers } from "../watchers/runner.ts";
 
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
@@ -58,7 +59,7 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
   const botName = botConfig.name;
 
   // 1. Run due scheduled tasks
-  await runScheduledTasks(api, botConfig);
+  await runScheduledTasks(api, config, botConfig);
 
   // 2. Goal deadline reminders (24h ahead)
   await runGoalReminders(api, botConfig);
@@ -72,7 +73,7 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
 
 // --- Scheduled Tasks ---
 
-async function runScheduledTasks(api: Api, botConfig: BotConfig): Promise<void> {
+async function runScheduledTasks(api: Api, config: Config, botConfig: BotConfig): Promise<void> {
   const tag = botConfig.name;
   const dueTasks = await getTasksDueNow(tag);
   for (const task of dueTasks) {
@@ -81,7 +82,7 @@ async function runScheduledTasks(api: Api, botConfig: BotConfig): Promise<void> 
       await updateTaskLastRun(task);
 
       agentStatus.set("running_task", task.title);
-      const message = await executeTask(task, botConfig);
+      const message = await executeTask(task, config, botConfig);
       agentStatus.set("sending_telegram", task.title);
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
       agentStatus.set("idle");
@@ -103,7 +104,7 @@ async function runScheduledTasks(api: Api, botConfig: BotConfig): Promise<void> 
   }
 }
 
-async function executeTask(task: ScheduledTask, botConfig: BotConfig): Promise<string> {
+async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig): Promise<string> {
   const cwd = botConfig.dir;
   switch (task.taskType) {
     case "reminder":
@@ -116,7 +117,7 @@ async function executeTask(task: ScheduledTask, botConfig: BotConfig): Promise<s
       );
 
     case "briefing":
-      return await generateBriefing(task, botConfig);
+      return await generateBriefing(task, config, botConfig);
 
     case "custom":
       if (!task.prompt) return `<b>${task.title}</b>`;
@@ -130,45 +131,35 @@ async function executeTask(task: ScheduledTask, botConfig: BotConfig): Promise<s
   }
 }
 
-async function generateBriefing(task: ScheduledTask, botConfig: BotConfig): Promise<string> {
-  // Fetch active goals for context
-  let goalsContext = "";
+async function generateBriefing(task: ScheduledTask, config: Config, botConfig: BotConfig): Promise<string> {
+  const t0 = performance.now();
+
   try {
-    const goals = await getActiveGoals(task.userId, task.botName);
-    if (goals.length > 0) {
-      goalsContext =
-        "\n\nUser's active goals:\n" +
-        goals
-          .map((g) => {
-            let line = `- ${g.title}`;
-            if (g.deadline) {
-              line += ` (deadline: ${new Date(g.deadline).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })})`;
-            }
-            return line;
-          })
-          .join("\n");
-    }
-  } catch {
-    // Non-critical, continue without goals
+    const { systemPrompt, userPrompt, meta } = await buildBriefingPrompt(
+      task,
+      botConfig.persona,
+      botConfig.name,
+    );
+
+    console.log(
+      `[${botConfig.name}] Briefing prompt built in ${Math.round(meta.buildMs)}ms` +
+        ` (${meta.memoriesCount} memories, ${meta.goalsCount} goals, ${meta.scheduledTasksCount} tasks, ${meta.alertsCount} alerts)`,
+    );
+
+    const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
+
+    const totalMs = Math.round(performance.now() - t0);
+    console.log(
+      `[${botConfig.name}] Briefing generated in ${totalMs}ms` +
+        ` (model: ${result.model}, input: ${result.inputTokens}, output: ${result.outputTokens}, turns: ${result.numTurns})`,
+    );
+
+    return result.result.trim();
+  } catch (err) {
+    console.error(`[${botConfig.name}] Briefing generation failed, using fallback:`, err);
+    const timeOfDay = task.scheduleHour < 12 ? "morning" : task.scheduleHour < 17 ? "afternoon" : "evening";
+    return `<b>Good ${timeOfDay}!</b>\nI wasn't able to generate your full briefing this time. Check back later!`;
   }
-
-  const timeOfDay = getTimeOfDay(task.scheduleHour);
-
-  const prompt = `Generate a brief ${timeOfDay} briefing message for the user. Use Telegram HTML formatting (<b>, <i> only). Be warm but concise (3-5 sentences). Include a brief overview of their goals and anything noteworthy.${goalsContext}${task.prompt ? `\n\nAdditional instructions: ${task.prompt}` : ""}`;
-
-  return await callHaiku(
-    prompt,
-    `<b>Good ${timeOfDay}!</b>\nHere's your briefing. You have ${goalsContext ? "active goals to work on" : "no active goals"} today.`,
-    "briefing",
-    botConfig.dir,
-    botConfig.name,
-  );
-}
-
-function getTimeOfDay(hour: number): string {
-  if (hour < 12) return "morning";
-  if (hour < 17) return "afternoon";
-  return "evening";
 }
 
 // --- Goal Reminders (moved from goals/scheduler.ts) ---
