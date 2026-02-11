@@ -8,6 +8,7 @@ interface DetectionInput {
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
+  platform?: string;
 }
 
 interface DetectionResult {
@@ -80,6 +81,7 @@ async function doExtract(
       deadline: deadline && !isNaN(deadline.getTime()) ? deadline : null,
       tags: result.tags ?? [],
       sourceMessageId: input.sourceMessageId ?? null,
+      platform: input.platform,
     });
 
     console.log(`[Jarvis] Goal detected: "${result.title}" (id: ${goalId})`);

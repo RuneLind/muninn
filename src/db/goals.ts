@@ -9,12 +9,13 @@ interface SaveGoalParams {
   deadline?: Date | null;
   tags?: string[];
   sourceMessageId?: string | null;
+  platform?: string;
 }
 
 export async function saveGoal(params: SaveGoalParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO goals (user_id, bot_name, title, description, deadline, tags, source_message_id)
+    INSERT INTO goals (user_id, bot_name, title, description, deadline, tags, source_message_id, platform)
     VALUES (
       ${params.userId},
       ${params.botName},
@@ -22,7 +23,8 @@ export async function saveGoal(params: SaveGoalParams): Promise<string> {
       ${params.description ?? null},
       ${params.deadline ?? null},
       ${params.tags ?? []},
-      ${params.sourceMessageId ?? null}
+      ${params.sourceMessageId ?? null},
+      ${params.platform ?? "telegram"}
     )
     RETURNING id
   `;
@@ -78,6 +80,7 @@ export async function getGoalsNeedingReminder(
     ? await sql`
       SELECT * FROM goals
       WHERE status = 'active' AND bot_name = ${botName}
+        AND (platform = 'telegram' OR platform IS NULL)
         AND deadline IS NOT NULL
         AND deadline <= now() + ${hoursAhead + " hours"}::interval
         AND deadline > now()
@@ -87,6 +90,7 @@ export async function getGoalsNeedingReminder(
     : await sql`
       SELECT * FROM goals
       WHERE status = 'active'
+        AND (platform = 'telegram' OR platform IS NULL)
         AND deadline IS NOT NULL
         AND deadline <= now() + ${hoursAhead + " hours"}::interval
         AND deadline > now()
@@ -105,6 +109,7 @@ export async function getGoalsNeedingCheckin(
     ? await sql`
       SELECT * FROM goals
       WHERE status = 'active' AND bot_name = ${botName}
+        AND (platform = 'telegram' OR platform IS NULL)
         AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
       ORDER BY last_checked_at ASC NULLS FIRST
       LIMIT 5
@@ -112,6 +117,7 @@ export async function getGoalsNeedingCheckin(
     : await sql`
       SELECT * FROM goals
       WHERE status = 'active'
+        AND (platform = 'telegram' OR platform IS NULL)
         AND (last_checked_at IS NULL OR last_checked_at < now() - ${daysSinceCheckin + " days"}::interval)
       ORDER BY last_checked_at ASC NULLS FIRST
       LIMIT 5
@@ -153,6 +159,7 @@ function mapRow(r: Record<string, any>): Goal {
     deadline: r.deadline ? new Date(r.deadline).getTime() : null,
     tags: r.tags ?? [],
     sourceMessageId: r.source_message_id ?? null,
+    platform: r.platform ?? "telegram",
     lastCheckedAt: r.last_checked_at
       ? new Date(r.last_checked_at).getTime()
       : null,

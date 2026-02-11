@@ -8,6 +8,7 @@ interface DetectionInput {
   botName: string;
   userMessage: string;
   assistantResponse: string;
+  platform?: string;
 }
 
 interface DetectionResult {
@@ -100,6 +101,7 @@ async function doExtract(
     scheduleDays: result.days ?? null,
     scheduleIntervalMs: result.interval_ms ?? null,
     timezone: result.timezone ?? "Europe/Oslo",
+    platform: input.platform,
   });
 
   console.log(

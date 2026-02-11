@@ -61,7 +61,7 @@ describe("extractMemoryAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSpawnHaiku).toHaveBeenCalledTimes(1);
-    const prompt = mockSpawnHaiku.mock.calls[0]![0] as string;
+    const prompt = (mockSpawnHaiku.mock.calls[0] as any[])[0] as string;
     expect(prompt).toContain("I love TypeScript");
     expect(prompt).toContain("TypeScript is great!");
   });
@@ -91,7 +91,7 @@ describe("extractMemoryAsync", () => {
 
     expect(mockGenerateEmbedding).toHaveBeenCalledWith("User prefers TypeScript");
     expect(mockSaveMemory).toHaveBeenCalledTimes(1);
-    const saveCall = mockSaveMemory.mock.calls[0]![0] as any;
+    const saveCall = (mockSaveMemory.mock.calls[0] as any[])[0];
     expect(saveCall.userId).toBe("u1");
     expect(saveCall.summary).toBe("User prefers TypeScript");
     expect(saveCall.tags).toEqual(["preferences", "typescript"]);
@@ -142,7 +142,7 @@ describe("extractMemoryAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSaveMemory).toHaveBeenCalledTimes(1);
-    const saveCall = mockSaveMemory.mock.calls[0]![0] as any;
+    const saveCall = (mockSaveMemory.mock.calls[0] as any[])[0];
     expect(saveCall.scope).toBe("shared");
   });
 

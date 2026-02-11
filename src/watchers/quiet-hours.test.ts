@@ -1,7 +1,8 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
+import type { UserSettings } from "../types.ts";
 
 // Mock getUserSettings before importing the module under test
-const mockGetUserSettings = mock(() =>
+const mockGetUserSettings = mock((): Promise<UserSettings> =>
   Promise.resolve({
     userId: "user-1",
     quietStart: null,

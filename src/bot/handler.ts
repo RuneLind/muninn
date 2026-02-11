@@ -96,6 +96,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
+          platform: "telegram",
         },
         config,
       );
@@ -105,6 +106,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           botName: botConfig.name,
           userMessage: text,
           assistantResponse: result.result,
+          platform: "telegram",
         },
         config,
       );

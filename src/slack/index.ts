@@ -2,7 +2,6 @@ import { App, Assistant } from "@slack/bolt";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { createSlackMessageHandler } from "./handler.ts";
-import { RelevanceFilter } from "./relevance-filter.ts";
 
 import type { WebClient } from "@slack/web-api";
 
@@ -62,39 +61,35 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
   const tag = `[${botConfig.name}/slack]`;
 
   // Track threads where the bot has responded — auto-respond without re-tagging
-  // Key: "channel:threadTs", Value: { ts: last activity, origin: how thread started }
-  interface TrackedThread { ts: number; origin: "mention" | "channel_listen"; }
-  const activeThreads = new Map<string, TrackedThread>();
+  // Key: "channel:threadTs", Value: last activity timestamp
+  const activeThreads = new Map<string, number>();
   const THREAD_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-  function trackThread(channel: string, threadTs: string, origin: "mention" | "channel_listen" = "mention") {
-    activeThreads.set(`${channel}:${threadTs}`, { ts: Date.now(), origin });
+  function trackThread(channel: string, threadTs: string) {
+    activeThreads.set(`${channel}:${threadTs}`, Date.now());
     // Prune old threads
     if (activeThreads.size > 500) {
       const cutoff = Date.now() - THREAD_TTL_MS;
-      for (const [key, t] of activeThreads) {
-        if (t.ts < cutoff) activeThreads.delete(key);
+      for (const [key, ts] of activeThreads) {
+        if (ts < cutoff) activeThreads.delete(key);
       }
     }
   }
 
-  function getTrackedThread(channel: string, threadTs: string): TrackedThread | null {
+  function isTrackedThread(channel: string, threadTs: string): boolean {
     const key = `${channel}:${threadTs}`;
-    const t = activeThreads.get(key);
-    if (!t) return null;
-    if (Date.now() - t.ts > THREAD_TTL_MS) {
+    const ts = activeThreads.get(key);
+    if (!ts) return false;
+    if (Date.now() - ts > THREAD_TTL_MS) {
       activeThreads.delete(key);
-      return null;
+      return false;
     }
-    activeThreads.set(key, { ...t, ts: Date.now() }); // refresh TTL
-    return t;
+    activeThreads.set(key, Date.now()); // refresh TTL
+    return true;
   }
 
-  const relevanceFilter = new RelevanceFilter(botConfig);
-  const contextMessageCount = botConfig.channelListening?.contextMessages ?? 10;
-
   /** Fetch recent messages from a channel for context */
-  async function fetchRecentMessages(client: WebClient, channel: string, limit: number): Promise<string[]> {
+  async function fetchChannelMessages(client: WebClient, channel: string, limit: number = 15): Promise<string[]> {
     try {
       const result = await client.conversations.history({ channel, limit });
       const messages = (result.messages ?? []).reverse(); // oldest first
@@ -106,7 +101,25 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       }
       return lines;
     } catch (err) {
-      console.warn(`${tag} Failed to fetch recent messages for ${channel}:`, err);
+      console.warn(`${tag} Failed to fetch channel messages for ${channel}:`, err);
+      return [];
+    }
+  }
+
+  /** Fetch messages from a thread for context */
+  async function fetchThreadMessages(client: WebClient, channel: string, threadTs: string, limit: number = 15): Promise<string[]> {
+    try {
+      const result = await client.conversations.replies({ channel, ts: threadTs, limit });
+      const messages = result.messages ?? [];
+      const lines: string[] = [];
+      for (const msg of messages) {
+        if (!msg.text || msg.bot_id) continue;
+        const user = msg.user ? await resolveSlackUsername(app, msg.user) : "unknown";
+        lines.push(`${user}: ${msg.text.slice(0, 300)}`);
+      }
+      return lines;
+    } catch (err) {
+      console.warn(`${tag} Failed to fetch thread messages for ${channel}:${threadTs}:`, err);
       return [];
     }
   }
@@ -162,12 +175,6 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
     if (!text) return;
 
-    // Activate channel for passive listening when bot is @mentioned
-    if (botConfig.channelListening?.enabled) {
-      relevanceFilter.activateChannel(event.channel);
-      console.log(`${tag} Channel ${event.channel} activated for passive listening`);
-    }
-
     // Reply in the thread where the mention happened
     const threadTs = event.thread_ts ?? event.ts;
 
@@ -179,6 +186,11 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     const channelName = channelInfo?.channel?.name ? `#${channelInfo.channel.name}` : event.channel;
 
     console.log(`${tag} Channel mention from ${username} (${userId}) in ${channelName}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+
+    // Fetch recent messages for context
+    const recentChannelMessages = event.thread_ts
+      ? await fetchThreadMessages(client, event.channel, event.thread_ts)
+      : await fetchChannelMessages(client, event.channel);
 
     // Show native Slack thinking indicator (same as Assistant DM experience)
     try {
@@ -213,6 +225,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       },
       postToChannel: makePostToChannel(client, tag),
       channelContext: channelName,
+      recentChannelMessages,
       platform: "slack_channel",
     });
   });
@@ -232,8 +245,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     if (!text) return;
 
     // Check if this is a follow-up in a tracked channel thread
-    const tracked = threadTs && channel ? getTrackedThread(channel, threadTs) : null;
-    if (tracked) {
+    if (threadTs && channel && isTrackedThread(channel, threadTs)) {
       const username = await resolveSlackUsername(app, userId);
       // Strip any bot mentions (user might still @mention out of habit)
       const cleanText = text.replaceAll(/<@[A-Z0-9]+>/g, "").trim();
@@ -243,10 +255,10 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       const channelInfo = await client.conversations.info({ channel }).catch(() => null);
       const channelName = channelInfo?.channel?.name ? `#${channelInfo.channel.name}` : channel;
 
-      // Inherit platform from thread origin — channel_listen threads bypass auth
-      const threadPlatform = tracked.origin === "channel_listen" ? "slack_channel_listen" : "slack_channel";
+      // Fetch thread messages for context
+      const recentChannelMessages = await fetchThreadMessages(client, channel, threadTs);
 
-      console.log(`${tag} Thread follow-up from ${username} (${userId}) in ${channelName} (origin: ${tracked.origin}): "${cleanText.slice(0, 80)}${cleanText.length > 80 ? "..." : ""}"`);
+      console.log(`${tag} Thread follow-up from ${username} (${userId}) in ${channelName}: "${cleanText.slice(0, 80)}${cleanText.length > 80 ? "..." : ""}"`);
 
       // Show native Slack thinking indicator
       try {
@@ -279,22 +291,23 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         },
         postToChannel: makePostToChannel(client, tag),
         channelContext: channelName,
-        platform: threadPlatform,
+        recentChannelMessages,
+        platform: "slack_channel",
       });
 
       return;
     }
 
-    // Skip threaded messages that aren't tracked (e.g. assistant threads)
+    // Skip all non-DM messages that aren't in a tracked thread (no passive channel listening)
+    if (!isDM) return;
+
+    // Skip threaded DMs that aren't tracked
     if (threadTs) return;
 
-    // Regular DM or standalone channel message
     const username = await resolveSlackUsername(app, userId);
-    const messageTs = "ts" in message ? message.ts : "";
+    console.log(`${tag} DM from ${username} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
-    console.log(`${tag} ${isDM ? "DM" : "Channel message"} from ${username} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
-
-    if (isDM) {
+    {
       // Post a "Thinking..." message, then update it with the real response
       let thinkingTs: string | undefined;
       try {
@@ -327,65 +340,6 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       if (thinkingTs) {
         try { await client.chat.delete({ channel, ts: thinkingTs }); } catch { /* ignore */ }
       }
-    } else {
-      // Standalone channel message — check relevance before responding
-      if (!botConfig.channelListening?.enabled) {
-        console.log(`${tag} Channel listening disabled, ignoring channel message`);
-        return;
-      }
-      if (!relevanceFilter.isChannelActive(channel)) {
-        console.log(`${tag} Channel ${channel} not active (bot needs to be @mentioned first), ignoring`);
-        return;
-      }
-
-      const recentMessages = await fetchRecentMessages(client, channel, contextMessageCount);
-      const relevance = await relevanceFilter.checkRelevance(text, username, channel, recentMessages);
-
-      if (!relevance.relevant) {
-        if (relevance.skippedReason) {
-          console.log(`${tag} Skipped (${relevance.skippedReason}): "${text.slice(0, 60)}"`);
-        }
-        return;
-      }
-
-      console.log(`${tag} Relevant (${relevance.confidence}): "${text.slice(0, 60)}" — ${relevance.reason}`);
-      relevanceFilter.recordResponse(channel);
-
-      const threadTs = messageTs;
-      trackThread(channel, threadTs, "channel_listen");
-
-      // Resolve channel name for context
-      const channelInfo = await client.conversations.info({ channel }).catch(() => null);
-      const channelName = channelInfo?.channel?.name ? `#${channelInfo.channel.name}` : channel;
-
-      try {
-        await client.assistant.threads.setStatus({
-          channel_id: channel,
-          thread_ts: threadTs,
-          status: "tenker...",
-        });
-      } catch { /* ignore */ }
-
-      await handleMessage({
-        text,
-        userId,
-        username,
-        say: async (msg: string) => {
-          await client.chat.postMessage({ channel, thread_ts: threadTs, text: msg });
-        },
-        setStatus: async (status: string) => {
-          try {
-            await client.assistant.threads.setStatus({
-              channel_id: channel,
-              thread_ts: threadTs,
-              status,
-            });
-          } catch { /* ignore */ }
-        },
-        postToChannel: makePostToChannel(client, tag),
-        channelContext: channelName,
-        platform: "slack_channel_listen",
-      });
     }
   });
 

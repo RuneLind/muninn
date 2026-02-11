@@ -54,7 +54,7 @@ describe("extractScheduleAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSpawnHaiku).toHaveBeenCalledTimes(1);
-    const prompt = mockSpawnHaiku.mock.calls[0]![0] as string;
+    const prompt = (mockSpawnHaiku.mock.calls[0] as any[])[0] as string;
     expect(prompt).toContain("remind me every morning at 8");
     expect(prompt).toContain("I'll set that up!");
   });
@@ -86,7 +86,7 @@ describe("extractScheduleAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSaveScheduledTask).toHaveBeenCalledTimes(1);
-    const saveCall = mockSaveScheduledTask.mock.calls[0]![0] as any;
+    const saveCall = (mockSaveScheduledTask.mock.calls[0] as any[])[0];
     expect(saveCall.userId).toBe("u1");
     expect(saveCall.botName).toBe("testbot");
     expect(saveCall.title).toBe("Morning briefing");
@@ -140,7 +140,7 @@ describe("extractScheduleAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSaveScheduledTask).toHaveBeenCalledTimes(1);
-    const saveCall = mockSaveScheduledTask.mock.calls[0]![0] as any;
+    const saveCall = (mockSaveScheduledTask.mock.calls[0] as any[])[0];
     expect(saveCall.scheduleIntervalMs).toBe(7200000);
   });
 
@@ -206,7 +206,7 @@ describe("extractScheduleAsync", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     expect(mockSaveScheduledTask).toHaveBeenCalledTimes(1);
-    const saveCall = mockSaveScheduledTask.mock.calls[0]![0] as any;
+    const saveCall = (mockSaveScheduledTask.mock.calls[0] as any[])[0];
     expect(saveCall.taskType).toBe("reminder");
   });
 });

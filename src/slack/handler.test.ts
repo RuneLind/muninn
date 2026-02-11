@@ -127,20 +127,42 @@ describe("Slack handler", () => {
     expect(mockBuildPrompt).not.toHaveBeenCalled();
   });
 
-  test("skips auth for channel_listen platform", async () => {
+  test("includes recentChannelMessages in system prompt", async () => {
     const handler = createSlackMessageHandler(config, botConfig);
 
     await handler({
-      text: "anyone know about TypeScript?",
-      userId: "RANDOM_USER",
-      username: "random",
+      text: "what do you think?",
+      userId: "U123",
+      username: "testuser",
       say: sayMock,
       setStatus: setStatusMock,
-      platform: "slack_channel_listen",
+      postToChannel: mock(() => Promise.resolve()),
+      recentChannelMessages: ["alice: Has anyone tried the new API?", "bob: Yeah, it works great"],
+      platform: "slack_channel",
     });
 
-    // Should proceed despite unknown user
-    expect(mockBuildPrompt).toHaveBeenCalledTimes(1);
+    const claudeCall = mockExecuteClaudePrompt.mock.calls[0] as any[];
+    const systemPrompt = claudeCall[3] as string;
+    expect(systemPrompt).toContain("Channel Context");
+    expect(systemPrompt).toContain("alice: Has anyone tried the new API?");
+    expect(systemPrompt).toContain("bob: Yeah, it works great");
+  });
+
+  test("does not include channel context section when no messages", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+
+    await handler({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      say: sayMock,
+      setStatus: setStatusMock,
+      platform: "slack_dm",
+    });
+
+    const claudeCall = mockExecuteClaudePrompt.mock.calls[0] as any[];
+    const systemPrompt = claudeCall[3] as string;
+    expect(systemPrompt).not.toContain("Channel Context");
   });
 
   test("ignores empty text", async () => {
@@ -186,7 +208,7 @@ describe("Slack handler", () => {
 
     // Should send error message
     expect(sayMock).toHaveBeenCalledTimes(1);
-    const errorMsg = sayMock.mock.calls[0]![0] as string;
+    const errorMsg = (sayMock.mock.calls[0] as any[])[0] as string;
     expect(errorMsg).toContain("Something went wrong");
   });
 
@@ -203,7 +225,7 @@ describe("Slack handler", () => {
       });
 
       // buildPrompt(userId, text, ...) — text is 2nd arg
-      const userMessage = mockBuildPrompt.mock.calls[0]![1];
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
       expect(userMessage).toBe("post to #heidrun-agent-testing");
     });
 
@@ -218,7 +240,7 @@ describe("Slack handler", () => {
         setStatus: setStatusMock,
       });
 
-      const userMessage = mockBuildPrompt.mock.calls[0]![1];
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
       expect(userMessage).toBe("post to #C0ADMP9CYG7");
     });
 
@@ -233,7 +255,7 @@ describe("Slack handler", () => {
         setStatus: setStatusMock,
       });
 
-      const userMessage = mockBuildPrompt.mock.calls[0]![1];
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
       expect(userMessage).toBe("copy from #general to #random");
     });
   });
@@ -261,11 +283,11 @@ describe("Slack handler", () => {
 
       // postToChannel should be called with channel and formatted message
       expect(postToChannelMock).toHaveBeenCalledTimes(1);
-      expect(postToChannelMock.mock.calls[0]![0]).toBe("#testing");
-      expect(postToChannelMock.mock.calls[0]![1]).toContain("Hello from bot!");
+      expect((postToChannelMock.mock.calls[0] as any[])[0]).toBe("#testing");
+      expect((postToChannelMock.mock.calls[0] as any[])[1]).toContain("Hello from bot!");
 
       // say() should get the cleaned text (without <slack-post> tags)
-      const sentMsg = sayMock.mock.calls[0]![0] as string;
+      const sentMsg = (sayMock.mock.calls[0] as any[])[0] as string;
       expect(sentMsg).not.toContain("slack-post");
       expect(sentMsg).not.toContain("Hello from bot!");
       expect(sentMsg).toContain("Posted!");
@@ -314,7 +336,7 @@ describe("Slack handler", () => {
         postToChannel: postToChannelMock,
       });
 
-      const sentMsg = sayMock.mock.calls[0]![0] as string;
+      const sentMsg = (sayMock.mock.calls[0] as any[])[0] as string;
       expect(sentMsg).toContain("Klarte ikke poste til kanal");
       expect(sentMsg).toContain("channel_not_found");
     });
@@ -340,8 +362,8 @@ describe("Slack handler", () => {
       });
 
       expect(postToChannelMock).toHaveBeenCalledTimes(2);
-      expect(postToChannelMock.mock.calls[0]![0]).toBe("#general");
-      expect(postToChannelMock.mock.calls[1]![0]).toBe("#random");
+      expect((postToChannelMock.mock.calls[0] as any[])[0]).toBe("#general");
+      expect((postToChannelMock.mock.calls[1] as any[])[0]).toBe("#random");
     });
   });
 
@@ -393,7 +415,7 @@ describe("Slack handler", () => {
       });
 
       // The system prompt passed to Claude should include slack-post instructions
-      const claudeCall = mockExecuteClaudePrompt.mock.calls[0]!;
+      const claudeCall = mockExecuteClaudePrompt.mock.calls[0] as any[];
       const systemPrompt = claudeCall[3] as string; // 4th arg is systemPrompt
       expect(systemPrompt).toContain("Slack Channel Posting");
       expect(systemPrompt).toContain("<slack-post");
@@ -411,7 +433,7 @@ describe("Slack handler", () => {
         // no postToChannel
       });
 
-      const claudeCall = mockExecuteClaudePrompt.mock.calls[0]!;
+      const claudeCall = mockExecuteClaudePrompt.mock.calls[0] as any[];
       const systemPrompt = claudeCall[3] as string;
       expect(systemPrompt).not.toContain("Slack Channel Posting");
     });

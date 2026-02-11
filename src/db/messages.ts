@@ -1,7 +1,7 @@
 import { getDb } from "./client.ts";
 import type { ConversationMessage } from "../types.ts";
 
-interface SaveMessageParams {
+export interface SaveMessageParams {
   userId: string;
   botName: string;
   username?: string;

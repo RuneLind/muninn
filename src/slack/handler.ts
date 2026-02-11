@@ -34,6 +34,8 @@ interface HandleSlackMessageParams {
   postToChannel?: PostToChannel;
   /** Channel name/context for the current conversation (e.g. "#general") */
   channelContext?: string;
+  /** Recent messages from the channel/thread for context (when responding to @mentions) */
+  recentChannelMessages?: string[];
   /** Platform identifier for analytics (e.g. 'slack_dm', 'slack_channel', 'slack_assistant') */
   platform?: string;
 }
@@ -41,7 +43,7 @@ interface HandleSlackMessageParams {
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}/slack]`;
 
-  return async ({ text: rawText, userId, username, say, setStatus, postToChannel, channelContext, platform }: HandleSlackMessageParams) => {
+  return async ({ text: rawText, userId, username, say, setStatus, postToChannel, channelContext, recentChannelMessages, platform }: HandleSlackMessageParams) => {
     if (!rawText) return;
 
     // Convert Slack channel/user references to readable names
@@ -50,9 +52,8 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
       .replace(/<#([A-Z0-9]+)>/g, "#$1");
 
-    // Auth check — skip for passive channel listening (anyone in the channel can trigger)
-    if (platform !== "slack_channel_listen" &&
-        botConfig.slackAllowedUserIds.length > 0 &&
+    // Auth check
+    if (botConfig.slackAllowedUserIds.length > 0 &&
         !botConfig.slackAllowedUserIds.includes(userId)) {
       activityLog.push("error", `Unauthorized Slack access attempt from user ${userId} (@${username})`);
       await say("Unauthorized.");
@@ -89,9 +90,9 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       ? systemPrompt + SLACK_POST_CAPABILITY(channelContext)
       : systemPrompt;
 
-    // Add proactive context guidance for passive channel listening
-    if (platform === "slack_channel_listen") {
-      fullSystemPrompt += CHANNEL_LISTEN_CONTEXT;
+    // Add channel/thread context when available (from @mention or thread follow-up)
+    if (recentChannelMessages && recentChannelMessages.length > 0) {
+      fullSystemPrompt += `\n\n## Channel Context\nRecent messages in the channel/thread (for context):\n${recentChannelMessages.join("\n")}`;
     }
     console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
@@ -143,6 +144,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
+          platform: platform ?? "slack",
         },
         config,
       );
@@ -152,6 +154,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           botName: botConfig.name,
           userMessage: text,
           assistantResponse: result.result,
+          platform: platform ?? "slack",
         },
         config,
       );
@@ -268,13 +271,6 @@ interface ChannelPost {
   channel: string;
   message: string;
 }
-
-const CHANNEL_LISTEN_CONTEXT = `
-
-## Channel Listening Mode
-You are responding to a message in a public Slack channel that was deemed relevant to your expertise.
-You were NOT directly asked — keep your response helpful but concise. Don't be intrusive.
-If you're not confident you can add value, it's better to stay silent (respond with an empty message).`;
 
 /** Parse <slack-post channel="#name">content</slack-post> from Claude's response.
  *  Also handles incomplete tags (missing closing tag, e.g. from interrupted responses). */

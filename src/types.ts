@@ -81,6 +81,7 @@ export interface ScheduledTask {
   scheduleDays: number[] | null; // 0=Sun..6=Sat, null=every day
   scheduleIntervalMs: number | null; // alternative: repeat every N ms
   timezone: string;
+  platform?: string;
   enabled: boolean;
   lastRunAt: number | null; // epoch ms
   nextRunAt: number | null; // epoch ms
@@ -133,6 +134,7 @@ export interface Goal {
   deadline: number | null; // epoch ms
   tags: string[];
   sourceMessageId: string | null;
+  platform?: string;
   lastCheckedAt: number | null;
   reminderSentAt: number | null;
   createdAt: number;

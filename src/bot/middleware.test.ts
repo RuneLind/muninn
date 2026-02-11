@@ -70,11 +70,11 @@ describe("auth middleware", () => {
       message: {
         message_id: 1,
         date: Math.floor(Date.now() / 1000),
-        chat: { id: 123, type: "private" as const },
+        chat: { id: 123, type: "private" as const, first_name: "Test" },
         text: "hello",
       },
     };
-    await bot.handleUpdate(update);
+    await bot.handleUpdate(update as any);
     expect(nextCalled).toBe(false);
   });
 });

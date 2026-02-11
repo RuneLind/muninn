@@ -12,6 +12,7 @@ interface SaveScheduledTaskParams {
   scheduleDays?: number[] | null;
   scheduleIntervalMs?: number | null;
   timezone?: string;
+  platform?: string;
 }
 
 export async function saveScheduledTask(
@@ -24,7 +25,7 @@ export async function saveScheduledTask(
     INSERT INTO scheduled_tasks (
       user_id, bot_name, title, task_type, prompt,
       schedule_hour, schedule_minute, schedule_days,
-      schedule_interval_ms, timezone, next_run_at
+      schedule_interval_ms, timezone, platform, next_run_at
     )
     VALUES (
       ${params.userId},
@@ -37,6 +38,7 @@ export async function saveScheduledTask(
       ${params.scheduleDays ?? null},
       ${params.scheduleIntervalMs ?? null},
       ${params.timezone ?? "Europe/Oslo"},
+      ${params.platform ?? "telegram"},
       ${nextRunAt}
     )
     RETURNING id
@@ -69,6 +71,7 @@ export async function getTasksDueNow(botName?: string): Promise<ScheduledTask[]>
     ? await sql`
       SELECT * FROM scheduled_tasks
       WHERE bot_name = ${botName} AND enabled = true
+        AND (platform = 'telegram' OR platform IS NULL)
         AND next_run_at IS NOT NULL
         AND next_run_at <= now()
       ORDER BY next_run_at ASC
@@ -76,6 +79,7 @@ export async function getTasksDueNow(botName?: string): Promise<ScheduledTask[]>
     : await sql`
       SELECT * FROM scheduled_tasks
       WHERE enabled = true
+        AND (platform = 'telegram' OR platform IS NULL)
         AND next_run_at IS NOT NULL
         AND next_run_at <= now()
       ORDER BY next_run_at ASC
@@ -236,6 +240,7 @@ function mapRow(r: Record<string, any>): ScheduledTask {
       ? Number(r.schedule_interval_ms)
       : null,
     timezone: r.timezone,
+    platform: r.platform ?? "telegram",
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
     nextRunAt: r.next_run_at ? new Date(r.next_run_at).getTime() : null,

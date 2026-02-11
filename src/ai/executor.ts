@@ -49,8 +49,10 @@ export async function executeClaudePrompt(
     },
   );
 
+  let timeoutTimer: ReturnType<typeof setTimeout>;
+
   const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(
+    timeoutTimer = setTimeout(
       () => {
         console.error(`[${botConfig.name}] Claude process timed out after ${timeoutMs}ms — killing PID ${proc.pid}`);
         proc.kill();
@@ -77,5 +79,12 @@ export async function executeClaudePrompt(
     return { ...parsed, wallClockMs, startupMs };
   })();
 
-  return Promise.race([resultPromise, timeoutPromise]);
+  try {
+    const result = await Promise.race([resultPromise, timeoutPromise]);
+    clearTimeout(timeoutTimer!);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutTimer!);
+    throw error;
+  }
 }

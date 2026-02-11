@@ -39,7 +39,7 @@ export function createFakeUpdate(text: string, opts: {
     message: {
       message_id: 1,
       date: Math.floor(Date.now() / 1000),
-      chat: { id: chatId, type: "private" as const },
+      chat: { id: chatId, type: "private" as const, first_name: opts.firstName ?? "Test" },
       from: {
         id: userId,
         is_bot: false,
