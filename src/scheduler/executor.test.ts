@@ -54,7 +54,7 @@ describe("spawnHaiku timeout", () => {
 
 describe("callHaiku", () => {
   test("returns fallback when process fails", async () => {
-    const result = await callHaiku("test", "fallback-value", "test-source");
+    const result = await callHaiku("test", "fallback-value", "test-source", undefined, undefined, 100);
     expect(result).toBe("fallback-value");
   });
 });

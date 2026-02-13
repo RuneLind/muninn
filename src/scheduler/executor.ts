@@ -107,9 +107,10 @@ export async function callHaiku(
   source = "task",
   cwd?: string,
   botName?: string,
+  timeoutMs?: number,
 ): Promise<string> {
   try {
-    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd, botName);
+    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd, botName, timeoutMs);
     return result.trim();
   } catch {
     return fallback;
