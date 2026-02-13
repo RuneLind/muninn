@@ -9,8 +9,9 @@ import { extractMemoryAsync } from "../memory/extractor.ts";
 import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
-import { Timing } from "../utils/timing.ts";
+import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
+import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 
 export function createMessageHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}]`;
@@ -23,7 +24,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     if (!ctx.from?.id) return;
     const userId = String(ctx.from.id);
 
-    const t = new Timing();
+    const t = new Tracer("telegram_text", { botName: botConfig.name, userId, username, platform: "telegram" });
 
     activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
     agentStatus.set("receiving", username);
@@ -38,7 +39,8 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools);
-    t.end("prompt_build");
+    t.end("prompt_build", promptMeta);
+    savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});
     console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
     // Keep typing indicator alive while Claude processes
@@ -56,7 +58,15 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       console.log(`${tag} Calling Claude (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
-      t.end("claude");
+      t.end("claude", {
+        model: result.model,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        numTurns: result.numTurns,
+        startupMs: result.startupMs,
+        apiMs: result.durationApiMs,
+        costUsd: result.costUsd,
+      });
       console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
 
       clearInterval(typingInterval);
@@ -79,6 +89,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       t.end("db_save_response");
 
       // Extract memories and goals async (don't block response)
+      const traceCtx = t.context;
       extractMemoryAsync(
         {
           userId,
@@ -88,6 +99,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           sourceMessageId: messageId,
         },
         config,
+        traceCtx,
       );
       extractGoalAsync(
         {
@@ -99,6 +111,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           platform: "telegram",
         },
         config,
+        traceCtx,
       );
       extractScheduleAsync(
         {
@@ -109,6 +122,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
           platform: "telegram",
         },
         config,
+        traceCtx,
       );
 
       // Convert to Telegram-safe HTML
@@ -165,6 +179,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       });
 
       agentStatus.set("idle");
+      t.finish("ok");
 
       // Console timing breakdown
       const s = t.summary();
@@ -180,6 +195,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     } catch (error) {
       clearInterval(typingInterval);
       agentStatus.set("idle");
+      t.error(error instanceof Error ? error : String(error));
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       const s = t.summary();

@@ -13,8 +13,9 @@ import { splitMessage } from "./handler.ts";
 import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
-import { Timing } from "../utils/timing.ts";
+import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
+import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 
 export function createVoiceHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}]`;
@@ -27,7 +28,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     if (!ctx.from?.id) return;
     const userId = String(ctx.from.id);
 
-    const t = new Timing();
+    const t = new Tracer("telegram_voice", { botName: botConfig.name, userId, username, platform: "telegram_voice" });
 
     // Download voice message from Telegram
     agentStatus.set("receiving", username);
@@ -69,7 +70,8 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools);
-    t.end("prompt_build");
+    t.end("prompt_build", promptMeta);
+    savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});
 
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
@@ -83,7 +85,15 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       console.log(`${tag} Calling Claude for voice (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
-      t.end("claude");
+      t.end("claude", {
+        model: result.model,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        numTurns: result.numTurns,
+        startupMs: result.startupMs,
+        apiMs: result.durationApiMs,
+        costUsd: result.costUsd,
+      });
       console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
       clearInterval(typingInterval);
 
@@ -105,6 +115,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       t.end("db_save_response");
 
       // Extract memories and goals async
+      const traceCtx = t.context;
       extractMemoryAsync(
         {
           userId,
@@ -114,6 +125,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
           sourceMessageId: messageId,
         },
         config,
+        traceCtx,
       );
       extractGoalAsync(
         {
@@ -124,6 +136,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
           sourceMessageId: messageId,
         },
         config,
+        traceCtx,
       );
       extractScheduleAsync(
         {
@@ -133,6 +146,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
           assistantResponse: result.result,
         },
         config,
+        traceCtx,
       );
 
       // Convert to Telegram-safe HTML and send text reply first
@@ -184,6 +198,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       }
 
       agentStatus.set("idle");
+      t.finish("ok");
 
       // Push activity with timing metadata
       const s = t.summary();
@@ -223,6 +238,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     } catch (error) {
       clearInterval(typingInterval);
       agentStatus.set("idle");
+      t.error(error instanceof Error ? error : String(error));
       const errorMessage = error instanceof Error ? error.message : String(error);
       const s = t.summary();
       const elapsed = Math.round(t.totalMs());

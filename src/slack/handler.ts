@@ -9,8 +9,9 @@ import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { formatSlackMrkdwn } from "./slack-format.ts";
 import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
-import { Timing } from "../utils/timing.ts";
+import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
+import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 
 interface SlackSay {
   (message: string): Promise<any>;
@@ -60,7 +61,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       return;
     }
 
-    const t = new Timing();
+    const t = new Tracer("slack_message", { botName: botConfig.name, userId, username, platform: platform ?? "slack" });
 
     activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
     agentStatus.set("receiving", username);
@@ -83,7 +84,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools);
-    t.end("prompt_build");
+    t.end("prompt_build", promptMeta);
 
     // Append Slack channel posting capability to system prompt if available
     let fullSystemPrompt = postToChannel
@@ -94,6 +95,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
     if (recentChannelMessages && recentChannelMessages.length > 0) {
       fullSystemPrompt += `\n\n## Channel Context\nRecent messages in the channel/thread (for context):\n${recentChannelMessages.join("\n")}`;
     }
+    savePromptSnapshot({ traceId: t.traceId, systemPrompt: fullSystemPrompt, userPrompt }).catch(() => {});
     console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
 
     await setStatus("Thinking...").catch(() => {});
@@ -105,7 +107,15 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       console.log(`${tag} Calling Claude (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt);
-      t.end("claude");
+      t.end("claude", {
+        model: result.model,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        numTurns: result.numTurns,
+        startupMs: result.startupMs,
+        apiMs: result.durationApiMs,
+        costUsd: result.costUsd,
+      });
       console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
 
       // Save assistant response to DB
@@ -127,6 +137,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       t.end("db_save_response");
 
       // Extract memories and goals async (don't block response)
+      const traceCtx = t.context;
       extractMemoryAsync(
         {
           userId,
@@ -136,6 +147,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           sourceMessageId: messageId,
         },
         config,
+        traceCtx,
       );
       extractGoalAsync(
         {
@@ -147,6 +159,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           platform: platform ?? "slack",
         },
         config,
+        traceCtx,
       );
       extractScheduleAsync(
         {
@@ -157,6 +170,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
           platform: platform ?? "slack",
         },
         config,
+        traceCtx,
       );
 
       // Extract and execute channel post directives
@@ -218,6 +232,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       });
 
       agentStatus.set("idle");
+      t.finish("ok");
 
       // Console timing breakdown
       const s = t.summary();
@@ -232,6 +247,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       );
     } catch (error) {
       agentStatus.set("idle");
+      t.error(error instanceof Error ? error : String(error));
 
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`${tag} Request failed: ${errorMessage}`);

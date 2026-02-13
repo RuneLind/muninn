@@ -54,6 +54,18 @@ mock.module("../goals/detector.ts", () => ({
   extractGoalAsync: mock(),
 }));
 
+mock.module("../db/goals.ts", () => ({
+  saveGoal: mock(() => Promise.resolve("g-1")),
+  getActiveGoals: mock(() => Promise.resolve([])),
+  getGoalById: mock(() => Promise.resolve(null)),
+  updateGoalStatus: mock(() => Promise.resolve()),
+  updateGoalCheckedAt: mock(() => Promise.resolve()),
+  updateGoalReminderSentAt: mock(() => Promise.resolve()),
+  getGoalsNeedingReminder: mock(() => Promise.resolve([])),
+  getGoalsNeedingCheckin: mock(() => Promise.resolve([])),
+  getAllGoals: mock(() => Promise.resolve([])),
+}));
+
 mock.module("../scheduler/detector.ts", () => ({
   extractScheduleAsync: mock(),
 }));
@@ -64,6 +76,25 @@ mock.module("../dashboard/activity-log.ts", () => ({
 
 mock.module("../dashboard/agent-status.ts", () => ({
   agentStatus: { set: mock() },
+}));
+
+mock.module("../db/prompt-snapshots.ts", () => ({
+  savePromptSnapshot: mock(() => Promise.resolve()),
+}));
+
+mock.module("../tracing/index.ts", () => ({
+  Tracer: class MockTracer {
+    traceId = "mock-trace-id";
+    start() { return "mock-span-id"; }
+    end() { return 0; }
+    event() {}
+    finish() {}
+    error() {}
+    totalMs() { return 0; }
+    summary() { return {}; }
+    formatTelegram() { return ""; }
+    get context() { return { traceId: "mock-trace-id", parentId: "mock-span-id" }; }
+  },
 }));
 
 const { createSlackMessageHandler, extractChannelPosts } = await import("./handler.ts");

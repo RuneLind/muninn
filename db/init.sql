@@ -32,7 +32,7 @@ CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, create
 -- ============================================================================
 CREATE TABLE activity_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  type TEXT NOT NULL CHECK (type IN ('message_in', 'message_out', 'error', 'system')),
+  type TEXT NOT NULL CHECK (type IN ('message_in', 'message_out', 'error', 'system', 'slack_channel_post')),
   user_id TEXT,
   bot_name TEXT,
   username TEXT,
@@ -241,3 +241,43 @@ CREATE TRIGGER user_settings_updated_at
   BEFORE UPDATE ON user_settings
   FOR EACH ROW
   EXECUTE FUNCTION update_user_settings_updated_at();
+
+-- ============================================================================
+-- Traces: observability spans for request tracing
+-- ============================================================================
+CREATE TABLE traces (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id UUID NOT NULL,
+  parent_id UUID,  -- no FK: spans are inserted fire-and-forget, child may arrive before parent
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'span',  -- 'root' | 'span' | 'event'
+  status TEXT NOT NULL DEFAULT 'ok',   -- 'ok' | 'error'
+  bot_name TEXT,
+  user_id TEXT,
+  username TEXT,
+  platform TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duration_ms INTEGER,
+  attributes JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_traces_trace_id ON traces (trace_id, started_at);
+CREATE INDEX idx_traces_root ON traces (started_at DESC) WHERE parent_id IS NULL;
+CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_id IS NULL;
+
+-- ============================================================================
+-- Prompt snapshots: full system + user prompts per trace for inspection
+-- No FK on trace_id — snapshots have shorter retention (3d) than traces (7d),
+-- so traces may be deleted while snapshots still exist, and vice versa.
+-- ============================================================================
+CREATE TABLE prompt_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id UUID NOT NULL,
+  system_prompt TEXT NOT NULL,
+  user_prompt TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX idx_prompt_snapshots_trace ON prompt_snapshots (trace_id);
+CREATE INDEX idx_prompt_snapshots_created ON prompt_snapshots (created_at DESC);

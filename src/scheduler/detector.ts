@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
 import type { TaskType } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
+import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface DetectionInput {
   userId: string;
@@ -55,8 +56,9 @@ Assistant replied: """
 export function extractScheduleAsync(
   input: DetectionInput,
   config: Config,
+  traceContext?: TraceContext,
 ): void {
-  doExtract(input, config).catch((err) => {
+  doExtract(input, config, traceContext).catch((err) => {
     console.error("[Jarvis] Schedule detection failed:", err);
   });
 }
@@ -64,7 +66,18 @@ export function extractScheduleAsync(
 async function doExtract(
   input: DetectionInput,
   config: Config,
+  traceContext?: TraceContext,
 ): Promise<void> {
+  let tracer: Tracer | undefined;
+  if (traceContext) {
+    tracer = new Tracer("schedule_detection", {
+      botName: input.botName,
+      userId: input.userId,
+      traceId: traceContext.traceId,
+      parentId: traceContext.parentId,
+    });
+  }
+
   const prompt = DETECTION_PROMPT.replace(
     "{USER_MESSAGE}",
     input.userMessage,
@@ -83,10 +96,12 @@ async function doExtract(
       "[Jarvis] Schedule detection: failed to parse result:",
       haiku.result,
     );
+    tracer?.finish("error", { error: "parse_failed" });
     return;
   }
 
   if (!result.has_schedule || !result.title || result.hour == null) {
+    tracer?.finish("ok", { hasSchedule: false });
     return;
   }
 
@@ -113,6 +128,7 @@ async function doExtract(
         `[Jarvis] Scheduled task skipped (duplicate): "${result.title}" (${taskType}, id: ${existing.id})`,
       );
     }
+    tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType, duplicate: true });
     return;
   }
 
@@ -133,4 +149,6 @@ async function doExtract(
   console.log(
     `[Jarvis] Scheduled task detected: "${result.title}" (${taskType}, id: ${taskId})`,
   );
+
+  tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType });
 }

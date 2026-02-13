@@ -19,6 +19,8 @@ export interface PromptBuildResult {
     goalsCount: number;
     scheduledTasksCount: number;
     alertsCount: number;
+    memoryDetails?: { id: string; summary: string; scope: string }[];
+    goalDetails?: { id: string; title: string }[];
   };
 }
 
@@ -60,7 +62,7 @@ export async function buildPrompt(
 
   const totalMs = performance.now() - t0;
   console.log(
-    `[Jarvis] prompt_build: ${Math.round(totalMs)}ms` +
+    `[${botName}] prompt_build: ${Math.round(totalMs)}ms` +
       ` (db: ${Math.round(dbHistoryMs)}ms, embed: ${Math.round(embeddingMs)}ms, search: ${Math.round(memorySearchMs)}ms` +
       ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts)`,
   );
@@ -116,6 +118,8 @@ export async function buildPrompt(
       goalsCount: activeGoals.length,
       scheduledTasksCount: scheduledTasks.length,
       alertsCount: recentAlerts.length,
+      memoryDetails: relevantMemories.map((m) => ({ id: m.id, summary: m.summary, scope: m.scope ?? "personal" })),
+      goalDetails: activeGoals.map((g) => ({ id: g.id, title: g.title })),
     },
   };
 }

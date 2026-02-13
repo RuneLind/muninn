@@ -15,12 +15,15 @@ export interface HaikuResult {
  * .claude/settings.local.json from that directory, keeping bot
  * sessions isolated from the dev project root.
  */
+export const HAIKU_TIMEOUT_MS = 60_000;
+
 export async function spawnHaiku(
   prompt: string,
   source: string,
   entrypoint = "jarvis-scheduler",
   cwd?: string,
   botName?: string,
+  timeoutMs = HAIKU_TIMEOUT_MS,
 ): Promise<HaikuResult> {
   const args = [
     "claude",
@@ -46,35 +49,53 @@ export async function spawnHaiku(
     },
   );
 
-  const stdout = await new Response(proc.stdout).text();
-  const exitCode = await proc.exited;
+  // Consume both streams eagerly to avoid resource leaks on timeout/kill
+  const stdoutPromise = new Response(proc.stdout).text().catch(() => "");
+  const stderrPromise = new Response(proc.stderr).text().catch(() => "");
 
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`Claude Haiku exited with code ${exitCode}: ${stderr}`);
+  let timeoutTimer: ReturnType<typeof setTimeout>;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => {
+      console.error(`[${botName ?? "haiku"}] Haiku process timed out after ${timeoutMs}ms — killing PID ${proc.pid}`);
+      proc.kill();
+      reject(new Error(`Haiku timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    const exitCode = await Promise.race([proc.exited, timeoutPromise]);
+
+    if (exitCode !== 0) {
+      const stderr = await stderrPromise;
+      throw new Error(`Claude Haiku exited with code ${exitCode}: ${stderr}`);
+    }
+
+    const stdout = await stdoutPromise;
+    const parsed = JSON.parse(stdout);
+
+    const inputTokens = parsed.usage
+      ? (parsed.usage.input_tokens ?? 0)
+        + (parsed.usage.cache_creation_input_tokens ?? 0)
+        + (parsed.usage.cache_read_input_tokens ?? 0)
+      : 0;
+    const outputTokens = parsed.usage?.output_tokens ?? 0;
+    const model = parsed.modelUsage
+      ? Object.keys(parsed.modelUsage)[0] ?? "claude-haiku-4-5-20251001"
+      : "claude-haiku-4-5-20251001";
+
+    // Track usage async — don't block the caller
+    trackUsage(source, model, inputTokens, outputTokens, botName);
+
+    return {
+      result: parsed.result,
+      inputTokens,
+      outputTokens,
+      model,
+    };
+  } finally {
+    clearTimeout(timeoutTimer!);
   }
-
-  const parsed = JSON.parse(stdout);
-
-  const inputTokens = parsed.usage
-    ? (parsed.usage.input_tokens ?? 0)
-      + (parsed.usage.cache_creation_input_tokens ?? 0)
-      + (parsed.usage.cache_read_input_tokens ?? 0)
-    : 0;
-  const outputTokens = parsed.usage?.output_tokens ?? 0;
-  const model = parsed.modelUsage
-    ? Object.keys(parsed.modelUsage)[0] ?? "claude-haiku-4-5-20251001"
-    : "claude-haiku-4-5-20251001";
-
-  // Track usage async — don't block the caller
-  trackUsage(source, model, inputTokens, outputTokens, botName);
-
-  return {
-    result: parsed.result,
-    inputTokens,
-    outputTokens,
-    model,
-  };
 }
 
 /**
@@ -109,6 +130,6 @@ function trackUsage(
     INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name)
     VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null})
   `.catch((err) => {
-    console.error("[Jarvis] Failed to track Haiku usage:", err);
+    console.error(`[${botName ?? "haiku"}] Failed to track Haiku usage:`, err);
   });
 }

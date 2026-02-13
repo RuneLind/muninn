@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
+import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface DetectionInput {
   userId: string;
@@ -20,8 +21,8 @@ interface DetectionResult {
   completed_goal_title?: string;
 }
 
-export function extractGoalAsync(input: DetectionInput, config: Config): void {
-  doExtract(input, config).catch((err) => {
+export function extractGoalAsync(input: DetectionInput, config: Config, traceContext?: TraceContext): void {
+  doExtract(input, config, traceContext).catch((err) => {
     console.error("[Jarvis] Goal detection failed:", err);
   });
 }
@@ -29,7 +30,18 @@ export function extractGoalAsync(input: DetectionInput, config: Config): void {
 async function doExtract(
   input: DetectionInput,
   config: Config,
+  traceContext?: TraceContext,
 ): Promise<void> {
+  let tracer: Tracer | undefined;
+  if (traceContext) {
+    tracer = new Tracer("goal_detection", {
+      botName: input.botName,
+      userId: input.userId,
+      traceId: traceContext.traceId,
+      parentId: traceContext.parentId,
+    });
+  }
+
   // Load active goals so the detector can match completions
   let activeGoalsList = "";
   try {
@@ -62,11 +74,13 @@ async function doExtract(
       "[Jarvis] Goal detection: failed to parse detection result:",
       haiku.result,
     );
+    tracer?.finish("error", { error: "parse_failed" });
     return;
   }
 
   if (result.action === "completed" && result.completed_goal_title) {
     await handleCompletion(input.userId, result.completed_goal_title, input.botName);
+    tracer?.finish("ok", { action: "completed", title: result.completed_goal_title });
     return;
   }
 
@@ -85,7 +99,11 @@ async function doExtract(
     });
 
     console.log(`[Jarvis] Goal detected: "${result.title}" (id: ${goalId})`);
+    tracer?.finish("ok", { action: "new", title: result.title });
+    return;
   }
+
+  tracer?.finish("ok", { action: "none" });
 }
 
 async function handleCompletion(

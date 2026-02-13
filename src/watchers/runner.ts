@@ -8,6 +8,7 @@ import { checkNews } from "./news.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
+import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
 
@@ -53,7 +54,7 @@ function extractProperNouns(text: string): string[] {
   return tokens.sort();
 }
 
-export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void> {
+export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
   const tag = botConfig.name;
   const dueWatchers = await getWatchersDueNow(tag);
   if (dueWatchers.length > 0) {
@@ -61,11 +62,22 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
   }
 
   for (const watcher of dueWatchers) {
+    let wt: Tracer | undefined;
+    if (traceContext) {
+      wt = new Tracer(`watcher:${watcher.type}`, {
+        botName: tag,
+        userId: watcher.userId,
+        traceId: traceContext.traceId,
+        parentId: traceContext.parentId,
+      });
+    }
+
     try {
       // Check quiet hours — skip notifications but still mark as run
       const quiet = await isQuietHours(watcher.userId);
       if (quiet) {
         await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+        wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
         continue;
       }
 
@@ -125,8 +137,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig): Promise<void>
 
       await updateWatcherLastRun(watcher.id, updatedIds);
       agentStatus.set("idle");
+      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: newAlerts.length });
     } catch (err) {
       agentStatus.set("idle");
+      wt?.error(err instanceof Error ? err : String(err));
       console.error(
         `[${tag}] Watcher "${watcher.name}" (${watcher.id}) failed:`,
         err,

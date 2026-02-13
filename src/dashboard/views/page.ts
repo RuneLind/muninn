@@ -1,3 +1,5 @@
+import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+
 export function renderDashboardPage(): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -7,25 +9,7 @@ export function renderDashboardPage(): string {
   <title>Jarvis Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: #0a0a0f;
-      color: #e0e0e0;
-      min-height: 100vh;
-    }
-
-    /* Header */
-    header {
-      background: #12121a;
-      border-bottom: 1px solid #1e1e2e;
-      padding: 16px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    header h1 { font-size: 20px; font-weight: 600; color: #fff; }
-    header h1 span { color: #6c63ff; }
+    ${SHARED_STYLES}
     .status {
       display: flex;
       align-items: center;
@@ -39,7 +23,6 @@ export function renderDashboardPage(): string {
       background: #444;
     }
     .status-dot.connected { background: #4ade80; }
-    .header-left { display: flex; align-items: center; gap: 16px; }
 
     /* Agent Status */
     .agent-status {
@@ -544,9 +527,7 @@ export function renderDashboardPage(): string {
   </style>
 </head>
 <body>
-  <header>
-    <div class="header-left">
-      <h1><span>J</span>arvis</h1>
+  ${renderNav("dashboard")}
       <div class="agent-status" id="agentStatus">
         <div class="agent-spinner"></div>
         <span class="agent-phase" id="agentPhase">Idle</span>

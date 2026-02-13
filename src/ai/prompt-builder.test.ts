@@ -85,6 +85,8 @@ mock.module("../db/scheduled-tasks.ts", () => ({
   disableTask: mock(() => Promise.resolve()),
   enableTask: mock(() => Promise.resolve()),
   deleteTask: mock(() => Promise.resolve()),
+  findSimilarTask: mock(() => Promise.resolve(null)),
+  updateTaskPrompt: mock(() => Promise.resolve()),
   computeNextRun: mock(() => new Date()),
 }));
 

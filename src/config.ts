@@ -25,6 +25,9 @@ export function loadConfig() {
     ),
     schedulerEnabled:
       optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true",
+    tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
+    tracingRetentionDays: parseInt(optionalEnv("TRACING_RETENTION_DAYS", "7"), 10),
+    promptSnapshotsRetentionDays: parseInt(optionalEnv("PROMPT_SNAPSHOTS_RETENTION_DAYS", "3"), 10),
   } as const;
 }
 

@@ -38,14 +38,14 @@ const server = Bun.serve({
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
 // Start all discovered bots
-const telegramBots: Bot[] = [];
+const telegramBotMap = new Map<string, Bot>();
 const slackApps: SlackApp[] = [];
 
 for (const botConfig of botConfigs) {
   // Start Telegram if token is available
   if (botConfig.telegramBotToken) {
     const bot = createBot(config, botConfig);
-    telegramBots.push(bot);
+    telegramBotMap.set(botConfig.name, bot);
 
     activityLog.push("system", `Starting ${botConfig.name} Telegram bot...`);
 
@@ -76,18 +76,10 @@ for (const botConfig of botConfigs) {
 // Start per-bot schedulers after bots are connected (10s delay for stability)
 // Scheduler uses Telegram API — only start for bots with Telegram tokens
 setTimeout(() => {
-  for (let i = 0; i < botConfigs.length; i++) {
-    const botCfg = botConfigs[i]!;
+  for (const botCfg of botConfigs) {
     if (!botCfg.telegramBotToken) continue;
 
-    const bot = telegramBots.find((b) =>
-      // Match by token — Grammy bots don't expose config directly,
-      // but we push them in order, so find the matching one
-      true
-    );
-    // Find the telegram bot for this config — they're pushed in order for telegram-enabled bots
-    const telegramIndex = botConfigs.slice(0, i + 1).filter((c) => c.telegramBotToken).length - 1;
-    const telegramBot = telegramBots[telegramIndex];
+    const telegramBot = telegramBotMap.get(botCfg.name);
     if (telegramBot) {
       startScheduler(telegramBot.api, config, botCfg);
     }
@@ -98,7 +90,7 @@ setTimeout(() => {
 async function shutdown() {
   console.log("\nShutting down...");
   stopScheduler();
-  for (const bot of telegramBots) {
+  for (const bot of telegramBotMap.values()) {
     bot.stop();
   }
   for (const app of slackApps) {

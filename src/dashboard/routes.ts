@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
+import { renderTracesPage } from "./views/traces-page.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getAllGoals } from "../db/goals.ts";
@@ -10,6 +11,8 @@ import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getRecentMemories } from "../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
+import { getRecentTraces, getTrace, getTraceStats } from "../db/traces.ts";
+import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { agentStatus } from "./agent-status.ts";
 
 export function createDashboardRoutes(): Hono {
@@ -85,6 +88,62 @@ export function createDashboardRoutes(): Hono {
     } catch (err) {
       console.error("Failed to fetch watchers:", err);
       return c.json({ error: "Failed to fetch watchers" }, 500);
+    }
+  });
+
+  // --- Traces page ---
+
+  app.get("/traces", (c) => {
+    return c.html(renderTracesPage());
+  });
+
+  app.get("/api/traces", async (c) => {
+    try {
+      const limit = parseInt(c.req.query("limit") ?? "50", 10);
+      const offset = parseInt(c.req.query("offset") ?? "0", 10);
+      const botName = c.req.query("bot") || undefined;
+      const name = c.req.query("name") || undefined;
+      const traces = await getRecentTraces(limit, offset, botName, name);
+      return c.json({ traces });
+    } catch (err) {
+      console.error("Failed to fetch traces:", err);
+      return c.json({ error: "Failed to fetch traces" }, 500);
+    }
+  });
+
+  app.get("/api/traces/:traceId", async (c) => {
+    try {
+      const traceId = c.req.param("traceId");
+      const spans = await getTrace(traceId);
+      return c.json({ spans });
+    } catch (err) {
+      console.error("Failed to fetch trace:", err);
+      return c.json({ error: "Failed to fetch trace" }, 500);
+    }
+  });
+
+  app.get("/api/prompts/:traceId", async (c) => {
+    try {
+      const traceId = c.req.param("traceId");
+      const snapshot = await getPromptSnapshot(traceId);
+      if (!snapshot) {
+        return c.json({ error: "Prompt snapshot not found" }, 404);
+      }
+      return c.json(snapshot);
+    } catch (err) {
+      console.error("Failed to fetch prompt snapshot:", err);
+      return c.json({ error: "Failed to fetch prompt snapshot" }, 500);
+    }
+  });
+
+  app.get("/api/trace-stats", async (c) => {
+    try {
+      const botName = c.req.query("bot") || undefined;
+      const stats = await getTraceStats(botName);
+      return c.json(stats);
+    } catch (err) {
+      console.error("Failed to fetch trace stats:", err);
+      return c.json({ error: "Failed to fetch trace stats" }, 500);
     }
   });
 

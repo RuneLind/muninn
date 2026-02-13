@@ -15,9 +15,13 @@ import { callHaiku } from "./executor.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { buildBriefingPrompt } from "./briefing-prompt.ts";
 import { runWatchers } from "../watchers/runner.ts";
+import { Tracer } from "../tracing/index.ts";
+import { cleanupOldTraces } from "../db/traces.ts";
+import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
 
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
+let lastCleanupAt = 0;
 
 export function startScheduler(api: Api, config: Config, botConfig: BotConfig): void {
   if (!config.schedulerEnabled) {
@@ -58,24 +62,72 @@ export function stopScheduler(): void {
 async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig): Promise<void> {
   const botName = botConfig.name;
 
-  // 1. Run due scheduled tasks
-  await runScheduledTasks(api, config, botConfig);
+  // Check if there's anything to do before creating a trace
+  const dueTasks = await getTasksDueNow(botName);
+  const goalReminders = await getGoalsNeedingReminder(24, botName);
+  const staleGoals = await getGoalsNeedingCheckin(3, botName);
+  const hasWork = dueTasks.length > 0 || goalReminders.length > 0 || staleGoals.length > 0;
 
-  // 2. Goal deadline reminders (24h ahead)
-  await runGoalReminders(api, botConfig);
+  // Only create a trace if something will actually run (watchers always checked)
+  let t: Tracer | undefined;
+  if (hasWork) {
+    t = new Tracer("scheduler_tick", { botName, platform: "scheduler" });
+  }
 
-  // 3. Goal check-ins (stale goals, max 1 per tick)
-  await runGoalCheckins(api, botConfig);
+  try {
+    // 1. Run due scheduled tasks
+    if (dueTasks.length > 0) {
+      t?.start("scheduled_tasks");
+      await runScheduledTasksFromList(api, config, botConfig, dueTasks);
+      t?.end("scheduled_tasks", { count: dueTasks.length });
+    }
 
-  // 4. Watchers (email, calendar, etc.)
-  await runWatchers(api, botConfig);
+    // 2. Goal deadline reminders (24h ahead)
+    if (goalReminders.length > 0) {
+      t?.start("goal_reminders");
+      await runGoalRemindersFromList(api, botConfig, goalReminders);
+      t?.end("goal_reminders", { count: goalReminders.length });
+    }
+
+    // 3. Goal check-ins (stale goals, max 1 per tick)
+    if (staleGoals.length > 0) {
+      t?.start("goal_checkins");
+      await runGoalCheckinsFromList(api, botConfig, staleGoals);
+      t?.end("goal_checkins", { count: Math.min(staleGoals.length, 1) });
+    }
+
+    // 4. Watchers (email, calendar, etc.)
+    await runWatchers(api, botConfig, t?.context);
+
+    t?.finish("ok");
+  } catch (err) {
+    t?.error(err instanceof Error ? err : String(err));
+    throw err;
+  }
+
+  // 5. Retention cleanup — once per hour
+  const now = Date.now();
+  if (now - lastCleanupAt > 3_600_000) {
+    lastCleanupAt = now;
+    try {
+      const deleted = await cleanupOldTraces(config.tracingRetentionDays);
+      if (deleted > 0) {
+        console.log(`[${botName}] Cleaned up ${deleted} old traces`);
+      }
+      const deletedSnapshots = await cleanupOldSnapshots(config.promptSnapshotsRetentionDays);
+      if (deletedSnapshots > 0) {
+        console.log(`[${botName}] Cleaned up ${deletedSnapshots} old prompt snapshots`);
+      }
+    } catch (err) {
+      console.error(`[${botName}] Trace cleanup failed:`, err);
+    }
+  }
 }
 
 // --- Scheduled Tasks ---
 
-async function runScheduledTasks(api: Api, config: Config, botConfig: BotConfig): Promise<void> {
+async function runScheduledTasksFromList(api: Api, config: Config, botConfig: BotConfig, dueTasks: ScheduledTask[]): Promise<void> {
   const tag = botConfig.name;
-  const dueTasks = await getTasksDueNow(tag);
   for (const task of dueTasks) {
     try {
       // Update next_run_at FIRST to prevent re-firing on overlapping ticks
@@ -164,9 +216,8 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
 
 // --- Goal Reminders (moved from goals/scheduler.ts) ---
 
-async function runGoalReminders(api: Api, botConfig: BotConfig): Promise<void> {
+async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminders: Goal[]): Promise<void> {
   const tag = botConfig.name;
-  const reminders = await getGoalsNeedingReminder(24, tag);
   for (const goal of reminders) {
     try {
       agentStatus.set("checking_goals", goal.title);
@@ -193,9 +244,8 @@ async function runGoalReminders(api: Api, botConfig: BotConfig): Promise<void> {
   }
 }
 
-async function runGoalCheckins(api: Api, botConfig: BotConfig): Promise<void> {
+async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoals: Goal[]): Promise<void> {
   const tag = botConfig.name;
-  const staleGoals = await getGoalsNeedingCheckin(3, tag);
   if (staleGoals.length > 0) {
     const goal = staleGoals[0]!;
     try {

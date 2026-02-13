@@ -16,11 +16,15 @@ mock.module("../db/memories.ts", () => ({
 }));
 
 mock.module("../db/goals.ts", () => ({
+  saveGoal: mock(() => Promise.resolve("g-1")),
   getActiveGoals: mockGetActiveGoals,
+  getGoalById: mock(() => Promise.resolve(null)),
+  updateGoalStatus: mock(() => Promise.resolve()),
   getGoalsNeedingReminder: mock(() => Promise.resolve([])),
   getGoalsNeedingCheckin: mock(() => Promise.resolve([])),
   updateGoalReminderSentAt: mock(() => Promise.resolve()),
   updateGoalCheckedAt: mock(() => Promise.resolve()),
+  getAllGoals: mock(() => Promise.resolve([])),
 }));
 
 mock.module("../db/scheduled-tasks.ts", () => ({

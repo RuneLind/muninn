@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import { saveMemory } from "../db/memories.ts";
 import { generateEmbedding } from "../ai/embeddings.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
+import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface ExtractionInput {
   userId: string;
@@ -40,14 +41,24 @@ Assistant replied: """
 {ASSISTANT_RESPONSE}
 """`;
 
-export function extractMemoryAsync(input: ExtractionInput, config: Config): void {
+export function extractMemoryAsync(input: ExtractionInput, config: Config, traceContext?: TraceContext): void {
   // Fire and forget — don't block the chat response
-  doExtract(input, config).catch((err) => {
+  doExtract(input, config, traceContext).catch((err) => {
     console.error("Memory extraction failed:", err);
   });
 }
 
-async function doExtract(input: ExtractionInput, config: Config): Promise<void> {
+async function doExtract(input: ExtractionInput, config: Config, traceContext?: TraceContext): Promise<void> {
+  let tracer: Tracer | undefined;
+  if (traceContext) {
+    tracer = new Tracer("memory_extraction", {
+      botName: input.botName,
+      userId: input.userId,
+      traceId: traceContext.traceId,
+      parentId: traceContext.parentId,
+    });
+  }
+
   const prompt = EXTRACTION_PROMPT
     .replace("{USER_MESSAGE}", input.userMessage)
     .replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
@@ -61,10 +72,12 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     result = JSON.parse(cleaned);
   } catch {
     console.error("Memory extraction: failed to parse extraction result:", haiku.result);
+    tracer?.finish("error", { error: "parse_failed" });
     return;
   }
 
   if (!result.worth_remembering || !result.summary || !result.tags) {
+    tracer?.finish("ok", { worthRemembering: false });
     return;
   }
 
@@ -79,5 +92,12 @@ async function doExtract(input: ExtractionInput, config: Config): Promise<void> 
     sourceMessageId: input.sourceMessageId,
     embedding,
     scope: result.scope === 'shared' ? 'shared' : 'personal',
+  });
+
+  tracer?.finish("ok", {
+    worthRemembering: true,
+    summary: result.summary,
+    tags: result.tags,
+    scope: result.scope ?? "personal",
   });
 }
