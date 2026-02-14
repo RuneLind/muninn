@@ -26,13 +26,23 @@ export const SHARED_STYLES = `
 `;
 
 /** Shared header HTML with nav links */
-export function renderNav(activePage: "dashboard" | "traces"): string {
+export function renderNav(
+  activePage: "dashboard" | "traces" | "simulator",
+  options?: { showSimulator?: boolean; headerLeftExtra?: string; headerRight?: string },
+): string {
+  const simulatorLink = options?.showSimulator
+    ? `\n        <a href="/simulator" class="nav-link${activePage === "simulator" ? " active" : ""}">Simulator</a>`
+    : "";
   return `
   <header>
     <div class="header-left">
       <h1><span>J</span>arvis</h1>
       <nav>
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
-        <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
-      </nav>`;
+        <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>${simulatorLink}
+      </nav>
+${options?.headerLeftExtra ?? ""}
+    </div>
+${options?.headerRight ?? ""}
+  </header>`;
 }

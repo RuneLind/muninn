@@ -1,24 +1,37 @@
 import { loadConfig } from "./config.ts";
-import { discoverBots } from "./bots/config.ts";
-import { initDb, closeDb } from "./db/client.ts";
+import { discoverBots, discoverBotsForSimulator } from "./bots/config.ts";
+import { initDb, closeDb, ensureSimulatorDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler } from "./scheduler/runner.ts";
+import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
 
 const config = loadConfig();
-const botConfigs = discoverBots();
+const botConfigs = config.simulatorEnabled
+  ? discoverBotsForSimulator()
+  : discoverBots();
 
 if (botConfigs.length === 0) {
-  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists and at least one platform token is set.");
+  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists" +
+    (config.simulatorEnabled ? "." : " and at least one platform token is set."));
   process.exit(1);
 }
 
-// Initialize database
-initDb(config);
+// Module-level references for shutdown handler
+let telegramBotMap: Map<string, Bot> | undefined;
+let slackAppList: SlackApp[] | undefined;
+
+// Initialize database — simulator mode uses a separate DB
+if (config.simulatorEnabled) {
+  await ensureSimulatorDb(config.databaseUrl, config.simulatorDatabaseUrl);
+  initDb(config, config.simulatorDatabaseUrl);
+} else {
+  initDb(config);
+}
 
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
@@ -26,76 +39,119 @@ warmupEmbeddings();
 // Load persisted activity events from DB
 await activityLog.loadFromDb();
 
-// Start dashboard
+// Build the combined Hono app
 const dashboard = createDashboardRoutes();
+const app = new Hono();
+app.route("/", dashboard);
 
-const server = Bun.serve({
+// Lazy-load simulator module only when enabled (avoids importing in production)
+type WsData = { unsubscribe: (() => void) | null };
+let simulatorWs: import("bun").WebSocketHandler<WsData> | undefined;
+
+if (config.simulatorEnabled) {
+  const sim = await import("./simulator/index.ts");
+  const simulator = sim.createSimulatorRoutes(botConfigs, config);
+  app.route("/simulator", simulator);
+  simulatorWs = sim.simulatorWebSocket;
+}
+
+// Start server — with WebSocket support for simulator
+const noopWs: import("bun").WebSocketHandler<WsData> = { message() {} };
+
+const server = Bun.serve<WsData>({
   port: config.dashboardPort,
-  fetch: dashboard.fetch,
   idleTimeout: 255, // max value, needed for SSE connections
+  fetch(req, server) {
+    // Handle WebSocket upgrade for simulator (only when enabled)
+    if (simulatorWs) {
+      const url = new URL(req.url);
+      if (url.pathname === "/simulator/ws") {
+        const upgraded = server.upgrade(req, {
+          data: { unsubscribe: null },
+        });
+        if (upgraded) return undefined;
+        return new Response("WebSocket upgrade failed", { status: 500 });
+      }
+    }
+    return app.fetch(req);
+  },
+  websocket: simulatorWs ?? noopWs,
 });
 
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
-// Start all discovered bots
-const telegramBotMap = new Map<string, Bot>();
-const slackApps: SlackApp[] = [];
+if (config.simulatorEnabled) {
+  // Simulator mode — skip real platform startup
+  activityLog.push("system", "Simulator mode enabled — real platform bots and scheduler are disabled");
+  console.log(`Simulator mode — dashboard: http://localhost:${server.port}, simulator: http://localhost:${server.port}/simulator`);
+} else {
+  // Normal mode — start real Telegram/Slack bots + scheduler
+  telegramBotMap = new Map<string, Bot>();
+  slackAppList = [];
 
-for (const botConfig of botConfigs) {
-  // Start Telegram if token is available
-  if (botConfig.telegramBotToken) {
-    const bot = createBot(config, botConfig);
-    telegramBotMap.set(botConfig.name, bot);
+  for (const botConfig of botConfigs) {
+    // Start Telegram if token is available
+    if (botConfig.telegramBotToken) {
+      const bot = createBot(config, botConfig);
+      telegramBotMap.set(botConfig.name, bot);
 
-    activityLog.push("system", `Starting ${botConfig.name} Telegram bot...`);
+      activityLog.push("system", `Starting ${botConfig.name} Telegram bot...`);
 
-    bot.start({
-      onStart: (botInfo) => {
-        activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
-        console.log(`${botConfig.name} Telegram is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
-      },
-    });
-  }
-
-  // Start Slack if tokens are available
-  if (botConfig.slackBotToken && botConfig.slackAppToken) {
-    activityLog.push("system", `Starting ${botConfig.name} Slack app...`);
-
-    createSlackApp(config, botConfig)
-      .then((app) => {
-        slackApps.push(app);
-        activityLog.push("system", `${botConfig.name} Slack app connected`);
-      })
-      .catch((err) => {
-        console.error(`[${botConfig.name}] Failed to start Slack app:`, err);
-        activityLog.push("error", `${botConfig.name} Slack app failed: ${err.message}`);
+      bot.start({
+        onStart: (botInfo) => {
+          activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
+          console.log(`${botConfig.name} Telegram is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+        },
       });
-  }
-}
+    }
 
-// Start per-bot schedulers after bots are connected (10s delay for stability)
-// Scheduler uses Telegram API — only start for bots with Telegram tokens
-setTimeout(() => {
-  for (const botCfg of botConfigs) {
-    if (!botCfg.telegramBotToken) continue;
+    // Start Slack if tokens are available
+    if (botConfig.slackBotToken && botConfig.slackAppToken) {
+      activityLog.push("system", `Starting ${botConfig.name} Slack app...`);
 
-    const telegramBot = telegramBotMap.get(botCfg.name);
-    if (telegramBot) {
-      startScheduler(telegramBot.api, config, botCfg);
+      createSlackApp(config, botConfig)
+        .then((app) => {
+          slackAppList?.push(app);
+          activityLog.push("system", `${botConfig.name} Slack app connected`);
+        })
+        .catch((err) => {
+          console.error(`[${botConfig.name}] Failed to start Slack app:`, err);
+          activityLog.push("error", `${botConfig.name} Slack app failed: ${err.message}`);
+        });
     }
   }
-}, 10_000);
+
+  // Start per-bot schedulers after bots are connected (10s delay for stability)
+  // Scheduler uses Telegram API — only start for bots with Telegram tokens
+  setTimeout(() => {
+    for (const botCfg of botConfigs) {
+      if (!botCfg.telegramBotToken) continue;
+
+      const telegramBot = telegramBotMap?.get(botCfg.name);
+      if (telegramBot) {
+        startScheduler(telegramBot.api, config, botCfg);
+      }
+    }
+  }, 10_000);
+}
 
 // Graceful shutdown
 async function shutdown() {
   console.log("\nShutting down...");
   stopScheduler();
-  for (const bot of telegramBotMap.values()) {
-    bot.stop();
+
+  if (telegramBotMap) {
+    for (const bot of telegramBotMap.values()) {
+      bot.stop();
+    }
   }
-  for (const app of slackApps) {
-    await app.stop().catch(() => {});
+
+  if (slackAppList) {
+    for (const app of slackAppList) {
+      await app.stop().catch(() => {});
+    }
   }
+
   server.stop();
   await closeDb();
   process.exit(0);

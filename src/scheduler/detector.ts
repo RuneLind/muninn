@@ -1,6 +1,6 @@
 import type { Config } from "../config.ts";
 import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
-import type { TaskType } from "../types.ts";
+import type { TaskType, Platform } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 
@@ -9,7 +9,7 @@ interface DetectionInput {
   botName: string;
   userMessage: string;
   assistantResponse: string;
-  platform?: string;
+  platform?: Platform;
 }
 
 interface DetectionResult {

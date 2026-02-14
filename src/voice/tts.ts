@@ -4,7 +4,31 @@ import { unlink } from "node:fs/promises";
 
 const MAX_TTS_CHARS = 4000;
 
+/** Whether TTS is available (requires macOS `say` command) */
+let ttsAvailable: boolean | null = null;
+
+export async function isTtsAvailable(): Promise<boolean> {
+  if (ttsAvailable !== null) return ttsAvailable;
+
+  try {
+    const proc = Bun.spawn(["which", "say"], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+    const exit = await proc.exited;
+    ttsAvailable = exit === 0;
+  } catch {
+    ttsAvailable = false;
+  }
+
+  if (!ttsAvailable) {
+    console.warn("[Voice] TTS unavailable — 'say' command not found (macOS only). Voice replies will be text-only.");
+  }
+  return ttsAvailable;
+}
+
 export async function synthesizeVoice(text: string): Promise<Uint8Array> {
+  if (!(await isTtsAvailable())) {
+    throw new Error("TTS unavailable — 'say' command not found");
+  }
+
   const id = crypto.randomUUID();
   const textPath = join(tmpdir(), `jarvis-${id}.txt`);
   const aiffPath = join(tmpdir(), `jarvis-${id}.aiff`);

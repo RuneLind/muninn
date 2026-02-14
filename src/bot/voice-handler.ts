@@ -9,7 +9,7 @@ import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
 import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
-import { splitMessage } from "./handler.ts";
+import { splitMessage } from "../utils/split-message.ts";
 import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
@@ -28,7 +28,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     if (!ctx.from?.id) return;
     const userId = String(ctx.from.id);
 
-    const t = new Tracer("telegram_voice", { botName: botConfig.name, userId, username, platform: "telegram_voice" });
+    const t = new Tracer("telegram_voice", { botName: botConfig.name, userId, username, platform: "telegram" });
 
     // Download voice message from Telegram
     agentStatus.set("receiving", username);
@@ -228,7 +228,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
           `  voice_download: ${pad(s.voice_download)}\n` +
           `  stt:           ${pad(s.stt)}\n` +
           `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
-          `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
+          `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs ?? 0)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
           `  db_save:        ${pad((s.db_save_user ?? 0) + (s.db_save_response ?? 0))}\n` +
           `  format+send:    ${pad(s.telegram_send)}\n` +
           `  tts:           ${pad(s.tts)}\n` +

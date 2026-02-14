@@ -1,5 +1,5 @@
 import { getDb } from "./client.ts";
-import type { ScheduledTask, TaskType } from "../types.ts";
+import type { ScheduledTask, TaskType, Platform } from "../types.ts";
 
 interface SaveScheduledTaskParams {
   userId: string;
@@ -12,7 +12,7 @@ interface SaveScheduledTaskParams {
   scheduleDays?: number[] | null;
   scheduleIntervalMs?: number | null;
   timezone?: string;
-  platform?: string;
+  platform?: Platform;
 }
 
 export async function saveScheduledTask(
@@ -264,7 +264,7 @@ function mapRow(r: Record<string, any>): ScheduledTask {
       ? Number(r.schedule_interval_ms)
       : null,
     timezone: r.timezone,
-    platform: r.platform ?? "telegram",
+    platform: (r.platform ?? "telegram") as Platform,
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
     nextRunAt: r.next_run_at ? new Date(r.next_run_at).getTime() : null,

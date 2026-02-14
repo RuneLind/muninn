@@ -136,13 +136,15 @@ export interface SlackUserStats {
   messageCount: number;
   firstSeen: number;
   lastSeen: number;
-  primaryPlatform: string;
+  primaryPlatform: Platform;
   personalMemories: number;
   sharedMemories: number;
 }
 
+import type { Platform } from "../types.ts";
+
 export interface SlackPlatformBreakdown {
-  platform: string;
+  platform: Platform;
   messages: number;
   users: number;
 }
@@ -264,12 +266,12 @@ export async function getSlackAnalytics(botName?: string): Promise<SlackAnalytic
       messageCount: Number(r.message_count),
       firstSeen: new Date(r.first_seen).getTime(),
       lastSeen: new Date(r.last_seen).getTime(),
-      primaryPlatform: r.primary_platform,
+      primaryPlatform: r.primary_platform as Platform,
       personalMemories: Number(r.personal_memories),
       sharedMemories: Number(r.shared_memories),
     })),
     platformBreakdown: breakdown.map((r) => ({
-      platform: r.platform,
+      platform: r.platform as Platform,
       messages: Number(r.messages),
       users: Number(r.users),
     })),

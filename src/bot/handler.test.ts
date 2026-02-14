@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { splitMessage } from "./handler.ts";
+import { splitMessage } from "../utils/split-message.ts";
 
 describe("splitMessage", () => {
   test("returns single chunk for short text", () => {

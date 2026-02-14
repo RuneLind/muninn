@@ -1,4 +1,5 @@
 import type { Config } from "../config.ts";
+import type { Platform } from "../types.ts";
 import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
@@ -9,7 +10,7 @@ interface DetectionInput {
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
-  platform?: string;
+  platform?: Platform;
 }
 
 interface DetectionResult {

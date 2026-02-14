@@ -66,6 +66,8 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | Path to whisper-cpp model file |
 | `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval in ms |
 | `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler |
+| `SIMULATOR_ENABLED` | No | `false` | Enable platform simulator mode |
+| `SIMULATOR_DATABASE_URL` | No | Derived from `DATABASE_URL` | Simulator database URL (defaults to `javrvis_simulator`) |
 
 ### Per-Bot (.env)
 
@@ -174,6 +176,95 @@ Any other text or voice message is forwarded to Claude for a conversational resp
 - `GET /api/goals/:userId` — Active goals for a user
 - `GET /api/scheduled-tasks/:userId` — Scheduled tasks for a user
 - `GET /api/events` — SSE stream for real-time activity updates
+
+## Simulator
+
+A test platform that simulates Telegram and Slack conversations without needing real bot tokens or user accounts. Useful for development and integration testing.
+
+### Enabling
+
+Set `SIMULATOR_ENABLED=true` in `.env` (or pass as environment variable):
+
+```bash
+SIMULATOR_ENABLED=true bun run dev
+```
+
+The simulator uses a **separate database** (`javrvis_simulator` by default, auto-created) to keep test data isolated from production. Override with `SIMULATOR_DATABASE_URL` if needed.
+
+### Web UI
+
+Open `/simulator` on the dashboard (e.g. `http://localhost:3010/simulator`). The UI has a three-panel layout:
+- **Left** — Conversation list and creation controls
+- **Center** — Chat view with message history
+- **Right** — Conversation details and status
+
+Real-time updates are delivered via WebSocket.
+
+### REST API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/simulator/bots` | List available bots |
+| `POST` | `/simulator/conversations` | Create a conversation (`{ type, botName, userId?, username?, channelName? }`) |
+| `GET` | `/simulator/conversations` | List all conversations |
+| `GET` | `/simulator/conversations/:id` | Get conversation with messages |
+| `DELETE` | `/simulator/conversations/:id` | Delete a conversation |
+| `POST` | `/simulator/conversations/:id/messages` | Send a message (`{ text }`) — response arrives via WebSocket |
+| `DELETE` | `/simulator/reset` | Clear all state and truncate simulator DB tables |
+
+Supported conversation types: `telegram_dm`, `slack_dm`, `slack_channel`, `slack_assistant`.
+
+**Note:** Simulator conversations are held in memory and lost on server restart. The simulator database (for messages, memories, etc.) persists across restarts.
+
+### Integration Tests
+
+Simulator-related tests run as part of the standard test suite:
+
+```bash
+bun run test
+```
+
+## Docker Production
+
+The `prod` profile in `docker-compose.yml` runs the full stack (Postgres + app) in Docker.
+
+### Starting
+
+```bash
+docker compose --profile prod up -d
+```
+
+This starts:
+- **postgres** — pgvector/pg17 with the schema from `db/init.sql`
+- **app** — Bun + ffmpeg + Claude CLI, running as non-root `javrvis` user
+
+### Volume Mounts
+
+| Mount | Container Path | Description |
+|---|---|---|
+| `~/.claude` | `/home/javrvis/.claude` (read-only) | Claude CLI authentication credentials |
+| `./bots` | `/app/bots` (read-only) | Bot persona, MCP config, and permissions |
+
+Bot configuration is mounted (not baked in) so you can change personas and MCP tools without rebuilding the image.
+
+### Environment
+
+The app container reads `.env` via `env_file`, with `DATABASE_URL` overridden to point at the Postgres container:
+
+```
+DATABASE_URL=postgresql://javrvis:javrvis@postgres:5432/javrvis
+```
+
+The dashboard port maps `DASHBOARD_PORT` (default 3010) on the host to port 3000 inside the container.
+
+### Health Check
+
+The app container has a health check that polls `GET /api/stats` every 30 seconds. Use `docker compose ps` to verify the app is healthy.
+
+### Limitations
+
+- **TTS on Linux**: macOS `say` is not available — TTS gracefully degrades (text replies only, no voice output)
+- **whisper-cli**: Not installed in the Docker image — voice input requires adding whisper-cpp to the Dockerfile
 
 ## How It Works
 

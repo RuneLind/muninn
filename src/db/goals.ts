@@ -1,5 +1,5 @@
 import { getDb } from "./client.ts";
-import type { Goal, GoalStatus } from "../types.ts";
+import type { Goal, GoalStatus, Platform } from "../types.ts";
 
 interface SaveGoalParams {
   userId: string;
@@ -9,7 +9,7 @@ interface SaveGoalParams {
   deadline?: Date | null;
   tags?: string[];
   sourceMessageId?: string | null;
-  platform?: string;
+  platform?: Platform;
 }
 
 export async function saveGoal(params: SaveGoalParams): Promise<string> {
@@ -159,7 +159,7 @@ function mapRow(r: Record<string, any>): Goal {
     deadline: r.deadline ? new Date(r.deadline).getTime() : null,
     tags: r.tags ?? [],
     sourceMessageId: r.source_message_id ?? null,
-    platform: r.platform ?? "telegram",
+    platform: (r.platform ?? "telegram") as Platform,
     lastCheckedAt: r.last_checked_at
       ? new Date(r.last_checked_at).getTime()
       : null,

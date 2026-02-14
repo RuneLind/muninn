@@ -17,5 +17,24 @@ services:
       timeout: 5s
       retries: 5
 
+  app:
+    build: .
+    container_name: javrvis-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${DASHBOARD_PORT:-3010}:3000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://javrvis:javrvis@postgres:5432/javrvis
+      DASHBOARD_PORT: "3000"  # Override .env inside container — host port mapped via ports above
+    volumes:
+      - ~/.claude:/home/javrvis/.claude:ro
+      - ./bots:/app/bots:ro
+    restart: unless-stopped
+    profiles:
+      - prod
+
 volumes:
   javrvis-pgdata:

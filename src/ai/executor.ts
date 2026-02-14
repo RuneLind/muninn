@@ -5,7 +5,6 @@ import { parseClaudeOutput } from "./result-parser.ts";
 
 export interface ClaudeExecResult extends ClaudeResult {
   wallClockMs: number;
-  startupMs: number;
 }
 
 export async function executeClaudePrompt(

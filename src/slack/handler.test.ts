@@ -97,7 +97,8 @@ mock.module("../tracing/index.ts", () => ({
   },
 }));
 
-const { createSlackMessageHandler, extractChannelPosts } = await import("./handler.ts");
+const { createSlackMessageHandler } = await import("./handler.ts");
+const { extractChannelPosts } = await import("../core/message-processor.ts");
 
 const config = {
   claudeModel: "sonnet",

@@ -311,8 +311,6 @@ export function renderTracesPage(): string {
 </head>
 <body>
   ${renderNav("traces")}
-    </div>
-  </header>
 
   <div class="stats-bar" id="statsBar">
     <div class="stat-card"><div class="stat-value" id="statTotal">-</div><div class="stat-label">Traces (24h)</div></div>

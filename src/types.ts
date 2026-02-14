@@ -1,3 +1,5 @@
+export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown";
+
 export type ActivityEventType = "message_in" | "message_out" | "error" | "system" | "slack_channel_post";
 
 export interface TimingMetadata {
@@ -33,6 +35,7 @@ export interface ClaudeResult {
   costUsd: number;
   durationMs: number;
   durationApiMs: number;
+  startupMs?: number;
   numTurns: number;
   model: string;
   inputTokens: number;
@@ -81,7 +84,7 @@ export interface ScheduledTask {
   scheduleDays: number[] | null; // 0=Sun..6=Sat, null=every day
   scheduleIntervalMs: number | null; // alternative: repeat every N ms
   timezone: string;
-  platform?: string;
+  platform?: Platform;
   enabled: boolean;
   lastRunAt: number | null; // epoch ms
   nextRunAt: number | null; // epoch ms
@@ -134,7 +137,7 @@ export interface Goal {
   deadline: number | null; // epoch ms
   tags: string[];
   sourceMessageId: string | null;
-  platform?: string;
+  platform?: Platform;
   lastCheckedAt: number | null;
   reminderSentAt: number | null;
   createdAt: number;

@@ -527,18 +527,19 @@ export function renderDashboardPage(): string {
   </style>
 </head>
 <body>
-  ${renderNav("dashboard")}
+  ${renderNav("dashboard", {
+    headerLeftExtra: `
       <div class="agent-status" id="agentStatus">
         <div class="agent-spinner"></div>
         <span class="agent-phase" id="agentPhase">Idle</span>
         <span class="agent-user" id="agentUser"></span>
-      </div>
-    </div>
+      </div>`,
+    headerRight: `
     <div class="status">
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">Connecting...</span>
-    </div>
-  </header>
+    </div>`,
+  })}
 
   <div class="stats-bar">
     <div class="stat-card">

@@ -28,6 +28,17 @@ export function loadConfig() {
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
     tracingRetentionDays: parseInt(optionalEnv("TRACING_RETENTION_DAYS", "7"), 10),
     promptSnapshotsRetentionDays: parseInt(optionalEnv("PROMPT_SNAPSHOTS_RETENTION_DAYS", "3"), 10),
+    simulatorEnabled: optionalEnv("SIMULATOR_ENABLED", "false") === "true",
+    simulatorDatabaseUrl: (() => {
+      const explicit = process.env.SIMULATOR_DATABASE_URL;
+      if (explicit) return explicit;
+      if (optionalEnv("SIMULATOR_ENABLED", "false") !== "true") return "";
+      const url = new URL(requireEnv("DATABASE_URL"));
+      const parts = url.pathname.split("/").filter(Boolean);
+      parts[parts.length - 1] = "javrvis_simulator";
+      url.pathname = "/" + parts.join("/");
+      return url.toString();
+    })(),
   } as const;
 }
 

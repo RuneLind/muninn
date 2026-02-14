@@ -52,7 +52,19 @@ export interface BotConfig {
  * Claude CLI auto-discovers .mcp.json and .claude/settings.local.json
  * from the bot's dir (set as cwd), so we don't need explicit paths.
  */
+/**
+ * Discovers bots for simulator mode — only requires CLAUDE.md (tokens are optional).
+ * Uses the same loading logic as discoverBots() but skips the platform token requirement.
+ */
+export function discoverBotsForSimulator(): BotConfig[] {
+  return discoverBotsInternal({ requireTokens: false });
+}
+
 export function discoverBots(): BotConfig[] {
+  return discoverBotsInternal({ requireTokens: true });
+}
+
+function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
   if (!existsSync(botsDir)) {
@@ -77,11 +89,11 @@ export function discoverBots(): BotConfig[] {
     const slackBotToken = process.env[`SLACK_BOT_TOKEN_${envName}`];
     const slackAppToken = process.env[`SLACK_APP_TOKEN_${envName}`];
 
-    // Bot needs at least one platform token
+    // Bot needs at least one platform token (unless in simulator mode)
     const hasTelegram = !!telegramToken;
     const hasSlack = !!slackBotToken && !!slackAppToken;
 
-    if (!hasTelegram && !hasSlack) {
+    if (opts.requireTokens && !hasTelegram && !hasSlack) {
       console.log(`[Jarvis] Skipping bot "${name}" — no platform tokens found (need TELEGRAM_BOT_TOKEN_${envName} or SLACK_BOT_TOKEN_${envName} + SLACK_APP_TOKEN_${envName})`);
       continue;
     }

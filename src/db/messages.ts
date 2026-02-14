@@ -1,5 +1,5 @@
 import { getDb } from "./client.ts";
-import type { ConversationMessage } from "../types.ts";
+import type { ConversationMessage, Platform } from "../types.ts";
 
 export interface SaveMessageParams {
   userId: string;
@@ -13,7 +13,7 @@ export interface SaveMessageParams {
   inputTokens?: number;
   outputTokens?: number;
   source?: string;
-  platform?: string;
+  platform?: Platform;
 }
 
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
