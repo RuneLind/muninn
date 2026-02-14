@@ -4,7 +4,7 @@ import { test, expect, describe, mock } from "bun:test";
 mock.module("../db/messages.ts", () => ({
   saveMessage: mock(() => Promise.resolve("msg-1")),
   getRecentMessages: mock(() => Promise.resolve([
-    { id: "m1", role: "user", text: "previous question", timestamp: Date.now() - 60000, userId: "u1" },
+    { id: "m1", role: "user", text: "previous question", timestamp: Date.now() - 60000, userId: "u1", username: "Rune" },
     { id: "m2", role: "assistant", text: "previous answer", timestamp: Date.now() - 30000, userId: "u1" },
   ])),
   getRecentAlerts: mock(() => Promise.resolve([])),
@@ -154,5 +154,43 @@ describe("buildPrompt", () => {
     };
     const result = await buildPrompt("u1", "hello", "persona", "testbot", restrictedTools);
     expect(result.systemPrompt).not.toContain("Verktøyrestriksjoner");
+  });
+
+  test("includes username in system prompt when provided as string", async () => {
+    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, "Rune");
+    expect(result.systemPrompt).toContain("You are currently talking to: Rune");
+  });
+
+  test("includes enriched identity when provided as UserIdentity", async () => {
+    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, {
+      name: "Rune Lind",
+      displayName: "rli",
+      title: "Senior Consultant",
+    });
+    expect(result.systemPrompt).toContain("You are currently talking to: Rune Lind");
+    expect(result.systemPrompt).toContain("Display name: rli");
+    expect(result.systemPrompt).toContain("Title: Senior Consultant");
+  });
+
+  test("omits missing identity fields", async () => {
+    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, {
+      name: "Rune Lind",
+    });
+    expect(result.systemPrompt).toContain("You are currently talking to: Rune Lind");
+    expect(result.systemPrompt).not.toContain("Display name");
+    expect(result.systemPrompt).not.toContain("Title");
+  });
+
+  test("does not include username line when not provided", async () => {
+    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    expect(result.systemPrompt).not.toContain("You are currently talking to");
+  });
+
+  test("shows username in conversation history for user messages", async () => {
+    const result = await buildPrompt("u1", "new question", "persona", "testbot");
+    // Mock user message has username "Rune", so history should show [user/Rune]
+    expect(result.userPrompt).toContain("[user/Rune]");
+    // Assistant messages should still show plain [assistant]
+    expect(result.userPrompt).toContain("[assistant]");
   });
 });

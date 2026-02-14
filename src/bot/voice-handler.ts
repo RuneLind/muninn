@@ -4,6 +4,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
+import type { UserIdentity } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
@@ -24,9 +25,15 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     const voice = ctx.message?.voice;
     if (!voice) return;
 
-    const username = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
     if (!ctx.from?.id) return;
     const userId = String(ctx.from.id);
+    const from = ctx.from;
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(" ");
+    const username = from.username ?? from.first_name ?? "unknown";
+    const userIdentity: UserIdentity = {
+      name: fullName || username,
+      ...(from.username && fullName && from.username !== fullName ? { displayName: from.username } : {}),
+    };
 
     const t = new Tracer("telegram_voice", { botName: botConfig.name, userId, username, platform: "telegram" });
 
@@ -69,7 +76,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     // Build context-aware prompt and run through Claude
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity);
     t.end("prompt_build", promptMeta);
     savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});
 

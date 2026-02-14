@@ -4,21 +4,34 @@ import type { BotConfig } from "../bots/config.ts";
 import { createSlackMessageHandler } from "./handler.ts";
 
 import type { WebClient } from "@slack/web-api";
+import type { UserIdentity } from "../types.ts";
 
-const userNameCache = new Map<string, string>();
+const USER_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const userInfoCache = new Map<string, { identity: UserIdentity; cachedAt: number }>();
 const channelIdCache = new Map<string, string>();
 
-async function resolveSlackUsername(app: App, userId: string): Promise<string> {
-  const cached = userNameCache.get(userId);
-  if (cached) return cached;
+async function resolveSlackUser(app: App, userId: string): Promise<UserIdentity> {
+  const cached = userInfoCache.get(userId);
+  if (cached && Date.now() - cached.cachedAt < USER_CACHE_TTL_MS) return cached.identity;
   try {
     const result = await app.client.users.info({ user: userId });
-    const name = result.user?.profile?.display_name
-      || result.user?.real_name || result.user?.name || userId;
-    userNameCache.set(userId, name);
-    return name;
-  } catch {
-    return userId;
+    const profile = result.user?.profile;
+    // Prefer real_name (full name like "Rune Lind") over display_name (often just a handle like "rli")
+    const name =
+      profile?.real_name?.trim() ||
+      result.user?.real_name?.trim() ||
+      profile?.display_name?.trim() ||
+      result.user?.name?.trim() ||
+      userId;
+    const displayName = profile?.display_name?.trim() || undefined;
+    const title = profile?.title?.trim() || undefined;
+    console.debug(`[slack] Resolved user ${userId} → "${name}" (display_name="${displayName}", title="${title}")`);
+    const info: UserIdentity = { name, displayName, title };
+    userInfoCache.set(userId, { identity: info, cachedAt: Date.now() });
+    return info;
+  } catch (err) {
+    console.warn(`[slack] Failed to resolve username for ${userId} — check users:read scope:`, err);
+    return { name: userId };
   }
 }
 
@@ -96,8 +109,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       const lines: string[] = [];
       for (const msg of messages) {
         if (!msg.text || msg.bot_id) continue;
-        const user = msg.user ? await resolveSlackUsername(app, msg.user) : "unknown";
-        lines.push(`${user}: ${msg.text.slice(0, 300)}`);
+        const userInfo = msg.user ? await resolveSlackUser(app, msg.user) : null;
+        lines.push(`${userInfo?.name ?? "unknown"}: ${msg.text.slice(0, 300)}`);
       }
       return lines;
     } catch (err) {
@@ -114,8 +127,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       const lines: string[] = [];
       for (const msg of messages) {
         if (!msg.text || msg.bot_id) continue;
-        const user = msg.user ? await resolveSlackUsername(app, msg.user) : "unknown";
-        lines.push(`${user}: ${msg.text.slice(0, 300)}`);
+        const userInfo = msg.user ? await resolveSlackUser(app, msg.user) : null;
+        lines.push(`${userInfo?.name ?? "unknown"}: ${msg.text.slice(0, 300)}`);
       }
       return lines;
     } catch (err) {
@@ -146,14 +159,15 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     userMessage: async ({ message, say, setStatus }) => {
       const text = "text" in message ? (message.text ?? "") : "";
       const userId = "user" in message ? (message.user ?? "unknown") : "unknown";
-      const username = await resolveSlackUsername(app, userId);
+      const userInfo = await resolveSlackUser(app, userId);
 
-      console.log(`${tag} Assistant message from ${username} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+      console.log(`${tag} Assistant message from ${userInfo.name} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
       await handleMessage({
         text,
         userId,
-        username,
+        username: userInfo.name,
+        userIdentity: userInfo,
         say: async (msg: string) => { await say(msg); },
         setStatus: async (status: string) => { await setStatus(status); },
         postToChannel: makePostToChannel(app.client, tag),
@@ -168,7 +182,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
   app.event("app_mention", async ({ event, client }) => {
     const userId = event.user ?? "";
     if (!userId) return;
-    const username = await resolveSlackUsername(app, userId);
+    const userInfo = await resolveSlackUser(app, userId);
     // Strip the bot mention tag(s) like <@U12345> from the text
     const rawText = event.text ?? "";
     const text = rawText.replaceAll(/<@[A-Z0-9]+>/g, "").trim();
@@ -185,7 +199,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     const channelInfo = await client.conversations.info({ channel: event.channel }).catch(() => null);
     const channelName = channelInfo?.channel?.name ? `#${channelInfo.channel.name}` : event.channel;
 
-    console.log(`${tag} Channel mention from ${username} (${userId}) in ${channelName}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    console.log(`${tag} Channel mention from ${userInfo.name} (${userId}) in ${channelName}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     // Fetch recent messages for context
     const recentChannelMessages = event.thread_ts
@@ -206,7 +220,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     await handleMessage({
       text,
       userId,
-      username,
+      username: userInfo.name,
+      userIdentity: userInfo,
       say: async (msg: string) => {
         await client.chat.postMessage({
           channel: event.channel,
@@ -246,7 +261,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
     // Check if this is a follow-up in a tracked channel thread
     if (threadTs && channel && isTrackedThread(channel, threadTs)) {
-      const username = await resolveSlackUsername(app, userId);
+      const userInfo = await resolveSlackUser(app, userId);
       // Strip any bot mentions (user might still @mention out of habit)
       const cleanText = text.replaceAll(/<@[A-Z0-9]+>/g, "").trim();
       if (!cleanText) return;
@@ -258,7 +273,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       // Fetch thread messages for context
       const recentChannelMessages = await fetchThreadMessages(client, channel, threadTs);
 
-      console.log(`${tag} Thread follow-up from ${username} (${userId}) in ${channelName}: "${cleanText.slice(0, 80)}${cleanText.length > 80 ? "..." : ""}"`);
+      console.log(`${tag} Thread follow-up from ${userInfo.name} (${userId}) in ${channelName}: "${cleanText.slice(0, 80)}${cleanText.length > 80 ? "..." : ""}"`);
 
       // Show native Slack thinking indicator
       try {
@@ -272,7 +287,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       await handleMessage({
         text: cleanText,
         userId,
-        username,
+        username: userInfo.name,
+        userIdentity: userInfo,
         say: async (msg: string) => {
           await client.chat.postMessage({
             channel,
@@ -304,8 +320,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     // Skip threaded DMs that aren't tracked
     if (threadTs) return;
 
-    const username = await resolveSlackUsername(app, userId);
-    console.log(`${tag} DM from ${username} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    const userInfo = await resolveSlackUser(app, userId);
+    console.log(`${tag} DM from ${userInfo.name} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
 
     {
       // Post a "Thinking..." message, then update it with the real response
@@ -321,7 +337,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       await handleMessage({
         text,
         userId,
-        username,
+        username: userInfo.name,
+        userIdentity: userInfo,
         say: async (msg: string) => {
           if (thinkingTs) {
             // Replace the thinking message with the actual response

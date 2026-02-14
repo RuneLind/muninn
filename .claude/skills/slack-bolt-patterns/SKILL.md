@@ -174,3 +174,50 @@ See [references/api_reference.md](references/api_reference.md) for detailed API 
 | Channel | `<#C12345>` | N/A |
 
 Convert Claude's Markdown output to Slack mrkdwn before posting.
+
+## User Identity Resolution
+
+### Scope Requirement
+
+The `users:read` OAuth scope is required to call `users.info`. Without it, user resolution fails silently and falls back to the raw userId.
+
+### Profile Fields
+
+| Field | Source | Example | Notes |
+|---|---|---|---|
+| `real_name` | `user.profile.real_name` | "Rune Lind" | Full legal/display name |
+| `display_name` | `user.profile.display_name` | "rli" | Slack handle — may be empty |
+| `title` | `user.profile.title` | "Senior Consultant" | Job title — often empty |
+| `name` | `user.name` | "rune.lind" | Workspace username (legacy) |
+
+### Fallback Chain
+
+`real_name` → `user.real_name` → `display_name` → `user.name` → userId
+
+### `UserIdentity` Object (shared type)
+
+```ts
+// Defined in src/types.ts — used by all platforms
+interface UserIdentity {
+  name: string;          // Best name from fallback chain
+  displayName?: string;  // Slack handle (e.g. "rli")
+  title?: string;        // Job title from profile
+}
+```
+
+`resolveSlackUser()` returns a `UserIdentity` (cached per userId). Call sites that only need a display string use `.name`.
+
+### Identity Flow Into Prompt
+
+1. `resolveSlackUser()` returns `UserIdentity` (cached)
+2. Slack handler passes `userIdentity` object to `handleMessage()`
+3. Handler forwards to `processMessage()` which passes it to `buildPrompt()`
+4. `buildPrompt()` accepts `string | UserIdentity` — renders a multi-line block:
+
+```
+You are currently talking to: Rune Lind
+- Display name: rli
+- Title: Senior Consultant
+```
+
+Only lines with values are included. Telegram callers pass a plain string — backwards compatible.

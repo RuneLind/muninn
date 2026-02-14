@@ -321,6 +321,29 @@ bun run db:restore   # Restores from latest backup in backups/
 
 Backups are full `pg_dump` exports stored in the `backups/` directory.
 
+## Gmail MCP Re-Authentication
+
+The Gmail MCP server (`@gongrzhe/server-gmail-autoauth-mcp`) uses OAuth tokens that expire periodically. When you see `invalid_grant` errors, re-authenticate:
+
+```bash
+# Jarvis (personal Gmail)
+GOOGLE_OAUTH_CREDENTIALS=/Users/rune/.gmail-mcp/gcp-oauth.keys.json \
+  npx -y @gongrzhe/server-gmail-autoauth-mcp auth
+
+# Capra (rli@capraconsulting.no) — uses HOME override for credential isolation
+HOME=/Users/rune/.gmail-mcp-capra \
+  npx -y @gongrzhe/server-gmail-autoauth-mcp auth
+```
+
+This opens a browser for Google OAuth login. **Requires port 3000 to be free** (used for the OAuth callback).
+
+After re-auth, restart Claude Code so the MCP server picks up the new token.
+
+| Bot | Account | Credentials path |
+|---|---|---|
+| Jarvis | Personal Gmail | `~/.gmail-mcp/credentials.json` |
+| Capra | rli@capraconsulting.no | `~/.gmail-mcp-capra/.gmail-mcp/credentials.json` |
+
 ## Security
 
 - No public ports — local Telegram relay only

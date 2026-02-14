@@ -3,6 +3,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
+import type { UserIdentity } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
@@ -19,6 +20,8 @@ export interface ProcessMessageParams {
   text: string;
   userId: string;
   username: string;
+  /** Enriched user identity (e.g. from Slack profile). If omitted, username is used. */
+  userIdentity?: string | UserIdentity;
   platform: Platform;
   botConfig: BotConfig;
   config: Config;
@@ -51,7 +54,7 @@ export interface ProcessMessageResult {
  */
 export async function processMessage(params: ProcessMessageParams): Promise<ProcessMessageResult | undefined> {
   const {
-    text, userId, username, platform, botConfig, config,
+    text, userId, username, userIdentity, platform, botConfig, config,
     say, setStatus, postToChannel, channelContext, recentChannelMessages,
   } = params;
 
@@ -72,7 +75,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   agentStatus.set("building_prompt", username);
   t.start("prompt_build");
   const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(
-    userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools,
+    userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity ?? username,
   );
   t.end("prompt_build", promptMeta);
 

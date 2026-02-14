@@ -122,6 +122,17 @@ If the HuggingFace embedding model fails to load, `generateEmbedding()` returns 
 
 ---
 
+### 13. Voice handler duplicates full message pipeline
+**Priority:** Medium | **Effort:** 1 hr | **Files:** `src/bot/voice-handler.ts`
+
+`voice-handler.ts` duplicates the entire `processMessage()` pipeline (save message → build prompt → call Claude → save response → extract memory/goals/schedule → format → send). Every change to the core pipeline must be manually replicated here, which is fragile and has already caused bugs (e.g. missing user identity passthrough).
+
+**Fix:** Refactor voice handler to use `processMessage()` from `src/core/message-processor.ts`. The voice-specific parts (STT before, TTS after) can wrap the shared call. This eliminates ~150 lines of duplication and guarantees voice messages get every pipeline enhancement automatically.
+
+**Depends on:** #8 (the shared `processMessage` is already extracted — voice handler just needs to adopt it).
+
+---
+
 ### 12. `formatTelegramHtml` italic regex edge case
 **Priority:** Low | **Effort:** 10 min | **Files:** `src/bot/telegram-format.ts`
 
@@ -157,5 +168,6 @@ The italic pattern `(?<!\w)\*([^*]+?)\*(?!\w)` could match markdown bullet point
 | 6 | Deduplicate `pad()` / `fmtTokens()` (#9) | Low | 5 min |
 | 7 | Embedding model failure visibility (#11) | Low | 15 min |
 | 8 | Fix italic regex edge case (#12) | Low | 10 min |
+| 9 | Refactor voice handler to use processMessage (#13) | Medium | 1 hr |
 
-**Total remaining effort:** ~2.5-3.5 hours, ~1.5 hr for medium priority items.
+**Total remaining effort:** ~3.5-4.5 hours, ~2.5 hr for medium priority items.

@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
+import type { UserIdentity } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
@@ -21,6 +22,8 @@ interface HandleSlackMessageParams {
   text: string;
   userId: string;
   username: string;
+  /** Enriched user identity from Slack profile (name, display name, title) */
+  userIdentity?: UserIdentity;
   say: SlackSay;
   setStatus: SlackSetStatus;
   /** If provided, Claude can post messages to Slack channels via <slack-post> directives */
@@ -36,7 +39,7 @@ interface HandleSlackMessageParams {
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
   const tag = `[${botConfig.name}/slack]`;
 
-  return async ({ text: rawText, userId, username, say, setStatus, postToChannel, channelContext, recentChannelMessages, platform }: HandleSlackMessageParams) => {
+  return async ({ text: rawText, userId, username, userIdentity, say, setStatus, postToChannel, channelContext, recentChannelMessages, platform }: HandleSlackMessageParams) => {
     if (!rawText) return;
 
     // Convert Slack channel/user references to readable names
@@ -65,6 +68,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
       text,
       userId,
       username,
+      userIdentity,
       platform: platform ?? "slack_unknown",
       botConfig,
       config,

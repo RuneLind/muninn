@@ -1,5 +1,11 @@
 export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown";
 
+export interface UserIdentity {
+  name: string;
+  displayName?: string;
+  title?: string;
+}
+
 export type ActivityEventType = "message_in" | "message_out" | "error" | "system" | "slack_channel_post";
 
 export interface TimingMetadata {

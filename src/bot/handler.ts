@@ -1,6 +1,7 @@
 import type { Context } from "grammy";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
+import type { UserIdentity } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { stripHtml } from "./telegram-format.ts";
 
@@ -9,9 +10,15 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     const text = ctx.message?.text;
     if (!text) return;
 
-    const username = ctx.from?.username ?? ctx.from?.first_name ?? "unknown";
     if (!ctx.from?.id) return;
     const userId = String(ctx.from.id);
+    const from = ctx.from;
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(" ");
+    const username = from.username ?? from.first_name ?? "unknown";
+    const userIdentity: UserIdentity = {
+      name: fullName || username,
+      ...(from.username && fullName && from.username !== fullName ? { displayName: from.username } : {}),
+    };
 
     // Keep typing indicator alive while processing
     const typingInterval = setInterval(() => {
@@ -31,6 +38,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
         text,
         userId,
         username,
+        userIdentity,
         platform: "telegram",
         botConfig,
         config,

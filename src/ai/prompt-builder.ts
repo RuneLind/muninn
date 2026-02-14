@@ -5,7 +5,7 @@ import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { generateEmbedding } from "./embeddings.ts";
 import type { RestrictedTools } from "../bots/config.ts";
 import { getRestrictedToolsForUser, buildToolRestrictionPrompt } from "./tool-restrictions.ts";
-import type { ConversationMessage, Goal, Memory, ScheduledTask } from "../types.ts";
+import type { ConversationMessage, Goal, Memory, ScheduledTask, UserIdentity } from "../types.ts";
 
 export interface PromptBuildResult {
   systemPrompt: string;
@@ -30,6 +30,7 @@ export async function buildPrompt(
   persona: string,
   botName: string,
   restrictedTools?: RestrictedTools,
+  userIdentity?: string | UserIdentity,
 ): Promise<PromptBuildResult> {
   const t0 = performance.now();
   let dbHistoryMs = 0;
@@ -67,8 +68,16 @@ export async function buildPrompt(
       ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts)`,
   );
 
-  // System prompt: persona + tool restrictions + context (memories, goals)
+  // System prompt: persona + user identity + tool restrictions + context (memories, goals)
   const systemParts: string[] = [persona];
+
+  if (userIdentity) {
+    const identity = typeof userIdentity === "string" ? { name: userIdentity } : userIdentity;
+    const lines = [`You are currently talking to: ${identity.name}`];
+    if (identity.displayName) lines.push(`- Display name: ${identity.displayName}`);
+    if (identity.title) lines.push(`- Title: ${identity.title}`);
+    systemParts.push(lines.join("\n"));
+  }
 
   const deniedGroups = getRestrictedToolsForUser(userId, restrictedTools);
   const restrictionPrompt = buildToolRestrictionPrompt(deniedGroups);
@@ -197,7 +206,10 @@ export function formatAlerts(alerts: AlertMessage[]): string {
 
 function formatConversationHistory(messages: ConversationMessage[]): string {
   const items = messages
-    .map((m) => `[${m.role}] ${m.text}`)
+    .map((m) => {
+      const label = m.role === "user" && m.username ? `user/${m.username}` : m.role;
+      return `[${label}] ${m.text}`;
+    })
     .join("\n\n");
   return `<conversation_history>\n${items}\n</conversation_history>`;
 }
