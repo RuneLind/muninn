@@ -320,17 +320,12 @@ export function renderTracesPage(): string {
   </div>
 
   <div class="filters">
-    <select id="filterName">
+    <select id="filterName" onchange="currentPage=0;loadTraces();loadStats()">
       <option value="">All types</option>
-      <option value="telegram_text">telegram_text</option>
-      <option value="telegram_voice">telegram_voice</option>
-      <option value="slack_message">slack_message</option>
-      <option value="scheduler_tick">scheduler_tick</option>
     </select>
-    <select id="filterBot">
+    <select id="filterBot" onchange="currentPage=0;loadTraces();loadStats()">
       <option value="">All bots</option>
     </select>
-    <button onclick="loadTraces()">Filter</button>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#666;margin-left:auto">
       <input type="checkbox" id="autoRefresh" checked> Auto-refresh (15s)
     </label>
@@ -615,10 +610,13 @@ export function renderTracesPage(): string {
 
     function startAutoRefresh() {
       if (refreshTimer) clearInterval(refreshTimer);
+      let refreshCount = 0;
       refreshTimer = setInterval(() => {
         if (document.getElementById('autoRefresh').checked) {
           loadTraces();
           loadStats();
+          refreshCount++;
+          if (refreshCount % 4 === 0) loadFilters(); // refresh filters every ~60s
         }
       }, 15000);
     }
@@ -628,7 +626,37 @@ export function renderTracesPage(): string {
       if (e.key === 'Escape') closePromptModal();
     });
 
+    async function loadFilters() {
+      try {
+        const res = await fetch('/api/trace-filters');
+        if (!res.ok) return;
+        const { bots, types } = await res.json();
+        if (!bots || !types) return;
+        const nameSelect = document.getElementById('filterName');
+        const nameVal = nameSelect.value;
+        nameSelect.innerHTML = '<option value="">All types</option>';
+        types.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t;
+          opt.textContent = t;
+          nameSelect.appendChild(opt);
+        });
+        nameSelect.value = nameVal;
+        const botSelect = document.getElementById('filterBot');
+        const botVal = botSelect.value;
+        botSelect.innerHTML = '<option value="">All bots</option>';
+        bots.forEach(b => {
+          const opt = document.createElement('option');
+          opt.value = b;
+          opt.textContent = b;
+          botSelect.appendChild(opt);
+        });
+        botSelect.value = botVal;
+      } catch (e) { console.error('Failed to load filters', e); }
+    }
+
     // Init
+    loadFilters();
     loadStats();
     loadTraces();
     startAutoRefresh();

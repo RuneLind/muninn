@@ -229,7 +229,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     });
 
     agentStatus.set("idle");
-    t.finish("ok");
+    t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
 
     // Console timing breakdown
     const s = t.summary();

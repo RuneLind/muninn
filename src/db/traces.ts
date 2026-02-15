@@ -54,7 +54,7 @@ export async function saveSpan(params: SaveSpanParams): Promise<void> {
       ${params.platform ?? null},
       ${params.startedAt},
       ${params.durationMs ?? null},
-      ${params.attributes ? JSON.stringify(params.attributes) : "{}"}
+      ${sql.json((params.attributes ?? {}) as Record<string, never>)}
     )
   `;
 }
@@ -66,8 +66,8 @@ export async function updateSpan(id: string, params: UpdateSpanParams): Promise<
       duration_ms = COALESCE(${params.durationMs ?? null}, duration_ms),
       status = COALESCE(${params.status ?? null}, status),
       attributes = CASE
-        WHEN ${params.attributes ? JSON.stringify(params.attributes) : null}::jsonb IS NOT NULL
-        THEN attributes || ${params.attributes ? JSON.stringify(params.attributes) : "{}"}::jsonb
+        WHEN ${params.attributes ? true : null}::bool IS NOT NULL
+        THEN attributes || ${sql.json((params.attributes ?? {}) as Record<string, never>)}
         ELSE attributes
       END
     WHERE id = ${id}
@@ -94,13 +94,28 @@ export async function getRecentTraces(
 ): Promise<SpanRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT id, trace_id, parent_id, name, kind, status, bot_name, user_id, username, platform,
-           started_at, duration_ms, attributes, created_at
-    FROM traces
-    WHERE parent_id IS NULL
-      AND (${botName ?? null}::text IS NULL OR bot_name = ${botName ?? null})
-      AND (${name ?? null}::text IS NULL OR name = ${name ?? null})
-    ORDER BY started_at DESC
+    SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
+           t.started_at, t.duration_ms, t.attributes, t.created_at,
+           c.input_tokens, c.output_tokens
+    FROM traces t
+    LEFT JOIN LATERAL (
+      SELECT
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'inputTokens')::int
+          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN ((cs.attributes->>-1)::jsonb->>'inputTokens')::int
+        END) AS input_tokens,
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'outputTokens')::int
+          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN ((cs.attributes->>-1)::jsonb->>'outputTokens')::int
+        END) AS output_tokens
+      FROM traces cs
+      WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
+      LIMIT 1
+    ) c ON true
+    WHERE t.parent_id IS NULL
+      AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
+      AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})
+    ORDER BY t.started_at DESC
     LIMIT ${limit} OFFSET ${offset}
   `;
   return rows.map(mapRow);
@@ -147,6 +162,18 @@ export async function getTraceStats(botName?: string): Promise<TraceStats> {
   };
 }
 
+export async function getTraceFilterOptions(): Promise<{ bots: string[]; types: string[] }> {
+  const sql = getDb();
+  const [bots, types] = await Promise.all([
+    sql`SELECT DISTINCT bot_name FROM traces WHERE bot_name IS NOT NULL ORDER BY bot_name`,
+    sql`SELECT DISTINCT name FROM traces WHERE parent_id IS NULL ORDER BY name`,
+  ]);
+  return {
+    bots: bots.map((r) => r.bot_name),
+    types: types.map((r) => r.name),
+  };
+}
+
 export async function cleanupOldTraces(retentionDays: number): Promise<number> {
   const sql = getDb();
   const result = await sql`
@@ -156,6 +183,27 @@ export async function cleanupOldTraces(retentionDays: number): Promise<number> {
 }
 
 function mapRow(r: Record<string, any>): SpanRow {
+  // Normalize attributes: handle double-encoded strings/arrays from legacy bug
+  let attrs = r.attributes ?? {};
+  if (typeof attrs === "string") {
+    try { attrs = JSON.parse(attrs); } catch { attrs = {}; }
+  }
+  if (Array.isArray(attrs)) {
+    // Legacy bug: attributes stored as [string, object] array — merge all object entries
+    attrs = attrs.reduce((acc: Record<string, unknown>, item: unknown) => {
+      if (typeof item === "string") {
+        try { const parsed = JSON.parse(item); if (typeof parsed === "object" && parsed) Object.assign(acc, parsed); } catch {}
+      } else if (typeof item === "object" && item) {
+        Object.assign(acc, item);
+      }
+      return acc;
+    }, {});
+  }
+
+  // Merge token data from child span join (if available and not already in attributes)
+  if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
+  if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
+
   return {
     id: r.id,
     traceId: r.trace_id,
@@ -169,7 +217,7 @@ function mapRow(r: Record<string, any>): SpanRow {
     platform: r.platform ?? null,
     startedAt: new Date(r.started_at).getTime(),
     durationMs: r.duration_ms ?? null,
-    attributes: r.attributes ?? {},
+    attributes: attrs,
     createdAt: new Date(r.created_at).getTime(),
   };
 }

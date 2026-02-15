@@ -205,7 +205,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       }
 
       agentStatus.set("idle");
-      t.finish("ok");
+      t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
 
       // Push activity with timing metadata
       const s = t.summary();

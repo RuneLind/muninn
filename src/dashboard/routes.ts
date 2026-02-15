@@ -11,7 +11,7 @@ import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getRecentMemories } from "../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
-import { getRecentTraces, getTrace, getTraceStats } from "../db/traces.ts";
+import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { agentStatus } from "./agent-status.ts";
 
@@ -144,6 +144,16 @@ export function createDashboardRoutes(): Hono {
     } catch (err) {
       console.error("Failed to fetch trace stats:", err);
       return c.json({ error: "Failed to fetch trace stats" }, 500);
+    }
+  });
+
+  app.get("/api/trace-filters", async (c) => {
+    try {
+      const options = await getTraceFilterOptions();
+      return c.json(options);
+    } catch (err) {
+      console.error("Failed to fetch trace filter options:", err);
+      return c.json({ error: "Failed to fetch filter options" }, 500);
     }
   });
 

@@ -4,6 +4,7 @@ import { initDb, getDb } from "../db/client.ts";
 const TEST_DATABASE_URL = "postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis_test";
 
 const ALL_TABLES = [
+  "traces",
   "haiku_usage",
   "watchers",
   "scheduled_tasks",
