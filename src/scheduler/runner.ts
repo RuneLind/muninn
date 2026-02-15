@@ -18,6 +18,9 @@ import { runWatchers } from "../watchers/runner.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("scheduler");
 
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
@@ -25,22 +28,20 @@ let lastCleanupAt = 0;
 
 export function startScheduler(api: Api, config: Config, botConfig: BotConfig): void {
   if (!config.schedulerEnabled) {
-    console.log(`[${botConfig.name}] Scheduler disabled`);
+    log.info("Scheduler disabled", { botName: botConfig.name });
     return;
   }
 
   const intervalMs = config.schedulerIntervalMs;
   const tag = botConfig.name;
-  console.log(
-    `[${tag}] Unified scheduler started (interval: ${intervalMs / 1000}s)`,
-  );
+  log.info("Unified scheduler started (interval: {interval}s)", { botName: tag, interval: intervalMs / 1000 });
 
   const id = setInterval(() => {
     if (tickRunning.get(tag)) return;
     tickRunning.set(tag, true);
     runSchedulerTick(api, config, botConfig)
       .catch((err) => {
-        console.error(`[${tag}] Scheduler tick failed:`, err);
+        log.error("Scheduler tick failed: {error}", { botName: tag, error: err instanceof Error ? err.message : String(err) });
       })
       .finally(() => {
         tickRunning.set(tag, false);
@@ -53,7 +54,7 @@ export function startScheduler(api: Api, config: Config, botConfig: BotConfig): 
 export function stopScheduler(): void {
   for (const [tag, id] of intervals) {
     clearInterval(id);
-    console.log(`[${tag}] Scheduler stopped`);
+    log.info("Scheduler stopped", { botName: tag });
   }
   intervals.clear();
   tickRunning.clear();
@@ -112,14 +113,14 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
     try {
       const deleted = await cleanupOldTraces(config.tracingRetentionDays);
       if (deleted > 0) {
-        console.log(`[${botName}] Cleaned up ${deleted} old traces`);
+        log.info("Cleaned up {count} old traces", { botName, count: deleted });
       }
       const deletedSnapshots = await cleanupOldSnapshots(config.promptSnapshotsRetentionDays);
       if (deletedSnapshots > 0) {
-        console.log(`[${botName}] Cleaned up ${deletedSnapshots} old prompt snapshots`);
+        log.info("Cleaned up {count} old prompt snapshots", { botName, count: deletedSnapshots });
       }
     } catch (err) {
-      console.error(`[${botName}] Trace cleanup failed:`, err);
+      log.error("Trace cleanup failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }
@@ -143,15 +144,10 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
         `Scheduled task fired: ${task.title} (${task.taskType})`,
         { userId: task.userId, botName: tag },
       );
-      console.log(
-        `[${tag}] Scheduled task fired: "${task.title}" (${task.taskType}) to user ${task.userId}`,
-      );
+      log.info("Scheduled task fired: \"{title}\" ({taskType}) to user {userId}", { botName: tag, title: task.title, taskType: task.taskType, userId: task.userId });
     } catch (err) {
       agentStatus.set("idle");
-      console.error(
-        `[${tag}] Failed to execute scheduled task ${task.id}:`,
-        err,
-      );
+      log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }
@@ -193,22 +189,22 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
       botConfig.name,
     );
 
-    console.log(
-      `[${botConfig.name}] Briefing prompt built in ${Math.round(meta.buildMs)}ms` +
-        ` (${meta.memoriesCount} memories, ${meta.goalsCount} goals, ${meta.scheduledTasksCount} tasks, ${meta.alertsCount} alerts)`,
-    );
+    log.info("Briefing prompt built in {ms}ms ({memoriesCount} memories, {goalsCount} goals, {tasksCount} tasks, {alertsCount} alerts)", {
+      botName: botConfig.name, ms: Math.round(meta.buildMs), memoriesCount: meta.memoriesCount,
+      goalsCount: meta.goalsCount, tasksCount: meta.scheduledTasksCount, alertsCount: meta.alertsCount,
+    });
 
     const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
 
     const totalMs = Math.round(performance.now() - t0);
-    console.log(
-      `[${botConfig.name}] Briefing generated in ${totalMs}ms` +
-        ` (model: ${result.model}, input: ${result.inputTokens}, output: ${result.outputTokens}, turns: ${result.numTurns})`,
-    );
+    log.info("Briefing generated in {ms}ms (model: {model}, input: {input}, output: {output}, turns: {turns})", {
+      botName: botConfig.name, ms: totalMs, model: result.model,
+      input: result.inputTokens, output: result.outputTokens, turns: result.numTurns,
+    });
 
     return result.result.trim();
   } catch (err) {
-    console.error(`[${botConfig.name}] Briefing generation failed, using fallback:`, err);
+    log.error("Briefing generation failed, using fallback: {error}", { botName: botConfig.name, error: err instanceof Error ? err.message : String(err) });
     const timeOfDay = task.scheduleHour < 12 ? "morning" : task.scheduleHour < 17 ? "afternoon" : "evening";
     return `<b>Good ${timeOfDay}!</b>\nI wasn't able to generate your full briefing this time. Check back later!`;
   }
@@ -231,15 +227,10 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
         `Deadline reminder sent for goal: ${goal.title}`,
         { userId: goal.userId, botName: tag },
       );
-      console.log(
-        `[${tag}] Deadline reminder sent: "${goal.title}" to user ${goal.userId}`,
-      );
+      log.info("Deadline reminder sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
       agentStatus.set("idle");
-      console.error(
-        `[${tag}] Failed to send reminder for goal ${goal.id}:`,
-        err,
-      );
+      log.error("Failed to send reminder for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }
@@ -260,15 +251,10 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
         `Check-in sent for goal: ${goal.title}`,
         { userId: goal.userId, botName: tag },
       );
-      console.log(
-        `[${tag}] Check-in sent: "${goal.title}" to user ${goal.userId}`,
-      );
+      log.info("Check-in sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
       agentStatus.set("idle");
-      console.error(
-        `[${tag}] Failed to send check-in for goal ${goal.id}:`,
-        err,
-      );
+      log.error("Failed to send check-in for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }

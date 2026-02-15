@@ -9,6 +9,9 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("watchers");
 
 const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
 
@@ -58,7 +61,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
   const tag = botConfig.name;
   const dueWatchers = await getWatchersDueNow(tag);
   if (dueWatchers.length > 0) {
-    console.log(`[${tag}] Running ${dueWatchers.length} due watcher(s)`);
+    log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }
 
   for (const watcher of dueWatchers) {
@@ -89,15 +92,15 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       const known = watcher.lastNotifiedIds;
       const newAlerts = alerts.filter((a) => {
         if (known.includes(a.id)) {
-          console.log(`[${tag}] Dedup: skipped by ID "${a.id}"`);
+          log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
           return false;
         }
         const hash = contentHash(a);
         if (hash && known.includes(hash)) {
-          console.log(`[${tag}] Dedup: skipped by content hash ${hash} — "${a.summary.slice(0, 60)}"`);
+          log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
           return false;
         }
-        console.log(`[${tag}] Dedup: NEW alert id="${a.id}" hash=${hash} — "${a.summary.slice(0, 60)}"`);
+        log.debug("Dedup: NEW alert id=\"{id}\" hash={hash} — \"{summary}\"", { botName: tag, id: a.id, hash, summary: a.summary.slice(0, 60) });
         return true;
       });
 
@@ -120,9 +123,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
           `Watcher "${watcher.name}" sent ${newAlerts.length} alert(s)`,
           { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
         );
-        console.log(
-          `[${tag}] Watcher "${watcher.name}" sent ${newAlerts.length} alert(s) to user ${watcher.userId}`,
-        );
+        log.info("Watcher \"{name}\" sent {count} alert(s) to user {userId}", { botName: tag, name: watcher.name, count: newAlerts.length, userId: watcher.userId });
       }
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
@@ -141,10 +142,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     } catch (err) {
       agentStatus.set("idle");
       wt?.error(err instanceof Error ? err : String(err));
-      console.error(
-        `[${tag}] Watcher "${watcher.name}" (${watcher.id}) failed:`,
-        err,
-      );
+      log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }
@@ -156,7 +154,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
     case "news":
       return await checkNews(watcher);
     default:
-      console.log(`Watcher type "${watcher.type}" not yet implemented`);
+      log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
   }
 }

@@ -5,6 +5,9 @@ import type { UserIdentity } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bot", "slack");
 
 interface SlackSay {
   (message: string): Promise<any>;
@@ -37,8 +40,6 @@ interface HandleSlackMessageParams {
 }
 
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
-  const tag = `[${botConfig.name}/slack]`;
-
   return async ({ text: rawText, userId, username, userIdentity, say, setStatus, postToChannel, channelContext, recentChannelMessages, platform }: HandleSlackMessageParams) => {
     if (!rawText) return;
 
@@ -60,7 +61,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
     if (botConfig.restrictedTools) {
       const denied = getRestrictedToolsForUser(userId, botConfig.restrictedTools);
       if (denied.length > 0) {
-        console.log(`${tag} User ${username} (${userId}) has restricted tools: ${denied.map((d) => d.name).join(", ")}`);
+        log.info("User {username} ({userId}) has restricted tools: {tools}", { botName: botConfig.name, username, userId, tools: denied.map((d) => d.name).join(", ") });
       }
     }
 

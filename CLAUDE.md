@@ -284,6 +284,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `SLACK_BOT_TOKEN_<NAME>` | No | — | Slack bot token (per bot) |
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
+| `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 
@@ -327,9 +328,37 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)
 - All timestamps stored as `TIMESTAMPTZ` in DB, exposed as epoch ms in TypeScript
 
-## Database & Migrations 
+## Logging
+
+Uses [LogTape](https://github.com/dahlia/logtape) for structured logging. **Never use `console.log/warn/error` in `src/` files** — use the logger instead.
+
+```typescript
+import { getLog } from "../logging.ts";
+const log = getLog("subsystem", "subpath"); // → category ["javrvis", "subsystem", "subpath"]
+```
+
+**Levels:**
+- `log.info(...)` — lifecycle events, request timing, successful operations
+- `log.warn(...)` — recoverable issues, fallbacks, deprecations
+- `log.error(...)` — failures, exceptions, crashes
+- `log.debug(...)` — verbose traces (dedup, user resolution) — only visible when level lowered
+
+**Structured properties** (second argument):
+```typescript
+log.info("Message from {username}: {preview}", { botName, username, preview: text.slice(0, 80) });
+```
+- `botName` is special: the console formatter prepends it as `[jarvis]`
+- Properties become searchable fields in the JSONL file sink
+
+**Sinks:**
+- Console: colored `LEVEL [subsystem/path] message` format
+- File: daily-rotating JSONL in `logs/` dir (7-day retention, configurable via `LOG_DIR` env var, set `LOG_DIR=none` to disable)
+
+**Tests:** Unconfigured loggers are silent no-ops — tests never call `setupLogging()`, so all logs are discarded. No mocking needed.
+
+## Database & Migrations
 After creating database migrations, always remind the user to run them against the target database. When modifying data models, check if existing data needs to be backfilled or updated — don't assume only new records matter.
 
-## Code Quality 
+## Code Quality
 This project is primarily TypeScript. Always ensure code compiles cleanly (`tsc --noEmit` or equivalent) before committing. When fixing TypeScript errors, fix all of them — don't leave partial fixes.
 

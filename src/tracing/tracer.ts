@@ -1,6 +1,9 @@
 import { Timing, type TimingExtras } from "../utils/timing.ts";
 import { saveSpan, updateSpan } from "../db/traces.ts";
 import { loadConfig } from "../config.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("tracing");
 
 // Cached on first access — won't pick up env changes at runtime, which is fine
 // since tracing is a startup-time configuration concern.
@@ -187,5 +190,5 @@ export class Tracer {
 }
 
 function logError(err: unknown): void {
-  console.error("[tracing] Failed to write span:", err);
+  log.error("Failed to write span: {error}", { error: err instanceof Error ? err.message : String(err) });
 }

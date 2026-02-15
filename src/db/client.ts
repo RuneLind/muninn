@@ -1,5 +1,8 @@
 import postgres from "postgres";
 import type { Config } from "../config.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("db");
 
 let sql: postgres.Sql | null = null;
 
@@ -29,7 +32,7 @@ export async function ensureSimulatorDb(mainUrl: string, simulatorUrl: string): 
       // CREATE DATABASE can't be parameterized — use unsafe with validated name
       if (!/^[a-zA-Z0-9_]+$/.test(dbName)) throw new Error(`Invalid DB name: ${dbName}`);
       await mainSql.unsafe(`CREATE DATABASE ${dbName}`);
-      console.log(`[simulator] Created database ${dbName}`);
+      log.info("Created simulator database {dbName}", { dbName });
     }
   } finally {
     await mainSql.end();
@@ -45,7 +48,7 @@ export async function ensureSimulatorDb(mainUrl: string, simulatorUrl: string): 
       const initSqlPath = new URL("../../db/init.sql", import.meta.url).pathname;
       const initContent = await Bun.file(initSqlPath).text();
       await simSql.unsafe(initContent);
-      console.log(`[simulator] Applied schema to ${dbName}`);
+      log.info("Applied schema to {dbName}", { dbName });
     }
   } finally {
     await simSql.end();

@@ -15,6 +15,9 @@ import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("core", "processor");
 
 export interface ProcessMessageParams {
   text: string;
@@ -58,13 +61,13 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     say, setStatus, postToChannel, channelContext, recentChannelMessages,
   } = params;
 
-  const tag = `[${botConfig.name}/${platform}]`;
   const isTelegram = platform.startsWith("telegram");
   const t = new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
+  const props = { botName: botConfig.name, userId, username, platform };
 
   activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
   agentStatus.set("receiving", username);
-  console.log(`${tag} Message from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+  log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
   // Save user message to DB
   t.start("db_save_user");
@@ -90,7 +93,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   }
 
   savePromptSnapshot({ traceId: t.traceId, systemPrompt: fullSystemPrompt, userPrompt }).catch(() => {});
-  console.log(`${tag} Prompt built in ${Math.round(t.summary().prompt_build ?? 0)}ms (${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)`);
+  log.info("Prompt built in {ms}ms ({msgCount} msgs, {memCount} memories)", { ...props, ms: Math.round(t.summary().prompt_build ?? 0), msgCount: promptMeta.messagesCount, memCount: promptMeta.memoriesCount });
 
   if (setStatus) await setStatus("Thinking...").catch(() => {});
 
@@ -98,7 +101,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     agentStatus.set("calling_claude", username);
     const effectiveModel = botConfig.model ?? config.claudeModel;
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
-    console.log(`${tag} Calling Claude (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
+    log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
     const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt);
     const toolCount = result.toolCalls?.length ?? 0;
@@ -125,7 +128,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     }
 
     const toolInfo = toolCount > 0 ? `, ${toolCount} tools: ${result.toolCalls!.map(tc => tc.displayName).join(", ")}` : "";
-    console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns${toolInfo})`);
+    log.info("Claude responded in {ms}ms ({numTurns} turns{toolInfo})", { ...props, ms: Math.round(t.summary().claude ?? 0), numTurns: result.numTurns, toolInfo });
 
     // Save assistant response to DB
     agentStatus.set("saving_response", username);
@@ -168,15 +171,15 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     if (postToChannel) {
       const { cleanText, posts } = extractChannelPosts(responseText);
       if (posts.length > 0) {
-        console.log(`${tag} extractChannelPosts: found ${posts.length} post(s), cleanText length=${cleanText.length}`);
+        log.info("extractChannelPosts: found {count} post(s), cleanText length={len}", { ...props, count: posts.length, len: cleanText.length });
       }
       if (posts.length === 0 && responseText.includes("<slack-post")) {
-        console.warn(`${tag} WARNING: response contains "<slack-post" but no posts were extracted!`);
+        log.warn("Response contains \"<slack-post\" but no posts were extracted!", props);
       }
       const failedPosts: string[] = [];
       for (const post of posts) {
         try {
-          console.log(`${tag} Posting to channel ${post.channel}: "${post.message.slice(0, 80)}..."`);
+          log.info("Posting to channel {channel}: \"{preview}\"", { ...props, channel: post.channel, preview: post.message.slice(0, 80) });
           await postToChannel(post.channel, formatSlackMrkdwn(post.message));
           activityLog.push("slack_channel_post", post.message, {
             userId, username, botName: botConfig.name,
@@ -184,7 +187,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           });
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
-          console.error(`${tag} Failed to post to ${post.channel}: ${errMsg}`);
+          log.error("Failed to post to {channel}: {error}", { ...props, channel: post.channel, error: errMsg });
           failedPosts.push(`${post.channel}: ${errMsg}`);
         }
       }
@@ -247,16 +250,17 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     agentStatus.set("idle");
     t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
 
-    // Console timing breakdown
+    // Timing breakdown
     const s = t.summary();
-    console.log(
-      `${tag} Request timing breakdown:\n` +
+    log.info(
+      "Request timing breakdown:\n" +
         `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
         `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs ?? 0)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
         `  db_save:        ${pad((s.db_save_user ?? 0) + (s.db_save_response ?? 0))}\n` +
         `  format+send:    ${pad(s.send)}\n` +
         `  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
         `  total:         ${pad(t.totalMs())}  ($${(result.costUsd ?? 0).toFixed(4)})`,
+      props,
     );
 
     return {
@@ -277,10 +281,11 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       .filter(([, v]) => v != null)
       .map(([k]) => k)
       .pop() ?? "unknown";
-    console.error(
-      `${tag} Request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+    log.error(
+      "Request failed after {elapsed}ms (last completed phase: {lastPhase})\n" +
         `  Error: ${errorMessage}\n` +
         `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
+      { ...props, elapsed, lastPhase },
     );
     activityLog.push("error", errorMessage, { userId, username, botName: botConfig.name });
     if (isTelegram) {

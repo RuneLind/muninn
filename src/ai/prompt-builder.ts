@@ -1,5 +1,8 @@
+import { getLog } from "../logging.ts";
 import { getRecentMessages, getRecentAlerts, type AlertMessage } from "../db/messages.ts";
 import { searchMemoriesHybrid } from "../db/memories.ts";
+
+const log = getLog("ai", "prompt");
 import { getActiveGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { generateEmbedding } from "./embeddings.ts";
@@ -69,13 +72,14 @@ export async function buildPrompt(
   const memorySearchMs = performance.now() - searchStart;
 
   const totalMs = performance.now() - t0;
-  console.log(
-    `[${botName}] prompt_build: ${Math.round(totalMs)}ms` +
+  log.info(
+    "prompt_build: {ms}ms" +
       ` (db: ${Math.round(dbHistoryMs)}ms, embed: ${Math.round(embeddingMs)}ms, search: ${Math.round(memorySearchMs)}ms` +
       (knowledgeResult.results.length > 0 ? `, knowledge: ${Math.round(knowledgeResult.searchMs)}ms` : "") +
       ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts` +
       (knowledgeResult.results.length > 0 ? `, ${knowledgeResult.results.length} knowledge` : "") +
       `)`,
+    { botName, ms: Math.round(totalMs) },
   );
 
   // System prompt: persona + user identity + tool restrictions + context (memories, goals)

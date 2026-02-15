@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { getLog } from "../logging.ts";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { renderTracesPage } from "./views/traces-page.ts";
@@ -14,6 +15,8 @@ import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { agentStatus } from "./agent-status.ts";
+
+const log = getLog("dashboard");
 
 export function createDashboardRoutes(): Hono {
   const app = new Hono();
@@ -30,7 +33,7 @@ export function createDashboardRoutes(): Hono {
       const stats = await getDashboardStats(botName);
       return c.json(stats);
     } catch (err) {
-      console.error("Failed to fetch dashboard stats:", err);
+      log.error("Failed to fetch dashboard stats: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch stats" }, 500);
     }
   });
@@ -42,7 +45,7 @@ export function createDashboardRoutes(): Hono {
       const memories = await getRecentMemories(limit, botName);
       return c.json({ memories });
     } catch (err) {
-      console.error("Failed to fetch memories:", err);
+      log.error("Failed to fetch memories: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch memories" }, 500);
     }
   });
@@ -53,7 +56,7 @@ export function createDashboardRoutes(): Hono {
       const goals = await getAllGoals(botName);
       return c.json({ goals });
     } catch (err) {
-      console.error("Failed to fetch goals:", err);
+      log.error("Failed to fetch goals: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch goals" }, 500);
     }
   });
@@ -64,7 +67,7 @@ export function createDashboardRoutes(): Hono {
       const tasks = await getAllScheduledTasks(botName);
       return c.json({ tasks });
     } catch (err) {
-      console.error("Failed to fetch tasks:", err);
+      log.error("Failed to fetch tasks: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch tasks" }, 500);
     }
   });
@@ -75,7 +78,7 @@ export function createDashboardRoutes(): Hono {
       const analytics = await getSlackAnalytics(botName);
       return c.json(analytics);
     } catch (err) {
-      console.error("Failed to fetch Slack analytics:", err);
+      log.error("Failed to fetch Slack analytics: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch Slack analytics" }, 500);
     }
   });
@@ -86,7 +89,7 @@ export function createDashboardRoutes(): Hono {
       const watchers = await getAllWatchers(botName);
       return c.json({ watchers });
     } catch (err) {
-      console.error("Failed to fetch watchers:", err);
+      log.error("Failed to fetch watchers: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch watchers" }, 500);
     }
   });
@@ -106,7 +109,7 @@ export function createDashboardRoutes(): Hono {
       const traces = await getRecentTraces(limit, offset, botName, name);
       return c.json({ traces });
     } catch (err) {
-      console.error("Failed to fetch traces:", err);
+      log.error("Failed to fetch traces: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch traces" }, 500);
     }
   });
@@ -117,7 +120,7 @@ export function createDashboardRoutes(): Hono {
       const spans = await getTrace(traceId);
       return c.json({ spans });
     } catch (err) {
-      console.error("Failed to fetch trace:", err);
+      log.error("Failed to fetch trace: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch trace" }, 500);
     }
   });
@@ -131,7 +134,7 @@ export function createDashboardRoutes(): Hono {
       }
       return c.json(snapshot);
     } catch (err) {
-      console.error("Failed to fetch prompt snapshot:", err);
+      log.error("Failed to fetch prompt snapshot: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch prompt snapshot" }, 500);
     }
   });
@@ -142,7 +145,7 @@ export function createDashboardRoutes(): Hono {
       const stats = await getTraceStats(botName);
       return c.json(stats);
     } catch (err) {
-      console.error("Failed to fetch trace stats:", err);
+      log.error("Failed to fetch trace stats: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch trace stats" }, 500);
     }
   });
@@ -152,7 +155,7 @@ export function createDashboardRoutes(): Hono {
       const options = await getTraceFilterOptions();
       return c.json(options);
     } catch (err) {
-      console.error("Failed to fetch trace filter options:", err);
+      log.error("Failed to fetch trace filter options: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch filter options" }, 500);
     }
   });

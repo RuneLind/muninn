@@ -4,6 +4,9 @@ import type { BotConfig } from "../bots/config.ts";
 import { simulatorState, type ConversationType } from "./state.ts";
 import { processSimulatorMessage } from "./processor.ts";
 import { renderSimulatorPage } from "./views/page.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("simulator");
 
 /**
  * Creates the simulator Hono sub-router.
@@ -122,7 +125,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
 
     // Process asynchronously — response comes via WebSocket
     processSimulatorMessage(id, body.text, bot, config).catch((err) => {
-      console.error(`[simulator] Error processing message:`, err);
+      log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       simulatorState.addMessage(id, {
         id: crypto.randomUUID(),

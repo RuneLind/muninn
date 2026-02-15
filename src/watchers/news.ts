@@ -1,4 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("watchers", "news");
 
 const MAX_RESULTS = 10;
 
@@ -7,7 +10,7 @@ export async function checkNews(watcher: Watcher): Promise<WatcherAlert[]> {
   const keywords = config.filter;
 
   if (!keywords) {
-    console.log(`[news] Watcher "${watcher.name}" has no keywords, skipping`);
+    log.warn("Watcher \"{name}\" has no keywords, skipping", { name: watcher.name });
     return [];
   }
 
@@ -17,12 +20,12 @@ export async function checkNews(watcher: Watcher): Promise<WatcherAlert[]> {
   try {
     const res = await fetch(url);
     if (!res.ok) {
-      console.log(`[news] HTTP ${res.status} for "${keywords}"`);
+      log.warn("HTTP {status} for \"{keywords}\"", { status: res.status, keywords });
       return [];
     }
     xml = await res.text();
   } catch (err) {
-    console.error(`[news] Fetch failed for "${keywords}":`, err);
+    log.error("Fetch failed for \"{keywords}\": {error}", { keywords, error: err instanceof Error ? err.message : String(err) });
     return [];
   }
 

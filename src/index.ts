@@ -1,3 +1,4 @@
+import { setupLogging, getLog } from "./logging.ts";
 import { loadConfig } from "./config.ts";
 import { discoverBots, discoverBotsForSimulator } from "./bots/config.ts";
 import { initDb, closeDb, ensureSimulatorDb } from "./db/client.ts";
@@ -10,13 +11,16 @@ import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
 
+await setupLogging();
+const log = getLog("core");
+
 const config = loadConfig();
 const botConfigs = config.simulatorEnabled
   ? discoverBotsForSimulator()
   : discoverBots();
 
 if (botConfigs.length === 0) {
-  console.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists" +
+  log.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists" +
     (config.simulatorEnabled ? "." : " and at least one platform token is set."));
   process.exit(1);
 }
@@ -83,7 +87,7 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 if (config.simulatorEnabled) {
   // Simulator mode — skip real platform startup
   activityLog.push("system", "Simulator mode enabled — real platform bots and scheduler are disabled");
-  console.log(`Simulator mode — dashboard: http://localhost:${server.port}, simulator: http://localhost:${server.port}/simulator`);
+  log.info("Simulator mode — dashboard: http://localhost:{port}, simulator: http://localhost:{port}/simulator", { port: server.port });
 } else {
   // Normal mode — start real Telegram/Slack bots + scheduler
   telegramBotMap = new Map<string, Bot>();
@@ -100,7 +104,7 @@ if (config.simulatorEnabled) {
       bot.start({
         onStart: (botInfo) => {
           activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
-          console.log(`${botConfig.name} Telegram is live — bot: @${botInfo.username}, dashboard: http://localhost:${server.port}`);
+          log.info("{botName} Telegram is live — bot: @{botUsername}, dashboard: http://localhost:{port}", { botName: botConfig.name, botUsername: botInfo.username, port: server.port });
         },
       });
     }
@@ -115,7 +119,7 @@ if (config.simulatorEnabled) {
           activityLog.push("system", `${botConfig.name} Slack app connected`);
         })
         .catch((err) => {
-          console.error(`[${botConfig.name}] Failed to start Slack app:`, err);
+          log.error("Failed to start Slack app: {error}", { botName: botConfig.name, error: err.message });
           activityLog.push("error", `${botConfig.name} Slack app failed: ${err.message}`);
         });
     }
@@ -137,7 +141,7 @@ if (config.simulatorEnabled) {
 
 // Graceful shutdown
 async function shutdown() {
-  console.log("\nShutting down...");
+  log.info("Shutting down...");
   stopScheduler();
 
   if (telegramBotMap) {

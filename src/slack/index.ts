@@ -5,6 +5,9 @@ import { createSlackMessageHandler } from "./handler.ts";
 
 import type { WebClient } from "@slack/web-api";
 import type { UserIdentity } from "../types.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bot", "slack");
 
 const USER_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const userInfoCache = new Map<string, { identity: UserIdentity; cachedAt: number }>();
@@ -25,12 +28,12 @@ async function resolveSlackUser(app: App, userId: string): Promise<UserIdentity>
       userId;
     const displayName = profile?.display_name?.trim() || undefined;
     const title = profile?.title?.trim() || undefined;
-    console.debug(`[slack] Resolved user ${userId} → "${name}" (display_name="${displayName}", title="${title}")`);
+    log.debug("Resolved user {userId} → \"{name}\" (display_name=\"{displayName}\", title=\"{title}\")", { userId, name, displayName, title });
     const info: UserIdentity = { name, displayName, title };
     userInfoCache.set(userId, { identity: info, cachedAt: Date.now() });
     return info;
   } catch (err) {
-    console.warn(`[slack] Failed to resolve username for ${userId} — check users:read scope:`, err);
+    log.warn("Failed to resolve username for {userId} — check users:read scope: {error}", { userId, error: err instanceof Error ? err.message : String(err) });
     return { name: userId };
   }
 }
@@ -61,17 +64,17 @@ async function resolveChannelId(client: WebClient, channelName: string): Promise
 }
 
 /** Create a postToChannel function bound to a Slack client */
-function makePostToChannel(client: WebClient, tag: string) {
+function makePostToChannel(client: WebClient, botName: string) {
   return async (channel: string, message: string) => {
     const channelId = await resolveChannelId(client, channel);
-    console.log(`${tag} postToChannel: channel="${channel}" → resolved="${channelId}", message="${message.slice(0, 100)}..."`);
+    log.info("postToChannel: channel=\"{channel}\" → resolved=\"{channelId}\", message=\"{preview}\"", { botName, channel, channelId, preview: message.slice(0, 100) });
     const result = await client.chat.postMessage({ channel: channelId, text: message });
-    console.log(`${tag} postToChannel: success, ts=${result.ts}, channel=${result.channel}`);
+    log.info("postToChannel: success, ts={ts}, channel={ch}", { botName, ts: result.ts, ch: result.channel });
   };
 }
 
 export async function createSlackApp(config: Config, botConfig: BotConfig): Promise<App> {
-  const tag = `[${botConfig.name}/slack]`;
+  const bn = botConfig.name;
 
   // Track threads where the bot has responded — auto-respond without re-tagging
   // Key: "channel:threadTs", Value: last activity timestamp
@@ -114,7 +117,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       }
       return lines;
     } catch (err) {
-      console.warn(`${tag} Failed to fetch channel messages for ${channel}:`, err);
+      log.warn("Failed to fetch channel messages for {channel}: {error}", { botName: bn, channel, error: err instanceof Error ? err.message : String(err) });
       return [];
     }
   }
@@ -132,7 +135,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       }
       return lines;
     } catch (err) {
-      console.warn(`${tag} Failed to fetch thread messages for ${channel}:${threadTs}:`, err);
+      log.warn("Failed to fetch thread messages for {channel}:{threadTs}: {error}", { botName: bn, channel, threadTs, error: err instanceof Error ? err.message : String(err) });
       return [];
     }
   }
@@ -161,7 +164,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       const userId = "user" in message ? (message.user ?? "unknown") : "unknown";
       const userInfo = await resolveSlackUser(app, userId);
 
-      console.log(`${tag} Assistant message from ${userInfo.name} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+      log.info("Assistant message from {username} ({userId}): \"{preview}\"", { botName: bn, username: userInfo.name, userId, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
       await handleMessage({
         text,
@@ -170,7 +173,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         userIdentity: userInfo,
         say: async (msg: string) => { await say(msg); },
         setStatus: async (status: string) => { await setStatus(status); },
-        postToChannel: makePostToChannel(app.client, tag),
+        postToChannel: makePostToChannel(app.client, botConfig.name),
         platform: "slack_assistant",
       });
     },
@@ -199,7 +202,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     const channelInfo = await client.conversations.info({ channel: event.channel }).catch(() => null);
     const channelName = channelInfo?.channel?.name ? `#${channelInfo.channel.name}` : event.channel;
 
-    console.log(`${tag} Channel mention from ${userInfo.name} (${userId}) in ${channelName}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    log.info("Channel mention from {username} ({userId}) in {channel}: \"{preview}\"", { botName: bn, username: userInfo.name, userId, channel: channelName, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
     // Fetch recent messages for context
     const recentChannelMessages = event.thread_ts
@@ -214,7 +217,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         status: "tenker...",
       });
     } catch (err) {
-      console.log(`${tag} assistant.threads.setStatus not available:`, err);
+      log.warn("assistant.threads.setStatus not available: {error}", { botName: bn, error: err instanceof Error ? err.message : String(err) });
     }
 
     await handleMessage({
@@ -238,7 +241,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
           });
         } catch { /* ignore */ }
       },
-      postToChannel: makePostToChannel(client, tag),
+      postToChannel: makePostToChannel(client, botConfig.name),
       channelContext: channelName,
       recentChannelMessages,
       platform: "slack_channel",
@@ -273,7 +276,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       // Fetch thread messages for context
       const recentChannelMessages = await fetchThreadMessages(client, channel, threadTs);
 
-      console.log(`${tag} Thread follow-up from ${userInfo.name} (${userId}) in ${channelName}: "${cleanText.slice(0, 80)}${cleanText.length > 80 ? "..." : ""}"`);
+      log.info("Thread follow-up from {username} ({userId}) in {channel}: \"{preview}\"", { botName: bn, username: userInfo.name, userId, channel: channelName, preview: cleanText.slice(0, 80) + (cleanText.length > 80 ? "..." : "") });
 
       // Show native Slack thinking indicator
       try {
@@ -305,7 +308,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
             });
           } catch { /* ignore */ }
         },
-        postToChannel: makePostToChannel(client, tag),
+        postToChannel: makePostToChannel(client, botConfig.name),
         channelContext: channelName,
         recentChannelMessages,
         platform: "slack_channel",
@@ -321,7 +324,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     if (threadTs) return;
 
     const userInfo = await resolveSlackUser(app, userId);
-    console.log(`${tag} DM from ${userInfo.name} (${userId}): "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`);
+    log.info("DM from {username} ({userId}): \"{preview}\"", { botName: bn, username: userInfo.name, userId, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
     {
       // Post a "Thinking..." message, then update it with the real response
@@ -349,7 +352,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
           }
         },
         setStatus: async (_status: string) => {},
-        postToChannel: makePostToChannel(client, tag),
+        postToChannel: makePostToChannel(client, botConfig.name),
         platform: "slack_dm",
       });
 
@@ -361,7 +364,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
   });
 
   await app.start();
-  console.log(`${tag} Slack app started in Socket Mode`);
+  log.info("Slack app started in Socket Mode", { botName: bn });
 
   return app;
 }

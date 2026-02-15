@@ -4,6 +4,9 @@ import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("goals");
 
 interface DetectionInput {
   userId: string;
@@ -25,7 +28,7 @@ interface DetectionResult {
 
 export function extractGoalAsync(input: DetectionInput, config: Config, traceContext?: TraceContext): void {
   doExtract(input, config, traceContext).catch((err) => {
-    console.error("[Jarvis] Goal detection failed:", err);
+    log.error("Goal detection failed: {error}", { botName: input.botName, error: err instanceof Error ? err.message : String(err) });
   });
 }
 
@@ -69,10 +72,7 @@ async function doExtract(
   try {
     result = extractJson<DetectionResult>(haiku.result);
   } catch {
-    console.error(
-      "[Jarvis] Goal detection: failed to parse detection result:",
-      haiku.result,
-    );
+    log.error("Goal detection: failed to parse result: {raw}", { botName: input.botName, raw: haiku.result.slice(0, 300) });
     tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }
@@ -97,7 +97,7 @@ async function doExtract(
       platform: input.platform,
     });
 
-    console.log(`[Jarvis] Goal detected: "${result.title}" (id: ${goalId})`);
+    log.info("Goal detected: \"{title}\" (id: {goalId})", { botName: input.botName, title: result.title, goalId });
     tracer?.finish("ok", { action: "new", title: result.title });
     return;
   }
@@ -122,13 +122,9 @@ async function handleCompletion(
 
   if (match) {
     await updateGoalStatus(match.id, "completed");
-    console.log(
-      `[Jarvis] Goal completed: "${match.title}" (id: ${match.id})`,
-    );
+    log.info("Goal completed: \"{title}\" (id: {goalId})", { botName, title: match.title, goalId: match.id });
   } else {
-    console.log(
-      `[Jarvis] Goal completion detected for "${completedTitle}" but no matching active goal found`,
-    );
+    log.info("Goal completion detected for \"{title}\" but no matching active goal found", { botName, title: completedTitle });
   }
 }
 

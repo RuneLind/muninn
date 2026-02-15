@@ -27,6 +27,8 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@logtape/file": "^2.0.2",
+    "@logtape/logtape": "^2.0.2",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@slack/bolt": "^4.6.0",
     "grammy": "^1.39.3",

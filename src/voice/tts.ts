@@ -1,6 +1,9 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { unlink } from "node:fs/promises";
+import { getLog } from "../logging.ts";
+
+const log = getLog("voice");
 
 const MAX_TTS_CHARS = 4000;
 
@@ -19,7 +22,7 @@ export async function isTtsAvailable(): Promise<boolean> {
   }
 
   if (!ttsAvailable) {
-    console.warn("[Voice] TTS unavailable — 'say' command not found (macOS only). Voice replies will be text-only.");
+    log.warn("TTS unavailable — 'say' command not found (macOS only). Voice replies will be text-only.");
   }
   return ttsAvailable;
 }

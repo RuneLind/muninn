@@ -17,11 +17,12 @@ import { synthesizeVoice } from "../voice/tts.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bot", "voice");
 
 export function createVoiceHandler(config: Config, botConfig: BotConfig) {
-  const tag = `[${botConfig.name}]`;
-
-  return async (ctx: Context) => {
+  return async (ctx: Context): Promise<void> => {
     const voice = ctx.message?.voice;
     if (!voice) return;
 
@@ -65,8 +66,9 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     }
     t.end("stt");
 
+    const props = { botName: botConfig.name, userId, username };
     activityLog.push("message_in", `[Voice] ${text}`, { userId, username, botName: botConfig.name });
-    console.log(`${tag} Voice from ${username}: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}" (STT: ${Math.round(t.summary().stt ?? 0)}ms)`);
+    log.info("Voice from {username}: \"{preview}\" (STT: {sttMs}ms)", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : ""), sttMs: Math.round(t.summary().stt ?? 0) });
 
     // Save transcribed message to DB
     t.start("db_save_user");
@@ -89,7 +91,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       agentStatus.set("calling_claude", username);
       const effectiveModel = botConfig.model ?? config.claudeModel;
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
-      console.log(`${tag} Calling Claude for voice (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
+      log.info("Calling Claude for voice (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
       t.start("claude");
       const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
       t.end("claude", {
@@ -101,7 +103,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         apiMs: result.durationApiMs,
         costUsd: result.costUsd,
       });
-      console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
+      log.info("Claude responded in {ms}ms ({numTurns} turns)", { ...props, ms: Math.round(t.summary().claude ?? 0), numTurns: result.numTurns });
       clearInterval(typingInterval);
 
       // Save assistant response
@@ -200,7 +202,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       } catch (ttsError) {
         if (!t.summary().tts) t.end("tts");
         const msg = ttsError instanceof Error ? ttsError.message : String(ttsError);
-        console.error(`[Voice] TTS failed: ${msg}`);
+        log.error("TTS failed: {error}", { ...props, error: msg });
         activityLog.push("error", `[Voice] TTS failed: ${msg}`, { userId, username, botName: botConfig.name });
       }
 
@@ -229,9 +231,9 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         },
       });
 
-      // Console timing breakdown
-      console.log(
-        `${tag} Voice request timing breakdown:\n` +
+      // Timing breakdown
+      log.info(
+        "Voice request timing breakdown:\n" +
           `  voice_download: ${pad(s.voice_download)}\n` +
           `  stt:           ${pad(s.stt)}\n` +
           `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
@@ -241,6 +243,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
           `  tts:           ${pad(s.tts)}\n` +
           `  ─────────────────────\n` +
           `  total:         ${pad(t.totalMs())}  ($${(result.costUsd ?? 0).toFixed(4)})`,
+        props,
       );
     } catch (error) {
       clearInterval(typingInterval);
@@ -253,10 +256,11 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         .filter(([, v]) => v != null)
         .map(([k]) => k)
         .pop() ?? "unknown";
-      console.error(
-        `${tag} Voice request failed after ${elapsed}ms (last completed phase: ${lastPhase})\n` +
+      log.error(
+        "Voice request failed after {elapsed}ms (last completed phase: {lastPhase})\n" +
           `  Error: ${errorMessage}\n` +
           `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
+        { ...props, elapsed, lastPhase },
       );
       activityLog.push("error", errorMessage, { userId, username, botName: botConfig.name });
       await ctx.reply(`Something went wrong: ${errorMessage}`);

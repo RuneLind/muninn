@@ -1,4 +1,7 @@
 import { getDb } from "../db/client.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("scheduler", "executor");
 
 export interface HaikuResult {
   result: string;
@@ -57,7 +60,7 @@ export async function spawnHaiku(
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
-      console.error(`[${botName ?? "haiku"}] Haiku process timed out after ${timeoutMs}ms — killing PID ${proc.pid}`);
+      log.error("Haiku process timed out after {timeoutMs}ms — killing PID {pid}", { botName: botName ?? "haiku", timeoutMs, pid: proc.pid });
       proc.kill();
       reject(new Error(`Haiku timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -143,6 +146,6 @@ function trackUsage(
     INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name)
     VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null})
   `.catch((err) => {
-    console.error(`[${botName ?? "haiku"}] Failed to track Haiku usage:`, err);
+    log.error("Failed to track Haiku usage: {error}", { botName: botName ?? "haiku", error: err instanceof Error ? err.message : String(err) });
   });
 }

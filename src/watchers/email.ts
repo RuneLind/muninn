@@ -1,6 +1,9 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("watchers", "email");
 
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string };
@@ -28,7 +31,7 @@ If nothing worth notifying, return: []`;
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {
-    console.warn(`[watcher-email] Failed to parse Haiku response as JSON, skipping. Raw:\n${result.slice(0, 300)}`);
+    log.warn("Failed to parse Haiku response as JSON, skipping. Raw: {raw}", { raw: result.slice(0, 300) });
     return [];
   }
 }

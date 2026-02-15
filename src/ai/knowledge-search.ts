@@ -4,6 +4,9 @@
  * and returns formatted results for injection into AI prompts.
  */
 
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "knowledge");
 const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 const KNOWLEDGE_TIMEOUT_MS = 3000;
 
@@ -54,7 +57,7 @@ export async function searchKnowledge(
     clearTimeout(timeout);
 
     if (!response.ok) {
-      console.warn(`[knowledge] API returned ${response.status}`);
+      log.warn("API returned {status}", { status: response.status });
       return { results: [], searchMs: performance.now() - t0 };
     }
 
@@ -65,9 +68,9 @@ export async function searchKnowledge(
     // Fail silently — knowledge is supplementary, not critical
     const isAbort = e instanceof DOMException && e.name === "AbortError";
     if (!isAbort) {
-      console.warn(`[knowledge] API unreachable: ${e instanceof Error ? e.message : e}`);
+      log.warn("API unreachable: {error}", { error: e instanceof Error ? e.message : String(e) });
     } else {
-      console.warn(`[knowledge] API timeout after ${KNOWLEDGE_TIMEOUT_MS}ms`);
+      log.warn("API timeout after {ms}ms", { ms: KNOWLEDGE_TIMEOUT_MS });
     }
     return { results: [], searchMs: performance.now() - t0 };
   }

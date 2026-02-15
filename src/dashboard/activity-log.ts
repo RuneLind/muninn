@@ -1,5 +1,8 @@
 import type { ActivityEvent, ActivityEventType } from "../types.ts";
 import { saveActivity, getRecentActivity } from "../db/activity.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("dashboard", "activity");
 
 type Subscriber = (event: ActivityEvent) => void;
 
@@ -17,7 +20,7 @@ class ActivityLog {
       this.events = persisted;
       this.dbReady = true;
     } catch (err) {
-      console.error("Failed to load activity from DB:", err);
+      log.error("Failed to load activity from DB: {error}", { error: err instanceof Error ? err.message : String(err) });
       this.dbReady = true; // still allow writes
     }
   }
@@ -52,7 +55,7 @@ class ActivityLog {
         costUsd: event.costUsd,
         metadata: event.metadata,
       }).catch((err) => {
-        console.error("Failed to persist activity event:", err);
+        log.error("Failed to persist activity event: {error}", { error: err instanceof Error ? err.message : String(err) });
       });
     }
 

@@ -4,6 +4,9 @@ import type { TaskType, Platform } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("scheduler", "detector");
 
 interface DetectionInput {
   userId: string;
@@ -60,7 +63,7 @@ export function extractScheduleAsync(
   traceContext?: TraceContext,
 ): void {
   doExtract(input, config, traceContext).catch((err) => {
-    console.error("[Jarvis] Schedule detection failed:", err);
+    log.error("Schedule detection failed: {error}", { botName: input.botName, error: err instanceof Error ? err.message : String(err) });
   });
 }
 
@@ -90,10 +93,7 @@ async function doExtract(
   try {
     result = extractJson<DetectionResult>(haiku.result);
   } catch {
-    console.error(
-      "[Jarvis] Schedule detection: failed to parse result:",
-      haiku.result,
-    );
+    log.error("Schedule detection: failed to parse result: {raw}", { botName: input.botName, raw: haiku.result.slice(0, 300) });
     tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }
@@ -118,13 +118,9 @@ async function doExtract(
     const newPrompt = result.prompt ?? null;
     if (newPrompt !== existing.prompt) {
       await updateTaskPrompt(existing.id, newPrompt);
-      console.log(
-        `[Jarvis] Scheduled task updated (duplicate detected): "${result.title}" (${taskType}, id: ${existing.id})`,
-      );
+      log.info("Scheduled task updated (duplicate detected): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
     } else {
-      console.log(
-        `[Jarvis] Scheduled task skipped (duplicate): "${result.title}" (${taskType}, id: ${existing.id})`,
-      );
+      log.info("Scheduled task skipped (duplicate): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
     }
     tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType, duplicate: true });
     return;
@@ -144,9 +140,7 @@ async function doExtract(
     platform: input.platform,
   });
 
-  console.log(
-    `[Jarvis] Scheduled task detected: "${result.title}" (${taskType}, id: ${taskId})`,
-  );
+  log.info("Scheduled task detected: \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId });
 
   tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType });
 }

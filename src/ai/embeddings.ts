@@ -1,4 +1,7 @@
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "embeddings");
 
 let extractor: FeatureExtractionPipeline | null = null;
 let initPromise: Promise<FeatureExtractionPipeline> | null = null;
@@ -24,17 +27,17 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
     const output = await pipe(text, { pooling: "mean", normalize: true });
     return Array.from(output.data as Float32Array);
   } catch (err) {
-    console.error("Embedding generation failed:", err);
+    log.error("Embedding generation failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     return null;
   }
 }
 
 export async function warmupEmbeddings(): Promise<void> {
   try {
-    console.log("Loading embedding model...");
+    log.info("Loading embedding model...");
     await getExtractor();
-    console.log("Embedding model ready");
+    log.info("Embedding model ready");
   } catch (err) {
-    console.error("Failed to load embedding model:", err);
+    log.error("Failed to load embedding model: {error}", { error: err instanceof Error ? err.message : String(err) });
   }
 }

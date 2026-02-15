@@ -4,6 +4,9 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("memory");
 
 interface ExtractionInput {
   userId: string;
@@ -45,7 +48,7 @@ Assistant replied: """
 export function extractMemoryAsync(input: ExtractionInput, config: Config, traceContext?: TraceContext): void {
   // Fire and forget — don't block the chat response
   doExtract(input, config, traceContext).catch((err) => {
-    console.error("Memory extraction failed:", err);
+    log.error("Memory extraction failed: {error}", { botName: input.botName, error: err instanceof Error ? err.message : String(err) });
   });
 }
 
@@ -70,7 +73,7 @@ async function doExtract(input: ExtractionInput, config: Config, traceContext?: 
   try {
     result = extractJson<ExtractionResult>(haiku.result);
   } catch {
-    console.error("Memory extraction: failed to parse extraction result:", haiku.result);
+    log.error("Memory extraction: failed to parse result: {raw}", { botName: input.botName, raw: haiku.result.slice(0, 300) });
     tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }

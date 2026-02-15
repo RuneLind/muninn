@@ -1,5 +1,8 @@
 import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bots");
 
 export interface RestrictedToolGroup {
   description: string;
@@ -70,7 +73,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
   if (!existsSync(botsDir)) {
-    console.warn(`[Jarvis] bots/ directory not found at ${botsDir}`);
+    log.warn("bots/ directory not found at {path}", { path: botsDir });
     return [];
   }
 
@@ -96,7 +99,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     const hasSlack = !!slackBotToken && !!slackAppToken;
 
     if (opts.requireTokens && !hasTelegram && !hasSlack) {
-      console.log(`[Jarvis] Skipping bot "${name}" — no platform tokens found (need TELEGRAM_BOT_TOKEN_${envName} or SLACK_BOT_TOKEN_${envName} + SLACK_APP_TOKEN_${envName})`);
+      log.info("Skipping bot \"{name}\" — no platform tokens found (need TELEGRAM_BOT_TOKEN_{env} or SLACK_BOT_TOKEN_{env} + SLACK_APP_TOKEN_{env})", { name, env: envName });
       continue;
     }
 
@@ -122,7 +125,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
       } catch (e) {
-        console.warn(`[Jarvis] Failed to parse ${configJsonPath}: ${e}`);
+        log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }
     }
 
@@ -157,14 +160,15 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
 
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;
 
-    console.log(
-      `[Jarvis] Discovered bot "${name}" (platforms: ${platforms.join("+")}, ` +
+    log.info(
+      "Discovered bot \"{name}\" (platforms: {platforms}, " +
         `telegram users: ${telegramAllowedUserIds.length}, slack users: ${slackAllowedUserIds.length}, ` +
         `MCP: ${hasMcp ? "yes" : "no"}, ` +
         `settings: ${hasSettings ? "yes" : "no"}, ` +
         `config.json: ${hasConfigJson ? `yes (${configParts.join(", ") || "empty"})` : "no"}, ` +
         `channelListening: ${channelListening?.enabled ? "yes" : "no"}, ` +
         `dir: ${dir})`,
+      { name, platforms: platforms.join("+") },
     );
   }
 

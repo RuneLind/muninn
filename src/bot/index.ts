@@ -5,6 +5,9 @@ import { createAuthMiddleware } from "./middleware.ts";
 import { createMessageHandler } from "./handler.ts";
 import { createVoiceHandler } from "./voice-handler.ts";
 import { registerWatcherCommands } from "./watcher-commands.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bot", "telegram");
 
 export function createBot(config: Config, botConfig: BotConfig): Bot {
   const bot = new Bot(botConfig.telegramBotToken!);
@@ -21,7 +24,7 @@ export function createBot(config: Config, botConfig: BotConfig): Bot {
   bot.on("message:voice", createVoiceHandler(config, botConfig));
 
   bot.catch((err) => {
-    console.error(`[${botConfig.name}] Bot error:`, err.message);
+    log.error("Bot error: {error}", { botName: botConfig.name, error: err.message });
   });
 
   return bot;

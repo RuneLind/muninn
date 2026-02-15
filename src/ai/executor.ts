@@ -3,6 +3,9 @@ import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeResult } from "../types.ts";
 import { StreamParser } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "executor");
 
 export interface ClaudeExecResult extends ClaudeResult {
   wallClockMs: number;
@@ -55,7 +58,7 @@ export async function executeClaudePrompt(
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(
       () => {
-        console.error(`[${botConfig.name}] Claude process timed out after ${timeoutMs}ms — killing PID ${proc.pid}`);
+        log.error("Claude process timed out after {timeoutMs}ms — killing PID {pid}", { botName: botConfig.name, timeoutMs, pid: proc.pid });
         proc.kill();
         reject(new Error(`Claude timed out after ${timeoutMs}ms`));
       },
@@ -70,7 +73,7 @@ export async function executeClaudePrompt(
 
     if (exitCode !== 0) {
       const stderr = await new Response(proc.stderr).text();
-      console.error(`[${botConfig.name}] Claude process exited with code ${exitCode} (PID ${proc.pid})\n  stderr: ${stderr.slice(0, 500)}`);
+      log.error("Claude process exited with code {exitCode} (PID {pid})\n  stderr: {stderr}", { botName: botConfig.name, exitCode, pid: proc.pid, stderr: stderr.slice(0, 500) });
       throw new Error(`Claude exited with code ${exitCode}: ${stderr}`);
     }
 
@@ -147,12 +150,12 @@ function parseStreamOutput(lines: TimestampedLine[], botName: string): ClaudeRes
     if (e instanceof Error && e.message.startsWith("Claude error:")) {
       throw e;
     }
-    console.warn(`[${botName}] Stream parser failed, trying legacy JSON parser: ${e}`);
+    log.warn("Stream parser failed, trying legacy JSON parser: {error}", { botName, error: String(e) });
   }
 
   // Fallback: concatenate all lines and try legacy JSON parse
   // This handles cases where stream-json result event is missing (known bug)
   const fullOutput = lines.map((l) => l.line).join("\n");
-  console.warn(`[${botName}] Falling back to legacy JSON parser (${lines.length} lines)`);
+  log.warn("Falling back to legacy JSON parser ({lineCount} lines)", { botName, lineCount: lines.length });
   return parseClaudeOutput(fullOutput);
 }
