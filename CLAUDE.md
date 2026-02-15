@@ -207,13 +207,14 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 |---|---|---|
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
-| AI | `src/ai/` | Claude executor (cwd-based isolation), prompt builder, embeddings |
+| AI | `src/ai/` | Claude executor (stream-json + tool tracking), prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
 | Watchers | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours, runner |
 | DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, user settings |
-| Dashboard | `src/dashboard/` | Hono server with SSE activity feed + REST APIs |
+| Tracing | `src/tracing/` | Request tracing with span hierarchy, tool call child spans |
+| Dashboard | `src/dashboard/` | Hono server with SSE activity feed, traces waterfall + REST APIs |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
 
 ### Bot Folder Structure
@@ -260,7 +261,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`
+- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
 
 ### Configuration (.env)
 
@@ -318,6 +319,8 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
 - Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + conversation history
 - Claude CLI isolation: each bot spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there
+- Claude CLI output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
+- MCP tool tracking: tool calls extracted from stream-json `assistant` messages, per-tool timing from timestamped line reads, displayed as child spans in traces waterfall
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
 - Watcher email checking: Haiku spawned with bot's cwd for Gmail MCP access

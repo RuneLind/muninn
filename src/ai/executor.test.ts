@@ -59,7 +59,8 @@ describe("executeClaudePrompt", () => {
     expect(args).toContain("-p");
     expect(args).toContain("test prompt");
     expect(args).toContain("--output-format");
-    expect(args).toContain("json");
+    expect(args).toContain("stream-json");
+    expect(args).toContain("--verbose");
     expect(args).toContain("--model");
     expect(args).toContain("sonnet");
     expect(opts!.cwd).toBe("/tmp/testbot");

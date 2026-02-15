@@ -105,6 +105,33 @@ export class Tracer {
     return durationMs;
   }
 
+  /** Create a completed child span under a named parent span (for pre-computed durations like tool calls).
+   *  Status defaults to 'ok' in the DB schema. */
+  addChildSpan(
+    parentLabel: string,
+    name: string,
+    durationMs: number,
+    attributes?: Record<string, unknown>,
+  ): void {
+    if (!this.enabled) return;
+
+    const parentSpan = this.spans.get(parentLabel);
+    const parentId = parentSpan?.id ?? this.rootSpanId;
+
+    saveSpan({
+      id: crypto.randomUUID(),
+      traceId: this.traceId,
+      parentId,
+      name,
+      kind: "span",
+      botName: this.opts.botName,
+      userId: this.opts.userId,
+      startedAt: new Date(),
+      durationMs: Math.round(durationMs),
+      attributes,
+    }).catch(logError);
+  }
+
   /** Point-in-time event (no duration) */
   event(label: string, attributes?: Record<string, unknown>): void {
     if (!this.enabled) return;

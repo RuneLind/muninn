@@ -76,7 +76,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     // Build context-aware prompt and run through Claude
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity, botConfig.knowledgeCollections);
     t.end("prompt_build", promptMeta);
     savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});
 

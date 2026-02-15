@@ -8,8 +8,8 @@
     "dev:simulator": "SIMULATOR_ENABLED=true SCHEDULER_ENABLED=false DASHBOARD_PORT=3011 bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test src/utils/ src/bot/telegram-format.test.ts src/slack/slack-format.test.ts src/ai/result-parser.test.ts src/ai/tool-restrictions.test.ts src/db/ src/simulator/state.test.ts src/voice/tts.test.ts && bun test src/scheduler/executor.test.ts && bun test src/core/message-processor.test.ts && bun test src/ai/prompt-builder.test.ts src/ai/executor.test.ts src/bot/handler.test.ts src/bot/middleware.test.ts src/slack/handler.test.ts src/memory/ src/scheduler/detector.test.ts src/scheduler/briefing-prompt.test.ts src/watchers/",
-    "test:unit": "bun test src/utils/ src/ai/result-parser.test.ts src/ai/tool-restrictions.test.ts src/slack/slack-format.test.ts src/bot/telegram-format.test.ts",
+    "test": "bun test src/utils/ src/bot/telegram-format.test.ts src/slack/slack-format.test.ts src/ai/result-parser.test.ts src/ai/stream-parser.test.ts src/ai/tool-restrictions.test.ts src/ai/knowledge-search.test.ts src/db/ src/simulator/state.test.ts src/voice/tts.test.ts && bun test src/scheduler/executor.test.ts && bun test src/core/message-processor.test.ts && bun test src/ai/prompt-builder.test.ts src/ai/executor.test.ts src/bot/handler.test.ts src/bot/middleware.test.ts src/slack/handler.test.ts src/memory/ src/scheduler/detector.test.ts src/scheduler/briefing-prompt.test.ts src/watchers/",
+    "test:unit": "bun test src/utils/ src/ai/result-parser.test.ts src/ai/stream-parser.test.ts src/ai/tool-restrictions.test.ts src/ai/knowledge-search.test.ts src/slack/slack-format.test.ts src/bot/telegram-format.test.ts",
     "test:db": "bun test src/db/",
     "test:handlers": "bun test src/core/message-processor.test.ts src/ai/prompt-builder.test.ts src/ai/executor.test.ts src/bot/handler.test.ts src/bot/middleware.test.ts src/slack/handler.test.ts src/memory/ src/scheduler/detector.test.ts src/scheduler/briefing-prompt.test.ts src/watchers/ src/simulator/state.test.ts src/voice/tts.test.ts",
     "test:integration": "bun test src/simulator/integration.test.ts",
@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "@slack/bolt": "^4.6.0",
     "grammy": "^1.39.3",
     "hono": "^4.11.8",

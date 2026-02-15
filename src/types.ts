@@ -36,6 +36,14 @@ export interface ActivityEvent {
   metadata?: TimingMetadata;
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;        // e.g. "mcp__gmail__search_emails"
+  displayName: string; // e.g. "search_emails (gmail)"
+  durationMs: number;
+  input?: string;      // abbreviated JSON, max 500 chars
+}
+
 export interface ClaudeResult {
   result: string;
   costUsd: number;
@@ -46,6 +54,7 @@ export interface ClaudeResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  toolCalls?: ToolCall[];
 }
 
 export interface JarvisMessage {

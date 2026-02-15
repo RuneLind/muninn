@@ -96,7 +96,7 @@ export async function getRecentTraces(
   const rows = await sql`
     SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
            t.started_at, t.duration_ms, t.attributes, t.created_at,
-           c.input_tokens, c.output_tokens
+           c.input_tokens, c.output_tokens, c.tool_count
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -107,7 +107,11 @@ export async function getRecentTraces(
         (CASE
           WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'outputTokens')::int
           WHEN jsonb_typeof(cs.attributes) = 'array'  THEN ((cs.attributes->>-1)::jsonb->>'outputTokens')::int
-        END) AS output_tokens
+        END) AS output_tokens,
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'toolCount')::int
+          ELSE NULL
+        END) AS tool_count
       FROM traces cs
       WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
       LIMIT 1
@@ -200,9 +204,10 @@ function mapRow(r: Record<string, any>): SpanRow {
     }, {});
   }
 
-  // Merge token data from child span join (if available and not already in attributes)
+  // Merge token/tool data from child span join (if available and not already in attributes)
   if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
   if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
+  if (r.tool_count != null && !attrs.toolCount) attrs = { ...attrs, toolCount: Number(r.tool_count) };
 
   return {
     id: r.id,

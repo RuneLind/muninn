@@ -11,7 +11,8 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 - **Scheduled Tasks** — Cron-style or interval-based recurring tasks detected from conversation ("remind me every morning at 8") — supports reminders, AI-generated briefings, and custom prompts
 - **Proactive Watchers** — Background monitors (email via Gmail MCP) with quiet hours and dedup
 - **Voice** — Speech-to-text (whisper-cli) and text-to-speech (macOS say + ffmpeg) with mirror mode (voice in → voice + text out)
-- **Live Dashboard** — Hono web server with SSE real-time activity feed, stats, goals, tasks, and memories panels
+- **Request Tracing** — Full request lifecycle tracing with MCP tool call tracking (which tools, how long each took), waterfall visualization in the dashboard
+- **Live Dashboard** — Hono web server with SSE real-time activity feed, stats, goals, tasks, memories, and traces panels
 - **Local-first** — All data stays on your machine (PostgreSQL via Docker, local embeddings, no cloud dependencies beyond Telegram and Claude API)
 
 ## Prerequisites
@@ -128,13 +129,14 @@ bots/
 | `src/bots/config.ts` | Bot auto-discovery from `bots/` directory |
 | `src/index.ts` | Entrypoint — inits DB, discovers bots, starts all + dashboard + scheduler |
 | `src/bot/` | Telegram handlers (text, voice), auth middleware, HTML formatting |
-| `src/ai/` | Claude executor (cwd-based isolation), prompt builder, local embeddings |
+| `src/ai/` | Claude executor (stream-json + tool tracking), prompt builder, local embeddings |
 | `src/memory/` | Async memory extraction from conversations |
 | `src/goals/` | Goal detection (async Claude Haiku) |
 | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), shared Haiku executor |
 | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours |
-| `src/db/` | Postgres CRUD — messages, memories, goals, scheduled tasks, activity, watchers |
-| `src/dashboard/` | Hono web server with SSE + REST APIs |
+| `src/db/` | Postgres CRUD — messages, memories, goals, scheduled tasks, activity, watchers, traces |
+| `src/tracing/` | Request tracing with span hierarchy and MCP tool call child spans |
+| `src/dashboard/` | Hono web server with SSE activity feed, traces waterfall + REST APIs |
 | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
 
 ## Adding a New Bot
@@ -176,6 +178,12 @@ Any other text or voice message is forwarded to Claude for a conversational resp
 - `GET /api/goals/:userId` — Active goals for a user
 - `GET /api/scheduled-tasks/:userId` — Scheduled tasks for a user
 - `GET /api/events` — SSE stream for real-time activity updates
+- `GET /traces` — Traces dashboard with waterfall view (HTML)
+- `GET /api/traces` — Recent traces (supports `?bot=`, `?name=`, `?limit=`, `?offset=`)
+- `GET /api/traces/:traceId` — Span tree for a single trace
+- `GET /api/trace-stats` — Trace statistics (24h counts, avg duration, errors)
+- `GET /api/trace-filters` — Available filter options (bot names, trace types)
+- `GET /api/prompts/:traceId` — Prompt snapshot for a trace
 
 ## Simulator
 
@@ -291,12 +299,15 @@ Background monitors that check external services at intervals:
 ### Voice
 Send a voice message and the bot will transcribe it (whisper-cli), process it through Claude, and reply with both text and a voice message (mirror mode).
 
+### Tracing & Tool Tracking
+Every request creates a trace — a tree of timed spans (prompt build, Claude execution, DB saves, send). The Claude executor uses `--output-format stream-json --verbose` to capture MCP tool calls (Gmail, Calendar, etc.) from the NDJSON event stream. Each tool call becomes a child span with its own timing, visible in the traces dashboard waterfall as orange bars. See [`docs/tracing-and-tool-tracking.md`](docs/tracing-and-tool-tracking.md) for details.
+
 ## Testing
 
 Tests require the local Postgres container running (`bun run db:up`). A separate `javrvis_test` database is used automatically.
 
 ```bash
-bun run test              # Run all tests (220 tests across 22 files)
+bun run test              # Run all tests (341 tests across 29 files)
 bun run test:unit         # Unit tests only (pure functions, no DB)
 bun run test:db           # DB integration tests only
 bun run test:handlers     # Handler/integration tests (with mocks)

@@ -92,6 +92,7 @@ export function renderTracesPage(): string {
     .badge-bot { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
 
     .tokens { color: #888; font-size: 12px; }
+    .badge-tools { background: rgba(245, 158, 11, 0.15); color: #f59e0b; margin-left: 6px; }
 
     /* Waterfall */
     .waterfall-container {
@@ -155,6 +156,7 @@ export function renderTracesPage(): string {
     .waterfall-bar:hover { opacity: 0.8; }
     .waterfall-bar.kind-root { background: #6c63ff; }
     .waterfall-bar.kind-span { background: #22d3ee; }
+    .waterfall-bar.kind-tool { background: #f59e0b; }
     .waterfall-bar.kind-event { background: #fbbf24; width: 3px !important; }
     .waterfall-bar.status-error { background: #f87171; }
     .waterfall-duration {
@@ -356,6 +358,7 @@ export function renderTracesPage(): string {
           <th>User</th>
           <th>Duration</th>
           <th>Status</th>
+          <th>Tools</th>
           <th>Tokens</th>
         </tr>
       </thead>
@@ -449,12 +452,16 @@ export function renderTracesPage(): string {
     function renderTraceList(traces) {
       const tbody = document.getElementById('traceList');
       if (traces.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="empty">No traces found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No traces found</td></tr>';
         return;
       }
       tbody.innerHTML = traces.map(t => {
         // Find token info from child spans' attributes
         const tokens = fmtTokens(t.attributes);
+        const toolCount = t.attributes?.toolCount || 0;
+        const toolsBadge = toolCount > 0
+          ? '<span class="badge badge-tools">' + toolCount + '</span>'
+          : '<span style="color:#444">-</span>';
         return '<tr onclick="loadWaterfall(\\'' + t.traceId + '\\')" data-trace="' + t.traceId + '">' +
           '<td>' + fmtDate(t.startedAt) + '</td>' +
           '<td><span class="badge badge-name">' + esc(t.name) + '</span></td>' +
@@ -462,6 +469,7 @@ export function renderTracesPage(): string {
           '<td>' + (t.username || t.userId || '-') + '</td>' +
           '<td>' + fmtDuration(t.durationMs) + '</td>' +
           '<td><span class="badge badge-' + t.status + '">' + t.status + '</span></td>' +
+          '<td>' + toolsBadge + '</td>' +
           '<td class="tokens">' + tokens + '</td>' +
           '</tr>';
       }).join('');
@@ -498,6 +506,24 @@ export function renderTracesPage(): string {
       const el = document.getElementById('waterfall');
       if (spans.length === 0) { el.innerHTML = '<div class="empty">No spans</div>'; return; }
 
+      // Build parent lookup for nesting depth
+      const spanById = {};
+      spans.forEach(s => { spanById[s.id] = s; });
+
+      function nestingDepth(s) {
+        let depth = 0;
+        let current = s;
+        while (current.parentId && spanById[current.parentId]) {
+          depth++;
+          current = spanById[current.parentId];
+        }
+        return depth;
+      }
+
+      function isToolSpan(s) {
+        return s.attributes && (s.attributes.toolName || s.attributes.toolId);
+      }
+
       const minTime = Math.min(...spans.map(s => s.startedAt));
       const maxTime = Math.max(...spans.map(s => s.startedAt + (s.durationMs || 0)));
       const totalRange = Math.max(maxTime - minTime, 1);
@@ -506,11 +532,14 @@ export function renderTracesPage(): string {
         const left = ((s.startedAt - minTime) / totalRange) * 100;
         const width = s.kind === 'event' ? 0.3 : Math.max(((s.durationMs || 0) / totalRange) * 100, 0.3);
         const statusClass = s.status === 'error' ? ' status-error' : '';
-        const label = (s.parentId ? '  ' : '') + s.name;
+        const depth = nestingDepth(s);
+        const indent = '\u00A0\u00A0'.repeat(depth);
+        const label = indent + s.name;
+        const barKind = isToolSpan(s) ? 'tool' : s.kind;
         return '<div class="waterfall-row">' +
           '<div class="waterfall-label" title="' + esc(s.name) + '">' + esc(label) + '</div>' +
           '<div class="waterfall-bar-container">' +
-            '<div class="waterfall-bar kind-' + s.kind + statusClass + '" ' +
+            '<div class="waterfall-bar kind-' + barKind + statusClass + '" ' +
               'style="left:' + left + '%;width:' + width + '%"' +
               ' data-span-index="' + i + '">' +
               '<span class="waterfall-duration">' + fmtDuration(s.durationMs) + '</span>' +

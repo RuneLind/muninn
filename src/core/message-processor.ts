@@ -76,6 +76,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   t.start("prompt_build");
   const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(
     userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity ?? username,
+    botConfig.knowledgeCollections,
   );
   t.end("prompt_build", promptMeta);
 
@@ -100,6 +101,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     console.log(`${tag} Calling Claude (model: ${effectiveModel}, timeout: ${effectiveTimeout}ms)...`);
     t.start("claude");
     const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt);
+    const toolCount = result.toolCalls?.length ?? 0;
     t.end("claude", {
       model: result.model,
       inputTokens: result.inputTokens,
@@ -108,8 +110,22 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       startupMs: result.startupMs,
       apiMs: result.durationApiMs,
       costUsd: result.costUsd,
+      toolCount,
     });
-    console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns)`);
+
+    // Create child spans for each tool call
+    if (result.toolCalls) {
+      for (const tool of result.toolCalls) {
+        t.addChildSpan("claude", tool.displayName, tool.durationMs, {
+          toolId: tool.id,
+          toolName: tool.name,
+          input: tool.input,
+        });
+      }
+    }
+
+    const toolInfo = toolCount > 0 ? `, ${toolCount} tools: ${result.toolCalls!.map(tc => tc.displayName).join(", ")}` : "";
+    console.log(`${tag} Claude responded in ${Math.round(t.summary().claude ?? 0)}ms (${result.numTurns} turns${toolInfo})`);
 
     // Save assistant response to DB
     agentStatus.set("saving_response", username);
