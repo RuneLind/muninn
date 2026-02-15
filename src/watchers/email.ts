@@ -1,5 +1,6 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
+import { extractJson } from "../ai/json-extract.ts";
 
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string };
@@ -25,7 +26,7 @@ If nothing worth notifying, return: []`;
 
   const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName);
   try {
-    return JSON.parse(extractJsonArray(result));
+    return extractJson<WatcherAlert[]>(result);
   } catch {
     console.warn(`[watcher-email] Failed to parse Haiku response as JSON, skipping. Raw:\n${result.slice(0, 300)}`);
     return [];
@@ -43,19 +44,4 @@ function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): 
     parts.push(`after:${yyyy}/${mm}/${dd}`);
   }
   return parts.join(" ");
-}
-
-function extractJsonArray(text: string): string {
-  // Strip markdown fences first
-  const stripped = text.replace(/^```(?:json)?\s*/m, "").replace(/\s*```$/m, "").trim();
-
-  // Find the JSON array in the response — Haiku sometimes wraps it in prose
-  const start = stripped.indexOf("[");
-  const end = stripped.lastIndexOf("]");
-  if (start !== -1 && end > start) {
-    return stripped.slice(start, end + 1);
-  }
-
-  // No array found — assume empty
-  return "[]";
 }

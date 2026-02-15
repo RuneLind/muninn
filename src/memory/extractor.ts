@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import { saveMemory } from "../db/memories.ts";
 import { generateEmbedding } from "../ai/embeddings.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
+import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface ExtractionInput {
@@ -67,12 +68,10 @@ async function doExtract(input: ExtractionInput, config: Config, traceContext?: 
 
   let result: ExtractionResult;
   try {
-    // Strip markdown fences if Haiku wraps the JSON in ```json ... ```
-    const cleaned = haiku.result.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/,"");
-    result = JSON.parse(cleaned);
+    result = extractJson<ExtractionResult>(haiku.result);
   } catch {
     console.error("Memory extraction: failed to parse extraction result:", haiku.result);
-    tracer?.finish("error", { error: "parse_failed" });
+    tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }
 

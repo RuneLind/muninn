@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import type { Platform } from "../types.ts";
 import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { spawnHaiku } from "../scheduler/executor.ts";
+import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface DetectionInput {
@@ -66,16 +67,13 @@ async function doExtract(
 
   let result: DetectionResult;
   try {
-    const cleaned = haiku.result
-      .replace(/^```(?:json)?\s*\n?/i, "")
-      .replace(/\n?```\s*$/, "");
-    result = JSON.parse(cleaned);
+    result = extractJson<DetectionResult>(haiku.result);
   } catch {
     console.error(
       "[Jarvis] Goal detection: failed to parse detection result:",
       haiku.result,
     );
-    tracer?.finish("error", { error: "parse_failed" });
+    tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }
 

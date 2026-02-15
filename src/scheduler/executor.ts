@@ -84,11 +84,23 @@ export async function spawnHaiku(
       ? Object.keys(parsed.modelUsage)[0] ?? "claude-haiku-4-5-20251001"
       : "claude-haiku-4-5-20251001";
 
+    // Normalize result to string — CLI 2.x may return an object
+    let resultText: string;
+    if (typeof parsed.result === "string") {
+      resultText = parsed.result;
+    } else if (parsed.result?.content) {
+      // CLI 2.x object format: { content: [{ type: "text", text: "..." }] }
+      const textBlock = parsed.result.content.find((b: any) => b.type === "text");
+      resultText = textBlock?.text ?? "";
+    } else {
+      resultText = String(parsed.result ?? "");
+    }
+
     // Track usage async — don't block the caller
     trackUsage(source, model, inputTokens, outputTokens, botName);
 
     return {
-      result: parsed.result,
+      result: resultText,
       inputTokens,
       outputTokens,
       model,

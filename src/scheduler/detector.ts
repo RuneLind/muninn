@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
 import type { TaskType, Platform } from "../types.ts";
 import { spawnHaiku } from "./executor.ts";
+import { extractJson } from "../ai/json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 interface DetectionInput {
@@ -87,16 +88,13 @@ async function doExtract(
 
   let result: DetectionResult;
   try {
-    const cleaned = haiku.result
-      .replace(/^```(?:json)?\s*\n?/i, "")
-      .replace(/\n?```\s*$/, "");
-    result = JSON.parse(cleaned);
+    result = extractJson<DetectionResult>(haiku.result);
   } catch {
     console.error(
       "[Jarvis] Schedule detection: failed to parse result:",
       haiku.result,
     );
-    tracer?.finish("error", { error: "parse_failed" });
+    tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
     return;
   }
 
