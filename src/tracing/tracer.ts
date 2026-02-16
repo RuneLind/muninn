@@ -109,17 +109,27 @@ export class Tracer {
   }
 
   /** Create a completed child span under a named parent span (for pre-computed durations like tool calls).
+   *  If startOffsetMs is provided, the span's start time is offset from the parent span's start.
    *  Status defaults to 'ok' in the DB schema. */
   addChildSpan(
     parentLabel: string,
     name: string,
     durationMs: number,
     attributes?: Record<string, unknown>,
+    startOffsetMs?: number,
   ): void {
     if (!this.enabled) return;
 
     const parentSpan = this.spans.get(parentLabel);
     const parentId = parentSpan?.id ?? this.rootSpanId;
+
+    // Position the child span at the correct time within its parent
+    let startedAt: Date;
+    if (startOffsetMs != null && parentSpan) {
+      startedAt = new Date(parentSpan.startedAt.getTime() + startOffsetMs);
+    } else {
+      startedAt = parentSpan ? parentSpan.startedAt : new Date();
+    }
 
     saveSpan({
       id: crypto.randomUUID(),
@@ -129,7 +139,7 @@ export class Tracer {
       kind: "span",
       botName: this.opts.botName,
       userId: this.opts.userId,
-      startedAt: new Date(),
+      startedAt,
       durationMs: Math.round(durationMs),
       attributes,
     }).catch(logError);

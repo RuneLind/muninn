@@ -119,14 +119,14 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCount,
     });
 
-    // Create child spans for each tool call
+    // Create child spans for each tool call (positioned at their actual execution time)
     if (result.toolCalls) {
       for (const tool of result.toolCalls) {
         t.addChildSpan("claude", tool.displayName, tool.durationMs, {
           toolId: tool.id,
           toolName: tool.name,
           input: tool.input,
-        });
+        }, tool.startOffsetMs);
       }
     }
 

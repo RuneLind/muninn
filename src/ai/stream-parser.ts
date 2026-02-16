@@ -41,6 +41,15 @@ export class StreamParser {
   private toolCalls: ToolCall[] = [];
   private pendingTools: PendingToolCall[] = [];
   private hasResult = false;
+  /** Reference timestamp (performance.now()) for computing tool startOffsetMs */
+  private refTimestamp: number;
+
+  /**
+   * @param referenceTimestamp - performance.now() at CLI spawn time, used to compute tool startOffsetMs
+   */
+  constructor(referenceTimestamp: number = performance.now()) {
+    this.refTimestamp = referenceTimestamp;
+  }
 
   /**
    * Parse a single NDJSON line with its arrival timestamp.
@@ -112,11 +121,13 @@ export class StreamParser {
   private resolvePendingTools(endTimestamp: number): void {
     for (const pending of this.pendingTools) {
       const durationMs = Math.max(0, Math.round(endTimestamp - pending.startTimestamp));
+      const startOffsetMs = Math.max(0, Math.round(pending.startTimestamp - this.refTimestamp));
       this.toolCalls.push({
         id: pending.id,
         name: pending.name,
         displayName: formatToolDisplayName(pending.name),
         durationMs,
+        startOffsetMs,
         input: abbreviateInput(pending.input),
       });
     }

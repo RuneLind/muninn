@@ -78,7 +78,7 @@ export async function executeClaudePrompt(
     }
 
     const wallClockMs = performance.now() - wallStart;
-    const parsed = parseStreamOutput(lines, botConfig.name);
+    const parsed = parseStreamOutput(lines, botConfig.name, wallStart);
     const startupMs = wallClockMs - parsed.durationMs;
 
     return { ...parsed, wallClockMs, startupMs };
@@ -135,10 +135,10 @@ async function readLinesWithTimestamps(stdout: ReadableStream<Uint8Array>): Prom
 }
 
 /** Parse stream-json NDJSON lines, falling back to legacy JSON parser */
-function parseStreamOutput(lines: TimestampedLine[], botName: string): ClaudeResult {
+function parseStreamOutput(lines: TimestampedLine[], botName: string, referenceTimestamp?: number): ClaudeResult {
   // Try stream-json parsing first
   try {
-    const parser = new StreamParser();
+    const parser = new StreamParser(referenceTimestamp);
     for (const { line, timestamp } of lines) {
       parser.parseLine(line, timestamp);
     }

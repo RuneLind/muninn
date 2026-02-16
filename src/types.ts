@@ -41,6 +41,7 @@ export interface ToolCall {
   name: string;        // e.g. "mcp__gmail__search_emails"
   displayName: string; // e.g. "search_emails (gmail)"
   durationMs: number;
+  startOffsetMs: number; // offset from Claude CLI start (for waterfall positioning)
   input?: string;      // abbreviated JSON, max 500 chars
 }
 

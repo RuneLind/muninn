@@ -68,10 +68,10 @@ describe("StreamParser", () => {
   });
 
   test("extracts tool calls from assistant messages", () => {
-    const parser = new StreamParser();
+    const t0 = 1000;
+    const parser = new StreamParser(t0);
 
     // Simulate: assistant calls a tool, user returns result, assistant responds
-    const t0 = 1000;
     parser.parseLine(JSON.stringify(systemEvent), t0);
     parser.parseLine(JSON.stringify(makeAssistant([
       { type: "text", text: "Let me check." },
@@ -96,12 +96,13 @@ describe("StreamParser", () => {
     expect(tool.name).toBe("mcp__gmail__search_emails");
     expect(tool.displayName).toBe("search_emails (gmail)");
     expect(tool.durationMs).toBe(2000); // 2100 - 100
+    expect(tool.startOffsetMs).toBe(100); // tool started 100ms after ref
     expect(tool.input).toBe('{"query":"from:boss"}');
   });
 
   test("handles multiple tools in one turn", () => {
-    const parser = new StreamParser();
     const t0 = 1000;
+    const parser = new StreamParser(t0);
 
     parser.parseLine(JSON.stringify(systemEvent), t0);
     parser.parseLine(JSON.stringify(makeAssistant([
@@ -125,11 +126,14 @@ describe("StreamParser", () => {
     // Both tools started at same time, resolved at same time
     expect(result.toolCalls![0]!.durationMs).toBe(5000);
     expect(result.toolCalls![1]!.durationMs).toBe(5000);
+    // Both have same start offset (appeared in same assistant message)
+    expect(result.toolCalls![0]!.startOffsetMs).toBe(100);
+    expect(result.toolCalls![1]!.startOffsetMs).toBe(100);
   });
 
   test("handles multiple sequential tool turns", () => {
-    const parser = new StreamParser();
     const t0 = 0;
+    const parser = new StreamParser(t0);
 
     parser.parseLine(JSON.stringify(systemEvent), t0);
     // Turn 1: read file
@@ -157,8 +161,10 @@ describe("StreamParser", () => {
     expect(result.toolCalls![0]!.name).toBe("Read");
     expect(result.toolCalls![0]!.displayName).toBe("Read");
     expect(result.toolCalls![0]!.durationMs).toBe(100); // 200 - 100
+    expect(result.toolCalls![0]!.startOffsetMs).toBe(100); // started at t0 + 100
     expect(result.toolCalls![1]!.name).toBe("Write");
     expect(result.toolCalls![1]!.durationMs).toBe(100); // 1300 - 1200
+    expect(result.toolCalls![1]!.startOffsetMs).toBe(1200); // started at t0 + 1200
   });
 
   test("uses result text over last assistant text", () => {
@@ -230,9 +236,9 @@ describe("StreamParser", () => {
   });
 
   test("abbreviates long tool input", () => {
-    const parser = new StreamParser();
-    const longInput = { data: "x".repeat(600) };
     const t0 = 0;
+    const parser = new StreamParser(t0);
+    const longInput = { data: "x".repeat(600) };
 
     parser.parseLine(JSON.stringify(systemEvent), t0);
     parser.parseLine(JSON.stringify(makeAssistant([
