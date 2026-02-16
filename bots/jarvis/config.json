@@ -1,3 +1,5 @@
 {
-  "model": "sonnet"
+  "model": "claude-opus-4-6",
+  "thinkingMaxTokens": 40000,
+  "timeoutMs": 300000
 }

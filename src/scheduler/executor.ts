@@ -15,7 +15,7 @@ export interface HaikuResult {
  * All async Haiku calls should use this to get token tracking.
  *
  * When cwd is provided, Claude CLI auto-discovers .mcp.json and
- * .claude/settings.local.json from that directory, keeping bot
+ * .claude/settings.json from that directory, keeping bot
  * sessions isolated from the dev project root.
  */
 export const HAIKU_TIMEOUT_MS = 60_000;

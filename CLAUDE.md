@@ -195,7 +195,7 @@ Each bot lives in `bots/<name>/` with its own:
 - `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
 - `config.json` — per-bot overrides (model, thinking tokens, timeout)
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
-- `.claude/settings.local.json` — tool permissions
+- `.claude/settings.json` — tool permissions
 
 Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately from the dev project root.
 
@@ -227,13 +227,13 @@ bots/
 │   ├── config.json              ← model, thinking, timeout overrides
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
-│       └── settings.local.json  ← tool permissions
+│       └── settings.json  ← tool permissions
 ├── capra/
 │   ├── CLAUDE.md
 │   ├── config.json
 │   ├── .mcp.json
 │   └── .claude/
-│       └── settings.local.json
+│       └── settings.json
 ```
 
 #### Per-bot config.json
@@ -293,7 +293,7 @@ PostgreSQL + pgvector via Docker (single container).
 
 1. Create `bots/<name>/CLAUDE.md` with the bot's persona
 2. Optionally add `bots/<name>/config.json` (model, thinking, timeout overrides)
-3. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.local.json`
+3. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.json`
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
 

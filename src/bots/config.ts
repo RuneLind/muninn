@@ -54,7 +54,7 @@ export interface BotConfig {
  * 1. A CLAUDE.md file (persona)
  * 2. At least one platform token (Telegram or Slack)
  *
- * Claude CLI auto-discovers .mcp.json and .claude/settings.local.json
+ * Claude CLI auto-discovers .mcp.json and .claude/settings.json
  * from the bot's dir (set as cwd), so we don't need explicit paths.
  */
 /**
@@ -130,7 +130,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     }
 
     const hasMcp = existsSync(join(dir, ".mcp.json"));
-    const hasSettings = existsSync(join(dir, ".claude", "settings.local.json"));
+    const hasSettings = existsSync(join(dir, ".claude", "settings.json")) || existsSync(join(dir, ".claude", "settings.local.json"));
 
     const platforms: string[] = [];
     if (hasTelegram) platforms.push("telegram");
