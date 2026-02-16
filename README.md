@@ -167,8 +167,22 @@ bots/
 | `/watch <type> [filter]` | Create a new watcher. Types: `email`, `calendar`, `github`, `news`, `goal`. Example: `/watch email from:github.com` |
 | `/unwatch <name\|id>` | Remove a watcher by name or short ID |
 | `/quiet [start-end\|off]` | View, set, or disable quiet hours (e.g. `/quiet 22-08`) |
+| `/topic [name]` | Show current topic, or switch to (and create) a named topic. Example: `/topic work` |
+| `/topics` | List all topics with message counts and last activity |
+| `/deltopic <name>` | Delete a topic (cannot delete `main`). Messages are preserved. |
 
 Any other text or voice message is forwarded to Claude for a conversational response.
+
+### Conversation Threads
+
+Each user+bot pair can have multiple named conversation threads (topics). Only chat history is isolated per thread — memories, goals, and scheduled tasks are shared across all threads.
+
+- First message auto-creates a `main` thread (backward compatible with existing conversations)
+- `/topic work` switches to the "work" thread, creating it if needed
+- `/topic` with no argument shows the current thread and lists all threads
+- `/deltopic work` deletes a thread and switches back to `main`
+- Thread names are case-insensitive, max 50 characters
+- Pre-migration messages (before threads existed) are visible only in the `main` thread
 
 ## Dashboard API
 

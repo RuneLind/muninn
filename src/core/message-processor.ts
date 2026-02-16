@@ -38,6 +38,8 @@ export interface ProcessMessageParams {
   channelContext?: string;
   /** Recent messages from the channel/thread for context */
   recentChannelMessages?: string[];
+  /** Thread ID for conversation isolation (Telegram topics) */
+  threadId?: string;
 }
 
 export interface ProcessMessageResult {
@@ -58,7 +60,7 @@ export interface ProcessMessageResult {
 export async function processMessage(params: ProcessMessageParams): Promise<ProcessMessageResult | undefined> {
   const {
     text, userId, username, userIdentity, platform, botConfig, config,
-    say, setStatus, postToChannel, channelContext, recentChannelMessages,
+    say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
@@ -71,16 +73,17 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
   // Save user message to DB
   t.start("db_save_user");
-  await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform });
+  await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform, threadId });
   t.end("db_save_user");
 
   // Build context-aware prompt
   agentStatus.set("building_prompt", username);
   t.start("prompt_build");
-  const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(
-    userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity ?? username,
-    botConfig.knowledgeCollections,
-  );
+  const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
+    userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
+    restrictedTools: botConfig.restrictedTools, userIdentity: userIdentity ?? username,
+    knowledgeCollections: botConfig.knowledgeCollections, threadId,
+  });
   t.end("prompt_build", promptMeta);
 
   // Append Slack-specific system prompt additions
@@ -145,6 +148,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       platform,
+      threadId,
     });
     t.end("db_save_response");
 

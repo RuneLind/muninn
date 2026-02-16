@@ -256,8 +256,8 @@ describe("Slack handler", () => {
         setStatus: setStatusMock,
       });
 
-      // buildPrompt(userId, text, ...) — text is 2nd arg
-      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
+      // buildPrompt({ currentMessage, ... }) — extract from options object
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[0].currentMessage;
       expect(userMessage).toBe("post to #heidrun-agent-testing");
     });
 
@@ -272,7 +272,7 @@ describe("Slack handler", () => {
         setStatus: setStatusMock,
       });
 
-      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[0].currentMessage;
       expect(userMessage).toBe("post to #C0ADMP9CYG7");
     });
 
@@ -287,7 +287,7 @@ describe("Slack handler", () => {
         setStatus: setStatusMock,
       });
 
-      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[1];
+      const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[0].currentMessage;
       expect(userMessage).toBe("copy from #general to #random");
     });
   });

@@ -96,40 +96,43 @@ mock.module("./embeddings.ts", () => ({
 
 const { buildPrompt } = await import("./prompt-builder.ts");
 
+const bp = (overrides: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
+  buildPrompt({ userId: "u1", currentMessage: "hello", persona: "persona", botName: "testbot", ...overrides });
+
 describe("buildPrompt", () => {
   test("includes persona in system prompt", async () => {
-    const result = await buildPrompt("u1", "hello", "You are Jarvis, a helpful assistant.", "testbot");
+    const result = await bp({ persona: "You are Jarvis, a helpful assistant." });
     expect(result.systemPrompt).toContain("You are Jarvis, a helpful assistant.");
   });
 
   test("includes memories in system prompt", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    const result = await bp();
     expect(result.systemPrompt).toContain("Prefers TypeScript over JavaScript");
   });
 
   test("includes goals in system prompt", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    const result = await bp();
     expect(result.systemPrompt).toContain("Learn Rust");
   });
 
   test("includes scheduled tasks in system prompt", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    const result = await bp();
     expect(result.systemPrompt).toContain("Morning briefing");
   });
 
   test("includes conversation history in user prompt", async () => {
-    const result = await buildPrompt("u1", "new question", "persona", "testbot");
+    const result = await bp({ currentMessage: "new question" });
     expect(result.userPrompt).toContain("previous question");
     expect(result.userPrompt).toContain("previous answer");
   });
 
   test("includes current message in user prompt", async () => {
-    const result = await buildPrompt("u1", "new question", "persona", "testbot");
+    const result = await bp({ currentMessage: "new question" });
     expect(result.userPrompt).toContain("new question");
   });
 
   test("returns metadata", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    const result = await bp();
     expect(result.meta.messagesCount).toBeGreaterThan(0);
     expect(result.meta.memoriesCount).toBeGreaterThan(0);
     expect(result.meta.goalsCount).toBeGreaterThan(0);
@@ -143,7 +146,7 @@ describe("buildPrompt", () => {
     const restrictedTools = {
       Gmail: { description: "Email access", allowedUsers: ["other-user"] },
     };
-    const result = await buildPrompt("u1", "hello", "persona", "testbot", restrictedTools);
+    const result = await bp({ restrictedTools });
     expect(result.systemPrompt).toContain("Verktøyrestriksjoner");
     expect(result.systemPrompt).toContain("Gmail");
   });
@@ -152,20 +155,18 @@ describe("buildPrompt", () => {
     const restrictedTools = {
       Gmail: { description: "Email access", allowedUsers: ["u1"] },
     };
-    const result = await buildPrompt("u1", "hello", "persona", "testbot", restrictedTools);
+    const result = await bp({ restrictedTools });
     expect(result.systemPrompt).not.toContain("Verktøyrestriksjoner");
   });
 
   test("includes username in system prompt when provided as string", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, "Rune");
+    const result = await bp({ userIdentity: "Rune" });
     expect(result.systemPrompt).toContain("You are currently talking to: Rune");
   });
 
   test("includes enriched identity when provided as UserIdentity", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, {
-      name: "Rune Lind",
-      displayName: "rli",
-      title: "Senior Consultant",
+    const result = await bp({
+      userIdentity: { name: "Rune Lind", displayName: "rli", title: "Senior Consultant" },
     });
     expect(result.systemPrompt).toContain("You are currently talking to: Rune Lind");
     expect(result.systemPrompt).toContain("Display name: rli");
@@ -173,21 +174,19 @@ describe("buildPrompt", () => {
   });
 
   test("omits missing identity fields", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot", undefined, {
-      name: "Rune Lind",
-    });
+    const result = await bp({ userIdentity: { name: "Rune Lind" } });
     expect(result.systemPrompt).toContain("You are currently talking to: Rune Lind");
     expect(result.systemPrompt).not.toContain("Display name");
     expect(result.systemPrompt).not.toContain("Title");
   });
 
   test("does not include username line when not provided", async () => {
-    const result = await buildPrompt("u1", "hello", "persona", "testbot");
+    const result = await bp();
     expect(result.systemPrompt).not.toContain("You are currently talking to");
   });
 
   test("shows username in conversation history for user messages", async () => {
-    const result = await buildPrompt("u1", "new question", "persona", "testbot");
+    const result = await bp({ currentMessage: "new question" });
     // Mock user message has username "Rune", so history should show [user/Rune]
     expect(result.userPrompt).toContain("[user/Rune]");
     // Assistant messages should still show plain [assistant]

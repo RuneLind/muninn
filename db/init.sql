@@ -5,6 +5,42 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
+-- Threads: isolated conversation contexts per topic
+-- (must be created before messages, which has a FK reference)
+-- ============================================================================
+CREATE TABLE threads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL,
+  bot_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Only one active thread per user+bot
+CREATE UNIQUE INDEX idx_threads_active ON threads(user_id, bot_name)
+  WHERE is_active = true;
+
+-- Unique thread names per user+bot
+CREATE UNIQUE INDEX idx_threads_name ON threads(user_id, bot_name, name);
+
+CREATE INDEX idx_threads_user_bot ON threads(user_id, bot_name, updated_at DESC);
+
+CREATE OR REPLACE FUNCTION update_threads_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER threads_updated_at
+  BEFORE UPDATE ON threads
+  FOR EACH ROW
+  EXECUTE FUNCTION update_threads_updated_at();
+
+-- ============================================================================
 -- Messages: full conversation history
 -- ============================================================================
 CREATE TABLE messages (
@@ -21,11 +57,13 @@ CREATE TABLE messages (
   output_tokens INTEGER,
   source TEXT DEFAULT NULL,
   platform TEXT DEFAULT 'telegram',
+  thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_messages_user_created ON messages(user_id, created_at DESC);
 CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, created_at DESC);
+CREATE INDEX idx_messages_thread ON messages(thread_id, created_at DESC);
 
 -- ============================================================================
 -- Activity log: persisted version of the in-memory ring buffer

@@ -17,6 +17,7 @@ import { synthesizeVoice } from "../voice/tts.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
+import { getActiveThreadId } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("bot", "voice");
@@ -70,15 +71,21 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     activityLog.push("message_in", `[Voice] ${text}`, { userId, username, botName: botConfig.name });
     log.info("Voice from {username}: \"{preview}\" (STT: {sttMs}ms)", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : ""), sttMs: Math.round(t.summary().stt ?? 0) });
 
+    // Resolve active thread for conversation isolation
+    const threadId = await getActiveThreadId(userId, botConfig.name);
+
     // Save transcribed message to DB
     t.start("db_save_user");
-    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text });
+    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, threadId });
     t.end("db_save_user");
 
     // Build context-aware prompt and run through Claude
     agentStatus.set("building_prompt", username);
     t.start("prompt_build");
-    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt(userId, text, botConfig.persona, botConfig.name, botConfig.restrictedTools, userIdentity, botConfig.knowledgeCollections);
+    const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
+      userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
+      restrictedTools: botConfig.restrictedTools, userIdentity, knowledgeCollections: botConfig.knowledgeCollections, threadId,
+    });
     t.end("prompt_build", promptMeta);
     savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});
 
@@ -120,6 +127,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         model: result.model,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
+        threadId,
       });
       t.end("db_save_response");
 

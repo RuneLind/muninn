@@ -4,6 +4,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { UserIdentity } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { stripHtml } from "./telegram-format.ts";
+import { getActiveThreadId } from "../db/threads.ts";
 
 export function createMessageHandler(config: Config, botConfig: BotConfig) {
   return async (ctx: Context) => {
@@ -34,6 +35,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     };
 
     try {
+      const threadId = await getActiveThreadId(userId, botConfig.name);
       await processMessage({
         text,
         userId,
@@ -43,6 +45,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
         botConfig,
         config,
         say,
+        threadId,
       });
     } catch (error) {
       // processMessage handles its own errors and calls say() with the error message,

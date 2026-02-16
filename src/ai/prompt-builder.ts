@@ -30,22 +30,26 @@ export interface PromptBuildResult {
   };
 }
 
-export async function buildPrompt(
-  userId: string,
-  currentMessage: string,
-  persona: string,
-  botName: string,
-  restrictedTools?: RestrictedTools,
-  userIdentity?: string | UserIdentity,
-  knowledgeCollections?: string[],
-): Promise<PromptBuildResult> {
+export interface BuildPromptOptions {
+  userId: string;
+  currentMessage: string;
+  persona: string;
+  botName: string;
+  restrictedTools?: RestrictedTools;
+  userIdentity?: string | UserIdentity;
+  knowledgeCollections?: string[];
+  threadId?: string;
+}
+
+export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, knowledgeCollections, threadId } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
 
   const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts, knowledgeResult] =
     await Promise.all([
-      getRecentMessages(userId, 20, botName).then((r) => {
+      getRecentMessages(userId, 20, botName, threadId).then((r) => {
         dbHistoryMs = performance.now() - t0;
         return r;
       }),

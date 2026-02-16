@@ -212,7 +212,8 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
 | Watchers | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours, runner |
-| DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, user settings |
+| Threads | `src/db/threads.ts`, `src/bot/topic-commands.ts` | Per-user+bot conversation threads for isolated chat history |
+| DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, threads, user settings |
 | Tracing | `src/tracing/` | Request tracing with span hierarchy, tool call child spans |
 | Dashboard | `src/dashboard/` | Hono server with SSE activity feed, traces waterfall + REST APIs |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
@@ -261,7 +262,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
+- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `threads` (per-user+bot conversation isolation), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
 
 ### Configuration (.env)
 
@@ -318,7 +319,8 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
 - Memory scope: `personal` (per-user) or `shared` (visible to all users of a bot) — Haiku auto-classifies during extraction
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
-- Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + conversation history
+- Conversation threads: per-user+bot named threads for chat isolation; memories/goals/tasks shared across threads. Commands: `/topic`, `/topics`, `/deltopic`. Pre-migration messages (NULL thread_id) visible only in `main` thread.
+- Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + thread-scoped conversation history
 - Claude CLI isolation: each bot spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there
 - Claude CLI output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
 - MCP tool tracking: tool calls extracted from stream-json `assistant` messages, per-tool timing from timestamped line reads, displayed as child spans in traces waterfall
