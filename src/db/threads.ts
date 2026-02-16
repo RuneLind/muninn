@@ -138,6 +138,22 @@ export async function listThreads(userId: string, botName: string): Promise<Thre
   return rows.map(rowToThread);
 }
 
+/** Get or create a thread for a Slack channel thread. Returns the thread id.
+ *  Thread name format: `slack:{channel}:{threadTs}` — always inactive (no topic switching). */
+export async function getOrCreateSlackThread(
+  userId: string, botName: string, channel: string, threadTs: string,
+): Promise<string> {
+  const name = `slack:${channel}:${threadTs}`;
+  const sql = getDb();
+  const [row] = await sql`
+    INSERT INTO threads (user_id, bot_name, name, is_active)
+    VALUES (${userId}, ${botName}, ${name}, false)
+    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
+    RETURNING id
+  `;
+  return row!.id;
+}
+
 /** Delete a thread (archive — messages remain but thread is removed). */
 export async function deleteThread(userId: string, botName: string, name: string): Promise<boolean> {
   const sql = getDb();

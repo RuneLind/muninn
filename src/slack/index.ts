@@ -5,6 +5,7 @@ import { createSlackMessageHandler } from "./handler.ts";
 
 import type { WebClient } from "@slack/web-api";
 import type { UserIdentity } from "../types.ts";
+import { getActiveThreadId, getOrCreateSlackThread } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("bot", "slack");
@@ -149,12 +150,21 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
   const handleMessage = createSlackMessageHandler(config, botConfig);
 
   const assistant = new Assistant({
-    threadStarted: async ({ say, setSuggestedPrompts }) => {
-      await say(`Hi! I'm ${botConfig.name}. How can I help you?`);
+    threadStarted: async ({ event, say, setSuggestedPrompts }) => {
+      const threadEvent = event as { assistant_thread?: { user_id?: string } };
+      const startUserId = threadEvent.assistant_thread?.user_id;
+      const userName = startUserId
+        ? (await resolveSlackUser(app, startUserId)).name
+        : undefined;
+      const greeting = userName
+        ? `Hei ${userName}! Jeg er Heidrun, hvordan kan jeg hjelpe deg?`
+        : `Hei! Jeg er Heidrun, hvordan kan jeg hjelpe deg?`;
+      await say(greeting);
       await setSuggestedPrompts({
         prompts: [
-          { title: "What can you do?", message: "What can you help me with?" },
-          { title: "Status", message: "Give me a quick status update" },
+          { title: "Hva kan du hjelpe meg med?", message: "Hva kan du hjelpe meg med?" },
+          { title: "Gjør en analyse av anbud, i forhold til hvilken kompentanse Capra har", message: "Gjør en analyse av anbud, i forhold til hvilken kompentanse Capra har" },
+          { title: "Hjelp meg å skrive et nytt anbud", message: "Hjelp meg å skrive et nytt anbud" }
         ],
       });
     },
@@ -166,6 +176,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
       log.info("Assistant message from {username} ({userId}): \"{preview}\"", { botName: bn, username: userInfo.name, userId, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
+      const threadId = await getActiveThreadId(userId, botConfig.name);
+
       await handleMessage({
         text,
         userId,
@@ -175,6 +187,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         setStatus: async (status: string) => { await setStatus(status); },
         postToChannel: makePostToChannel(app.client, botConfig.name),
         platform: "slack_assistant",
+        threadId,
       });
     },
   });
@@ -208,6 +221,9 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     const recentChannelMessages = event.thread_ts
       ? await fetchThreadMessages(client, event.channel, event.thread_ts)
       : await fetchChannelMessages(client, event.channel);
+
+    // Resolve Javrvis thread for conversation isolation
+    const threadId = await getOrCreateSlackThread(userId, botConfig.name, event.channel, threadTs);
 
     // Show native Slack thinking indicator (same as Assistant DM experience)
     try {
@@ -245,6 +261,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       channelContext: channelName,
       recentChannelMessages,
       platform: "slack_channel",
+      threadId,
     });
   });
 
@@ -277,6 +294,9 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       const recentChannelMessages = await fetchThreadMessages(client, channel, threadTs);
 
       log.info("Thread follow-up from {username} ({userId}) in {channel}: \"{preview}\"", { botName: bn, username: userInfo.name, userId, channel: channelName, preview: cleanText.slice(0, 80) + (cleanText.length > 80 ? "..." : "") });
+
+      // Resolve Javrvis thread for conversation isolation (reuses same thread as the @mention)
+      const javrvisThreadId = await getOrCreateSlackThread(userId, botConfig.name, channel, threadTs);
 
       // Show native Slack thinking indicator
       try {
@@ -312,6 +332,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         channelContext: channelName,
         recentChannelMessages,
         platform: "slack_channel",
+        threadId: javrvisThreadId,
       });
 
       return;
@@ -325,6 +346,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
     const userInfo = await resolveSlackUser(app, userId);
     log.info("DM from {username} ({userId}): \"{preview}\"", { botName: bn, username: userInfo.name, userId, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
+
+    const dmThreadId = await getActiveThreadId(userId, botConfig.name);
 
     {
       // Post a "Thinking..." message, then update it with the real response
@@ -354,6 +377,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         setStatus: async (_status: string) => {},
         postToChannel: makePostToChannel(client, botConfig.name),
         platform: "slack_dm",
+        threadId: dmThreadId,
       });
 
       // If no response was sent, clean up the thinking message

@@ -97,6 +97,16 @@ mock.module("../tracing/index.ts", () => ({
   },
 }));
 
+const mockHandleTopicCommand = mock(() => Promise.resolve());
+const mockHandleTopicsCommand = mock(() => Promise.resolve());
+const mockHandleDelTopicCommand = mock(() => Promise.resolve());
+
+mock.module("../core/topic-commands.ts", () => ({
+  handleTopicCommand: mockHandleTopicCommand,
+  handleTopicsCommand: mockHandleTopicsCommand,
+  handleDelTopicCommand: mockHandleDelTopicCommand,
+}));
+
 const { createSlackMessageHandler } = await import("./handler.ts");
 const { extractChannelPosts } = await import("../core/message-processor.ts");
 
@@ -125,6 +135,9 @@ describe("Slack handler", () => {
     mockBuildPrompt.mockClear();
     mockSaveMessage.mockClear();
     mockActivityPush.mockClear();
+    mockHandleTopicCommand.mockClear();
+    mockHandleTopicsCommand.mockClear();
+    mockHandleDelTopicCommand.mockClear();
   });
 
   test("processes a message and calls say", async () => {
@@ -469,6 +482,99 @@ describe("Slack handler", () => {
       const systemPrompt = claudeCall[3] as string;
       expect(systemPrompt).not.toContain("Slack Channel Posting");
     });
+  });
+});
+
+describe("Slack topic command interception", () => {
+  let sayMock: ReturnType<typeof mock>;
+  let setStatusMock: ReturnType<typeof mock>;
+
+  beforeEach(() => {
+    sayMock = mock(() => Promise.resolve());
+    setStatusMock = mock(() => Promise.resolve());
+    mockHandleTopicCommand.mockClear();
+    mockHandleTopicsCommand.mockClear();
+    mockHandleDelTopicCommand.mockClear();
+    mockExecuteClaudePrompt.mockClear();
+    mockBuildPrompt.mockClear();
+  });
+
+  test("intercepts /topic in slack_dm", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "/topic", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicCommand).toHaveBeenCalledTimes(1);
+    expect(mockBuildPrompt).not.toHaveBeenCalled();
+  });
+
+  test("intercepts 'topic' without slash in slack_dm", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "topic", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicCommand).toHaveBeenCalledTimes(1);
+    expect(mockBuildPrompt).not.toHaveBeenCalled();
+  });
+
+  test("intercepts 'topic work' without slash in slack_dm", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "topic work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicCommand).toHaveBeenCalledTimes(1);
+    const call = mockHandleTopicCommand.mock.calls[0] as any[];
+    expect(call[2]).toBe("work"); // arg
+  });
+
+  test("intercepts /topic in slack_assistant", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "/topic work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_assistant" });
+    expect(mockHandleTopicCommand).toHaveBeenCalledTimes(1);
+  });
+
+  test("intercepts /topics", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "/topics", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicsCommand).toHaveBeenCalledTimes(1);
+    expect(mockBuildPrompt).not.toHaveBeenCalled();
+  });
+
+  test("intercepts 'topics' without slash", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "topics", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicsCommand).toHaveBeenCalledTimes(1);
+  });
+
+  test("intercepts /deltopic name", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "/deltopic work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleDelTopicCommand).toHaveBeenCalledTimes(1);
+    const call = mockHandleDelTopicCommand.mock.calls[0] as any[];
+    expect(call[2]).toBe("work"); // arg
+  });
+
+  test("intercepts 'deltopic work' without slash", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "deltopic work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleDelTopicCommand).toHaveBeenCalledTimes(1);
+    const call = mockHandleDelTopicCommand.mock.calls[0] as any[];
+    expect(call[2]).toBe("work");
+  });
+
+  test("does NOT intercept topic commands in slack_channel", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "/topic work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_channel" });
+    expect(mockHandleTopicCommand).not.toHaveBeenCalled();
+    expect(mockBuildPrompt).toHaveBeenCalledTimes(1); // passes through to processMessage
+  });
+
+  test("does NOT intercept regular messages in slack_dm", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "hello", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicCommand).not.toHaveBeenCalled();
+    expect(mockBuildPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  test("does NOT intercept 'topical discussion' as a command", async () => {
+    const handler = createSlackMessageHandler(config, botConfig);
+    await handler({ text: "topical discussion about work", userId: "U123", username: "testuser", say: sayMock, setStatus: setStatusMock, platform: "slack_dm" });
+    expect(mockHandleTopicCommand).not.toHaveBeenCalled();
+    expect(mockBuildPrompt).toHaveBeenCalledTimes(1);
   });
 });
 

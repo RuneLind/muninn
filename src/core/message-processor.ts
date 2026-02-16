@@ -38,7 +38,7 @@ export interface ProcessMessageParams {
   channelContext?: string;
   /** Recent messages from the channel/thread for context */
   recentChannelMessages?: string[];
-  /** Thread ID for conversation isolation (Telegram topics) */
+  /** Thread ID for conversation isolation */
   threadId?: string;
 }
 

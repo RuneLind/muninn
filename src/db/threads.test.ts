@@ -9,6 +9,7 @@ import {
   switchThread,
   listThreads,
   deleteThread,
+  getOrCreateSlackThread,
 } from "./threads.ts";
 
 setupTestDb();
@@ -208,6 +209,46 @@ describe("threads", () => {
       const threads = await listThreads("u1", "bot1");
       const names = threads.map((t) => t.name).sort();
       expect(names).toEqual(["main", "play"]);
+    });
+  });
+
+  describe("getOrCreateSlackThread", () => {
+    test("creates a new thread on first call", async () => {
+      const id = await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      expect(id).toBeTruthy();
+      expect(typeof id).toBe("string");
+    });
+
+    test("returns same id on subsequent calls (upsert)", async () => {
+      const id1 = await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      const id2 = await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      expect(id1).toBe(id2);
+    });
+
+    test("different channel+threadTs creates different threads", async () => {
+      const id1 = await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      const id2 = await getOrCreateSlackThread("u1", "bot1", "C456", "1737000000.000001");
+      const id3 = await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000002");
+      expect(id1).not.toBe(id2);
+      expect(id1).not.toBe(id3);
+      expect(id2).not.toBe(id3);
+    });
+
+    test("creates thread with is_active=false", async () => {
+      await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      const threads = await listThreads("u1", "bot1");
+      const slackThread = threads.find((t) => t.name.startsWith("slack:"));
+      expect(slackThread).toBeDefined();
+      expect(slackThread!.isActive).toBe(false);
+      expect(slackThread!.name).toBe("slack:C123:1737000000.000001");
+    });
+
+    test("does not interfere with active thread", async () => {
+      await switchThread("u1", "bot1", "work");
+      await getOrCreateSlackThread("u1", "bot1", "C123", "1737000000.000001");
+      const active = await getActiveThread("u1", "bot1");
+      expect(active).not.toBeNull();
+      expect(active!.name).toBe("work");
     });
   });
 
