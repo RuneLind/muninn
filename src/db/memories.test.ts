@@ -8,6 +8,8 @@ import {
   updateMemoryEmbedding,
   getRecentMemories,
   getMemoriesWithoutEmbeddings,
+  getMemoriesByUser,
+  getMemoriesForUser,
 } from "./memories.ts";
 
 setupTestDb();
@@ -165,5 +167,94 @@ describe("memories", () => {
     const queryEmbedding = Array.from({ length: 384 }, () => Math.random());
     const results = await searchMemoriesHybrid("u1", "Kubernetes", queryEmbedding, 5, "testbot");
     expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+
+  describe("getMemoriesByUser", () => {
+    test("groups memories by user with scope counts", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", scope: "personal", summary: "u1 personal" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", scope: "shared", summary: "u1 shared" }));
+      await saveMemory(makeMemory({ userId: "u2", botName: "testbot", scope: "personal", summary: "u2 personal" }));
+
+      const users = await getMemoriesByUser("testbot");
+      expect(users.length).toBeGreaterThanOrEqual(2);
+
+      const u1 = users.find((u) => u.userId === "u1");
+      expect(u1).toBeDefined();
+      expect(u1!.personalCount).toBe(1);
+      expect(u1!.sharedCount).toBe(1);
+      expect(u1!.totalCount).toBe(2);
+    });
+
+    test("filters by botName", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot1", summary: "bot1 mem" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot2", summary: "bot2 mem" }));
+
+      const users = await getMemoriesByUser("bot1");
+      expect(users).toHaveLength(1);
+      expect(users[0]!.totalCount).toBe(1);
+    });
+
+    test("returns all users when no botName specified", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot1", summary: "some mem" }));
+      await saveMemory(makeMemory({ userId: "u2", botName: "bot2", summary: "other mem" }));
+
+      const users = await getMemoriesByUser();
+      expect(users.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test("includes recent tags", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", tags: ["work", "kotlin"], summary: "tagged mem" }));
+
+      const users = await getMemoriesByUser("testbot");
+      const u1 = users.find((u) => u.userId === "u1");
+      expect(u1).toBeDefined();
+      expect(u1!.recentTags).toContain("work");
+      expect(u1!.recentTags).toContain("kotlin");
+    });
+  });
+
+  describe("getMemoriesForUser", () => {
+    test("returns memories for a specific user", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "u1 mem" }));
+      await saveMemory(makeMemory({ userId: "u2", botName: "testbot", summary: "u2 mem" }));
+
+      const memories = await getMemoriesForUser("u1", 10, "testbot");
+      expect(memories).toHaveLength(1);
+      expect(memories[0]!.summary).toBe("u1 mem");
+    });
+
+    test("respects limit parameter", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "mem1" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "mem2" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "mem3" }));
+
+      const memories = await getMemoriesForUser("u1", 2, "testbot");
+      expect(memories).toHaveLength(2);
+    });
+
+    test("orders by created_at DESC", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "first" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "testbot", summary: "second" }));
+
+      const memories = await getMemoriesForUser("u1", 10, "testbot");
+      expect(memories[0]!.summary).toBe("second");
+    });
+
+    test("filters by botName", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot1", summary: "bot1 mem" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot2", summary: "bot2 mem" }));
+
+      const memories = await getMemoriesForUser("u1", 10, "bot1");
+      expect(memories).toHaveLength(1);
+      expect(memories[0]!.summary).toBe("bot1 mem");
+    });
+
+    test("returns all bots when no botName specified", async () => {
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot1", summary: "bot1 mem" }));
+      await saveMemory(makeMemory({ userId: "u1", botName: "bot2", summary: "bot2 mem" }));
+
+      const memories = await getMemoriesForUser("u1", 10);
+      expect(memories).toHaveLength(2);
+    });
   });
 });

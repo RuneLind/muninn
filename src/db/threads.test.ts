@@ -10,6 +10,7 @@ import {
   listThreads,
   deleteThread,
   getOrCreateSlackThread,
+  getAllThreadsForBot,
 } from "./threads.ts";
 
 setupTestDb();
@@ -249,6 +250,63 @@ describe("threads", () => {
       const active = await getActiveThread("u1", "bot1");
       expect(active).not.toBeNull();
       expect(active!.name).toBe("work");
+    });
+  });
+
+  describe("getAllThreadsForBot", () => {
+    test("returns empty array when no threads exist", async () => {
+      const threads = await getAllThreadsForBot("bot1");
+      expect(threads).toHaveLength(0);
+    });
+
+    test("returns threads for a specific bot", async () => {
+      await switchThread("u1", "bot1", "work");
+      await switchThread("u1", "bot1", "play");
+      await switchThread("u2", "bot1", "research");
+      await switchThread("u1", "bot2", "other");
+
+      const threads = await getAllThreadsForBot("bot1");
+      expect(threads).toHaveLength(3);
+      const names = threads.map((t) => t.name).sort();
+      expect(names).toEqual(["play", "research", "work"]);
+    });
+
+    test("returns all threads when no botName specified", async () => {
+      await switchThread("u1", "bot1", "work");
+      await switchThread("u1", "bot2", "play");
+
+      const threads = await getAllThreadsForBot();
+      expect(threads.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test("includes message counts", async () => {
+      const thread = await switchThread("u1", "bot1", "work");
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "msg1", threadId: thread.id }));
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "msg2", threadId: thread.id }));
+
+      const threads = await getAllThreadsForBot("bot1");
+      const workThread = threads.find((t) => t.name === "work");
+      expect(workThread!.messageCount).toBe(2);
+    });
+
+    test("includes username from latest message", async () => {
+      const thread = await switchThread("u1", "bot1", "work");
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", username: "alice", content: "hello", threadId: thread.id }));
+
+      const threads = await getAllThreadsForBot("bot1");
+      const workThread = threads.find((t) => t.name === "work");
+      expect(workThread!.username).toBe("alice");
+    });
+
+    test("returns threads with updatedAt timestamps", async () => {
+      await switchThread("u1", "bot1", "first");
+      await switchThread("u1", "bot1", "second");
+
+      const threads = await getAllThreadsForBot("bot1");
+      // All threads should have valid updatedAt timestamps
+      threads.forEach((t) => {
+        expect(t.updatedAt).toBeGreaterThan(0);
+      });
     });
   });
 

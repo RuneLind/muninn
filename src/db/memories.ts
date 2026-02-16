@@ -191,6 +191,97 @@ export async function getRecentMemories(limit = 20, botName?: string): Promise<M
   }));
 }
 
+export interface MemoryUserSummary {
+  userId: string;
+  username: string | null;
+  personalCount: number;
+  sharedCount: number;
+  totalCount: number;
+  recentTags: string[];
+  lastMemoryAt: number;
+}
+
+/** Get memory counts grouped by user, with scope breakdown and recent tags. */
+export async function getMemoriesByUser(botName?: string): Promise<MemoryUserSummary[]> {
+  const sql = getDb();
+  const rows = botName
+    ? await sql`
+      SELECT
+        m.user_id,
+        (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS username,
+        COUNT(*) FILTER (WHERE m.scope = 'personal')::int AS personal_count,
+        COUNT(*) FILTER (WHERE m.scope = 'shared')::int AS shared_count,
+        COUNT(*)::int AS total_count,
+        MAX(m.created_at) AS last_memory_at,
+        (SELECT array_agg(DISTINCT tag ORDER BY tag) FROM (
+          SELECT unnest(m2.tags) AS tag FROM memories m2
+          WHERE m2.user_id = m.user_id AND m2.bot_name = ${botName}
+          ORDER BY m2.created_at DESC LIMIT 10
+        ) sub) AS recent_tags
+      FROM memories m
+      WHERE m.bot_name = ${botName}
+      GROUP BY m.user_id
+      ORDER BY last_memory_at DESC
+      LIMIT 100
+    `
+    : await sql`
+      SELECT
+        m.user_id,
+        (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS username,
+        COUNT(*) FILTER (WHERE m.scope = 'personal')::int AS personal_count,
+        COUNT(*) FILTER (WHERE m.scope = 'shared')::int AS shared_count,
+        COUNT(*)::int AS total_count,
+        MAX(m.created_at) AS last_memory_at,
+        (SELECT array_agg(DISTINCT tag ORDER BY tag) FROM (
+          SELECT unnest(m2.tags) AS tag FROM memories m2
+          WHERE m2.user_id = m.user_id
+          ORDER BY m2.created_at DESC LIMIT 10
+        ) sub) AS recent_tags
+      FROM memories m
+      GROUP BY m.user_id
+      ORDER BY last_memory_at DESC
+      LIMIT 100
+    `;
+  return rows.map((r) => ({
+    userId: r.user_id as string,
+    username: (r.username as string) ?? null,
+    personalCount: Number(r.personal_count),
+    sharedCount: Number(r.shared_count),
+    totalCount: Number(r.total_count),
+    recentTags: (r.recent_tags as string[]) ?? [],
+    lastMemoryAt: new Date(r.last_memory_at as string).getTime(),
+  }));
+}
+
+/** Get memories for a specific user, optionally filtered by bot. */
+export async function getMemoriesForUser(userId: string, limit = 20, botName?: string): Promise<Memory[]> {
+  const sql = getDb();
+  const rows = botName
+    ? await sql`
+      SELECT id, user_id, content, summary, tags, scope, created_at
+      FROM memories
+      WHERE user_id = ${userId} AND bot_name = ${botName}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `
+    : await sql`
+      SELECT id, user_id, content, summary, tags, scope, created_at
+      FROM memories
+      WHERE user_id = ${userId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.user_id,
+    content: r.content,
+    summary: r.summary,
+    tags: r.tags,
+    scope: r.scope,
+    createdAt: new Date(r.created_at).getTime(),
+  }));
+}
+
 export async function getMemoriesWithoutEmbeddings(): Promise<
   { id: string; summary: string }[]
 > {

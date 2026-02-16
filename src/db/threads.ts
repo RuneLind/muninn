@@ -154,6 +154,53 @@ export async function getOrCreateSlackThread(
   return row!.id;
 }
 
+/** Get all threads for a bot (or all bots), with message counts and username from latest message. */
+export async function getAllThreadsForBot(botName?: string): Promise<(Thread & { username?: string })[]> {
+  const sql = getDb();
+  const rows = botName
+    ? await sql`
+      SELECT t.*,
+        COALESCE(mc.cnt, 0) AS message_count,
+        lu.username
+      FROM threads t
+      LEFT JOIN (
+        SELECT thread_id, COUNT(*) AS cnt
+        FROM messages WHERE thread_id IS NOT NULL
+        GROUP BY thread_id
+      ) mc ON mc.thread_id = t.id
+      LEFT JOIN LATERAL (
+        SELECT username FROM messages
+        WHERE thread_id = t.id AND username IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1
+      ) lu ON true
+      WHERE t.bot_name = ${botName}
+      ORDER BY t.updated_at DESC
+      LIMIT 200
+    `
+    : await sql`
+      SELECT t.*,
+        COALESCE(mc.cnt, 0) AS message_count,
+        lu.username
+      FROM threads t
+      LEFT JOIN (
+        SELECT thread_id, COUNT(*) AS cnt
+        FROM messages WHERE thread_id IS NOT NULL
+        GROUP BY thread_id
+      ) mc ON mc.thread_id = t.id
+      LEFT JOIN LATERAL (
+        SELECT username FROM messages
+        WHERE thread_id = t.id AND username IS NOT NULL
+        ORDER BY created_at DESC LIMIT 1
+      ) lu ON true
+      ORDER BY t.updated_at DESC
+      LIMIT 200
+    `;
+  return rows.map((r) => ({
+    ...rowToThread(r),
+    username: (r.username as string) ?? undefined,
+  }));
+}
+
 /** Delete a thread (archive — messages remain but thread is removed). */
 export async function deleteThread(userId: string, botName: string, name: string): Promise<boolean> {
   const sql = getDb();

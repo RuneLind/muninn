@@ -9,14 +9,22 @@ import { getActiveGoals } from "../db/goals.ts";
 import { getAllGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
-import { getRecentMemories } from "../db/memories.ts";
+import { getRecentMemories, getMemoriesByUser, getMemoriesForUser } from "../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
+import { getAllThreadsForBot } from "../db/threads.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { agentStatus } from "./agent-status.ts";
 
 const log = getLog("dashboard");
+
+/** Parse a numeric query param with fallback and bounds clamping. */
+function parseIntParam(value: string | undefined, defaultVal: number, max: number): number {
+  const parsed = parseInt(value ?? String(defaultVal), 10);
+  if (isNaN(parsed) || parsed < 1) return defaultVal;
+  return Math.min(parsed, max);
+}
 
 export function createDashboardRoutes(): Hono {
   const app = new Hono();
@@ -40,7 +48,7 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/memories", async (c) => {
     try {
-      const limit = parseInt(c.req.query("limit") ?? "20", 10);
+      const limit = parseIntParam(c.req.query("limit"), 20, 100);
       const botName = c.req.query("bot") || undefined;
       const memories = await getRecentMemories(limit, botName);
       return c.json({ memories });
@@ -94,6 +102,44 @@ export function createDashboardRoutes(): Hono {
     }
   });
 
+  app.get("/api/threads", async (c) => {
+    try {
+      const botName = c.req.query("bot") || undefined;
+      const threads = await getAllThreadsForBot(botName);
+      return c.json({ threads });
+    } catch (err) {
+      log.error("Failed to fetch threads: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch threads" }, 500);
+    }
+  });
+
+  app.get("/api/memories/by-user", async (c) => {
+    try {
+      const botName = c.req.query("bot") || undefined;
+      const users = await getMemoriesByUser(botName);
+      return c.json({ users });
+    } catch (err) {
+      log.error("Failed to fetch memories by user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch memories by user" }, 500);
+    }
+  });
+
+  app.get("/api/memories/user/:userId", async (c) => {
+    try {
+      const userId = c.req.param("userId");
+      if (!userId) {
+        return c.json({ error: "Invalid userId" }, 400);
+      }
+      const limit = parseIntParam(c.req.query("limit"), 20, 100);
+      const botName = c.req.query("bot") || undefined;
+      const memories = await getMemoriesForUser(userId, limit, botName);
+      return c.json({ memories });
+    } catch (err) {
+      log.error("Failed to fetch memories for user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch memories for user" }, 500);
+    }
+  });
+
   // --- Traces page ---
 
   app.get("/traces", (c) => {
@@ -102,8 +148,8 @@ export function createDashboardRoutes(): Hono {
 
   app.get("/api/traces", async (c) => {
     try {
-      const limit = parseInt(c.req.query("limit") ?? "50", 10);
-      const offset = parseInt(c.req.query("offset") ?? "0", 10);
+      const limit = parseIntParam(c.req.query("limit"), 50, 200);
+      const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
       const botName = c.req.query("bot") || undefined;
       const name = c.req.query("name") || undefined;
       const traces = await getRecentTraces(limit, offset, botName, name);
@@ -174,7 +220,7 @@ export function createDashboardRoutes(): Hono {
     if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
-    const limit = parseInt(c.req.query("limit") ?? "50", 10);
+    const limit = parseIntParam(c.req.query("limit"), 50, 200);
     const messages = await getRecentMessages(userId, limit);
     return c.json({ messages });
   });
