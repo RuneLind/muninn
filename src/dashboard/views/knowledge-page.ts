@@ -263,6 +263,17 @@ export function renderKnowledgePage(): string {
       height: 100%;
       border-radius: 2px;
     }
+    .chunk-heading {
+      background: rgba(108, 99, 255, 0.1);
+      color: #8b83ff;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
+    }
     .chunk-label {
       color: #555;
       font-size: 11px;
@@ -392,6 +403,21 @@ export function renderKnowledgePage(): string {
       return text.slice(0, maxLen).trimEnd() + '...';
     }
 
+    function headingSuffix(headings) {
+      if (!headings || headings.length === 0) return '';
+      const shown = headings.slice(0, 3);
+      return ' (' + shown.join(', ') + (headings.length > 3 ? ', ...' : '') + ')';
+    }
+
+    function stripBreadcrumb(text) {
+      if (!text) return '';
+      const lines = text.split('\\n');
+      if (lines[0].startsWith('[') && lines[0].includes(']')) {
+        return lines.slice(1).join('\\n').replace(/^\\n+/, '');
+      }
+      return text;
+    }
+
     async function checkApiHealth() {
       try {
         const res = await fetch('/api/knowledge/health');
@@ -493,6 +519,15 @@ export function renderKnowledgePage(): string {
       }
     }
 
+    function renderChunksToggle(chunks, chunksHtml) {
+      const uniqueHeadings = [...new Set(chunks.map(c => c.heading).filter(Boolean))];
+      const suffix = headingSuffix(uniqueHeadings.map(h => esc(h)));
+      const toggleLabel = chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' matched' + suffix;
+      return '<button class="result-chunks-toggle" onclick="toggleChunks(this)" data-headings="' + esc(JSON.stringify(uniqueHeadings)) + '">' +
+        toggleLabel + ' — click to expand</button>' +
+        '<div class="result-chunks">' + chunksHtml + '</div>';
+    }
+
     function renderResults(results, query) {
       // L2 distance: lower = better. Find min/max for relative bar width.
       const scores = results.map(r => {
@@ -521,7 +556,14 @@ export function renderKnowledgePage(): string {
           barClass = 'score-high';
         }
 
-        const bestChunkPreview = chunks.length > 0 ? truncate(chunks[0].content, 200) : '';
+        let bestChunkPreview = '';
+        if (chunks.length > 0) {
+          const stripped = stripBreadcrumb(chunks[0].content);
+          const preview = truncate(stripped, 200);
+          bestChunkPreview = chunks[0].heading
+            ? '<strong>' + esc(chunks[0].heading) + ':</strong> ' + highlightQuery(preview, query)
+            : highlightQuery(preview, query);
+        }
         const safeUrl = r.url && /^https?:\\/\\//i.test(r.url) ? r.url : '';
         const titleHtml = safeUrl
           ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener">' + esc(r.title || 'Untitled') + '</a>'
@@ -535,13 +577,17 @@ export function renderKnowledgePage(): string {
             chunkBarPct = 100;
           }
           const chunkBarClass = chunkBarPct >= 70 ? 'score-high' : chunkBarPct >= 40 ? 'score-medium' : 'score-low';
+          const headingBadge = c.heading
+            ? '<span class="chunk-heading" title="' + esc(c.heading) + '">' + esc(c.heading) + '</span>'
+            : '';
           return '<div class="chunk-card">' +
             '<div class="chunk-header">' +
               '<span class="chunk-score">' + c.score.toFixed(4) + '</span>' +
               '<div class="chunk-score-bar"><div class="chunk-score-fill ' + chunkBarClass + '" style="width:' + chunkBarPct + '%"></div></div>' +
+              headingBadge +
               '<span class="chunk-label">chunk ' + (ci + 1) + '</span>' +
             '</div>' +
-            '<div class="chunk-content">' + highlightQuery(c.content, query) + '</div>' +
+            '<div class="chunk-content">' + highlightQuery(stripBreadcrumb(c.content), query) + '</div>' +
           '</div>';
         }).join('');
 
@@ -556,11 +602,9 @@ export function renderKnowledgePage(): string {
             '</div>' +
           '</div>' +
           '<div class="result-title">' + titleHtml + '</div>' +
-          '<div class="result-summary">' + highlightQuery(bestChunkPreview, query) + '</div>' +
+          '<div class="result-summary">' + bestChunkPreview + '</div>' +
           (chunks.length > 0
-            ? '<button class="result-chunks-toggle" onclick="toggleChunks(this)">' +
-                chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' matched — click to expand</button>' +
-              '<div class="result-chunks">' + chunksHtml + '</div>'
+            ? renderChunksToggle(chunks, chunksHtml)
             : '') +
         '</div>';
       }).join('');
@@ -569,9 +613,14 @@ export function renderKnowledgePage(): string {
     function toggleChunks(btn) {
       const card = btn.closest('.result-card');
       const expanded = card.classList.toggle('expanded');
+      const count = card.querySelectorAll('.chunk-card').length;
+      let suffix = '';
+      try {
+        suffix = headingSuffix(JSON.parse(btn.dataset.headings || '[]'));
+      } catch {}
       btn.textContent = expanded
-        ? (card.querySelectorAll('.chunk-card').length) + ' chunks — click to collapse'
-        : (card.querySelectorAll('.chunk-card').length) + ' chunk' + (card.querySelectorAll('.chunk-card').length !== 1 ? 's' : '') + ' matched — click to expand';
+        ? count + ' chunks' + suffix + ' — click to collapse'
+        : count + ' chunk' + (count !== 1 ? 's' : '') + ' matched' + suffix + ' — click to expand';
     }
 
     // Enter key triggers search
