@@ -1,4 +1,4 @@
-/** Scheduled tasks panel */
+/** Scheduled tasks panel with tooltip + detail click */
 export function tasksPanelStyles(): string {
   return `
     .task-item {
@@ -8,6 +8,7 @@ export function tasksPanelStyles(): string {
       padding: 10px 12px;
       border-radius: 6px;
       transition: background 0.15s;
+      cursor: pointer;
     }
     .task-item:hover { background: #ffffff06; }
     .task-badge {
@@ -41,19 +42,23 @@ export function tasksPanelHtml(): string {
 
 export function tasksPanelScript(): string {
   return `
+    let tasksData = [];
+
     function renderTasks(tasks) {
+      tasksData = tasks;
       const el = document.getElementById('tasksList');
       document.getElementById('tasksCount').textContent = tasks.length;
       if (!tasks.length) { el.innerHTML = '<div class="panel-empty">No scheduled tasks</div>'; return; }
-      el.innerHTML = tasks.map(t => {
+      el.innerHTML = tasks.map((t, i) => {
         const badgeClass = t.enabled ? escapeAttr(t.taskType) : 'disabled';
-        const nextRun = t.nextRunAt ? timeAgo(t.nextRunAt).replace(' ago', '').replace('just now', 'now') : '';
         const nextLabel = t.nextRunAt && t.nextRunAt > Date.now() ? 'next: ' + new Date(t.nextRunAt).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' }) : '';
-        return '<div class="task-item">' +
+        const scheduleStr = formatSchedule(t);
+        const tipData = JSON.stringify({ type: 'task', taskType: t.taskType, schedule: scheduleStr, nextRun: nextLabel || null });
+        return '<div class="task-item" data-tip=\\'' + escapeAttr(tipData) + '\\' data-detail-type="task" data-detail-index="' + i + '">' +
           '<span class="task-badge ' + badgeClass + '">' + escapeHtml(t.taskType) + '</span>' +
           '<div class="task-info">' +
             '<div class="task-title">' + escapeHtml(t.title) + (!t.enabled ? ' <span style="color:#555">(disabled)</span>' : '') + '</div>' +
-            '<div class="task-schedule">' + formatSchedule(t) + (nextLabel ? ' &middot; ' + nextLabel : '') + '</div>' +
+            '<div class="task-schedule">' + scheduleStr + (nextLabel ? ' &middot; ' + nextLabel : '') + '</div>' +
           '</div></div>';
       }).join('');
     }

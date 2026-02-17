@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 
 export function renderTracesPage(): string {
   return `<!DOCTYPE html>
@@ -9,6 +10,7 @@ export function renderTracesPage(): string {
   <title>Jarvis - Traces</title>
   <style>
     ${SHARED_STYLES}
+    ${botSelectorStyles()}
 
     /* Stats Bar */
     .stats-bar {
@@ -312,7 +314,7 @@ export function renderTracesPage(): string {
   </style>
 </head>
 <body>
-  ${renderNav("traces")}
+  ${renderNav("traces", { headerLeftExtra: botSelectorHtml() })}
 
   <div class="stats-bar" id="statsBar">
     <div class="stat-card"><div class="stat-value" id="statTotal">-</div><div class="stat-label">Traces (24h)</div></div>
@@ -324,9 +326,6 @@ export function renderTracesPage(): string {
   <div class="filters">
     <select id="filterName" onchange="currentPage=0;loadTraces();loadStats()">
       <option value="">All types</option>
-    </select>
-    <select id="filterBot" onchange="currentPage=0;loadTraces();loadStats()">
-      <option value="">All bots</option>
     </select>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#666;margin-left:auto">
       <input type="checkbox" id="autoRefresh" checked> Auto-refresh (15s)
@@ -395,6 +394,42 @@ export function renderTracesPage(): string {
     let promptCache = {};  // traceId -> { systemPrompt, userPrompt } | null
     let activePromptTab = 'system';
 
+    // --- Bot selector (synced with dashboard via localStorage) ---
+    let selectedBot = '';
+    (function initBotSelector() {
+      try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
+      loadBotList();
+    })();
+
+    async function loadBotList() {
+      try {
+        const res = await fetch('/api/bots').then(r => r.json());
+        const container = document.getElementById('botSelector');
+        const bots = res.bots || [];
+        container.innerHTML =
+          '<button class="bot-pill' + (!selectedBot ? ' active' : '') + '" data-bot="">All Bots</button>' +
+          bots.map(b =>
+            '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + esc(b) + '">' + esc(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>'
+          ).join('');
+      } catch {}
+    }
+
+    function selectBot(name) {
+      selectedBot = name;
+      try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+      document.querySelectorAll('.bot-pill').forEach(p => {
+        p.classList.toggle('active', p.dataset.bot === name);
+      });
+      currentPage = 0;
+      loadTraces();
+      loadStats();
+    }
+
+    document.getElementById('botSelector').addEventListener('click', (e) => {
+      const pill = e.target.closest('.bot-pill');
+      if (pill) selectBot(pill.dataset.bot);
+    });
+
     function fmtTime(epochMs) {
       return new Date(epochMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
@@ -418,7 +453,7 @@ export function renderTracesPage(): string {
 
     async function loadStats() {
       try {
-        const bot = document.getElementById('filterBot').value;
+        const bot = selectedBot;
         const params = bot ? '?bot=' + bot : '';
         const res = await fetch('/api/trace-stats' + params);
         const stats = await res.json();
@@ -433,7 +468,7 @@ export function renderTracesPage(): string {
     async function loadTraces() {
       try {
         const name = document.getElementById('filterName').value;
-        const bot = document.getElementById('filterBot').value;
+        const bot = selectedBot;
         const params = new URLSearchParams();
         params.set('limit', PAGE_SIZE);
         params.set('offset', currentPage * PAGE_SIZE);
@@ -572,7 +607,7 @@ export function renderTracesPage(): string {
 
     function esc(str) {
       if (!str) return '';
-      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
 
     async function openPromptModal() {
@@ -659,8 +694,8 @@ export function renderTracesPage(): string {
       try {
         const res = await fetch('/api/trace-filters');
         if (!res.ok) return;
-        const { bots, types } = await res.json();
-        if (!bots || !types) return;
+        const { types } = await res.json();
+        if (!types) return;
         const nameSelect = document.getElementById('filterName');
         const nameVal = nameSelect.value;
         nameSelect.innerHTML = '<option value="">All types</option>';
@@ -671,16 +706,6 @@ export function renderTracesPage(): string {
           nameSelect.appendChild(opt);
         });
         nameSelect.value = nameVal;
-        const botSelect = document.getElementById('filterBot');
-        const botVal = botSelect.value;
-        botSelect.innerHTML = '<option value="">All bots</option>';
-        bots.forEach(b => {
-          const opt = document.createElement('option');
-          opt.value = b;
-          opt.textContent = b;
-          botSelect.appendChild(opt);
-        });
-        botSelect.value = botVal;
       } catch (e) { console.error('Failed to load filters', e); }
     }
 

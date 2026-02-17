@@ -163,14 +163,15 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
         COALESCE(mc.cnt, 0) AS message_count,
         lu.username
       FROM threads t
-      LEFT JOIN (
-        SELECT thread_id, COUNT(*) AS cnt
-        FROM messages WHERE thread_id IS NOT NULL
-        GROUP BY thread_id
-      ) mc ON mc.thread_id = t.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt FROM messages
+        WHERE thread_id = t.id
+           OR (thread_id IS NULL AND t.name = 'main' AND messages.user_id = t.user_id AND messages.bot_name = t.bot_name)
+      ) mc ON true
       LEFT JOIN LATERAL (
         SELECT username FROM messages
-        WHERE thread_id = t.id AND username IS NOT NULL
+        WHERE (thread_id = t.id OR (thread_id IS NULL AND t.name = 'main' AND messages.user_id = t.user_id AND messages.bot_name = t.bot_name))
+          AND username IS NOT NULL
         ORDER BY created_at DESC LIMIT 1
       ) lu ON true
       WHERE t.bot_name = ${botName}
@@ -182,14 +183,15 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
         COALESCE(mc.cnt, 0) AS message_count,
         lu.username
       FROM threads t
-      LEFT JOIN (
-        SELECT thread_id, COUNT(*) AS cnt
-        FROM messages WHERE thread_id IS NOT NULL
-        GROUP BY thread_id
-      ) mc ON mc.thread_id = t.id
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt FROM messages
+        WHERE thread_id = t.id
+           OR (thread_id IS NULL AND t.name = 'main' AND messages.user_id = t.user_id AND messages.bot_name = t.bot_name)
+      ) mc ON true
       LEFT JOIN LATERAL (
         SELECT username FROM messages
-        WHERE thread_id = t.id AND username IS NOT NULL
+        WHERE (thread_id = t.id OR (thread_id IS NULL AND t.name = 'main' AND messages.user_id = t.user_id AND messages.bot_name = t.bot_name))
+          AND username IS NOT NULL
         ORDER BY created_at DESC LIMIT 1
       ) lu ON true
       ORDER BY t.updated_at DESC

@@ -59,7 +59,7 @@ export function slackPanelStyles(): string {
     .slack-user-name { font-size: 13px; color: #ddd; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .slack-user-meta { font-size: 11px; color: #555; display: flex; gap: 8px; align-items: center; }
 
-    /* Slack message conversation in feed */
+    /* Slack message conversation in detail panel */
     .slack-msg {
       padding: 10px 14px;
       border-radius: 8px;
@@ -133,109 +133,36 @@ export function slackPanelHtml(): string {
 
 export function slackPanelScript(): string {
   return `
-    // --- Slack User Message History ---
-    let slackUserFilterActive = false;
-    let cachedFeedHtml = '';
-    let pendingEvents = [];
+    let slackAnalyticsData = null;
 
     async function showSlackUserMessages(userId, username) {
-      const feedEl = document.getElementById('feed');
-      const filterBar = document.getElementById('feedFilterBar');
-      const showMore = document.getElementById('feedShowMore');
-      const liveBadge = document.querySelector('.live-badge');
+      // Open user detail panel instead of hijacking feed
+      const user = slackAnalyticsData && slackAnalyticsData.users
+        ? slackAnalyticsData.users.find(u => u.userId === userId)
+        : null;
 
-      document.querySelectorAll('.slack-user-item').forEach(el => {
-        el.classList.toggle('active', el.dataset.userId === userId);
+      openDetail('user', {
+        userId: userId,
+        username: username,
+        platform: user ? user.primaryPlatform : 'slack',
+        messageCount: user ? user.messageCount : 0,
+        memoryCount: user ? (user.personalMemories + user.sharedMemories) : 0,
+        threadCount: 0,
+        lastActive: user ? user.lastSeen : null,
       });
-
-      if (!slackUserFilterActive) {
-        cachedFeedHtml = feedEl.innerHTML;
-      }
-      slackUserFilterActive = true;
-
-      filterBar.classList.add('visible');
-      document.getElementById('feedFilterLabel').textContent = 'Messages from @' + username;
-      showMore.style.display = 'none';
-      if (liveBadge) liveBadge.style.display = 'none';
-
-      document.querySelector('.feed-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-      feedEl.innerHTML = '<div class="panel-empty">Loading messages...</div>';
-
-      try {
-        const res = await fetch('/api/messages/' + encodeURIComponent(userId) + '?limit=100');
-        const data = await res.json();
-        const msgs = data.messages || [];
-
-        if (!msgs.length) {
-          feedEl.innerHTML = '<div class="panel-empty">No messages found for @' + escapeHtml(username) + '</div>';
-          return;
-        }
-
-        const convo = document.createElement('div');
-        convo.className = 'slack-convo-container';
-
-        msgs.forEach(m => {
-          const div = document.createElement('div');
-          div.className = 'slack-msg role-' + m.role;
-
-          const time = formatTime(m.timestamp);
-          const roleLabel = m.role === 'user' ? 'YOU' : 'BOT';
-          const modelInfo = m.model ? ' &middot; <span class="slack-msg-model">' + escapeHtml(m.model) + '</span>' : '';
-          const content = escapeHtml(m.text || '');
-          const isLong = content.length > 500;
-
-          div.innerHTML =
-            '<div class="slack-msg-header">' +
-              '<span class="slack-msg-role">' + roleLabel + '</span>' +
-              '<span class="slack-msg-time">' + time + '</span>' +
-              modelInfo +
-            '</div>' +
-            '<div class="slack-msg-content' + (isLong ? ' collapsed' : '') + '">' + content + '</div>' +
-            (isLong ? '<span class="slack-msg-expand">Show more</span>' : '');
-
-          convo.appendChild(div);
-        });
-
-        feedEl.innerHTML = '';
-        feedEl.appendChild(convo);
-
-        feedEl.scrollTop = feedEl.scrollHeight;
-      } catch (err) {
-        console.error('Failed to load user messages:', err);
-        feedEl.innerHTML = '<div class="panel-empty">Failed to load messages</div>';
-      }
-    }
-
-    function clearSlackUserFilter() {
-      if (!slackUserFilterActive) return;
-      slackUserFilterActive = false;
-
-      const feedEl = document.getElementById('feed');
-      const filterBar = document.getElementById('feedFilterBar');
-      const liveBadge = document.querySelector('.live-badge');
-
-      document.querySelectorAll('.slack-user-item').forEach(el => el.classList.remove('active'));
-
-      feedEl.innerHTML = cachedFeedHtml;
-      cachedFeedHtml = '';
-
-      filterBar.classList.remove('visible');
-      if (liveBadge) liveBadge.style.display = '';
-
-      const eventsToReplay = pendingEvents.slice();
-      pendingEvents = [];
-      eventsToReplay.forEach(ev => addEvent(ev));
-
-      feedExpanded = false;
-      updateFeedVisibility();
     }
 
     // --- Slack Analytics Panel ---
     function renderSlackAnalytics(data) {
+      slackAnalyticsData = data;
       const panel = document.getElementById('slackPanel');
-      if (!data || data.totalMessages === 0) { panel.style.display = 'none'; return; }
+      if (!data || data.totalMessages === 0) {
+        panel.style.display = 'none';
+        hideTab('slack');
+        return;
+      }
       panel.style.display = '';
+      showTab('slack');
       document.getElementById('slackMsgCount').textContent = data.totalMessages;
 
       const platformLabel = { slack_dm: 'DM', slack_channel: 'Channel', slack_assistant: 'Assistant' };
@@ -250,7 +177,8 @@ export function slackPanelScript(): string {
       const usersHtml = data.users.map(u => {
         const memCount = u.personalMemories + u.sharedMemories;
         const badge = u.primaryPlatform ? '<span class="slack-platform-badge ' + escapeAttr(u.primaryPlatform) + '" style="font-size:9px">' + escapeHtml(platformLabel[u.primaryPlatform] || u.primaryPlatform) + '</span>' : '';
-        return '<div class="slack-user-item" data-user-id="' + escapeAttr(u.userId) + '" data-username="' + escapeAttr(u.username) + '">' +
+        const tipData = JSON.stringify({ type: 'user', platform: u.primaryPlatform || 'slack', messageCount: u.messageCount, lastActive: timeAgo(u.lastSeen) });
+        return '<div class="slack-user-item" data-user-id="' + escapeAttr(u.userId) + '" data-username="' + escapeAttr(u.username) + '" data-tip=\\'' + escapeAttr(tipData) + '\\'>' +
           '<span class="slack-user-name">' + escapeHtml(u.username) + '</span>' +
           '<span class="slack-user-meta">' +
             u.messageCount + ' msgs' +

@@ -27,6 +27,15 @@ export function connectionStatusHtml(): string {
 
 export function connectionScript(): string {
   return `
+    // --- Bot param helpers ---
+    function botParam() {
+      return selectedBot ? '?bot=' + encodeURIComponent(selectedBot) : '';
+    }
+    function appendBot(url) {
+      if (!selectedBot) return url;
+      return url + (url.includes('?') ? '&' : '?') + 'bot=' + encodeURIComponent(selectedBot);
+    }
+
     // --- SSE Connection ---
     function connect() {
       const es = new EventSource('/api/events');
@@ -39,12 +48,20 @@ export function connectionScript(): string {
       };
 
       es.addEventListener('activity', (e) => {
-        addEvent(JSON.parse(e.data));
+        const ev = JSON.parse(e.data);
+        // Client-side bot filter for SSE events
+        if (selectedBot && ev.botName && ev.botName !== selectedBot) return;
+        addEvent(ev);
+        // Update overview recent activity
+        recentEvents.push(ev);
+        if (recentEvents.length > 50) recentEvents = recentEvents.slice(-50);
+        updateRecentActivity(recentEvents.slice(-5).reverse());
       });
 
       es.addEventListener('stats', (e) => {
         const data = JSON.parse(e.data);
-        document.getElementById('statMsgsToday').textContent = data.messagesToday;
+        const el = document.getElementById('metricMsgsToday');
+        if (el) el.textContent = data.messagesToday;
       });
 
       es.addEventListener('agent_status', (e) => {
@@ -60,38 +77,114 @@ export function connectionScript(): string {
     }
 
     // --- Data Loading ---
+    let usersData = [];
+
     async function loadDashboard() {
       try {
-        const [statsRes, goalsRes, tasksRes, watchersRes, memoriesRes, slackRes, memByUserRes, threadsRes] = await Promise.all([
-          fetch('/api/stats').then(r => r.json()),
-          fetch('/api/goals').then(r => r.json()),
-          fetch('/api/tasks').then(r => r.json()),
-          fetch('/api/watchers').then(r => r.json()),
-          fetch('/api/memories').then(r => r.json()),
-          fetch('/api/slack-analytics').then(r => r.json()).catch(() => null),
-          fetch('/api/memories/by-user').then(r => r.json()).catch(() => ({ users: [] })),
-          fetch('/api/threads').then(r => r.json()).catch(() => ({ threads: [] })),
+        clearFeed();
+        const bp = botParam();
+        const memUrl = '/api/memories' + bp + (bp ? '&' : '?') + 'limit=50';
+        const [statsRes, goalsRes, tasksRes, watchersRes, memoriesRes, slackRes, threadsRes, usersRes, activityRes] = await Promise.all([
+          fetch('/api/stats' + bp).then(r => r.json()),
+          fetch('/api/goals' + bp).then(r => r.json()),
+          fetch('/api/tasks' + bp).then(r => r.json()),
+          fetch('/api/watchers' + bp).then(r => r.json()),
+          fetch(memUrl).then(r => r.json()),
+          fetch('/api/slack-analytics' + bp).then(r => r.json()).catch(() => null),
+          fetch('/api/threads' + bp).then(r => r.json()).catch(() => ({ threads: [] })),
+          fetch('/api/users' + bp).then(r => r.json()).catch(() => ({ users: [] })),
+          fetch('/api/activity').then(r => r.json()).catch(() => ({ events: [] })),
         ]);
 
-        updateStatCards(statsRes);
+        updateMetricsStrip(statsRes);
         renderGoals(goalsRes.goals || []);
         renderTasks(tasksRes.tasks || []);
         renderWatchers(watchersRes.watchers || []);
         renderMemories(memoriesRes.memories || []);
         renderSlackAnalytics(slackRes);
-        renderMemoriesByUser(memByUserRes.users || []);
         renderThreads(threadsRes.threads || []);
+        renderUsers(usersRes.users || []);
+        renderKnowledgePanel();
         initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []);
+
+        // Activity feed + overview: recent activity
+        let events = activityRes.events || [];
+        if (selectedBot) {
+          events = events.filter(ev => !ev.botName || ev.botName === selectedBot);
+        }
+        // Repopulate feed (events are oldest-first, addEvent prepends, so reverse to get chronological)
+        events.slice().reverse().forEach(ev => addEvent(ev));
+        recentEvents = events;
+        updateRecentActivity(recentEvents.slice(-5).reverse());
+
+        // Overview: upcoming
+        updateUpcoming(goalsRes.goals || [], tasksRes.tasks || []);
       } catch (err) {
         console.error('Failed to load dashboard data:', err);
       }
     }
 
+    // --- Users Rendering ---
+    let selectedUserId = null;
+
+    function renderUsers(users) {
+      usersData = users;
+      const el = document.getElementById('usersMasterList');
+      document.getElementById('usersCount').textContent = users.length;
+      updateTabCount('users', users.length);
+      if (!users.length) {
+        el.innerHTML = '<div class="panel-empty">No users yet</div>';
+        document.getElementById('usersDetailEmpty').style.display = 'flex';
+        document.getElementById('usersDetailContent').style.display = 'none';
+        selectedUserId = null;
+        return;
+      }
+      el.innerHTML = users.map(u => {
+        const initial = (u.username || u.userId || '?')[0].toUpperCase();
+        const platform = u.platform || 'telegram';
+        const platformClass = platform.replace(/[^a-z_]/g, '');
+        return '<div class="md-row" data-user-select="' + escapeAttr(u.userId) + '">' +
+          '<div class="user-avatar">' + escapeHtml(initial) + '</div>' +
+          '<div class="md-row-info">' +
+            '<div class="md-row-name">' + escapeHtml(u.username || u.userId) + '</div>' +
+            '<div class="md-row-meta">' +
+              '<span class="user-platform-badge ' + escapeAttr(platformClass) + '">' + escapeHtml(platform) + '</span>' +
+              '<span>' + (u.messageCount || 0) + ' msgs</span>' +
+              '<span>' + (u.lastActive ? timeAgo(u.lastActive) : '') + '</span>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // Re-select previous user or auto-select first
+      const match = selectedUserId && users.find(u => u.userId === selectedUserId);
+      selectUser(match ? selectedUserId : users[0].userId);
+    }
+
+    function selectUser(userId) {
+      const u = usersData.find(u => u.userId === userId);
+      if (!u) return;
+      selectedUserId = userId;
+
+      // Highlight selected row
+      document.querySelectorAll('#usersMasterList .md-row').forEach(r => {
+        r.classList.toggle('selected', r.dataset.userSelect === userId);
+      });
+
+      // Show detail content, hide empty
+      document.getElementById('usersDetailEmpty').style.display = 'none';
+      const content = document.getElementById('usersDetailContent');
+      content.style.display = 'flex';
+
+      // Render inline detail
+      renderInlineUserDetail(u);
+    }
+
     // --- Periodic Refresh ---
     async function refreshStats() {
       try {
-        const stats = await fetch('/api/stats').then(r => r.json());
-        updateStatCards(stats);
+        const stats = await fetch('/api/stats' + botParam()).then(r => r.json());
+        updateMetricsStrip(stats);
         initChart(stats.messagesByDay || [], stats.tokensByDay || []);
       } catch (err) {
         console.error('Failed to refresh stats:', err);
@@ -99,12 +192,39 @@ export function connectionScript(): string {
     }
 
     // --- Init ---
+    initSectionTabs();
     loadDashboard();
     connect();
     setInterval(refreshStats, 60000);
 
-    // Event delegation for watcher log buttons, slack user clicks, memory user clicks, and message expand
+    // One-time click handlers for master-detail lists (avoids listener leak on re-render)
+    document.getElementById('usersMasterList').addEventListener('click', (e) => {
+      const row = e.target.closest('[data-user-select]');
+      if (row) selectUser(row.dataset.userSelect);
+    });
+    document.getElementById('threadsMasterList').addEventListener('click', (e) => {
+      const row = e.target.closest('[data-thread-select]');
+      if (row) selectThread(row.dataset.threadSelect);
+    });
+
+    // --- Event Delegation ---
     document.addEventListener('click', (e) => {
+      // Detail panel opens (from any panel item with data-detail-type)
+      const detailItem = e.target.closest('[data-detail-type]');
+      if (detailItem && !e.target.closest('[data-filter-watcher]')) {
+        e.stopPropagation();
+        const type = detailItem.dataset.detailType;
+        const idx = parseInt(detailItem.dataset.detailIndex, 10);
+        let data = null;
+        switch (type) {
+          case 'task': data = tasksData[idx]; break;
+          case 'watcher': data = watchersData[idx]; break;
+        }
+        if (data) openDetail(type, data);
+        return;
+      }
+
+      // Watcher filter button
       const btn = e.target.closest('[data-filter-watcher]');
       if (btn) {
         e.stopPropagation();
@@ -112,6 +232,7 @@ export function connectionScript(): string {
         return;
       }
 
+      // Slack user clicks
       const userItem = e.target.closest('.slack-user-item[data-user-id]');
       if (userItem) {
         e.stopPropagation();
@@ -119,20 +240,7 @@ export function connectionScript(): string {
         return;
       }
 
-      const memUserItem = e.target.closest('.memory-user-item[data-memory-user-id]');
-      if (memUserItem) {
-        e.stopPropagation();
-        toggleMemoryUserDetail(memUserItem.dataset.memoryUserId);
-        return;
-      }
-
-      const memToggle = e.target.closest('.memory-toggle-btn[data-memory-view]');
-      if (memToggle) {
-        e.stopPropagation();
-        switchMemoryView(memToggle.dataset.memoryView);
-        return;
-      }
-
+      // Slack message expand
       const expandBtn = e.target.closest('.slack-msg-expand');
       if (expandBtn) {
         const content = expandBtn.previousElementSibling;

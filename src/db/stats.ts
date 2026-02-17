@@ -128,6 +128,78 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
   };
 }
 
+// --- Users Summary ---
+
+export interface UserSummary {
+  userId: string;
+  username: string;
+  platform: string;
+  messageCount: number;
+  memoryCount: number;
+  threadCount: number;
+  lastActive: number;
+  firstSeen: number;
+  activeGoalCount: number;
+  scheduledTaskCount: number;
+  totalTokens: number;
+}
+
+export async function getUsersSummary(botName?: string): Promise<UserSummary[]> {
+  const sql = getDb();
+
+  const rows = botName
+    ? await sql`
+      SELECT
+        m.user_id,
+        m.username,
+        mode() WITHIN GROUP (ORDER BY m.platform) AS platform,
+        count(DISTINCT m.id)::int AS message_count,
+        coalesce((SELECT count(*) FROM memories mem WHERE mem.user_id = m.user_id AND mem.bot_name = ${botName}), 0)::int AS memory_count,
+        coalesce((SELECT count(*) FROM threads t WHERE t.user_id = m.user_id AND t.bot_name = ${botName}), 0)::int AS thread_count,
+        max(m.created_at) AS last_active,
+        min(m.created_at) AS first_seen,
+        coalesce((SELECT count(*) FROM goals g WHERE g.user_id = m.user_id AND g.status = 'active' AND g.bot_name = ${botName}), 0)::int AS active_goal_count,
+        coalesce((SELECT count(*) FROM scheduled_tasks st WHERE st.user_id = m.user_id AND st.enabled = true AND st.bot_name = ${botName}), 0)::int AS scheduled_task_count,
+        coalesce((SELECT sum(coalesce(am.input_tokens, 0) + coalesce(am.output_tokens, 0)) FROM messages am WHERE am.user_id = m.user_id AND am.role = 'assistant' AND am.bot_name = ${botName}), 0)::bigint AS total_tokens
+      FROM messages m
+      WHERE m.role = 'user' AND m.bot_name = ${botName}
+      GROUP BY m.user_id, m.username
+      ORDER BY last_active DESC
+    `
+    : await sql`
+      SELECT
+        m.user_id,
+        m.username,
+        mode() WITHIN GROUP (ORDER BY m.platform) AS platform,
+        count(DISTINCT m.id)::int AS message_count,
+        coalesce((SELECT count(*) FROM memories mem WHERE mem.user_id = m.user_id), 0)::int AS memory_count,
+        coalesce((SELECT count(*) FROM threads t WHERE t.user_id = m.user_id), 0)::int AS thread_count,
+        max(m.created_at) AS last_active,
+        min(m.created_at) AS first_seen,
+        coalesce((SELECT count(*) FROM goals g WHERE g.user_id = m.user_id AND g.status = 'active'), 0)::int AS active_goal_count,
+        coalesce((SELECT count(*) FROM scheduled_tasks st WHERE st.user_id = m.user_id AND st.enabled = true), 0)::int AS scheduled_task_count,
+        coalesce((SELECT sum(coalesce(am.input_tokens, 0) + coalesce(am.output_tokens, 0)) FROM messages am WHERE am.user_id = m.user_id AND am.role = 'assistant'), 0)::bigint AS total_tokens
+      FROM messages m
+      WHERE m.role = 'user'
+      GROUP BY m.user_id, m.username
+      ORDER BY last_active DESC
+    `;
+
+  return rows.map((r) => ({
+    userId: r.user_id,
+    username: r.username ?? r.user_id,
+    platform: r.platform ?? "telegram",
+    messageCount: Number(r.message_count),
+    memoryCount: Number(r.memory_count),
+    threadCount: Number(r.thread_count),
+    lastActive: new Date(r.last_active).getTime(),
+    firstSeen: new Date(r.first_seen).getTime(),
+    activeGoalCount: Number(r.active_goal_count),
+    scheduledTaskCount: Number(r.scheduled_task_count),
+    totalTokens: Number(r.total_tokens),
+  }));
+}
+
 // --- Slack Analytics ---
 
 export interface SlackUserStats {

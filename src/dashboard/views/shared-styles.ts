@@ -27,7 +27,7 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "simulator",
+  activePage: "dashboard" | "traces" | "search" | "knowledge" | "simulator",
   options?: { showSimulator?: boolean; headerLeftExtra?: string; headerRight?: string },
 ): string {
   const simulatorLink = options?.showSimulator
@@ -39,7 +39,9 @@ export function renderNav(
       <h1><span>J</span>arvis</h1>
       <nav>
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
-        <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>${simulatorLink}
+        <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
+        <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">Search</a>
+        <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>${simulatorLink}
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>

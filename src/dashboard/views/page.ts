@@ -3,14 +3,19 @@ import { helpersScript } from "./components/helpers.ts";
 import { layoutStyles } from "./components/layout.ts";
 import { connectionStyles, connectionStatusHtml, connectionScript } from "./components/connection.ts";
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "./components/agent-status-ui.ts";
-import { statCardsStyles, statCardsHtml, statCardsScript } from "./components/stat-cards.ts";
+import { botSelectorStyles, botSelectorHtml, botSelectorScript } from "./components/bot-selector.ts";
+import { sectionTabsStyles, sectionTabsHtml, sectionTabsScript } from "./components/section-tabs.ts";
+import { overviewSectionStyles, overviewSectionHtml, overviewSectionScript } from "./components/overview-section.ts";
+import { detailPanelStyles, detailPanelHtml, detailPanelScript } from "./components/detail-panel.ts";
+import { tooltipStyles, tooltipHtml, tooltipScript } from "./components/tooltip.ts";
 import { goalsPanelStyles, goalsPanelHtml, goalsPanelScript } from "./components/goals-panel.ts";
 import { tasksPanelStyles, tasksPanelHtml, tasksPanelScript } from "./components/tasks-panel.ts";
 import { watchersPanelStyles, watchersPanelHtml, watchersPanelScript } from "./components/watchers-panel.ts";
 import { memoriesPanelStyles, memoriesPanelHtml, memoriesPanelScript } from "./components/memories-panel.ts";
+import { knowledgePanelStyles, knowledgePanelHtml, knowledgePanelScript } from "./components/knowledge-panel.ts";
 import { threadsPanelStyles, threadsPanelHtml, threadsPanelScript } from "./components/threads-panel.ts";
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
-import { usageChartStyles, usageChartHtml, usageChartScript } from "./components/usage-chart.ts";
+import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
 import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
 
 export function renderDashboardPage(): string {
@@ -25,12 +30,17 @@ export function renderDashboardPage(): string {
     ${SHARED_STYLES}
     ${connectionStyles()}
     ${agentStatusStyles()}
-    ${statCardsStyles()}
+    ${botSelectorStyles()}
     ${layoutStyles()}
+    ${sectionTabsStyles()}
+    ${overviewSectionStyles()}
+    ${detailPanelStyles()}
+    ${tooltipStyles()}
     ${goalsPanelStyles()}
     ${tasksPanelStyles()}
     ${watchersPanelStyles()}
     ${memoriesPanelStyles()}
+    ${knowledgePanelStyles()}
     ${threadsPanelStyles()}
     ${slackPanelStyles()}
     ${usageChartStyles()}
@@ -38,29 +48,59 @@ export function renderDashboardPage(): string {
   </style>
 </head>
 <body>
-  ${renderNav("dashboard", { headerLeftExtra: agentStatusHtml(), headerRight: connectionStatusHtml() })}
-  ${statCardsHtml()}
-  <div class="main-grid">
-    <div class="left-col">
-      ${goalsPanelHtml()}
-      ${tasksPanelHtml()}
-      ${watchersPanelHtml()}
-      ${memoriesPanelHtml()}
+  ${renderNav("dashboard", { headerLeftExtra: botSelectorHtml() + agentStatusHtml(), headerRight: connectionStatusHtml() })}
+  ${sectionTabsHtml()}
+  <div class="section-content">
+    ${overviewSectionHtml()}
+    <div data-section="users">
+      <div class="md-layout">
+        <div class="md-master">
+          <div class="md-master-header">
+            Users <span class="count" id="usersCount">0</span>
+          </div>
+          <div class="md-master-body" id="usersMasterList">
+            <div class="panel-empty">Loading...</div>
+          </div>
+        </div>
+        <div class="md-detail" id="usersDetailPanel">
+          <div class="md-detail-empty" id="usersDetailEmpty">
+            Select a user to view details
+          </div>
+          <div class="md-detail-content" id="usersDetailContent" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+    <div data-section="threads">
       ${threadsPanelHtml()}
+    </div>
+    <div data-section="memories-goals">
+      ${knowledgePanelHtml()}
+    </div>
+    <div data-section="schedules-watchers">
+      <div class="section-dual">
+        <div>${tasksPanelHtml()}</div>
+        <div>${watchersPanelHtml()}</div>
+      </div>
+    </div>
+    <div data-section="slack">
       ${slackPanelHtml()}
     </div>
-    <div class="right-col">
-      ${usageChartHtml()}
-      ${activityFeedHtml()}
-    </div>
   </div>
+  ${detailPanelHtml()}
+  ${activityFeedHtml()}
+  ${tooltipHtml()}
   <script>
     ${helpersScript()}
-    ${statCardsScript()}
+    ${botSelectorScript()}
+    ${sectionTabsScript()}
+    ${overviewSectionScript()}
+    ${detailPanelScript()}
+    ${tooltipScript()}
     ${goalsPanelScript()}
     ${tasksPanelScript()}
     ${watchersPanelScript()}
     ${memoriesPanelScript()}
+    ${knowledgePanelScript()}
     ${threadsPanelScript()}
     ${slackPanelScript()}
     ${usageChartScript()}

@@ -1,36 +1,124 @@
-/** Activity feed — real-time event stream with show more/less */
+/** Activity feed — fixed bottom drawer with collapsed/expanded states */
 export function activityFeedStyles(): string {
   return `
-    .feed-panel .panel-body {
-      max-height: none;
-      flex: 1;
-      min-height: 300px;
-    }
-    .feed-panel {
-      flex: 1;
+    /* Activity Drawer */
+    .activity-drawer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: #0f0f17;
+      border-top: 1px solid #1e1e2e;
+      transition: height 0.3s ease;
       display: flex;
       flex-direction: column;
     }
-    .feed-hidden { display: none !important; }
-    .feed-show-more {
-      padding: 8px 16px;
-      text-align: center;
-      border-top: 1px solid #1e1e2e;
+    .activity-drawer.collapsed {
+      height: 44px;
     }
-    .feed-show-more button {
+    .activity-drawer.expanded {
+      height: 40vh;
+    }
+
+    .drawer-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      height: 44px;
+      min-height: 44px;
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .drawer-bar:hover {
+      background: #ffffff04;
+    }
+    .drawer-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .drawer-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .drawer-new-count {
+      display: none;
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: rgba(108, 99, 255, 0.2);
+      color: #a5a0ff;
+      font-weight: 500;
+    }
+    .drawer-new-count.has-new { display: inline-block; }
+    .drawer-toggle {
       background: none;
       border: 1px solid #2a2a3a;
-      color: #888;
-      padding: 6px 16px;
-      border-radius: 6px;
+      color: #666;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
       cursor: pointer;
-      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
       transition: all 0.15s;
     }
-    .feed-show-more button:hover {
+    .drawer-toggle:hover {
       border-color: #6c63ff;
       color: #ccc;
     }
+
+    .drawer-content {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .activity-drawer.collapsed .drawer-content {
+      display: none;
+    }
+
+    .feed-filter-bar {
+      display: none;
+      padding: 8px 12px;
+      background: rgba(108, 99, 255, 0.08);
+      border-bottom: 1px solid rgba(108, 99, 255, 0.15);
+      font-size: 12px;
+      color: #a5a0ff;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .feed-filter-bar.visible { display: flex; }
+    .feed-filter-clear {
+      background: none;
+      border: 1px solid rgba(108, 99, 255, 0.25);
+      color: #a5a0ff;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .feed-filter-clear:hover { background: rgba(108, 99, 255, 0.15); }
+    .event.feed-dim { opacity: 0.15; }
+
+    .feed-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 8px;
+    }
+    .feed-body::-webkit-scrollbar { width: 4px; }
+    .feed-body::-webkit-scrollbar-track { background: transparent; }
+    .feed-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+
     .live-badge {
       display: flex; align-items: center; gap: 6px;
       font-size: 11px; color: #4ade80; font-weight: 500;
@@ -96,33 +184,92 @@ export function activityFeedStyles(): string {
     }
     .event-timing .t-label { color: #555; }
     .event-timing .t-val { color: #8b8bcd; }
+    .event-bot {
+      font-size: 10px;
+      color: #555;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.15);
+      white-space: nowrap;
+    }
   `;
 }
 
 export function activityFeedHtml(): string {
   return `
-      <div class="panel feed-panel">
-        <div class="panel-header">
-          Activity Feed
+    <div class="activity-drawer collapsed" id="activityDrawer">
+      <div class="drawer-bar" id="drawerBar">
+        <div class="drawer-bar-left">
+          <span class="drawer-title">Activity</span>
           <div class="live-badge"><div class="live-dot"></div> Live</div>
+          <span class="drawer-new-count" id="drawerNewCount"></span>
         </div>
+        <button class="drawer-toggle" id="drawerToggle">&#9650;</button>
+      </div>
+      <div class="drawer-content">
         <div class="feed-filter-bar" id="feedFilterBar">
           <span id="feedFilterLabel">Filtering...</span>
           <button class="feed-filter-clear" onclick="clearFeedFilter()">Clear filter</button>
         </div>
-        <div class="panel-body" id="feed"></div>
-        <div class="feed-show-more" id="feedShowMore" style="display:none">
-          <button id="feedToggleBtn" onclick="toggleFeed()">Show all</button>
-        </div>
-      </div>`;
+        <div class="feed-body" id="feed"></div>
+      </div>
+    </div>`;
 }
 
 export function activityFeedScript(): string {
   return `
     const feed = document.getElementById('feed');
-    const FEED_LIMIT = 10;
-    let feedExpanded = false;
-    let feedEventCount = 0;
+    const drawer = document.getElementById('activityDrawer');
+    let drawerExpanded = false;
+    let newEventCount = 0;
+
+    function clearFeed() {
+      feed.innerHTML = '';
+      newEventCount = 0;
+      updateNewEventBadge();
+    }
+
+    function expandActivityDrawer() {
+      drawerExpanded = true;
+      drawer.classList.remove('collapsed');
+      drawer.classList.add('expanded');
+      document.getElementById('drawerToggle').innerHTML = '&#9660;';
+      newEventCount = 0;
+      updateNewEventBadge();
+    }
+
+    function collapseActivityDrawer() {
+      drawerExpanded = false;
+      drawer.classList.remove('expanded');
+      drawer.classList.add('collapsed');
+      document.getElementById('drawerToggle').innerHTML = '&#9650;';
+    }
+
+    function toggleActivityDrawer() {
+      if (drawerExpanded) collapseActivityDrawer();
+      else expandActivityDrawer();
+    }
+
+    function updateNewEventBadge() {
+      const badge = document.getElementById('drawerNewCount');
+      if (newEventCount > 0 && !drawerExpanded) {
+        badge.textContent = newEventCount + ' new';
+        badge.classList.add('has-new');
+      } else {
+        badge.classList.remove('has-new');
+      }
+    }
+
+    document.getElementById('drawerBar').addEventListener('click', toggleActivityDrawer);
+
+    // Keyboard: A to toggle drawer
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'a' && !e.ctrlKey && !e.metaKey && !e.altKey && e.target === document.body) {
+        e.preventDefault();
+        toggleActivityDrawer();
+      }
+    });
 
     function badgeLabel(type) {
       switch (type) {
@@ -147,9 +294,9 @@ export function activityFeedScript(): string {
     }
 
     function addEvent(ev) {
-      if (slackUserFilterActive) {
-        pendingEvents.push(ev);
-        return;
+      if (!drawerExpanded) {
+        newEventCount++;
+        updateNewEventBadge();
       }
 
       const fragment = document.createDocumentFragment();
@@ -166,9 +313,12 @@ export function activityFeedScript(): string {
       }
       if (ev.username) meta += (meta ? ' &middot; ' : '') + '@' + escapeHtml(ev.username);
 
+      const botBadge = (ev.botName && !selectedBot) ? '<span class="event-bot">' + escapeHtml(ev.botName) + '</span>' : '';
+
       div.innerHTML =
         '<span class="event-time">' + formatTime(ev.timestamp) + '</span>' +
         '<span class="event-badge">' + badgeLabel(ev.type) + '</span>' +
+        botBadge +
         '<span class="event-text">' + escapeHtml(ev.text) + '</span>' +
         (meta ? '<span class="event-meta">' + meta + '</span>' : '');
 
@@ -187,42 +337,6 @@ export function activityFeedScript(): string {
       }
 
       feed.prepend(fragment);
-      feedEventCount++;
-      updateFeedVisibility();
-    }
-
-    function updateFeedVisibility() {
-      if (feedExpanded || feedEventCount <= FEED_LIMIT) {
-        document.getElementById('feedShowMore').style.display = 'none';
-        for (const child of feed.children) child.classList.remove('feed-hidden');
-        return;
-      }
-
-      let count = 0;
-      for (const child of feed.children) {
-        if (child.dataset.feedEvent) count++;
-        if (count > FEED_LIMIT) {
-          child.classList.add('feed-hidden');
-        } else {
-          child.classList.remove('feed-hidden');
-        }
-      }
-
-      const showMore = document.getElementById('feedShowMore');
-      const hidden = feedEventCount - FEED_LIMIT;
-      showMore.style.display = '';
-      document.getElementById('feedToggleBtn').textContent = 'Show all (' + feedEventCount + ' events)';
-    }
-
-    function toggleFeed() {
-      feedExpanded = !feedExpanded;
-      if (feedExpanded) {
-        for (const child of feed.children) child.classList.remove('feed-hidden');
-        document.getElementById('feedToggleBtn').textContent = 'Show less';
-        document.getElementById('feedShowMore').style.display = '';
-      } else {
-        updateFeedVisibility();
-      }
     }
   `;
 }

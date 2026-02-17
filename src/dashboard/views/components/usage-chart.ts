@@ -1,21 +1,11 @@
-/** Usage chart — 7-day message + token chart */
+/** Usage chart — 7-day message + token chart (full width in overview) */
 export function usageChartStyles(): string {
   return `
     .chart-container {
       padding: 16px;
-      height: 260px;
+      height: 320px;
     }
   `;
-}
-
-export function usageChartHtml(): string {
-  return `
-      <div class="panel">
-        <div class="panel-header">Usage (7 Days)</div>
-        <div class="chart-container">
-          <canvas id="usageChart"></canvas>
-        </div>
-      </div>`;
 }
 
 export function usageChartScript(): string {
