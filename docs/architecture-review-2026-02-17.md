@@ -108,27 +108,29 @@ In-memory `activeThreads` map not persisted. Has TTL (24h) and size cap (500). I
 ## Refactoring Opportunities
 
 ### 14. Duplicate executor timeout logic
-`src/ai/executor.ts` and `src/scheduler/executor.ts` implement nearly identical timeout/spawn patterns. Extract shared `spawnWithTimeout()`.
+**Status:** DEFERRED — ~11% code overlap between `executor.ts` and `scheduler/executor.ts`. Different spawn args (stream-json vs print mode), error handling, and output parsing. Extraction would save ~30 lines but add indirection.
 
 ### 15. Three identical fire-and-forget extraction patterns
-`extractMemoryAsync`, `extractGoalAsync`, `extractScheduleAsync` — consolidate into shared async processor.
+**Status:** DEFERRED — `extractMemoryAsync`, `extractGoalAsync`, `extractScheduleAsync` share the fire-and-forget pattern but have distinct prompts, DB writes, and error handling. ~25 lines savings, non-trivial to abstract cleanly.
 
 ### 16. Voice handler duplicates message handler (~60% overlap)
-Extract shared post-response utility. (See also improvements-plan.md #13)
+**Status:** DEFERRED — See also improvements-plan.md #13. Requires careful extraction of post-response logic (memory/goal/schedule extraction, message storage, activity logging). High risk of subtle regressions.
 
 ### 17. Conditional bot filtering repeated ~15x in DB layer
-Every DB function has `botName ? WHERE bot_name = ... : WHERE ...`. Use query builder helper.
+**Status:** DEFERRED — Every DB function has `botName ? WHERE bot_name = ... : WHERE ...`. A query builder helper would reduce repetition but adds abstraction complexity. The pattern is mechanical and works reliably.
 
 ### 18. Dashboard search has 3 near-identical functions
-`dashboardSearchText()`, `dashboardSearchSemantic()`, `dashboardSearchHybrid()` share ~80% code.
+**Status:** DEFERRED — `dashboardSearchText()`, `dashboardSearchSemantic()`, `dashboardSearchHybrid()` share ~80% code but differ in WHERE clauses and result assembly. Worth revisiting if search logic changes.
 
 ### ~~19. Duplicate `esc()`/`escapeHtml()` across dashboard pages~~
 **Status:** [x] DONE
 ~~Defined separately in traces-page.ts, search-page.ts, logs-page.ts, knowledge-page.ts.~~
 Extracted `escScript()` into `helpers.ts`. All four pages now import and use the shared function.
 
-### 20. N+1 queries in stats
-`getUsersSummary()` has correlated subqueries for each user row.
+### ~~20. N+1 queries in stats~~
+**Status:** [x] DONE
+~~`getUsersSummary()` has correlated subqueries for each user row.~~
+Rewrote `getUsersSummary()`, `getSlackAnalytics()` users query, and `tokensByDay` using CTEs with pre-aggregation and LEFT JOINs instead of correlated subqueries.
 
 ---
 
@@ -155,16 +157,18 @@ Now logs a warning when embedding is null. Memory is still saved (valuable for t
 `log.warn` already present on parse failure (line 34), making it distinguishable in logs. Returning `[]` is the safe fallback — prevents false positive notifications.
 
 ### 25. Content dedup hash is format-dependent
-If Haiku changes output format, emails get duplicated.
+**Status:** ACCEPTED — Format fragility is real but no clean fix without redesigning the dedup approach. Current rolling-window `lastNotifiedIds` provides a secondary dedup layer.
 
-### 26. Dashboard SSE has duplicate cleanup
-Both in `onAbort` and after while loop.
+### ~~26. Dashboard SSE has duplicate cleanup~~
+**Status:** [x] DONE
+~~Both in `onAbort` and after while loop.~~
+Removed post-while-loop cleanup — already handled in `stream.onAbort()` callback which sets `alive = false` to exit the loop.
 
 ### 27. Event listeners accumulate on dashboard re-render
-No cleanup of old listeners.
+**Status:** FALSE POSITIVE — Server-rendered pages, not SPA. Event listeners in `<script>` tags execute once per page load. No re-rendering occurs that would accumulate listeners.
 
 ### 28. No linter configured
-Relies on TypeScript strictness only.
+**Status:** DEFERRED — Linter setup (ESLint/Biome) is a separate discussion. TypeScript strict mode catches most issues.
 
 ---
 

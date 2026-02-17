@@ -20,8 +20,7 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
   const sql = getDb();
 
   // For optional bot_name filtering, use parameterized query with $1
-  const botFilter = botName ? "WHERE bot_name = $1" : "";
-  const haikuBotFilter = botName ? "WHERE bot_name = $1" : "";
+  const whereBot = botName ? "WHERE bot_name = $1" : "";
   const params = botName ? [botName] : [];
 
   const [counts] = await sql.unsafe(`
@@ -33,7 +32,7 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
         coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)) FILTER (WHERE created_at >= CURRENT_DATE), 0) AS tokens_today,
         coalesce(avg(duration_ms) FILTER (WHERE role = 'assistant' AND duration_ms IS NOT NULL), 0) AS avg_response_ms
       FROM messages
-      ${botFilter}
+      ${whereBot}
     ),
     haiku_stats AS (
       SELECT
@@ -42,20 +41,20 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
         coalesce(sum(input_tokens + output_tokens) FILTER (WHERE source LIKE 'watcher-%'), 0) AS watcher_total_tokens,
         coalesce(sum(input_tokens + output_tokens) FILTER (WHERE source LIKE 'watcher-%' AND created_at >= CURRENT_DATE), 0) AS watcher_tokens_today
       FROM haiku_usage
-      ${haikuBotFilter}
+      ${whereBot}
     ),
     mem_stats AS (
-      SELECT count(*) AS memories_count FROM memories ${botFilter}
+      SELECT count(*) AS memories_count FROM memories ${whereBot}
     ),
     goal_stats AS (
       SELECT
         count(*) FILTER (WHERE status = 'active') AS active_goals,
         count(*) FILTER (WHERE status = 'completed') AS completed_goals
       FROM goals
-      ${botFilter}
+      ${whereBot}
     ),
     task_stats AS (
-      SELECT count(*) FILTER (WHERE enabled = true) AS scheduled_tasks FROM scheduled_tasks ${botFilter}
+      SELECT count(*) FILTER (WHERE enabled = true) AS scheduled_tasks FROM scheduled_tasks ${whereBot}
     )
     SELECT
       msg_stats.*,
@@ -87,29 +86,34 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
       ORDER BY d.day
     `;
 
-  const tokensByDay = botName
-    ? await sql`
-      SELECT
-        to_char(d.day, 'YYYY-MM-DD') AS date,
-        coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName}), 0)::int AS haiku_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND bot_name = ${botName} AND source LIKE 'watcher-%'), 0)::int AS watcher_tokens
-      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
-      LEFT JOIN messages m ON m.created_at::date = d.day AND m.bot_name = ${botName}
-      GROUP BY d.day
-      ORDER BY d.day
-    `
-    : await sql`
-      SELECT
-        to_char(d.day, 'YYYY-MM-DD') AS date,
-        coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS main_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day), 0)::int AS haiku_tokens,
-        coalesce((SELECT sum(input_tokens + output_tokens) FROM haiku_usage WHERE created_at::date = d.day AND source LIKE 'watcher-%'), 0)::int AS watcher_tokens
-      FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d(day)
-      LEFT JOIN messages m ON m.created_at::date = d.day
-      GROUP BY d.day
-      ORDER BY d.day
-    `;
+  const andBot = botName ? "AND bot_name = $1" : "";
+
+  const tokensByDay = await sql.unsafe(`
+    WITH days AS (
+      SELECT d::date AS day FROM generate_series(CURRENT_DATE - interval '6 days', CURRENT_DATE, '1 day') AS d
+    ),
+    msg_tokens AS (
+      SELECT created_at::date AS day, coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0)::int AS total
+      FROM messages WHERE created_at >= CURRENT_DATE - interval '6 days' ${andBot}
+      GROUP BY created_at::date
+    ),
+    haiku_tokens AS (
+      SELECT created_at::date AS day,
+        coalesce(sum(input_tokens + output_tokens), 0)::int AS total,
+        coalesce(sum(input_tokens + output_tokens) FILTER (WHERE source LIKE 'watcher-%'), 0)::int AS watcher_total
+      FROM haiku_usage WHERE created_at >= CURRENT_DATE - interval '6 days' ${andBot}
+      GROUP BY created_at::date
+    )
+    SELECT
+      to_char(d.day, 'YYYY-MM-DD') AS date,
+      coalesce(mt.total, 0)::int AS main_tokens,
+      coalesce(ht.total, 0)::int AS haiku_tokens,
+      coalesce(ht.watcher_total, 0)::int AS watcher_tokens
+    FROM days d
+    LEFT JOIN msg_tokens mt ON mt.day = d.day
+    LEFT JOIN haiku_tokens ht ON ht.day = d.day
+    ORDER BY d.day
+  `, params);
 
   return {
     messagesToday: Number(counts!.messages_today),
@@ -147,43 +151,53 @@ export interface UserSummary {
 export async function getUsersSummary(botName?: string): Promise<UserSummary[]> {
   const sql = getDb();
 
-  const rows = botName
-    ? await sql`
+  const whereBot = botName ? `WHERE bot_name = $1` : "";
+  const andBot = botName ? `AND bot_name = $1` : "";
+  const params = botName ? [botName] : [];
+
+  const rows = await sql.unsafe(`
+    WITH user_msgs AS (
       SELECT
-        m.user_id,
-        m.username,
+        m.user_id, m.username,
         mode() WITHIN GROUP (ORDER BY m.platform) AS platform,
         count(DISTINCT m.id)::int AS message_count,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.user_id = m.user_id AND mem.bot_name = ${botName}), 0)::int AS memory_count,
-        coalesce((SELECT count(*) FROM threads t WHERE t.user_id = m.user_id AND t.bot_name = ${botName}), 0)::int AS thread_count,
         max(m.created_at) AS last_active,
-        min(m.created_at) AS first_seen,
-        coalesce((SELECT count(*) FROM goals g WHERE g.user_id = m.user_id AND g.status = 'active' AND g.bot_name = ${botName}), 0)::int AS active_goal_count,
-        coalesce((SELECT count(*) FROM scheduled_tasks st WHERE st.user_id = m.user_id AND st.enabled = true AND st.bot_name = ${botName}), 0)::int AS scheduled_task_count,
-        coalesce((SELECT sum(coalesce(am.input_tokens, 0) + coalesce(am.output_tokens, 0)) FROM messages am WHERE am.user_id = m.user_id AND am.role = 'assistant' AND am.bot_name = ${botName}), 0)::bigint AS total_tokens
+        min(m.created_at) AS first_seen
       FROM messages m
-      WHERE m.role = 'user' AND m.bot_name = ${botName}
+      WHERE m.role = 'user' ${andBot}
       GROUP BY m.user_id, m.username
-      ORDER BY last_active DESC
-    `
-    : await sql`
-      SELECT
-        m.user_id,
-        m.username,
-        mode() WITHIN GROUP (ORDER BY m.platform) AS platform,
-        count(DISTINCT m.id)::int AS message_count,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.user_id = m.user_id), 0)::int AS memory_count,
-        coalesce((SELECT count(*) FROM threads t WHERE t.user_id = m.user_id), 0)::int AS thread_count,
-        max(m.created_at) AS last_active,
-        min(m.created_at) AS first_seen,
-        coalesce((SELECT count(*) FROM goals g WHERE g.user_id = m.user_id AND g.status = 'active'), 0)::int AS active_goal_count,
-        coalesce((SELECT count(*) FROM scheduled_tasks st WHERE st.user_id = m.user_id AND st.enabled = true), 0)::int AS scheduled_task_count,
-        coalesce((SELECT sum(coalesce(am.input_tokens, 0) + coalesce(am.output_tokens, 0)) FROM messages am WHERE am.user_id = m.user_id AND am.role = 'assistant'), 0)::bigint AS total_tokens
-      FROM messages m
-      WHERE m.role = 'user'
-      GROUP BY m.user_id, m.username
-      ORDER BY last_active DESC
-    `;
+    ),
+    user_memories AS (
+      SELECT user_id, count(*)::int AS cnt FROM memories ${whereBot} GROUP BY user_id
+    ),
+    user_threads AS (
+      SELECT user_id, count(*)::int AS cnt FROM threads ${whereBot} GROUP BY user_id
+    ),
+    user_goals AS (
+      SELECT user_id, count(*)::int AS cnt FROM goals WHERE status = 'active' ${andBot} GROUP BY user_id
+    ),
+    user_tasks AS (
+      SELECT user_id, count(*)::int AS cnt FROM scheduled_tasks WHERE enabled = true ${andBot} GROUP BY user_id
+    ),
+    user_tokens AS (
+      SELECT user_id, coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0)::bigint AS total
+      FROM messages WHERE role = 'assistant' ${andBot} GROUP BY user_id
+    )
+    SELECT
+      um.user_id, um.username, um.platform, um.message_count, um.last_active, um.first_seen,
+      coalesce(umem.cnt, 0)::int AS memory_count,
+      coalesce(ut.cnt, 0)::int AS thread_count,
+      coalesce(ug.cnt, 0)::int AS active_goal_count,
+      coalesce(ust.cnt, 0)::int AS scheduled_task_count,
+      coalesce(utok.total, 0)::bigint AS total_tokens
+    FROM user_msgs um
+    LEFT JOIN user_memories umem USING (user_id)
+    LEFT JOIN user_threads ut USING (user_id)
+    LEFT JOIN user_goals ug USING (user_id)
+    LEFT JOIN user_tasks ust USING (user_id)
+    LEFT JOIN user_tokens utok USING (user_id)
+    ORDER BY um.last_active DESC
+  `, params);
 
   return rows.map((r) => ({
     userId: r.user_id,
@@ -242,37 +256,41 @@ export async function getSlackAnalytics(botName?: string): Promise<SlackAnalytic
   const sql = getDb();
 
   // Users with message counts, first/last seen, primary platform
-  const users = botName
-    ? await sql`
+  const andBot = botName ? `AND bot_name = $1` : "";
+  const params = botName ? [botName] : [];
+
+  const users = await sql.unsafe(`
+    WITH slack_msgs AS (
+      SELECT id, user_id FROM messages
+      WHERE platform LIKE 'slack_%' ${andBot}
+    ),
+    slack_mem_counts AS (
+      SELECT sm.user_id,
+        count(*) FILTER (WHERE mem.scope = 'personal') AS personal,
+        count(*) FILTER (WHERE mem.scope = 'shared') AS shared
+      FROM slack_msgs sm
+      JOIN memories mem ON mem.source_message_id = sm.id
+      GROUP BY sm.user_id
+    ),
+    slack_users AS (
       SELECT
-        m.user_id,
-        m.username,
+        m.user_id, m.username,
         count(*)::int AS message_count,
         min(m.created_at) AS first_seen,
         max(m.created_at) AS last_seen,
-        mode() WITHIN GROUP (ORDER BY m.platform) AS primary_platform,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.source_message_id IN (SELECT id FROM messages WHERE user_id = m.user_id AND platform LIKE 'slack_%' AND bot_name = ${botName}) AND mem.scope = 'personal'), 0)::int AS personal_memories,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.source_message_id IN (SELECT id FROM messages WHERE user_id = m.user_id AND platform LIKE 'slack_%' AND bot_name = ${botName}) AND mem.scope = 'shared'), 0)::int AS shared_memories
+        mode() WITHIN GROUP (ORDER BY m.platform) AS primary_platform
       FROM messages m
-      WHERE m.platform LIKE 'slack_%' AND m.role = 'user' AND m.bot_name = ${botName}
+      WHERE m.platform LIKE 'slack_%' AND m.role = 'user' ${andBot}
       GROUP BY m.user_id, m.username
-      ORDER BY message_count DESC
-    `
-    : await sql`
-      SELECT
-        m.user_id,
-        m.username,
-        count(*)::int AS message_count,
-        min(m.created_at) AS first_seen,
-        max(m.created_at) AS last_seen,
-        mode() WITHIN GROUP (ORDER BY m.platform) AS primary_platform,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.source_message_id IN (SELECT id FROM messages WHERE user_id = m.user_id AND platform LIKE 'slack_%') AND mem.scope = 'personal'), 0)::int AS personal_memories,
-        coalesce((SELECT count(*) FROM memories mem WHERE mem.source_message_id IN (SELECT id FROM messages WHERE user_id = m.user_id AND platform LIKE 'slack_%') AND mem.scope = 'shared'), 0)::int AS shared_memories
-      FROM messages m
-      WHERE m.platform LIKE 'slack_%' AND m.role = 'user'
-      GROUP BY m.user_id, m.username
-      ORDER BY message_count DESC
-    `;
+    )
+    SELECT
+      su.user_id, su.username, su.message_count, su.first_seen, su.last_seen, su.primary_platform,
+      coalesce(smc.personal, 0)::int AS personal_memories,
+      coalesce(smc.shared, 0)::int AS shared_memories
+    FROM slack_users su
+    LEFT JOIN slack_mem_counts smc USING (user_id)
+    ORDER BY su.message_count DESC
+  `, params);
 
   // Platform breakdown
   const breakdown = botName

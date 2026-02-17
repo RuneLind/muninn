@@ -540,14 +540,10 @@ export function createDashboardRoutes(config: Config): Hono {
         clearInterval(heartbeat);
       });
 
-      // Keep the stream open
+      // Keep the stream open (cleanup handled in onAbort)
       while (alive) {
         await Bun.sleep(1000);
       }
-
-      unsubscribe();
-      unsubscribeStatus();
-      clearInterval(heartbeat);
     });
   });
 
