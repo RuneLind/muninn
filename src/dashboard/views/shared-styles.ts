@@ -34,6 +34,36 @@ export function renderNav(
     ? `\n        <a href="/simulator" class="nav-link${activePage === "simulator" ? " active" : ""}">Simulator</a>`
     : "";
   return `
+  <script>
+    if (!window.__fullscreenNav) {
+      window.__fullscreenNav = true;
+
+      // Toggle fullscreen with 'f' (skip when typing in inputs)
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey &&
+            !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName) &&
+            !e.target.isContentEditable) {
+          if (document.fullscreenElement) {
+            document.exitFullscreen();
+            sessionStorage.removeItem('fs');
+          } else {
+            document.documentElement.requestFullscreen();
+            sessionStorage.setItem('fs', '1');
+          }
+        }
+      });
+
+      // Track exit via Escape or browser UI
+      document.addEventListener('fullscreenchange', function() {
+        if (!document.fullscreenElement) sessionStorage.removeItem('fs');
+      });
+
+      // Re-enter fullscreen after navigation if it was active
+      if (sessionStorage.getItem('fs')) {
+        document.documentElement.requestFullscreen().catch(function() {});
+      }
+    }
+  </script>
   <header>
     <div class="header-left">
       <h1><span>J</span>arvis</h1>
