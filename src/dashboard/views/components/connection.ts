@@ -97,15 +97,22 @@ export function connectionScript(): string {
         ]);
 
         updateMetricsStrip(statsRes);
+
+        // Store data in globals (order doesn't matter — just setters)
         renderGoals(goalsRes.goals || []);
         renderTasks(tasksRes.tasks || []);
         renderWatchers(watchersRes.watchers || []);
         renderMemories(memoriesRes.memories || []);
-        renderSlackAnalytics(slackRes);
-        renderThreads(threadsRes.threads || []);
-        renderUsers(usersRes.users || []);
-        renderKnowledgePanel();
-        initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []);
+
+        // Render panels — each wrapped so one failure doesn't block others
+        [
+          () => renderSlackAnalytics(slackRes),
+          () => renderThreads(threadsRes.threads || []),
+          () => renderUsers(usersRes.users || []),
+          () => renderKnowledgePanel(),
+          () => renderAutomationPanel(),
+          () => initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []),
+        ].forEach(fn => { try { fn(); } catch (e) { console.error('Render error:', e); } });
 
         // Activity feed + overview: recent activity
         let events = activityRes.events || [];
@@ -209,29 +216,6 @@ export function connectionScript(): string {
 
     // --- Event Delegation ---
     document.addEventListener('click', (e) => {
-      // Detail panel opens (from any panel item with data-detail-type)
-      const detailItem = e.target.closest('[data-detail-type]');
-      if (detailItem && !e.target.closest('[data-filter-watcher]')) {
-        e.stopPropagation();
-        const type = detailItem.dataset.detailType;
-        const idx = parseInt(detailItem.dataset.detailIndex, 10);
-        let data = null;
-        switch (type) {
-          case 'task': data = tasksData[idx]; break;
-          case 'watcher': data = watchersData[idx]; break;
-        }
-        if (data) openDetail(type, data);
-        return;
-      }
-
-      // Watcher filter button
-      const btn = e.target.closest('[data-filter-watcher]');
-      if (btn) {
-        e.stopPropagation();
-        filterFeedByWatcher(btn.dataset.filterWatcher);
-        return;
-      }
-
       // Slack user clicks
       const userItem = e.target.closest('.slack-user-item[data-user-id]');
       if (userItem) {

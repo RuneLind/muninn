@@ -313,14 +313,6 @@ export function detailPanelScript(): string {
           switchSection('memories-goals');
           if (data && data.id) selectMgItem('goal', data.id);
           return;
-        case 'task':
-          title.textContent = 'Scheduled Task';
-          body.innerHTML = renderTaskDetail(data);
-          break;
-        case 'watcher':
-          title.textContent = 'Watcher';
-          body.innerHTML = renderWatcherDetail(data);
-          break;
         case 'memory':
           // Redirect to inline knowledge panel
           closeDetail();
@@ -362,65 +354,6 @@ export function detailPanelScript(): string {
         closeDetail();
       }
     });
-
-    // Delegated click for watcher filter button
-    document.getElementById('detailBody').addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-watcher-filter]');
-      if (btn) {
-        filterFeedByWatcher(btn.dataset.watcherFilter);
-        closeDetail();
-      }
-    });
-
-    // --- Detail Renderers ---
-
-    function renderTaskDetail(t) {
-      return '' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Title</div>' +
-          '<div class="detail-value">' + escapeHtml(t.title) + '</div>' +
-        '</div>' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Type</div>' +
-          '<div class="detail-value"><span class="detail-badge ' + (t.enabled ? escapeAttr(t.taskType) : 'disabled') + '">' + escapeHtml(t.taskType) + '</span></div>' +
-        '</div>' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Status</div>' +
-          '<div class="detail-value"><span class="detail-badge ' + (t.enabled ? 'enabled' : 'disabled') + '">' + (t.enabled ? 'Enabled' : 'Disabled') + '</span></div>' +
-        '</div>' +
-        '<div class="detail-field"><div class="detail-label">Schedule</div><div class="detail-value">' + formatSchedule(t) + '</div></div>' +
-        (t.nextRunAt ? '<div class="detail-field"><div class="detail-label">Next Run</div><div class="detail-value">' + new Date(t.nextRunAt).toLocaleString() + '</div></div>' : '') +
-        (t.lastRunAt ? '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + timeAgo(t.lastRunAt) + '</div></div>' : '') +
-        (t.prompt ? '<div class="detail-field"><div class="detail-label">Prompt</div><div class="detail-value" style="font-family:monospace;font-size:12px;background:#12121a;padding:8px;border-radius:6px">' + escapeHtml(t.prompt) + '</div></div>' : '') +
-        '<div class="detail-field"><div class="detail-label">User</div><div class="detail-value">' + escapeHtml(t.username || t.userId || 'Unknown') + '</div></div>';
-    }
-
-    function renderWatcherDetail(w) {
-      const configEntries = Object.entries(w.config || {});
-      const configHtml = configEntries.map(([k, v]) =>
-        '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a2e"><span style="color:#666">' + escapeHtml(k) + '</span><span style="color:#bbb">' + escapeHtml(String(v)) + '</span></div>'
-      ).join('');
-      return '' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Name</div>' +
-          '<div class="detail-value">' + escapeHtml(w.name) + '</div>' +
-        '</div>' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Type</div>' +
-          '<div class="detail-value"><span class="detail-badge ' + escapeAttr(w.type) + '">' + escapeHtml(w.type) + '</span></div>' +
-        '</div>' +
-        '<div class="detail-field">' +
-          '<div class="detail-label">Status</div>' +
-          '<div class="detail-value"><span class="detail-badge ' + (w.enabled ? 'enabled' : 'disabled') + '">' + (w.enabled ? 'Active' : 'Disabled') + '</span></div>' +
-        '</div>' +
-        '<div class="detail-field"><div class="detail-label">Interval</div><div class="detail-value">' + formatInterval(w.intervalMs) + '</div></div>' +
-        (w.lastRunAt ? '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + timeAgo(w.lastRunAt) + '</div></div>' : '') +
-        '<div class="detail-field"><div class="detail-label">Tracked IDs</div><div class="detail-value">' + (w.lastNotifiedIds ? w.lastNotifiedIds.length : 0) + '</div></div>' +
-        '<div class="detail-field"><div class="detail-label">Created</div><div class="detail-value">' + new Date(w.createdAt).toLocaleDateString() + '</div></div>' +
-        (configHtml ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
-        '<hr class="detail-divider">' +
-        '<button data-watcher-filter="' + escapeAttr(w.name) + '" style="width:100%;padding:8px;background:rgba(108,99,255,0.1);border:1px solid rgba(108,99,255,0.25);border-radius:6px;color:#a5a0ff;cursor:pointer;font-size:12px">View Activity Log</button>';
-    }
 
     // --- Inline User Detail (master-detail panel) ---
     let activeUserTab = 'messages';

@@ -13,6 +13,7 @@ import { tasksPanelStyles, tasksPanelHtml, tasksPanelScript } from "./components
 import { watchersPanelStyles, watchersPanelHtml, watchersPanelScript } from "./components/watchers-panel.ts";
 import { memoriesPanelStyles, memoriesPanelHtml, memoriesPanelScript } from "./components/memories-panel.ts";
 import { knowledgePanelStyles, knowledgePanelHtml, knowledgePanelScript } from "./components/knowledge-panel.ts";
+import { automationPanelStyles, automationPanelHtml, automationPanelScript } from "./components/automation-panel.ts";
 import { threadsPanelStyles, threadsPanelHtml, threadsPanelScript } from "./components/threads-panel.ts";
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
@@ -41,6 +42,7 @@ export function renderDashboardPage(): string {
     ${watchersPanelStyles()}
     ${memoriesPanelStyles()}
     ${knowledgePanelStyles()}
+    ${automationPanelStyles()}
     ${threadsPanelStyles()}
     ${slackPanelStyles()}
     ${usageChartStyles()}
@@ -77,10 +79,7 @@ export function renderDashboardPage(): string {
       ${knowledgePanelHtml()}
     </div>
     <div data-section="schedules-watchers">
-      <div class="section-dual">
-        <div>${tasksPanelHtml()}</div>
-        <div>${watchersPanelHtml()}</div>
-      </div>
+      ${automationPanelHtml()}
     </div>
     <div data-section="slack">
       ${slackPanelHtml()}
@@ -101,6 +100,7 @@ export function renderDashboardPage(): string {
     ${watchersPanelScript()}
     ${memoriesPanelScript()}
     ${knowledgePanelScript()}
+    ${automationPanelScript()}
     ${threadsPanelScript()}
     ${slackPanelScript()}
     ${usageChartScript()}

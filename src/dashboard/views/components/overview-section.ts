@@ -198,15 +198,6 @@ export function overviewSectionScript(): string {
       document.getElementById('metricGoals').textContent = stats.activeGoalsCount;
       document.getElementById('metricTasks').textContent = stats.scheduledTasksCount;
       document.getElementById('metricTokens').textContent = fmtTokens(stats.totalTokens);
-
-      const wb = document.getElementById('watcherTokensBadge');
-      if (wb && stats.watcherTokensToday > 0) {
-        wb.textContent = fmtTokens(stats.watcherTokensToday) + ' tok today';
-      } else if (wb && stats.watcherTokensTotal > 0) {
-        wb.textContent = fmtTokens(stats.watcherTokensTotal) + ' tok total';
-      } else if (wb) {
-        wb.textContent = '';
-      }
     }
 
     function miniBadgeClass(type) {
