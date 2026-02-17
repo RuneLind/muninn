@@ -1,9 +1,8 @@
 import type { Config } from "../config.ts";
 import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
 import type { TaskType, Platform } from "../types.ts";
-import { spawnHaiku } from "./executor.ts";
-import { extractJson } from "../ai/json-extract.ts";
-import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
+import type { TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler", "detector");
@@ -59,88 +58,69 @@ Assistant replied: """
 
 export function extractScheduleAsync(
   input: DetectionInput,
-  config: Config,
+  _config: Config,
   traceContext?: TraceContext,
 ): void {
-  doExtract(input, config, traceContext).catch((err) => {
-    log.error("Schedule detection failed: {error}", { botName: input.botName, error: err instanceof Error ? err.message : String(err) });
-  });
-}
-
-async function doExtract(
-  input: DetectionInput,
-  config: Config,
-  traceContext?: TraceContext,
-): Promise<void> {
-  let tracer: Tracer | undefined;
-  if (traceContext) {
-    tracer = new Tracer("schedule_detection", {
-      botName: input.botName,
-      userId: input.userId,
-      traceId: traceContext.traceId,
-      parentId: traceContext.parentId,
-    });
-  }
-
   const prompt = DETECTION_PROMPT.replace(
     "{USER_MESSAGE}",
     input.userMessage,
   ).replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
 
-  const haiku = await spawnHaiku(prompt, "schedule", "jarvis-schedule-detector", undefined, input.botName);
-
-  let result: DetectionResult;
-  try {
-    result = extractJson<DetectionResult>(haiku.result);
-  } catch {
-    log.error("Schedule detection: failed to parse result: {raw}", { botName: input.botName, raw: haiku.result.slice(0, 300) });
-    tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
-    return;
-  }
-
-  if (!result.has_schedule || !result.title || result.hour == null) {
-    tracer?.finish("ok", { hasSchedule: false });
-    return;
-  }
-
-  const taskType = result.task_type ?? "reminder";
-
-  // Check for existing similar task to avoid duplicates
-  const existing = await findSimilarTask(
-    input.userId,
-    input.botName,
-    result.title,
-    taskType,
-  );
-
-  if (existing) {
-    // Update prompt if it changed, otherwise skip
-    const newPrompt = result.prompt ?? null;
-    if (newPrompt !== existing.prompt) {
-      await updateTaskPrompt(existing.id, newPrompt);
-      log.info("Scheduled task updated (duplicate detected): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
-    } else {
-      log.info("Scheduled task skipped (duplicate): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
-    }
-    tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType, duplicate: true });
-    return;
-  }
-
-  const taskId = await saveScheduledTask({
-    userId: input.userId,
+  runHaikuExtraction<DetectionResult>({
+    spanName: "schedule_detection",
+    source: "schedule",
+    entrypoint: "jarvis-schedule-detector",
     botName: input.botName,
-    title: result.title,
-    taskType: taskType,
-    prompt: result.prompt ?? null,
-    scheduleHour: result.hour,
-    scheduleMinute: result.minute ?? 0,
-    scheduleDays: result.days ?? null,
-    scheduleIntervalMs: result.interval_ms ?? null,
-    timezone: result.timezone ?? "Europe/Oslo",
-    platform: input.platform,
+    userId: input.userId,
+    prompt,
+    log,
+    traceContext,
+    onResult: async (result, tracer) => {
+      if (!result.has_schedule || !result.title || result.hour == null) {
+        tracer?.finish("ok", { hasSchedule: false });
+        return;
+      }
+
+      const taskType = result.task_type ?? "reminder";
+
+      // Check for existing similar task to avoid duplicates
+      const existing = await findSimilarTask(
+        input.userId,
+        input.botName,
+        result.title,
+        taskType,
+      );
+
+      if (existing) {
+        // Update prompt if it changed, otherwise skip
+        const newPrompt = result.prompt ?? null;
+        if (newPrompt !== existing.prompt) {
+          await updateTaskPrompt(existing.id, newPrompt);
+          log.info("Scheduled task updated (duplicate detected): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
+        } else {
+          log.info("Scheduled task skipped (duplicate): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
+        }
+        tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType, duplicate: true });
+        return;
+      }
+
+      const taskId = await saveScheduledTask({
+        userId: input.userId,
+        botName: input.botName,
+        title: result.title,
+        taskType: taskType,
+        prompt: result.prompt ?? null,
+        scheduleHour: result.hour,
+        scheduleMinute: result.minute ?? 0,
+        scheduleDays: result.days ?? null,
+        scheduleIntervalMs: result.interval_ms ?? null,
+        timezone: result.timezone ?? "Europe/Oslo",
+        platform: input.platform,
+      });
+
+      log.info("Scheduled task detected: \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId });
+
+      tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType });
+    },
   });
-
-  log.info("Scheduled task detected: \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId });
-
-  tracer?.finish("ok", { hasSchedule: true, title: result.title, taskType });
 }

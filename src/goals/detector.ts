@@ -1,9 +1,8 @@
 import type { Config } from "../config.ts";
 import type { Platform } from "../types.ts";
 import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
-import { spawnHaiku } from "../scheduler/executor.ts";
-import { extractJson } from "../ai/json-extract.ts";
-import { Tracer, type TraceContext } from "../tracing/index.ts";
+import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
+import type { TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("goals");
@@ -26,27 +25,14 @@ interface DetectionResult {
   completed_goal_title?: string;
 }
 
-export function extractGoalAsync(input: DetectionInput, config: Config, traceContext?: TraceContext): void {
-  doExtract(input, config, traceContext).catch((err) => {
+export function extractGoalAsync(input: DetectionInput, _config: Config, traceContext?: TraceContext): void {
+  // Goal detection needs active goals for completion matching — fetch before spawning Haiku.
+  doGoalExtraction(input, traceContext).catch((err) => {
     log.error("Goal detection failed: {error}", { botName: input.botName, error: err instanceof Error ? err.message : String(err) });
   });
 }
 
-async function doExtract(
-  input: DetectionInput,
-  config: Config,
-  traceContext?: TraceContext,
-): Promise<void> {
-  let tracer: Tracer | undefined;
-  if (traceContext) {
-    tracer = new Tracer("goal_detection", {
-      botName: input.botName,
-      userId: input.userId,
-      traceId: traceContext.traceId,
-      parentId: traceContext.parentId,
-    });
-  }
-
+async function doGoalExtraction(input: DetectionInput, traceContext?: TraceContext): Promise<void> {
   // Load active goals so the detector can match completions
   let activeGoalsList = "";
   try {
@@ -66,43 +52,44 @@ async function doExtract(
     activeGoalsList,
   );
 
-  const haiku = await spawnHaiku(prompt, "goals", "jarvis-goals", undefined, input.botName);
+  runHaikuExtraction<DetectionResult>({
+    spanName: "goal_detection",
+    source: "goals",
+    entrypoint: "jarvis-goals",
+    botName: input.botName,
+    userId: input.userId,
+    prompt,
+    log,
+    traceContext,
+    onResult: async (result, tracer) => {
+      if (result.action === "completed" && result.completed_goal_title) {
+        await handleCompletion(input.userId, result.completed_goal_title, input.botName);
+        tracer?.finish("ok", { action: "completed", title: result.completed_goal_title });
+        return;
+      }
 
-  let result: DetectionResult;
-  try {
-    result = extractJson<DetectionResult>(haiku.result);
-  } catch {
-    log.error("Goal detection: failed to parse result: {raw}", { botName: input.botName, raw: haiku.result.slice(0, 300) });
-    tracer?.finish("error", { error: "parse_failed", rawResult: haiku.result.slice(0, 300) });
-    return;
-  }
+      if (result.action === "new" && result.title) {
+        const deadline = result.deadline ? new Date(result.deadline) : null;
 
-  if (result.action === "completed" && result.completed_goal_title) {
-    await handleCompletion(input.userId, result.completed_goal_title, input.botName);
-    tracer?.finish("ok", { action: "completed", title: result.completed_goal_title });
-    return;
-  }
+        const goalId = await saveGoal({
+          userId: input.userId,
+          botName: input.botName,
+          title: result.title,
+          description: result.description ?? null,
+          deadline: deadline && !isNaN(deadline.getTime()) ? deadline : null,
+          tags: result.tags ?? [],
+          sourceMessageId: input.sourceMessageId ?? null,
+          platform: input.platform,
+        });
 
-  if (result.action === "new" && result.title) {
-    const deadline = result.deadline ? new Date(result.deadline) : null;
+        log.info("Goal detected: \"{title}\" (id: {goalId})", { botName: input.botName, title: result.title, goalId });
+        tracer?.finish("ok", { action: "new", title: result.title });
+        return;
+      }
 
-    const goalId = await saveGoal({
-      userId: input.userId,
-      botName: input.botName,
-      title: result.title,
-      description: result.description ?? null,
-      deadline: deadline && !isNaN(deadline.getTime()) ? deadline : null,
-      tags: result.tags ?? [],
-      sourceMessageId: input.sourceMessageId ?? null,
-      platform: input.platform,
-    });
-
-    log.info("Goal detected: \"{title}\" (id: {goalId})", { botName: input.botName, title: result.title, goalId });
-    tracer?.finish("ok", { action: "new", title: result.title });
-    return;
-  }
-
-  tracer?.finish("ok", { action: "none" });
+      tracer?.finish("ok", { action: "none" });
+    },
+  });
 }
 
 async function handleCompletion(

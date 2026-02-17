@@ -110,8 +110,8 @@ In-memory `activeThreads` map not persisted. Has TTL (24h) and size cap (500). I
 ### 14. Duplicate executor timeout logic
 **Status:** DEFERRED — ~11% code overlap between `executor.ts` and `scheduler/executor.ts`. Different spawn args (stream-json vs print mode), error handling, and output parsing. Extraction would save ~30 lines but add indirection.
 
-### 15. Three identical fire-and-forget extraction patterns
-**Status:** DEFERRED — `extractMemoryAsync`, `extractGoalAsync`, `extractScheduleAsync` share the fire-and-forget pattern but have distinct prompts, DB writes, and error handling. ~25 lines savings, non-trivial to abstract cleanly.
+### ~~15. Three identical fire-and-forget extraction patterns~~
+**Status:** [x] DONE — Extracted `runHaikuExtraction()` helper in `src/ai/haiku-extraction.ts`. Handles fire-and-forget wrapper, tracer setup, spawnHaiku + extractJson parsing, and error handling. Each extractor keeps its own prompt, result type, and post-parse domain logic via `onResult` callback.
 
 ### 16. Voice handler duplicates message handler (~60% overlap)
 **Status:** DEFERRED — See also improvements-plan.md #13. Requires careful extraction of post-response logic (memory/goal/schedule extraction, message storage, activity logging). High risk of subtle regressions.
@@ -119,8 +119,8 @@ In-memory `activeThreads` map not persisted. Has TTL (24h) and size cap (500). I
 ### 17. Conditional bot filtering repeated ~15x in DB layer
 **Status:** DEFERRED — Every DB function has `botName ? WHERE bot_name = ... : WHERE ...`. A query builder helper would reduce repetition but adds abstraction complexity. The pattern is mechanical and works reliably.
 
-### 18. Dashboard search has 3 near-identical functions
-**Status:** DEFERRED — `dashboardSearchText()`, `dashboardSearchSemantic()`, `dashboardSearchHybrid()` share ~80% code but differ in WHERE clauses and result assembly. Worth revisiting if search logic changes.
+### ~~18. Dashboard search has 3 near-identical functions~~
+**Status:** [x] DONE — Extracted `buildSearchFilters()` helper in `src/db/memories.ts`. Takes `startParamIdx`, `botName?`, `scope?` and returns `{ conditions, params, nextParamIdx }`. All three dashboard search functions now use it for shared condition building.
 
 ### ~~19. Duplicate `esc()`/`escapeHtml()` across dashboard pages~~
 **Status:** [x] DONE

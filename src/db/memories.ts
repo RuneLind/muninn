@@ -292,6 +292,38 @@ export async function getMemoriesWithoutEmbeddings(): Promise<
   return rows.map((r) => ({ id: r.id, summary: r.summary }));
 }
 
+// --- Dashboard search helpers ---
+
+interface SearchFilters {
+  conditions: string[];
+  params: any[];
+  nextParamIdx: number;
+}
+
+/** Build shared botName/scope filter conditions for dashboard search queries. */
+function buildSearchFilters(
+  startParamIdx: number,
+  botName?: string,
+  scope?: MemoryScope,
+): SearchFilters {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  let paramIdx = startParamIdx;
+
+  if (botName) {
+    conditions.push(`m.bot_name = $${paramIdx}`);
+    params.push(botName);
+    paramIdx++;
+  }
+  if (scope) {
+    conditions.push(`m.scope = $${paramIdx}`);
+    params.push(scope);
+    paramIdx++;
+  }
+
+  return { conditions, params, nextParamIdx: paramIdx };
+}
+
 // --- Dashboard search (all users, all bots) ---
 
 export interface DashboardSearchResult {
@@ -320,7 +352,6 @@ interface DashboardSearchOptions {
 export async function dashboardSearchMemories(
   opts: DashboardSearchOptions,
 ): Promise<DashboardSearchResult[]> {
-  const sql = getDb();
   const limit = opts.limit ?? 25;
 
   if (opts.mode === "text" || !opts.embedding) {
@@ -342,23 +373,10 @@ async function dashboardSearchText(
   scope?: MemoryScope,
 ): Promise<DashboardSearchResult[]> {
   const sql = getDb();
-  const conditions: string[] = [`search_vector @@ plainto_tsquery('english', $1)`];
-  const params: any[] = [query];
-  let paramIdx = 2;
-
-  if (botName) {
-    conditions.push(`m.bot_name = $${paramIdx}`);
-    params.push(botName);
-    paramIdx++;
-  }
-  if (scope) {
-    conditions.push(`m.scope = $${paramIdx}`);
-    params.push(scope);
-    paramIdx++;
-  }
-
-  params.push(limit);
-  const limitParam = `$${paramIdx}`;
+  const filters = buildSearchFilters(2, botName, scope);
+  const conditions = [`search_vector @@ plainto_tsquery('english', $1)`, ...filters.conditions];
+  const params = [query, ...filters.params, limit];
+  const limitParam = `$${filters.nextParamIdx}`;
 
   const where = conditions.join(" AND ");
   const rows = await sql.unsafe(
@@ -383,23 +401,10 @@ async function dashboardSearchSemantic(
 ): Promise<DashboardSearchResult[]> {
   const sql = getDb();
   const embeddingStr = `[${embedding.join(",")}]`;
-  const conditions: string[] = ["m.embedding IS NOT NULL"];
-  const params: any[] = [embeddingStr];
-  let paramIdx = 2;
-
-  if (botName) {
-    conditions.push(`m.bot_name = $${paramIdx}`);
-    params.push(botName);
-    paramIdx++;
-  }
-  if (scope) {
-    conditions.push(`m.scope = $${paramIdx}`);
-    params.push(scope);
-    paramIdx++;
-  }
-
-  params.push(limit);
-  const limitParam = `$${paramIdx}`;
+  const filters = buildSearchFilters(2, botName, scope);
+  const conditions = ["m.embedding IS NOT NULL", ...filters.conditions];
+  const params = [embeddingStr, ...filters.params, limit];
+  const limitParam = `$${filters.nextParamIdx}`;
 
   const where = conditions.join(" AND ");
   const rows = await sql.unsafe(
@@ -425,26 +430,12 @@ async function dashboardSearchHybrid(
 ): Promise<DashboardSearchResult[]> {
   const sql = getDb();
   const embeddingStr = `[${embedding.join(",")}]`;
-  const conditions: string[] = [];
-  const params: any[] = [query, embeddingStr];
-  let paramIdx = 3;
+  const filters = buildSearchFilters(3, botName, scope);
+  const params = [query, embeddingStr, ...filters.params, limit];
+  const limitParam = `$${filters.nextParamIdx}`;
 
-  if (botName) {
-    conditions.push(`m.bot_name = $${paramIdx}`);
-    params.push(botName);
-    paramIdx++;
-  }
-  if (scope) {
-    conditions.push(`m.scope = $${paramIdx}`);
-    params.push(scope);
-    paramIdx++;
-  }
-
-  params.push(limit);
-  const limitParam = `$${paramIdx}`;
-
-  const ftsWhere = [`m.search_vector @@ plainto_tsquery('english', $1)`, ...conditions].join(" AND ");
-  const vecWhere = ["m.embedding IS NOT NULL", ...conditions].join(" AND ");
+  const ftsWhere = [`m.search_vector @@ plainto_tsquery('english', $1)`, ...filters.conditions].join(" AND ");
+  const vecWhere = ["m.embedding IS NOT NULL", ...filters.conditions].join(" AND ");
 
   const rows = await sql.unsafe(
     `WITH fts AS (
