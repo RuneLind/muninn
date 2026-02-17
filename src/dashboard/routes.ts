@@ -6,6 +6,7 @@ import { renderDashboardPage } from "./views/page.ts";
 import { renderTracesPage } from "./views/traces-page.ts";
 import { renderSearchPage } from "./views/search-page.ts";
 import { renderKnowledgePage } from "./views/knowledge-page.ts";
+import { renderLogsPage } from "./views/logs-page.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getAllGoals } from "../db/goals.ts";
@@ -294,6 +295,74 @@ export function createDashboardRoutes(): Hono {
     } catch (err) {
       log.error("Failed to fetch search stats: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch search stats" }, 500);
+    }
+  });
+
+  // --- Logs page ---
+
+  const LOG_DIR = process.env.LOG_DIR ?? "./logs";
+
+  app.get("/logs", (c) => {
+    return c.html(renderLogsPage());
+  });
+
+  app.get("/api/logs/dates", async (c) => {
+    try {
+      const glob = new Bun.Glob("*.log");
+      const dates: string[] = [];
+      for await (const file of glob.scan(LOG_DIR)) {
+        const match = file.match(/^(\d{4}-\d{2}-\d{2})\.log$/);
+        if (match && match[1]) dates.push(match[1]);
+      }
+      dates.sort((a, b) => b.localeCompare(a)); // newest first
+      return c.json({ dates });
+    } catch (err) {
+      log.error("Failed to scan log dates: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ dates: [] });
+    }
+  });
+
+  /** Read and parse a JSONL log file, returning parsed entries. */
+  async function readLogEntries(date: string): Promise<Record<string, unknown>[]> {
+    const filePath = `${LOG_DIR}/${date}.log`;
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) return [];
+    const text = await file.text();
+    return text.trim().split("\n").filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+  }
+
+  app.get("/api/logs", async (c) => {
+    try {
+      const date = c.req.query("date");
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return c.json({ error: "Invalid date format" }, 400);
+      }
+      const entries = await readLogEntries(date);
+      return c.json({ entries });
+    } catch (err) {
+      log.error("Failed to read log file: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to read logs" }, 500);
+    }
+  });
+
+  app.get("/api/logs/tail", async (c) => {
+    try {
+      const date = c.req.query("date");
+      const after = c.req.query("after");
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return c.json({ error: "Invalid date format" }, 400);
+      }
+      if (!after) {
+        return c.json({ error: "Missing 'after' parameter" }, 400);
+      }
+      const entries = (await readLogEntries(date))
+        .filter((e) => (e as { ts: string }).ts > after);
+      return c.json({ entries });
+    } catch (err) {
+      log.error("Failed to tail log file: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to tail logs" }, 500);
     }
   });
 
