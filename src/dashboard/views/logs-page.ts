@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
+import { escScript } from "./components/helpers.ts";
 
 export function renderLogsPage(): string {
   return `<!DOCTYPE html>
@@ -472,10 +473,7 @@ export function renderLogsPage(): string {
         '.' + String(d.getMilliseconds()).padStart(3, '0');
     }
 
-    function esc(str) {
-      if (!str) return '';
-      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    }
+    ${escScript()}
 
     // --- Init ---
     loadDates();

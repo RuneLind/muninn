@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { escScript } from "./components/helpers.ts";
 
 export function renderKnowledgePage(): string {
   return `<!DOCTYPE html>
@@ -372,10 +373,7 @@ export function renderKnowledgePage(): string {
     let searchResults = [];
     let apiAvailable = false;
 
-    function esc(str) {
-      if (!str) return '';
-      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    }
+    ${escScript()}
 
     function highlightQuery(text, query) {
       if (!query || !text) return esc(text);

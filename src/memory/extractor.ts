@@ -84,6 +84,9 @@ async function doExtract(input: ExtractionInput, config: Config, traceContext?: 
   }
 
   const embedding = await generateEmbedding(result.summary);
+  if (!embedding) {
+    log.warn("Embedding generation returned null for memory — saving without embedding (will not appear in semantic search)", { botName: input.botName, summary: result.summary });
+  }
 
   await saveMemory({
     userId: input.userId,

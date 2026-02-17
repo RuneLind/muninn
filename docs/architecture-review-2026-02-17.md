@@ -49,41 +49,59 @@ If a checker (Gmail MCP) consistently fails, it retries every tick indefinitely 
 
 ## Important Issues (Should Fix)
 
-### 5. DB connection can be initialized twice
+### ~~5. DB connection can be initialized twice~~
+**Status:** [x] DONE (pre-existing fix)
 **File:** `src/db/client.ts:9-15`
-No guard against double `initDb()` — first pool orphaned silently.
+~~No guard against double `initDb()` — first pool orphaned silently.~~
+Guard already present: `initDb()` throws if `sql` is already set.
 
-### 6. Voice handler missing `finally` block
-**File:** `src/bot/voice-handler.ts:92`
-`setInterval` for typing indicator not cleaned up in `finally` (text handler does this correctly).
+### ~~6. Voice handler missing `finally` block~~
+**Status:** [x] DONE (pre-existing fix)
+**File:** `src/bot/voice-handler.ts:273`
+~~`setInterval` for typing indicator not cleaned up in `finally`.~~
+`finally { clearInterval(typingInterval); }` already present.
 
-### 7. Config not centralized
-**Files:** `src/logging.ts`, `src/dashboard/routes.ts`, `src/ai/knowledge-search.ts`
-Read `process.env` directly instead of going through `src/config.ts`.
+### ~~7. Config not centralized~~
+**Status:** [x] DONE
+**Files:** `src/logging.ts`, `src/ai/knowledge-search.ts`
+~~Read `process.env` directly instead of going through `src/config.ts`.~~
+- `knowledge-search.ts`: already uses `configureKnowledgeSearch()` pattern (pre-existing).
+- `logging.ts`: now accepts `logDir` parameter; `index.ts` passes `config.logDir` to `setupLogging()`.
 
-### 8. No integer validation in config
-**File:** `src/config.ts:15-30`
-`parseInt("abc")` returns `NaN`, silently used as port/interval.
+### ~~8. No integer validation in config~~
+**Status:** [x] DONE (pre-existing fix)
+**File:** `src/config.ts:13-18`
+~~`parseInt("abc")` returns `NaN`, silently used as port/interval.~~
+`optionalEnvInt()` validates with `isNaN()` and throws.
 
-### 9. Shutdown race condition
-**File:** `src/index.ts:145`
-`stopScheduler()` clears intervals but in-flight ticks may still write to DB after `closeDb()`.
+### ~~9. Shutdown race condition~~
+**Status:** [x] DONE (pre-existing fix)
+**File:** `src/index.ts:149-150`
+~~`stopScheduler()` clears intervals but in-flight ticks may still write to DB after `closeDb()`.~~
+Shutdown now calls `waitForPendingTicks(10_000)` before `closeDb()`.
 
-### 10. Prompt builder timing metrics wrong
+### ~~10. Prompt builder timing metrics wrong~~
+**Status:** [x] FALSE POSITIVE
 **File:** `src/ai/prompt-builder.ts:47-53`
-`dbHistoryMs` set inside `Promise.all().then()` measures wall time, not individual query time.
+~~`dbHistoryMs` set inside `Promise.all().then()` measures wall time, not individual query time.~~
+The `.then()` fires when each individual promise resolves. Since all start at `t0` in `Promise.all()`, `performance.now() - t0` gives the actual duration of each async I/O operation. Correct for parallel async operations.
 
-### 11. Task execution marks run before sending
-**File:** `src/scheduler/runner.ts:134`
-`updateTaskLastRun()` before `api.sendMessage()` — if send fails, task won't retry.
+### ~~11. Task execution marks run before sending~~
+**Status:** [x] DONE (pre-existing fix)
+**File:** `src/scheduler/runner.ts:162-163`
+~~`updateTaskLastRun()` before `api.sendMessage()` — if send fails, task won't retry.~~
+Now calls `sendMessage` first, then `updateTaskLastRun`. Error handler still advances `lastRunAt` to prevent retry storms (with comment explaining why).
 
-### 12. Slack thread tracking lost on restart
+### ~~12. Slack thread tracking lost on restart~~
+**Status:** [x] ACCEPTED — Documented limitation
 **File:** `src/slack/index.ts:82`
-In-memory `activeThreads` map not persisted.
+In-memory `activeThreads` map not persisted. Has TTL (24h) and size cap (500). Impact is low: user just needs to @mention again after restart. Core conversation tracking uses persisted DB threads.
 
-### 13. Unbounded Slack caches
+### ~~13. Unbounded Slack caches~~
+**Status:** [x] DONE
 **File:** `src/slack/index.ts:14-15`
-`channelIdCache` has no TTL; `userInfoCache` has no size limit.
+- `userInfoCache`: already has 1-hour TTL (pre-existing fix).
+- `channelIdCache`: now capped at 500 entries.
 
 ---
 
@@ -104,8 +122,10 @@ Every DB function has `botName ? WHERE bot_name = ... : WHERE ...`. Use query bu
 ### 18. Dashboard search has 3 near-identical functions
 `dashboardSearchText()`, `dashboardSearchSemantic()`, `dashboardSearchHybrid()` share ~80% code.
 
-### 19. Duplicate `esc()`/`escapeHtml()` across dashboard pages
-Defined separately in traces-page.ts, search-page.ts, logs-page.ts. Consolidate into helpers.ts.
+### ~~19. Duplicate `esc()`/`escapeHtml()` across dashboard pages~~
+**Status:** [x] DONE
+~~Defined separately in traces-page.ts, search-page.ts, logs-page.ts, knowledge-page.ts.~~
+Extracted `escScript()` into `helpers.ts`. All four pages now import and use the shared function.
 
 ### 20. N+1 queries in stats
 `getUsersSummary()` has correlated subqueries for each user row.
@@ -114,17 +134,25 @@ Defined separately in traces-page.ts, search-page.ts, logs-page.ts. Consolidate 
 
 ## Minor Issues
 
-### 21. Missing `TELEGRAM_ALLOWED_USER_IDS` silently defaults to empty list
-Bot starts but rejects everyone with no warning.
+### ~~21. Missing `TELEGRAM_ALLOWED_USER_IDS` silently defaults to empty list~~
+**Status:** [x] DONE
+~~Bot starts but rejects everyone with no warning.~~
+`discoverBots()` now logs a warning when a bot has a Telegram token but no allowed user IDs.
 
-### 22. `config.json` parse failures are silent
-Misspelled fields like `thinkingMaxTokenz` go unnoticed.
+### ~~22. `config.json` parse failures are silent~~
+**Status:** [x] DONE
+~~Misspelled fields like `thinkingMaxTokenz` go unnoticed.~~
+`discoverBots()` now validates config.json keys against known schema and warns about unknown keys.
 
-### 23. Null embedding saved to DB
-Memory with null embedding is unfindable via semantic search.
+### ~~23. Null embedding saved to DB~~
+**Status:** [x] DONE
+~~Memory with null embedding is unfindable via semantic search.~~
+Now logs a warning when embedding is null. Memory is still saved (valuable for text search) but the warning makes the issue visible.
 
-### 24. Email watcher JSON parse failure returns `[]`
-Indistinguishable from "no new emails".
+### ~~24. Email watcher JSON parse failure returns `[]`~~
+**Status:** [x] ALREADY HANDLED
+~~Indistinguishable from "no new emails".~~
+`log.warn` already present on parse failure (line 34), making it distinguishable in logs. Returning `[]` is the safe fallback — prevents false positive notifications.
 
 ### 25. Content dedup hash is format-dependent
 If Haiku changes output format, emails get duplicated.

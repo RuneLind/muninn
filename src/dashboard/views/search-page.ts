@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { escScript } from "./components/helpers.ts";
 
 export function renderSearchPage(): string {
   return `<!DOCTYPE html>
@@ -432,10 +433,7 @@ export function renderSearchPage(): string {
     let searchMode = 'hybrid';
     let searchResults = [];
 
-    function esc(str) {
-      if (!str) return '';
-      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    }
+    ${escScript()}
 
     function fmtDate(epochMs) {
       const d = new Date(epochMs);

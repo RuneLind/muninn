@@ -1,14 +1,24 @@
+/** Inline JS: HTML-escape a string (null-safe, handles &<>"') */
+export function escScript(): string {
+  return `
+    function esc(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+  `;
+}
+
 /** Shared JS helper functions used by multiple dashboard components */
 export function helpersScript(): string {
   return `
+    ${escScript()}
+
     function escapeHtml(text) {
-      const d = document.createElement('div');
-      d.textContent = text;
-      return d.innerHTML;
+      return esc(text);
     }
 
     function escapeAttr(text) {
-      return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return esc(text);
     }
 
     function formatTime(ts) {

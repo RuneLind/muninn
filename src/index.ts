@@ -12,10 +12,9 @@ import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
 
-await setupLogging();
-const log = getLog("core");
-
 const config = loadConfig();
+await setupLogging(config.logDir);
+const log = getLog("core");
 const botConfigs = config.simulatorEnabled
   ? discoverBotsForSimulator()
   : discoverBots();

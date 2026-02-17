@@ -109,6 +109,10 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       .map((id) => id.trim())
       .filter((id) => id.length > 0);
 
+    if (hasTelegram && telegramAllowedUserIds.length === 0) {
+      log.warn("Bot \"{name}\" has a Telegram token but no TELEGRAM_ALLOWED_USER_IDS_{env} — all messages will be rejected", { name, env: envName });
+    }
+
     const slackAllowedIdsEnv = process.env[`SLACK_ALLOWED_USER_IDS_${envName}`] ?? "";
     const slackAllowedUserIds = slackAllowedIdsEnv
       .split(",")
@@ -124,6 +128,12 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (hasConfigJson) {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
+        // Warn about unknown keys to catch typos
+        const knownKeys = new Set(["model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "knowledgeCollections"]);
+        const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
+        if (unknownKeys.length > 0) {
+          log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
+        }
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }

@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
+import { escScript } from "./components/helpers.ts";
 
 export function renderTracesPage(): string {
   return `<!DOCTYPE html>
@@ -605,10 +606,7 @@ export function renderTracesPage(): string {
       document.querySelectorAll('.trace-table tr').forEach(r => r.classList.remove('expanded'));
     }
 
-    function esc(str) {
-      if (!str) return '';
-      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    }
+    ${escScript()}
 
     async function openPromptModal() {
       if (!currentWaterfallTraceId) return;

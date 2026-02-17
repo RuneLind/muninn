@@ -11,6 +11,7 @@ import { getLog } from "../logging.ts";
 const log = getLog("bot", "slack");
 
 const USER_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const MAX_CHANNEL_CACHE_SIZE = 500;
 const userInfoCache = new Map<string, { identity: UserIdentity; cachedAt: number }>();
 const channelIdCache = new Map<string, string>();
 
@@ -53,8 +54,11 @@ async function resolveChannelId(client: WebClient, channelName: string): Promise
     do {
       const result = await client.conversations.list({ limit: 200, cursor, types: "public_channel,private_channel" });
       for (const ch of result.channels ?? []) {
-        if (ch.id && ch.name) channelIdCache.set(ch.name, ch.id);
-        if (ch.name === name && ch.id) return ch.id;
+        if (ch.id && ch.name && channelIdCache.size < MAX_CHANNEL_CACHE_SIZE) channelIdCache.set(ch.name, ch.id);
+        if (ch.name === name && ch.id) {
+          channelIdCache.set(ch.name, ch.id); // Always cache the resolved channel
+          return ch.id;
+        }
       }
       cursor = result.response_metadata?.next_cursor || undefined;
     } while (cursor);

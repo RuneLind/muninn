@@ -84,11 +84,9 @@ function jsonlFormatter(record: LogRecord): string {
 
 let configured = false;
 
-export async function setupLogging(): Promise<void> {
+export async function setupLogging(logDir: string = "./logs"): Promise<void> {
   if (configured) return;
   configured = true;
-
-  const logDir = process.env.LOG_DIR ?? "./logs";
 
   const sinks: Record<string, Sink> = {
     console: consoleSink,
