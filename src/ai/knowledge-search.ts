@@ -7,8 +7,13 @@
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "knowledge");
-const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+let knowledgeApiUrl = "http://localhost:8321";
 const KNOWLEDGE_TIMEOUT_MS = 3000;
+
+/** Configure the Knowledge API URL from centralized config. Call once at startup. */
+export function configureKnowledgeSearch(apiUrl: string): void {
+  knowledgeApiUrl = apiUrl;
+}
 
 interface KnowledgeChunk {
   content: string;
@@ -51,7 +56,7 @@ export async function searchKnowledge(
       for (const c of collections) params.append("collection", c);
     }
 
-    const response = await fetch(`${KNOWLEDGE_API_URL}/api/search?${params}`, {
+    const response = await fetch(`${knowledgeApiUrl}/api/search?${params}`, {
       signal: controller.signal,
     });
     clearTimeout(timeout);

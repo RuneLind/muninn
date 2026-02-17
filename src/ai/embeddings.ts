@@ -14,8 +14,11 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
     dtype: "q8",
   }).then((pipe) => {
     extractor = pipe;
-    initPromise = null;
     return pipe;
+  }).catch((err) => {
+    // Only clear on error so concurrent callers can retry
+    initPromise = null;
+    throw err;
   });
 
   return initPromise;

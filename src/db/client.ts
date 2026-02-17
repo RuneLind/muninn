@@ -7,6 +7,7 @@ const log = getLog("db");
 let sql: postgres.Sql | null = null;
 
 export function initDb(config: Config, urlOverride?: string): postgres.Sql {
+  if (sql) throw new Error("Database already initialized — call closeDb() first");
   sql = postgres(urlOverride ?? config.databaseUrl, {
     max: 5,
     idle_timeout: 20,

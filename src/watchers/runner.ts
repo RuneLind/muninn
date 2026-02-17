@@ -143,6 +143,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       agentStatus.set("idle");
       wt?.error(err instanceof Error ? err : String(err));
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });
+
+      // Still advance lastRunAt on failure to prevent retry storms
+      try {
+        await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+      } catch (updateErr) {
+        log.error("Failed to update watcher last_run_at after error: {error}", { botName: tag, watcherId: watcher.id, error: updateErr instanceof Error ? updateErr.message : String(updateErr) });
+      }
     }
   }
 }

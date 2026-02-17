@@ -111,7 +111,6 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         costUsd: result.costUsd,
       });
       log.info("Claude responded in {ms}ms ({numTurns} turns)", { ...props, ms: Math.round(t.summary().claude ?? 0), numTurns: result.numTurns });
-      clearInterval(typingInterval);
 
       // Save assistant response
       agentStatus.set("saving_response", username);
@@ -254,7 +253,6 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         props,
       );
     } catch (error) {
-      clearInterval(typingInterval);
       agentStatus.set("idle");
       t.error(error instanceof Error ? error : String(error));
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -272,6 +270,8 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       );
       activityLog.push("error", errorMessage, { userId, username, botName: botConfig.name });
       await ctx.reply(`Something went wrong: ${errorMessage}`);
+    } finally {
+      clearInterval(typingInterval);
     }
   };
 }

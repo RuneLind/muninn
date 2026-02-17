@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
@@ -31,7 +32,7 @@ function parseIntParam(value: string | undefined, defaultVal: number, max: numbe
   return Math.min(parsed, max);
 }
 
-export function createDashboardRoutes(): Hono {
+export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
 
   app.get("/", (c) => {
@@ -300,7 +301,7 @@ export function createDashboardRoutes(): Hono {
 
   // --- Logs page ---
 
-  const LOG_DIR = process.env.LOG_DIR ?? "./logs";
+  const LOG_DIR = config.logDir;
 
   app.get("/logs", (c) => {
     return c.html(renderLogsPage());
@@ -368,7 +369,7 @@ export function createDashboardRoutes(): Hono {
 
   // --- Knowledge page (proxy to Knowledge API) ---
 
-  const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+  const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
   app.get("/knowledge", (c) => {
     return c.html(renderKnowledgePage());

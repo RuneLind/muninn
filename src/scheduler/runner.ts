@@ -25,6 +25,7 @@ const log = getLog("scheduler");
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
 let lastCleanupAt = 0;
+const TICK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max per tick
 
 export function startScheduler(api: Api, config: Config, botConfig: BotConfig): void {
   if (!config.schedulerEnabled) {
@@ -37,9 +38,21 @@ export function startScheduler(api: Api, config: Config, botConfig: BotConfig): 
   log.info("Unified scheduler started (interval: {interval}s)", { botName: tag, interval: intervalMs / 1000 });
 
   const id = setInterval(() => {
-    if (tickRunning.get(tag)) return;
+    if (tickRunning.get(tag)) {
+      log.warn("Scheduler tick skipped — previous tick still running", { botName: tag });
+      return;
+    }
     tickRunning.set(tag, true);
-    runSchedulerTick(api, config, botConfig)
+
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tickWithTimeout = Promise.race([
+      runSchedulerTick(api, config, botConfig),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`Scheduler tick timed out after ${TICK_TIMEOUT_MS}ms`)), TICK_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timeoutId));
+
+    tickWithTimeout
       .catch((err) => {
         log.error("Scheduler tick failed: {error}", { botName: tag, error: err instanceof Error ? err.message : String(err) });
       })
@@ -57,7 +70,19 @@ export function stopScheduler(): void {
     log.info("Scheduler stopped", { botName: tag });
   }
   intervals.clear();
-  tickRunning.clear();
+}
+
+export async function waitForPendingTicks(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const anyRunning = [...tickRunning.values()].some(Boolean);
+    if (!anyRunning) return;
+    await Bun.sleep(200);
+  }
+  const running = [...tickRunning.entries()].filter(([, v]) => v).map(([k]) => k);
+  if (running.length > 0) {
+    log.warn("Shutdown: timed out waiting for scheduler ticks: {bots}", { bots: running.join(", ") });
+  }
 }
 
 async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig): Promise<void> {
@@ -131,13 +156,11 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
   const tag = botConfig.name;
   for (const task of dueTasks) {
     try {
-      // Update next_run_at FIRST to prevent re-firing on overlapping ticks
-      await updateTaskLastRun(task);
-
       agentStatus.set("running_task", task.title);
       const message = await executeTask(task, config, botConfig);
       agentStatus.set("sending_telegram", task.title);
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
+      await updateTaskLastRun(task);
       agentStatus.set("idle");
       activityLog.push(
         "system",
@@ -148,6 +171,13 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
     } catch (err) {
       agentStatus.set("idle");
       log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
+
+      // Still advance schedule to prevent infinite retry storms (same pattern as watchers)
+      try {
+        await updateTaskLastRun(task);
+      } catch (updateErr) {
+        log.error("Failed to update task last_run_at after error: {error}", { botName: tag, taskId: task.id, error: updateErr instanceof Error ? updateErr.message : String(updateErr) });
+      }
     }
   }
 }

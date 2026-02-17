@@ -6,7 +6,8 @@ import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
-import { startScheduler, stopScheduler } from "./scheduler/runner.ts";
+import { configureKnowledgeSearch } from "./ai/knowledge-search.ts";
+import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
@@ -37,6 +38,9 @@ if (config.simulatorEnabled) {
   initDb(config);
 }
 
+// Configure modules with centralized config
+configureKnowledgeSearch(config.knowledgeApiUrl);
+
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
@@ -44,7 +48,7 @@ warmupEmbeddings();
 await activityLog.loadFromDb();
 
 // Build the combined Hono app
-const dashboard = createDashboardRoutes();
+const dashboard = createDashboardRoutes(config);
 const app = new Hono();
 app.route("/", dashboard);
 
@@ -143,6 +147,7 @@ if (config.simulatorEnabled) {
 async function shutdown() {
   log.info("Shutting down...");
   stopScheduler();
+  await waitForPendingTicks(10_000);
 
   if (telegramBotMap) {
     for (const bot of telegramBotMap.values()) {
