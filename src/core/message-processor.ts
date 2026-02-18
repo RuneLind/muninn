@@ -155,17 +155,17 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // Extract memories, goals, and schedules async (fire-and-forget)
     const traceCtx = t.context;
     extractMemoryAsync(
-      { userId, botName: botConfig.name, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId },
+      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId },
       config,
       traceCtx,
     );
     extractGoalAsync(
-      { userId, botName: botConfig.name, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId, platform },
+      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId, platform },
       config,
       traceCtx,
     );
     extractScheduleAsync(
-      { userId, botName: botConfig.name, userMessage: text, assistantResponse: result.result, platform },
+      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, platform },
       config,
       traceCtx,
     );

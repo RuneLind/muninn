@@ -10,6 +10,7 @@ const log = getLog("memory");
 interface ExtractionInput {
   userId: string;
   botName: string;
+  botDir?: string;
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
@@ -56,6 +57,7 @@ export function extractMemoryAsync(input: ExtractionInput, _config: Config, trac
     botName: input.botName,
     userId: input.userId,
     prompt,
+    cwd: input.botDir,
     log,
     traceContext,
     onResult: async (result, tracer) => {

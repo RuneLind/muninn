@@ -16,6 +16,8 @@ interface HaikuExtractionOptions<T> {
   userId: string;
   /** The prompt to send to Haiku */
   prompt: string;
+  /** Working directory for the Haiku process — keeps sessions out of project root */
+  cwd?: string;
   /** Logger instance for error reporting */
   log: Logger;
   /** Optional trace context for parent span linking */
@@ -53,7 +55,7 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
     opts.prompt,
     opts.source,
     opts.entrypoint,
-    undefined,
+    opts.cwd,
     opts.botName,
   );
 

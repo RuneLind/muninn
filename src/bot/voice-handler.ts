@@ -136,6 +136,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         {
           userId,
           botName: botConfig.name,
+          botDir: botConfig.dir,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
@@ -147,6 +148,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         {
           userId,
           botName: botConfig.name,
+          botDir: botConfig.dir,
           userMessage: text,
           assistantResponse: result.result,
           sourceMessageId: messageId,
@@ -158,6 +160,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         {
           userId,
           botName: botConfig.name,
+          botDir: botConfig.dir,
           userMessage: text,
           assistantResponse: result.result,
         },
