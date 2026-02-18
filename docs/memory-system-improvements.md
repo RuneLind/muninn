@@ -1,5 +1,7 @@
 # Memory System Improvements Plan
 
+**Status:** Roadmap — no improvements implemented yet (as of 2026-02-18)
+
 Comparison of Javrvis memory system with OpenClaw's approach, with concrete improvements identified.
 
 ## Current State: What Javrvis Does Well

@@ -1,8 +1,8 @@
-# Javrvis Architecture Review — 2026-02-17
+# Javrvis Architecture Review
 
 Full codebase review covering architecture, DB layer, AI/executor, bot handlers, background processing, dashboard, and code quality.
 
-**Previous review:** `docs/improvements-plan.md` (2026-02-13)
+> Supersedes the previous `improvements-plan.md` (2026-02-13). Outstanding items from that review are merged into the "Merged from improvements-plan.md" section below.
 
 ---
 
@@ -114,7 +114,7 @@ In-memory `activeThreads` map not persisted. Has TTL (24h) and size cap (500). I
 **Status:** [x] DONE — Extracted `runHaikuExtraction()` helper in `src/ai/haiku-extraction.ts`. Handles fire-and-forget wrapper, tracer setup, spawnHaiku + extractJson parsing, and error handling. Each extractor keeps its own prompt, result type, and post-parse domain logic via `onResult` callback.
 
 ### 16. Voice handler duplicates message handler (~60% overlap)
-**Status:** DEFERRED — See also improvements-plan.md #13. Requires careful extraction of post-response logic (memory/goal/schedule extraction, message storage, activity logging). High risk of subtle regressions.
+**Status:** DEFERRED — See also IP-13 below. Requires careful extraction of post-response logic (memory/goal/schedule extraction, message storage, activity logging). High risk of subtle regressions.
 
 ### 17. Conditional bot filtering repeated ~15x in DB layer
 **Status:** DEFERRED — Every DB function has `botName ? WHERE bot_name = ... : WHERE ...`. A query builder helper would reduce repetition but adds abstraction complexity. The pattern is mechanical and works reliably.
@@ -169,6 +169,70 @@ Removed post-while-loop cleanup — already handled in `stream.onAbort()` callba
 
 ### 28. No linter configured
 **Status:** DEFERRED — Linter setup (ESLint/Biome) is a separate discussion. TypeScript strict mode catches most issues.
+
+---
+
+## Merged from improvements-plan.md
+
+Outstanding items carried over from the 2026-02-13 review. Completed items included for tracking.
+
+### ~~IP-5. Prompt injection in async extractors~~
+**Status:** Still outstanding
+**Priority:** Low | **Effort:** 30 min | **Files:** `src/memory/extractor.ts`, `src/goals/detector.ts`, `src/scheduler/detector.ts`
+
+User messages are interpolated directly into prompts via `.replace()`. A crafted message could influence extraction by closing the `"""` delimiters and injecting instructions.
+
+**Fix:** Use XML-style tags with random nonces as delimiters, and add an explicit note in the prompt that content between delimiters is untrusted user input.
+
+### ~~IP-6. Dashboard API has no authentication~~
+**Status:** Still outstanding
+**Priority:** Medium | **Effort:** 15 min | **Files:** `src/dashboard/routes.ts`, `src/index.ts`
+
+All endpoints are publicly accessible. Anyone on the network can read conversation history, memories, prompt snapshots, and traces.
+
+**Fix (choose one):**
+- **Minimal:** Bind Bun.serve to `127.0.0.1` only (prevents non-local access)
+- **Better:** Add a `DASHBOARD_TOKEN` env var and require `Authorization: Bearer <token>` header on all API routes via Hono middleware
+
+### ~~IP-7. DB connection pool has no startup health check~~
+**Status:** Still outstanding
+**Priority:** Low | **Effort:** 5 min | **Files:** `src/db/client.ts`
+
+`initDb()` creates the pool but never validates connectivity. If Postgres is down, the first real query fails with a less helpful error.
+
+**Fix:** Add `await sql('SELECT 1')` after pool creation. Fail fast with a clear error message.
+
+### ~~IP-8. Telegram and Slack handlers ~80% duplicated~~
+**Status:** [x] DONE — Extracted `processMessage()` in `src/core/message-processor.ts`. Both Telegram and Slack handlers now use the shared core.
+
+### ~~IP-9. `pad()` function duplicated~~
+**Status:** Partially resolved — handlers share `processMessage()` now, but `pad()`/`fmtTokens()` still duplicated in `src/bot/voice-handler.ts` and `src/core/message-processor.ts`.
+
+### ~~IP-10. Legacy config fields never read externally~~
+**Status:** Still outstanding
+**Priority:** Low | **Effort:** 5 min | **Files:** `src/config.ts:20-21`
+
+`goalCheckIntervalMs` and `goalCheckEnabled` are only used as fallbacks within `config.ts` itself. They exist for backward compatibility from the old goal scheduler.
+
+**Fix:** Remove the legacy fields and the `GOAL_CHECK_*` env var references. Update `.env.example` if needed.
+
+### ~~IP-12. `formatTelegramHtml` italic regex edge case~~
+**Status:** Still outstanding
+**Priority:** Low | **Effort:** 10 min | **Files:** `src/bot/telegram-format.ts`
+
+The italic pattern `(?<!\w)\*([^*]+?)\*(?!\w)` could match markdown bullet points (`* item`) since `*` at line start has no preceding `\w`. A standalone `* item` line would become `<i>item</i>`.
+
+**Fix:** Require the opening `*` to not be followed by a space (bullets have `* space`), or convert markdown bullets to a proper list format first.
+
+### ~~IP-13. Voice handler duplicates full message pipeline~~
+**Status:** Still outstanding
+**Priority:** Medium | **Effort:** 1 hr | **Files:** `src/bot/voice-handler.ts`
+
+`voice-handler.ts` duplicates the entire `processMessage()` pipeline. Every change to the core pipeline must be manually replicated here.
+
+**Fix:** Refactor voice handler to use `processMessage()` from `src/core/message-processor.ts`. The voice-specific parts (STT before, TTS after) can wrap the shared call.
+
+**Depends on:** IP-8 (done).
 
 ---
 
