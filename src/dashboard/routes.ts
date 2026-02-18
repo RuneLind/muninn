@@ -8,6 +8,9 @@ import { renderTracesPage } from "./views/traces-page.ts";
 import { renderSearchPage } from "./views/search-page.ts";
 import { renderKnowledgePage } from "./views/knowledge-page.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
+import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
+import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "./mcp-client.ts";
+import { discoverBots, discoverBotsForSimulator } from "../bots/config.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getAllGoals } from "../db/goals.ts";
@@ -446,6 +449,89 @@ export function createDashboardRoutes(config: Config): Hono {
     } catch (err) {
       log.warn("Knowledge document fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  // --- MCP Debug page ---
+
+  const getBotConfigs = () => {
+    try {
+      return config.simulatorEnabled ? discoverBotsForSimulator() : discoverBots();
+    } catch {
+      return [];
+    }
+  };
+
+  app.get("/mcp-debug", (c) => {
+    return c.html(renderMcpDebugPage());
+  });
+
+  app.get("/api/mcp/bots", (c) => {
+    const bots = getBotConfigs().map((b) => b.name);
+    return c.json({ bots });
+  });
+
+  app.get("/api/mcp/config", async (c) => {
+    const botName = c.req.query("bot");
+    if (!botName) return c.json({ error: "Missing bot parameter" }, 400);
+
+    const bot = getBotConfigs().find((b) => b.name === botName);
+    if (!bot) return c.json({ error: "Bot not found" }, 404);
+
+    const mcpConfig = await loadMcpConfig(bot.dir);
+    if (!mcpConfig) return c.json({ error: "No .mcp.json found" }, 404);
+
+    return c.json(mcpConfig);
+  });
+
+  app.post("/api/mcp/connect", async (c) => {
+    try {
+      const { bot: botName, server: serverName } = await c.req.json();
+      if (!botName || !serverName) return c.json({ error: "Missing bot or server" }, 400);
+
+      const bot = getBotConfigs().find((b) => b.name === botName);
+      if (!bot) return c.json({ error: "Bot not found" }, 404);
+
+      const mcpConfig = await loadMcpConfig(bot.dir);
+      if (!mcpConfig?.mcpServers?.[serverName]) {
+        return c.json({ error: "Server not found in config" }, 404);
+      }
+
+      const result = await connectToServer(botName, serverName, mcpConfig.mcpServers[serverName]);
+      return c.json(result);
+    } catch (err) {
+      log.error("MCP connect failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: err instanceof Error ? err.message : "Connection failed" }, 500);
+    }
+  });
+
+  app.post("/api/mcp/call", async (c) => {
+    try {
+      const body = await c.req.json();
+      const { bot: botName, server: serverName, tool: toolName } = body;
+      const args = body.arguments || {};
+      if (!botName || !serverName || !toolName) {
+        return c.json({ error: "Missing bot, server, or tool" }, 400);
+      }
+
+      const result = await callTool(botName, serverName, toolName, args);
+      return c.json(result);
+    } catch (err) {
+      log.error("MCP call failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: err instanceof Error ? err.message : "Call failed" }, 500);
+    }
+  });
+
+  app.post("/api/mcp/disconnect", async (c) => {
+    try {
+      const { bot: botName, server: serverName } = await c.req.json();
+      if (!botName || !serverName) return c.json({ error: "Missing bot or server" }, 400);
+
+      await disconnectServer(botName, serverName);
+      return c.json({ ok: true });
+    } catch (err) {
+      log.error("MCP disconnect failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: err instanceof Error ? err.message : "Disconnect failed" }, 500);
     }
   });
 

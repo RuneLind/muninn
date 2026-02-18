@@ -8,6 +8,7 @@ import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { configureKnowledgeSearch } from "./ai/knowledge-search.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
+import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
@@ -161,6 +162,7 @@ async function shutdown() {
   }
 
   server.stop();
+  await disconnectAllMcp();
   await closeDb();
   process.exit(0);
 }
