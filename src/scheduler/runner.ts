@@ -157,10 +157,13 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
   for (const task of dueTasks) {
     try {
       agentStatus.set("running_task", task.title);
+      const requestId = agentStatus.startRequest(botConfig.name, "running_task");
       const message = await executeTask(task, config, botConfig);
       agentStatus.set("sending_telegram", task.title);
+      agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
       await updateTaskLastRun(task);
+      agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       activityLog.push(
         "system",
@@ -169,6 +172,7 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
       );
       log.info("Scheduled task fired: \"{title}\" ({taskType}) to user {userId}", { botName: tag, title: task.title, taskType: task.taskType, userId: task.userId });
     } catch (err) {
+      agentStatus.clearRequest();
       agentStatus.set("idle");
       log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
 
@@ -247,9 +251,12 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
   for (const goal of reminders) {
     try {
       agentStatus.set("checking_goals", goal.title);
+      const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
       const message = await generateReminderMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
+      agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       await updateGoalReminderSentAt(goal.id);
       activityLog.push(
@@ -259,6 +266,7 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
       );
       log.info("Deadline reminder sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
+      agentStatus.clearRequest();
       agentStatus.set("idle");
       log.error("Failed to send reminder for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
@@ -271,9 +279,12 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
     const goal = staleGoals[0]!;
     try {
       agentStatus.set("checking_goals", goal.title);
+      const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
       const message = await generateCheckinMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
+      agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       await updateGoalCheckedAt(goal.id);
       activityLog.push(
@@ -283,6 +294,7 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
       );
       log.info("Check-in sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
+      agentStatus.clearRequest();
       agentStatus.set("idle");
       log.error("Failed to send check-in for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }

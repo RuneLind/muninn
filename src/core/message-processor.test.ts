@@ -63,7 +63,13 @@ mock.module("../dashboard/activity-log.ts", () => ({
 }));
 
 mock.module("../dashboard/agent-status.ts", () => ({
-  agentStatus: { set: mock() },
+  agentStatus: {
+    set: mock(),
+    startRequest: mock(() => "req_1"),
+    updatePhase: mock(),
+    completeRequest: mock(),
+    clearRequest: mock(),
+  },
   createProgressCallback: mock(() => () => {}),
 }));
 

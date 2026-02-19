@@ -41,11 +41,14 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
     // Download voice message from Telegram
     agentStatus.set("receiving", username);
+    const requestId = agentStatus.startRequest(botConfig.name, "receiving", username);
     t.start("voice_download");
     const file = await ctx.api.getFile(voice.file_id);
     const fileUrl = `https://api.telegram.org/file/bot${botConfig.telegramBotToken!}/${file.file_path}`;
     const response = await fetch(fileUrl);
     if (!response.ok) {
+      agentStatus.clearRequest();
+      agentStatus.set("idle");
       await ctx.reply("Failed to download voice message.");
       return;
     }
@@ -54,12 +57,15 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
     // Transcribe voice → text
     agentStatus.set("transcribing", username);
+    agentStatus.updatePhase("transcribing");
     t.start("stt");
     let text: string;
     try {
       text = await transcribeVoice(oggBuffer, config);
     } catch (error) {
       t.end("stt");
+      agentStatus.clearRequest();
+      agentStatus.set("idle");
       const msg = error instanceof Error ? error.message : String(error);
       activityLog.push("error", `[Voice] Transcription failed: ${msg}`, { userId, username, botName: botConfig.name });
       await ctx.reply(`Couldn't transcribe voice: ${msg}`);
@@ -81,6 +87,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
     // Build context-aware prompt and run through Claude
     agentStatus.set("building_prompt", username);
+    agentStatus.updatePhase("building_prompt");
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
       userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
@@ -96,6 +103,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
     try {
       agentStatus.set("calling_claude", username);
+      agentStatus.updatePhase("calling_claude");
       const effectiveModel = botConfig.model ?? config.claudeModel;
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
       log.info("Calling Claude for voice (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
@@ -114,6 +122,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
       // Save assistant response
       agentStatus.set("saving_response", username);
+      agentStatus.updatePhase("saving_response");
       t.start("db_save_response");
       const messageId = await saveMessage({
         userId,
@@ -182,6 +191,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       const fullHtml = html + footer;
 
       agentStatus.set("sending_telegram", username);
+      agentStatus.updatePhase("sending_telegram");
       t.start("telegram_send");
       if (fullHtml.length <= 4096) {
         await ctx.reply(fullHtml, { parse_mode: "HTML" }).catch(async () => {
@@ -201,6 +211,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
 
       // Mirror mode: also send voice reply
       agentStatus.set("synthesizing_voice", username);
+      agentStatus.updatePhase("synthesizing_voice");
       t.start("tts");
       try {
         const voiceBuffer = await synthesizeVoice(result.result);
@@ -216,6 +227,13 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         activityLog.push("error", `[Voice] TTS failed: ${msg}`, { userId, username, botName: botConfig.name });
       }
 
+      agentStatus.completeRequest(requestId, {
+        traceId: t.traceId,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        numTurns: result.numTurns,
+        toolCount: result.toolCalls?.length ?? 0,
+      });
       agentStatus.set("idle");
       t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
 
@@ -256,6 +274,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
         props,
       );
     } catch (error) {
+      agentStatus.clearRequest();
       agentStatus.set("idle");
       t.error(error instanceof Error ? error : String(error));
       const errorMessage = error instanceof Error ? error.message : String(error);

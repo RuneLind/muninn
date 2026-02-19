@@ -68,6 +68,11 @@ export function connectionScript(): string {
         updateAgentStatus(JSON.parse(e.data));
       });
 
+      es.addEventListener('request_progress', (e) => {
+        const progress = JSON.parse(e.data);
+        updateRequestProgress(progress);
+      });
+
       es.onerror = () => {
         statusDot.className = 'status-dot';
         statusText.textContent = 'Reconnecting...';

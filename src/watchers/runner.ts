@@ -85,6 +85,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       }
 
       agentStatus.set("running_watcher", watcher.name);
+      const requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
 
       const alerts = await runChecker(watcher, botConfig.dir, tag);
 
@@ -137,9 +138,11 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       ].slice(-MAX_NOTIFIED_IDS);
 
       await updateWatcherLastRun(watcher.id, updatedIds);
+      agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: newAlerts.length });
     } catch (err) {
+      agentStatus.clearRequest();
       agentStatus.set("idle");
       wt?.error(err instanceof Error ? err : String(err));
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });

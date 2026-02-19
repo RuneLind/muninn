@@ -18,6 +18,7 @@ import { threadsPanelStyles, threadsPanelHtml, threadsPanelScript } from "./comp
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
 import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
+import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "./components/request-progress-ui.ts";
 
 export function renderDashboardPage(): string {
   return `<!DOCTYPE html>
@@ -45,12 +46,14 @@ export function renderDashboardPage(): string {
     ${automationPanelStyles()}
     ${threadsPanelStyles()}
     ${slackPanelStyles()}
+    ${requestProgressStyles()}
     ${usageChartStyles()}
     ${activityFeedStyles()}
   </style>
 </head>
 <body>
   ${renderNav("dashboard", { headerLeftExtra: botSelectorHtml() + agentStatusHtml(), headerRight: connectionStatusHtml() })}
+  ${requestProgressHtml()}
   ${sectionTabsHtml()}
   <div class="section-content">
     ${overviewSectionHtml()}
@@ -105,6 +108,7 @@ export function renderDashboardPage(): string {
     ${slackPanelScript()}
     ${usageChartScript()}
     ${activityFeedScript()}
+    ${requestProgressScript()}
     ${agentStatusScript()}
     ${connectionScript()}
   </script>

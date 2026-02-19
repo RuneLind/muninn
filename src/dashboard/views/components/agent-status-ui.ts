@@ -55,6 +55,7 @@ export function agentStatusScript(): string {
       calling_claude: 'Calling Claude',
       saving_response: 'Saving response',
       sending_telegram: 'Sending to Telegram',
+      sending_slack: 'Sending to Slack',
       synthesizing_voice: 'Synthesizing voice',
       running_task: 'Running scheduled task',
       checking_goals: 'Checking goals',
@@ -79,5 +80,17 @@ export function agentStatusScript(): string {
         userEl.textContent = status.username ? '(@' + status.username + ')' : '';
       }
     }
-  `;
+
+    function updateAgentStatusFromProgress(progress) {
+      const detailEl = document.getElementById('agentDetail');
+      if (!detailEl || !progress || progress.completed) return;
+      const toolCount = progress.tools.length;
+      if (toolCount > 0) {
+        const lastTool = progress.tools[progress.tools.length - 1];
+        const activeName = lastTool && !lastTool.endedAt ? lastTool.displayName : '';
+        const countSuffix = toolCount > 1 ? ' (' + toolCount + ' tools)' : '';
+        detailEl.textContent = activeName ? ' \u2014 ' + activeName + countSuffix : countSuffix;
+      }
+    }
+`;
 }

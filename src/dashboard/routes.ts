@@ -587,9 +587,18 @@ export function createDashboardRoutes(config: Config): Hono {
       // Send current stats and agent status
       await stream.writeSSE({ event: "stats", data: JSON.stringify(activityLog.stats) });
       await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get()) });
+      await stream.writeSSE({ event: "request_progress", data: JSON.stringify(agentStatus.getProgress()) });
 
       // Subscribe to live updates
       let alive = true;
+      const unsubscribeProgress = agentStatus.subscribeProgress(async (progress) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "request_progress", data: JSON.stringify(progress) });
+        } catch {
+          alive = false;
+        }
+      });
       const unsubscribeStatus = agentStatus.subscribe(async (status) => {
         if (!alive) return;
         try {
@@ -623,6 +632,7 @@ export function createDashboardRoutes(config: Config): Hono {
         alive = false;
         unsubscribe();
         unsubscribeStatus();
+        unsubscribeProgress();
         clearInterval(heartbeat);
       });
 

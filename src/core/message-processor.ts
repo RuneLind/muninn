@@ -69,6 +69,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
   activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
   agentStatus.set("receiving", username);
+  const requestId = agentStatus.startRequest(botConfig.name, "receiving", username);
   log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
   // Save user message to DB
@@ -78,6 +79,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
   // Build context-aware prompt
   agentStatus.set("building_prompt", username);
+  agentStatus.updatePhase("building_prompt");
   t.start("prompt_build");
   const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
     userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
@@ -102,6 +104,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
   try {
     agentStatus.set("calling_claude", username);
+    agentStatus.updatePhase("calling_claude");
     const effectiveModel = botConfig.model ?? config.claudeModel;
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
     log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
@@ -135,6 +138,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     // Save assistant response to DB
     agentStatus.set("saving_response", username);
+    agentStatus.updatePhase("saving_response");
     t.start("db_save_response");
     const messageId = await saveMessage({
       userId,
@@ -202,7 +206,9 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     }
 
     // Format and send based on platform
-    agentStatus.set(isTelegram ? "sending_telegram" : "sending_slack", username);
+    const sendPhase = isTelegram ? "sending_telegram" : "sending_slack";
+    agentStatus.set(sendPhase, username);
+    agentStatus.updatePhase(sendPhase);
     t.start("send");
 
     if (isTelegram) {
@@ -251,6 +257,13 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       },
     });
 
+    agentStatus.completeRequest(requestId, {
+      traceId: t.traceId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      numTurns: result.numTurns,
+      toolCount,
+    });
     agentStatus.set("idle");
     t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
 
@@ -275,6 +288,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       outputTokens: result.outputTokens,
     };
   } catch (error) {
+    agentStatus.clearRequest();
     agentStatus.set("idle");
     t.error(error instanceof Error ? error : String(error));
 
