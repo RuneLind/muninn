@@ -30,6 +30,7 @@ export function agentStatusStyles(): string {
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .agent-phase { font-weight: 500; }
+    .agent-detail { color: #8a85cc; font-size: 11px; }
     .agent-user { color: #666; }
   `;
 }
@@ -39,6 +40,7 @@ export function agentStatusHtml(): string {
       <div class="agent-status" id="agentStatus">
         <div class="agent-spinner"></div>
         <span class="agent-phase" id="agentPhase">Idle</span>
+        <span class="agent-detail" id="agentDetail"></span>
         <span class="agent-user" id="agentUser"></span>
       </div>`;
 }
@@ -62,15 +64,18 @@ export function agentStatusScript(): string {
     function updateAgentStatus(status) {
       const el = document.getElementById('agentStatus');
       const phaseEl = document.getElementById('agentPhase');
+      const detailEl = document.getElementById('agentDetail');
       const userEl = document.getElementById('agentUser');
 
       if (status.phase === 'idle') {
         el.classList.remove('working');
         phaseEl.textContent = 'Idle';
+        detailEl.textContent = '';
         userEl.textContent = '';
       } else {
         el.classList.add('working');
         phaseEl.textContent = phaseLabels[status.phase] || status.phase;
+        detailEl.textContent = status.detail ? ' \u2014 ' + status.detail : '';
         userEl.textContent = status.username ? '(@' + status.username + ')' : '';
       }
     }

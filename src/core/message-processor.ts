@@ -13,7 +13,7 @@ import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { splitMessage } from "../utils/split-message.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { Tracer } from "../tracing/index.ts";
-import { agentStatus } from "../dashboard/agent-status.ts";
+import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getLog } from "../logging.ts";
 
@@ -106,7 +106,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
     log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
-    const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt);
+    const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt, createProgressCallback("calling_claude", username));
     const toolCount = result.toolCalls?.length ?? 0;
     t.end("claude", {
       model: result.model,

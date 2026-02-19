@@ -1,5 +1,5 @@
-import { test, expect, describe } from "bun:test";
-import { StreamParser, formatToolDisplayName } from "./stream-parser.ts";
+import { test, expect, describe, mock } from "bun:test";
+import { StreamParser, formatToolDisplayName, type StreamProgressEvent } from "./stream-parser.ts";
 
 /** Helper to build a stream-json NDJSON string from events */
 function buildStream(...events: object[]): string {
@@ -267,6 +267,103 @@ describe("StreamParser", () => {
 
     parser.parseLine(JSON.stringify(makeResult()));
     expect(parser.complete).toBe(true);
+  });
+});
+
+describe("StreamParser progress callbacks", () => {
+  test("fires tool_start and tool_end for tool calls", () => {
+    const events: StreamProgressEvent[] = [];
+    const onProgress = mock((e: StreamProgressEvent) => events.push(e));
+
+    const t0 = 1000;
+    const parser = new StreamParser(t0, onProgress);
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "text", text: "Let me check." },
+      { type: "tool_use", id: "toolu_01", name: "mcp__gmail__search_emails", input: { query: "test" } },
+    ])), t0 + 100);
+
+    // tool_start should have fired
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({ type: "tool_start", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)" });
+
+    // Tool result resolves the tool
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "emails", is_error: false },
+    ])), t0 + 2100);
+
+    // User message with tool_result resolves pending tools → fires tool_end
+    expect(events).toHaveLength(2);
+    expect(events[1]).toEqual({ type: "tool_end", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)" });
+
+    // Final assistant response
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "text", text: "You have emails." },
+    ])), t0 + 3000);
+
+    // text event fires for text-only assistant message
+    expect(events).toHaveLength(3);
+    expect(events[2]).toEqual({ type: "text" });
+
+    parser.parseLine(JSON.stringify(makeResult({ result: "You have emails." })), t0 + 3100);
+    expect(parser.complete).toBe(true);
+  });
+
+  test("fires tool_start for each tool in a multi-tool turn", () => {
+    const events: StreamProgressEvent[] = [];
+    const t0 = 1000;
+    const parser = new StreamParser(t0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "mcp__gmail__search_emails", input: {} },
+      { type: "tool_use", id: "toolu_02", name: "mcp__calendar__get_events", input: {} },
+    ])), t0 + 100);
+
+    // Both tool_start events should fire
+    expect(events).toHaveLength(2);
+    expect(events[0]!.type).toBe("tool_start");
+    expect((events[0] as any).displayName).toBe("search_emails (gmail)");
+    expect(events[1]!.type).toBe("tool_start");
+    expect((events[1] as any).displayName).toBe("get_events (calendar)");
+
+    // Resolve
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "ok", is_error: false },
+      { type: "tool_result", tool_use_id: "toolu_02", content: "ok", is_error: false },
+    ])), t0 + 5000);
+
+    // Both tool_end events
+    expect(events).toHaveLength(4);
+    expect(events[2]!.type).toBe("tool_end");
+    expect(events[3]!.type).toBe("tool_end");
+  });
+
+  test("does not fire text event when assistant message has tools", () => {
+    const events: StreamProgressEvent[] = [];
+    const t0 = 0;
+    const parser = new StreamParser(t0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "text", text: "Let me check." },
+      { type: "tool_use", id: "toolu_01", name: "Read", input: {} },
+    ])), t0 + 100);
+
+    // Only tool_start, no text event
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe("tool_start");
+  });
+
+  test("works without callback (backward compatible)", () => {
+    const parser = new StreamParser();
+    parser.parseAll(buildStream(
+      systemEvent,
+      makeAssistant([{ type: "text", text: "Hello" }]),
+      makeResult(),
+    ));
+    expect(parser.getResult().result).toBe("Hello world");
   });
 });
 

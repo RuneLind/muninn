@@ -15,7 +15,7 @@ import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
 import { Tracer } from "../tracing/index.ts";
-import { agentStatus } from "../dashboard/agent-status.ts";
+import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getActiveThreadId } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
@@ -100,7 +100,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
       log.info("Calling Claude for voice (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
       t.start("claude");
-      const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt);
+      const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt, createProgressCallback("calling_claude", username));
       t.end("claude", {
         model: result.model,
         inputTokens: result.inputTokens,

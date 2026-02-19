@@ -1,3 +1,5 @@
+import type { StreamProgressCallback } from "../ai/stream-parser.ts";
+
 export type AgentPhase =
   | "idle"
   | "receiving"
@@ -15,6 +17,7 @@ export type AgentPhase =
 export interface AgentStatus {
   phase: AgentPhase;
   username?: string;
+  detail?: string;
   startedAt?: number;
 }
 
@@ -24,10 +27,11 @@ class AgentStatusTracker {
   private current: AgentStatus = { phase: "idle" };
   private subscribers = new Set<Subscriber>();
 
-  set(phase: AgentPhase, username?: string) {
+  set(phase: AgentPhase, username?: string, detail?: string) {
     this.current = {
       phase,
       username,
+      detail,
       startedAt: phase === "idle" ? undefined : Date.now(),
     };
     for (const sub of this.subscribers) {
@@ -46,3 +50,14 @@ class AgentStatusTracker {
 }
 
 export const agentStatus = new AgentStatusTracker();
+
+/** Create a progress callback that updates agent status with tool details */
+export function createProgressCallback(phase: AgentPhase, username?: string): StreamProgressCallback {
+  return (event) => {
+    if (event.type === "tool_start") {
+      agentStatus.set(phase, username, event.displayName);
+    } else if (event.type === "tool_end") {
+      agentStatus.set(phase, username);
+    }
+  };
+}

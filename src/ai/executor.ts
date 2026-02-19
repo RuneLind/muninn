@@ -1,7 +1,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeResult } from "../types.ts";
-import { StreamParser } from "./stream-parser.ts";
+import { StreamParser, type StreamProgressCallback } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 import { getLog } from "../logging.ts";
 
@@ -16,6 +16,7 @@ export async function executeClaudePrompt(
   config: Config,
   botConfig: BotConfig,
   systemPrompt?: string,
+  onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
   const wallStart = performance.now();
 
@@ -67,8 +68,11 @@ export async function executeClaudePrompt(
   });
 
   const resultPromise = (async () => {
-    // Read stdout line-by-line with timestamps for accurate tool call timing
-    const lines = await readLinesWithTimestamps(proc.stdout);
+    // Read stdout line-by-line, feeding each to StreamParser incrementally
+    // for real-time tool progress callbacks
+    const { result: parsed, rawLines } = await readAndParseIncrementally(
+      proc.stdout, wallStart, onProgress, botConfig.name,
+    );
     const exitCode = await proc.exited;
 
     if (exitCode !== 0) {
@@ -77,11 +81,19 @@ export async function executeClaudePrompt(
       throw new Error(`Claude exited with code ${exitCode}: ${stderr}`);
     }
 
-    const wallClockMs = performance.now() - wallStart;
-    const parsed = parseStreamOutput(lines, botConfig.name, wallStart);
-    const startupMs = wallClockMs - parsed.durationMs;
+    if (parsed) {
+      const wallClockMs = performance.now() - wallStart;
+      const startupMs = wallClockMs - parsed.durationMs;
+      return { ...parsed, wallClockMs, startupMs };
+    }
 
-    return { ...parsed, wallClockMs, startupMs };
+    // Fallback: stream parser didn't complete (known CLI bug — missing result event)
+    const fullOutput = rawLines.join("\n");
+    log.warn("Falling back to legacy JSON parser ({lineCount} lines)", { botName: botConfig.name, lineCount: rawLines.length });
+    const fallback = parseClaudeOutput(fullOutput);
+    const wallClockMs = performance.now() - wallStart;
+    const startupMs = wallClockMs - fallback.durationMs;
+    return { ...fallback, wallClockMs, startupMs };
   })();
 
   try {
@@ -94,17 +106,24 @@ export async function executeClaudePrompt(
   }
 }
 
-interface TimestampedLine {
-  line: string;
-  timestamp: number;
+interface IncrementalResult {
+  result: ClaudeResult | null;
+  rawLines: string[];
 }
 
-/** Read stdout as timestamped lines for tool call duration tracking */
-async function readLinesWithTimestamps(stdout: ReadableStream<Uint8Array>): Promise<TimestampedLine[]> {
-  const lines: TimestampedLine[] = [];
+/** Read stdout line-by-line, feeding each to StreamParser incrementally for real-time progress */
+async function readAndParseIncrementally(
+  stdout: ReadableStream<Uint8Array>,
+  referenceTimestamp: number,
+  onProgress: StreamProgressCallback | undefined,
+  botName: string,
+): Promise<IncrementalResult> {
+  const parser = new StreamParser(referenceTimestamp, onProgress);
+  const rawLines: string[] = [];
   const reader = stdout.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let parseError: Error | null = null;
 
   try {
     while (true) {
@@ -118,7 +137,19 @@ async function readLinesWithTimestamps(stdout: ReadableStream<Uint8Array>): Prom
         const line = buffer.slice(0, newlineIdx);
         buffer = buffer.slice(newlineIdx + 1);
         if (line.trim()) {
-          lines.push({ line, timestamp: performance.now() });
+          rawLines.push(line);
+          if (!parseError) {
+            try {
+              parser.parseLine(line, performance.now());
+            } catch (e) {
+              // If stream parser threw a Claude error (is_error: true), rethrow immediately
+              if (e instanceof Error && e.message.startsWith("Claude error:")) {
+                throw e;
+              }
+              parseError = e instanceof Error ? e : new Error(String(e));
+              log.warn("Stream parser failed, will use legacy fallback: {error}", { botName, error: String(e) });
+            }
+          }
         }
       }
     }
@@ -128,34 +159,22 @@ async function readLinesWithTimestamps(stdout: ReadableStream<Uint8Array>): Prom
 
   // Handle remaining buffer (no trailing newline)
   if (buffer.trim()) {
-    lines.push({ line: buffer, timestamp: performance.now() });
+    rawLines.push(buffer);
+    if (!parseError) {
+      try {
+        parser.parseLine(buffer, performance.now());
+      } catch (e) {
+        if (e instanceof Error && e.message.startsWith("Claude error:")) {
+          throw e;
+        }
+        parseError = e instanceof Error ? e : new Error(String(e));
+      }
+    }
   }
 
-  return lines;
-}
-
-/** Parse stream-json NDJSON lines, falling back to legacy JSON parser */
-function parseStreamOutput(lines: TimestampedLine[], botName: string, referenceTimestamp?: number): ClaudeResult {
-  // Try stream-json parsing first
-  try {
-    const parser = new StreamParser(referenceTimestamp);
-    for (const { line, timestamp } of lines) {
-      parser.parseLine(line, timestamp);
-    }
-    if (parser.complete) {
-      return parser.getResult();
-    }
-  } catch (e) {
-    // If stream parser threw a Claude error (is_error: true), rethrow
-    if (e instanceof Error && e.message.startsWith("Claude error:")) {
-      throw e;
-    }
-    log.warn("Stream parser failed, trying legacy JSON parser: {error}", { botName, error: String(e) });
+  if (!parseError && parser.complete) {
+    return { result: parser.getResult(), rawLines };
   }
 
-  // Fallback: concatenate all lines and try legacy JSON parse
-  // This handles cases where stream-json result event is missing (known bug)
-  const fullOutput = lines.map((l) => l.line).join("\n");
-  log.warn("Falling back to legacy JSON parser ({lineCount} lines)", { botName, lineCount: lines.length });
-  return parseClaudeOutput(fullOutput);
+  return { result: null, rawLines };
 }

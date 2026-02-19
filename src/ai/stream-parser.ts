@@ -16,6 +16,13 @@ import type { ClaudeResult, ToolCall } from "../types.ts";
  * For accurate timing, feed lines as they arrive (not all at once after process exits).
  */
 
+export type StreamProgressEvent =
+  | { type: "tool_start"; name: string; displayName: string }
+  | { type: "tool_end"; name: string; displayName: string }
+  | { type: "text" };
+
+export type StreamProgressCallback = (event: StreamProgressEvent) => void;
+
 interface TimestampedLine {
   line: string;
   timestamp: number; // performance.now()
@@ -43,12 +50,15 @@ export class StreamParser {
   private hasResult = false;
   /** Reference timestamp (performance.now()) for computing tool startOffsetMs */
   private refTimestamp: number;
+  private onProgress?: StreamProgressCallback;
 
   /**
    * @param referenceTimestamp - performance.now() at CLI spawn time, used to compute tool startOffsetMs
+   * @param onProgress - optional callback fired when tool events or text are detected
    */
-  constructor(referenceTimestamp: number = performance.now()) {
+  constructor(referenceTimestamp: number = performance.now(), onProgress?: StreamProgressCallback) {
     this.refTimestamp = referenceTimestamp;
+    this.onProgress = onProgress;
   }
 
   /**
@@ -98,18 +108,26 @@ export class StreamParser {
     // Resolve any pending tool calls — the assistant responding means tools finished
     this.resolvePendingTools(timestamp);
 
+    let hasToolUse = false;
     for (const block of content) {
       if (block.type === "text" && typeof block.text === "string") {
         // Accumulate text (last assistant text block is the final answer)
         this.resultText = block.text;
       } else if (block.type === "tool_use") {
+        hasToolUse = true;
+        const displayName = formatToolDisplayName(block.name);
         this.pendingTools.push({
           id: block.id,
           name: block.name,
           input: block.input,
           startTimestamp: timestamp,
         });
+        this.onProgress?.({ type: "tool_start", name: block.name, displayName });
       }
+    }
+    // Fire text event if assistant responded with text and no tool calls
+    if (!hasToolUse && this.resultText && this.onProgress) {
+      this.onProgress({ type: "text" });
     }
   }
 
@@ -122,14 +140,16 @@ export class StreamParser {
     for (const pending of this.pendingTools) {
       const durationMs = Math.max(0, Math.round(endTimestamp - pending.startTimestamp));
       const startOffsetMs = Math.max(0, Math.round(pending.startTimestamp - this.refTimestamp));
+      const displayName = formatToolDisplayName(pending.name);
       this.toolCalls.push({
         id: pending.id,
         name: pending.name,
-        displayName: formatToolDisplayName(pending.name),
+        displayName,
         durationMs,
         startOffsetMs,
         input: abbreviateInput(pending.input),
       });
+      this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
     }
     this.pendingTools = [];
   }
