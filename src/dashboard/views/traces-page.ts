@@ -21,13 +21,13 @@ export function renderTracesPage(): string {
       padding: 16px 24px;
     }
     .stat-card {
-      background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
-      border: 1px solid #1e1e2e;
+      background: linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-gradient-end) 100%);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
     }
-    .stat-value { color: #fff; font-weight: 700; font-size: 24px; }
-    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; }
+    .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 
     /* Filters */
     .filters {
@@ -37,24 +37,24 @@ export function renderTracesPage(): string {
       align-items: center;
     }
     .filters select, .filters input {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 6px 10px;
       border-radius: 6px;
       font-size: 13px;
     }
-    .filters select:focus, .filters input:focus { outline: none; border-color: #6c63ff; }
+    .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
     .filters button {
-      background: #6c63ff;
-      color: #fff;
+      background: var(--accent);
+      color: var(--text-primary);
       border: none;
       padding: 6px 14px;
       border-radius: 6px;
       cursor: pointer;
       font-size: 13px;
     }
-    .filters button:hover { background: #5a52e0; }
+    .filters button:hover { background: var(--accent-hover); }
 
     /* Trace List */
     .content { padding: 0 24px 24px; }
@@ -66,21 +66,21 @@ export function renderTracesPage(): string {
     .trace-table th {
       text-align: left;
       padding: 10px 12px;
-      color: #666;
+      color: var(--text-dim);
       font-weight: 500;
       text-transform: uppercase;
       font-size: 11px;
       letter-spacing: 0.5px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
     .trace-table td {
       padding: 10px 12px;
-      border-bottom: 1px solid #1a1a24;
+      border-bottom: 1px solid var(--border-subtle);
       white-space: nowrap;
     }
     .trace-table tr { cursor: pointer; transition: background 0.15s; }
-    .trace-table tr:hover { background: rgba(108, 99, 255, 0.05); }
-    .trace-table tr.expanded { background: rgba(108, 99, 255, 0.08); }
+    .trace-table tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .trace-table tr.expanded { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
     .badge {
       display: inline-block;
@@ -89,20 +89,20 @@ export function renderTracesPage(): string {
       font-size: 11px;
       font-weight: 500;
     }
-    .badge-ok { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
-    .badge-error { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-    .badge-name { background: rgba(108, 99, 255, 0.15); color: #a5a0ff; }
-    .badge-bot { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .badge-ok { background: color-mix(in srgb, var(--status-success) 15%, transparent); color: var(--status-success); }
+    .badge-error { background: color-mix(in srgb, var(--status-error) 15%, transparent); color: var(--status-error); }
+    .badge-name { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-light); }
+    .badge-bot { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); }
 
-    .tokens { color: #888; font-size: 12px; }
-    .badge-tools { background: rgba(245, 158, 11, 0.15); color: #f59e0b; margin-left: 6px; }
+    .tokens { color: var(--text-muted); font-size: 12px; }
+    .badge-tools { background: color-mix(in srgb, var(--status-tool) 15%, transparent); color: var(--status-tool); margin-left: 6px; }
 
     /* Waterfall */
     .waterfall-container {
       display: none;
       padding: 16px 24px;
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 8px;
       margin: 8px 0 16px;
     }
@@ -113,16 +113,16 @@ export function renderTracesPage(): string {
       align-items: center;
       margin-bottom: 16px;
     }
-    .waterfall-header h3 { font-size: 14px; color: #fff; }
+    .waterfall-header h3 { font-size: 14px; color: var(--text-primary); }
     .waterfall-close {
       background: none;
       border: none;
-      color: #666;
+      color: var(--text-dim);
       cursor: pointer;
       font-size: 18px;
       padding: 4px;
     }
-    .waterfall-close:hover { color: #fff; }
+    .waterfall-close:hover { color: var(--text-primary); }
 
     .waterfall {
       position: relative;
@@ -137,7 +137,7 @@ export function renderTracesPage(): string {
     }
     .waterfall-label {
       font-size: 12px;
-      color: #aaa;
+      color: var(--text-soft);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -145,7 +145,7 @@ export function renderTracesPage(): string {
     .waterfall-bar-container {
       position: relative;
       height: 16px;
-      background: rgba(255,255,255,0.03);
+      background: color-mix(in srgb, white 3%, transparent);
       border-radius: 3px;
     }
     .waterfall-bar {
@@ -157,17 +157,17 @@ export function renderTracesPage(): string {
       transition: opacity 0.15s;
     }
     .waterfall-bar:hover { opacity: 0.8; }
-    .waterfall-bar.kind-root { background: #6c63ff; }
-    .waterfall-bar.kind-span { background: #22d3ee; }
-    .waterfall-bar.kind-tool { background: #f59e0b; }
-    .waterfall-bar.kind-event { background: #fbbf24; width: 3px !important; }
-    .waterfall-bar.status-error { background: #f87171; }
+    .waterfall-bar.kind-root { background: var(--accent); }
+    .waterfall-bar.kind-span { background: var(--status-cyan); }
+    .waterfall-bar.kind-tool { background: var(--status-tool); }
+    .waterfall-bar.kind-event { background: var(--status-warning); width: 3px !important; }
+    .waterfall-bar.status-error { background: var(--status-error); }
     .waterfall-duration {
       position: absolute;
       right: -60px;
       top: 0;
       font-size: 10px;
-      color: #666;
+      color: var(--text-dim);
       line-height: 16px;
       width: 55px;
     }
@@ -175,21 +175,21 @@ export function renderTracesPage(): string {
     /* Span Details */
     .span-details {
       margin-top: 16px;
-      background: #0a0a0f;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-page);
+      border: 1px solid var(--border-primary);
       border-radius: 6px;
       padding: 12px;
       font-size: 12px;
       display: none;
     }
     .span-details.visible { display: block; }
-    .span-details h4 { color: #a5a0ff; margin-bottom: 8px; font-size: 13px; }
+    .span-details h4 { color: var(--accent-light); margin-bottom: 8px; font-size: 13px; }
     .span-details pre {
-      background: #12121a;
+      background: var(--bg-panel);
       padding: 10px;
       border-radius: 4px;
       overflow-x: auto;
-      color: #ccc;
+      color: var(--text-tertiary);
       font-size: 11px;
       line-height: 1.5;
     }
@@ -202,19 +202,19 @@ export function renderTracesPage(): string {
       padding: 16px;
     }
     .pagination button {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 6px 14px;
       border-radius: 6px;
       cursor: pointer;
       font-size: 13px;
     }
-    .pagination button:hover { border-color: #6c63ff; }
+    .pagination button:hover { border-color: var(--accent); }
     .pagination button:disabled { opacity: 0.3; cursor: default; }
-    .pagination span { color: #666; font-size: 13px; line-height: 32px; }
+    .pagination span { color: var(--text-dim); font-size: 13px; line-height: 32px; }
 
-    .empty { color: #555; text-align: center; padding: 40px; font-size: 14px; }
+    .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
 
     /* Prompt Modal */
     .prompt-modal-backdrop {
@@ -228,8 +228,8 @@ export function renderTracesPage(): string {
     }
     .prompt-modal-backdrop.visible { display: flex; }
     .prompt-modal {
-      background: #12121a;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-secondary);
       border-radius: 12px;
       width: 90vw;
       max-width: 900px;
@@ -242,38 +242,38 @@ export function renderTracesPage(): string {
       justify-content: space-between;
       align-items: center;
       padding: 16px 20px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
-    .prompt-modal-header h3 { font-size: 14px; color: #fff; }
+    .prompt-modal-header h3 { font-size: 14px; color: var(--text-primary); }
     .prompt-modal-close {
       background: none;
       border: none;
-      color: #666;
+      color: var(--text-dim);
       cursor: pointer;
       font-size: 20px;
       padding: 4px 8px;
     }
-    .prompt-modal-close:hover { color: #fff; }
+    .prompt-modal-close:hover { color: var(--text-primary); }
     .prompt-tabs {
       display: flex;
       gap: 0;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
     .prompt-tab {
       padding: 10px 20px;
       font-size: 13px;
-      color: #888;
+      color: var(--text-muted);
       background: none;
       border: none;
       cursor: pointer;
       border-bottom: 2px solid transparent;
       transition: all 0.2s;
     }
-    .prompt-tab:hover { color: #a5a0ff; }
-    .prompt-tab.active { color: #6c63ff; border-bottom-color: #6c63ff; }
+    .prompt-tab:hover { color: var(--accent-light); }
+    .prompt-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .prompt-tab .char-count {
       font-size: 10px;
-      color: #555;
+      color: var(--text-faint);
       margin-left: 6px;
     }
     .prompt-modal-body {
@@ -282,18 +282,18 @@ export function renderTracesPage(): string {
       padding: 16px 20px;
     }
     .prompt-modal-body pre {
-      background: #0a0a0f;
+      background: var(--bg-page);
       padding: 14px;
       border-radius: 6px;
       font-size: 12px;
       line-height: 1.6;
-      color: #ccc;
+      color: var(--text-tertiary);
       white-space: pre-wrap;
       word-break: break-word;
       overflow-x: auto;
     }
     .prompt-unavailable {
-      color: #555;
+      color: var(--text-faint);
       text-align: center;
       padding: 40px;
       font-size: 14px;
@@ -301,9 +301,9 @@ export function renderTracesPage(): string {
 
     /* View Prompt button in waterfall header */
     .btn-view-prompt {
-      background: rgba(108, 99, 255, 0.15);
-      border: 1px solid rgba(108, 99, 255, 0.3);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--accent-light);
       padding: 4px 12px;
       border-radius: 6px;
       font-size: 12px;
@@ -311,7 +311,7 @@ export function renderTracesPage(): string {
       transition: all 0.2s;
       margin-right: 8px;
     }
-    .btn-view-prompt:hover { background: rgba(108, 99, 255, 0.25); border-color: #6c63ff; }
+    .btn-view-prompt:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); border-color: var(--accent); }
 
     /* Prompt Stats Pills */
     .prompt-stats {
@@ -319,7 +319,7 @@ export function renderTracesPage(): string {
       gap: 8px;
       padding: 10px 20px;
       flex-wrap: wrap;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
     .prompt-stat-pill {
       display: inline-flex;
@@ -328,23 +328,23 @@ export function renderTracesPage(): string {
       padding: 3px 10px;
       border-radius: 12px;
       font-size: 11px;
-      background: rgba(108, 99, 255, 0.1);
-      color: #888;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: var(--text-muted);
     }
-    .prompt-stat-pill .stat-val { font-weight: 600; color: #e0e0e0; }
+    .prompt-stat-pill .stat-val { font-weight: 600; color: var(--text-secondary); }
     .prompt-stat-pill.clickable { cursor: pointer; transition: all 0.15s; }
-    .prompt-stat-pill.clickable:hover { background: rgba(108, 99, 255, 0.25); color: #e0e0e0; }
+    .prompt-stat-pill.clickable:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--text-secondary); }
 
     /* Section highlight flash */
     .section-highlight { animation: sectionFlash 1.5s ease-out; }
     @keyframes sectionFlash {
-      0% { box-shadow: 0 0 0 2px rgba(108, 99, 255, 0.6); }
+      0% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
       100% { box-shadow: 0 0 0 2px transparent; }
     }
 
     /* Prompt Sections */
     .prompt-section {
-      border: 1px solid #1e1e2e;
+      border: 1px solid var(--border-primary);
       border-radius: 8px;
       margin-bottom: 8px;
       overflow: hidden;
@@ -358,29 +358,29 @@ export function renderTracesPage(): string {
       user-select: none;
       transition: background 0.15s;
     }
-    .prompt-section-header:hover { background: rgba(255,255,255,0.03); }
+    .prompt-section-header:hover { background: color-mix(in srgb, white 3%, transparent); }
     .prompt-section-chevron {
       transition: transform 0.2s;
       font-size: 10px;
-      color: #666;
+      color: var(--text-dim);
     }
     .prompt-section-chevron.collapsed { transform: rotate(-90deg); }
     .prompt-section-title { font-size: 12px; font-weight: 600; }
-    .prompt-section-meta { font-size: 10px; color: #555; margin-left: auto; }
+    .prompt-section-meta { font-size: 10px; color: var(--text-faint); margin-left: auto; }
     .prompt-section-badge {
       font-size: 10px;
       padding: 1px 6px;
       border-radius: 8px;
       font-weight: 500;
-      background: rgba(255,255,255,0.06);
-      color: #999;
+      background: color-mix(in srgb, white 6%, transparent);
+      color: var(--text-soft);
     }
     .prompt-section-body {
       padding: 8px 12px;
-      border-top: 1px solid #1e1e2e;
+      border-top: 1px solid var(--border-primary);
       font-size: 12px;
       line-height: 1.6;
-      color: #ccc;
+      color: var(--text-tertiary);
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -450,17 +450,17 @@ export function renderTracesPage(): string {
 
     /* Current message highlight */
     .current-message-wrapper { margin-top: 8px; }
-    .current-message-label { font-size: 11px; font-weight: 600; color: #4ade80; margin-bottom: 6px; }
+    .current-message-label { font-size: 11px; font-weight: 600; color: var(--status-success); margin-bottom: 6px; }
     .current-message {
-      border: 1px solid rgba(74,222,128,0.3);
-      background: rgba(74,222,128,0.05);
+      border: 1px solid color-mix(in srgb, var(--status-success) 30%, transparent);
+      background: color-mix(in srgb, var(--status-success) 5%, transparent);
       padding: 10px 12px;
       border-radius: 8px;
       font-size: 12px;
       line-height: 1.6;
       white-space: pre-wrap;
       word-break: break-word;
-      color: #e0e0e0;
+      color: var(--text-secondary);
     }
   </style>
 </head>
@@ -478,7 +478,7 @@ export function renderTracesPage(): string {
     <select id="filterName" onchange="currentPage=0;loadTraces();loadStats()">
       <option value="">All types</option>
     </select>
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#666;margin-left:auto">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);margin-left:auto">
       <input type="checkbox" id="autoRefresh" checked> Auto-refresh (15s)
     </label>
   </div>
@@ -648,7 +648,7 @@ export function renderTracesPage(): string {
         const toolCount = t.attributes?.toolCount || 0;
         const toolsBadge = toolCount > 0
           ? '<span class="badge badge-tools">' + toolCount + '</span>'
-          : '<span style="color:#444">-</span>';
+          : '<span style="color:var(--text-disabled)">-</span>';
         return '<tr onclick="loadWaterfall(\\'' + t.traceId + '\\')" data-trace="' + t.traceId + '">' +
           '<td>' + fmtDate(t.startedAt) + '</td>' +
           '<td><span class="badge badge-name">' + esc(t.name) + '</span></td>' +

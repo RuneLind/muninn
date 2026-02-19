@@ -4,13 +4,13 @@ export function tooltipStyles(): string {
     #tooltip {
       position: fixed;
       z-index: 200;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
       border-radius: 8px;
       padding: 10px 14px;
       max-width: 320px;
       font-size: 12px;
-      color: #ccc;
+      color: var(--text-tertiary);
       line-height: 1.5;
       pointer-events: none;
       opacity: 0;
@@ -21,13 +21,13 @@ export function tooltipStyles(): string {
       opacity: 1;
     }
     .tip-label {
-      color: #555;
+      color: var(--text-faint);
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
     .tip-value {
-      color: #ddd;
+      color: var(--text-tertiary);
     }
     .tip-badge {
       display: inline-block;
@@ -38,13 +38,13 @@ export function tooltipStyles(): string {
       text-transform: uppercase;
       vertical-align: middle;
     }
-    .tip-badge.active { background: #1a3a2a; color: #4ade80; }
-    .tip-badge.completed { background: #1e1e3e; color: #6c63ff; }
-    .tip-badge.cancelled { background: #1a1a1a; color: #666; }
-    .tip-badge.personal { background: #1e1e3e; color: #6c63ff; }
-    .tip-badge.shared { background: #1a3a2a; color: #4ade80; }
+    .tip-badge.active { background: var(--tint-success); color: var(--status-success); }
+    .tip-badge.completed { background: var(--tint-purple); color: var(--accent); }
+    .tip-badge.cancelled { background: var(--tint-neutral); color: var(--text-dim); }
+    .tip-badge.personal { background: var(--tint-purple); color: var(--accent); }
+    .tip-badge.shared { background: var(--tint-success); color: var(--status-success); }
     .tip-preview {
-      color: #999;
+      color: var(--text-soft);
       font-style: italic;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -150,7 +150,7 @@ export function tooltipScript(): string {
 
         case 'overview':
           return '<span class="tip-value">' + (data.count || 0) + ' ' + escapeHtml(data.label || 'items') + '</span>' +
-            '<br><span style="color:#666;font-size:11px">Click to view</span>';
+            '<br><span style="color:var(--text-dim);font-size:11px">Click to view</span>';
 
         default:
           return null;

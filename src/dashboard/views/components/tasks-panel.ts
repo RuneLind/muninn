@@ -9,10 +9,10 @@ export function tasksPanelStyles(): string {
       text-transform: uppercase;
       white-space: nowrap;
     }
-    .task-badge.reminder { background: #1e3a5f; color: #60a5fa; }
-    .task-badge.briefing { background: #2a1a3a; color: #c084fc; }
-    .task-badge.custom { background: #2a2a1a; color: #facc15; }
-    .task-badge.disabled { background: #1a1a1a; color: #555; }
+    .task-badge.reminder { background: var(--tint-info); color: var(--status-info); }
+    .task-badge.briefing { background: var(--tint-magenta); color: var(--status-magenta); }
+    .task-badge.custom { background: var(--tint-warning); color: var(--status-warning); }
+    .task-badge.disabled { background: var(--tint-neutral); color: var(--text-faint); }
   `;
 }
 

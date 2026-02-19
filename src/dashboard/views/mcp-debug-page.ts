@@ -20,8 +20,8 @@ export function renderMcpDebugPage(): string {
 
     /* Left panel */
     .left-panel {
-      background: #12121a;
-      border-right: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-primary);
       overflow-y: auto;
       padding: 16px;
     }
@@ -30,7 +30,7 @@ export function renderMcpDebugPage(): string {
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #666;
+      color: var(--text-dim);
       margin-bottom: 8px;
       display: flex;
       align-items: center;
@@ -40,20 +40,20 @@ export function renderMcpDebugPage(): string {
     /* Bot selector */
     .bot-select {
       width: 100%;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 8px 10px;
       border-radius: 6px;
       font-size: 13px;
       margin-bottom: 16px;
     }
-    .bot-select:focus { outline: none; border-color: #6c63ff; }
+    .bot-select:focus { outline: none; border-color: var(--accent); }
 
     /* Server list */
     .server-item {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
       border-radius: 8px;
       padding: 10px 12px;
       margin-bottom: 8px;
@@ -65,7 +65,7 @@ export function renderMcpDebugPage(): string {
     .server-name {
       font-size: 13px;
       font-weight: 500;
-      color: #e0e0e0;
+      color: var(--text-secondary);
       flex: 1;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -75,12 +75,12 @@ export function renderMcpDebugPage(): string {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #444;
+      background: var(--text-disabled);
       flex-shrink: 0;
     }
-    .server-status.connected { background: #4ade80; }
-    .server-status.connecting { background: #fbbf24; animation: pulse 1s infinite; }
-    .server-status.error { background: #f87171; }
+    .server-status.connected { background: var(--status-success); }
+    .server-status.connecting { background: var(--status-warning); animation: pulse 1s infinite; }
+    .server-status.error { background: var(--status-error); }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
     .btn {
@@ -94,24 +94,24 @@ export function renderMcpDebugPage(): string {
       white-space: nowrap;
     }
     .btn-connect {
-      background: rgba(108, 99, 255, 0.2);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent-light);
     }
-    .btn-connect:hover { background: rgba(108, 99, 255, 0.35); }
+    .btn-connect:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); }
     .btn-disconnect {
-      background: rgba(248, 113, 113, 0.15);
-      color: #f87171;
+      background: color-mix(in srgb, var(--status-error) 15%, transparent);
+      color: var(--status-error);
     }
-    .btn-disconnect:hover { background: rgba(248, 113, 113, 0.3); }
+    .btn-disconnect:hover { background: color-mix(in srgb, var(--status-error) 30%, transparent); }
     .btn-call {
-      background: #6c63ff;
-      color: #fff;
+      background: var(--accent);
+      color: var(--text-primary);
       padding: 8px 20px;
       border-radius: 6px;
       font-size: 13px;
       font-weight: 500;
     }
-    .btn-call:hover { background: #5a52e0; }
+    .btn-call:hover { background: var(--accent-hover); }
     .btn-call:disabled { opacity: 0.4; cursor: default; }
 
     /* Tool list */
@@ -123,14 +123,14 @@ export function renderMcpDebugPage(): string {
       border-radius: 6px;
       cursor: pointer;
       font-size: 12px;
-      color: #aaa;
+      color: var(--text-soft);
       transition: all 0.15s;
       display: flex;
       align-items: center;
       gap: 6px;
     }
-    .tool-item:hover { background: rgba(108, 99, 255, 0.08); color: #e0e0e0; }
-    .tool-item.active { background: rgba(108, 99, 255, 0.15); color: #a5a0ff; }
+    .tool-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--text-secondary); }
+    .tool-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-light); }
     .tool-item-name { font-weight: 500; }
 
     /* Right panel */
@@ -144,23 +144,23 @@ export function renderMcpDebugPage(): string {
       align-items: center;
       justify-content: center;
       height: 100%;
-      color: #555;
+      color: var(--text-faint);
       font-size: 14px;
     }
 
     .tool-detail h2 {
       font-size: 18px;
-      color: #fff;
+      color: var(--text-primary);
       margin-bottom: 4px;
     }
     .tool-mcp-name {
       font-size: 12px;
-      color: #666;
+      color: var(--text-dim);
       font-family: 'SF Mono', 'Fira Code', monospace;
       margin-bottom: 16px;
     }
     .tool-description {
-      color: #aaa;
+      color: var(--text-soft);
       font-size: 13px;
       margin-bottom: 20px;
       line-height: 1.5;
@@ -169,15 +169,15 @@ export function renderMcpDebugPage(): string {
     /* Schema section */
     .schema-toggle {
       font-size: 12px;
-      color: #666;
+      color: var(--text-dim);
       cursor: pointer;
       user-select: none;
       margin-bottom: 8px;
     }
-    .schema-toggle:hover { color: #a5a0ff; }
+    .schema-toggle:hover { color: var(--accent-light); }
     .schema-content {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 6px;
       padding: 12px;
       margin-bottom: 20px;
@@ -187,7 +187,7 @@ export function renderMcpDebugPage(): string {
     .schema-content pre {
       font-size: 11px;
       line-height: 1.5;
-      color: #ccc;
+      color: var(--text-tertiary);
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -196,7 +196,7 @@ export function renderMcpDebugPage(): string {
     .input-section { margin-bottom: 20px; }
     .input-section h3 {
       font-size: 13px;
-      color: #888;
+      color: var(--text-muted);
       margin-bottom: 12px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -207,18 +207,18 @@ export function renderMcpDebugPage(): string {
     .form-field label {
       display: block;
       font-size: 12px;
-      color: #aaa;
+      color: var(--text-soft);
       margin-bottom: 4px;
     }
-    .form-field label .required { color: #f87171; }
-    .form-field label .type-hint { color: #555; font-style: italic; }
+    .form-field label .required { color: var(--status-error); }
+    .form-field label .type-hint { color: var(--text-faint); font-style: italic; }
     .form-field input,
     .form-field textarea,
     .form-field select {
       width: 100%;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 8px 10px;
       border-radius: 6px;
       font-size: 13px;
@@ -233,14 +233,14 @@ export function renderMcpDebugPage(): string {
     .form-field input:focus,
     .form-field textarea:focus {
       outline: none;
-      border-color: #6c63ff;
+      border-color: var(--accent);
     }
     .form-field input[type="checkbox"] {
       width: auto;
     }
     .form-field .field-desc {
       font-size: 11px;
-      color: #555;
+      color: var(--text-faint);
       margin-top: 2px;
     }
 
@@ -253,11 +253,11 @@ export function renderMcpDebugPage(): string {
     }
     .call-duration {
       font-size: 12px;
-      color: #888;
+      color: var(--text-muted);
     }
     .call-error {
       font-size: 12px;
-      color: #f87171;
+      color: var(--status-error);
       margin-top: 4px;
     }
 
@@ -265,7 +265,7 @@ export function renderMcpDebugPage(): string {
     .result-section { margin-top: 8px; }
     .result-section h3 {
       font-size: 13px;
-      color: #888;
+      color: var(--text-muted);
       margin-bottom: 8px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -280,7 +280,7 @@ export function renderMcpDebugPage(): string {
     .result-tab {
       padding: 6px 14px;
       font-size: 12px;
-      color: #666;
+      color: var(--text-dim);
       background: none;
       border: 1px solid transparent;
       border-bottom: none;
@@ -288,15 +288,15 @@ export function renderMcpDebugPage(): string {
       cursor: pointer;
       transition: all 0.15s;
     }
-    .result-tab:hover { color: #a5a0ff; }
+    .result-tab:hover { color: var(--accent-light); }
     .result-tab.active {
-      color: #e0e0e0;
-      background: #12121a;
-      border-color: #1e1e2e;
+      color: var(--text-secondary);
+      background: var(--bg-panel);
+      border-color: var(--border-primary);
     }
     .result-box {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 0 8px 8px 8px;
       padding: 14px;
       overflow-x: auto;
@@ -306,7 +306,7 @@ export function renderMcpDebugPage(): string {
     .result-box pre {
       font-size: 12px;
       line-height: 1.5;
-      color: #ccc;
+      color: var(--text-tertiary);
       white-space: pre-wrap;
       word-break: break-word;
     }
@@ -314,7 +314,7 @@ export function renderMcpDebugPage(): string {
     /* Server info badge */
     .server-info {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
       margin-top: 2px;
     }
 
@@ -323,8 +323,8 @@ export function renderMcpDebugPage(): string {
       display: inline-block;
       width: 14px;
       height: 14px;
-      border: 2px solid rgba(108, 99, 255, 0.3);
-      border-top-color: #6c63ff;
+      border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.6s linear infinite;
     }
@@ -343,15 +343,15 @@ export function renderMcpDebugPage(): string {
 
       <div class="section-title">
         Servers
-        <span id="serverCount" style="color: #444"></span>
+        <span id="serverCount" style="color: var(--text-disabled)"></span>
       </div>
       <div id="serverList"></div>
-      <div id="serverError" style="color:#f87171;font-size:12px;padding:4px 0;display:none"></div>
+      <div id="serverError" style="color:var(--status-error);font-size:12px;padding:4px 0;display:none"></div>
 
       <div class="tool-list" id="toolSection" style="display:none">
         <div class="section-title">
           Tools
-          <span id="toolCount" style="color: #444"></span>
+          <span id="toolCount" style="color: var(--text-disabled)"></span>
         </div>
         <div id="toolList"></div>
       </div>
@@ -439,7 +439,7 @@ export function renderMcpDebugPage(): string {
         const res = await fetch('/api/mcp/config?bot=' + encodeURIComponent(currentBot));
         if (!res.ok) {
           document.getElementById('serverList').innerHTML =
-            '<div style="color:#555;font-size:12px;padding:8px">No .mcp.json found for this bot</div>';
+            '<div style="color:var(--text-faint);font-size:12px;padding:8px">No .mcp.json found for this bot</div>';
           return;
         }
         mcpConfig = await res.json();
@@ -643,7 +643,7 @@ export function renderMcpDebugPage(): string {
     function buildInputForm(schema) {
       var formEl = document.getElementById('inputForm');
       if (!schema || !schema.properties) {
-        formEl.innerHTML = '<div style="color:#555;font-size:12px">(no parameters)</div>';
+        formEl.innerHTML = '<div style="color:var(--text-faint);font-size:12px">(no parameters)</div>';
         return;
       }
 

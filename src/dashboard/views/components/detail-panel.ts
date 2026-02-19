@@ -21,8 +21,8 @@ export function detailPanelStyles(): string {
       width: 420px;
       max-width: 90vw;
       height: 100vh;
-      background: #0f0f17;
-      border-left: 1px solid #1e1e2e;
+      background: var(--bg-deep);
+      border-left: 1px solid var(--border-primary);
       z-index: 101;
       transform: translateX(100%);
       transition: transform 0.25s ease;
@@ -37,19 +37,19 @@ export function detailPanelStyles(): string {
       align-items: center;
       justify-content: space-between;
       padding: 16px 20px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       flex-shrink: 0;
     }
     .detail-header h3 {
       font-size: 15px;
       font-weight: 600;
-      color: #fff;
+      color: var(--text-primary);
       margin: 0;
     }
     .detail-close {
       background: none;
-      border: 1px solid #2a2a3a;
-      color: #888;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-muted);
       width: 28px;
       height: 28px;
       border-radius: 6px;
@@ -61,8 +61,8 @@ export function detailPanelStyles(): string {
       transition: all 0.15s;
     }
     .detail-close:hover {
-      border-color: #6c63ff;
-      color: #ccc;
+      border-color: var(--accent);
+      color: var(--text-tertiary);
     }
     .detail-body {
       flex: 1;
@@ -71,7 +71,7 @@ export function detailPanelStyles(): string {
     }
     .detail-body::-webkit-scrollbar { width: 4px; }
     .detail-body::-webkit-scrollbar-track { background: transparent; }
-    .detail-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .detail-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
 
     /* Detail content styles */
     .detail-field {
@@ -81,12 +81,12 @@ export function detailPanelStyles(): string {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       margin-bottom: 4px;
     }
     .detail-value {
       font-size: 13px;
-      color: #ccc;
+      color: var(--text-tertiary);
       line-height: 1.5;
     }
     .detail-badge {
@@ -97,13 +97,13 @@ export function detailPanelStyles(): string {
       font-weight: 600;
       text-transform: uppercase;
     }
-    .detail-badge.active { background: #1a3a2a; color: #4ade80; }
-    .detail-badge.completed { background: #1e1e3e; color: #6c63ff; }
-    .detail-badge.cancelled { background: #1a1a1a; color: #666; }
-    .detail-badge.enabled { background: #1a3a2a; color: #4ade80; }
-    .detail-badge.disabled { background: #1a1a1a; color: #666; }
-    .detail-badge.personal { background: #1e1e3e; color: #6c63ff; }
-    .detail-badge.shared { background: #1a3a2a; color: #4ade80; }
+    .detail-badge.active { background: var(--tint-success); color: var(--status-success); }
+    .detail-badge.completed { background: var(--tint-purple); color: var(--accent); }
+    .detail-badge.cancelled { background: var(--tint-neutral); color: var(--text-dim); }
+    .detail-badge.enabled { background: var(--tint-success); color: var(--status-success); }
+    .detail-badge.disabled { background: var(--tint-neutral); color: var(--text-dim); }
+    .detail-badge.personal { background: var(--tint-purple); color: var(--accent); }
+    .detail-badge.shared { background: var(--tint-success); color: var(--status-success); }
 
     .detail-tags {
       display: flex;
@@ -113,7 +113,7 @@ export function detailPanelStyles(): string {
     }
     .detail-divider {
       border: none;
-      border-top: 1px solid #1e1e2e;
+      border-top: 1px solid var(--border-primary);
       margin: 16px 0;
     }
 
@@ -128,20 +128,20 @@ export function detailPanelStyles(): string {
       white-space: pre-wrap;
     }
     .detail-msg.role-user {
-      background: #1e3a5f;
-      color: #c8ddf5;
+      background: var(--tint-info);
+      color: var(--chat-user-text);
       margin-left: 32px;
       border-bottom-right-radius: 2px;
     }
     .detail-msg.role-assistant {
-      background: #1a3a2a;
-      color: #c8f5d8;
+      background: var(--tint-success);
+      color: var(--chat-assistant-text);
       margin-right: 32px;
       border-bottom-left-radius: 2px;
     }
     .detail-msg-meta {
       font-size: 10px;
-      color: #666;
+      color: var(--text-dim);
       margin-bottom: 4px;
     }
 
@@ -156,22 +156,22 @@ export function detailPanelStyles(): string {
       width: 40px;
       height: 40px;
       border-radius: 50%;
-      background: linear-gradient(135deg, #6c63ff, #4ade80);
+      background: linear-gradient(135deg, var(--accent), var(--status-success));
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 16px;
       font-weight: 700;
-      color: #fff;
+      color: var(--text-primary);
     }
     .detail-user-name {
       font-size: 16px;
       font-weight: 600;
-      color: #fff;
+      color: var(--text-primary);
     }
     .detail-user-platform {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
     }
     .detail-stat-row {
       display: flex;
@@ -182,18 +182,18 @@ export function detailPanelStyles(): string {
       flex: 1;
       text-align: center;
       padding: 10px;
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 8px;
     }
     .detail-stat-num {
       font-size: 18px;
       font-weight: 700;
-      color: #fff;
+      color: var(--text-primary);
     }
     .detail-stat-label {
       font-size: 10px;
-      color: #555;
+      color: var(--text-faint);
       text-transform: uppercase;
       margin-top: 2px;
     }
@@ -206,11 +206,11 @@ export function detailPanelStyles(): string {
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       font-weight: 600;
       margin-bottom: 8px;
       padding-bottom: 4px;
-      border-bottom: 1px solid #1a1a28;
+      border-bottom: 1px solid var(--border-subtle);
     }
     .detail-timeline {
       display: flex;
@@ -222,9 +222,9 @@ export function detailPanelStyles(): string {
       display: flex;
       justify-content: space-between;
       font-size: 12px;
-      color: #888;
+      color: var(--text-muted);
     }
-    .detail-timeline-item span:last-child { color: #ccc; }
+    .detail-timeline-item span:last-child { color: var(--text-tertiary); }
     .detail-mini-list {
       display: flex;
       flex-direction: column;
@@ -232,11 +232,11 @@ export function detailPanelStyles(): string {
     }
     .detail-mini-item {
       padding: 8px 10px;
-      background: #0d0d14;
-      border: 1px solid #1a1a28;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
       font-size: 12px;
-      color: #bbb;
+      color: var(--text-soft);
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -248,21 +248,21 @@ export function detailPanelStyles(): string {
       font-weight: 600;
     }
     .detail-mini-item .mini-badge.deadline { background: #3a2a1a; color: #f0c060; }
-    .detail-mini-item .mini-badge.msgs { background: #1a1a2e; color: #8b8bcd; }
+    .detail-mini-item .mini-badge.msgs { background: var(--bg-surface); color: var(--accent-muted); }
     .detail-mini-item .mini-badge.quiet { background: #1a2a3e; color: #60b0f0; }
     .detail-mini-memory {
       padding: 8px 10px;
-      background: #0d0d14;
-      border: 1px solid #1a1a28;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
       font-size: 12px;
-      color: #999;
+      color: var(--text-soft);
       line-height: 1.4;
     }
     .detail-mini-memory + .detail-mini-memory { margin-top: 4px; }
     .detail-mini-memory .detail-tags { margin-top: 4px; }
     .detail-skeleton {
-      background: linear-gradient(90deg, #1a1a28 25%, #22222e 50%, #1a1a28 75%);
+      background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
       background-size: 200% 100%;
       animation: shimmer 1.5s infinite;
       border-radius: 6px;
@@ -275,7 +275,7 @@ export function detailPanelStyles(): string {
     }
     .detail-empty-hint {
       font-size: 11px;
-      color: #444;
+      color: var(--text-disabled);
       font-style: italic;
       padding: 8px 0;
     }
@@ -385,7 +385,7 @@ export function detailPanelScript(): string {
               '<div class="detail-user-name">' + escapeHtml(u.username || u.userId) +
                 ' <span class="user-platform-badge ' + escapeAttr(platformClass) + '" style="font-size:10px">' + escapeHtml(platform) + '</span>' +
               '</div>' +
-              '<div class="detail-user-platform" style="font-family:monospace;font-size:11px;margin-top:2px;color:#666">' + escapeHtml(u.userId || '') + '</div>' +
+              '<div class="detail-user-platform" style="font-family:monospace;font-size:11px;margin-top:2px;color:var(--text-dim)">' + escapeHtml(u.userId || '') + '</div>' +
             '</div>' +
           '</div>' +
           '<div class="detail-stat-row">' +
@@ -490,7 +490,7 @@ export function detailPanelScript(): string {
           const scope = '<span class="detail-badge ' + (m.scope || 'personal') + '" style="font-size:9px;margin-left:4px">' + escapeHtml(m.scope || 'personal') + '</span>';
           return '<div class="detail-mini-memory">' + escapeHtml(m.summary) + scope +
             (tags ? '<div class="detail-tags">' + tags + '</div>' : '') +
-            '<div style="font-size:10px;color:#444;margin-top:4px">' + timeAgo(m.createdAt) + '</div>' +
+            '<div style="font-size:10px;color:var(--text-disabled);margin-top:4px">' + timeAgo(m.createdAt) + '</div>' +
           '</div>';
         }).join('');
       } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load memories</div>'; }
@@ -518,7 +518,7 @@ export function detailPanelScript(): string {
         .filter(t => t.userId === u.userId);
       if (!userThreads.length) { sec.innerHTML = '<div class="detail-empty-hint">No threads</div>'; return; }
       sec.innerHTML = '<div class="detail-mini-list">' + userThreads.map(t => {
-        const active = t.isActive ? ' <span class="mini-badge" style="background:#1a3a2a;color:#4ade80">active</span>' : '';
+        const active = t.isActive ? ' <span class="mini-badge" style="background:var(--tint-success);color:var(--status-success)">active</span>' : '';
         return '<div class="detail-mini-item"><span>' + escapeHtml(t.name || 'main') + active + '</span><span class="mini-badge msgs">' + (t.messageCount || 0) + ' msgs</span></div>';
       }).join('') + '</div>';
     }
@@ -533,7 +533,7 @@ export function detailPanelScript(): string {
         if (!tasks.length) { sec.innerHTML = '<div class="detail-empty-hint">No scheduled tasks</div>'; return; }
         sec.innerHTML = '<div class="detail-mini-list">' + tasks.map(t => {
           const badge = '<span class="detail-badge ' + (t.enabled ? 'enabled' : 'disabled') + '" style="font-size:9px">' + (t.enabled ? 'On' : 'Off') + '</span>';
-          return '<div class="detail-mini-item"><span>' + escapeHtml(t.title) + ' ' + badge + '</span><span style="font-size:10px;color:#666">' + formatSchedule(t) + '</span></div>';
+          return '<div class="detail-mini-item"><span>' + escapeHtml(t.title) + ' ' + badge + '</span><span style="font-size:10px;color:var(--text-dim)">' + formatSchedule(t) + '</span></div>';
         }).join('') + '</div>';
       } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load tasks</div>'; }
     }

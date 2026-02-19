@@ -19,24 +19,24 @@ export function renderKnowledgePage(): string {
       padding: 16px 24px;
     }
     .stat-card {
-      background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
-      border: 1px solid #1e1e2e;
+      background: linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-gradient-end) 100%);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
     }
-    .stat-value { color: #fff; font-weight: 700; font-size: 24px; transition: font-size 0.2s; }
+    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; transition: font-size 0.2s; }
     .stat-value.text-value { font-size: 18px; }
-    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+    .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 
     /* Error Banner */
     .error-banner {
       display: none;
       margin: 0 24px 12px;
       padding: 12px 16px;
-      background: rgba(248, 113, 113, 0.1);
-      border: 1px solid rgba(248, 113, 113, 0.3);
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
       border-radius: 8px;
-      color: #f87171;
+      color: var(--status-error);
       font-size: 13px;
     }
     .error-banner.visible { display: block; }
@@ -52,20 +52,20 @@ export function renderKnowledgePage(): string {
     }
     .search-input {
       flex: 1;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 10px 16px;
       border-radius: 8px;
       font-size: 15px;
       outline: none;
       transition: border-color 0.2s;
     }
-    .search-input:focus { border-color: #6c63ff; }
-    .search-input::placeholder { color: #555; }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--text-faint); }
     .search-btn {
-      background: #6c63ff;
-      color: #fff;
+      background: var(--accent);
+      color: var(--text-primary);
       border: none;
       padding: 10px 24px;
       border-radius: 8px;
@@ -75,7 +75,7 @@ export function renderKnowledgePage(): string {
       transition: background 0.2s;
       white-space: nowrap;
     }
-    .search-btn:hover { background: #5a52e0; }
+    .search-btn:hover { background: var(--accent-hover); }
     .search-btn:disabled { opacity: 0.5; cursor: default; }
 
     /* Filters */
@@ -92,22 +92,22 @@ export function renderKnowledgePage(): string {
       gap: 6px;
     }
     .filter-label {
-      color: #666;
+      color: var(--text-dim);
       font-size: 12px;
     }
     .filters select {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 5px 10px;
       border-radius: 6px;
       font-size: 13px;
     }
-    .filters select:focus { outline: none; border-color: #6c63ff; }
+    .filters select:focus { outline: none; border-color: var(--accent); }
 
     .search-timing {
       margin-left: auto;
-      color: #555;
+      color: var(--text-faint);
       font-size: 12px;
     }
 
@@ -115,7 +115,7 @@ export function renderKnowledgePage(): string {
     .content { padding: 0 24px 24px; }
 
     .result-count {
-      color: #666;
+      color: var(--text-dim);
       font-size: 13px;
       padding: 12px 0 8px;
     }
@@ -126,15 +126,15 @@ export function renderKnowledgePage(): string {
       gap: 8px;
     }
     .result-card {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
       transition: all 0.2s;
     }
     .result-card:hover {
-      border-color: rgba(108, 99, 255, 0.3);
-      background: #14142a;
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      background: color-mix(in srgb, var(--bg-panel) 50%, var(--bg-gradient-end));
     }
 
     .result-header {
@@ -147,8 +147,8 @@ export function renderKnowledgePage(): string {
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      background: rgba(108, 99, 255, 0.15);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
       padding: 2px 8px;
       border-radius: 4px;
       font-size: 12px;
@@ -159,7 +159,7 @@ export function renderKnowledgePage(): string {
     .result-score-bar {
       width: 60px;
       height: 4px;
-      background: #1e1e2e;
+      background: var(--border-primary);
       border-radius: 2px;
       overflow: hidden;
     }
@@ -168,9 +168,9 @@ export function renderKnowledgePage(): string {
       border-radius: 2px;
       transition: width 0.3s;
     }
-    .score-high { background: #4ade80; }
-    .score-medium { background: #fbbf24; }
-    .score-low { background: #f87171; }
+    .score-high { background: var(--status-success); }
+    .score-medium { background: var(--status-warning); }
+    .score-low { background: var(--status-error); }
 
     .result-meta {
       display: flex;
@@ -186,7 +186,7 @@ export function renderKnowledgePage(): string {
       font-size: 11px;
       font-weight: 500;
     }
-    .badge-collection { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
+    .badge-collection { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); }
 
     .result-title {
       font-size: 14px;
@@ -194,37 +194,37 @@ export function renderKnowledgePage(): string {
       margin-bottom: 8px;
     }
     .result-title a {
-      color: #e0e0e0;
+      color: var(--text-secondary);
       text-decoration: none;
     }
     .result-title a:hover {
-      color: #a5a0ff;
+      color: var(--accent-light);
       text-decoration: underline;
     }
 
     .result-summary {
-      color: #999;
+      color: var(--text-soft);
       font-size: 13px;
       line-height: 1.5;
       margin-bottom: 8px;
     }
     .result-summary mark {
-      background: rgba(108, 99, 255, 0.3);
-      color: #e0e0e0;
+      background: color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--text-secondary);
       padding: 0 2px;
       border-radius: 2px;
     }
 
     /* Expandable chunks */
     .result-chunks-toggle {
-      color: #6c63ff;
+      color: var(--accent);
       font-size: 12px;
       cursor: pointer;
       border: none;
       background: none;
       padding: 4px 0;
     }
-    .result-chunks-toggle:hover { color: #a5a0ff; }
+    .result-chunks-toggle:hover { color: var(--accent-light); }
 
     .result-chunks {
       max-height: 0;
@@ -236,8 +236,8 @@ export function renderKnowledgePage(): string {
     }
 
     .chunk-card {
-      background: #0a0a0f;
-      border: 1px solid #1a1a2e;
+      background: var(--bg-page);
+      border: 1px solid var(--bg-surface);
       border-radius: 6px;
       padding: 10px 12px;
       margin-top: 8px;
@@ -249,14 +249,14 @@ export function renderKnowledgePage(): string {
       margin-bottom: 6px;
     }
     .chunk-score {
-      color: #a5a0ff;
+      color: var(--accent-light);
       font-size: 11px;
       font-weight: 600;
     }
     .chunk-score-bar {
       width: 40px;
       height: 3px;
-      background: #1e1e2e;
+      background: var(--border-primary);
       border-radius: 2px;
       overflow: hidden;
     }
@@ -265,8 +265,8 @@ export function renderKnowledgePage(): string {
       border-radius: 2px;
     }
     .chunk-heading {
-      background: rgba(108, 99, 255, 0.1);
-      color: #8b83ff;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: color-mix(in srgb, var(--accent) 50%, var(--accent-light));
       font-size: 11px;
       padding: 2px 8px;
       border-radius: 4px;
@@ -276,26 +276,26 @@ export function renderKnowledgePage(): string {
       max-width: 300px;
     }
     .chunk-label {
-      color: #555;
+      color: var(--text-faint);
       font-size: 11px;
       margin-left: auto;
     }
     .chunk-content {
-      color: #aaa;
+      color: var(--text-soft);
       font-size: 12px;
       line-height: 1.5;
       white-space: pre-wrap;
       word-break: break-word;
     }
     .chunk-content mark {
-      background: rgba(108, 99, 255, 0.3);
-      color: #e0e0e0;
+      background: color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--text-secondary);
       padding: 0 2px;
       border-radius: 2px;
     }
 
     .empty {
-      color: #555;
+      color: var(--text-faint);
       text-align: center;
       padding: 60px 24px;
       font-size: 14px;
@@ -306,7 +306,7 @@ export function renderKnowledgePage(): string {
       opacity: 0.3;
     }
     .empty-hint {
-      color: #444;
+      color: var(--text-disabled);
       font-size: 12px;
       margin-top: 8px;
     }
@@ -314,14 +314,14 @@ export function renderKnowledgePage(): string {
     .loading {
       text-align: center;
       padding: 40px;
-      color: #666;
+      color: var(--text-dim);
     }
     .spinner {
       display: inline-block;
       width: 20px;
       height: 20px;
-      border: 2px solid #2a2a3e;
-      border-top-color: #6c63ff;
+      border: 2px solid var(--border-secondary);
+      border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
       margin-right: 8px;

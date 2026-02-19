@@ -6,14 +6,14 @@ export function connectionStyles(): string {
       align-items: center;
       gap: 8px;
       font-size: 13px;
-      color: #888;
+      color: var(--text-muted);
     }
     .status-dot {
       width: 8px; height: 8px;
       border-radius: 50%;
-      background: #444;
+      background: var(--text-disabled);
     }
-    .status-dot.connected { background: #4ade80; }
+    .status-dot.connected { background: var(--status-success); }
   `;
 }
 

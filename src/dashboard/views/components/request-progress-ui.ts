@@ -3,8 +3,8 @@
 export function requestProgressStyles(): string {
   return `
     .request-progress {
-      background: #12121a;
-      border-bottom: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-primary);
       max-height: 0;
       overflow: hidden;
       transition: max-height 0.35s ease, padding 0.35s ease, opacity 0.3s ease;
@@ -17,7 +17,7 @@ export function requestProgressStyles(): string {
       padding: 12px 24px;
     }
     .request-progress.completed {
-      border-left: 3px solid #4ade80;
+      border-left: 3px solid var(--status-success);
     }
     .rp-header {
       display: flex;
@@ -33,28 +33,28 @@ export function requestProgressStyles(): string {
     .rp-phase {
       font-size: 12px;
       font-weight: 500;
-      color: #a5a0ff;
+      color: var(--accent-light);
     }
     .rp-elapsed {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
       font-variant-numeric: tabular-nums;
     }
     .rp-bot {
       font-size: 11px;
-      color: #555;
-      background: rgba(108, 99, 255, 0.1);
+      color: var(--text-faint);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
       padding: 1px 6px;
       border-radius: 4px;
     }
     .rp-user {
       font-size: 11px;
-      color: #555;
+      color: var(--text-faint);
     }
     .rp-dismiss {
       background: none;
       border: none;
-      color: #555;
+      color: var(--text-faint);
       cursor: pointer;
       font-size: 16px;
       padding: 2px 6px;
@@ -63,7 +63,7 @@ export function requestProgressStyles(): string {
       transition: color 0.15s, background 0.15s;
     }
     .rp-dismiss:hover {
-      color: #ccc;
+      color: var(--text-tertiary);
       background: rgba(255,255,255,0.06);
     }
 
@@ -81,7 +81,7 @@ export function requestProgressStyles(): string {
     }
     .rp-wf-label {
       font-size: 11px;
-      color: #999;
+      color: var(--text-soft);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -99,7 +99,7 @@ export function requestProgressStyles(): string {
       top: 1px;
       height: 12px;
       border-radius: 2px;
-      background: #f59e0b;
+      background: var(--status-tool);
       min-width: 3px;
       transition: left 0.12s linear, width 0.12s linear;
     }
@@ -107,7 +107,7 @@ export function requestProgressStyles(): string {
       animation: rp-bar-pulse 1.5s ease-in-out infinite;
     }
     .rp-wf-bar.done {
-      background: rgba(245, 158, 11, 0.5);
+      background: color-mix(in srgb, var(--status-tool) 50%, transparent);
     }
     @keyframes rp-bar-pulse {
       0%, 100% { opacity: 1; }
@@ -115,7 +115,7 @@ export function requestProgressStyles(): string {
     }
     .rp-wf-dur {
       font-size: 10px;
-      color: #666;
+      color: var(--text-dim);
       font-variant-numeric: tabular-nums;
       text-align: right;
     }
@@ -126,7 +126,7 @@ export function requestProgressStyles(): string {
       top: 0;
       width: 1px;
       height: 100%;
-      background: rgba(108, 99, 255, 0.4);
+      background: color-mix(in srgb, var(--accent) 40%, transparent);
       z-index: 1;
       transition: left 0.12s linear;
     }
@@ -137,7 +137,7 @@ export function requestProgressStyles(): string {
       align-items: center;
       gap: 12px;
       font-size: 11px;
-      color: #888;
+      color: var(--text-muted);
       margin-top: 6px;
     }
     .rp-summary-stat {
@@ -146,11 +146,11 @@ export function requestProgressStyles(): string {
       gap: 4px;
     }
     .rp-summary-val {
-      color: #ccc;
+      color: var(--text-tertiary);
       font-variant-numeric: tabular-nums;
     }
     .rp-trace-link {
-      color: #6c63ff;
+      color: var(--accent);
       text-decoration: none;
       font-size: 11px;
     }

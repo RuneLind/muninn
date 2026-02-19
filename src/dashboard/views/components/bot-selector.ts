@@ -12,23 +12,23 @@ export function botSelectorStyles(): string {
       border-radius: 14px;
       font-size: 12px;
       font-weight: 500;
-      color: #666;
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      color: var(--text-dim);
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       cursor: pointer;
       white-space: nowrap;
       transition: all 0.2s;
       user-select: none;
     }
     .bot-pill:hover {
-      color: #a5a0ff;
-      border-color: rgba(108, 99, 255, 0.3);
-      background: rgba(108, 99, 255, 0.06);
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      background: color-mix(in srgb, var(--accent) 6%, transparent);
     }
     .bot-pill.active {
-      color: #fff;
-      background: rgba(108, 99, 255, 0.2);
-      border-color: rgba(108, 99, 255, 0.5);
+      color: var(--text-primary);
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 50%, transparent);
     }
   `;
 }

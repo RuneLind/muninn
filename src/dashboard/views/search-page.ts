@@ -19,13 +19,13 @@ export function renderSearchPage(): string {
       padding: 16px 24px;
     }
     .stat-card {
-      background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
-      border: 1px solid #1e1e2e;
+      background: linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-gradient-end) 100%);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
     }
-    .stat-value { color: #fff; font-weight: 700; font-size: 24px; }
-    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; }
+    .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 
     /* Search Area */
     .search-area {
@@ -38,20 +38,20 @@ export function renderSearchPage(): string {
     }
     .search-input {
       flex: 1;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 10px 16px;
       border-radius: 8px;
       font-size: 15px;
       outline: none;
       transition: border-color 0.2s;
     }
-    .search-input:focus { border-color: #6c63ff; }
-    .search-input::placeholder { color: #555; }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--text-faint); }
     .search-btn {
-      background: #6c63ff;
-      color: #fff;
+      background: var(--accent);
+      color: var(--text-primary);
       border: none;
       padding: 10px 24px;
       border-radius: 8px;
@@ -61,7 +61,7 @@ export function renderSearchPage(): string {
       transition: background 0.2s;
       white-space: nowrap;
     }
-    .search-btn:hover { background: #5a52e0; }
+    .search-btn:hover { background: var(--accent-hover); }
     .search-btn:disabled { opacity: 0.5; cursor: default; }
 
     /* Filters */
@@ -78,46 +78,46 @@ export function renderSearchPage(): string {
       gap: 6px;
     }
     .filter-label {
-      color: #666;
+      color: var(--text-dim);
       font-size: 12px;
     }
     .filters select {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 5px 10px;
       border-radius: 6px;
       font-size: 13px;
     }
-    .filters select:focus { outline: none; border-color: #6c63ff; }
+    .filters select:focus { outline: none; border-color: var(--accent); }
 
     .mode-pills {
       display: flex;
       gap: 0;
-      border: 1px solid #2a2a3e;
+      border: 1px solid var(--border-secondary);
       border-radius: 6px;
       overflow: hidden;
     }
     .mode-pill {
-      background: #1a1a2e;
-      color: #888;
+      background: var(--bg-surface);
+      color: var(--text-muted);
       border: none;
       padding: 5px 12px;
       font-size: 12px;
       cursor: pointer;
       transition: all 0.2s;
-      border-right: 1px solid #2a2a3e;
+      border-right: 1px solid var(--border-secondary);
     }
     .mode-pill:last-child { border-right: none; }
-    .mode-pill:hover { color: #a5a0ff; }
+    .mode-pill:hover { color: var(--accent-light); }
     .mode-pill.active {
-      background: rgba(108, 99, 255, 0.2);
-      color: #6c63ff;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent);
     }
 
     .search-timing {
       margin-left: auto;
-      color: #555;
+      color: var(--text-faint);
       font-size: 12px;
     }
 
@@ -125,7 +125,7 @@ export function renderSearchPage(): string {
     .content { padding: 0 24px 24px; }
 
     .result-count {
-      color: #666;
+      color: var(--text-dim);
       font-size: 13px;
       padding: 12px 0 8px;
     }
@@ -136,16 +136,16 @@ export function renderSearchPage(): string {
       gap: 8px;
     }
     .result-card {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
       cursor: pointer;
       transition: all 0.2s;
     }
     .result-card:hover {
-      border-color: rgba(108, 99, 255, 0.3);
-      background: #14142a;
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      background: var(--bg-gradient-end);
     }
 
     .result-header {
@@ -158,8 +158,8 @@ export function renderSearchPage(): string {
       display: inline-flex;
       align-items: center;
       gap: 4px;
-      background: rgba(108, 99, 255, 0.15);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
       padding: 2px 8px;
       border-radius: 4px;
       font-size: 12px;
@@ -170,7 +170,7 @@ export function renderSearchPage(): string {
     .result-score-bar {
       width: 60px;
       height: 4px;
-      background: #1e1e2e;
+      background: var(--border-primary);
       border-radius: 2px;
       overflow: hidden;
     }
@@ -179,9 +179,9 @@ export function renderSearchPage(): string {
       border-radius: 2px;
       transition: width 0.3s;
     }
-    .score-high { background: #4ade80; }
-    .score-medium { background: #fbbf24; }
-    .score-low { background: #f87171; }
+    .score-high { background: var(--status-success); }
+    .score-medium { background: var(--status-warning); }
+    .score-low { background: var(--status-error); }
 
     .result-meta {
       display: flex;
@@ -197,27 +197,27 @@ export function renderSearchPage(): string {
       font-size: 11px;
       font-weight: 500;
     }
-    .badge-bot { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-    .badge-user { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
-    .badge-scope-personal { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
-    .badge-scope-shared { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
-    .badge-tag { background: rgba(255, 255, 255, 0.06); color: #888; }
+    .badge-bot { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); }
+    .badge-user { background: color-mix(in srgb, var(--status-info) 15%, transparent); color: var(--status-info); }
+    .badge-scope-personal { background: color-mix(in srgb, var(--status-magenta) 15%, transparent); color: var(--status-magenta); }
+    .badge-scope-shared { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); }
+    .badge-tag { background: color-mix(in srgb, white 6%, transparent); color: var(--text-muted); }
 
     .result-summary {
-      color: #ccc;
+      color: var(--text-tertiary);
       font-size: 14px;
       line-height: 1.5;
       margin-bottom: 8px;
     }
     .result-summary mark {
-      background: rgba(108, 99, 255, 0.3);
-      color: #e0e0e0;
+      background: color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--text-secondary);
       padding: 0 2px;
       border-radius: 2px;
     }
 
     .result-content {
-      color: #888;
+      color: var(--text-muted);
       font-size: 12px;
       line-height: 1.5;
       max-height: 0;
@@ -229,7 +229,7 @@ export function renderSearchPage(): string {
       margin-bottom: 8px;
     }
     .result-content pre {
-      background: #0a0a0f;
+      background: var(--bg-page);
       padding: 10px;
       border-radius: 6px;
       white-space: pre-wrap;
@@ -245,13 +245,13 @@ export function renderSearchPage(): string {
       flex-wrap: wrap;
     }
     .result-date {
-      color: #555;
+      color: var(--text-faint);
       font-size: 11px;
       margin-left: auto;
     }
 
     .empty {
-      color: #555;
+      color: var(--text-faint);
       text-align: center;
       padding: 60px 24px;
       font-size: 14px;
@@ -262,7 +262,7 @@ export function renderSearchPage(): string {
       opacity: 0.3;
     }
     .empty-hint {
-      color: #444;
+      color: var(--text-disabled);
       font-size: 12px;
       margin-top: 8px;
     }
@@ -270,14 +270,14 @@ export function renderSearchPage(): string {
     .loading {
       text-align: center;
       padding: 40px;
-      color: #666;
+      color: var(--text-dim);
     }
     .spinner {
       display: inline-block;
       width: 20px;
       height: 20px;
-      border: 2px solid #2a2a3e;
-      border-top-color: #6c63ff;
+      border: 2px solid var(--border-secondary);
+      border-top-color: var(--accent);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
       margin-right: 8px;
@@ -297,8 +297,8 @@ export function renderSearchPage(): string {
     }
     .modal-backdrop.visible { display: flex; }
     .modal {
-      background: #12121a;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-secondary);
       border-radius: 12px;
       width: 90vw;
       max-width: 700px;
@@ -311,18 +311,18 @@ export function renderSearchPage(): string {
       justify-content: space-between;
       align-items: center;
       padding: 16px 20px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
-    .modal-header h3 { font-size: 14px; color: #fff; }
+    .modal-header h3 { font-size: 14px; color: var(--text-primary); }
     .modal-close {
       background: none;
       border: none;
-      color: #666;
+      color: var(--text-dim);
       cursor: pointer;
       font-size: 20px;
       padding: 4px 8px;
     }
-    .modal-close:hover { color: #fff; }
+    .modal-close:hover { color: var(--text-primary); }
     .modal-body {
       flex: 1;
       overflow: auto;
@@ -330,19 +330,19 @@ export function renderSearchPage(): string {
     }
     .modal-field { margin-bottom: 16px; }
     .modal-field-label {
-      color: #666;
+      color: var(--text-dim);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       margin-bottom: 4px;
     }
     .modal-field-value {
-      color: #ccc;
+      color: var(--text-tertiary);
       font-size: 13px;
       line-height: 1.6;
     }
     .modal-field-value pre {
-      background: #0a0a0f;
+      background: var(--bg-page);
       padding: 12px;
       border-radius: 6px;
       white-space: pre-wrap;

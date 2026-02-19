@@ -10,14 +10,14 @@ export function slackPanelStyles(): string {
     .slack-stat {
       text-align: center;
       padding: 8px;
-      background: #1a1a2e;
+      background: var(--bg-surface);
       border-radius: 6px;
     }
-    .slack-stat-value { font-size: 20px; font-weight: 700; color: #fff; }
-    .slack-stat-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+    .slack-stat-value { font-size: 20px; font-weight: 700; color: var(--text-primary); }
+    .slack-stat-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
     .slack-section-title {
       font-size: 11px;
-      color: #555;
+      color: var(--text-faint);
       text-transform: uppercase;
       letter-spacing: 0.5px;
       padding: 8px 12px 4px;
@@ -31,7 +31,7 @@ export function slackPanelStyles(): string {
       justify-content: space-between;
       padding: 6px 0;
       font-size: 12px;
-      border-bottom: 1px solid #1a1a2e;
+      border-bottom: 1px solid var(--bg-surface);
     }
     .slack-breakdown-row:last-child { border-bottom: none; }
     .slack-platform-badge {
@@ -41,9 +41,9 @@ export function slackPanelStyles(): string {
       font-weight: 600;
       text-transform: uppercase;
     }
-    .slack-platform-badge.slack_dm { background: #1e3a5f; color: #60a5fa; }
-    .slack-platform-badge.slack_channel { background: #1a3a2a; color: #4ade80; }
-    .slack-platform-badge.slack_assistant { background: #2a1a3a; color: #c084fc; }
+    .slack-platform-badge.slack_dm { background: var(--tint-info); color: var(--status-info); }
+    .slack-platform-badge.slack_channel { background: var(--tint-success); color: var(--status-success); }
+    .slack-platform-badge.slack_assistant { background: var(--tint-magenta); color: var(--status-magenta); }
     .slack-user-item {
       display: flex;
       align-items: center;
@@ -55,9 +55,9 @@ export function slackPanelStyles(): string {
     }
     .slack-user-item:hover { background: #ffffff0a; }
     .slack-user-item:active { background: #ffffff12; }
-    .slack-user-item.active { background: rgba(108, 99, 255, 0.08); border: 1px solid rgba(108, 99, 255, 0.2); margin: -1px; }
-    .slack-user-name { font-size: 13px; color: #ddd; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .slack-user-meta { font-size: 11px; color: #555; display: flex; gap: 8px; align-items: center; }
+    .slack-user-item.active { background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); margin: -1px; }
+    .slack-user-name { font-size: 13px; color: var(--text-tertiary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .slack-user-meta { font-size: 11px; color: var(--text-faint); display: flex; gap: 8px; align-items: center; }
 
     /* Slack message conversation in detail panel */
     .slack-msg {
@@ -71,15 +71,15 @@ export function slackPanelStyles(): string {
       white-space: pre-wrap;
     }
     .slack-msg.role-user {
-      background: #1e3a5f;
-      color: #c8ddf5;
+      background: var(--tint-info);
+      color: var(--chat-user-text);
       align-self: flex-end;
       margin-left: auto;
       border-bottom-right-radius: 2px;
     }
     .slack-msg.role-assistant {
-      background: #1a3a2a;
-      color: #c8f5d8;
+      background: var(--tint-success);
+      color: var(--chat-assistant-text);
       align-self: flex-start;
       margin-right: auto;
       border-bottom-left-radius: 2px;
@@ -98,20 +98,20 @@ export function slackPanelStyles(): string {
       padding: 1px 5px;
       border-radius: 3px;
     }
-    .role-user .slack-msg-role { background: #1e3a5f; color: #60a5fa; }
-    .role-assistant .slack-msg-role { background: #1a3a2a; color: #4ade80; }
-    .slack-msg-time { color: #555; font-family: monospace; font-size: 11px; }
-    .slack-msg-model { color: #666; font-size: 10px; }
+    .role-user .slack-msg-role { background: var(--tint-info); color: var(--status-info); }
+    .role-assistant .slack-msg-role { background: var(--tint-success); color: var(--status-success); }
+    .slack-msg-time { color: var(--text-faint); font-family: monospace; font-size: 11px; }
+    .slack-msg-model { color: var(--text-dim); font-size: 10px; }
     .slack-msg-content { overflow: hidden; }
     .slack-msg-content.collapsed { max-height: 120px; }
     .slack-msg-expand {
       display: inline-block;
       margin-top: 4px;
-      color: #6c63ff;
+      color: var(--accent);
       font-size: 11px;
       cursor: pointer;
     }
-    .slack-msg-expand:hover { color: #a5a0ff; }
+    .slack-msg-expand:hover { color: var(--accent-light); }
     .slack-convo-container {
       display: flex;
       flex-direction: column;
@@ -169,8 +169,8 @@ export function slackPanelScript(): string {
       const breakdownHtml = data.platformBreakdown.map(b =>
         '<div class="slack-breakdown-row">' +
           '<span class="slack-platform-badge ' + escapeAttr(b.platform) + '">' + escapeHtml(platformLabel[b.platform] || b.platform) + '</span>' +
-          '<span style="color:#aaa">' + escapeHtml(String(b.messages)) + ' msgs</span>' +
-          '<span style="color:#666">' + escapeHtml(String(b.users)) + ' users</span>' +
+          '<span style="color:var(--text-soft)">' + escapeHtml(String(b.messages)) + ' msgs</span>' +
+          '<span style="color:var(--text-dim)">' + escapeHtml(String(b.users)) + ' users</span>' +
         '</div>'
       ).join('');
 

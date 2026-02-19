@@ -16,26 +16,26 @@ export function layoutStyles(): string {
 
     /* Panels */
     .panel {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       overflow: hidden;
     }
     .panel-header {
       padding: 14px 16px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       display: flex;
       align-items: center;
       justify-content: space-between;
       font-size: 13px;
       font-weight: 600;
-      color: #ccc;
+      color: var(--text-tertiary);
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
     .panel-header .count {
-      background: #1e1e2e;
-      color: #888;
+      background: var(--border-primary);
+      color: var(--text-muted);
       padding: 2px 8px;
       border-radius: 10px;
       font-size: 11px;
@@ -47,11 +47,11 @@ export function layoutStyles(): string {
     }
     .panel-body::-webkit-scrollbar { width: 4px; }
     .panel-body::-webkit-scrollbar-track { background: transparent; }
-    .panel-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .panel-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
     .panel-empty {
       padding: 24px;
       text-align: center;
-      color: #444;
+      color: var(--text-disabled);
       font-size: 13px;
     }
 
@@ -60,18 +60,18 @@ export function layoutStyles(): string {
       font-size: 10px;
       padding: 1px 6px;
       border-radius: 8px;
-      background: #1a1a2e;
-      color: #8b8bcd;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-surface);
+      color: var(--accent-muted);
+      border: 1px solid var(--border-secondary);
     }
-    .time-ago { font-size: 10px; color: #444; }
+    .time-ago { font-size: 10px; color: var(--text-disabled); }
 
     /* Master-detail layout (shared by users, threads) */
     .md-layout {
       display: flex;
       height: calc(100vh - 180px);
-      background: #0f0f17;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-deep);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       overflow: hidden;
     }
@@ -80,18 +80,18 @@ export function layoutStyles(): string {
       flex-shrink: 0;
       display: flex;
       flex-direction: column;
-      background: #12121a;
-      border-right: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-primary);
     }
     .md-master-header {
       padding: 14px 16px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       display: flex;
       align-items: center;
       justify-content: space-between;
       font-size: 13px;
       font-weight: 600;
-      color: #ccc;
+      color: var(--text-tertiary);
       text-transform: uppercase;
       letter-spacing: 0.5px;
       flex-shrink: 0;
@@ -103,7 +103,7 @@ export function layoutStyles(): string {
     }
     .md-master-body::-webkit-scrollbar { width: 4px; }
     .md-master-body::-webkit-scrollbar-track { background: transparent; }
-    .md-master-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .md-master-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
     .md-detail {
       flex: 1;
       display: flex;
@@ -112,13 +112,13 @@ export function layoutStyles(): string {
     }
     .md-detail::-webkit-scrollbar { width: 4px; }
     .md-detail::-webkit-scrollbar-track { background: transparent; }
-    .md-detail::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .md-detail::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
     .md-detail-empty {
       display: flex;
       align-items: center;
       justify-content: center;
       height: 100%;
-      color: #444;
+      color: var(--text-disabled);
       font-size: 14px;
     }
 
@@ -134,16 +134,16 @@ export function layoutStyles(): string {
       border-left: 3px solid transparent;
     }
     .md-row:hover {
-      background: rgba(108, 99, 255, 0.04);
+      background: color-mix(in srgb, var(--accent) 4%, transparent);
     }
     .md-row.selected {
-      background: rgba(108, 99, 255, 0.08);
-      border-left-color: #6c63ff;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border-left-color: var(--accent);
     }
     .md-row-info { flex: 1; min-width: 0; }
     .md-row-name {
       font-size: 13px;
-      color: #ddd;
+      color: var(--text-tertiary);
       font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
@@ -155,7 +155,7 @@ export function layoutStyles(): string {
       gap: 6px;
       margin-top: 2px;
       font-size: 10px;
-      color: #555;
+      color: var(--text-faint);
     }
 
     /* User-specific row styles */
@@ -163,13 +163,13 @@ export function layoutStyles(): string {
       width: 32px;
       height: 32px;
       border-radius: 50%;
-      background: linear-gradient(135deg, #6c63ff, #4ade80);
+      background: linear-gradient(135deg, var(--accent), var(--status-success));
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 12px;
       font-weight: 700;
-      color: #fff;
+      color: var(--text-primary);
       flex-shrink: 0;
     }
     .user-platform-badge {
@@ -191,18 +191,18 @@ export function layoutStyles(): string {
       width: 28px;
       height: 28px;
       border-radius: 6px;
-      background: #1a1a2e;
+      background: var(--bg-surface);
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 13px;
       flex-shrink: 0;
-      color: #666;
+      color: var(--text-dim);
     }
     .thread-active-dot {
       width: 6px; height: 6px;
       border-radius: 50%;
-      background: #4ade80;
+      background: var(--status-success);
       flex-shrink: 0;
     }
 
@@ -213,7 +213,7 @@ export function layoutStyles(): string {
       display: flex;
       gap: 0;
       padding: 0 24px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       flex-shrink: 0;
       overflow-x: auto;
     }
@@ -222,7 +222,7 @@ export function layoutStyles(): string {
       padding: 10px 14px;
       font-size: 12px;
       font-weight: 500;
-      color: #555;
+      color: var(--text-faint);
       cursor: pointer;
       border-bottom: 2px solid transparent;
       transition: all 0.15s;
@@ -232,10 +232,10 @@ export function layoutStyles(): string {
       border-left: none;
       border-right: none;
     }
-    .md-detail-tab:hover { color: #a5a0ff; }
+    .md-detail-tab:hover { color: var(--accent-light); }
     .md-detail-tab.active {
-      color: #ccc;
-      border-bottom-color: #6c63ff;
+      color: var(--text-tertiary);
+      border-bottom-color: var(--accent);
     }
     .md-detail-tab .md-tab-count {
       display: inline-block;
@@ -244,12 +244,12 @@ export function layoutStyles(): string {
       border-radius: 6px;
       font-size: 10px;
       font-weight: 400;
-      background: #1e1e2e;
-      color: #555;
+      background: var(--border-primary);
+      color: var(--text-faint);
     }
     .md-detail-tab.active .md-tab-count {
-      background: rgba(108, 99, 255, 0.2);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent-light);
     }
     .md-detail-body {
       flex: 1;
@@ -258,7 +258,7 @@ export function layoutStyles(): string {
     }
     .md-detail-body::-webkit-scrollbar { width: 4px; }
     .md-detail-body::-webkit-scrollbar-track { background: transparent; }
-    .md-detail-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .md-detail-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
     .md-detail-section { display: none; }
     .md-detail-section.active { display: block; }
 
@@ -273,21 +273,21 @@ export function layoutStyles(): string {
       width: 40px;
       height: 40px;
       border-radius: 8px;
-      background: #1a1a2e;
+      background: var(--bg-surface);
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 18px;
-      color: #888;
+      color: var(--text-muted);
     }
     .thread-detail-name {
       font-size: 16px;
       font-weight: 600;
-      color: #fff;
+      color: var(--text-primary);
     }
     .thread-detail-user {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
       margin-top: 2px;
     }
 
@@ -296,7 +296,7 @@ export function layoutStyles(): string {
       .stats-bar { grid-template-columns: repeat(3, 1fr); }
       .section-dual { grid-template-columns: 1fr; }
       .md-layout { flex-direction: column; height: auto; }
-      .md-master { width: 100%; max-height: 300px; border-right: none; border-bottom: 1px solid #1e1e2e; }
+      .md-master { width: 100%; max-height: 300px; border-right: none; border-bottom: 1px solid var(--border-primary); }
       .md-detail { min-height: 400px; }
     }
     @media (max-width: 500px) {

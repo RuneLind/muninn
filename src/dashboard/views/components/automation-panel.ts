@@ -4,7 +4,7 @@ export function automationPanelStyles(): string {
     /* Automation panel filters */
     .at-filters {
       padding: 8px 12px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       display: flex;
       flex-direction: column;
       gap: 6px;
@@ -19,19 +19,19 @@ export function automationPanelStyles(): string {
       font-size: 10px;
       padding: 3px 8px;
       border-radius: 10px;
-      background: #1a1a2e;
-      color: #666;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-surface);
+      color: var(--text-dim);
+      border: 1px solid var(--border-secondary);
       cursor: pointer;
       transition: all 0.15s;
       white-space: nowrap;
       font-weight: 500;
     }
-    .at-pill:hover { color: #999; border-color: #3a3a4e; }
+    .at-pill:hover { color: var(--text-soft); border-color: var(--border-secondary); }
     .at-pill.active {
-      background: rgba(108, 99, 255, 0.15);
-      color: #a5a0ff;
-      border-color: rgba(108, 99, 255, 0.3);
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
     }
     .at-pill .at-pill-count {
       margin-left: 3px;
@@ -49,8 +49,8 @@ export function automationPanelStyles(): string {
       font-size: 12px;
       flex-shrink: 0;
     }
-    .at-type-icon.task { background: #1e3a5f; }
-    .at-type-icon.watcher { background: #2a1a3a; }
+    .at-type-icon.task { background: var(--tint-info); }
+    .at-type-icon.watcher { background: var(--tint-magenta); }
 
     /* Status dot */
     .at-status-dot {
@@ -59,8 +59,8 @@ export function automationPanelStyles(): string {
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .at-status-dot.enabled { background: #4ade80; }
-    .at-status-dot.disabled { background: #666; }
+    .at-status-dot.enabled { background: var(--status-success); }
+    .at-status-dot.disabled { background: var(--text-dim); }
 
     /* Overview (default right panel state) */
     .at-overview {
@@ -80,7 +80,7 @@ export function automationPanelStyles(): string {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       margin-bottom: 8px;
     }
     .at-next-up-list {
@@ -93,15 +93,15 @@ export function automationPanelStyles(): string {
       justify-content: space-between;
       align-items: center;
       padding: 8px 10px;
-      background: #0d0d14;
-      border: 1px solid #1a1a28;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
       font-size: 12px;
-      color: #bbb;
+      color: var(--text-soft);
     }
     .at-next-up-item .at-next-time {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
       font-family: monospace;
     }
   `;
@@ -329,8 +329,8 @@ export function automationPanelScript(): string {
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div class="at-type-icon task" style="width:32px;height:32px;font-size:16px">&#128197;</div>' +
             '<div>' +
-              '<div style="font-size:14px;font-weight:600;color:#fff">Scheduled Task</div>' +
-              '<div style="font-size:11px;color:#666">' + escapeHtml(username) + '</div>' +
+              '<div style="font-size:14px;font-weight:600;color:var(--text-primary)">Scheduled Task</div>' +
+              '<div style="font-size:11px;color:var(--text-dim)">' + escapeHtml(username) + '</div>' +
             '</div>' +
             '<span class="detail-badge ' + (t.enabled ? 'enabled' : 'disabled') + '" style="margin-left:auto">' + (t.enabled ? 'Enabled' : 'Disabled') + '</span>' +
           '</div>' +
@@ -353,7 +353,7 @@ export function automationPanelScript(): string {
             '<div class="detail-value">' + nextLabel + '</div>' +
           '</div>' +
           (t.lastRunAt ? '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + timeAgo(t.lastRunAt) + '</div></div>' : '') +
-          (t.prompt ? '<div class="detail-field"><div class="detail-label">Prompt</div><div class="detail-value" style="font-family:monospace;font-size:12px;background:#12121a;padding:8px;border-radius:6px">' + escapeHtml(t.prompt) + '</div></div>' : '') +
+          (t.prompt ? '<div class="detail-field"><div class="detail-label">Prompt</div><div class="detail-value" style="font-family:monospace;font-size:12px;background:var(--bg-panel);padding:8px;border-radius:6px">' + escapeHtml(t.prompt) + '</div></div>' : '') +
           '<div class="detail-field"><div class="detail-label">User</div><div class="detail-value">' + escapeHtml(username) + '</div></div>' +
         '</div>';
     }
@@ -362,7 +362,7 @@ export function automationPanelScript(): string {
       const content = document.getElementById('atDetailContent');
       const configEntries = Object.entries(w.config || {});
       const configHtml = configEntries.map(([k, v]) =>
-        '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1a1a2e"><span style="color:#666">' + escapeHtml(k) + '</span><span style="color:#bbb">' + escapeHtml(String(v)) + '</span></div>'
+        '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--bg-surface)"><span style="color:var(--text-dim)">' + escapeHtml(k) + '</span><span style="color:var(--text-soft)">' + escapeHtml(String(v)) + '</span></div>'
       ).join('');
 
       content.innerHTML = '' +
@@ -370,8 +370,8 @@ export function automationPanelScript(): string {
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div class="at-type-icon watcher" style="width:32px;height:32px;font-size:16px">&#128065;</div>' +
             '<div>' +
-              '<div style="font-size:14px;font-weight:600;color:#fff">Watcher</div>' +
-              '<div style="font-size:11px;color:#666">' + escapeHtml(w.type) + '</div>' +
+              '<div style="font-size:14px;font-weight:600;color:var(--text-primary)">Watcher</div>' +
+              '<div style="font-size:11px;color:var(--text-dim)">' + escapeHtml(w.type) + '</div>' +
             '</div>' +
             '<span class="detail-badge ' + (w.enabled ? 'enabled' : 'disabled') + '" style="margin-left:auto">' + (w.enabled ? 'Active' : 'Disabled') + '</span>' +
           '</div>' +
@@ -394,7 +394,7 @@ export function automationPanelScript(): string {
           '<div class="detail-field"><div class="detail-label">Created</div><div class="detail-value">' + new Date(w.createdAt).toLocaleDateString() + '</div></div>' +
           (configHtml ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
           '<hr class="detail-divider">' +
-          '<button data-at-watcher-filter="' + escapeAttr(w.name) + '" style="width:100%;padding:8px;background:rgba(108,99,255,0.1);border:1px solid rgba(108,99,255,0.25);border-radius:6px;color:#a5a0ff;cursor:pointer;font-size:12px">View Activity Log</button>' +
+          '<button data-at-watcher-filter="' + escapeAttr(w.name) + '" style="width:100%;padding:8px;background:color-mix(in srgb, var(--accent) 10%, transparent);border:1px solid color-mix(in srgb, var(--accent) 25%, transparent);border-radius:6px;color:var(--accent-light);cursor:pointer;font-size:12px">View Activity Log</button>' +
         '</div>';
     }
 

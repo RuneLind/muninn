@@ -8,8 +8,8 @@ export function activityFeedStyles(): string {
       left: 0;
       right: 0;
       z-index: 50;
-      background: #0f0f17;
-      border-top: 1px solid #1e1e2e;
+      background: var(--bg-deep);
+      border-top: 1px solid var(--border-primary);
       transition: height 0.3s ease;
       display: flex;
       flex-direction: column;
@@ -43,7 +43,7 @@ export function activityFeedStyles(): string {
     .drawer-title {
       font-size: 12px;
       font-weight: 600;
-      color: #888;
+      color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
@@ -52,15 +52,15 @@ export function activityFeedStyles(): string {
       font-size: 10px;
       padding: 2px 8px;
       border-radius: 10px;
-      background: rgba(108, 99, 255, 0.2);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent-light);
       font-weight: 500;
     }
     .drawer-new-count.has-new { display: inline-block; }
     .drawer-toggle {
       background: none;
-      border: 1px solid #2a2a3a;
-      color: #666;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-dim);
       width: 24px;
       height: 24px;
       border-radius: 4px;
@@ -72,8 +72,8 @@ export function activityFeedStyles(): string {
       transition: all 0.15s;
     }
     .drawer-toggle:hover {
-      border-color: #6c63ff;
-      color: #ccc;
+      border-color: var(--accent);
+      color: var(--text-tertiary);
     }
 
     .drawer-content {
@@ -89,10 +89,10 @@ export function activityFeedStyles(): string {
     .feed-filter-bar {
       display: none;
       padding: 8px 12px;
-      background: rgba(108, 99, 255, 0.08);
-      border-bottom: 1px solid rgba(108, 99, 255, 0.15);
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
       font-size: 12px;
-      color: #a5a0ff;
+      color: var(--accent-light);
       align-items: center;
       justify-content: space-between;
       flex-shrink: 0;
@@ -100,14 +100,14 @@ export function activityFeedStyles(): string {
     .feed-filter-bar.visible { display: flex; }
     .feed-filter-clear {
       background: none;
-      border: 1px solid rgba(108, 99, 255, 0.25);
-      color: #a5a0ff;
+      border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+      color: var(--accent-light);
       padding: 2px 8px;
       border-radius: 4px;
       cursor: pointer;
       font-size: 11px;
     }
-    .feed-filter-clear:hover { background: rgba(108, 99, 255, 0.15); }
+    .feed-filter-clear:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
     .event.feed-dim { opacity: 0.15; }
 
     .feed-body {
@@ -117,22 +117,22 @@ export function activityFeedStyles(): string {
     }
     .feed-body::-webkit-scrollbar { width: 4px; }
     .feed-body::-webkit-scrollbar-track { background: transparent; }
-    .feed-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .feed-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
 
     .live-badge {
       display: flex; align-items: center; gap: 6px;
-      font-size: 11px; color: #4ade80; font-weight: 500;
+      font-size: 11px; color: var(--status-success); font-weight: 500;
       text-transform: uppercase; letter-spacing: 0.5px;
     }
     .live-dot {
       width: 6px; height: 6px;
       border-radius: 50%;
-      background: #4ade80;
+      background: var(--status-success);
       animation: pulse 2s ease-in-out infinite;
     }
     @keyframes pulse {
-      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.4); }
-      50% { opacity: 0.6; box-shadow: 0 0 0 4px rgba(74, 222, 128, 0); }
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-success) 40%, transparent); }
+      50% { opacity: 0.6; box-shadow: 0 0 0 4px transparent; }
     }
 
     /* Feed events */
@@ -147,7 +147,7 @@ export function activityFeedStyles(): string {
     }
     .event:hover { background: #ffffff06; }
     .event-time {
-      color: #555;
+      color: var(--text-faint);
       font-size: 12px;
       font-family: monospace;
       white-space: nowrap;
@@ -163,12 +163,12 @@ export function activityFeedStyles(): string {
       text-align: center;
     }
     .event-text { flex: 1; word-break: break-word; white-space: pre-wrap; }
-    .type-message_in .event-badge { background: #1e3a5f; color: #60a5fa; }
-    .type-message_out .event-badge { background: #1a3a2a; color: #4ade80; }
-    .type-error .event-badge { background: #3a1a1a; color: #f87171; }
-    .type-system .event-badge { background: #2a2a1a; color: #facc15; }
+    .type-message_in .event-badge { background: var(--tint-info); color: var(--status-info); }
+    .type-message_out .event-badge { background: var(--tint-success); color: var(--status-success); }
+    .type-error .event-badge { background: var(--tint-error); color: var(--status-error); }
+    .type-system .event-badge { background: var(--tint-warning); color: var(--status-warning); }
     .event-meta {
-      color: #555;
+      color: var(--text-faint);
       font-size: 11px;
       white-space: nowrap;
     }
@@ -177,20 +177,20 @@ export function activityFeedStyles(): string {
       padding: 4px 8px;
       font-size: 11px;
       font-family: monospace;
-      color: #666;
+      color: var(--text-dim);
       background: #ffffff04;
       border-radius: 3px;
       line-height: 1.4;
     }
-    .event-timing .t-label { color: #555; }
-    .event-timing .t-val { color: #8b8bcd; }
+    .event-timing .t-label { color: var(--text-faint); }
+    .event-timing .t-val { color: var(--accent-muted); }
     .event-bot {
       font-size: 10px;
-      color: #555;
+      color: var(--text-faint);
       padding: 1px 6px;
       border-radius: 3px;
-      background: rgba(251, 191, 36, 0.08);
-      border: 1px solid rgba(251, 191, 36, 0.15);
+      background: color-mix(in srgb, var(--status-warning) 8%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-warning) 15%, transparent);
       white-space: nowrap;
     }
   `;

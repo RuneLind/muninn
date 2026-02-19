@@ -6,7 +6,7 @@ export function threadsPanelStyles(): string {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       font-weight: 600;
     }
   `;
@@ -61,7 +61,7 @@ export function threadsPanelScript(): string {
       el.innerHTML = Object.entries(grouped).map(([userId, group]) => {
         const rowsHtml = group.threads.map(t => {
           const activeDot = t.isActive ? '<span class="thread-active-dot" title="Active"></span>' : '';
-          const msgBadge = t.messageCount != null ? '<span style="font-size:10px;color:#666">' + t.messageCount + '</span>' : '';
+          const msgBadge = t.messageCount != null ? '<span style="font-size:10px;color:var(--text-dim)">' + t.messageCount + '</span>' : '';
           return '<div class="md-row" data-thread-select="' + escapeAttr(t.id || '') + '">' +
             '<div class="thread-icon">#</div>' +
             '<div class="md-row-info">' +

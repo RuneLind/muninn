@@ -24,23 +24,23 @@ export function sectionTabsStyles(): string {
       border-radius: 20px;
       font-size: 13px;
       font-weight: 500;
-      color: #666;
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      color: var(--text-dim);
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       cursor: pointer;
       white-space: nowrap;
       transition: all 0.2s;
       user-select: none;
     }
     .section-tab:hover {
-      color: #a5a0ff;
-      border-color: rgba(108, 99, 255, 0.3);
-      background: rgba(108, 99, 255, 0.06);
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+      background: color-mix(in srgb, var(--accent) 6%, transparent);
     }
     .section-tab.active {
-      color: #fff;
-      background: rgba(108, 99, 255, 0.15);
-      border-color: rgba(108, 99, 255, 0.4);
+      color: var(--text-primary);
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .section-tab .tab-count {
       display: inline-block;
@@ -49,12 +49,12 @@ export function sectionTabsStyles(): string {
       border-radius: 8px;
       font-size: 10px;
       font-weight: 400;
-      background: #1e1e2e;
-      color: #555;
+      background: var(--border-primary);
+      color: var(--text-faint);
     }
     .section-tab.active .tab-count {
-      background: rgba(108, 99, 255, 0.25);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 25%, transparent);
+      color: var(--accent-light);
     }
     .section-content > [data-section] {
       display: none;

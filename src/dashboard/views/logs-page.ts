@@ -21,13 +21,13 @@ export function renderLogsPage(): string {
       padding: 16px 24px;
     }
     .stat-card {
-      background: linear-gradient(135deg, #1a1a2e 0%, #16162a 100%);
-      border: 1px solid #1e1e2e;
+      background: linear-gradient(135deg, var(--bg-surface) 0%, var(--bg-gradient-end) 100%);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
     }
-    .stat-value { color: #fff; font-weight: 700; font-size: 24px; }
-    .stat-label { color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; }
+    .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 
     /* Filters */
     .filters {
@@ -38,14 +38,14 @@ export function renderLogsPage(): string {
       flex-wrap: wrap;
     }
     .filters select, .filters input[type="text"] {
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 6px 10px;
       border-radius: 6px;
       font-size: 13px;
     }
-    .filters select:focus, .filters input:focus { outline: none; border-color: #6c63ff; }
+    .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
 
     .level-pills { display: flex; gap: 4px; }
     .level-pill {
@@ -60,20 +60,20 @@ export function renderLogsPage(): string {
     }
     .level-pill.active { opacity: 1; }
     .level-pill:not(.active) { opacity: 0.35; }
-    .level-pill[data-level="info"] { background: rgba(74, 222, 128, 0.15); color: #4ade80; border-color: rgba(74, 222, 128, 0.3); }
-    .level-pill[data-level="warning"] { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border-color: rgba(251, 191, 36, 0.3); }
-    .level-pill[data-level="error"] { background: rgba(248, 113, 113, 0.15); color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
-    .level-pill[data-level="debug"] { background: rgba(34, 211, 238, 0.15); color: #22d3ee; border-color: rgba(34, 211, 238, 0.3); }
-    .level-pill[data-level="fatal"] { background: rgba(192, 132, 252, 0.15); color: #c084fc; border-color: rgba(192, 132, 252, 0.3); }
+    .level-pill[data-level="info"] { background: color-mix(in srgb, var(--status-success) 15%, transparent); color: var(--status-success); border-color: color-mix(in srgb, var(--status-success) 30%, transparent); }
+    .level-pill[data-level="warning"] { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); border-color: color-mix(in srgb, var(--status-warning) 30%, transparent); }
+    .level-pill[data-level="error"] { background: color-mix(in srgb, var(--status-error) 15%, transparent); color: var(--status-error); border-color: color-mix(in srgb, var(--status-error) 30%, transparent); }
+    .level-pill[data-level="debug"] { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); border-color: color-mix(in srgb, var(--status-cyan) 30%, transparent); }
+    .level-pill[data-level="fatal"] { background: color-mix(in srgb, var(--status-magenta) 15%, transparent); color: var(--status-magenta); border-color: color-mix(in srgb, var(--status-magenta) 30%, transparent); }
 
-    .filter-count { color: #555; font-size: 12px; white-space: nowrap; }
+    .filter-count { color: var(--text-faint); font-size: 12px; white-space: nowrap; }
 
     .tail-label {
       display: flex;
       align-items: center;
       gap: 6px;
       font-size: 12px;
-      color: #666;
+      color: var(--text-dim);
       cursor: pointer;
       user-select: none;
     }
@@ -88,41 +88,41 @@ export function renderLogsPage(): string {
     .log-table th {
       text-align: left;
       padding: 10px 12px;
-      color: #666;
+      color: var(--text-dim);
       font-weight: 500;
       text-transform: uppercase;
       font-size: 11px;
       letter-spacing: 0.5px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       position: sticky;
       top: 0;
-      background: #0a0a0f;
+      background: var(--bg-page);
       z-index: 1;
     }
     .log-table td {
       padding: 8px 12px;
-      border-bottom: 1px solid #1a1a24;
+      border-bottom: 1px solid var(--border-subtle);
       vertical-align: top;
     }
     .log-table tr.log-row { cursor: pointer; transition: background 0.15s; }
-    .log-table tr.log-row:hover { background: rgba(108, 99, 255, 0.05); }
-    .log-table tr.log-row.expanded { background: rgba(108, 99, 255, 0.08); }
+    .log-table tr.log-row:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .log-table tr.log-row.expanded { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
     .log-detail {
       display: none;
-      background: #12121a;
+      background: var(--bg-panel);
     }
     .log-detail.visible { display: table-row; }
     .log-detail td {
       padding: 12px 16px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
     .log-detail pre {
-      background: #0a0a0f;
+      background: var(--bg-page);
       padding: 10px;
       border-radius: 6px;
       overflow-x: auto;
-      color: #ccc;
+      color: var(--text-tertiary);
       font-size: 11px;
       line-height: 1.5;
       white-space: pre-wrap;
@@ -130,13 +130,13 @@ export function renderLogsPage(): string {
       margin: 0;
     }
     .log-detail .detail-message {
-      color: #e0e0e0;
+      color: var(--text-secondary);
       font-size: 13px;
       margin-bottom: 8px;
       line-height: 1.5;
     }
     .log-detail .detail-label {
-      color: #666;
+      color: var(--text-dim);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -151,13 +151,13 @@ export function renderLogsPage(): string {
       font-size: 11px;
       font-weight: 500;
     }
-    .badge-info { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
-    .badge-warning { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-    .badge-error { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-    .badge-debug { background: rgba(34, 211, 238, 0.15); color: #22d3ee; }
-    .badge-fatal { background: rgba(192, 132, 252, 0.15); color: #c084fc; }
-    .badge-bot { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
-    .badge-category { background: rgba(108, 99, 255, 0.15); color: #a5a0ff; }
+    .badge-info { background: color-mix(in srgb, var(--status-success) 15%, transparent); color: var(--status-success); }
+    .badge-warning { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); }
+    .badge-error { background: color-mix(in srgb, var(--status-error) 15%, transparent); color: var(--status-error); }
+    .badge-debug { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); }
+    .badge-fatal { background: color-mix(in srgb, var(--status-magenta) 15%, transparent); color: var(--status-magenta); }
+    .badge-bot { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); }
+    .badge-category { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent-light); }
 
     .msg-text {
       max-width: 600px;
@@ -166,7 +166,7 @@ export function renderLogsPage(): string {
       white-space: nowrap;
     }
 
-    .empty { color: #555; text-align: center; padding: 40px; font-size: 14px; }
+    .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -430,10 +430,10 @@ export function renderLogsPage(): string {
 
         html.push(
           '<tr class="log-row' + (isExpanded ? ' expanded' : '') + '" onclick="toggleRow(' + e._id + ')">' +
-            '<td style="white-space:nowrap;color:#888">' + time + '</td>' +
+            '<td style="white-space:nowrap;color:var(--text-muted)">' + time + '</td>' +
             '<td><span class="badge badge-' + safeLevel + '">' + safeLevel + '</span></td>' +
             '<td><span class="badge badge-category">' + esc(e.category) + '</span></td>' +
-            '<td>' + (e.botName ? '<span class="badge badge-bot">' + esc(e.botName) + '</span>' : '<span style="color:#444">-</span>') + '</td>' +
+            '<td>' + (e.botName ? '<span class="badge badge-bot">' + esc(e.botName) + '</span>' : '<span style="color:var(--text-disabled)">-</span>') + '</td>' +
             '<td class="msg-text">' + esc(msg) + '</td>' +
           '</tr>'
         );

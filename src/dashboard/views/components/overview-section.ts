@@ -7,8 +7,8 @@ export function overviewSectionStyles(): string {
       gap: 6px 16px;
       padding: 10px 16px;
       margin-bottom: 16px;
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
     }
     .metric-item {
@@ -16,18 +16,18 @@ export function overviewSectionStyles(): string {
       align-items: center;
       gap: 6px;
       font-size: 13px;
-      color: #888;
+      color: var(--text-muted);
       white-space: nowrap;
     }
     .metric-item .metric-icon { font-size: 14px; }
     .metric-item .metric-value {
       font-weight: 700;
-      color: #fff;
+      color: var(--text-primary);
       font-size: 15px;
     }
     .metric-item .metric-label {
       font-size: 11px;
-      color: #666;
+      color: var(--text-dim);
     }
 
     .overview-columns {
@@ -41,8 +41,8 @@ export function overviewSectionStyles(): string {
     }
 
     .overview-mini-panel {
-      background: #12121a;
-      border: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
       border-radius: 10px;
       overflow: hidden;
     }
@@ -50,10 +50,10 @@ export function overviewSectionStyles(): string {
       padding: 10px 14px;
       font-size: 12px;
       font-weight: 600;
-      color: #888;
+      color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
     }
     .overview-mini-body {
       padding: 4px 0;
@@ -61,12 +61,12 @@ export function overviewSectionStyles(): string {
       overflow-y: auto;
     }
     .overview-mini-body::-webkit-scrollbar { width: 3px; }
-    .overview-mini-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+    .overview-mini-body::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
 
     .overview-mini-empty {
       padding: 16px 14px;
       font-size: 12px;
-      color: #444;
+      color: var(--text-disabled);
       text-align: center;
     }
 
@@ -80,7 +80,7 @@ export function overviewSectionStyles(): string {
     }
     .mini-event:hover { background: #ffffff04; }
     .mini-event-time {
-      color: #555;
+      color: var(--text-faint);
       font-family: monospace;
       font-size: 11px;
       min-width: 44px;
@@ -95,13 +95,13 @@ export function overviewSectionStyles(): string {
       min-width: 28px;
       text-align: center;
     }
-    .mini-event-badge.in { background: #1e3a5f; color: #60a5fa; }
-    .mini-event-badge.out { background: #1a3a2a; color: #4ade80; }
-    .mini-event-badge.err { background: #3a1a1a; color: #f87171; }
-    .mini-event-badge.sys { background: #2a2a1a; color: #facc15; }
+    .mini-event-badge.in { background: var(--tint-info); color: var(--status-info); }
+    .mini-event-badge.out { background: var(--tint-success); color: var(--status-success); }
+    .mini-event-badge.err { background: var(--tint-error); color: var(--status-error); }
+    .mini-event-badge.sys { background: var(--tint-warning); color: var(--status-warning); }
     .mini-event-text {
       flex: 1;
-      color: #aaa;
+      color: var(--text-soft);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -125,21 +125,21 @@ export function overviewSectionStyles(): string {
       min-width: 36px;
       text-align: center;
     }
-    .upcoming-type.goal { background: #1a2e3a; color: #38bdf8; }
-    .upcoming-type.task { background: #2a2a1a; color: #facc15; }
+    .upcoming-type.goal { background: var(--tint-cyan); color: var(--status-cyan); }
+    .upcoming-type.task { background: var(--tint-warning); color: var(--status-warning); }
     .upcoming-info {
       flex: 1;
       min-width: 0;
     }
     .upcoming-title {
-      color: #ccc;
+      color: var(--text-tertiary);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .upcoming-when {
       font-size: 11px;
-      color: #555;
+      color: var(--text-faint);
       margin-top: 1px;
     }
 

@@ -9,11 +9,11 @@ export function watchersPanelStyles(): string {
       text-transform: uppercase;
       white-space: nowrap;
     }
-    .watcher-badge.email { background: #1e3a5f; color: #60a5fa; }
-    .watcher-badge.calendar { background: #2a1a3a; color: #c084fc; }
-    .watcher-badge.github { background: #1a2a1a; color: #4ade80; }
-    .watcher-badge.news { background: #2a2a1a; color: #facc15; }
-    .watcher-badge.disabled { background: #1a1a1a; color: #555; }
+    .watcher-badge.email { background: var(--tint-info); color: var(--status-info); }
+    .watcher-badge.calendar { background: var(--tint-magenta); color: var(--status-magenta); }
+    .watcher-badge.github { background: #1a2a1a; color: var(--status-success); }
+    .watcher-badge.news { background: var(--tint-warning); color: var(--status-warning); }
+    .watcher-badge.disabled { background: var(--tint-neutral); color: var(--text-faint); }
   `;
 }
 

@@ -4,7 +4,7 @@ export function knowledgePanelStyles(): string {
     /* Knowledge panel filters */
     .mg-filters {
       padding: 8px 12px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       display: flex;
       flex-direction: column;
       gap: 6px;
@@ -19,19 +19,19 @@ export function knowledgePanelStyles(): string {
       font-size: 10px;
       padding: 3px 8px;
       border-radius: 10px;
-      background: #1a1a2e;
-      color: #666;
-      border: 1px solid #2a2a3e;
+      background: var(--bg-surface);
+      color: var(--text-dim);
+      border: 1px solid var(--border-secondary);
       cursor: pointer;
       transition: all 0.15s;
       white-space: nowrap;
       font-weight: 500;
     }
-    .mg-pill:hover { color: #999; border-color: #3a3a4e; }
+    .mg-pill:hover { color: var(--text-soft); border-color: var(--border-secondary); }
     .mg-pill.active {
-      background: rgba(108, 99, 255, 0.15);
-      color: #a5a0ff;
-      border-color: rgba(108, 99, 255, 0.3);
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
     }
     .mg-pill .mg-pill-count {
       margin-left: 3px;
@@ -49,8 +49,8 @@ export function knowledgePanelStyles(): string {
       font-size: 12px;
       flex-shrink: 0;
     }
-    .mg-type-icon.memory { background: #1e1e3e; }
-    .mg-type-icon.goal { background: #1a3a2a; }
+    .mg-type-icon.memory { background: var(--tint-purple); }
+    .mg-type-icon.goal { background: var(--tint-success); }
 
     /* Scope dot */
     .mg-scope-dot {
@@ -59,8 +59,8 @@ export function knowledgePanelStyles(): string {
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .mg-scope-dot.personal { background: #6c63ff; }
-    .mg-scope-dot.shared { background: #4ade80; }
+    .mg-scope-dot.personal { background: var(--accent); }
+    .mg-scope-dot.shared { background: var(--status-success); }
 
     /* Overview (default right panel state) */
     .mg-overview {
@@ -78,7 +78,7 @@ export function knowledgePanelStyles(): string {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       margin-bottom: 6px;
     }
     .mg-scope-bar {
@@ -86,16 +86,16 @@ export function knowledgePanelStyles(): string {
       height: 6px;
       border-radius: 3px;
       overflow: hidden;
-      background: #1a1a2e;
+      background: var(--bg-surface);
     }
-    .mg-scope-bar-personal { background: #6c63ff; height: 100%; transition: width 0.3s; }
-    .mg-scope-bar-shared { background: #4ade80; height: 100%; transition: width 0.3s; }
+    .mg-scope-bar-personal { background: var(--accent); height: 100%; transition: width 0.3s; }
+    .mg-scope-bar-shared { background: var(--status-success); height: 100%; transition: width 0.3s; }
     .mg-scope-bar-legend {
       display: flex;
       gap: 16px;
       margin-top: 6px;
       font-size: 10px;
-      color: #666;
+      color: var(--text-dim);
     }
     .mg-scope-bar-legend span::before {
       content: '';
@@ -105,15 +105,15 @@ export function knowledgePanelStyles(): string {
       border-radius: 50%;
       margin-right: 4px;
     }
-    .mg-scope-bar-legend .legend-personal::before { background: #6c63ff; }
-    .mg-scope-bar-legend .legend-shared::before { background: #4ade80; }
+    .mg-scope-bar-legend .legend-personal::before { background: var(--accent); }
+    .mg-scope-bar-legend .legend-shared::before { background: var(--status-success); }
 
     /* Tag cloud in overview */
     .mg-tag-cloud-label {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: #555;
+      color: var(--text-faint);
       margin-bottom: 8px;
     }
     .mg-tag-cloud {
@@ -132,9 +132,9 @@ export function knowledgePanelStyles(): string {
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .mg-goal-dot.active { background: #4ade80; }
-    .mg-goal-dot.completed { background: #6c63ff; }
-    .mg-goal-dot.cancelled { background: #666; }
+    .mg-goal-dot.active { background: var(--status-success); }
+    .mg-goal-dot.completed { background: var(--accent); }
+    .mg-goal-dot.cancelled { background: var(--text-dim); }
   `;
 }
 
@@ -359,7 +359,7 @@ export function knowledgePanelScript(): string {
         '<span class="mg-pill" data-mg-cloud-tag="' + escapeAttr(tag) + '">' +
           escapeHtml(tag) + '<span class="mg-pill-count">' + count + '</span>' +
         '</span>'
-      ).join('') : '<span style="color:#444;font-size:12px">No tags yet</span>';
+      ).join('') : '<span style="color:var(--text-disabled);font-size:12px">No tags yet</span>';
 
       el.innerHTML = '' +
         '<div class="mg-overview-stats">' +
@@ -397,8 +397,8 @@ export function knowledgePanelScript(): string {
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div class="mg-type-icon memory" style="width:32px;height:32px;font-size:16px">&#129504;</div>' +
             '<div>' +
-              '<div style="font-size:14px;font-weight:600;color:#fff">Memory</div>' +
-              '<div style="font-size:11px;color:#666">' + escapeHtml(username) + '</div>' +
+              '<div style="font-size:14px;font-weight:600;color:var(--text-primary)">Memory</div>' +
+              '<div style="font-size:11px;color:var(--text-dim)">' + escapeHtml(username) + '</div>' +
             '</div>' +
             '<span class="detail-badge ' + escapeAttr(scope) + '" style="margin-left:auto">' + escapeHtml(scope) + '</span>' +
           '</div>' +
@@ -426,8 +426,8 @@ export function knowledgePanelScript(): string {
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">' +
             '<div class="mg-type-icon goal" style="width:32px;height:32px;font-size:16px">&#127919;</div>' +
             '<div>' +
-              '<div style="font-size:14px;font-weight:600;color:#fff">Goal</div>' +
-              '<div style="font-size:11px;color:#666">' + escapeHtml(username) + '</div>' +
+              '<div style="font-size:14px;font-weight:600;color:var(--text-primary)">Goal</div>' +
+              '<div style="font-size:11px;color:var(--text-dim)">' + escapeHtml(username) + '</div>' +
             '</div>' +
             '<span class="detail-badge ' + escapeAttr(g.status) + '" style="margin-left:auto">' + escapeHtml(g.status) + '</span>' +
           '</div>' +

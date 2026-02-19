@@ -6,21 +6,21 @@ export function agentStatusStyles(): string {
       align-items: center;
       gap: 8px;
       font-size: 12px;
-      color: #555;
+      color: var(--text-faint);
       padding: 4px 10px;
       border-radius: 6px;
       background: transparent;
       transition: all 0.3s ease;
     }
     .agent-status.working {
-      background: rgba(108, 99, 255, 0.1);
-      border: 1px solid rgba(108, 99, 255, 0.2);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent-light);
     }
     .agent-spinner {
       width: 14px; height: 14px;
       border: 2px solid transparent;
-      border-top-color: #6c63ff;
+      border-top-color: var(--accent);
       border-radius: 50%;
       display: none;
     }
@@ -30,8 +30,8 @@ export function agentStatusStyles(): string {
     }
     @keyframes spin { to { transform: rotate(360deg); } }
     .agent-phase { font-weight: 500; }
-    .agent-detail { color: #8a85cc; font-size: 11px; }
-    .agent-user { color: #666; }
+    .agent-detail { color: var(--accent-muted); font-size: 11px; }
+    .agent-user { color: var(--text-dim); }
   `;
 }
 

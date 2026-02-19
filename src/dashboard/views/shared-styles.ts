@@ -1,28 +1,87 @@
 /** Shared CSS for all dashboard pages — base reset, header, and nav */
 export const SHARED_STYLES = `
+    :root {
+      /* Backgrounds */
+      --bg-page: #0a0a0f;
+      --bg-panel: #12121a;
+      --bg-surface: #1a1a2e;
+      --bg-deep: #0f0f17;
+      --bg-inset: #0d0d14;
+      --bg-gradient-end: #16162a;
+
+      /* Borders */
+      --border-primary: #1e1e2e;
+      --border-secondary: #2a2a3e;
+      --border-subtle: #1a1a28;
+      --scrollbar-thumb: #2a2a3a;
+
+      /* Text */
+      --text-primary: #fff;
+      --text-secondary: #e0e0e0;
+      --text-tertiary: #ccc;
+      --text-soft: #aaa;
+      --text-muted: #888;
+      --text-dim: #666;
+      --text-faint: #555;
+      --text-disabled: #444;
+
+      /* Accent (brand purple) */
+      --accent: #6c63ff;
+      --accent-hover: #5a52e0;
+      --accent-light: #a5a0ff;
+
+      /* Status colors */
+      --status-success: #4ade80;
+      --status-error: #f87171;
+      --status-warning: #fbbf24;
+      --status-info: #60a5fa;
+      --status-tool: #f59e0b;
+      --status-cyan: #22d3ee;
+      --status-magenta: #c084fc;
+
+      /* Tinted backgrounds (for badges, events) */
+      --tint-success: #1a3a2a;
+      --tint-error: #3a1a1a;
+      --tint-warning: #2a2a1a;
+      --tint-info: #1e3a5f;
+      --tint-purple: #1e1e3e;
+      --tint-magenta: #2a1a3a;
+      --tint-cyan: #1a2e3a;
+      --tint-neutral: #1a1a1a;
+
+      /* Accent text variants */
+      --accent-muted: #8b8bcd;
+
+      /* Chat bubbles */
+      --chat-user-bg: #1e3a5f;
+      --chat-user-text: #c8ddf5;
+      --chat-assistant-bg: #1a3a2a;
+      --chat-assistant-text: #c8f5d8;
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      background: #0a0a0f;
-      color: #e0e0e0;
+      background: var(--bg-page);
+      color: var(--text-secondary);
       min-height: 100vh;
     }
 
     /* Header */
     header {
-      background: #12121a;
-      border-bottom: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border-primary);
       padding: 16px 24px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    header h1 { font-size: 20px; font-weight: 600; color: #fff; }
-    header h1 span { color: #6c63ff; }
+    header h1 { font-size: 20px; font-weight: 600; color: var(--text-primary); }
+    header h1 span { color: var(--accent); }
     .header-left { display: flex; align-items: center; gap: 16px; }
-    .nav-link { color: #888; text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; transition: all 0.2s; }
-    .nav-link:hover { color: #a5a0ff; background: rgba(108, 99, 255, 0.1); }
-    .nav-link.active { color: #6c63ff; background: rgba(108, 99, 255, 0.15); }
+    .nav-link { color: var(--text-muted); text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; transition: all 0.2s; }
+    .nav-link:hover { color: var(--accent-light); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .nav-link.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
 `;
 
 /** Shared header HTML with nav links */
