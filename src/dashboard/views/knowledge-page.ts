@@ -578,11 +578,8 @@ export function renderKnowledgePage(): string {
     }
 
     function renderResults(results, query) {
-      // L2 distance: lower = better. Find min/max for relative bar width.
-      const scores = results.map(r => {
-        const chunks = r.matchedChunks || [];
-        return chunks.length > 0 ? chunks[0].score : Infinity;
-      }).filter(s => s !== Infinity);
+      // Relevance: 0-1 scale, higher = better. Find min/max for relative bar width.
+      const scores = results.map(r => r.relevance).filter(s => s != null);
 
       const minScore = Math.min(...scores);
       const maxScore = Math.max(...scores);
@@ -591,14 +588,13 @@ export function renderKnowledgePage(): string {
       const el = document.getElementById('results');
       el.innerHTML = results.map((r, i) => {
         const chunks = r.matchedChunks || [];
-        const bestScore = chunks.length > 0 ? chunks[0].score : null;
+        const bestScore = r.relevance != null ? r.relevance : null;
 
-        // Relative bar: best (lowest L2) = 100%, worst = proportional
-        // Invert so lower distance = higher bar
+        // Relative bar: higher relevance = wider bar
         let barPct = 0;
         let barClass = 'score-low';
         if (bestScore !== null && scores.length > 1) {
-          barPct = Math.round((1 - (bestScore - minScore) / scoreRange) * 100);
+          barPct = Math.round(((bestScore - minScore) / scoreRange) * 100);
           barClass = barPct >= 70 ? 'score-high' : barPct >= 40 ? 'score-medium' : 'score-low';
         } else if (bestScore !== null) {
           barPct = 100;
@@ -621,7 +617,7 @@ export function renderKnowledgePage(): string {
         const chunksHtml = chunks.map((c, ci) => {
           let chunkBarPct = 0;
           if (scores.length > 1) {
-            chunkBarPct = Math.round((1 - (c.score - minScore) / scoreRange) * 100);
+            chunkBarPct = Math.round(((c.relevance - minScore) / scoreRange) * 100);
           } else {
             chunkBarPct = 100;
           }
@@ -631,7 +627,7 @@ export function renderKnowledgePage(): string {
             : '';
           return '<div class="chunk-card">' +
             '<div class="chunk-header">' +
-              '<span class="chunk-score">' + c.score.toFixed(4) + '</span>' +
+              '<span class="chunk-score">' + (c.relevance != null ? c.relevance.toFixed(3) : '—') + '</span>' +
               '<div class="chunk-score-bar"><div class="chunk-score-fill ' + chunkBarClass + '" style="width:' + chunkBarPct + '%"></div></div>' +
               headingBadge +
               '<span class="chunk-label">chunk ' + (ci + 1) + '</span>' +
@@ -643,7 +639,7 @@ export function renderKnowledgePage(): string {
         return '<div class="result-card" data-index="' + i + '">' +
           '<div class="result-header">' +
             (bestScore !== null
-              ? '<span class="result-score">' + bestScore.toFixed(4) + '</span>' +
+              ? '<span class="result-score">' + bestScore.toFixed(3) + '</span>' +
                 '<div class="result-score-bar"><div class="result-score-fill ' + barClass + '" style="width:' + barPct + '%"></div></div>'
               : '') +
             '<div class="result-meta">' +

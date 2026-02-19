@@ -13,7 +13,8 @@ describe("formatKnowledgeResults", () => {
         id: "1",
         title: "My Page",
         url: "https://notion.so/my-page",
-        matchedChunks: [{ content: "Some relevant content here", score: 0.9 }],
+        relevance: 0.9,
+        matchedChunks: [{ content: "Some relevant content here", relevance: 0.9 }],
       },
     ]);
     expect(result).toContain("Relevant company knowledge");
@@ -28,7 +29,8 @@ describe("formatKnowledgeResults", () => {
         id: "1",
         title: "No URL Page",
         url: "",
-        matchedChunks: [{ content: "Content", score: 0.8 }],
+        relevance: 0.8,
+        matchedChunks: [{ content: "Content", relevance: 0.8 }],
       },
     ]);
     expect(result).toContain("- No URL Page — Content");
@@ -43,6 +45,7 @@ describe("formatKnowledgeResults", () => {
         id: "1",
         title: "Empty Chunks",
         url: "",
+        relevance: 0,
         matchedChunks: [],
       },
     ]);
@@ -57,7 +60,8 @@ describe("formatKnowledgeResults", () => {
         id: "1",
         title: "Long",
         url: "",
-        matchedChunks: [{ content: longContent, score: 0.9 }],
+        relevance: 0.9,
+        matchedChunks: [{ content: longContent, relevance: 0.9 }],
       },
     ]);
     expect(result).toContain("...");
@@ -73,7 +77,8 @@ describe("formatKnowledgeResults", () => {
         id: "1",
         title: "Newlines",
         url: "",
-        matchedChunks: [{ content: "line one\n\n\nline two\nline three", score: 0.9 }],
+        relevance: 0.9,
+        matchedChunks: [{ content: "line one\n\n\nline two\nline three", relevance: 0.9 }],
       },
     ]);
     expect(result).toContain("line one line two line three");

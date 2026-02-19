@@ -17,7 +17,8 @@ export function configureKnowledgeSearch(apiUrl: string): void {
 
 interface KnowledgeChunk {
   content: string;
-  score: number;
+  relevance: number;
+  heading?: string;
 }
 
 interface KnowledgeResult {
@@ -25,6 +26,7 @@ interface KnowledgeResult {
   id: string;
   title: string;
   url: string;
+  relevance: number;
   matchedChunks: KnowledgeChunk[];
 }
 
