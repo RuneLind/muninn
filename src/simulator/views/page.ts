@@ -1,4 +1,7 @@
 import { SHARED_STYLES, renderNav } from "../../dashboard/views/shared-styles.ts";
+import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "../../dashboard/views/components/agent-status-ui.ts";
+import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "../../dashboard/views/components/request-progress-ui.ts";
+import { helpersScript } from "../../dashboard/views/components/helpers.ts";
 
 export function renderSimulatorPage(): string {
   return `<!DOCTYPE html>
@@ -6,14 +9,17 @@ export function renderSimulatorPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis Simulator</title>
+  <title>Jarvis Chat</title>
   <style>
     ${SHARED_STYLES}
+    ${agentStatusStyles()}
+    ${requestProgressStyles()}
     ${SIMULATOR_STYLES}
   </style>
 </head>
 <body>
-  ${renderNav("simulator", { showSimulator: true })}
+  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() })}
+  ${requestProgressHtml()}
 
   <div class="sim-layout">
     <!-- Left: Conversations sidebar -->
@@ -88,6 +94,10 @@ export function renderSimulatorPage(): string {
   </div>
 
   <script>
+    ${helpersScript()}
+    ${agentStatusScript()}
+    ${requestProgressScript()}
+    ${CHAT_SSE_SCRIPT}
     ${SIMULATOR_SCRIPT}
   </script>
 </body>
@@ -95,17 +105,24 @@ export function renderSimulatorPage(): string {
 }
 
 const SIMULATOR_STYLES = `
+    body {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
     .sim-layout {
       display: grid;
       grid-template-columns: 260px 1fr 280px;
-      height: calc(100vh - 57px);
+      flex: 1;
+      min-height: 0;
       overflow: hidden;
     }
 
     /* Sidebar */
     .sim-sidebar {
-      background: #12121a;
-      border-right: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border-primary);
       display: flex;
       flex-direction: column;
       overflow: hidden;
@@ -113,7 +130,7 @@ const SIMULATOR_STYLES = `
     .sidebar-header {
       padding: 12px 16px 8px;
     }
-    .sidebar-header h3 { font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+    .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
     .new-conv-buttons {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -121,9 +138,9 @@ const SIMULATOR_STYLES = `
       padding: 8px 12px;
     }
     .new-conv-btn {
-      background: rgba(108, 99, 255, 0.1);
-      border: 1px solid rgba(108, 99, 255, 0.2);
-      color: #a5a0ff;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      color: var(--accent-light);
       padding: 6px 8px;
       border-radius: 6px;
       font-size: 11px;
@@ -131,8 +148,8 @@ const SIMULATOR_STYLES = `
       transition: all 0.2s;
     }
     .new-conv-btn:hover {
-      background: rgba(108, 99, 255, 0.2);
-      border-color: rgba(108, 99, 255, 0.4);
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .bot-selector, .user-config {
       padding: 6px 12px;
@@ -140,12 +157,12 @@ const SIMULATOR_STYLES = `
       gap: 6px;
       align-items: center;
     }
-    .bot-selector label { font-size: 12px; color: #666; white-space: nowrap; }
+    .bot-selector label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
     .bot-selector select, .user-config input {
       flex: 1;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 4px 8px;
       border-radius: 4px;
       font-size: 12px;
@@ -163,10 +180,10 @@ const SIMULATOR_STYLES = `
       transition: background 0.15s;
       margin-bottom: 2px;
     }
-    .conv-item:hover { background: rgba(108, 99, 255, 0.08); }
-    .conv-item.active { background: rgba(108, 99, 255, 0.15); border: 1px solid rgba(108, 99, 255, 0.25); }
-    .conv-item-title { font-size: 13px; color: #e0e0e0; font-weight: 500; }
-    .conv-item-sub { font-size: 11px; color: #666; margin-top: 2px; }
+    .conv-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .conv-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+    .conv-item-title { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+    .conv-item-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
     .conv-item-badge {
       display: inline-block;
       font-size: 10px;
@@ -174,26 +191,26 @@ const SIMULATOR_STYLES = `
       border-radius: 3px;
       margin-right: 4px;
     }
-    .badge-tg { background: rgba(0, 136, 204, 0.2); color: #29b6f6; }
-    .badge-slack { background: rgba(74, 21, 75, 0.3); color: #e0a0e0; }
+    .badge-tg { background: var(--tint-info); color: var(--status-info); }
+    .badge-slack { background: var(--tint-magenta); color: var(--status-magenta); }
 
     /* Chat */
     .sim-chat {
       display: flex;
       flex-direction: column;
-      background: #0e0e14;
+      background: var(--bg-inset);
       overflow: hidden;
     }
     .chat-header {
       padding: 10px 16px;
-      border-bottom: 1px solid #1e1e2e;
+      border-bottom: 1px solid var(--border-primary);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: #12121a;
+      background: var(--bg-panel);
     }
     .chat-title { font-size: 14px; font-weight: 500; }
-    .chat-status { font-size: 12px; color: #6c63ff; }
+    .chat-status { font-size: 12px; color: var(--accent); }
     .chat-status:empty { display: none; }
     .chat-messages {
       flex: 1;
@@ -214,36 +231,36 @@ const SIMULATOR_STYLES = `
     }
     .msg-user {
       align-self: flex-end;
-      background: #2a2a4e;
-      color: #e0e0e0;
+      background: var(--chat-user-bg);
+      color: var(--chat-user-text);
       border-bottom-right-radius: 2px;
     }
     .msg-bot {
       align-self: flex-start;
-      background: #1a1a2e;
-      color: #d0d0e0;
+      background: var(--chat-assistant-bg);
+      color: var(--chat-assistant-text);
       border-bottom-left-radius: 2px;
-      border: 1px solid #1e1e2e;
+      border: 1px solid var(--border-primary);
     }
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
     .msg-time {
       font-size: 10px;
-      color: #555;
+      color: var(--text-faint);
       margin-top: 4px;
     }
     .chat-input {
       padding: 12px 16px;
-      border-top: 1px solid #1e1e2e;
+      border-top: 1px solid var(--border-primary);
       display: flex;
       gap: 8px;
-      background: #12121a;
+      background: var(--bg-panel);
     }
     .chat-input textarea {
       flex: 1;
-      background: #1a1a2e;
-      border: 1px solid #2a2a3e;
-      color: #e0e0e0;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
       padding: 8px 12px;
       border-radius: 8px;
       font-size: 14px;
@@ -252,10 +269,10 @@ const SIMULATOR_STYLES = `
       outline: none;
       max-height: 120px;
     }
-    .chat-input textarea:focus { border-color: #6c63ff; }
+    .chat-input textarea:focus { border-color: var(--accent); }
     .chat-input button {
-      background: #6c63ff;
-      color: white;
+      background: var(--accent);
+      color: var(--text-primary);
       border: none;
       padding: 8px 16px;
       border-radius: 8px;
@@ -264,20 +281,20 @@ const SIMULATOR_STYLES = `
       font-weight: 500;
       transition: background 0.2s;
     }
-    .chat-input button:hover:not(:disabled) { background: #7b73ff; }
-    .chat-input button:disabled { background: #333; cursor: not-allowed; }
+    .chat-input button:hover:not(:disabled) { background: var(--accent-hover); }
+    .chat-input button:disabled { background: var(--text-disabled); cursor: not-allowed; }
 
     /* Inspector */
     .sim-inspector {
-      background: #12121a;
-      border-left: 1px solid #1e1e2e;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border-primary);
       padding: 12px 16px;
       overflow-y: auto;
     }
-    .sim-inspector h3 { font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    .sim-inspector h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
     .inspector-section { margin-bottom: 10px; }
-    .inspector-label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 0.3px; }
-    .inspector-value { font-size: 13px; color: #e0e0e0; margin-top: 2px; }
+    .inspector-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.3px; }
+    .inspector-value { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
     .activity-feed {
       font-size: 12px;
       max-height: 400px;
@@ -285,13 +302,13 @@ const SIMULATOR_STYLES = `
     }
     .activity-item {
       padding: 4px 0;
-      border-bottom: 1px solid #1a1a2a;
-      color: #888;
+      border-bottom: 1px solid var(--border-subtle);
+      color: var(--text-muted);
     }
-    .activity-item .act-type { color: #6c63ff; font-weight: 500; }
-    .activity-item .act-time { color: #555; font-size: 10px; }
+    .activity-item .act-type { color: var(--accent); font-weight: 500; }
+    .activity-item .act-time { color: var(--text-faint); font-size: 10px; }
 
-    .empty-state { color: #444; font-size: 13px; text-align: center; padding: 24px 0; }
+    .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
     /* Typing indicator */
     .typing-indicator {
@@ -304,7 +321,7 @@ const SIMULATOR_STYLES = `
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: #6c63ff;
+      background: var(--accent);
       animation: typing 1.2s ease-in-out infinite;
     }
     .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
@@ -313,6 +330,29 @@ const SIMULATOR_STYLES = `
       0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
       30% { opacity: 1; transform: scale(1); }
     }
+`;
+
+/** Minimal SSE connection — subscribes to agent_status + request_progress events */
+const CHAT_SSE_SCRIPT = `
+(function() {
+  function connectSSE() {
+    var es = new EventSource('/api/events');
+
+    es.addEventListener('agent_status', function(e) {
+      updateAgentStatus(JSON.parse(e.data));
+    });
+
+    es.addEventListener('request_progress', function(e) {
+      updateRequestProgress(JSON.parse(e.data));
+    });
+
+    es.onerror = function() {
+      es.close();
+      setTimeout(connectSSE, 3000);
+    };
+  }
+  connectSSE();
+})();
 `;
 
 const SIMULATOR_SCRIPT = `
@@ -649,12 +689,6 @@ const SIMULATOR_SCRIPT = `
     }
     walk(tmp);
     return tmp.innerHTML;
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
   }
 
   // Event listeners

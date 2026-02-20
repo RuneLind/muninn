@@ -16,13 +16,19 @@ import type { App as SlackApp } from "@slack/bolt";
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
+// Discover all bots with CLAUDE.md (token-optional — chat page needs all bots)
+const allBotConfigs = discoverBotsForSimulator();
+// For platform startup: only bots with Telegram/Slack tokens
 const botConfigs = config.simulatorEnabled
-  ? discoverBotsForSimulator()
+  ? allBotConfigs
   : discoverBots();
 
-if (botConfigs.length === 0) {
-  log.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists" +
-    (config.simulatorEnabled ? "." : " and at least one platform token is set."));
+if (allBotConfigs.length === 0) {
+  log.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists.");
+  process.exit(1);
+}
+if (!config.simulatorEnabled && botConfigs.length === 0) {
+  log.error("No bots have platform tokens. Set TELEGRAM_BOT_TOKEN_<NAME> or SLACK_BOT_TOKEN_<NAME> + SLACK_APP_TOKEN_<NAME>.");
   process.exit(1);
 }
 
@@ -52,38 +58,27 @@ const dashboard = createDashboardRoutes(config);
 const app = new Hono();
 app.route("/", dashboard);
 
-// Lazy-load simulator module only when enabled (avoids importing in production)
-type WsData = { unsubscribe: (() => void) | null };
-let simulatorWs: import("bun").WebSocketHandler<WsData> | undefined;
+// Always mount simulator/chat routes — uses ALL bots (not just those with platform tokens)
+const sim = await import("./simulator/index.ts");
+const simulator = sim.createSimulatorRoutes(allBotConfigs, config);
+app.route("/simulator", simulator);
 
-if (config.simulatorEnabled) {
-  const sim = await import("./simulator/index.ts");
-  const simulator = sim.createSimulatorRoutes(botConfigs, config);
-  app.route("/simulator", simulator);
-  simulatorWs = sim.simulatorWebSocket;
-}
-
-// Start server — with WebSocket support for simulator
-const noopWs: import("bun").WebSocketHandler<WsData> = { message() {} };
-
-const server = Bun.serve<WsData>({
+// Start server — with WebSocket support for chat
+const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
   port: config.dashboardPort,
   idleTimeout: 255, // max value, needed for SSE connections
   fetch(req, server) {
-    // Handle WebSocket upgrade for simulator (only when enabled)
-    if (simulatorWs) {
-      const url = new URL(req.url);
-      if (url.pathname === "/simulator/ws") {
-        const upgraded = server.upgrade(req, {
-          data: { unsubscribe: null },
-        });
-        if (upgraded) return undefined;
-        return new Response("WebSocket upgrade failed", { status: 500 });
-      }
+    const url = new URL(req.url);
+    if (url.pathname === "/simulator/ws") {
+      const upgraded = server.upgrade(req, {
+        data: { unsubscribe: null },
+      });
+      if (upgraded) return undefined;
+      return new Response("WebSocket upgrade failed", { status: 500 });
     }
     return app.fetch(req);
   },
-  websocket: simulatorWs ?? noopWs,
+  websocket: sim.simulatorWebSocket,
 });
 
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);

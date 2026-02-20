@@ -86,12 +86,9 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "knowledge" | "logs" | "mcp-debug" | "simulator",
-  options?: { showSimulator?: boolean; headerLeftExtra?: string; headerRight?: string },
+  activePage: "dashboard" | "traces" | "search" | "knowledge" | "logs" | "mcp-debug" | "chat",
+  options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
-  const simulatorLink = options?.showSimulator
-    ? `\n        <a href="/simulator" class="nav-link${activePage === "simulator" ? " active" : ""}">Simulator</a>`
-    : "";
   return `
   <script>
     if (!window.__fullscreenNav) {
@@ -132,7 +129,8 @@ export function renderNav(
         <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">Search</a>
         <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>
         <a href="/logs" class="nav-link${activePage === "logs" ? " active" : ""}">Logs</a>
-        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>${simulatorLink}
+        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
+        <a href="/simulator" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>

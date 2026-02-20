@@ -141,6 +141,9 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
 
   // Reset all simulator state (and optionally truncate simulator DB tables)
   app.delete("/reset", async (c) => {
+    if (!config.simulatorEnabled) {
+      return c.json({ error: "Reset is only available in simulator mode" }, 403);
+    }
     simulatorState.clear();
     try {
       const { getDb } = await import("../db/client.ts");
