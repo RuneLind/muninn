@@ -286,7 +286,7 @@ describe("StreamParser progress callbacks", () => {
 
     // tool_start should have fired
     expect(events).toHaveLength(1);
-    expect(events[0]).toEqual({ type: "tool_start", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)" });
+    expect(events[0]).toEqual({ type: "tool_start", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)", input: '{"query":"test"}' });
 
     // Tool result resolves the tool
     parser.parseLine(JSON.stringify(makeUser([

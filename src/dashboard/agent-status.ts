@@ -27,6 +27,7 @@ export interface ToolProgress {
   startedAt: number;
   endedAt?: number;
   durationMs?: number;
+  input?: string;
 }
 
 export interface RequestProgress {
@@ -106,12 +107,13 @@ class AgentStatusTracker {
     }
   }
 
-  toolStart(name: string, displayName: string) {
+  toolStart(name: string, displayName: string, input?: string) {
     if (!this.activeRequest) return;
     this.activeRequest.tools.push({
       name,
       displayName,
       startedAt: Date.now(),
+      input,
     });
     this.notifyProgress();
   }
@@ -188,7 +190,7 @@ export function createProgressCallback(phase: AgentPhase, username?: string): St
   return (event) => {
     if (event.type === "tool_start") {
       agentStatus.set(phase, username, event.displayName);
-      agentStatus.toolStart(event.name, event.displayName);
+      agentStatus.toolStart(event.name, event.displayName, event.input);
     } else if (event.type === "tool_end") {
       agentStatus.set(phase, username);
       agentStatus.toolEnd(event.name, event.displayName);

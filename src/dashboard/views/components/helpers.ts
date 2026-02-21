@@ -8,6 +8,52 @@ export function escScript(): string {
   `;
 }
 
+const TOOL_INPUT_PRIORITY_KEYS = ['query', 'pattern', 'prompt', 'text', 'command', 'url', 'file_path', 'path', 'subject', 'q', 'search', 'message', 'name', 'skill'];
+const TOOL_INPUT_MAX_LENGTH = 60;
+
+/** Extract a short readable summary from tool input (JSON string or object). Exported for testing. */
+export function extractToolInputLabel(input: unknown): string {
+  if (!input) return '';
+  try {
+    const obj = typeof input === 'object' ? input as Record<string, unknown> : JSON.parse(input as string);
+    for (const key of TOOL_INPUT_PRIORITY_KEYS) {
+      const v = obj[key];
+      if (typeof v === 'string' && v.length > 0) {
+        return v.length > TOOL_INPUT_MAX_LENGTH ? v.slice(0, TOOL_INPUT_MAX_LENGTH - 3) + '...' : v;
+      }
+    }
+    for (const val of Object.values(obj)) {
+      if (typeof val === 'string' && val.length > 0) {
+        return val.length > TOOL_INPUT_MAX_LENGTH ? val.slice(0, TOOL_INPUT_MAX_LENGTH - 3) + '...' : val;
+      }
+    }
+  } catch { /* invalid JSON — return empty */ }
+  return '';
+}
+
+/** Inline JS: extract a short readable summary from tool input JSON */
+export function toolInputLabelScript(): string {
+  return `
+    function toolInputLabel(input) {
+      if (!input) return '';
+      try {
+        var obj = typeof input === 'object' ? input : JSON.parse(input);
+        var keys = ${JSON.stringify(TOOL_INPUT_PRIORITY_KEYS)};
+        for (var i = 0; i < keys.length; i++) {
+          var v = obj[keys[i]];
+          if (typeof v === 'string' && v.length > 0) return v.length > ${TOOL_INPUT_MAX_LENGTH} ? v.slice(0, ${TOOL_INPUT_MAX_LENGTH - 3}) + '...' : v;
+        }
+        var allKeys = Object.keys(obj);
+        for (var j = 0; j < allKeys.length; j++) {
+          var val = obj[allKeys[j]];
+          if (typeof val === 'string' && val.length > 0) return val.length > ${TOOL_INPUT_MAX_LENGTH} ? val.slice(0, ${TOOL_INPUT_MAX_LENGTH - 3}) + '...' : val;
+        }
+      } catch (e) {}
+      return '';
+    }
+  `;
+}
+
 /** Shared JS helper functions used by multiple dashboard components */
 export function helpersScript(): string {
   return `
@@ -54,6 +100,8 @@ export function helpersScript(): string {
     function fmtTokens(n) {
       return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : '' + n;
     }
+
+    ${toolInputLabelScript()}
 
     function formatSchedule(task) {
       if (task.scheduleIntervalMs) {

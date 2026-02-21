@@ -73,7 +73,7 @@ export function requestProgressStyles(): string {
     }
     .rp-wf-row {
       display: grid;
-      grid-template-columns: 140px 1fr 50px;
+      grid-template-columns: 140px 1fr;
       align-items: center;
       gap: 8px;
       height: 22px;
@@ -92,7 +92,6 @@ export function requestProgressStyles(): string {
       height: 14px;
       background: rgba(255,255,255,0.02);
       border-radius: 3px;
-      overflow: hidden;
     }
     .rp-wf-bar {
       position: absolute;
@@ -113,11 +112,30 @@ export function requestProgressStyles(): string {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.6; }
     }
+    .rp-wf-meta {
+      position: absolute;
+      top: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      line-height: 14px;
+      pointer-events: none;
+    }
     .rp-wf-dur {
       font-size: 10px;
       color: var(--text-dim);
       font-variant-numeric: tabular-nums;
+      width: 50px;
       text-align: right;
+      flex-shrink: 0;
+    }
+    .rp-wf-input {
+      font-size: 10px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
     }
 
     /* Now marker */
@@ -232,14 +250,20 @@ export function requestProgressScript(): string {
           const barClass = isActive ? 'rp-wf-bar active' : 'rp-wf-bar done';
           const dur = t.durationMs != null ? fmtMs(t.durationMs) : (isActive ? fmtMs(now - t.startedAt) : '');
 
+          const inputText = toolInputLabel(t.input);
+          const rightEdgePct = leftPct + widthPct;
+          const metaStyle = 'left:calc(' + rightEdgePct.toFixed(1) + '% + 4px)';
           waterfallHtml +=
             '<div class="rp-wf-row" data-rp-tool="' + i + '">' +
               '<span class="rp-wf-label" title="' + escapeHtml(t.displayName) + '">' + escapeHtml(t.displayName) + '</span>' +
               '<div class="rp-wf-track">' +
                 '<div class="' + barClass + '" data-rp-bar style="left:' + leftPct.toFixed(1) + '%;width:' + widthPct.toFixed(1) + '%"></div>' +
                 (!progress.completed ? '<div class="rp-wf-now" data-rp-now style="left:' + (((now - reqStart) / totalDuration) * 100).toFixed(1) + '%"></div>' : '') +
+                '<div class="rp-wf-meta" data-rp-meta style="' + metaStyle + '">' +
+                  '<span class="rp-wf-dur" data-rp-dur>' + dur + '</span>' +
+                  (inputText ? '<span class="rp-wf-input" title="' + escapeHtml(inputText) + '">' + escapeHtml(inputText) + '</span>' : '') +
+                '</div>' +
               '</div>' +
-              '<span class="rp-wf-dur" data-rp-dur>' + dur + '</span>' +
             '</div>';
         }
         waterfallHtml += '</div>';
@@ -318,8 +342,13 @@ export function requestProgressScript(): string {
           bar.style.left = leftPct.toFixed(1) + '%';
           bar.style.width = widthPct.toFixed(1) + '%';
 
+          const rightEdge = leftPct + widthPct;
           if (durEl) {
             durEl.textContent = t.durationMs != null ? fmtMs(t.durationMs) : (isActive ? fmtMs(now - t.startedAt) : '');
+          }
+          const metaEl = row.querySelector('[data-rp-meta]');
+          if (metaEl) {
+            metaEl.style.left = 'calc(' + rightEdge.toFixed(1) + '% + 4px)';
           }
         }
 

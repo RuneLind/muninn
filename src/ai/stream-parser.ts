@@ -17,7 +17,7 @@ import type { ClaudeResult, ToolCall } from "../types.ts";
  */
 
 export type StreamProgressEvent =
-  | { type: "tool_start"; name: string; displayName: string }
+  | { type: "tool_start"; name: string; displayName: string; input?: string }
   | { type: "tool_end"; name: string; displayName: string }
   | { type: "text" };
 
@@ -122,7 +122,7 @@ export class StreamParser {
           input: block.input,
           startTimestamp: timestamp,
         });
-        this.onProgress?.({ type: "tool_start", name: block.name, displayName });
+        this.onProgress?.({ type: "tool_start", name: block.name, displayName, input: abbreviateInput(block.input) });
       }
     }
     // Fire text event if assistant responded with text and no tool calls

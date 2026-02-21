@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { escScript } from "./components/helpers.ts";
+import { escScript, toolInputLabelScript } from "./components/helpers.ts";
 
 export function renderTracesPage(): string {
   return `<!DOCTYPE html>
@@ -170,6 +170,18 @@ export function renderTracesPage(): string {
       color: var(--text-dim);
       line-height: 16px;
       width: 55px;
+    }
+    .waterfall-input {
+      position: absolute;
+      left: calc(100% + 65px);
+      top: 0;
+      font-size: 10px;
+      color: var(--text-faint);
+      line-height: 16px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
     }
 
     /* Span Details */
@@ -723,6 +735,8 @@ export function renderTracesPage(): string {
         const indent = '\u00A0\u00A0'.repeat(depth);
         const label = indent + s.name;
         const barKind = isToolSpan(s) ? 'tool' : s.kind;
+        const inputLabel = isToolSpan(s) ? toolInputLabel(s.attributes && s.attributes.input) : '';
+        const inputHtml = inputLabel ? '<span class="waterfall-input" title="' + esc(inputLabel) + '">' + esc(inputLabel) + '</span>' : '';
         return '<div class="waterfall-row">' +
           '<div class="waterfall-label" title="' + esc(s.name) + '">' + esc(label) + '</div>' +
           '<div class="waterfall-bar-container">' +
@@ -730,6 +744,7 @@ export function renderTracesPage(): string {
               'style="left:' + left + '%;width:' + width + '%"' +
               ' data-span-index="' + i + '">' +
               '<span class="waterfall-duration">' + fmtDuration(s.durationMs) + '</span>' +
+              inputHtml +
             '</div>' +
           '</div>' +
         '</div>';
@@ -758,6 +773,7 @@ export function renderTracesPage(): string {
     }
 
     ${escScript()}
+    ${toolInputLabelScript()}
 
     async function openPromptModal() {
       if (!currentWaterfallTraceId) return;
