@@ -242,6 +242,8 @@ const SIMULATOR_STYLES = `
       border-bottom-left-radius: 2px;
       border: 1px solid var(--border-primary);
     }
+    .msg-bot a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
+    .msg-bot a:hover { text-decoration-color: var(--accent-light); }
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
     .msg-time {
@@ -382,7 +384,7 @@ const SIMULATOR_SCRIPT = `
 
   // Load available bots
   async function loadBots() {
-    const res = await fetch('/simulator/bots');
+    const res = await fetch('/chat/bots');
     const data = await res.json();
     bots = data.bots;
     botSelect.innerHTML = bots.map(b =>
@@ -393,7 +395,7 @@ const SIMULATOR_SCRIPT = `
   // WebSocket connection
   function connectWs() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(protocol + '//' + location.host + '/simulator/ws');
+    ws = new WebSocket(protocol + '//' + location.host + '/chat/ws');
 
     ws.onmessage = function(e) {
       try {
@@ -469,7 +471,7 @@ const SIMULATOR_SCRIPT = `
       body.channelName = name.startsWith('#') ? name : '#' + name;
     }
 
-    const res = await fetch('/simulator/conversations', {
+    const res = await fetch('/chat/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -491,7 +493,7 @@ const SIMULATOR_SCRIPT = `
     chatInput.value = '';
     chatInput.style.height = 'auto';
 
-    await fetch('/simulator/conversations/' + activeConvId + '/messages', {
+    await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),

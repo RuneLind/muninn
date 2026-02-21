@@ -55,8 +55,8 @@ export const SHARED_STYLES = `
       /* Chat bubbles */
       --chat-user-bg: #1e3a5f;
       --chat-user-text: #c8ddf5;
-      --chat-assistant-bg: #1a3a2a;
-      --chat-assistant-text: #c8f5d8;
+      --chat-assistant-bg: #1a1d25;
+      --chat-assistant-text: #d8d8dc;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -130,7 +130,7 @@ export function renderNav(
         <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>
         <a href="/logs" class="nav-link${activePage === "logs" ? " active" : ""}">Logs</a>
         <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
-        <a href="/simulator" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
+        <a href="/chat" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>

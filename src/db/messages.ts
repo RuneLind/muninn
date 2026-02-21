@@ -85,6 +85,64 @@ export async function getRecentMessages(
     .reverse(); // chronological order
 }
 
+export interface SimConversationRow {
+  userId: string;
+  botName: string;
+  platform: string;
+  username: string | null;
+}
+
+/**
+ * Get distinct simulator conversations from the DB.
+ * Returns unique (user_id, bot_name, platform) tuples for sim-* users.
+ */
+export async function getSimConversations(): Promise<SimConversationRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT ON (user_id, bot_name, platform)
+      user_id, bot_name, platform, username
+    FROM messages
+    WHERE user_id LIKE 'sim-%'
+      AND platform IS NOT NULL
+    ORDER BY user_id, bot_name, platform, created_at DESC
+  `;
+  return rows.map((r) => ({
+    userId: r.user_id,
+    botName: r.bot_name,
+    platform: r.platform,
+    username: r.username,
+  }));
+}
+
+/**
+ * Get recent messages for a specific simulator conversation.
+ */
+export async function getSimMessages(
+  userId: string,
+  botName: string,
+  platform: string,
+  limit = 50,
+): Promise<{ id: string; role: string; content: string; createdAt: number }[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, role, content, created_at
+    FROM messages
+    WHERE user_id = ${userId}
+      AND bot_name = ${botName}
+      AND platform = ${platform}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows
+    .map((r) => ({
+      id: r.id,
+      role: r.role as string,
+      content: r.content as string,
+      createdAt: new Date(r.created_at).getTime(),
+    }))
+    .reverse();
+}
+
 export interface AlertMessage {
   id: string;
   source: string;

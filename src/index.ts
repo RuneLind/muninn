@@ -53,6 +53,17 @@ warmupEmbeddings();
 // Load persisted activity events from DB
 await activityLog.loadFromDb();
 
+// Hydrate simulator conversations from DB (best-effort — don't block startup)
+try {
+  const { simulatorState } = await import("./simulator/state.ts");
+  const hydratedCount = await simulatorState.hydrateFromDb();
+  if (hydratedCount > 0) {
+    log.info("Hydrated {count} conversations from DB", { count: hydratedCount });
+  }
+} catch (err) {
+  log.warn("Failed to hydrate chat conversations: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
+
 // Build the combined Hono app
 const dashboard = createDashboardRoutes(config);
 const app = new Hono();
@@ -61,7 +72,10 @@ app.route("/", dashboard);
 // Always mount simulator/chat routes — uses ALL bots (not just those with platform tokens)
 const sim = await import("./simulator/index.ts");
 const simulator = sim.createSimulatorRoutes(allBotConfigs, config);
-app.route("/simulator", simulator);
+app.route("/chat", simulator);
+// Redirect old /simulator paths for bookmarks/compat
+app.all("/simulator/*", (c) => c.redirect(c.req.path.replace("/simulator", "/chat"), 301));
+app.all("/simulator", (c) => c.redirect("/chat", 301));
 
 // Start server — with WebSocket support for chat
 const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
@@ -69,7 +83,7 @@ const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
   idleTimeout: 255, // max value, needed for SSE connections
   fetch(req, server) {
     const url = new URL(req.url);
-    if (url.pathname === "/simulator/ws") {
+    if (url.pathname === "/chat/ws" || url.pathname === "/simulator/ws") {
       const upgraded = server.upgrade(req, {
         data: { unsubscribe: null },
       });
@@ -86,7 +100,7 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 if (config.simulatorEnabled) {
   // Simulator mode — skip real platform startup
   activityLog.push("system", "Simulator mode enabled — real platform bots and scheduler are disabled");
-  log.info("Simulator mode — dashboard: http://localhost:{port}, simulator: http://localhost:{port}/simulator", { port: server.port });
+  log.info("Simulator mode — dashboard: http://localhost:{port}, chat: http://localhost:{port}/chat", { port: server.port });
 } else {
   // Normal mode — start real Telegram/Slack bots + scheduler
   telegramBotMap = new Map<string, Bot>();

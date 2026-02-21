@@ -10,7 +10,7 @@ const log = getLog("simulator");
 
 /**
  * Creates the simulator Hono sub-router.
- * Mounted at /simulator on the main dashboard server.
+ * Mounted at /chat on the main dashboard server.
  */
 export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): Hono {
   const app = new Hono();

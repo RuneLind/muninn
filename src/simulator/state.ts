@@ -1,3 +1,5 @@
+import { getSimConversations, getSimMessages } from "../db/messages.ts";
+
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant";
 
 export interface SimConversation {
@@ -110,6 +112,54 @@ export class SimulatorState {
     this.publish({ type: "status", conversationId, status });
   }
 
+  /**
+   * Hydrate conversations from database on startup.
+   * Creates deterministic conversation IDs from (userId, botName, platform)
+   * so they're stable across restarts.
+   */
+  async hydrateFromDb(): Promise<number> {
+    const convRows = await getSimConversations();
+    let count = 0;
+    const encoder = new TextEncoder();
+
+    for (const row of convRows) {
+      // Deterministic ID from the conversation tuple
+      const key = `${row.userId}:${row.botName}:${row.platform}`;
+      const hashBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(key));
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const id = hashArray.slice(0, 16).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+      // Skip if already exists in memory (in-memory takes priority)
+      if (this.conversations.has(id)) continue;
+
+      // Map platform to ConversationType
+      const type = platformToConversationType(row.platform);
+      if (!type) continue;
+
+      // Load messages
+      const msgs = await getSimMessages(row.userId, row.botName, row.platform);
+
+      const conversation: SimConversation = {
+        id,
+        type,
+        botName: row.botName,
+        userId: row.userId,
+        username: row.username ?? "simulator",
+        messages: msgs.map((m) => ({
+          id: m.id,
+          timestamp: m.createdAt,
+          sender: m.role === "user" ? "user" as const : "bot" as const,
+          text: m.content,
+        })),
+      };
+
+      this.conversations.set(id, conversation);
+      count++;
+    }
+
+    return count;
+  }
+
   /** Find or create a channel conversation for cross-channel posting */
   findOrCreateChannel(botName: string, channelName: string, userId: string, username: string): SimConversation {
     // Look for an existing channel conversation with this name and bot
@@ -126,6 +176,17 @@ export class SimulatorState {
       username,
       channelName,
     });
+  }
+}
+
+/** Map DB platform string to ConversationType */
+function platformToConversationType(platform: string): ConversationType | null {
+  switch (platform) {
+    case "telegram": return "telegram_dm";
+    case "slack_dm": return "slack_dm";
+    case "slack_channel": return "slack_channel";
+    case "slack_assistant": return "slack_assistant";
+    default: return null;
   }
 }
 
