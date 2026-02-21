@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "knowledge": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/rune/source/private/documents-vector-search",
+        "run",
+        "knowledge_api_mcp_adapter.py"
+      ],
+      "env": {
+        "KNOWLEDGE_API_URL": "http://localhost:8321",
+        "KNOWLEDGE_COLLECTIONS": "melosys-confluence-v3"
+      }
+    }
+  }
+}

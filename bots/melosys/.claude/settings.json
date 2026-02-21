@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+    "allow": [
+      "mcp__knowledge__search_knowledge",
+      "mcp__knowledge__get_document",
+      "mcp__knowledge__get_notion_page",
+      "mcp__knowledge__list_collections",
+      "WebFetch"
+    ]
+  },
+  "enableAllProjectMcpServers": true
+}
