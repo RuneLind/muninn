@@ -197,7 +197,7 @@ The bot is auto-discovered and starts handling messages immediately.
 
 | File | Purpose |
 |---|---|
-| `src/bots/config.ts` | `BotConfig` interface, `discoverBots()`, `discoverBotsForSimulator()` |
+| `src/bots/config.ts` | `BotConfig` interface, `discoverActiveBots()`, `discoverAllBots()` |
 | `src/index.ts` | Startup: discovers bots, starts Grammy/Slack + dashboard + scheduler per bot |
 | `src/ai/executor.ts` | Spawns Claude CLI with `cwd: botConfig.dir` |
 | `src/ai/tool-restrictions.ts` | Builds tool restriction prompt section |

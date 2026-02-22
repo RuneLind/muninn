@@ -38,9 +38,9 @@ No `.env` changes needed — `dev:simulator` uses env overrides automatically.
 | Scheduler | Enabled | Disabled |
 | Voice | Enabled | Disabled |
 | Bot tokens | Required | Not needed |
-| Bot discovery | `discoverBots()` — requires tokens | `discoverBotsForSimulator()` — only needs CLAUDE.md |
+| Bot discovery | `discoverActiveBots()` — requires tokens | `discoverAllBots()` — only needs CLAUDE.md |
 
-The simulator discovers bots using `discoverBotsForSimulator()`, which only requires a `CLAUDE.md` file (no platform tokens). This means any bot folder with a persona can be tested in the simulator.
+The simulator discovers bots using `discoverAllBots()`, which only requires a `CLAUDE.md` file (no platform tokens). This means any bot folder with a persona can be tested in the simulator.
 
 ### State Management
 
@@ -138,4 +138,4 @@ Both instances connect to the same PostgreSQL container (port 5434) but use diff
 | `src/simulator/routes.ts` | Hono REST API routes |
 | `src/simulator/ws.ts` | WebSocket handler for real-time updates |
 | `src/simulator/views/` | Browser UI HTML |
-| `src/bots/config.ts` | `discoverBotsForSimulator()` — token-free discovery |
+| `src/bots/config.ts` | `discoverAllBots()` — token-free discovery |

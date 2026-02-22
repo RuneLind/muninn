@@ -10,7 +10,7 @@ import { renderKnowledgePage } from "./views/knowledge-page.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
 import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "./mcp-client.ts";
-import { discoverBots, discoverBotsForSimulator } from "../bots/config.ts";
+import { discoverAllBots } from "../bots/config.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getAllGoals } from "../db/goals.ts";
@@ -456,7 +456,8 @@ export function createDashboardRoutes(config: Config): Hono {
 
   const getBotConfigs = () => {
     try {
-      return config.simulatorEnabled ? discoverBotsForSimulator() : discoverBots();
+      // MCP debug doesn't need platform tokens — always discover all bots
+      return discoverAllBots();
     } catch {
       return [];
     }

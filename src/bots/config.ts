@@ -50,22 +50,18 @@ export interface BotConfig {
 }
 
 /**
- * Scans bots/ directory and returns configs for bots that have:
- * 1. A CLAUDE.md file (persona)
- * 2. At least one platform token (Telegram or Slack)
- *
- * Claude CLI auto-discovers .mcp.json and .claude/settings.json
- * from the bot's dir (set as cwd), so we don't need explicit paths.
+ * Discovers all bot folders that have a CLAUDE.md — no platform tokens required.
+ * Used by dashboard (MCP debug, chat page) and simulator.
  */
-/**
- * Discovers bots for simulator mode — only requires CLAUDE.md (tokens are optional).
- * Uses the same loading logic as discoverBots() but skips the platform token requirement.
- */
-export function discoverBotsForSimulator(): BotConfig[] {
+export function discoverAllBots(): BotConfig[] {
   return discoverBotsInternal({ requireTokens: false });
 }
 
-export function discoverBots(): BotConfig[] {
+/**
+ * Discovers bots that have both a CLAUDE.md and at least one platform token
+ * (Telegram or Slack). Used for starting actual bot instances.
+ */
+export function discoverActiveBots(): BotConfig[] {
   return discoverBotsInternal({ requireTokens: true });
 }
 

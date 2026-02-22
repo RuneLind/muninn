@@ -1,6 +1,6 @@
 import { setupLogging, getLog } from "./logging.ts";
 import { loadConfig } from "./config.ts";
-import { discoverBots, discoverBotsForSimulator } from "./bots/config.ts";
+import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb, ensureSimulatorDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
@@ -16,12 +16,12 @@ import type { App as SlackApp } from "@slack/bolt";
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
-// Discover all bots with CLAUDE.md (token-optional — chat page needs all bots)
-const allBotConfigs = discoverBotsForSimulator();
+// Discover all bots with CLAUDE.md (dashboard/chat page needs all bots)
+const allBotConfigs = discoverAllBots();
 // For platform startup: only bots with Telegram/Slack tokens
 const botConfigs = config.simulatorEnabled
   ? allBotConfigs
-  : discoverBots();
+  : discoverActiveBots();
 
 if (allBotConfigs.length === 0) {
   log.error("No bots discovered. Ensure bots/<name>/CLAUDE.md exists.");
