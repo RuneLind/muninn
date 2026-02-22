@@ -126,11 +126,11 @@ export function renderNav(
       <nav>
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
         <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
-        <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">Search</a>
-        <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>
         <a href="/logs" class="nav-link${activePage === "logs" ? " active" : ""}">Logs</a>
-        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
         <a href="/chat" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
+        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
+        <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">MemSearch</a>
+        <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>
