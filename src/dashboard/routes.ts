@@ -18,7 +18,7 @@ import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../db/scheduled-tasks.ts";
 import { getRecentMemories, getMemoriesByUser, getMemoriesForUser, dashboardSearchMemories, getSearchStats } from "../db/memories.ts";
 import { generateEmbedding } from "../ai/embeddings.ts";
-import { getDashboardStats, getSlackAnalytics, getUsersSummary } from "../db/stats.ts";
+import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
 import { getAllThreadsForBot } from "../db/threads.ts";
@@ -141,6 +141,19 @@ export function createDashboardRoutes(config: Config): Hono {
     } catch (err) {
       log.error("Failed to fetch users: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch users" }, 500);
+    }
+  });
+
+  app.get("/api/users/:userId/overview", async (c) => {
+    try {
+      const userId = c.req.param("userId");
+      if (!userId) return c.json({ error: "Invalid userId" }, 400);
+      const botName = c.req.query("bot") || undefined;
+      const overview = await getUserOverview(userId, botName);
+      return c.json(overview);
+    } catch (err) {
+      log.error("Failed to fetch user overview: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch user overview" }, 500);
     }
   });
 

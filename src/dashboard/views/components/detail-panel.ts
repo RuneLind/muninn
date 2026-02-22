@@ -169,6 +169,20 @@ export function detailPanelStyles(): string {
       font-weight: 600;
       color: var(--text-primary);
     }
+    .detail-chat-btn {
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 12px;
+      background: var(--accent);
+      color: var(--text-primary);
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+    .detail-chat-btn:hover { background: var(--accent-hover); }
     .detail-user-platform {
       font-size: 11px;
       color: var(--text-dim);
@@ -261,6 +275,105 @@ export function detailPanelStyles(): string {
     }
     .detail-mini-memory + .detail-mini-memory { margin-top: 4px; }
     .detail-mini-memory .detail-tags { margin-top: 4px; }
+    /* Overview tab styles */
+    .overview-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 60px;
+      padding: 0 2px;
+      margin-bottom: 4px;
+    }
+    .overview-bar {
+      flex: 1;
+      min-width: 0;
+      background: var(--accent);
+      border-radius: 2px 2px 0 0;
+      opacity: 0.8;
+      transition: opacity 0.15s;
+    }
+    .overview-bar:hover { opacity: 1; }
+    .overview-chart-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 9px;
+      color: var(--text-disabled);
+      margin-bottom: 12px;
+    }
+    .overview-model-bar {
+      display: flex;
+      height: 10px;
+      border-radius: 5px;
+      overflow: hidden;
+      margin-bottom: 6px;
+    }
+    .overview-model-segment {
+      height: 100%;
+      min-width: 2px;
+    }
+    .overview-model-legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .overview-model-pill {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .overview-model-pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+    .overview-event {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border-subtle);
+      font-size: 12px;
+    }
+    .overview-event:last-child { border-bottom: none; }
+    .overview-event-time {
+      flex-shrink: 0;
+      width: 28px;
+      font-size: 10px;
+      color: var(--text-disabled);
+      text-align: right;
+    }
+    .overview-event-badge {
+      flex-shrink: 0;
+      width: 30px;
+      font-size: 9px;
+      font-weight: 700;
+      text-align: center;
+      padding: 2px 0;
+      border-radius: 3px;
+      text-transform: uppercase;
+    }
+    .overview-event-badge.in { background: var(--tint-info); color: var(--status-info, #60a5fa); }
+    .overview-event-badge.out { background: var(--tint-success); color: var(--status-success); }
+    .overview-event-badge.err { background: var(--tint-error, #3a1a1a); color: var(--status-error, #f87171); }
+    .overview-event-badge.sys { background: var(--tint-neutral); color: var(--text-dim); }
+    .overview-event-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-soft);
+    }
+    .overview-event-meta {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: right;
+    }
+
     .detail-skeleton {
       background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
       background-size: 200% 100%;
@@ -356,12 +469,12 @@ export function detailPanelScript(): string {
     });
 
     // --- Inline User Detail (master-detail panel) ---
-    let activeUserTab = 'messages';
+    let activeUserTab = 'overview';
     let userTabLoaded = {};
 
     function renderInlineUserDetail(u) {
       const content = document.getElementById('usersDetailContent');
-      activeUserTab = 'messages';
+      activeUserTab = 'overview';
       userTabLoaded = {};
 
       const initial = (u.username || u.userId || '?')[0].toUpperCase();
@@ -369,7 +482,7 @@ export function detailPanelScript(): string {
       const platformClass = platform.replace(/[^a-z_]/g, '');
 
       const tabs = [
-        { id: 'messages', label: 'Messages', count: u.messageCount || 0 },
+        { id: 'overview', label: 'Overview', count: 0 },
         { id: 'memories', label: 'Memories', count: u.memoryCount || 0 },
         { id: 'goals', label: 'Goals', count: u.activeGoalCount || 0 },
         { id: 'threads', label: 'Threads', count: u.threadCount || 0 },
@@ -381,12 +494,13 @@ export function detailPanelScript(): string {
         '<div class="md-detail-header">' +
           '<div class="detail-user-header">' +
             '<div class="detail-user-avatar" style="width:48px;height:48px;font-size:18px">' + escapeHtml(initial) + '</div>' +
-            '<div>' +
+            '<div style="flex:1">' +
               '<div class="detail-user-name">' + escapeHtml(u.username || u.userId) +
                 ' <span class="user-platform-badge ' + escapeAttr(platformClass) + '" style="font-size:10px">' + escapeHtml(platform) + '</span>' +
               '</div>' +
               '<div class="detail-user-platform" style="font-family:monospace;font-size:11px;margin-top:2px;color:var(--text-dim)">' + escapeHtml(u.userId || '') + '</div>' +
             '</div>' +
+            (selectedBot ? '<a class="detail-chat-btn" href="/chat?user=' + encodeURIComponent(u.userId) + '&bot=' + encodeURIComponent(selectedBot) + '&username=' + encodeURIComponent(u.username || u.userId) + '">Chat</a>' : '') +
           '</div>' +
           '<div class="detail-stat-row">' +
             '<div class="detail-stat-box"><div class="detail-stat-num">' + (u.messageCount || 0) + '</div><div class="detail-stat-label">Messages</div></div>' +
@@ -403,14 +517,14 @@ export function detailPanelScript(): string {
         '</div>' +
         '<div class="md-detail-tabs">' +
           tabs.map(t =>
-            '<button class="md-detail-tab' + (t.id === 'messages' ? ' active' : '') + '" data-utab="' + t.id + '">' +
+            '<button class="md-detail-tab' + (t.id === 'overview' ? ' active' : '') + '" data-utab="' + t.id + '">' +
               t.label + (t.count ? '<span class="md-tab-count">' + t.count + '</span>' : '') +
             '</button>'
           ).join('') +
         '</div>' +
         '<div class="md-detail-body">' +
           tabs.map(t =>
-            '<div class="md-detail-section' + (t.id === 'messages' ? ' active' : '') + '" data-utab-section="' + t.id + '">' +
+            '<div class="md-detail-section' + (t.id === 'overview' ? ' active' : '') + '" data-utab-section="' + t.id + '">' +
               '<div class="detail-skeleton"></div><div class="detail-skeleton" style="width:70%"></div>' +
             '</div>'
           ).join('') +
@@ -423,7 +537,7 @@ export function detailPanelScript(): string {
       });
 
       // Load initial tab
-      switchUserTab('messages');
+      switchUserTab('overview');
     }
 
     function switchUserTab(tabName) {
@@ -446,7 +560,7 @@ export function detailPanelScript(): string {
         if (!u) return;
         userTabLoaded[tabName] = true;
         switch (tabName) {
-          case 'messages': loadUserMessages(u); break;
+          case 'overview': loadUserOverview(u); break;
           case 'memories': loadUserMemories(u); break;
           case 'goals': loadUserGoals(u); break;
           case 'threads': loadUserThreads(u); break;
@@ -456,25 +570,97 @@ export function detailPanelScript(): string {
       }
     }
 
-    async function loadUserMessages(u) {
-      const sec = document.querySelector('[data-utab-section="messages"]');
+    async function loadUserOverview(u) {
+      const sec = document.querySelector('[data-utab-section="overview"]');
       try {
-        const url = appendBot('/api/messages/' + encodeURIComponent(u.userId) + '?limit=30');
+        const url = appendBot('/api/users/' + encodeURIComponent(u.userId) + '/overview');
         const res = await fetch(url);
         const data = await res.json();
-        const msgs = data.messages || [];
-        if (!msgs.length) { sec.innerHTML = '<div class="detail-empty-hint">No messages yet</div>'; return; }
-        sec.innerHTML = msgs.map(m => {
-          const text = escapeHtml(m.text || '');
-          const meta = (m.role === 'user' ? escapeHtml(m.username || 'User') : 'Bot') + ' &middot; ' + formatTime(m.timestamp);
-          const tokens = m.inputTokens || m.outputTokens
-            ? ' &middot; ' + fmtTokens((m.inputTokens || 0) + (m.outputTokens || 0)) + ' tok'
-            : '';
-          return '<div class="detail-msg role-' + m.role + '">' +
-            '<div class="detail-msg-meta">' + meta + tokens + '</div>' + text + '</div>';
-        }).join('');
-        sec.scrollTop = sec.scrollHeight;
-      } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load messages</div>'; }
+
+        const msgsByDay = data.messagesByDay || [];
+        const toksByDay = data.tokensByDay || [];
+        const avgMs = data.avgResponseMs || 0;
+        const models = data.modelDistribution || [];
+        const activity = data.recentActivity || [];
+
+        // Compute summary stats
+        const totalMsgs = msgsByDay.reduce((s, d) => s + d.count, 0);
+        const avgPerDay = msgsByDay.length ? (totalMsgs / msgsByDay.length).toFixed(1) : '0';
+        const totalToks = toksByDay.reduce((s, d) => s + d.tokens, 0);
+
+        // --- Stat cards ---
+        let html = '<div class="detail-stat-row">' +
+          '<div class="detail-stat-box"><div class="detail-stat-num">' + avgPerDay + '</div><div class="detail-stat-label">Msgs/day</div></div>' +
+          '<div class="detail-stat-box"><div class="detail-stat-num">' + (avgMs > 0 ? (avgMs / 1000).toFixed(1) + 's' : '-') + '</div><div class="detail-stat-label">Avg Response</div></div>' +
+          '<div class="detail-stat-box"><div class="detail-stat-num">' + fmtTokens(totalToks) + '</div><div class="detail-stat-label">Tokens (14d)</div></div>' +
+        '</div>';
+
+        // --- 14-day bar chart ---
+        const maxCount = Math.max(...msgsByDay.map(d => d.count), 1);
+        html += '<div class="detail-section"><div class="detail-section-title">Messages (14 days)</div>' +
+          '<div class="overview-chart">' +
+          msgsByDay.map(d => {
+            const pct = Math.max((d.count / maxCount) * 100, d.count > 0 ? 4 : 0);
+            return '<div class="overview-bar" style="height:' + pct + '%" title="' + escapeAttr(d.date) + ': ' + d.count + '"></div>';
+          }).join('') +
+          '</div>' +
+          '<div class="overview-chart-labels"><span>' + (msgsByDay[0]?.date?.slice(5) || '') + '</span><span>' + (msgsByDay[msgsByDay.length - 1]?.date?.slice(5) || '') + '</span></div>' +
+          '</div>';
+
+        // --- Model distribution ---
+        if (models.length) {
+          const modelColors = ['var(--accent)', 'var(--status-success)', '#f0c060', 'var(--status-info, #60a5fa)', '#f87171'];
+          const totalModel = models.reduce((s, m) => s + m.count, 0);
+          html += '<div class="detail-section"><div class="detail-section-title">Models (30 days)</div>' +
+            '<div class="overview-model-bar">' +
+            models.map((m, i) => {
+              const pct = (m.count / totalModel * 100).toFixed(1);
+              return '<div class="overview-model-segment" style="width:' + pct + '%;background:' + modelColors[i % modelColors.length] + '"></div>';
+            }).join('') +
+            '</div>' +
+            '<div class="overview-model-legend">' +
+            models.map((m, i) => {
+              const pct = (m.count / totalModel * 100).toFixed(0);
+              return '<span class="overview-model-pill"><span class="dot" style="background:' + modelColors[i % modelColors.length] + '"></span>' + escapeHtml(m.model) + ' ' + pct + '%</span>';
+            }).join('') +
+            '</div></div>';
+        }
+
+        // --- Recent Activity ---
+        html += '<div class="detail-section"><div class="detail-section-title">Recent Activity</div>';
+        if (!activity.length) {
+          html += '<div class="detail-empty-hint">No recent activity</div>';
+        } else {
+          const badgeMap = { message_in: 'in', message_out: 'out', error: 'err', system: 'sys', slack_channel_post: 'out' };
+          const labelMap = { message_in: 'IN', message_out: 'OUT', error: 'ERR', system: 'SYS', slack_channel_post: 'OUT' };
+          html += activity.map(e => {
+            const cls = badgeMap[e.type] || 'sys';
+            const label = labelMap[e.type] || e.type.slice(0, 3).toUpperCase();
+            const meta = e.durationMs ? (e.durationMs / 1000).toFixed(1) + 's' :
+              (e.inputTokens || e.outputTokens) ? fmtTokens((e.inputTokens || 0) + (e.outputTokens || 0)) : '';
+            return '<div class="overview-event">' +
+              '<span class="overview-event-time">' + shortTimeAgo(e.timestamp) + '</span>' +
+              '<span class="overview-event-badge ' + cls + '">' + label + '</span>' +
+              '<span class="overview-event-text">' + escapeHtml(e.text || '') + '</span>' +
+              (meta ? '<span class="overview-event-meta">' + meta + '</span>' : '') +
+            '</div>';
+          }).join('');
+        }
+        html += '</div>';
+
+        sec.innerHTML = html;
+      } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load overview</div>'; }
+    }
+
+    function shortTimeAgo(ts) {
+      const diff = Date.now() - ts;
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'now';
+      if (mins < 60) return mins + 'm';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h';
+      const days = Math.floor(hrs / 24);
+      return days + 'd';
     }
 
     async function loadUserMemories(u) {

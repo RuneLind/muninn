@@ -1,6 +1,6 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 
-export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant";
+export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
 export interface SimConversation {
   id: string;
@@ -186,6 +186,7 @@ function platformToConversationType(platform: string): ConversationType | null {
     case "slack_dm": return "slack_dm";
     case "slack_channel": return "slack_channel";
     case "slack_assistant": return "slack_assistant";
+    case "web": return "web";
     default: return null;
   }
 }

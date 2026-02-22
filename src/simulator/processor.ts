@@ -22,14 +22,11 @@ export async function processSimulatorMessage(
     throw new Error(`Conversation ${conversationId} not found`);
   }
 
-  // Map conversation type to platform
-  const platformMap: Record<string, Platform> = {
-    telegram_dm: "telegram",
-    slack_dm: "slack_dm",
-    slack_channel: "slack_channel",
-    slack_assistant: "slack_assistant",
-  };
-  const platform: Platform = platformMap[conversation.type] ?? "telegram";
+  // Messages sent from the chat page are stored as "web" platform, even when
+  // continuing a conversation that originated on Telegram or Slack.
+  const platform: Platform = "web";
+  // The original conversation type is still used for context gathering (e.g.
+  // Slack channel messages) and response formatting.
   const isSlack = conversation.type.startsWith("slack_");
 
   // Gather recent channel messages for context BEFORE adding user message

@@ -1,4 +1,4 @@
-export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown";
+export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown" | "web";
 
 export interface UserIdentity {
   name: string;

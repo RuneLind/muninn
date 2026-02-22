@@ -26,20 +26,12 @@ export function renderSimulatorPage(): string {
     <div class="sim-sidebar">
       <div class="sidebar-header">
         <h3>Conversations</h3>
+        <button class="new-chat-btn" id="newChatBtn">+ New</button>
       </div>
-      <div class="new-conv-buttons">
-        <button class="new-conv-btn" data-type="telegram_dm" title="Telegram DM">TG DM</button>
-        <button class="new-conv-btn" data-type="slack_dm" title="Slack DM">Slack DM</button>
-        <button class="new-conv-btn" data-type="slack_channel" title="Slack Channel">Channel</button>
-        <button class="new-conv-btn" data-type="slack_assistant" title="Slack Assistant">Assistant</button>
-      </div>
-      <div class="bot-selector">
-        <label>Bot:</label>
+      <div class="new-chat-picker" id="newChatPicker">
         <select id="botSelect"></select>
-      </div>
-      <div class="user-config">
-        <input id="simUserId" type="text" value="sim-user-1" placeholder="User ID" />
-        <input id="simUsername" type="text" value="chat-user" placeholder="Username" />
+        <button class="picker-start" id="newChatConfirm">Start</button>
+        <button class="picker-cancel" id="newChatCancel">&times;</button>
       </div>
       <div class="conv-list" id="convList">
         <div class="empty-state">No conversations yet</div>
@@ -53,7 +45,7 @@ export function renderSimulatorPage(): string {
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-messages" id="chatMessages">
-        <div class="empty-state">Start a conversation from the sidebar</div>
+        <div class="empty-state">Select a conversation from the sidebar</div>
       </div>
       <div class="chat-input">
         <textarea id="chatInput" placeholder="Type a message..." rows="1" disabled></textarea>
@@ -63,30 +55,11 @@ export function renderSimulatorPage(): string {
 
     <!-- Right: Inspector -->
     <div class="sim-inspector">
-      <h3>Inspector</h3>
       <div id="inspectorContent">
-        <div class="inspector-section">
-          <div class="inspector-label">Bot</div>
-          <div class="inspector-value" id="insBotName">-</div>
-        </div>
-        <div class="inspector-section">
-          <div class="inspector-label">Platform</div>
-          <div class="inspector-value" id="insPlatform">-</div>
-        </div>
-        <div class="inspector-section">
-          <div class="inspector-label">User</div>
-          <div class="inspector-value" id="insUser">-</div>
-        </div>
-        <div class="inspector-section">
-          <div class="inspector-label">Status</div>
-          <div class="inspector-value" id="insStatus">idle</div>
-        </div>
-        <div class="inspector-section">
-          <div class="inspector-label">Messages</div>
-          <div class="inspector-value" id="insMsgCount">0</div>
-        </div>
+        <div class="empty-state">Select a conversation</div>
       </div>
-      <h3 style="margin-top: 16px;">Activity Feed</h3>
+      <div id="inspectorContext"></div>
+      <h3 class="ins-heading">Activity Feed</h3>
       <div class="activity-feed" id="activityFeed">
         <div class="empty-state">Waiting for events...</div>
       </div>
@@ -113,7 +86,7 @@ const SIMULATOR_STYLES = `
     }
     .sim-layout {
       display: grid;
-      grid-template-columns: 260px 1fr 280px;
+      grid-template-columns: 280px 1fr 280px;
       flex: 1;
       min-height: 0;
       overflow: hidden;
@@ -129,36 +102,31 @@ const SIMULATOR_STYLES = `
     }
     .sidebar-header {
       padding: 12px 16px 8px;
-    }
-    .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
-    .new-conv-buttons {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      padding: 8px 12px;
-    }
-    .new-conv-btn {
-      background: color-mix(in srgb, var(--accent) 10%, transparent);
-      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-      color: var(--accent-light);
-      padding: 6px 8px;
-      border-radius: 6px;
-      font-size: 11px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .new-conv-btn:hover {
-      background: color-mix(in srgb, var(--accent) 20%, transparent);
-      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    }
-    .bot-selector, .user-config {
-      padding: 6px 12px;
       display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 0; }
+    .new-chat-btn {
+      background: var(--accent);
+      color: var(--text-primary);
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .new-chat-btn:hover { background: var(--accent-hover); }
+    .new-chat-picker {
+      display: none;
+      padding: 8px 12px;
       gap: 6px;
       align-items: center;
+      border-bottom: 1px solid var(--border-subtle);
     }
-    .bot-selector label { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
-    .bot-selector select, .user-config input {
+    .new-chat-picker select {
       flex: 1;
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);
@@ -167,14 +135,41 @@ const SIMULATOR_STYLES = `
       border-radius: 4px;
       font-size: 12px;
     }
-    .user-config input { width: 0; }
+    .picker-start {
+      background: var(--accent);
+      color: var(--text-primary);
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .picker-start:hover { background: var(--accent-hover); }
+    .picker-cancel {
+      background: none;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-muted);
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+    .picker-cancel:hover { border-color: var(--text-dim); }
     .conv-list {
       flex: 1;
       overflow-y: auto;
       padding: 8px;
     }
     .conv-item {
-      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
       border-radius: 6px;
       cursor: pointer;
       transition: background 0.15s;
@@ -182,17 +177,66 @@ const SIMULATOR_STYLES = `
     }
     .conv-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
     .conv-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
-    .conv-item-title { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
-    .conv-item-sub { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .conv-item-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-primary);
+      flex-shrink: 0;
+    }
+    .conv-item-content {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .conv-item-name {
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .conv-item-meta {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .conv-item-preview {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text-faint);
+    }
+    .conv-item-time {
+      font-size: 10px;
+      color: var(--text-faint);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
     .conv-item-badge {
       display: inline-block;
-      font-size: 10px;
+      font-size: 9px;
       padding: 1px 5px;
       border-radius: 3px;
-      margin-right: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      flex-shrink: 0;
     }
-    .badge-tg { background: var(--tint-info); color: var(--status-info); }
-    .badge-slack { background: var(--tint-magenta); color: var(--status-magenta); }
+    .badge-tg { background: #1a2a3e; color: #54a9eb; }
+    .badge-slack { background: #2a1a3e; color: #e0a0ff; }
+    .badge-web { background: #1a3a2a; color: #54eb8a; }
 
     /* Chat */
     .sim-chat {
@@ -286,6 +330,19 @@ const SIMULATOR_STYLES = `
     .chat-input button:hover:not(:disabled) { background: var(--accent-hover); }
     .chat-input button:disabled { background: var(--text-disabled); cursor: not-allowed; }
 
+    /* Cross-platform banner */
+    .cross-platform-banner {
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-dim);
+      padding: 6px 12px;
+      background: color-mix(in srgb, var(--accent) 5%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      flex-shrink: 0;
+    }
+
     /* Inspector */
     .sim-inspector {
       background: var(--bg-panel);
@@ -293,10 +350,105 @@ const SIMULATOR_STYLES = `
       padding: 12px 16px;
       overflow-y: auto;
     }
-    .sim-inspector h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
-    .inspector-section { margin-bottom: 10px; }
-    .inspector-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.3px; }
-    .inspector-value { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+    .ins-heading {
+      font-size: 14px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 16px 0 12px;
+    }
+    .ins-user-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .ins-user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-primary);
+      flex-shrink: 0;
+    }
+    .ins-user-info { flex: 1; min-width: 0; }
+    .ins-user-name { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+    .ins-user-id { font-size: 10px; color: var(--text-dim); font-family: monospace; margin-top: 2px; }
+    .ins-info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 3px 0;
+      font-size: 12px;
+    }
+    .ins-info-label { color: var(--text-faint); }
+    .ins-info-value { color: var(--text-secondary); }
+    .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 10px 0; }
+    .ins-section { margin-bottom: 12px; }
+    .ins-section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-faint);
+      font-weight: 600;
+      margin-bottom: 6px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .ins-mini-item {
+      padding: 6px 8px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--text-soft);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .ins-mini-memory {
+      padding: 6px 8px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      font-size: 11px;
+      color: var(--text-soft);
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+    .ins-tags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+    .ins-tag {
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--bg-surface);
+      color: var(--accent-muted);
+    }
+    .ins-skeleton {
+      background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 6px;
+      height: 24px;
+      margin-bottom: 4px;
+    }
+    .ins-empty-hint {
+      font-size: 11px;
+      color: var(--text-disabled);
+      font-style: italic;
+      padding: 4px 0;
+    }
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
     .activity-feed {
       font-size: 12px;
       max-height: 400px;
@@ -360,65 +512,105 @@ const CHAT_SSE_SCRIPT = `
 const SIMULATOR_SCRIPT = `
 (function() {
   // State
-  let conversations = {};
-  let activeConvId = null;
-  let bots = [];
-  let ws = null;
+  var conversations = {};
+  var activeConvId = null;
+  var bots = [];
+  var ws = null;
+  var deepLinkHandled = false;
+  var inspectorContextKey = null;
 
   // DOM refs
-  const botSelect = document.getElementById('botSelect');
-  const convList = document.getElementById('convList');
-  const chatMessages = document.getElementById('chatMessages');
-  const chatInput = document.getElementById('chatInput');
-  const chatSend = document.getElementById('chatSend');
-  const chatHeader = document.getElementById('chatHeader');
-  const chatStatus = document.getElementById('chatStatus');
-  const activityFeed = document.getElementById('activityFeed');
+  var convList = document.getElementById('convList');
+  var chatMessages = document.getElementById('chatMessages');
+  var chatInput = document.getElementById('chatInput');
+  var chatSend = document.getElementById('chatSend');
+  var chatHeader = document.getElementById('chatHeader');
+  var chatStatus = document.getElementById('chatStatus');
+  var activityFeed = document.getElementById('activityFeed');
+  var inspectorContent = document.getElementById('inspectorContent');
+  var inspectorContext = document.getElementById('inspectorContext');
+  var botSelect = document.getElementById('botSelect');
+  var newChatPicker = document.getElementById('newChatPicker');
 
-  // Inspector refs
-  const insBotName = document.getElementById('insBotName');
-  const insPlatform = document.getElementById('insPlatform');
-  const insUser = document.getElementById('insUser');
-  const insStatus = document.getElementById('insStatus');
-  const insMsgCount = document.getElementById('insMsgCount');
+  // Platform helpers
+  function typePlatformLabel(type) {
+    switch(type) {
+      case 'telegram_dm': return 'Telegram';
+      case 'slack_dm': return 'Slack DM';
+      case 'slack_channel': return 'Slack Channel';
+      case 'slack_assistant': return 'Slack Assistant';
+      case 'web': return 'Web';
+      default: return type;
+    }
+  }
+
+  function platformBadgeHtml(type) {
+    if (type === 'web') return '<span class="conv-item-badge badge-web">Web</span>';
+    if (type.startsWith('telegram')) return '<span class="conv-item-badge badge-tg">TG</span>';
+    return '<span class="conv-item-badge badge-slack">Slack</span>';
+  }
 
   // Load available bots
   async function loadBots() {
-    const res = await fetch('/chat/bots');
-    const data = await res.json();
+    var res = await fetch('/chat/bots');
+    var data = await res.json();
     bots = data.bots;
-    botSelect.innerHTML = bots.map(b =>
-      '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) + '</option>'
-    ).join('');
+    botSelect.innerHTML = bots.map(function(b) {
+      return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) + '</option>';
+    }).join('');
   }
+
+  // New Chat flow
+  var pickerVisible = false;
+  document.getElementById('newChatBtn').onclick = function() {
+    pickerVisible = !pickerVisible;
+    newChatPicker.style.display = pickerVisible ? 'flex' : 'none';
+  };
+  document.getElementById('newChatCancel').onclick = function() {
+    pickerVisible = false;
+    newChatPicker.style.display = 'none';
+  };
+  document.getElementById('newChatConfirm').onclick = async function() {
+    var botName = botSelect.value;
+    if (!botName) return;
+    var res = await fetch('/chat/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'web', botName: botName, userId: 'web-user', username: 'web-user' }),
+    });
+    if (res.ok) {
+      var data = await res.json();
+      conversations[data.conversation.id] = data.conversation;
+      selectConversation(data.conversation.id);
+      renderConvList();
+    }
+    pickerVisible = false;
+    newChatPicker.style.display = 'none';
+  };
 
   // WebSocket connection
   function connectWs() {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + location.host + '/chat/ws');
-
     ws.onmessage = function(e) {
-      try {
-        const event = JSON.parse(e.data);
-        handleWsEvent(event);
-      } catch (err) {
-        console.warn('Failed to parse WS message:', err);
-      }
+      try { handleWsEvent(JSON.parse(e.data)); }
+      catch (err) { console.warn('Failed to parse WS message:', err); }
     };
-
-    ws.onclose = function() {
-      setTimeout(connectWs, 2000);
-    };
+    ws.onclose = function() { setTimeout(connectWs, 2000); };
   }
 
   function handleWsEvent(event) {
     if (event.type === 'snapshot') {
-      // Initial state snapshot
-      for (const conv of event.conversations) {
+      for (var i = 0; i < event.conversations.length; i++) {
+        var conv = event.conversations[i];
         conversations[conv.id] = conv;
       }
       renderConvList();
       if (activeConvId) renderChat();
+      if (!deepLinkHandled) {
+        deepLinkHandled = true;
+        handleDeepLink();
+      }
       return;
     }
 
@@ -429,7 +621,7 @@ const SIMULATOR_SCRIPT = `
     }
 
     if (event.type === 'message') {
-      const conv = conversations[event.conversationId];
+      var conv = conversations[event.conversationId];
       if (conv) {
         conv.messages.push(event.message);
         if (event.conversationId === activeConvId) {
@@ -443,12 +635,11 @@ const SIMULATOR_SCRIPT = `
     }
 
     if (event.type === 'status') {
-      const conv = conversations[event.conversationId];
+      var conv = conversations[event.conversationId];
       if (conv) {
         conv.status = event.status;
         if (event.conversationId === activeConvId) {
           chatStatus.textContent = event.status || '';
-          insStatus.textContent = event.status || 'idle';
           updateTypingIndicator(event.status);
         }
       }
@@ -456,47 +647,52 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Create conversation
-  async function createConversation(type) {
-    const botName = botSelect.value;
-    const userId = document.getElementById('simUserId').value || 'sim-user-1';
-    const username = document.getElementById('simUsername').value || 'chat-user';
+  // Deep-link from dashboard: /chat?user=<id>&bot=<name>&username=<name>
+  function handleDeepLink() {
+    var params = new URLSearchParams(window.location.search);
+    var userId = params.get('user');
+    var botName = params.get('bot');
+    var username = params.get('username');
+    if (!userId || !botName) return;
 
-    const body = { type, botName, userId, username };
-
-    // For channel type, prompt for name
-    if (type === 'slack_channel') {
-      const name = prompt('Channel name (e.g. #general):', '#general');
-      if (!name) return;
-      body.channelName = name.startsWith('#') ? name : '#' + name;
+    // Find existing conversation for this user+bot
+    var convs = Object.values(conversations);
+    var match = null;
+    for (var i = 0; i < convs.length; i++) {
+      if (convs[i].userId === userId && convs[i].botName === botName) {
+        match = convs[i];
+        break;
+      }
+    }
+    if (match) {
+      selectConversation(match.id);
+      return;
     }
 
-    const res = await fetch('/chat/conversations', {
+    // Create a new web conversation
+    fetch('/chat/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ type: 'web', botName: botName, userId: userId, username: username || 'user' }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.conversation) {
+        conversations[data.conversation.id] = data.conversation;
+        selectConversation(data.conversation.id);
+        renderConvList();
+      }
     });
-
-    if (res.ok) {
-      const data = await res.json();
-      conversations[data.conversation.id] = data.conversation;
-      selectConversation(data.conversation.id);
-      renderConvList();
-    }
   }
 
   // Send message
   async function sendMessage() {
     if (!activeConvId || !chatInput.value.trim()) return;
-
-    const text = chatInput.value.trim();
+    var text = chatInput.value.trim();
     chatInput.value = '';
     chatInput.style.height = 'auto';
-
     await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text: text }),
     });
   }
 
@@ -510,32 +706,45 @@ const SIMULATOR_SCRIPT = `
     updateInspector();
   }
 
-  // Render conversation list
+  // Render conversation list (sorted by most recent message)
   function renderConvList() {
-    const convs = Object.values(conversations);
+    var convs = Object.values(conversations);
     if (convs.length === 0) {
       convList.innerHTML = '<div class="empty-state">No conversations yet</div>';
       return;
     }
 
+    convs.sort(function(a, b) {
+      var aTime = a.messages.length > 0 ? a.messages[a.messages.length - 1].timestamp : 0;
+      var bTime = b.messages.length > 0 ? b.messages[b.messages.length - 1].timestamp : 0;
+      return bTime - aTime;
+    });
+
     convList.innerHTML = convs.map(function(c) {
-      const isActive = c.id === activeConvId;
-      const isTg = c.type.startsWith('telegram');
-      const badge = isTg
-        ? '<span class="conv-item-badge badge-tg">TG</span>'
-        : '<span class="conv-item-badge badge-slack">Slack</span>';
-      const label = c.channelName || c.type.replace('_', ' ');
-      const lastMsg = c.messages.length > 0
-        ? c.messages[c.messages.length - 1].text.slice(0, 40) + (c.messages[c.messages.length - 1].text.length > 40 ? '...' : '')
-        : 'No messages';
+      var isActive = c.id === activeConvId;
+      var initial = (c.username || c.userId || '?')[0].toUpperCase();
+      var badge = platformBadgeHtml(c.type);
+      var lastMsg = c.messages.length > 0
+        ? c.messages[c.messages.length - 1].text.slice(0, 30)
+        : '';
+      var lastTime = c.messages.length > 0
+        ? timeAgo(c.messages[c.messages.length - 1].timestamp)
+        : '';
 
       return '<div class="conv-item' + (isActive ? ' active' : '') + '" data-id="' + c.id + '">'
-        + '<div class="conv-item-title">' + badge + escapeHtml(c.botName) + '</div>'
-        + '<div class="conv-item-sub">' + escapeHtml(label) + ' | ' + escapeHtml(lastMsg) + '</div>'
+        + '<div class="conv-item-avatar">' + escapeHtml(initial) + '</div>'
+        + '<div class="conv-item-content">'
+          + '<div class="conv-item-name">' + escapeHtml(c.username || c.userId) + '</div>'
+          + '<div class="conv-item-meta">'
+            + badge
+            + ' <span>' + escapeHtml(c.botName) + '</span>'
+            + (lastMsg ? ' <span class="conv-item-preview">&middot; ' + escapeHtml(lastMsg) + '</span>' : '')
+          + '</div>'
+        + '</div>'
+        + (lastTime ? '<div class="conv-item-time">' + escapeHtml(lastTime) + '</div>' : '')
         + '</div>';
     }).join('');
 
-    // Attach click handlers
     convList.querySelectorAll('.conv-item').forEach(function(el) {
       el.onclick = function() { selectConversation(el.dataset.id); };
     });
@@ -543,18 +752,24 @@ const SIMULATOR_SCRIPT = `
 
   // Render full chat view
   function renderChat() {
-    const conv = conversations[activeConvId];
+    var conv = conversations[activeConvId];
     if (!conv) return;
 
-    const isTg = conv.type.startsWith('telegram');
-    const titlePrefix = isTg ? 'Telegram' : 'Slack';
-    const titleSuffix = conv.channelName || conv.type.split('_').pop();
-    chatHeader.querySelector('.chat-title').textContent = titlePrefix + ' | ' + conv.botName + ' | ' + titleSuffix;
+    chatHeader.querySelector('.chat-title').textContent = (conv.username || conv.userId) + ' \\u00b7 ' + conv.botName;
     chatStatus.textContent = conv.status || '';
 
     chatMessages.innerHTML = '';
-    for (const msg of conv.messages) {
-      appendMessage(msg, conv.type);
+
+    // Cross-platform banner for non-web conversations
+    if (conv.type !== 'web') {
+      var banner = document.createElement('div');
+      banner.className = 'cross-platform-banner';
+      banner.textContent = 'Conversation from ' + typePlatformLabel(conv.type) + ' \\u2014 replies sent via web';
+      chatMessages.appendChild(banner);
+    }
+
+    for (var i = 0; i < conv.messages.length; i++) {
+      appendMessage(conv.messages[i], conv.type);
     }
     updateTypingIndicator(conv.status);
     scrollToBottom();
@@ -562,15 +777,13 @@ const SIMULATOR_SCRIPT = `
 
   // Append a single message to the chat
   function appendMessage(msg, convType) {
-    // Remove typing indicator if present
-    const existing = chatMessages.querySelector('.typing-indicator');
+    var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
 
-    const isTg = convType.startsWith('telegram');
-    const div = document.createElement('div');
+    var isTg = convType.startsWith('telegram') || convType === 'web';
+    var div = document.createElement('div');
     div.className = 'msg msg-' + msg.sender + (msg.sender === 'bot' ? (isTg ? ' telegram' : ' slack') : '');
 
-    // For bot messages: render HTML for telegram, render mrkdwn-ish for slack
     if (msg.sender === 'bot' && isTg) {
       div.innerHTML = sanitizeTelegramHtml(msg.text);
     } else if (msg.sender === 'bot') {
@@ -579,7 +792,7 @@ const SIMULATOR_SCRIPT = `
       div.textContent = msg.text;
     }
 
-    const time = document.createElement('div');
+    var time = document.createElement('div');
     time.className = 'msg-time';
     time.textContent = new Date(msg.timestamp).toLocaleTimeString();
     div.appendChild(time);
@@ -590,11 +803,10 @@ const SIMULATOR_SCRIPT = `
 
   // Typing indicator
   function updateTypingIndicator(status) {
-    const existing = chatMessages.querySelector('.typing-indicator');
+    var existing = chatMessages.querySelector('.typing-indicator');
     if (existing) existing.remove();
-
     if (status && status.length > 0) {
-      const indicator = document.createElement('div');
+      var indicator = document.createElement('div');
       indicator.className = 'typing-indicator';
       indicator.innerHTML = '<span></span><span></span><span></span>';
       chatMessages.appendChild(indicator);
@@ -608,13 +820,96 @@ const SIMULATOR_SCRIPT = `
 
   // Update inspector panel
   function updateInspector() {
-    const conv = conversations[activeConvId];
+    var conv = conversations[activeConvId];
     if (!conv) return;
-    insBotName.textContent = conv.botName;
-    insPlatform.textContent = conv.type.replace(/_/g, ' ');
-    insUser.textContent = conv.username + ' (' + conv.userId + ')';
-    insStatus.textContent = conv.status || 'idle';
-    insMsgCount.textContent = String(conv.messages.length);
+
+    var initial = (conv.username || conv.userId || '?')[0].toUpperCase();
+    var badge = platformBadgeHtml(conv.type);
+    var statusText = conv.status || 'idle';
+
+    inspectorContent.innerHTML =
+      '<div class="ins-user-header">'
+        + '<div class="ins-user-avatar">' + escapeHtml(initial) + '</div>'
+        + '<div class="ins-user-info">'
+          + '<div class="ins-user-name">' + escapeHtml(conv.username || conv.userId) + ' ' + badge + '</div>'
+          + '<div class="ins-user-id">' + escapeHtml(conv.userId) + '</div>'
+        + '</div>'
+      + '</div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(conv.botName) + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Messages</span><span class="ins-info-value">' + conv.messages.length + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText) + '</span></div>'
+      + '<hr class="ins-divider">';
+
+    // Load context sections if user changed
+    var contextKey = conv.userId + ':' + conv.botName;
+    if (inspectorContextKey !== contextKey) {
+      inspectorContextKey = contextKey;
+      loadInspectorContext(conv.userId, conv.botName);
+    }
+  }
+
+  function loadInspectorContext(userId, botName) {
+    var bp = encodeURIComponent(botName);
+    var up = encodeURIComponent(userId);
+
+    inspectorContext.innerHTML =
+      '<div class="ins-section"><div class="ins-section-title">Memories</div><div id="insMemories"><div class="ins-skeleton"></div><div class="ins-skeleton" style="width:70%"></div></div></div>'
+      + '<div class="ins-section"><div class="ins-section-title">Goals</div><div id="insGoals"><div class="ins-skeleton"></div></div></div>'
+      + '<div class="ins-section"><div class="ins-section-title">Tasks</div><div id="insTasks"><div class="ins-skeleton"></div></div></div>';
+
+    // Memories
+    fetch('/api/memories/user/' + up + '?limit=5&bot=' + bp)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var el = document.getElementById('insMemories');
+        if (!el) return;
+        var memories = data.memories || [];
+        if (!memories.length) { el.innerHTML = '<div class="ins-empty-hint">No memories</div>'; return; }
+        el.innerHTML = memories.map(function(m) {
+          var tags = (m.tags || []).map(function(t) { return '<span class="ins-tag">' + escapeHtml(t) + '</span>'; }).join('');
+          return '<div class="ins-mini-memory">' + escapeHtml(m.summary)
+            + (tags ? '<div class="ins-tags">' + tags + '</div>' : '')
+            + '</div>';
+        }).join('');
+      })
+      .catch(function() {
+        var el = document.getElementById('insMemories');
+        if (el) el.innerHTML = '<div class="ins-empty-hint">Failed to load</div>';
+      });
+
+    // Goals
+    fetch('/api/goals/' + up + '?bot=' + bp)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var el = document.getElementById('insGoals');
+        if (!el) return;
+        var goals = (data.goals || []).filter(function(g) { return g.status === 'active'; });
+        if (!goals.length) { el.innerHTML = '<div class="ins-empty-hint">No active goals</div>'; return; }
+        el.innerHTML = goals.map(function(g) {
+          return '<div class="ins-mini-item">' + escapeHtml(g.title) + '</div>';
+        }).join('');
+      })
+      .catch(function() {
+        var el = document.getElementById('insGoals');
+        if (el) el.innerHTML = '<div class="ins-empty-hint">Failed to load</div>';
+      });
+
+    // Tasks
+    fetch('/api/scheduled-tasks/' + up + '?bot=' + bp)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var el = document.getElementById('insTasks');
+        if (!el) return;
+        var tasks = data.tasks || [];
+        if (!tasks.length) { el.innerHTML = '<div class="ins-empty-hint">No scheduled tasks</div>'; return; }
+        el.innerHTML = tasks.map(function(t) {
+          return '<div class="ins-mini-item">' + escapeHtml(t.title) + '</div>';
+        }).join('');
+      })
+      .catch(function() {
+        var el = document.getElementById('insTasks');
+        if (el) el.innerHTML = '<div class="ins-empty-hint">Failed to load</div>';
+      });
   }
 
   // Activity feed
@@ -622,14 +917,12 @@ const SIMULATOR_SCRIPT = `
     if (activityFeed.querySelector('.empty-state')) {
       activityFeed.innerHTML = '';
     }
-    const div = document.createElement('div');
+    var div = document.createElement('div');
     div.className = 'activity-item';
     div.innerHTML = '<span class="act-time">' + new Date().toLocaleTimeString() + '</span> '
       + '<span class="act-type">' + type + '</span> '
       + escapeHtml(text);
     activityFeed.insertBefore(div, activityFeed.firstChild);
-
-    // Keep max 50 items
     while (activityFeed.children.length > 50) {
       activityFeed.removeChild(activityFeed.lastChild);
     }
@@ -637,7 +930,6 @@ const SIMULATOR_SCRIPT = `
 
   // Minimal Slack mrkdwn renderer
   function renderSlackMrkdwn(text) {
-    // Extract Slack links before HTML escaping (they use < > which escapeHtml converts)
     var links = [];
     var t = text.replace(/<(https?:\\/\\/[^|>]+)\\|([^>]+)>/g, function(_, url, label) {
       links.push({url: url, label: label});
@@ -667,14 +959,12 @@ const SIMULATOR_SCRIPT = `
       var children = Array.from(node.childNodes);
       for (var i = 0; i < children.length; i++) {
         var child = children[i];
-        if (child.nodeType === 1) { // Element
+        if (child.nodeType === 1) {
           var tag = child.tagName.toLowerCase();
           if (allowedTags.indexOf(tag) === -1) {
-            // Replace disallowed element with its text content
             var text = document.createTextNode(child.textContent || '');
             node.replaceChild(text, child);
           } else {
-            // Strip all attributes except href on <a> (http/https only) and class on <code>
             var attrs = Array.from(child.attributes);
             for (var j = 0; j < attrs.length; j++) {
               var attr = attrs[j];
@@ -682,7 +972,6 @@ const SIMULATOR_SCRIPT = `
               if (tag === 'code' && attr.name === 'class') continue;
               child.removeAttribute(attr.name);
             }
-            // Set target=_blank on links
             if (tag === 'a') child.setAttribute('target', '_blank');
             walk(child);
           }
@@ -694,20 +983,13 @@ const SIMULATOR_SCRIPT = `
   }
 
   // Event listeners
-  document.querySelectorAll('.new-conv-btn').forEach(function(btn) {
-    btn.onclick = function() { createConversation(btn.dataset.type); };
-  });
-
   chatSend.onclick = sendMessage;
-
   chatInput.onkeydown = function(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
   };
-
-  // Auto-resize textarea
   chatInput.oninput = function() {
     chatInput.style.height = 'auto';
     chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';

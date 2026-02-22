@@ -82,6 +82,7 @@ CREATE TABLE activity_log (
 );
 
 CREATE INDEX idx_activity_log_created ON activity_log(created_at DESC);
+CREATE INDEX idx_activity_log_user ON activity_log(user_id, bot_name, created_at DESC);
 
 -- ============================================================================
 -- Memories: searchable via full-text search + vector embeddings

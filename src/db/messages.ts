@@ -93,18 +93,22 @@ export interface SimConversationRow {
 }
 
 /**
- * Get distinct chat conversations from the DB.
- * Returns unique (user_id, bot_name, platform) tuples for sim-* users.
+ * Get distinct chat conversations from the DB, ordered by most recent activity.
+ * Returns unique (user_id, bot_name, platform) tuples, limited to the 100 most
+ * recently active conversations to avoid slow page loads with many users.
  */
 export async function getSimConversations(): Promise<SimConversationRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT DISTINCT ON (user_id, bot_name, platform)
-      user_id, bot_name, platform, username
-    FROM messages
-    WHERE user_id LIKE 'sim-%'
-      AND platform IS NOT NULL
-    ORDER BY user_id, bot_name, platform, created_at DESC
+    SELECT user_id, bot_name, platform, username FROM (
+      SELECT DISTINCT ON (user_id, bot_name, platform)
+        user_id, bot_name, platform, username, created_at
+      FROM messages
+      WHERE platform IS NOT NULL
+      ORDER BY user_id, bot_name, platform, created_at DESC
+    ) sub
+    ORDER BY created_at DESC
+    LIMIT 100
   `;
   return rows.map((r) => ({
     userId: r.user_id,

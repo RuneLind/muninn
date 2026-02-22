@@ -132,6 +132,99 @@ export async function getDashboardStats(botName?: string): Promise<DashboardStat
   };
 }
 
+// --- User Overview (detail panel) ---
+
+export interface UserOverview {
+  messagesByDay: { date: string; count: number }[];
+  tokensByDay: { date: string; tokens: number }[];
+  avgResponseMs: number;
+  modelDistribution: { model: string; count: number }[];
+  recentActivity: {
+    id: string;
+    type: string;
+    text: string;
+    timestamp: number;
+    durationMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    model?: string;
+  }[];
+}
+
+export async function getUserOverview(userId: string, botName?: string): Promise<UserOverview> {
+  const sql = getDb();
+
+  const andBot = botName ? "AND bot_name = $2" : "";
+  const params: (string | number)[] = [userId];
+  if (botName) params.push(botName);
+
+  const [messagesByDay, tokensByDay, [avgRow], modelDist, recentActivity] = await Promise.all([
+    // 14-day messages by day
+    sql.unsafe(`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(count(m.id), 0)::int AS count
+      FROM generate_series(CURRENT_DATE - interval '13 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day AND m.user_id = $1 ${andBot}
+      GROUP BY d.day
+      ORDER BY d.day
+    `, params),
+    // 14-day tokens by day (assistant messages only)
+    sql.unsafe(`
+      SELECT
+        to_char(d.day, 'YYYY-MM-DD') AS date,
+        coalesce(sum(coalesce(m.input_tokens, 0) + coalesce(m.output_tokens, 0)), 0)::int AS tokens
+      FROM generate_series(CURRENT_DATE - interval '13 days', CURRENT_DATE, '1 day') AS d(day)
+      LEFT JOIN messages m ON m.created_at::date = d.day AND m.user_id = $1 AND m.role = 'assistant' ${andBot}
+      GROUP BY d.day
+      ORDER BY d.day
+    `, params),
+    // Avg response time
+    sql.unsafe(`
+      SELECT coalesce(avg(duration_ms) FILTER (WHERE duration_ms IS NOT NULL), 0) AS avg_ms
+      FROM messages
+      WHERE user_id = $1 AND role = 'assistant' ${andBot}
+    `, params),
+    // Model distribution (last 30 days)
+    sql.unsafe(`
+      SELECT coalesce(model, 'unknown') AS model, count(*)::int AS count
+      FROM messages
+      WHERE user_id = $1 AND role = 'assistant' AND model IS NOT NULL
+        AND created_at >= CURRENT_DATE - interval '30 days' ${andBot}
+      GROUP BY model
+      ORDER BY count DESC
+    `, params),
+    // Recent activity from activity_log
+    sql.unsafe(`
+      SELECT id, type, text, created_at, duration_ms, metadata
+      FROM activity_log
+      WHERE user_id = $1 ${andBot}
+      ORDER BY created_at DESC
+      LIMIT 20
+    `, params),
+  ]);
+
+  return {
+    messagesByDay: messagesByDay.map((r) => ({ date: r.date, count: Number(r.count) })),
+    tokensByDay: tokensByDay.map((r) => ({ date: r.date, tokens: Number(r.tokens) })),
+    avgResponseMs: Number(avgRow!.avg_ms),
+    modelDistribution: modelDist.map((r) => ({ model: r.model, count: Number(r.count) })),
+    recentActivity: recentActivity.map((r) => {
+      const meta = r.metadata as Record<string, unknown> | null;
+      return {
+        id: r.id,
+        type: r.type,
+        text: r.text,
+        timestamp: new Date(r.created_at).getTime(),
+        durationMs: r.duration_ms ?? undefined,
+        inputTokens: meta?.inputTokens as number | undefined,
+        outputTokens: meta?.outputTokens as number | undefined,
+        model: meta?.model as string | undefined,
+      };
+    }),
+  };
+}
+
 // --- Users Summary ---
 
 export interface UserSummary {

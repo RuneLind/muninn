@@ -50,7 +50,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       return c.json({ error: `Bot "${body.botName}" not found` }, 404);
     }
 
-    const validTypes: ConversationType[] = ["telegram_dm", "slack_dm", "slack_channel", "slack_assistant"];
+    const validTypes: ConversationType[] = ["telegram_dm", "slack_dm", "slack_channel", "slack_assistant", "web"];
     if (!validTypes.includes(body.type)) {
       return c.json({ error: `Invalid type. Must be one of: ${validTypes.join(", ")}` }, 400);
     }
