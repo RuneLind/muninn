@@ -51,7 +51,7 @@ export interface BotConfig {
 
 /**
  * Discovers all bot folders that have a CLAUDE.md — no platform tokens required.
- * Used by dashboard (MCP debug, chat page) and simulator.
+ * Used by dashboard (MCP debug, chat page).
  */
 export function discoverAllBots(): BotConfig[] {
   return discoverBotsInternal({ requireTokens: false });
@@ -90,7 +90,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     const slackBotToken = process.env[`SLACK_BOT_TOKEN_${envName}`];
     const slackAppToken = process.env[`SLACK_APP_TOKEN_${envName}`];
 
-    // Bot needs at least one platform token (unless in simulator mode)
+    // Bot needs at least one platform token
     const hasTelegram = !!telegramToken;
     const hasSlack = !!slackBotToken && !!slackAppToken;
 

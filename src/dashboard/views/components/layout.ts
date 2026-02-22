@@ -184,7 +184,7 @@ export function layoutStyles(): string {
     .user-platform-badge.slack_dm,
     .user-platform-badge.slack_channel,
     .user-platform-badge.slack_assistant { background: #2a1a3e; color: #e0a0ff; }
-    .user-platform-badge.simulator { background: #1a3a2a; color: #4ade80; }
+
 
     /* Thread-specific row styles */
     .thread-icon {

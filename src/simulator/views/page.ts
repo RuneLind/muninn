@@ -39,7 +39,7 @@ export function renderSimulatorPage(): string {
       </div>
       <div class="user-config">
         <input id="simUserId" type="text" value="sim-user-1" placeholder="User ID" />
-        <input id="simUsername" type="text" value="simulator" placeholder="Username" />
+        <input id="simUsername" type="text" value="chat-user" placeholder="Username" />
       </div>
       <div class="conv-list" id="convList">
         <div class="empty-state">No conversations yet</div>
@@ -460,7 +460,7 @@ const SIMULATOR_SCRIPT = `
   async function createConversation(type) {
     const botName = botSelect.value;
     const userId = document.getElementById('simUserId').value || 'sim-user-1';
-    const username = document.getElementById('simUsername').value || 'simulator';
+    const username = document.getElementById('simUsername').value || 'chat-user';
 
     const body = { type, botName, userId, username };
 

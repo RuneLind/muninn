@@ -1,33 +1,33 @@
 /**
- * Integration tests for the simulator API.
+ * Integration tests for the chat API.
  *
  * These tests call real Claude (slow, ~30-60s each).
  * Run separately from unit tests:
  *
- *   SIMULATOR_ENABLED=true bun run dev &
+ *   bun run dev &
  *   bun test src/simulator/integration.test.ts
  *
  * Requires:
- * - The app running with SIMULATOR_ENABLED=true
+ * - The app running
  * - At least one bot configured (e.g. jarvis)
  * - Claude CLI authenticated
  */
 import { test, expect, describe, beforeAll } from "bun:test";
-import { SimulatorTestClient } from "./test-client.ts";
+import { ChatTestClient } from "./test-client.ts";
 
-const BASE_URL = process.env.SIMULATOR_BASE_URL ?? "http://localhost:3010";
+const BASE_URL = process.env.CHAT_BASE_URL ?? "http://localhost:3010";
 const TIMEOUT_MS = 120_000; // Claude responses can take a while
 
-const client = new SimulatorTestClient(BASE_URL);
+const client = new ChatTestClient(BASE_URL);
 
 let botName: string;
 
-describe("Simulator Integration", () => {
+describe("Chat Integration", () => {
   beforeAll(async () => {
     // Discover available bots
     const bots = await client.listBots();
     if (bots.length === 0) {
-      throw new Error("No bots available. Start the app with SIMULATOR_ENABLED=true and at least one bot configured.");
+      throw new Error("No bots available. Start the app with at least one bot configured.");
     }
     botName = bots[0]!.name;
     console.log(`Using bot: ${botName}`);

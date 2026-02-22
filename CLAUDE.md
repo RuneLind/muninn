@@ -125,54 +125,7 @@ Personal AI assistant — multi-bot Telegram platform backed by Claude CLI, with
 bun run db:up               # Start Postgres (requires Docker)
 bun run dev                 # Dev with --watch
 bun run start               # Production
-bun run dev:simulator       # Simulator UI (no tokens needed)
-```
-
-### Dual-Instance Mode (Production + Simulator)
-
-Production runs natively on macOS (voice, real bots). A second instance with the simulator UI can run alongside it on a different port and database — useful for development and testing.
-
-```
-┌──────────────────────────┐     ┌──────────────────────────┐
-│  Production (port 3010)  │     │  Simulator (port 3011)   │
-│  Real Telegram/Slack     │     │  Browser chat UI         │
-│  Voice, scheduler        │     │  No tokens, no scheduler │
-│  DATABASE_URL            │     │  SIMULATOR_DATABASE_URL   │
-└──────────┬───────────────┘     └──────────┬───────────────┘
-           │                                │
-           └───────── Postgres ─────────────┘
-                    (port 5434)
-```
-
-| Instance   | Port | Database           | Scheduler | Tokens  |
-|------------|------|--------------------|-----------|---------|
-| Production | 3010 | `javrvis`          | On        | Required|
-| Simulator  | 3011 | `javrvis_simulator`| Off       | None    |
-| Tests      | —    | `javrvis_test`     | —         | —       |
-
-**Quick start (same checkout):**
-```bash
-bun run dev:simulator       # Uses env overrides, no .env changes needed
-```
-
-**Git worktree setup (isolated changes):**
-```bash
-# Create worktree from main
-git worktree add ../javrvis-sim feature/simulator-dev
-
-# In the worktree, create .env with simulator settings:
-# SIMULATOR_ENABLED=true
-# DASHBOARD_PORT=3011
-# SCHEDULER_ENABLED=false
-# DATABASE_URL=postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis
-# SIMULATOR_DATABASE_URL=postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis_simulator
-
-# Run from worktree
-cd ../javrvis-sim && bun run dev
-
-# Worktree management
-git worktree list           # List all worktrees
-git worktree remove ../javrvis-sim  # Clean up
+bun run dev:chat            # Chat-only (no scheduler, port 3011)
 ```
 
 ### Multi-Bot Architecture
@@ -277,8 +230,6 @@ PostgreSQL + pgvector via Docker (single container).
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | whisper-cpp model file |
 | `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval (ms, default 1min) |
 | `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler (tasks + goal reminders) |
-| `SIMULATOR_ENABLED` | No | `false` | Enable browser-based simulator UI |
-| `SIMULATOR_DATABASE_URL` | No | `DATABASE_URL` + `_simulator` | Separate DB for simulator instance |
 | `TRACING_ENABLED` | No | `true` | Enable request tracing |
 | `TRACING_RETENTION_DAYS` | No | `7` | Days to keep trace data |
 | `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep prompt snapshots |

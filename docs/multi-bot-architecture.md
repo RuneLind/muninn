@@ -34,7 +34,7 @@ Slack user C ──────►│  Slack Bot 1 (Capra)             │
 5. Detects optional `.mcp.json` and `.claude/settings.json`
 6. Returns a `BotConfig[]` array
 
-A bot needs at least one platform token to be active (unless in simulator mode, which skips this requirement).
+A bot needs at least one platform token to be active. Bots without tokens still appear in the `/chat` UI for browser-based testing.
 
 ```typescript
 interface BotConfig {

@@ -67,8 +67,6 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | Path to whisper-cpp model file |
 | `SCHEDULER_INTERVAL_MS` | No | `60000` | Unified scheduler tick interval in ms |
 | `SCHEDULER_ENABLED` | No | `true` | Enable/disable unified scheduler |
-| `SIMULATOR_ENABLED` | No | `false` | Enable platform simulator mode |
-| `SIMULATOR_DATABASE_URL` | No | Derived from `DATABASE_URL` | Simulator database URL (defaults to `javrvis_simulator`) |
 
 ### Per-Bot (.env)
 
@@ -199,23 +197,18 @@ Each user+bot pair can have multiple named conversation threads (topics). Only c
 - `GET /api/trace-filters` — Available filter options (bot names, trace types)
 - `GET /api/prompts/:traceId` — Prompt snapshot for a trace
 
-## Simulator
+## Chat UI
 
-A test platform that simulates Telegram and Slack conversations without needing real bot tokens or user accounts. Useful for development and integration testing.
-
-### Enabling
-
-Set `SIMULATOR_ENABLED=true` in `.env` (or pass as environment variable):
+Browser-based chat interface for testing bots without Telegram/Slack tokens. Always available at `/chat` — no special mode needed. Any bot with a `CLAUDE.md` appears in the chat UI, even without platform tokens.
 
 ```bash
-SIMULATOR_ENABLED=true bun run dev
+bun run dev          # Full app — chat at http://localhost:3010/chat
+bun run dev:chat     # Chat-focused — scheduler off, port 3011
 ```
-
-The simulator uses a **separate database** (`javrvis_simulator` by default, auto-created) to keep test data isolated from production. Override with `SIMULATOR_DATABASE_URL` if needed.
 
 ### Web UI
 
-Open `/simulator` on the dashboard (e.g. `http://localhost:3010/simulator`). The UI has a three-panel layout:
+Open `/chat` on the dashboard (e.g. `http://localhost:3010/chat`). The UI has a three-panel layout:
 - **Left** — Conversation list and creation controls
 - **Center** — Chat view with message history
 - **Right** — Conversation details and status
@@ -226,25 +219,14 @@ Real-time updates are delivered via WebSocket.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/simulator/bots` | List available bots |
-| `POST` | `/simulator/conversations` | Create a conversation (`{ type, botName, userId?, username?, channelName? }`) |
-| `GET` | `/simulator/conversations` | List all conversations |
-| `GET` | `/simulator/conversations/:id` | Get conversation with messages |
-| `DELETE` | `/simulator/conversations/:id` | Delete a conversation |
-| `POST` | `/simulator/conversations/:id/messages` | Send a message (`{ text }`) — response arrives via WebSocket |
-| `DELETE` | `/simulator/reset` | Clear all state and truncate simulator DB tables |
+| `GET` | `/chat/bots` | List available bots |
+| `POST` | `/chat/conversations` | Create a conversation (`{ type, botName, userId?, username?, channelName? }`) |
+| `GET` | `/chat/conversations` | List all conversations |
+| `GET` | `/chat/conversations/:id` | Get conversation with messages |
+| `DELETE` | `/chat/conversations/:id` | Delete a conversation |
+| `POST` | `/chat/conversations/:id/messages` | Send a message (`{ text }`) — response arrives via WebSocket |
 
 Supported conversation types: `telegram_dm`, `slack_dm`, `slack_channel`, `slack_assistant`.
-
-**Note:** Simulator conversations are held in memory and lost on server restart. The simulator database (for messages, memories, etc.) persists across restarts.
-
-### Integration Tests
-
-Simulator-related tests run as part of the standard test suite:
-
-```bash
-bun run test
-```
 
 ## Docker Production
 

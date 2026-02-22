@@ -1,15 +1,15 @@
 import type { SimConversation, ConversationType } from "./state.ts";
 
 /**
- * HTTP client for the simulator API — reusable in integration tests.
+ * HTTP client for the chat API — reusable in integration tests.
  *
  * Usage:
- *   const client = new SimulatorTestClient("http://localhost:3010");
+ *   const client = new ChatTestClient("http://localhost:3010");
  *   const convId = await client.createConversation("telegram_dm", "jarvis", "user-1", "tester");
  *   await client.sendMessage(convId, "Hello!");
  *   const response = await client.waitForResponse(convId);
  */
-export class SimulatorTestClient {
+export class ChatTestClient {
   constructor(private baseUrl: string) {}
 
   async createConversation(
@@ -19,7 +19,7 @@ export class SimulatorTestClient {
     username = "tester",
     channelName?: string,
   ): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/simulator/conversations`, {
+    const res = await fetch(`${this.baseUrl}/chat/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, botName, userId, username, channelName }),
@@ -33,7 +33,7 @@ export class SimulatorTestClient {
   }
 
   async sendMessage(conversationId: string, text: string): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/simulator/conversations/${conversationId}/messages`, {
+    const res = await fetch(`${this.baseUrl}/chat/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -45,7 +45,7 @@ export class SimulatorTestClient {
   }
 
   async getConversation(conversationId: string): Promise<SimConversation> {
-    const res = await fetch(`${this.baseUrl}/simulator/conversations/${conversationId}`);
+    const res = await fetch(`${this.baseUrl}/chat/conversations/${conversationId}`);
     if (!res.ok) {
       throw new Error(`Failed to get conversation: ${res.status}`);
     }
@@ -80,7 +80,7 @@ export class SimulatorTestClient {
   }
 
   async listBots(): Promise<{ name: string; hasTelegram: boolean; hasSlack: boolean }[]> {
-    const res = await fetch(`${this.baseUrl}/simulator/bots`);
+    const res = await fetch(`${this.baseUrl}/chat/bots`);
     const data = await res.json() as { bots: any[] };
     return data.bots;
   }

@@ -93,7 +93,7 @@ export interface SimConversationRow {
 }
 
 /**
- * Get distinct simulator conversations from the DB.
+ * Get distinct chat conversations from the DB.
  * Returns unique (user_id, bot_name, platform) tuples for sim-* users.
  */
 export async function getSimConversations(): Promise<SimConversationRow[]> {
@@ -115,7 +115,7 @@ export async function getSimConversations(): Promise<SimConversationRow[]> {
 }
 
 /**
- * Get recent messages for a specific simulator conversation.
+ * Get recent messages for a specific chat conversation.
  */
 export async function getSimMessages(
   userId: string,

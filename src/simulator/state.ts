@@ -144,7 +144,7 @@ export class SimulatorState {
         type,
         botName: row.botName,
         userId: row.userId,
-        username: row.username ?? "simulator",
+        username: row.username ?? "chat-user",
         messages: msgs.map((m) => ({
           id: m.id,
           timestamp: m.createdAt,

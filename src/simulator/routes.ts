@@ -63,7 +63,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       type: body.type,
       botName: body.botName,
       userId: body.userId ?? "sim-user-1",
-      username: body.username ?? "simulator",
+      username: body.username ?? "chat-user",
       channelName: body.channelName,
     });
 
@@ -137,28 +137,6 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     });
 
     return c.json({ status: "processing" }, 202);
-  });
-
-  // Reset all simulator state (and optionally truncate simulator DB tables)
-  app.delete("/reset", async (c) => {
-    if (!config.simulatorEnabled) {
-      return c.json({ error: "Reset is only available in simulator mode" }, 403);
-    }
-    simulatorState.clear();
-    try {
-      const { getDb } = await import("../db/client.ts");
-      const sql = getDb();
-      // Safety: only truncate if connected to a simulator database
-      const rows = await sql`SELECT current_database()`;
-      const current_database = rows[0]?.current_database as string | undefined;
-      if (!current_database?.includes("simulator")) {
-        return c.json({ error: "Refusing to truncate non-simulator database" }, 403);
-      }
-      await sql`TRUNCATE messages, activity_log, memories, goals, scheduled_tasks, watchers, haiku_usage, user_settings, traces, prompt_snapshots CASCADE`;
-    } catch {
-      // DB truncate is best-effort — state is always cleared
-    }
-    return c.json({ ok: true });
   });
 
   return app;
