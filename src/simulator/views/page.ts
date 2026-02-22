@@ -1,6 +1,7 @@
 import { SHARED_STYLES, renderNav } from "../../dashboard/views/shared-styles.ts";
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "../../dashboard/views/components/agent-status-ui.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "../../dashboard/views/components/request-progress-ui.ts";
+import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/components/bot-selector.ts";
 import { helpersScript } from "../../dashboard/views/components/helpers.ts";
 
 export function renderSimulatorPage(): string {
@@ -14,11 +15,12 @@ export function renderSimulatorPage(): string {
     ${SHARED_STYLES}
     ${agentStatusStyles()}
     ${requestProgressStyles()}
+    ${botSelectorStyles()}
     ${SIMULATOR_STYLES}
   </style>
 </head>
 <body>
-  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() })}
+  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml() })}
   ${requestProgressHtml()}
 
   <div class="sim-layout">
@@ -532,6 +534,46 @@ const SIMULATOR_SCRIPT = `
   var ws = null;
   var deepLinkHandled = false;
   var inspectorContextKey = null;
+  var selectedBot = '';
+
+  // Bot selector init (synced with dashboard/traces/logs via localStorage)
+  try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
+
+  async function loadBotList() {
+    try {
+      var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
+      bots = res.bots || [];
+
+      // Populate pill selector
+      var container = document.getElementById('botSelector');
+      var botNames = bots.map(function(b) { return b.name; });
+      container.innerHTML =
+        '<button class="bot-pill' + (!selectedBot ? ' active' : '') + '" data-bot="">All Bots</button>' +
+        botNames.map(function(b) {
+          return '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + escapeAttr(b) + '">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>';
+        }).join('');
+
+      // Populate new-chat bot dropdown
+      botSelect.innerHTML = bots.map(function(b) {
+        return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) + '</option>';
+      }).join('');
+      if (selectedBot) botSelect.value = selectedBot;
+    } catch {}
+  }
+
+  function selectBot(name) {
+    selectedBot = name;
+    try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+    document.querySelectorAll('.bot-pill').forEach(function(p) {
+      p.classList.toggle('active', p.dataset.bot === name);
+    });
+    renderConvList();
+  }
+
+  document.getElementById('botSelector').addEventListener('click', function(e) {
+    var pill = e.target.closest('.bot-pill');
+    if (pill) selectBot(pill.dataset.bot);
+  });
 
   // DOM refs
   var convList = document.getElementById('convList');
@@ -563,16 +605,6 @@ const SIMULATOR_SCRIPT = `
     if (type === 'web') return '<span class="conv-item-badge badge-web">Web</span>';
     if (type.startsWith('telegram')) return '<span class="conv-item-badge badge-tg">TG</span>';
     return '<span class="conv-item-badge badge-slack">Slack</span>';
-  }
-
-  // Load available bots
-  async function loadBots() {
-    var res = await fetch('/chat/bots');
-    var data = await res.json();
-    bots = data.bots;
-    botSelect.innerHTML = bots.map(function(b) {
-      return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) + '</option>';
-    }).join('');
   }
 
   // New Chat flow
@@ -807,8 +839,11 @@ const SIMULATOR_SCRIPT = `
   // Render conversation list (sorted by most recent message)
   function renderConvList() {
     var convs = Object.values(conversations);
+    if (selectedBot) {
+      convs = convs.filter(function(c) { return c.botName === selectedBot; });
+    }
     if (convs.length === 0) {
-      convList.innerHTML = '<div class="empty-state">No conversations yet</div>';
+      convList.innerHTML = '<div class="empty-state">' + (selectedBot ? 'No conversations for ' + escapeHtml(selectedBot) : 'No conversations yet') + '</div>';
       return;
     }
 
@@ -1094,7 +1129,7 @@ const SIMULATOR_SCRIPT = `
   };
 
   // Init
-  loadBots();
+  loadBotList();
   connectWs();
 })();
 `;
