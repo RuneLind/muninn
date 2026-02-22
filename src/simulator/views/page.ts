@@ -42,6 +42,7 @@ export function renderSimulatorPage(): string {
     <div class="sim-chat">
       <div class="chat-header" id="chatHeader">
         <span class="chat-title">Select a conversation</span>
+        <select class="thread-picker" id="threadPicker" style="display:none"></select>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-messages" id="chatMessages">
@@ -254,6 +255,17 @@ const SIMULATOR_STYLES = `
       background: var(--bg-panel);
     }
     .chat-title { font-size: 14px; font-weight: 500; }
+    .thread-picker {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      max-width: 180px;
+    }
+    .thread-picker:focus { border-color: var(--accent); outline: none; }
     .chat-status { font-size: 12px; color: var(--accent); }
     .chat-status:empty { display: none; }
     .chat-messages {
@@ -514,6 +526,8 @@ const SIMULATOR_SCRIPT = `
   // State
   var conversations = {};
   var activeConvId = null;
+  var activeThreadId = null;
+  var activeThreads = [];
   var bots = [];
   var ws = null;
   var deepLinkHandled = false;
@@ -531,6 +545,7 @@ const SIMULATOR_SCRIPT = `
   var inspectorContext = document.getElementById('inspectorContext');
   var botSelect = document.getElementById('botSelect');
   var newChatPicker = document.getElementById('newChatPicker');
+  var threadPicker = document.getElementById('threadPicker');
 
   // Platform helpers
   function typePlatformLabel(type) {
@@ -625,7 +640,11 @@ const SIMULATOR_SCRIPT = `
       if (conv) {
         conv.messages.push(event.message);
         if (event.conversationId === activeConvId) {
-          appendMessage(event.message, conv.type);
+          // Only append if no thread filter is active, or the message belongs to the active thread
+          var msgThread = event.message.threadId || null;
+          if (!activeThreadId || msgThread === activeThreadId) {
+            appendMessage(event.message, conv.type);
+          }
           updateInspector();
         }
         renderConvList();
@@ -647,12 +666,13 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Deep-link from dashboard: /chat?user=<id>&bot=<name>&username=<name>
+  // Deep-link from dashboard: /chat?user=<id>&bot=<name>&username=<name>&thread=<threadId>
   function handleDeepLink() {
     var params = new URLSearchParams(window.location.search);
     var userId = params.get('user');
     var botName = params.get('bot');
     var username = params.get('username');
+    var threadParam = params.get('thread');
     if (!userId || !botName) return;
 
     // Find existing conversation for this user+bot
@@ -665,7 +685,7 @@ const SIMULATOR_SCRIPT = `
       }
     }
     if (match) {
-      selectConversation(match.id);
+      selectConversation(match.id, threadParam || undefined);
       return;
     }
 
@@ -677,7 +697,7 @@ const SIMULATOR_SCRIPT = `
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.conversation) {
         conversations[data.conversation.id] = data.conversation;
-        selectConversation(data.conversation.id);
+        selectConversation(data.conversation.id, threadParam || undefined);
         renderConvList();
       }
     });
@@ -689,22 +709,100 @@ const SIMULATOR_SCRIPT = `
     var text = chatInput.value.trim();
     chatInput.value = '';
     chatInput.style.height = 'auto';
+    var payload = { text: text };
+    if (activeThreadId) payload.threadId = activeThreadId;
     await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text }),
+      body: JSON.stringify(payload),
     });
   }
 
   // Select conversation
-  function selectConversation(id) {
+  function selectConversation(id, preselectedThreadId) {
     activeConvId = id;
+    activeThreadId = null;
+    activeThreads = [];
     chatInput.disabled = false;
     chatSend.disabled = false;
     renderConvList();
     renderChat();
     updateInspector();
+    loadThreadsForConv(preselectedThreadId);
   }
+
+  // Load threads for the active conversation
+  async function loadThreadsForConv(preselectedThreadId) {
+    var conv = conversations[activeConvId];
+    if (!conv) { threadPicker.style.display = 'none'; return; }
+    try {
+      var res = await fetch('/chat/threads/' + encodeURIComponent(conv.userId) + '/' + encodeURIComponent(conv.botName));
+      var data = await res.json();
+      activeThreads = data.threads || [];
+    } catch {
+      activeThreads = [];
+    }
+
+    if (activeThreads.length <= 1 && !preselectedThreadId) {
+      // Single thread or no threads — no picker needed, but set activeThreadId if there's one
+      threadPicker.style.display = 'none';
+      if (activeThreads.length === 1) activeThreadId = activeThreads[0].id;
+      return;
+    }
+
+    // Build picker options: "All messages" + each thread
+    threadPicker.innerHTML = '<option value="">All messages</option>' +
+      activeThreads.map(function(t) {
+        var label = t.name || 'main';
+        if (t.isActive) label += ' (active)';
+        return '<option value="' + escapeAttr(t.id) + '">' + escapeHtml(label) + '</option>';
+      }).join('');
+    threadPicker.style.display = 'inline-block';
+
+    // Pre-select thread if specified
+    if (preselectedThreadId) {
+      threadPicker.value = preselectedThreadId;
+      activeThreadId = preselectedThreadId;
+      loadThreadMessages(preselectedThreadId);
+    }
+  }
+
+  // Load messages filtered by thread from DB
+  async function loadThreadMessages(threadId) {
+    if (!activeConvId) return;
+    activeThreadId = threadId || null;
+    try {
+      var url = '/chat/conversations/' + activeConvId + '/messages';
+      if (threadId) url += '?thread=' + encodeURIComponent(threadId);
+      var res = await fetch(url);
+      var data = await res.json();
+      var msgs = data.messages || [];
+
+      var conv = conversations[activeConvId];
+      chatMessages.innerHTML = '';
+
+      // Cross-platform banner for non-web conversations
+      if (conv && conv.type !== 'web') {
+        var banner = document.createElement('div');
+        banner.className = 'cross-platform-banner';
+        banner.textContent = 'Conversation from ' + typePlatformLabel(conv.type) + ' \\u2014 replies sent via web';
+        chatMessages.appendChild(banner);
+      }
+
+      for (var i = 0; i < msgs.length; i++) {
+        appendMessage(msgs[i], conv ? conv.type : 'web');
+      }
+      scrollToBottom();
+    } catch {
+      chatMessages.innerHTML = '<div class="empty-state">Failed to load messages</div>';
+    }
+  }
+
+  // Thread picker change handler
+  threadPicker.onchange = function() {
+    var val = threadPicker.value;
+    loadThreadMessages(val || null);
+  };
 
   // Render conversation list (sorted by most recent message)
   function renderConvList() {

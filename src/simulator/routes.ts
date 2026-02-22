@@ -4,6 +4,8 @@ import type { BotConfig } from "../bots/config.ts";
 import { simulatorState, type ConversationType } from "./state.ts";
 import { processSimulatorMessage } from "./processor.ts";
 import { renderSimulatorPage } from "./views/page.ts";
+import { listThreads } from "../db/threads.ts";
+import { getSimMessages } from "../db/messages.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("simulator");
@@ -105,6 +107,42 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     return c.json({ ok: true });
   });
 
+  // List threads for a conversation's user+bot
+  app.get("/threads/:userId/:botName", async (c) => {
+    const userId = c.req.param("userId");
+    const botName = c.req.param("botName");
+    const threads = await listThreads(userId, botName);
+    return c.json({ threads });
+  });
+
+  // Get messages for a conversation, optionally filtered by thread
+  app.get("/conversations/:id/messages", async (c) => {
+    const id = c.req.param("id");
+    const conversation = simulatorState.getConversation(id);
+    if (!conversation) {
+      return c.json({ error: "Conversation not found" }, 404);
+    }
+
+    const threadId = c.req.query("thread");
+    const platform = conversationTypeToPlatform(conversation.type);
+    const msgs = await getSimMessages(
+      conversation.userId,
+      conversation.botName,
+      platform,
+      50,
+      threadId || undefined,
+    );
+    return c.json({
+      messages: msgs.map((m) => ({
+        id: m.id,
+        sender: m.role === "user" ? "user" : "bot",
+        text: m.content,
+        timestamp: m.createdAt,
+        threadId: m.threadId,
+      })),
+    });
+  });
+
   // Send a message in a conversation (triggers Claude processing)
   app.post("/conversations/:id/messages", async (c) => {
     const id = c.req.param("id");
@@ -113,7 +151,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       return c.json({ error: "Conversation not found" }, 404);
     }
 
-    const body = await c.req.json<{ text: string }>();
+    const body = await c.req.json<{ text: string; threadId?: string }>();
     if (!body.text) {
       return c.json({ error: "text is required" }, 400);
     }
@@ -124,7 +162,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     }
 
     // Process asynchronously — response comes via WebSocket
-    processSimulatorMessage(id, body.text, bot, config).catch((err) => {
+    processSimulatorMessage(id, body.text, bot, config, body.threadId).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       simulatorState.addMessage(id, {
@@ -140,4 +178,13 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   });
 
   return app;
+}
+
+/** Map ConversationType to the platform string used in the DB */
+function conversationTypeToPlatform(type: ConversationType): string {
+  switch (type) {
+    case "telegram_dm": return "telegram";
+    case "web": return "web";
+    default: return type; // slack_dm, slack_channel, slack_assistant match directly
+  }
 }

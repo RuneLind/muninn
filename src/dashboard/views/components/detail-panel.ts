@@ -432,12 +432,6 @@ export function detailPanelScript(): string {
           switchSection('memories-goals');
           if (data && data.id) selectMgItem('memory', data.id);
           return;
-        case 'thread':
-          // Redirect to inline threads panel instead of overlay
-          closeDetail();
-          switchSection('threads');
-          if (data && data.id) selectThread(data.id);
-          return;
         case 'user':
           // Redirect to inline users panel instead of overlay
           closeDetail();
@@ -698,15 +692,27 @@ export function detailPanelScript(): string {
       } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load goals</div>'; }
     }
 
-    function loadUserThreads(u) {
+    async function loadUserThreads(u) {
       const sec = document.querySelector('[data-utab-section="threads"]');
-      const userThreads = (typeof threadsData !== 'undefined' ? threadsData : [])
-        .filter(t => t.userId === u.userId);
-      if (!userThreads.length) { sec.innerHTML = '<div class="detail-empty-hint">No threads</div>'; return; }
-      sec.innerHTML = '<div class="detail-mini-list">' + userThreads.map(t => {
-        const active = t.isActive ? ' <span class="mini-badge" style="background:var(--tint-success);color:var(--status-success)">active</span>' : '';
-        return '<div class="detail-mini-item"><span>' + escapeHtml(t.name || 'main') + active + '</span><span class="mini-badge msgs">' + (t.messageCount || 0) + ' msgs</span></div>';
-      }).join('') + '</div>';
+      try {
+        const res = await fetch(appendBot('/api/threads'));
+        const data = await res.json();
+        const userThreads = (data.threads || []).filter(t => t.userId === u.userId);
+        if (!userThreads.length) { sec.innerHTML = '<div class="detail-empty-hint">No threads</div>'; return; }
+        sec.innerHTML = '<div class="detail-mini-list">' + userThreads.map(t => {
+          const chatUrl = '/chat?user=' + encodeURIComponent(u.userId)
+            + '&bot=' + encodeURIComponent(selectedBot || '')
+            + '&username=' + encodeURIComponent(u.username || u.userId)
+            + '&thread=' + encodeURIComponent(t.id);
+          const active = t.isActive ? ' <span class="mini-badge" style="background:var(--tint-success);color:var(--status-success)">active</span>' : '';
+          return '<div class="detail-mini-item">'
+            + '<span>' + escapeHtml(t.name || 'main') + active + '</span>'
+            + '<span style="display:flex;gap:6px;align-items:center">'
+            + '<span class="mini-badge msgs">' + (t.messageCount || 0) + ' msgs</span>'
+            + '<a class="detail-chat-btn" href="' + chatUrl + '" style="font-size:10px;padding:2px 8px">Open</a>'
+            + '</span></div>';
+        }).join('') + '</div>';
+      } catch { sec.innerHTML = '<div class="detail-empty-hint">Failed to load threads</div>'; }
     }
 
     async function loadUserTasks(u) {

@@ -14,7 +14,6 @@ import { watchersPanelStyles, watchersPanelHtml, watchersPanelScript } from "./c
 import { memoriesPanelStyles, memoriesPanelHtml, memoriesPanelScript } from "./components/memories-panel.ts";
 import { knowledgePanelStyles, knowledgePanelHtml, knowledgePanelScript } from "./components/knowledge-panel.ts";
 import { automationPanelStyles, automationPanelHtml, automationPanelScript } from "./components/automation-panel.ts";
-import { threadsPanelStyles, threadsPanelHtml, threadsPanelScript } from "./components/threads-panel.ts";
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
 import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
@@ -44,7 +43,6 @@ export function renderDashboardPage(): string {
     ${memoriesPanelStyles()}
     ${knowledgePanelStyles()}
     ${automationPanelStyles()}
-    ${threadsPanelStyles()}
     ${slackPanelStyles()}
     ${requestProgressStyles()}
     ${usageChartStyles()}
@@ -75,9 +73,6 @@ export function renderDashboardPage(): string {
         </div>
       </div>
     </div>
-    <div data-section="threads">
-      ${threadsPanelHtml()}
-    </div>
     <div data-section="memories-goals">
       ${knowledgePanelHtml()}
     </div>
@@ -104,7 +99,6 @@ export function renderDashboardPage(): string {
     ${memoriesPanelScript()}
     ${knowledgePanelScript()}
     ${automationPanelScript()}
-    ${threadsPanelScript()}
     ${slackPanelScript()}
     ${usageChartScript()}
     ${activityFeedScript()}

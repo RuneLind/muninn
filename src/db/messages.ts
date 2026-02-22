@@ -126,23 +126,41 @@ export async function getSimMessages(
   botName: string,
   platform: string,
   limit = 50,
-): Promise<{ id: string; role: string; content: string; createdAt: number }[]> {
+  threadId?: string,
+): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null }[]> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT id, role, content, created_at
-    FROM messages
-    WHERE user_id = ${userId}
-      AND bot_name = ${botName}
-      AND platform = ${platform}
-    ORDER BY created_at DESC
-    LIMIT ${limit}
-  `;
+  const rows = threadId
+    ? await sql`
+        SELECT id, role, content, created_at, thread_id
+        FROM messages
+        WHERE user_id = ${userId}
+          AND bot_name = ${botName}
+          AND platform = ${platform}
+          AND (
+            thread_id = ${threadId}
+            OR (thread_id IS NULL AND EXISTS (
+              SELECT 1 FROM threads t WHERE t.id = ${threadId} AND t.name = 'main'
+            ))
+          )
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `
+    : await sql`
+        SELECT id, role, content, created_at, thread_id
+        FROM messages
+        WHERE user_id = ${userId}
+          AND bot_name = ${botName}
+          AND platform = ${platform}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
   return rows
     .map((r) => ({
       id: r.id,
       role: r.role as string,
       content: r.content as string,
       createdAt: new Date(r.created_at).getTime(),
+      threadId: (r.thread_id as string) ?? null,
     }))
     .reverse();
 }

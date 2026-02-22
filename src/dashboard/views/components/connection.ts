@@ -89,14 +89,13 @@ export function connectionScript(): string {
         clearFeed();
         const bp = botParam();
         const memUrl = '/api/memories' + bp + (bp ? '&' : '?') + 'limit=50';
-        const [statsRes, goalsRes, tasksRes, watchersRes, memoriesRes, slackRes, threadsRes, usersRes, activityRes] = await Promise.all([
+        const [statsRes, goalsRes, tasksRes, watchersRes, memoriesRes, slackRes, usersRes, activityRes] = await Promise.all([
           fetch('/api/stats' + bp).then(r => r.json()),
           fetch('/api/goals' + bp).then(r => r.json()),
           fetch('/api/tasks' + bp).then(r => r.json()),
           fetch('/api/watchers' + bp).then(r => r.json()),
           fetch(memUrl).then(r => r.json()),
           fetch('/api/slack-analytics' + bp).then(r => r.json()).catch(() => null),
-          fetch('/api/threads' + bp).then(r => r.json()).catch(() => ({ threads: [] })),
           fetch('/api/users' + bp).then(r => r.json()).catch(() => ({ users: [] })),
           fetch('/api/activity').then(r => r.json()).catch(() => ({ events: [] })),
         ]);
@@ -112,7 +111,6 @@ export function connectionScript(): string {
         // Render panels — each wrapped so one failure doesn't block others
         [
           () => renderSlackAnalytics(slackRes),
-          () => renderThreads(threadsRes.threads || []),
           () => renderUsers(usersRes.users || []),
           () => renderKnowledgePanel(),
           () => renderAutomationPanel(),
@@ -214,11 +212,6 @@ export function connectionScript(): string {
       const row = e.target.closest('[data-user-select]');
       if (row) selectUser(row.dataset.userSelect);
     });
-    document.getElementById('threadsMasterList').addEventListener('click', (e) => {
-      const row = e.target.closest('[data-thread-select]');
-      if (row) selectThread(row.dataset.threadSelect);
-    });
-
     // --- Event Delegation ---
     document.addEventListener('click', (e) => {
       // Slack user clicks

@@ -18,7 +18,7 @@ export interface SimMessage {
   timestamp: number;
   sender: "user" | "bot";
   text: string;
-  threadId?: string;
+  threadId?: string | null;
 }
 
 export type SimEvent =
@@ -150,6 +150,7 @@ export class SimulatorState {
           timestamp: m.createdAt,
           sender: m.role === "user" ? "user" as const : "bot" as const,
           text: m.content,
+          threadId: m.threadId,
         })),
       };
 

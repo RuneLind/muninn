@@ -16,6 +16,7 @@ export async function processSimulatorMessage(
   text: string,
   botConfig: BotConfig,
   config: Config,
+  threadId?: string,
 ): Promise<void> {
   const conversation = simulatorState.getConversation(conversationId);
   if (!conversation) {
@@ -43,6 +44,7 @@ export async function processSimulatorMessage(
     timestamp: Date.now(),
     sender: "user",
     text,
+    threadId: threadId ?? null,
   };
   simulatorState.addMessage(conversationId, userMessage);
 
@@ -55,6 +57,7 @@ export async function processSimulatorMessage(
       timestamp: Date.now(),
       sender: "bot",
       text: message,
+      threadId: threadId ?? null,
     };
     simulatorState.addMessage(conversationId, botMessage);
   };
@@ -100,6 +103,7 @@ export async function processSimulatorMessage(
       postToChannel,
       channelContext,
       recentChannelMessages,
+      threadId,
     });
   } finally {
     simulatorState.setStatus(conversationId, "");

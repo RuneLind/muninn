@@ -3,7 +3,6 @@
 const TABS = [
   { id: "overview", label: "Overview", hash: "#overview" },
   { id: "users", label: "Users", hash: "#users" },
-  { id: "threads", label: "Threads", hash: "#threads" },
   { id: "memories-goals", label: "Memories & Goals", hash: "#memories-goals" },
   { id: "schedules-watchers", label: "Schedules & Watchers", hash: "#schedules-watchers" },
   { id: "slack", label: "Slack", hash: "#slack" },
