@@ -305,6 +305,65 @@ const SIMULATOR_STYLES = `
     .msg-bot a:hover { text-decoration-color: var(--accent-light); }
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
+    .msg-bot.web h2, .msg-bot.web h3, .msg-bot.web h4, .msg-bot.web h5, .msg-bot.web h6 {
+      margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3;
+    }
+    .msg-bot.web h2 { font-size: 1.25em; }
+    .msg-bot.web h3 { font-size: 1.15em; }
+    .msg-bot.web h4 { font-size: 1.05em; }
+    .msg-bot.web pre {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      margin: 8px 0;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .msg-bot.web pre code { background: none; padding: 0; border-radius: 0; }
+    .msg-bot.web code {
+      background: var(--bg-surface);
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+    .msg-bot.web blockquote {
+      border-left: 3px solid var(--accent);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--text-muted);
+      white-space: normal;
+    }
+    .msg-bot.web ul, .msg-bot.web ol {
+      margin: 6px 0;
+      padding-left: 24px;
+      white-space: normal;
+    }
+    .msg-bot.web li { margin: 2px 0; }
+    .msg-bot.web hr {
+      border: none;
+      border-top: 1px solid var(--border-primary);
+      margin: 12px 0;
+    }
+    .msg-bot.web table {
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 13px;
+      width: 100%;
+      white-space: normal;
+    }
+    .msg-bot.web th, .msg-bot.web td {
+      border: 1px solid var(--border-secondary);
+      padding: 5px 8px;
+      text-align: left;
+    }
+    .msg-bot.web th {
+      background: var(--bg-surface);
+      font-weight: 600;
+    }
+    .msg-bot.web strong { font-weight: 600; }
+    .msg-bot.web em { font-style: italic; }
     .msg-time {
       font-size: 10px;
       color: var(--text-faint);
@@ -495,6 +554,67 @@ const SIMULATOR_STYLES = `
       white-space: pre-wrap;
       opacity: 0.85;
     }
+    .msg-streaming.web h2, .msg-streaming.web h3, .msg-streaming.web h4, .msg-streaming.web h5, .msg-streaming.web h6 {
+      margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3;
+    }
+    .msg-streaming.web h2 { font-size: 1.25em; }
+    .msg-streaming.web h3 { font-size: 1.15em; }
+    .msg-streaming.web h4 { font-size: 1.05em; }
+    .msg-streaming.web pre {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      padding: 10px 12px;
+      overflow-x: auto;
+      white-space: pre;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .msg-streaming.web pre code { background: none; padding: 0; border-radius: 0; }
+    .msg-streaming.web code {
+      background: var(--bg-surface);
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+    .msg-streaming.web blockquote {
+      border-left: 3px solid var(--accent);
+      margin: 8px 0;
+      padding: 4px 12px;
+      color: var(--text-muted);
+      white-space: normal;
+    }
+    .msg-streaming.web ul, .msg-streaming.web ol {
+      margin: 6px 0;
+      padding-left: 24px;
+      white-space: normal;
+    }
+    .msg-streaming.web li { margin: 2px 0; }
+    .msg-streaming.web hr {
+      border: none;
+      border-top: 1px solid var(--border-primary);
+      margin: 12px 0;
+    }
+    .msg-streaming.web table {
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 13px;
+      width: 100%;
+      white-space: normal;
+    }
+    .msg-streaming.web th, .msg-streaming.web td {
+      border: 1px solid var(--border-secondary);
+      padding: 5px 8px;
+      text-align: left;
+    }
+    .msg-streaming.web th {
+      background: var(--bg-surface);
+      font-weight: 600;
+    }
+    .msg-streaming.web strong { font-weight: 600; }
+    .msg-streaming.web em { font-style: italic; }
+    .msg-streaming.web a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
+    .msg-streaming.web a:hover { text-decoration-color: var(--accent-light); }
 
     /* Typing indicator */
     .typing-indicator {
@@ -967,12 +1087,14 @@ const SIMULATOR_SCRIPT = `
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
 
-    var isTg = convType.startsWith('telegram') || convType === 'web';
+    var isWeb = convType === 'web';
+    var isTg = convType.startsWith('telegram');
+    var platformClass = isWeb ? ' web' : (isTg ? ' telegram' : ' slack');
     var div = document.createElement('div');
-    div.className = 'msg msg-' + msg.sender + (msg.sender === 'bot' ? (isTg ? ' telegram' : ' slack') : '');
+    div.className = 'msg msg-' + msg.sender + (msg.sender === 'bot' ? platformClass : '');
 
-    if (msg.sender === 'bot' && isTg) {
-      div.innerHTML = sanitizeTelegramHtml(msg.text);
+    if (msg.sender === 'bot' && (isWeb || isTg)) {
+      div.innerHTML = sanitizeHtml(msg.text, isWeb);
     } else if (msg.sender === 'bot') {
       div.innerHTML = renderSlackMrkdwn(msg.text);
     } else {
@@ -1002,23 +1124,33 @@ const SIMULATOR_SCRIPT = `
   }
 
   // Streaming bubble helpers
+  var streamingRawText = '';
+
   function appendStreamingDelta(delta) {
     var bubble = chatMessages.querySelector('.msg-streaming');
+    var conv = conversations[activeConvId];
+    var isWeb = conv && conv.type === 'web';
     if (!bubble) {
       // Remove typing indicator — streaming text replaces it
       var typing = chatMessages.querySelector('.typing-indicator');
       if (typing) typing.remove();
       bubble = document.createElement('div');
-      bubble.className = 'msg-streaming';
+      bubble.className = 'msg-streaming' + (isWeb ? ' web' : '');
       chatMessages.appendChild(bubble);
     }
-    bubble.textContent += delta;
+    if (isWeb) {
+      streamingRawText += delta;
+      bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
+    } else {
+      bubble.textContent += delta;
+    }
     scrollToBottom();
   }
 
   function removeStreamingBubble() {
     var bubble = chatMessages.querySelector('.msg-streaming');
     if (bubble) bubble.remove();
+    streamingRawText = '';
   }
 
   function scrollToBottom() {
@@ -1136,6 +1268,136 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
+  // Client-side markdown → HTML formatter for web chat (mirrors server-side web-format.ts)
+  function formatWebHtml(text) {
+    var result = text.replace(/\\r\\n/g, '\\n');
+
+    // Preserve code blocks
+    var codeBlocks = [];
+    result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
+      var idx = codeBlocks.length;
+      var langClass = lang ? ' class="language-' + escapeHtml(lang) + '"' : '';
+      codeBlocks.push('<pre><code' + langClass + '>' + escapeHtml(code.replace(/\\s+$/, '')) + '</code></pre>');
+      return '\\x00CODEBLOCK' + idx + '\\x00';
+    });
+
+    // Preserve inline code
+    var inlineCodes = [];
+    result = result.replace(/\`([^\`]+)\`/g, function(_, code) {
+      var idx = inlineCodes.length;
+      inlineCodes.push('<code>' + escapeHtml(code) + '</code>');
+      return '\\x00INLINE' + idx + '\\x00';
+    });
+
+    // Escape HTML entities
+    result = result.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    // Tables
+    result = result.replace(/^(\\|.+\\|)\\n(\\|[\\s\\-:|]+\\|)\\n((?:\\|.+\\|\\n?)+)/gm, function(_, headerLine, _sep, bodyLines) {
+      var headers = headerLine.replace(/^\\||\\|$/g, '').split('|');
+      var rows = bodyLines.replace(/\\s+$/, '').split('\\n');
+      var thead = '<thead><tr>' + headers.map(function(h) { return '<th>' + h.trim() + '</th>'; }).join('') + '</tr></thead>';
+      var tbody = '<tbody>' + rows.map(function(row) {
+        var cells = row.replace(/^\\||\\|$/g, '').split('|');
+        return '<tr>' + cells.map(function(c) { return '<td>' + c.trim() + '</td>'; }).join('') + '</tr>';
+      }).join('') + '</tbody>';
+      return '<table>' + thead + tbody + '</table>';
+    });
+
+    // Headings
+    result = result.replace(/^(#{1,6})\\s+(.+)$/gm, function(_, hashes, content) {
+      var level = Math.min(hashes.length + 1, 6);
+      return '<h' + level + '>' + content + '</h' + level + '>';
+    });
+
+    // Horizontal rules
+    result = result.replace(/^---+$/gm, '<hr>');
+
+    // Blockquotes (> escaped to &gt;)
+    var bqLines = result.split('\\n');
+    var bqResult = [];
+    var quoteLines = [];
+    function flushQuote() {
+      if (quoteLines.length > 0) {
+        bqResult.push('<blockquote>' + quoteLines.join('<br>') + '</blockquote>');
+        quoteLines = [];
+      }
+    }
+    for (var bi = 0; bi < bqLines.length; bi++) {
+      var bqMatch = bqLines[bi].match(/^&gt;\\s?(.*)/);
+      if (bqMatch) { quoteLines.push(bqMatch[1]); }
+      else { flushQuote(); bqResult.push(bqLines[bi]); }
+    }
+    flushQuote();
+    result = bqResult.join('\\n');
+
+    // Unordered lists
+    var ulLines = result.split('\\n');
+    var ulResult = [];
+    var ulItems = [];
+    function flushUl() {
+      if (ulItems.length > 0) {
+        ulResult.push('<ul>' + ulItems.map(function(item) { return '<li>' + item + '</li>'; }).join('') + '</ul>');
+        ulItems = [];
+      }
+    }
+    for (var ui = 0; ui < ulLines.length; ui++) {
+      var ulMatch = ulLines[ui].match(/^[-*]\\s+(.*)/);
+      if (ulMatch) { ulItems.push(ulMatch[1]); }
+      else { flushUl(); ulResult.push(ulLines[ui]); }
+    }
+    flushUl();
+    result = ulResult.join('\\n');
+
+    // Ordered lists
+    var olLines = result.split('\\n');
+    var olResult = [];
+    var olItems = [];
+    function flushOl() {
+      if (olItems.length > 0) {
+        olResult.push('<ol>' + olItems.map(function(item) { return '<li>' + item + '</li>'; }).join('') + '</ol>');
+        olItems = [];
+      }
+    }
+    for (var oi = 0; oi < olLines.length; oi++) {
+      var olMatch = olLines[oi].match(/^\\d+\\.\\s+(.*)/);
+      if (olMatch) { olItems.push(olMatch[1]); }
+      else { flushOl(); olResult.push(olLines[oi]); }
+    }
+    flushOl();
+    result = olResult.join('\\n');
+
+    // Bold
+    result = result.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+    // Italic *text*
+    result = result.replace(/(?<!\\w)\\*([^*]+?)\\*(?!\\w)/g, '<em>$1</em>');
+    // Italic _text_
+    result = result.replace(/(?<!\\w)_([^_]+?)_(?!\\w)/g, '<em>$1</em>');
+    // Strikethrough
+    result = result.replace(/~~(.+?)~~/g, '<s>$1</s>');
+
+    // Links [text](url) — only http/https
+    result = result.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, function(_, text, url) {
+      if (/^https?:\\/\\//.test(url)) {
+        return '<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>';
+      }
+      return text;
+    });
+
+    // Restore code blocks and inline codes
+    for (var ci = 0; ci < codeBlocks.length; ci++) {
+      result = result.replace('\\x00CODEBLOCK' + ci + '\\x00', codeBlocks[ci]);
+    }
+    for (var ii = 0; ii < inlineCodes.length; ii++) {
+      result = result.replace('\\x00INLINE' + ii + '\\x00', inlineCodes[ii]);
+    }
+
+    // Clean up excessive blank lines
+    result = result.replace(/\\n{3,}/g, '\\n\\n');
+
+    return result.trim();
+  }
+
   // Minimal Slack mrkdwn renderer
   function renderSlackMrkdwn(text) {
     var links = [];
@@ -1157,9 +1419,12 @@ const SIMULATOR_SCRIPT = `
     return t;
   }
 
-  // Sanitize Telegram HTML — only allow safe tags and attributes
-  function sanitizeTelegramHtml(html) {
-    var allowedTags = ['b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'pre', 'a', 'br', 'span'];
+  // Sanitize HTML — allow safe tags and attributes
+  var _tgTags = ['b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'pre', 'a', 'br', 'span'];
+  var _webTags = _tgTags.concat(['h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'p']);
+
+  function sanitizeHtml(html, isWeb) {
+    var allowedTags = isWeb ? _webTags : _tgTags;
     var tmp = document.createElement('div');
     tmp.innerHTML = html;
 
@@ -1177,10 +1442,14 @@ const SIMULATOR_SCRIPT = `
             for (var j = 0; j < attrs.length; j++) {
               var attr = attrs[j];
               if (tag === 'a' && attr.name === 'href' && /^https?:\\/\\//.test(attr.value)) continue;
+              if (tag === 'a' && (attr.name === 'target' || attr.name === 'rel')) continue;
               if (tag === 'code' && attr.name === 'class') continue;
               child.removeAttribute(attr.name);
             }
-            if (tag === 'a') child.setAttribute('target', '_blank');
+            if (tag === 'a') {
+              child.setAttribute('target', '_blank');
+              child.setAttribute('rel', 'noopener');
+            }
             walk(child);
           }
         }

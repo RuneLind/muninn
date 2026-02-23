@@ -1,4 +1,5 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -151,6 +152,7 @@ export class SimulatorState {
       // Load messages
       const msgs = await getSimMessages(row.userId, row.botName, row.platform);
 
+      const isWebPlatform = type === "web";
       const conversation: SimConversation = {
         id,
         type,
@@ -161,7 +163,7 @@ export class SimulatorState {
           id: m.id,
           timestamp: m.createdAt,
           sender: m.role === "user" ? "user" as const : "bot" as const,
-          text: m.content,
+          text: isWebPlatform && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
           threadId: m.threadId,
         })),
       };

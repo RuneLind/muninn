@@ -6,6 +6,7 @@ import { processSimulatorMessage } from "./processor.ts";
 import { renderSimulatorPage } from "./views/page.ts";
 import { listThreads } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("simulator");
@@ -125,6 +126,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
 
     const threadId = c.req.query("thread");
     const platform = conversationTypeToPlatform(conversation.type);
+    const isWeb = conversation.type === "web";
     const msgs = await getSimMessages(
       conversation.userId,
       conversation.botName,
@@ -136,7 +138,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       messages: msgs.map((m) => ({
         id: m.id,
         sender: m.role === "user" ? "user" : "bot",
-        text: m.content,
+        text: isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
         timestamp: m.createdAt,
         threadId: m.threadId,
       })),

@@ -12,6 +12,7 @@ import { extractScheduleAsync } from "../scheduler/detector.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { splitMessage } from "../utils/split-message.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
@@ -246,6 +247,9 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           await say(chunk);
         }
       }
+    } else if (platform === "web") {
+      const html = formatWebHtml(responseText);
+      if (html.trim()) await say(html);
     } else {
       const mrkdwn = formatSlackMrkdwn(responseText);
       if (mrkdwn.trim()) await say(mrkdwn);
