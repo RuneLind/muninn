@@ -480,6 +480,22 @@ const SIMULATOR_STYLES = `
 
     .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
+    /* Streaming bubble */
+    .msg-streaming {
+      align-self: flex-start;
+      background: var(--chat-assistant-bg);
+      color: var(--chat-assistant-text);
+      border: 1px solid var(--border-primary);
+      max-width: 85%;
+      padding: 8px 12px;
+      border-radius: 10px 10px 10px 2px;
+      font-size: 14px;
+      line-height: 1.5;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+      opacity: 0.85;
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -693,6 +709,8 @@ const SIMULATOR_SCRIPT = `
           // Only append if no thread filter is active, or the message belongs to the active thread
           var msgThread = event.message.threadId || null;
           if (!activeThreadId || msgThread === activeThreadId) {
+            // Remove streaming bubble — final formatted message replaces it
+            if (event.message.sender === 'bot') removeStreamingBubble();
             appendMessage(event.message, conv.type);
           }
           updateInspector();
@@ -703,12 +721,29 @@ const SIMULATOR_SCRIPT = `
       return;
     }
 
+    if (event.type === 'text_delta') {
+      if (event.conversationId !== activeConvId) return;
+      // Thread filtering: only show deltas for the active thread
+      var deltaThread = event.threadId || null;
+      if (activeThreadId && deltaThread !== activeThreadId) return;
+      appendStreamingDelta(event.delta);
+      return;
+    }
+
+    if (event.type === 'stream_clear') {
+      if (event.conversationId !== activeConvId) return;
+      removeStreamingBubble();
+      return;
+    }
+
     if (event.type === 'status') {
       var conv = conversations[event.conversationId];
       if (conv) {
         conv.status = event.status;
         if (event.conversationId === activeConvId) {
           chatStatus.textContent = event.status || '';
+          // Clear streaming bubble when status is cleared (safety net for errors)
+          if (!event.status) removeStreamingBubble();
           updateTypingIndicator(event.status);
         }
       }
@@ -964,6 +999,26 @@ const SIMULATOR_SCRIPT = `
       chatMessages.appendChild(indicator);
       scrollToBottom();
     }
+  }
+
+  // Streaming bubble helpers
+  function appendStreamingDelta(delta) {
+    var bubble = chatMessages.querySelector('.msg-streaming');
+    if (!bubble) {
+      // Remove typing indicator — streaming text replaces it
+      var typing = chatMessages.querySelector('.typing-indicator');
+      if (typing) typing.remove();
+      bubble = document.createElement('div');
+      bubble.className = 'msg-streaming';
+      chatMessages.appendChild(bubble);
+    }
+    bubble.textContent += delta;
+    scrollToBottom();
+  }
+
+  function removeStreamingBubble() {
+    var bubble = chatMessages.querySelector('.msg-streaming');
+    if (bubble) bubble.remove();
   }
 
   function scrollToBottom() {

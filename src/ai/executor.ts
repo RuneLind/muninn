@@ -28,6 +28,7 @@ export async function executeClaudePrompt(
     "-p", prompt,
     "--output-format", "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--model", model,
   ];
 

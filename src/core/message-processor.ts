@@ -40,6 +40,8 @@ export interface ProcessMessageParams {
   recentChannelMessages?: string[];
   /** Thread ID for conversation isolation */
   threadId?: string;
+  /** Callback for streaming text deltas (web chat only). Called with null to clear streaming state (e.g. when tool calls start). */
+  onTextDelta?: (delta: string | null) => void;
 }
 
 export interface ProcessMessageResult {
@@ -61,6 +63,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const {
     text, userId, username, userIdentity, platform, botConfig, config,
     say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
+    onTextDelta,
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
@@ -109,7 +112,19 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
     log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
-    const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt, createProgressCallback("calling_claude", username));
+    const baseProgress = createProgressCallback("calling_claude", username);
+    const progressCallback = onTextDelta
+      ? (event: import("../ai/stream-parser.ts").StreamProgressEvent) => {
+          if (event.type === "text_delta") {
+            onTextDelta(event.text);
+          } else {
+            // Clear streaming bubble when tools start (text was intermediate)
+            if (event.type === "tool_start") onTextDelta(null);
+            baseProgress(event);
+          }
+        }
+      : baseProgress;
+    const result = await executeClaudePrompt(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
     const toolCount = result.toolCalls?.length ?? 0;
     t.end("claude", {
       model: result.model,

@@ -367,6 +367,91 @@ describe("StreamParser progress callbacks", () => {
   });
 });
 
+describe("StreamParser text_delta from stream_event", () => {
+  function makeStreamEvent(deltaType: string, text: string) {
+    return {
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: deltaType, text },
+      },
+    };
+  }
+
+  test("emits text_delta from stream_event content_block_delta", () => {
+    const events: StreamProgressEvent[] = [];
+    const t0 = 1000;
+    const parser = new StreamParser(t0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeStreamEvent("text_delta", "Hello")), t0 + 100);
+    parser.parseLine(JSON.stringify(makeStreamEvent("text_delta", " world")), t0 + 200);
+
+    const deltas = events.filter((e) => e.type === "text_delta");
+    expect(deltas).toHaveLength(2);
+    expect((deltas[0] as any).text).toBe("Hello");
+    expect((deltas[1] as any).text).toBe(" world");
+  });
+
+  test("ignores thinking_delta stream events", () => {
+    const events: StreamProgressEvent[] = [];
+    const t0 = 1000;
+    const parser = new StreamParser(t0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeStreamEvent("thinking_delta", "Let me think")), t0 + 100);
+
+    const deltas = events.filter((e) => e.type === "text_delta");
+    expect(deltas).toHaveLength(0);
+  });
+
+  test("text_delta flows alongside tool events in multi-turn", () => {
+    const events: StreamProgressEvent[] = [];
+    const t0 = 1000;
+    const parser = new StreamParser(t0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+
+    // Streaming text deltas before assistant message completes
+    parser.parseLine(JSON.stringify(makeStreamEvent("text_delta", "Let me ")), t0 + 50);
+    parser.parseLine(JSON.stringify(makeStreamEvent("text_delta", "check.")), t0 + 60);
+
+    // Assistant message with text + tool (non-streaming, complete message)
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "text", text: "Let me check." },
+      { type: "tool_use", id: "toolu_01", name: "Read", input: {} },
+    ])), t0 + 100);
+
+    // Tool result
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "ok", is_error: false },
+    ])), t0 + 500);
+
+    // Streaming text for second turn
+    parser.parseLine(JSON.stringify(makeStreamEvent("text_delta", "Done.")), t0 + 550);
+
+    const deltas = events.filter((e) => e.type === "text_delta");
+    expect(deltas).toHaveLength(3);
+    expect((deltas[0] as any).text).toBe("Let me ");
+    expect((deltas[1] as any).text).toBe("check.");
+    expect((deltas[2] as any).text).toBe("Done.");
+
+    // Tool events also fired
+    const toolStarts = events.filter((e) => e.type === "tool_start");
+    expect(toolStarts).toHaveLength(1);
+  });
+
+  test("works without callback (no crash)", () => {
+    const parser = new StreamParser();
+    // Should not throw when no callback
+    parser.parseLine(JSON.stringify({
+      type: "stream_event",
+      event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+    }));
+  });
+});
+
 describe("formatToolDisplayName", () => {
   test("formats MCP tool names", () => {
     expect(formatToolDisplayName("mcp__gmail__search_emails")).toBe("search_emails (gmail)");

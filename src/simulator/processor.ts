@@ -90,6 +90,16 @@ export async function processSimulatorMessage(
   // Determine channel context for Slack channels
   const channelContext = conversation.channelName ?? undefined;
 
+  // Create onTextDelta callback for streaming text to web clients
+  // null = clear streaming bubble (e.g. tool calls started)
+  const onTextDelta = (delta: string | null): void => {
+    if (delta === null) {
+      simulatorState.publishStreamClear(conversationId);
+    } else {
+      simulatorState.publishTextDelta(conversationId, delta, threadId ?? null);
+    }
+  };
+
   try {
     await processMessage({
       text,
@@ -104,6 +114,7 @@ export async function processSimulatorMessage(
       channelContext,
       recentChannelMessages,
       threadId,
+      onTextDelta,
     });
   } finally {
     simulatorState.setStatus(conversationId, "");

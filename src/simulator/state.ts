@@ -24,7 +24,9 @@ export interface SimMessage {
 export type SimEvent =
   | { type: "message"; conversationId: string; message: SimMessage }
   | { type: "status"; conversationId: string; status: string }
-  | { type: "conversation_created"; conversation: SimConversation };
+  | { type: "conversation_created"; conversation: SimConversation }
+  | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
+  | { type: "stream_clear"; conversationId: string };
 
 type EventSubscriber = (event: SimEvent) => void;
 
@@ -110,6 +112,16 @@ export class SimulatorState {
     if (!conversation) return;
     conversation.status = status;
     this.publish({ type: "status", conversationId, status });
+  }
+
+  /** Broadcast a text delta to subscribers (ephemeral — no state mutation) */
+  publishTextDelta(conversationId: string, delta: string, threadId?: string | null): void {
+    this.publish({ type: "text_delta", conversationId, delta, threadId });
+  }
+
+  /** Signal subscribers to clear any streaming bubble (e.g. when tool calls start) */
+  publishStreamClear(conversationId: string): void {
+    this.publish({ type: "stream_clear", conversationId });
   }
 
   /**

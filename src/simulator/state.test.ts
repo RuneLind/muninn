@@ -218,6 +218,71 @@ describe("SimulatorState", () => {
     });
   });
 
+  describe("publishTextDelta", () => {
+    test("broadcasts text_delta to subscribers without mutating state", () => {
+      const conv = state.createConversation({
+        type: "web",
+        botName: "jarvis",
+        userId: "123",
+        username: "testuser",
+      });
+
+      const events: SimEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishTextDelta(conv.id, "Hello ", "thread-1");
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("text_delta");
+      const delta = events[0] as Extract<SimEvent, { type: "text_delta" }>;
+      expect(delta.conversationId).toBe(conv.id);
+      expect(delta.delta).toBe("Hello ");
+      expect(delta.threadId).toBe("thread-1");
+
+      // No state mutation — messages unchanged
+      expect(conv.messages).toHaveLength(0);
+    });
+
+    test("broadcasts multiple deltas", () => {
+      const conv = state.createConversation({
+        type: "web",
+        botName: "jarvis",
+        userId: "123",
+        username: "testuser",
+      });
+
+      const events: SimEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishTextDelta(conv.id, "Hello ");
+      state.publishTextDelta(conv.id, "world");
+
+      expect(events).toHaveLength(2);
+      expect((events[0] as any).delta).toBe("Hello ");
+      expect((events[1] as any).delta).toBe("world");
+    });
+  });
+
+  describe("publishStreamClear", () => {
+    test("broadcasts stream_clear event", () => {
+      const conv = state.createConversation({
+        type: "web",
+        botName: "jarvis",
+        userId: "123",
+        username: "testuser",
+      });
+
+      const events: SimEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishStreamClear(conv.id);
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("stream_clear");
+      expect((events[0] as Extract<SimEvent, { type: "stream_clear" }>).conversationId).toBe(conv.id);
+    });
+  });
+
   describe("setStatus", () => {
     test("updates status and publishes event", () => {
       const conv = state.createConversation({

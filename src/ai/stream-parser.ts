@@ -19,7 +19,8 @@ import type { ClaudeResult, ToolCall } from "../types.ts";
 export type StreamProgressEvent =
   | { type: "tool_start"; name: string; displayName: string; input?: string }
   | { type: "tool_end"; name: string; displayName: string }
-  | { type: "text" };
+  | { type: "text" }
+  | { type: "text_delta"; text: string };
 
 export type StreamProgressCallback = (event: StreamProgressEvent) => void;
 
@@ -85,8 +86,10 @@ export class StreamParser {
       this.handleUser(event, ts);
     } else if (type === "result") {
       this.handleResult(event);
+    } else if (type === "stream_event") {
+      this.handleStreamEvent(event);
     }
-    // "system" and "stream_event" types are ignored
+    // "system" type is ignored
   }
 
   /** Parse all lines from completed stdout (no real-time timestamps). */
@@ -125,6 +128,7 @@ export class StreamParser {
         this.onProgress?.({ type: "tool_start", name: block.name, displayName, input: abbreviateInput(block.input) });
       }
     }
+
     // Fire text event if assistant responded with text and no tool calls
     if (!hasToolUse && this.resultText && this.onProgress) {
       this.onProgress({ type: "text" });
@@ -180,6 +184,15 @@ export class StreamParser {
     // Model from result if not already set
     if (event.model && this.model === "unknown") {
       this.model = event.model;
+    }
+  }
+
+  private handleStreamEvent(event: any): void {
+    const inner = event.event;
+    if (!inner) return;
+    // content_block_delta with text_delta = streaming text token
+    if (inner.type === "content_block_delta" && inner.delta?.type === "text_delta" && typeof inner.delta.text === "string") {
+      this.onProgress?.({ type: "text_delta", text: inner.delta.text });
     }
   }
 
