@@ -163,14 +163,15 @@ export function layoutStyles(): string {
       width: 32px;
       height: 32px;
       border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
       flex-shrink: 0;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
     }
     .user-platform-badge {
       font-size: 9px;

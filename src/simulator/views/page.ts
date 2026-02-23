@@ -184,13 +184,14 @@ const SIMULATOR_STYLES = `
       width: 32px;
       height: 32px;
       border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
       flex-shrink: 0;
     }
     .conv-item-content {
@@ -381,13 +382,14 @@ const SIMULATOR_STYLES = `
       width: 40px;
       height: 40px;
       border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 16px;
-      font-weight: 700;
-      color: var(--text-primary);
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
       flex-shrink: 0;
     }
     .ins-user-info { flex: 1; min-width: 0; }
@@ -525,6 +527,22 @@ const CHAT_SSE_SCRIPT = `
 
 const SIMULATOR_SCRIPT = `
 (function() {
+  // Avatar color from name
+  var _avatarPalette = [
+    '#6c63ff', '#7c6cef', '#5b8def', '#4da8da', '#4ade80',
+    '#34d399', '#f59e0b', '#f97316', '#ef4444', '#ec4899',
+    '#a78bfa', '#8b5cf6', '#06b6d4', '#14b8a6', '#84cc16',
+  ];
+  function avatarColor(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+    return _avatarPalette[Math.abs(h) % _avatarPalette.length];
+  }
+  function avatarStyle(name) {
+    var c = avatarColor(name);
+    return 'background:' + c + ';box-shadow:0 0 0 1px rgba(255,255,255,0.08),inset 0 1px 0 rgba(255,255,255,0.15)';
+  }
+
   // State
   var conversations = {};
   var activeConvId = null;
@@ -864,8 +882,9 @@ const SIMULATOR_SCRIPT = `
         ? timeAgo(c.messages[c.messages.length - 1].timestamp)
         : '';
 
+      var aName = c.username || c.userId || '?';
       return '<div class="conv-item' + (isActive ? ' active' : '') + '" data-id="' + c.id + '">'
-        + '<div class="conv-item-avatar">' + escapeHtml(initial) + '</div>'
+        + '<div class="conv-item-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
         + '<div class="conv-item-content">'
           + '<div class="conv-item-name">' + escapeHtml(c.username || c.userId) + '</div>'
           + '<div class="conv-item-meta">'
@@ -960,9 +979,10 @@ const SIMULATOR_SCRIPT = `
     var badge = platformBadgeHtml(conv.type);
     var statusText = conv.status || 'idle';
 
+    var aName = conv.username || conv.userId || '?';
     inspectorContent.innerHTML =
       '<div class="ins-user-header">'
-        + '<div class="ins-user-avatar">' + escapeHtml(initial) + '</div>'
+        + '<div class="ins-user-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
         + '<div class="ins-user-info">'
           + '<div class="ins-user-name">' + escapeHtml(conv.username || conv.userId) + ' ' + badge + '</div>'
           + '<div class="ins-user-id">' + escapeHtml(conv.userId) + '</div>'

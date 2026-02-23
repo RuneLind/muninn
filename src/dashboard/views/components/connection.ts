@@ -27,6 +27,22 @@ export function connectionStatusHtml(): string {
 
 export function connectionScript(): string {
   return `
+    // --- Avatar color from name ---
+    var _avatarPalette = [
+      '#6c63ff', '#7c6cef', '#5b8def', '#4da8da', '#4ade80',
+      '#34d399', '#f59e0b', '#f97316', '#ef4444', '#ec4899',
+      '#a78bfa', '#8b5cf6', '#06b6d4', '#14b8a6', '#84cc16',
+    ];
+    function avatarColor(name) {
+      var h = 0;
+      for (var i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+      return _avatarPalette[Math.abs(h) % _avatarPalette.length];
+    }
+    function avatarStyle(name) {
+      var c = avatarColor(name);
+      return 'background:' + c + ';box-shadow:0 0 0 1px rgba(255,255,255,0.08),inset 0 1px 0 rgba(255,255,255,0.15)';
+    }
+
     // --- Bot param helpers ---
     function botParam() {
       return selectedBot ? '?bot=' + encodeURIComponent(selectedBot) : '';
@@ -153,8 +169,9 @@ export function connectionScript(): string {
         const initial = (u.username || u.userId || '?')[0].toUpperCase();
         const platform = u.platform || 'telegram';
         const platformClass = platform.replace(/[^a-z_]/g, '');
+        var aName = u.username || u.userId || '?';
         return '<div class="md-row" data-user-select="' + escapeAttr(u.userId) + '">' +
-          '<div class="user-avatar">' + escapeHtml(initial) + '</div>' +
+          '<div class="user-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>' +
           '<div class="md-row-info">' +
             '<div class="md-row-name">' + escapeHtml(u.username || u.userId) + '</div>' +
             '<div class="md-row-meta">' +

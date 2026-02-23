@@ -156,13 +156,14 @@ export function detailPanelStyles(): string {
       width: 40px;
       height: 40px;
       border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--status-success));
+      background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
       font-size: 16px;
-      font-weight: 700;
-      color: var(--text-primary);
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
+      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
     }
     .detail-user-name {
       font-size: 16px;
@@ -487,7 +488,7 @@ export function detailPanelScript(): string {
       content.innerHTML = '' +
         '<div class="md-detail-header">' +
           '<div class="detail-user-header">' +
-            '<div class="detail-user-avatar" style="width:48px;height:48px;font-size:18px">' + escapeHtml(initial) + '</div>' +
+            '<div class="detail-user-avatar" style="width:48px;height:48px;font-size:18px;' + avatarStyle(u.username || u.userId || '?') + '">' + escapeHtml(initial) + '</div>' +
             '<div style="flex:1">' +
               '<div class="detail-user-name">' + escapeHtml(u.username || u.userId) +
                 ' <span class="user-platform-badge ' + escapeAttr(platformClass) + '" style="font-size:10px">' + escapeHtml(platform) + '</span>' +
