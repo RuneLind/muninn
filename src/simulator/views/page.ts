@@ -21,7 +21,6 @@ export function renderSimulatorPage(): string {
 </head>
 <body>
   ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml() })}
-  ${requestProgressHtml()}
 
   <div class="sim-layout">
     <!-- Left: Conversations sidebar -->
@@ -47,6 +46,7 @@ export function renderSimulatorPage(): string {
         <select class="thread-picker" id="threadPicker" style="display:none"></select>
         <span class="chat-status" id="chatStatus"></span>
       </div>
+      ${requestProgressHtml()}
       <div class="chat-messages" id="chatMessages">
         <div class="empty-state">Select a conversation from the sidebar</div>
       </div>
@@ -248,6 +248,29 @@ const SIMULATOR_STYLES = `
       flex-direction: column;
       background: var(--bg-inset);
       overflow: hidden;
+    }
+
+    /* Curtain request progress — slides down from below the chat header */
+    .sim-chat .request-progress {
+      z-index: 10;
+      border-radius: 0;
+      border: none;
+      border-bottom: 1px solid var(--border-primary);
+      backdrop-filter: blur(12px);
+      background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      padding: 0 16px;
+      transition: max-height 0.35s ease, opacity 0.3s ease, padding 0.35s ease;
+    }
+    .sim-chat .request-progress.visible {
+      padding: 10px 16px;
+    }
+    .sim-chat .request-progress.completed {
+      border-left: 3px solid var(--status-success);
+    }
+    .sim-chat .request-progress.auto-dismiss {
+      opacity: 0;
+      pointer-events: none;
     }
     .chat-header {
       padding: 10px 16px;
@@ -641,6 +664,16 @@ const SIMULATOR_STYLES = `
 /** Minimal SSE connection — subscribes to agent_status + request_progress events */
 const CHAT_SSE_SCRIPT = `
 (function() {
+  var autoDismissTimer = null;
+  var autoDismissInner = null;
+
+  function clearAutoDismissTimers() {
+    clearTimeout(autoDismissTimer);
+    clearTimeout(autoDismissInner);
+    autoDismissTimer = null;
+    autoDismissInner = null;
+  }
+
   function connectSSE() {
     var es = new EventSource('/api/events');
 
@@ -649,7 +682,26 @@ const CHAT_SSE_SCRIPT = `
     });
 
     es.addEventListener('request_progress', function(e) {
-      updateRequestProgress(JSON.parse(e.data));
+      var data = JSON.parse(e.data);
+      updateRequestProgress(data);
+      // Auto-dismiss completed progress after 8s
+      if (data && data.completed) {
+        clearAutoDismissTimers();
+        autoDismissTimer = setTimeout(function() {
+          var panel = document.getElementById('requestProgress');
+          if (panel && panel.classList.contains('completed')) {
+            panel.classList.add('auto-dismiss');
+            autoDismissInner = setTimeout(function() {
+              panel.classList.remove('visible', 'completed', 'auto-dismiss');
+              panel.innerHTML = '';
+            }, 350);
+          }
+        }, 8000);
+      } else if (data) {
+        clearAutoDismissTimers();
+        var panel = document.getElementById('requestProgress');
+        if (panel) panel.classList.remove('auto-dismiss');
+      }
     });
 
     es.onerror = function() {
@@ -657,6 +709,14 @@ const CHAT_SSE_SCRIPT = `
       setTimeout(connectSSE, 3000);
     };
   }
+
+  // Wrap dismissRequestProgress to also clear auto-dismiss timers
+  var _origDismiss = dismissRequestProgress;
+  dismissRequestProgress = function() {
+    clearAutoDismissTimers();
+    _origDismiss();
+  };
+
   connectSSE();
 })();
 `;
@@ -1125,6 +1185,7 @@ const SIMULATOR_SCRIPT = `
 
   // Streaming bubble helpers
   var streamingRawText = '';
+  var streamingRafPending = false;
 
   function appendStreamingDelta(delta) {
     var bubble = chatMessages.querySelector('.msg-streaming');
@@ -1140,17 +1201,31 @@ const SIMULATOR_SCRIPT = `
     }
     if (isWeb) {
       streamingRawText += delta;
-      bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
+      // Throttle HTML re-rendering to once per animation frame to avoid O(n^2) cost
+      if (!streamingRafPending) {
+        streamingRafPending = true;
+        requestAnimationFrame(function() {
+          streamingRafPending = false;
+          var b = chatMessages.querySelector('.msg-streaming');
+          if (b) b.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
+          scrollToBottom();
+        });
+      }
     } else {
       bubble.textContent += delta;
+      scrollToBottom();
     }
-    scrollToBottom();
   }
 
   function removeStreamingBubble() {
     var bubble = chatMessages.querySelector('.msg-streaming');
+    // Flush any pending rAF render before removing
+    if (bubble && streamingRawText && bubble.classList.contains('web')) {
+      bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
+    }
     if (bubble) bubble.remove();
     streamingRawText = '';
+    streamingRafPending = false;
   }
 
   function scrollToBottom() {
@@ -1268,7 +1343,8 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Client-side markdown → HTML formatter for web chat (mirrors server-side web-format.ts)
+  // Client-side markdown → HTML formatter for web chat.
+  // IMPORTANT: This is a manual port of src/web/web-format.ts — keep both in sync.
   function formatWebHtml(text) {
     var result = text.replace(/\\r\\n/g, '\\n');
 
