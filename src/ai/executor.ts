@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeResult } from "../types.ts";
@@ -31,6 +33,13 @@ export async function executeClaudePrompt(
     "--include-partial-messages",
     "--model", model,
   ];
+
+  // Claude CLI discovers .mcp.json from the git root, not from cwd.
+  // Bot dirs are subdirectories, so explicitly pass their .mcp.json.
+  const mcpConfigPath = join(botConfig.dir, ".mcp.json");
+  if (existsSync(mcpConfigPath)) {
+    args.push("--mcp-config", mcpConfigPath);
+  }
 
   if (systemPrompt) {
     args.push("--system-prompt", systemPrompt);

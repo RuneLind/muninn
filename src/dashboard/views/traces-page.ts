@@ -832,7 +832,6 @@ export function renderTracesPage(): string {
         { value: a.goalsCount, label: 'Goals', section: 'goals', tab: 'system' },
         { value: a.scheduledTasksCount, label: 'Tasks', section: 'tasks', tab: 'system' },
         { value: a.alertsCount, label: 'Alerts', section: 'alerts', tab: 'system' },
-        { value: a.knowledgeCount, label: 'Knowledge', section: 'knowledge', tab: 'system' },
       ].filter(function(s) { return s.value != null; });
       el.innerHTML = stats.map(function(s) {
         var clickable = s.value > 0;

@@ -6,7 +6,6 @@ const log = getLog("ai", "prompt");
 import { getActiveGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { generateEmbedding } from "./embeddings.ts";
-import { searchKnowledge, formatKnowledgeResults } from "./knowledge-search.ts";
 import type { RestrictedTools } from "../bots/config.ts";
 import { getRestrictedToolsForUser, buildToolRestrictionPrompt } from "./tool-restrictions.ts";
 import type { ConversationMessage, Goal, Memory, ScheduledTask, UserIdentity } from "../types.ts";
@@ -18,13 +17,11 @@ export interface PromptBuildResult {
     dbHistoryMs: number;
     embeddingMs: number;
     memorySearchMs: number;
-    knowledgeSearchMs: number;
     messagesCount: number;
     memoriesCount: number;
     goalsCount: number;
     scheduledTasksCount: number;
     alertsCount: number;
-    knowledgeCount: number;
     memoryDetails?: { id: string; summary: string; scope: string }[];
     goalDetails?: { id: string; title: string }[];
   };
@@ -37,17 +34,16 @@ export interface BuildPromptOptions {
   botName: string;
   restrictedTools?: RestrictedTools;
   userIdentity?: string | UserIdentity;
-  knowledgeCollections?: string[];
   threadId?: string;
 }
 
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, knowledgeCollections, threadId } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
 
-  const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts, knowledgeResult] =
+  const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts] =
     await Promise.all([
       getRecentMessages(userId, 20, botName, threadId).then((r) => {
         dbHistoryMs = performance.now() - t0;
@@ -60,9 +56,6 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
       getActiveGoals(userId, botName),
       getScheduledTasksForUser(userId, botName),
       getRecentAlerts(userId, botName, 24, 5),
-      knowledgeCollections?.length
-        ? searchKnowledge(currentMessage, knowledgeCollections)
-        : Promise.resolve({ results: [], searchMs: 0 }),
     ]);
 
   const searchStart = performance.now();
@@ -79,10 +72,7 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
   log.info(
     "prompt_build: {ms}ms" +
       ` (db: ${Math.round(dbHistoryMs)}ms, embed: ${Math.round(embeddingMs)}ms, search: ${Math.round(memorySearchMs)}ms` +
-      (knowledgeResult.results.length > 0 ? `, knowledge: ${Math.round(knowledgeResult.searchMs)}ms` : "") +
-      ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts` +
-      (knowledgeResult.results.length > 0 ? `, ${knowledgeResult.results.length} knowledge` : "") +
-      `)`,
+      ` | ${recentMessages.length} msgs, ${relevantMemories.length} memories, ${activeGoals.length} goals, ${scheduledTasks.length} tasks, ${recentAlerts.length} alerts)`,
     { botName, ms: Math.round(totalMs) },
   );
 
@@ -119,10 +109,6 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     systemParts.push(formatAlerts(recentAlerts));
   }
 
-  if (knowledgeResult.results.length > 0) {
-    systemParts.push(formatKnowledgeResults(knowledgeResult.results));
-  }
-
   // User prompt: conversation history + current message
   // Drop the last message if it's the current user message (already saved to DB before buildPrompt)
   const history = recentMessages.at(-1)?.role === "user" && recentMessages.at(-1)?.text === currentMessage
@@ -144,13 +130,11 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
       dbHistoryMs,
       embeddingMs,
       memorySearchMs,
-      knowledgeSearchMs: knowledgeResult.searchMs,
       messagesCount: recentMessages.length,
       memoriesCount: relevantMemories.length,
       goalsCount: activeGoals.length,
       scheduledTasksCount: scheduledTasks.length,
       alertsCount: recentAlerts.length,
-      knowledgeCount: knowledgeResult.results.length,
       memoryDetails: relevantMemories.map((m) => ({ id: m.id, summary: m.summary, scope: m.scope ?? "personal" })),
       goalDetails: activeGoals.map((g) => ({ id: g.id, title: g.title })),
     },

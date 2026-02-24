@@ -1,106 +1,73 @@
 # Knowledge Search System
 
-The knowledge search system gives bots access to indexed company content (currently Notion pages) via vector similarity search. Results reach the AI through two independent paths: auto-injection into the system prompt, and an MCP tool for on-demand searches.
+The knowledge search system gives bots access to indexed company content (Notion pages, Confluence, etc.) via vector similarity search. Knowledge is accessed on-demand through MCP tools — the AI agent decides when to search based on the conversation.
 
 ## Architecture
 
 ```
 User message
     │
-    ├─ Auto-injection (prompt-builder.ts)
-    │   searchKnowledge(query, collections) ──► Knowledge API ──► top 5 results
-    │   └─ injected into system prompt before Claude sees the message
-    │
-    └─ MCP tool (knowledge-mcp.ts)
-        Claude calls search_knowledge / get_notion_page ──► Knowledge API
+    └─ MCP tool (knowledge_api_mcp_adapter.py)
+        Claude calls search_knowledge / get_document / get_notion_page ──► Knowledge API
         └─ Claude uses results inline in its response
 ```
 
-Both paths call the same Knowledge API Server (`http://localhost:8321`), which runs as a separate process and manages vector indexing of Notion content.
+The Knowledge API Server (`http://localhost:8321`) runs as a separate process and manages vector indexing of content sources (Notion, Confluence, etc.).
 
-## Search Paths
+## How It Works
 
-### 1. Auto-injection (passive)
+Claude has access to knowledge search via MCP tools registered in each bot's `.mcp.json`. The AI decides when a search is relevant based on the user's question — there is no automatic injection into every prompt.
 
-Every incoming message triggers a knowledge search before the AI responds. Results are injected into the system prompt alongside memories, goals, and tasks.
-
-- **File:** `src/ai/knowledge-search.ts`
-- **Called from:** `src/ai/prompt-builder.ts` (parallel with memory/goal/task fetches)
-- **Timeout:** 3 seconds (fails silently — knowledge is supplementary)
-- **Results:** Top 5 matches, formatted as `- Title (url) — snippet`
-- **Prompt section:** `Relevant company knowledge (from Notion):`
-
-### 2. MCP tool (active)
-
-Claude can call `search_knowledge` or `get_notion_page` during its response for deeper searches or fresh content. This is useful when the auto-injected results are insufficient or when Claude needs a specific page.
-
-- **File:** `bots/capra/knowledge-mcp.ts`
-- **Registered in:** `bots/capra/.mcp.json`
+- **Adapter:** `knowledge_api_mcp_adapter.py` (Python, in documents-vector-search repo)
 - **Tools:**
-  - `search_knowledge(query, collection?, limit?)` — vector search, returns pages + snippets
-  - `get_notion_page(notion_id)` — fetch fresh content from a specific Notion page
+  - `search_knowledge(query, collection?, limit?, brief?)` — vector search with optional brief mode
+  - `get_document(collection, doc_id)` — fetch full document content
+  - `get_notion_page(notion_id, source?)` — fetch Notion page (live API or local index)
+  - `list_collections()` — list loaded collections with stats
+- **Collection scoping:** `KNOWLEDGE_COLLECTIONS` env var restricts which collections a bot can access
 
 ## Configuration
 
-### Per-bot setup
+### Per-bot MCP setup
 
-Add `knowledgeCollections` to the bot's `config.json`:
-
-```json
-{
-  "knowledgeCollections": ["capra-notion"]
-}
-```
-
-This array is read by `discoverBots()` in `src/bots/config.ts` and passed to the prompt builder. Bots without this field (e.g. Jarvis) skip knowledge search entirely.
-
-### MCP registration
-
-Add the knowledge MCP server to the bot's `.mcp.json`:
+Add the knowledge MCP server to the bot's `.mcp.json` with `KNOWLEDGE_COLLECTIONS` to scope access:
 
 ```json
 {
   "mcpServers": {
     "knowledge": {
       "type": "stdio",
-      "command": "bun",
-      "args": ["run", "knowledge-mcp.ts"],
-      "env": { "KNOWLEDGE_API_URL": "http://localhost:8321" }
+      "command": "uv",
+      "args": [
+        "--directory", "/path/to/documents-vector-search",
+        "run", "knowledge_api_mcp_adapter.py"
+      ],
+      "env": {
+        "KNOWLEDGE_API_URL": "http://localhost:8321",
+        "KNOWLEDGE_COLLECTIONS": "capra-notion-v9,humahr-handbook"
+      }
     }
   }
 }
 ```
+
+### MCP discovery
+
+Claude CLI discovers `.mcp.json` from the git root, not from `cwd`. Since bot dirs are subdirectories, the executor explicitly passes `--mcp-config` pointing to the bot's `.mcp.json` file.
 
 ### Environment
 
 | Variable | Default | Description |
 |---|---|---|
 | `KNOWLEDGE_API_URL` | `http://localhost:8321` | Knowledge API server endpoint |
+| `KNOWLEDGE_COLLECTIONS` | (all) | Comma-separated list of allowed collections |
 
-## Formatting Pipeline
+## Formatting
 
-Knowledge results flow through a formatting pipeline depending on the platform:
+Claude formats knowledge results freely in its response. Platform-specific formatting is applied:
 
-```
-Knowledge API response (JSON)
-    │
-    ├─ Auto-injection: formatKnowledgeResults() → plain text in system prompt
-    │
-    └─ MCP tool: Claude formats freely in its response
-        │
-        ├─ Telegram: formatTelegramHtml() (HTML tags)
-        └─ Slack: formatSlackMrkdwn() (mrkdwn syntax)
-```
-
-### Slack formatting rules
-
-The `formatSlackMrkdwn()` function in `src/slack/slack-format.ts` handles:
-
-- **Markdown tables** → converted to labeled bullet lists (`• *Col:* value  *Col:* value`)
-- **Links** `[text](url)` → `<url|text>` (preserved through HTML stripping via placeholder mechanism)
-- **Empty bullet points** → stripped (common when Notion sections have no content)
-- **Bold/italic/strike** → Slack mrkdwn equivalents
-- **Code blocks** → preserved as-is
+- **Slack:** `formatSlackMrkdwn()` converts markdown tables to bullet lists, fixes links
+- **Telegram:** `formatTelegramHtml()` converts to HTML tags
 
 The bot's persona (`CLAUDE.md`) also instructs Claude to avoid markdown tables and empty bullets, providing defense-in-depth.
 
@@ -108,23 +75,18 @@ The bot's persona (`CLAUDE.md`) also instructs Claude to avoid markdown tables a
 
 | File | Purpose |
 |---|---|
-| `src/ai/knowledge-search.ts` | HTTP client for Knowledge API, result formatting |
-| `src/ai/knowledge-search.test.ts` | Tests for search client and formatting |
-| `bots/capra/knowledge-mcp.ts` | MCP server with `search_knowledge` and `get_notion_page` tools |
-| `bots/capra/config.json` | Per-bot knowledge collection config |
-| `bots/capra/.mcp.json` | MCP server registration |
-| `src/ai/prompt-builder.ts` | Injects knowledge results into system prompt |
-| `src/bots/config.ts` | Bot discovery, reads `knowledgeCollections` |
+| `bots/<name>/.mcp.json` | MCP server registration + collection scoping |
+| `src/ai/executor.ts` | Passes `--mcp-config` to Claude CLI |
+| `src/dashboard/routes.ts` | Dashboard proxy to Knowledge API (`/knowledge` page) |
+| `src/dashboard/views/knowledge-page.ts` | Dashboard knowledge search UI |
 | `src/slack/slack-format.ts` | Slack formatting (table conversion, link preservation) |
-| `src/ai/embeddings.ts` | Local embedding generation (MiniLM, used by memory system) |
 
 ## Data Flow
 
 1. User sends a message
-2. `processMessage()` calls `buildPrompt()` which fetches knowledge in parallel with memories/goals/tasks
-3. `searchKnowledge()` sends HTTP GET to Knowledge API with the user's message as query
-4. Knowledge API performs vector similarity search across configured collections
-5. Top 5 results (title, URL, best snippet) are formatted and added to the system prompt
-6. Claude generates its response, seeing knowledge context alongside conversation history
-7. During response, Claude may also call `search_knowledge` MCP tool for additional searches
-8. Response is formatted for the target platform (Slack mrkdwn or Telegram HTML)
+2. Claude receives the prompt with memories, goals, tasks, and conversation history
+3. Based on the question, Claude may call `search_knowledge` MCP tool
+4. MCP adapter sends HTTP GET to Knowledge API with the query
+5. Knowledge API performs hybrid vector + BM25 search across allowed collections
+6. Claude uses results inline in its response
+7. Response is formatted for the target platform (Slack mrkdwn or Telegram HTML)

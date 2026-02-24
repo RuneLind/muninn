@@ -91,7 +91,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     t.start("prompt_build");
     const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
       userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
-      restrictedTools: botConfig.restrictedTools, userIdentity, knowledgeCollections: botConfig.knowledgeCollections, threadId,
+      restrictedTools: botConfig.restrictedTools, userIdentity, threadId,
     });
     t.end("prompt_build", promptMeta);
     savePromptSnapshot({ traceId: t.traceId, systemPrompt, userPrompt }).catch(() => {});

@@ -1,6 +1,6 @@
 # Prompt Assembly
 
-How Javrvis assembles the full prompt from 7 context sources in parallel — persona, memories, goals, scheduled tasks, alerts, knowledge, and conversation history — while keeping latency under 1 second.
+How Javrvis assembles the full prompt from 6 context sources in parallel — persona, memories, goals, scheduled tasks, alerts, and conversation history — while keeping latency under 1 second. External knowledge (RAG) is accessed on-demand via MCP tools, not injected into every prompt.
 
 ## Overview
 
@@ -18,7 +18,6 @@ Every incoming message triggers a prompt build that fetches context from multipl
                     │  5. Active goals          │
                     │  6. Scheduled tasks       │
                     │  7. Recent alerts         │
-                    │  8. Knowledge results     │
                     │                          │
                     ├──────────────────────────┤
                     │      User Prompt         │
@@ -30,22 +29,23 @@ Every incoming message triggers a prompt build that fetches context from multipl
 
 ## Parallel Data Fetching
 
-Six data sources are fetched concurrently in a single `Promise.all()`:
+Five data sources are fetched concurrently in a single `Promise.all()`:
 
 ```typescript
-const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts, knowledgeResult] =
+const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts] =
   await Promise.all([
     getRecentMessages(userId, 20, botName, threadId),       // DB: thread-scoped history
     generateEmbedding(currentMessage),                      // Local: MiniLM-L6 384-dim
     getActiveGoals(userId, botName),                        // DB: active goals
     getScheduledTasksForUser(userId, botName),              // DB: user's scheduled tasks
     getRecentAlerts(userId, botName, 24, 5),                // DB: last 24h watcher alerts
-    searchKnowledge(message, collections),                  // HTTP: external knowledge API
   ]);
 
 // Then hybrid memory search (needs the embedding from above)
 const memories = await searchMemoriesHybrid(userId, message, queryEmbedding, 5, botName);
 ```
+
+External knowledge (Notion, Confluence) is NOT injected into the prompt. It is accessed on-demand via MCP tools when the AI decides a search is needed. See `docs/knowledge-search-system.md`.
 
 The embedding generation and memory search are sequential (search needs the embedding), but everything else runs in parallel. Typical build time is 100-500ms.
 
@@ -116,16 +116,6 @@ Recent watcher alerts sent to user (last 24h):
 - [14:30] news: TechCrunch — New AI breakthrough announced
 ```
 
-### 8. Knowledge Results
-
-If the bot has `knowledgeCollections` configured, the top 5 results from the external Knowledge API:
-
-```
-Relevant company knowledge (from Notion):
-- Onboarding Guide (https://notion.so/...) — New employees should complete...
-- Code Review Policy (https://notion.so/...) — All PRs require at least...
-```
-
 ## User Prompt Structure
 
 The user prompt contains the conversation history and current message:
@@ -180,13 +170,11 @@ interface PromptBuildResult {
     dbHistoryMs: number;         // Time to fetch conversation history
     embeddingMs: number;         // Time to generate query embedding
     memorySearchMs: number;      // Time for hybrid memory search
-    knowledgeSearchMs: number;   // Time for external knowledge API
     messagesCount: number;       // Messages in history
     memoriesCount: number;       // Memories found
     goalsCount: number;          // Active goals
     scheduledTasksCount: number; // Scheduled tasks
     alertsCount: number;         // Recent alerts
-    knowledgeCount: number;      // Knowledge results
   };
 }
 ```
@@ -199,7 +187,6 @@ This metadata is logged, stored in trace span attributes, and displayed in the d
 |---|---|
 | `src/ai/prompt-builder.ts` | `buildPrompt()` — parallel fetch + assembly |
 | `src/ai/embeddings.ts` | Local embedding generation for hybrid search |
-| `src/ai/knowledge-search.ts` | External knowledge API client |
 | `src/ai/tool-restrictions.ts` | Tool restriction prompt section |
 | `src/db/memories.ts` | `searchMemoriesHybrid()` — RRF search |
 | `src/db/goals.ts` | `getActiveGoals()` |

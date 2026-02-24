@@ -45,8 +45,6 @@ export interface BotConfig {
   restrictedTools?: RestrictedTools;
   /** Channel listening config — passive relevance-based responses in active channels */
   channelListening?: ChannelListeningConfig;
-  /** Collections to search in the Knowledge API (e.g. ["capra-notion"]) */
-  knowledgeCollections?: string[];
 }
 
 /**
@@ -125,7 +123,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "knowledgeCollections"]);
+        const knownKeys = new Set(["model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -156,7 +154,6 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       timeoutMs: botSettings.timeoutMs as number | undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
-      knowledgeCollections: botSettings.knowledgeCollections as string[] | undefined,
     });
 
     const configParts: string[] = [];

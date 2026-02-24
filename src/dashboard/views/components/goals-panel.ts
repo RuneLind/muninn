@@ -1,4 +1,4 @@
-/** Goals panel — data setter only (rendering handled by knowledge-panel.ts) */
+/** Goals panel — data setter only (rendering handled by memory-panel.ts) */
 export function goalsPanelStyles(): string {
   return ``;
 }

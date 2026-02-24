@@ -87,8 +87,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   t.start("prompt_build");
   const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
     userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
-    restrictedTools: botConfig.restrictedTools, userIdentity: userIdentity ?? username,
-    knowledgeCollections: botConfig.knowledgeCollections, threadId,
+    restrictedTools: botConfig.restrictedTools, userIdentity: userIdentity ?? username, threadId,
   });
   t.end("prompt_build", promptMeta);
 

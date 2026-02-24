@@ -174,14 +174,13 @@ Supports both cron-style (hour/minute/days-of-week) and interval-based (every N 
 The prompt builder fetches memories in parallel with other context sources:
 
 ```typescript
-const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, alerts, knowledge] =
+const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, alerts] =
   await Promise.all([
     getRecentMessages(userId, 20, botName, threadId),
     generateEmbedding(currentMessage),       // For hybrid search
     getActiveGoals(userId, botName),
     getScheduledTasksForUser(userId, botName),
     getRecentAlerts(userId, botName, 24, 5),
-    searchKnowledge(message, collections),
   ]);
 
 // Then hybrid search (needs the embedding)

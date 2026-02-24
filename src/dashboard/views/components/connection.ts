@@ -128,7 +128,7 @@ export function connectionScript(): string {
         [
           () => renderSlackAnalytics(slackRes),
           () => renderUsers(usersRes.users || []),
-          () => renderKnowledgePanel(),
+          () => renderMemoryPanel(),
           () => renderAutomationPanel(),
           () => initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []),
         ].forEach(fn => { try { fn(); } catch (e) { console.error('Render error:', e); } });

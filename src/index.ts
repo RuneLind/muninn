@@ -6,7 +6,6 @@ import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
-import { configureKnowledgeSearch } from "./ai/knowledge-search.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { Hono } from "hono";
@@ -35,9 +34,6 @@ const slackAppList: SlackApp[] = [];
 
 // Initialize database
 initDb(config);
-
-// Configure modules with centralized config
-configureKnowledgeSearch(config.knowledgeApiUrl);
 
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();

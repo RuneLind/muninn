@@ -1,6 +1,5 @@
 {
   "model": "sonnet",
   "thinkingMaxTokens": 16000,
-  "timeoutMs": 300000,
-  "knowledgeCollections": ["melosys-confluence-v3"]
+  "timeoutMs": 300000
 }

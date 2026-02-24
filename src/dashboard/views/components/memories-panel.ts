@@ -1,4 +1,4 @@
-/** Memories panel — data setter only (rendering handled by knowledge-panel.ts) */
+/** Memories panel — data setter only (rendering handled by memory-panel.ts) */
 export function memoriesPanelStyles(): string {
   return ``;
 }

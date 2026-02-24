@@ -12,7 +12,7 @@ import { goalsPanelStyles, goalsPanelHtml, goalsPanelScript } from "./components
 import { tasksPanelStyles, tasksPanelHtml, tasksPanelScript } from "./components/tasks-panel.ts";
 import { watchersPanelStyles, watchersPanelHtml, watchersPanelScript } from "./components/watchers-panel.ts";
 import { memoriesPanelStyles, memoriesPanelHtml, memoriesPanelScript } from "./components/memories-panel.ts";
-import { knowledgePanelStyles, knowledgePanelHtml, knowledgePanelScript } from "./components/knowledge-panel.ts";
+import { memoryPanelStyles, memoryPanelHtml, memoryPanelScript } from "./components/memory-panel.ts";
 import { automationPanelStyles, automationPanelHtml, automationPanelScript } from "./components/automation-panel.ts";
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
@@ -41,7 +41,7 @@ export function renderDashboardPage(): string {
     ${tasksPanelStyles()}
     ${watchersPanelStyles()}
     ${memoriesPanelStyles()}
-    ${knowledgePanelStyles()}
+    ${memoryPanelStyles()}
     ${automationPanelStyles()}
     ${slackPanelStyles()}
     ${requestProgressStyles()}
@@ -74,7 +74,7 @@ export function renderDashboardPage(): string {
       </div>
     </div>
     <div data-section="memories-goals">
-      ${knowledgePanelHtml()}
+      ${memoryPanelHtml()}
     </div>
     <div data-section="schedules-watchers">
       ${automationPanelHtml()}
@@ -97,7 +97,7 @@ export function renderDashboardPage(): string {
     ${tasksPanelScript()}
     ${watchersPanelScript()}
     ${memoriesPanelScript()}
-    ${knowledgePanelScript()}
+    ${memoryPanelScript()}
     ${automationPanelScript()}
     ${slackPanelScript()}
     ${usageChartScript()}

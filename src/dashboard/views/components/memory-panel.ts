@@ -1,7 +1,7 @@
-/** Knowledge panel — combined memories + goals master-detail with tag navigation */
-export function knowledgePanelStyles(): string {
+/** Memory panel — combined memories + goals master-detail with tag navigation */
+export function memoryPanelStyles(): string {
   return `
-    /* Knowledge panel filters */
+    /* Memory panel filters */
     .mg-filters {
       padding: 8px 12px;
       border-bottom: 1px solid var(--border-primary);
@@ -138,12 +138,12 @@ export function knowledgePanelStyles(): string {
   `;
 }
 
-export function knowledgePanelHtml(): string {
+export function memoryPanelHtml(): string {
   return `
       <div class="md-layout">
         <div class="md-master">
           <div class="md-master-header">
-            Knowledge <span class="count" id="knowledgeCount">0</span>
+            Memory <span class="count" id="memoryCount">0</span>
           </div>
           <div class="mg-filters" id="mgFilters">
             <div class="mg-filter-row" id="mgTypeFilters"></div>
@@ -163,17 +163,17 @@ export function knowledgePanelHtml(): string {
       </div>`;
 }
 
-export function knowledgePanelScript(): string {
+export function memoryPanelScript(): string {
   return `
     let mgFilter = { type: 'all', scope: 'all', tag: null };
     let selectedMgItem = null; // { kind, id }
 
-    function renderKnowledgePanel() {
+    function renderMemoryPanel() {
       const memories = memoriesData || [];
       const goals = goalsData || [];
       const total = memories.length + goals.length;
 
-      document.getElementById('knowledgeCount').textContent = total;
+      document.getElementById('memoryCount').textContent = total;
       updateTabCount('memories-goals', total);
 
       // Compute tag counts from both
@@ -464,10 +464,10 @@ export function knowledgePanelScript(): string {
       document.getElementById('mgDetailContent').style.display = 'none';
 
       // Re-render
-      renderKnowledgePanel();
+      renderMemoryPanel();
     }
 
-    // --- Click handlers for knowledge panel ---
+    // --- Click handlers for memory panel ---
     document.getElementById('mgFilters').addEventListener('click', (e) => {
       const typeEl = e.target.closest('[data-mg-type]');
       if (typeEl) { setMgFilter('type', typeEl.dataset.mgType); return; }

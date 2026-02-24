@@ -63,9 +63,9 @@ Guard already present: `initDb()` throws if `sql` is already set.
 
 ### ~~7. Config not centralized~~
 **Status:** [x] DONE
-**Files:** `src/logging.ts`, `src/ai/knowledge-search.ts`
+**Files:** `src/logging.ts`
 ~~Read `process.env` directly instead of going through `src/config.ts`.~~
-- `knowledge-search.ts`: already uses `configureKnowledgeSearch()` pattern (pre-existing).
+- `knowledge-search.ts`: removed (knowledge now accessed via MCP tools, not prompt injection).
 - `logging.ts`: now accepts `logDir` parameter; `index.ts` passes `config.logDir` to `setupLogging()`.
 
 ### ~~8. No integer validation in config~~

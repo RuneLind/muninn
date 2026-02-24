@@ -51,7 +51,6 @@ interface BotConfig {
   timeoutMs?: number;                 // Override global CLAUDE_TIMEOUT_MS
   restrictedTools?: RestrictedTools;  // Per-tool-group user access control
   channelListening?: ChannelListeningConfig;
-  knowledgeCollections?: string[];    // External knowledge API collections
 }
 ```
 
@@ -68,7 +67,7 @@ bots/
 ├── capra/
 │   ├── CLAUDE.md
 │   ├── config.json
-│   ├── .mcp.json                    ← MCP servers: Knowledge, Notion (optional)
+│   ├── .mcp.json                    ← MCP servers: Knowledge, Gmail (optional)
 │   └── .claude/
 │       └── settings.json
 ```
@@ -111,8 +110,7 @@ What `cwd` gives us for free (Claude CLI auto-discovers):
     "enabled": true,
     "cooldownMs": 120000,
     "topicHints": ["kotlin", "architecture"]
-  },
-  "knowledgeCollections": ["capra-notion"]
+  }
 }
 ```
 
