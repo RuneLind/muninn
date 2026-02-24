@@ -772,9 +772,9 @@ const SIMULATOR_SCRIPT = `
     if (autoSelectThreadId) {
       selectThread(autoSelectThreadId);
     } else if (!activeThreadId) {
-      var mainThread = threads.find(function(t) { return t.name === 'main'; });
-      if (mainThread && mainThread.id) {
-        selectThread(mainThread.id);
+      // Select the most recently active thread (first in the list, already sorted by activity)
+      if (threads.length > 0) {
+        selectThread(threads[0].id);
       } else {
         renderThreadList();
       }
