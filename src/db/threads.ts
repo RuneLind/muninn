@@ -68,6 +68,30 @@ export async function getActiveThreadId(userId: string, botName: string): Promis
   return ensureDefaultThread(userId, botName);
 }
 
+/** Create a new thread without deactivating others. For web UI thread creation. */
+export async function createThread(userId: string, botName: string, name: string): Promise<Thread> {
+  const sql = getDb();
+  const normalized = name.toLowerCase().trim();
+
+  if (!normalized) {
+    throw new Error("Thread name cannot be empty");
+  }
+  if (normalized.length > 50) {
+    throw new Error("Thread name too long (max 50 characters)");
+  }
+  if (/[\n\r\t]/.test(normalized)) {
+    throw new Error("Thread name cannot contain newlines or tabs");
+  }
+
+  const [row] = await sql`
+    INSERT INTO threads (user_id, bot_name, name, is_active)
+    VALUES (${userId}, ${botName}, ${normalized}, false)
+    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
+    RETURNING *
+  `;
+  return rowToThread(row!);
+}
+
 /** Switch to a thread by name, creating it if it doesn't exist. Returns the thread. */
 export async function switchThread(userId: string, botName: string, name: string): Promise<Thread> {
   const sql = getDb();

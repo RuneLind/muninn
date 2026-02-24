@@ -29,6 +29,11 @@ export function formatWebHtml(text: string): string {
     return `\x00INLINE${idx}\x00`;
   });
 
+  // Convert Slack mrkdwn links <url|text> → markdown [text](url) before escaping
+  result = result.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "[$2]($1)");
+  // Convert bare Slack links <url> → markdown [url](url)
+  result = result.replace(/<(https?:\/\/[^>]+)>/g, "[$1]($1)");
+
   // Escape HTML entities in regular text (code blocks already escaped above).
   // This prevents raw HTML in Claude's response from being interpreted as tags.
   // Must happen before markdown conversions so generated tags aren't affected.

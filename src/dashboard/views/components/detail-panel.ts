@@ -495,7 +495,7 @@ export function detailPanelScript(): string {
               '</div>' +
               '<div class="detail-user-platform" style="font-family:monospace;font-size:11px;margin-top:2px;color:var(--text-dim)">' + escapeHtml(u.userId || '') + '</div>' +
             '</div>' +
-            (selectedBot ? '<a class="detail-chat-btn" href="/chat?user=' + encodeURIComponent(u.userId) + '&bot=' + encodeURIComponent(selectedBot) + '&username=' + encodeURIComponent(u.username || u.userId) + '">Chat</a>' : '') +
+            (selectedBot ? '<a class="detail-chat-btn" href="/chat?bot=' + encodeURIComponent(selectedBot) + '">Chat</a>' : '') +
           '</div>' +
           '<div class="detail-stat-row">' +
             '<div class="detail-stat-box"><div class="detail-stat-num">' + (u.messageCount || 0) + '</div><div class="detail-stat-label">Messages</div></div>' +
@@ -701,9 +701,7 @@ export function detailPanelScript(): string {
         const userThreads = (data.threads || []).filter(t => t.userId === u.userId);
         if (!userThreads.length) { sec.innerHTML = '<div class="detail-empty-hint">No threads</div>'; return; }
         sec.innerHTML = '<div class="detail-mini-list">' + userThreads.map(t => {
-          const chatUrl = '/chat?user=' + encodeURIComponent(u.userId)
-            + '&bot=' + encodeURIComponent(selectedBot || '')
-            + '&username=' + encodeURIComponent(u.username || u.userId)
+          const chatUrl = '/chat?bot=' + encodeURIComponent(selectedBot || '')
             + '&thread=' + encodeURIComponent(t.id);
           const active = t.isActive ? ' <span class="mini-badge" style="background:var(--tint-success);color:var(--status-success)">active</span>' : '';
           return '<div class="detail-mini-item">'

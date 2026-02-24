@@ -1,5 +1,7 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
+import { ensureDefaultThread } from "../db/threads.ts";
+import type { ChatUser } from "./chat-config.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -30,6 +32,15 @@ export type SimEvent =
   | { type: "stream_clear"; conversationId: string };
 
 type EventSubscriber = (event: SimEvent) => void;
+
+/** Deterministic conversation ID from a composite key (e.g. "userId:botName:platform"). */
+async function deterministicId(key: string): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return Array.from(new Uint8Array(hashBuffer))
+    .slice(0, 16)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 /**
  * In-memory state for simulated conversations.
@@ -126,6 +137,42 @@ export class SimulatorState {
   }
 
   /**
+   * Hydrate conversations from chat.config.json user-bot bindings.
+   * Creates one SimConversation per binding with no messages preloaded.
+   */
+  async hydrateFromConfig(users: ChatUser[]): Promise<number> {
+    let count = 0;
+
+    const entries = await Promise.all(users.map(async (user) => {
+      const id = await deterministicId(`${user.id}:${user.bot}:web`);
+      return { id, user };
+    }));
+
+    const threadPromises: Promise<unknown>[] = [];
+    for (const { id, user } of entries) {
+      if (this.conversations.has(id)) continue;
+
+      const conversation: SimConversation = {
+        id,
+        type: "web",
+        botName: user.bot,
+        userId: user.id,
+        username: user.name,
+        messages: [],
+      };
+      this.conversations.set(id, conversation);
+
+      // Ensure "main" thread exists in DB for this user+bot
+      threadPromises.push(ensureDefaultThread(user.id, user.bot));
+
+      count++;
+    }
+
+    await Promise.all(threadPromises);
+    return count;
+  }
+
+  /**
    * Hydrate conversations from database on startup.
    * Creates deterministic conversation IDs from (userId, botName, platform)
    * so they're stable across restarts.
@@ -133,14 +180,10 @@ export class SimulatorState {
   async hydrateFromDb(): Promise<number> {
     const convRows = await getSimConversations();
     let count = 0;
-    const encoder = new TextEncoder();
 
     for (const row of convRows) {
       // Deterministic ID from the conversation tuple
-      const key = `${row.userId}:${row.botName}:${row.platform}`;
-      const hashBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(key));
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      const id = hashArray.slice(0, 16).map((b) => b.toString(16).padStart(2, "0")).join("");
+      const id = await deterministicId(`${row.userId}:${row.botName}:${row.platform}`);
 
       // Skip if already exists in memory (in-memory takes priority)
       if (this.conversations.has(id)) continue;

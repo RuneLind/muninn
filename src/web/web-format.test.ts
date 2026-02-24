@@ -221,4 +221,23 @@ describe("formatWebHtml", () => {
     const result = formatWebHtml('He said "hello"');
     expect(result).toBe("He said &quot;hello&quot;");
   });
+
+  test("converts Slack mrkdwn links with label", () => {
+    const input = "Ref: <https://confluence.adeo.no/pages/123|Vurdering av bostedsland>";
+    const result = formatWebHtml(input);
+    expect(result).toContain('<a href="https://confluence.adeo.no/pages/123" target="_blank" rel="noopener">Vurdering av bostedsland</a>');
+  });
+
+  test("converts bare Slack mrkdwn links", () => {
+    const input = "See <https://example.com/page>";
+    const result = formatWebHtml(input);
+    expect(result).toContain('<a href="https://example.com/page" target="_blank" rel="noopener">https://example.com/page</a>');
+  });
+
+  test("does not convert non-http Slack-style angle brackets", () => {
+    const input = "Use <div> for layout";
+    const result = formatWebHtml(input);
+    expect(result).not.toContain("<a ");
+    expect(result).toContain("&lt;div&gt;");
+  });
 });

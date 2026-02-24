@@ -4,9 +4,10 @@ import type { BotConfig } from "../bots/config.ts";
 import { simulatorState, type ConversationType } from "./state.ts";
 import { processSimulatorMessage } from "./processor.ts";
 import { renderSimulatorPage } from "./views/page.ts";
-import { listThreads } from "../db/threads.ts";
+import { listThreads, createThread } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
+import { loadChatConfig } from "./chat-config.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("simulator");
@@ -21,6 +22,26 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Serve the simulator UI page
   app.get("/", (c) => {
     return c.html(renderSimulatorPage());
+  });
+
+  // Serve chat config (mode: "config" with users, or mode: "discovery")
+  app.get("/config", async (c) => {
+    const chatCfg = await loadChatConfig();
+    if (chatCfg) {
+      return c.json({ mode: "config", users: chatCfg.users });
+    }
+    // Fallback: derive users from existing conversations
+    const convs = simulatorState.getConversations();
+    const seen = new Set<string>();
+    const users: { id: string; name: string; bot: string }[] = [];
+    for (const conv of convs) {
+      const key = `${conv.userId}:${conv.botName}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        users.push({ id: conv.userId, name: conv.username, bot: conv.botName });
+      }
+    }
+    return c.json({ mode: "discovery", users });
   });
 
   // List available bots
@@ -108,11 +129,30 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     return c.json({ ok: true });
   });
 
-  // List threads for a conversation's user+bot
+  // Create a new thread for a user+bot
+  app.post("/threads", async (c) => {
+    const body = await c.req.json<{ userId: string; botName: string; name: string }>();
+    if (!body.userId || !body.botName || !body.name) {
+      return c.json({ error: "userId, botName, and name are required" }, 400);
+    }
+    const bot = botConfigs.find((b) => b.name === body.botName);
+    if (!bot) {
+      return c.json({ error: `Bot "${body.botName}" not found` }, 404);
+    }
+    try {
+      const thread = await createThread(body.userId, body.botName, body.name);
+      return c.json({ thread }, 201);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  // List threads for a user+bot (excludes slack: threads)
   app.get("/threads/:userId/:botName", async (c) => {
     const userId = c.req.param("userId");
     const botName = c.req.param("botName");
-    const threads = await listThreads(userId, botName);
+    const allThreads = await listThreads(userId, botName);
+    const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
     return c.json({ threads });
   });
 

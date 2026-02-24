@@ -23,32 +23,26 @@ export function renderSimulatorPage(): string {
   ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml() })}
 
   <div class="sim-layout">
-    <!-- Left: Conversations sidebar -->
+    <!-- Left: Threads sidebar -->
     <div class="sim-sidebar">
       <div class="sidebar-header">
-        <h3>Conversations</h3>
-        <button class="new-chat-btn" id="newChatBtn">+ New</button>
+        <h3>Threads</h3>
+        <button class="new-thread-btn" id="newThreadBtn">+ New Thread</button>
       </div>
-      <div class="new-chat-picker" id="newChatPicker">
-        <select id="botSelect"></select>
-        <button class="picker-start" id="newChatConfirm">Start</button>
-        <button class="picker-cancel" id="newChatCancel">&times;</button>
-      </div>
-      <div class="conv-list" id="convList">
-        <div class="empty-state">No conversations yet</div>
+      <div class="thread-list" id="threadList">
+        <div class="empty-state">Select a bot</div>
       </div>
     </div>
 
     <!-- Center: Chat view -->
     <div class="sim-chat">
       <div class="chat-header" id="chatHeader">
-        <span class="chat-title">Select a conversation</span>
-        <select class="thread-picker" id="threadPicker" style="display:none"></select>
+        <span class="chat-title">Select a thread</span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       ${requestProgressHtml()}
       <div class="chat-messages" id="chatMessages">
-        <div class="empty-state">Select a conversation from the sidebar</div>
+        <div class="empty-state">Select a thread from the sidebar</div>
       </div>
       <div class="chat-input">
         <textarea id="chatInput" placeholder="Type a message..." rows="1" disabled></textarea>
@@ -59,7 +53,7 @@ export function renderSimulatorPage(): string {
     <!-- Right: Inspector -->
     <div class="sim-inspector">
       <div id="inspectorContent">
-        <div class="empty-state">Select a conversation</div>
+        <div class="empty-state">Select a thread</div>
       </div>
       <div id="inspectorContext"></div>
       <h3 class="ins-heading">Activity Feed</h3>
@@ -110,7 +104,7 @@ const SIMULATOR_STYLES = `
       justify-content: space-between;
     }
     .sidebar-header h3 { font-size: 14px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 0; }
-    .new-chat-btn {
+    .new-thread-btn {
       background: var(--accent);
       color: var(--text-primary);
       border: none;
@@ -121,54 +115,13 @@ const SIMULATOR_STYLES = `
       cursor: pointer;
       transition: background 0.2s;
     }
-    .new-chat-btn:hover { background: var(--accent-hover); }
-    .new-chat-picker {
-      display: none;
-      padding: 8px 12px;
-      gap: 6px;
-      align-items: center;
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .new-chat-picker select {
-      flex: 1;
-      background: var(--bg-surface);
-      border: 1px solid var(--border-secondary);
-      color: var(--text-secondary);
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-    .picker-start {
-      background: var(--accent);
-      color: var(--text-primary);
-      border: none;
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .picker-start:hover { background: var(--accent-hover); }
-    .picker-cancel {
-      background: none;
-      border: 1px solid var(--border-secondary);
-      color: var(--text-muted);
-      width: 24px;
-      height: 24px;
-      border-radius: 4px;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-    }
-    .picker-cancel:hover { border-color: var(--text-dim); }
-    .conv-list {
+    .new-thread-btn:hover { background: var(--accent-hover); }
+    .thread-list {
       flex: 1;
       overflow-y: auto;
       padding: 8px;
     }
-    .conv-item {
+    .thread-item {
       display: flex;
       align-items: center;
       gap: 10px;
@@ -178,28 +131,32 @@ const SIMULATOR_STYLES = `
       transition: background 0.15s;
       margin-bottom: 2px;
     }
-    .conv-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-    .conv-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
-    .conv-item-avatar {
+    .thread-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+    .thread-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+    .thread-item-icon {
       width: 32px;
       height: 32px;
       border-radius: 50%;
-      background: var(--accent);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 13px;
-      font-weight: 600;
-      color: rgba(255,255,255,0.9);
-      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+      font-size: 14px;
+      color: var(--text-muted);
       flex-shrink: 0;
     }
-    .conv-item-content {
+    .thread-item.active .thread-item-icon {
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .thread-item-content {
       flex: 1;
       min-width: 0;
       overflow: hidden;
     }
-    .conv-item-name {
+    .thread-item-name {
       font-size: 13px;
       color: var(--text-secondary);
       font-weight: 500;
@@ -207,7 +164,7 @@ const SIMULATOR_STYLES = `
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .conv-item-meta {
+    .thread-item-meta {
       display: flex;
       align-items: center;
       gap: 4px;
@@ -217,30 +174,12 @@ const SIMULATOR_STYLES = `
       white-space: nowrap;
       overflow: hidden;
     }
-    .conv-item-preview {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      color: var(--text-faint);
-    }
-    .conv-item-time {
+    .thread-item-time {
       font-size: 10px;
       color: var(--text-faint);
       white-space: nowrap;
       flex-shrink: 0;
     }
-    .conv-item-badge {
-      display: inline-block;
-      font-size: 9px;
-      padding: 1px 5px;
-      border-radius: 3px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-      flex-shrink: 0;
-    }
-    .badge-tg { background: #1a2a3e; color: #54a9eb; }
-    .badge-slack { background: #2a1a3e; color: #e0a0ff; }
-    .badge-web { background: #1a3a2a; color: #54eb8a; }
 
     /* Chat */
     .sim-chat {
@@ -281,17 +220,6 @@ const SIMULATOR_STYLES = `
       background: var(--bg-panel);
     }
     .chat-title { font-size: 14px; font-weight: 500; }
-    .thread-picker {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-secondary);
-      color: var(--text-secondary);
-      padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 12px;
-      cursor: pointer;
-      max-width: 180px;
-    }
-    .thread-picker:focus { border-color: var(--accent); outline: none; }
     .chat-status { font-size: 12px; color: var(--accent); }
     .chat-status:empty { display: none; }
     .chat-messages {
@@ -328,65 +256,69 @@ const SIMULATOR_STYLES = `
     .msg-bot a:hover { text-decoration-color: var(--accent-light); }
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
-    .msg-bot.web h2, .msg-bot.web h3, .msg-bot.web h4, .msg-bot.web h5, .msg-bot.web h6 {
+    /* Shared web rich-content styles (used by both .msg-bot.web and .msg-streaming.web) */
+    .web-content h2, .web-content h3, .web-content h4, .web-content h5, .web-content h6 {
       margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3;
     }
-    .msg-bot.web h2 { font-size: 1.25em; }
-    .msg-bot.web h3 { font-size: 1.15em; }
-    .msg-bot.web h4 { font-size: 1.05em; }
-    .msg-bot.web pre {
+    .web-content h2 { font-size: 1.25em; }
+    .web-content h3 { font-size: 1.15em; }
+    .web-content h4 { font-size: 1.05em; }
+    .web-content pre {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);
       border-radius: 6px;
       padding: 10px 12px;
       overflow-x: auto;
+      white-space: pre;
       margin: 8px 0;
       font-size: 13px;
       line-height: 1.4;
     }
-    .msg-bot.web pre code { background: none; padding: 0; border-radius: 0; }
-    .msg-bot.web code {
+    .web-content pre code { background: none; padding: 0; border-radius: 0; }
+    .web-content code {
       background: var(--bg-surface);
       padding: 2px 5px;
       border-radius: 3px;
       font-size: 0.9em;
     }
-    .msg-bot.web blockquote {
+    .web-content blockquote {
       border-left: 3px solid var(--accent);
       margin: 8px 0;
       padding: 4px 12px;
       color: var(--text-muted);
       white-space: normal;
     }
-    .msg-bot.web ul, .msg-bot.web ol {
+    .web-content ul, .web-content ol {
       margin: 6px 0;
       padding-left: 24px;
       white-space: normal;
     }
-    .msg-bot.web li { margin: 2px 0; }
-    .msg-bot.web hr {
+    .web-content li { margin: 2px 0; }
+    .web-content hr {
       border: none;
       border-top: 1px solid var(--border-primary);
       margin: 12px 0;
     }
-    .msg-bot.web table {
+    .web-content table {
       border-collapse: collapse;
       margin: 8px 0;
       font-size: 13px;
       width: 100%;
       white-space: normal;
     }
-    .msg-bot.web th, .msg-bot.web td {
+    .web-content th, .web-content td {
       border: 1px solid var(--border-secondary);
       padding: 5px 8px;
       text-align: left;
     }
-    .msg-bot.web th {
+    .web-content th {
       background: var(--bg-surface);
       font-weight: 600;
     }
-    .msg-bot.web strong { font-weight: 600; }
-    .msg-bot.web em { font-style: italic; }
+    .web-content strong { font-weight: 600; }
+    .web-content em { font-style: italic; }
+    .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
+    .web-content a:hover { text-decoration-color: var(--accent-light); }
     .msg-time {
       font-size: 10px;
       color: var(--text-faint);
@@ -577,67 +509,7 @@ const SIMULATOR_STYLES = `
       white-space: pre-wrap;
       opacity: 0.85;
     }
-    .msg-streaming.web h2, .msg-streaming.web h3, .msg-streaming.web h4, .msg-streaming.web h5, .msg-streaming.web h6 {
-      margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3;
-    }
-    .msg-streaming.web h2 { font-size: 1.25em; }
-    .msg-streaming.web h3 { font-size: 1.15em; }
-    .msg-streaming.web h4 { font-size: 1.05em; }
-    .msg-streaming.web pre {
-      background: var(--bg-surface);
-      border: 1px solid var(--border-secondary);
-      border-radius: 6px;
-      padding: 10px 12px;
-      overflow-x: auto;
-      white-space: pre;
-      font-size: 13px;
-      line-height: 1.4;
-    }
-    .msg-streaming.web pre code { background: none; padding: 0; border-radius: 0; }
-    .msg-streaming.web code {
-      background: var(--bg-surface);
-      padding: 2px 5px;
-      border-radius: 3px;
-      font-size: 0.9em;
-    }
-    .msg-streaming.web blockquote {
-      border-left: 3px solid var(--accent);
-      margin: 8px 0;
-      padding: 4px 12px;
-      color: var(--text-muted);
-      white-space: normal;
-    }
-    .msg-streaming.web ul, .msg-streaming.web ol {
-      margin: 6px 0;
-      padding-left: 24px;
-      white-space: normal;
-    }
-    .msg-streaming.web li { margin: 2px 0; }
-    .msg-streaming.web hr {
-      border: none;
-      border-top: 1px solid var(--border-primary);
-      margin: 12px 0;
-    }
-    .msg-streaming.web table {
-      border-collapse: collapse;
-      margin: 8px 0;
-      font-size: 13px;
-      width: 100%;
-      white-space: normal;
-    }
-    .msg-streaming.web th, .msg-streaming.web td {
-      border: 1px solid var(--border-secondary);
-      padding: 5px 8px;
-      text-align: left;
-    }
-    .msg-streaming.web th {
-      background: var(--bg-surface);
-      font-weight: 600;
-    }
-    .msg-streaming.web strong { font-weight: 600; }
-    .msg-streaming.web em { font-style: italic; }
-    .msg-streaming.web a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
-    .msg-streaming.web a:hover { text-decoration-color: var(--accent-light); }
+    /* .msg-streaming.web inherits from .web-content — no duplicate rules needed */
 
     /* Typing indicator */
     .typing-indicator {
@@ -740,57 +612,24 @@ const SIMULATOR_SCRIPT = `
   }
 
   // State
-  var conversations = {};
-  var activeConvId = null;
-  var activeThreadId = null;
-  var activeThreads = [];
+  var chatConfig = null;        // { mode, users } from /chat/config
+  var conversations = {};       // Still needed for WS routing
+  var activeConvId = null;      // 1:1 with selected user+bot binding
+  var activeThreadId = null;    // Currently selected thread
+  var threads = [];             // Thread list for current user+bot
   var bots = [];
   var ws = null;
   var deepLinkHandled = false;
   var inspectorContextKey = null;
-  var selectedBot = '';
+  var selectedBot = '';         // From bot pills (localStorage-synced)
+  var selectedUserId = null;    // Resolved from config for selected bot
+  var selectedUsername = null;   // Display name
 
   // Bot selector init (synced with dashboard/traces/logs via localStorage)
   try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
 
-  async function loadBotList() {
-    try {
-      var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
-      bots = res.bots || [];
-
-      // Populate pill selector
-      var container = document.getElementById('botSelector');
-      var botNames = bots.map(function(b) { return b.name; });
-      container.innerHTML =
-        '<button class="bot-pill' + (!selectedBot ? ' active' : '') + '" data-bot="">All Bots</button>' +
-        botNames.map(function(b) {
-          return '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + escapeAttr(b) + '">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>';
-        }).join('');
-
-      // Populate new-chat bot dropdown
-      botSelect.innerHTML = bots.map(function(b) {
-        return '<option value="' + escapeHtml(b.name) + '">' + escapeHtml(b.name) + '</option>';
-      }).join('');
-      if (selectedBot) botSelect.value = selectedBot;
-    } catch {}
-  }
-
-  function selectBot(name) {
-    selectedBot = name;
-    try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
-    document.querySelectorAll('.bot-pill').forEach(function(p) {
-      p.classList.toggle('active', p.dataset.bot === name);
-    });
-    renderConvList();
-  }
-
-  document.getElementById('botSelector').addEventListener('click', function(e) {
-    var pill = e.target.closest('.bot-pill');
-    if (pill) selectBot(pill.dataset.bot);
-  });
-
   // DOM refs
-  var convList = document.getElementById('convList');
+  var threadList = document.getElementById('threadList');
   var chatMessages = document.getElementById('chatMessages');
   var chatInput = document.getElementById('chatInput');
   var chatSend = document.getElementById('chatSend');
@@ -799,55 +638,215 @@ const SIMULATOR_SCRIPT = `
   var activityFeed = document.getElementById('activityFeed');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
-  var botSelect = document.getElementById('botSelect');
-  var newChatPicker = document.getElementById('newChatPicker');
-  var threadPicker = document.getElementById('threadPicker');
 
-  // Platform helpers
-  function typePlatformLabel(type) {
-    switch(type) {
-      case 'telegram_dm': return 'Telegram';
-      case 'slack_dm': return 'Slack DM';
-      case 'slack_channel': return 'Slack Channel';
-      case 'slack_assistant': return 'Slack Assistant';
-      case 'web': return 'Web';
-      default: return type;
+  async function loadBotList() {
+    try {
+      var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
+      bots = res.bots || [];
+
+      var container = document.getElementById('botSelector');
+      var botNames = bots.map(function(b) { return b.name; });
+
+      // No "All Bots" pill — a bot must always be selected
+      container.innerHTML = botNames.map(function(b) {
+        return '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + escapeAttr(b) + '">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>';
+      }).join('');
+
+      return botNames;
+    } catch { return []; }
+  }
+
+  async function selectBot(name, autoSelectThreadId) {
+    selectedBot = name;
+    try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+    document.querySelectorAll('.bot-pill').forEach(function(p) {
+      p.classList.toggle('active', p.dataset.bot === name);
+    });
+
+    // Resolve user for this bot from config
+    resolveUserForBot(name);
+
+    // Resolve or create conversation for this user+bot
+    await resolveConversation();
+
+    // Clear thread selection, load threads, clear chat
+    activeThreadId = null;
+    clearChat();
+    await loadThreads(autoSelectThreadId);
+  }
+
+  function resolveUserForBot(botName) {
+    selectedUserId = null;
+    selectedUsername = null;
+    if (!chatConfig || !chatConfig.users) return;
+    for (var i = 0; i < chatConfig.users.length; i++) {
+      if (chatConfig.users[i].bot === botName) {
+        selectedUserId = chatConfig.users[i].id;
+        selectedUsername = chatConfig.users[i].name;
+        return;
+      }
     }
   }
 
-  function platformBadgeHtml(type) {
-    if (type === 'web') return '<span class="conv-item-badge badge-web">Web</span>';
-    if (type.startsWith('telegram')) return '<span class="conv-item-badge badge-tg">TG</span>';
-    return '<span class="conv-item-badge badge-slack">Slack</span>';
+  async function resolveConversation() {
+    if (!selectedBot || !selectedUserId) {
+      activeConvId = null;
+      return;
+    }
+    // Find existing conversation for this userId+botName
+    var convs = Object.values(conversations);
+    for (var i = 0; i < convs.length; i++) {
+      if (convs[i].userId === selectedUserId && convs[i].botName === selectedBot) {
+        activeConvId = convs[i].id;
+        return;
+      }
+    }
+    // Create one if not found
+    activeConvId = null;
+    try {
+      var res = await fetch('/chat/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'web', botName: selectedBot, userId: selectedUserId, username: selectedUsername || 'user' }),
+      });
+      var data = await res.json();
+      if (data.conversation) {
+        conversations[data.conversation.id] = data.conversation;
+        activeConvId = data.conversation.id;
+      }
+    } catch {}
   }
 
-  // New Chat flow
-  var pickerVisible = false;
-  document.getElementById('newChatBtn').onclick = function() {
-    pickerVisible = !pickerVisible;
-    newChatPicker.style.display = pickerVisible ? 'flex' : 'none';
-  };
-  document.getElementById('newChatCancel').onclick = function() {
-    pickerVisible = false;
-    newChatPicker.style.display = 'none';
-  };
-  document.getElementById('newChatConfirm').onclick = async function() {
-    var botName = botSelect.value;
-    if (!botName) return;
-    var res = await fetch('/chat/conversations', {
+  document.getElementById('botSelector').addEventListener('click', function(e) {
+    var pill = e.target.closest('.bot-pill');
+    if (pill) selectBot(pill.dataset.bot);
+  });
+
+  // New thread creation
+  document.getElementById('newThreadBtn').onclick = function() {
+    if (!selectedBot || !selectedUserId) return;
+    var name = prompt('Thread name:');
+    if (!name || !name.trim()) return;
+    fetch('/chat/threads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'web', botName: botName, userId: 'web-user', username: 'web-user' }),
-    });
-    if (res.ok) {
-      var data = await res.json();
-      conversations[data.conversation.id] = data.conversation;
-      selectConversation(data.conversation.id);
-      renderConvList();
-    }
-    pickerVisible = false;
-    newChatPicker.style.display = 'none';
+      body: JSON.stringify({ userId: selectedUserId, botName: selectedBot, name: name.trim() }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.error) {
+        alert('Failed to create thread: ' + data.error);
+        return;
+      }
+      if (data.thread) {
+        loadThreads(data.thread.id);
+      }
+    }).catch(function() { alert('Failed to create thread'); });
   };
+
+  // Thread list
+  async function loadThreads(autoSelectThreadId) {
+    if (!selectedUserId || !selectedBot) {
+      threadList.innerHTML = '<div class="empty-state">Select a bot</div>';
+      return;
+    }
+
+    try {
+      var res = await fetch('/chat/threads/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
+      var data = await res.json();
+      threads = data.threads || [];
+    } catch {
+      threads = [];
+    }
+
+    // Sort: "main" always first, then by updatedAt desc
+    threads.sort(function(a, b) {
+      if (a.name === 'main') return -1;
+      if (b.name === 'main') return 1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+
+    // Threads should always exist (created during hydration), but handle edge case
+    if (threads.length === 0) {
+      threadList.innerHTML = '<div class="empty-state">No threads</div>';
+      return;
+    }
+
+    // Auto-select (selectThread calls renderThreadList internally)
+    if (autoSelectThreadId) {
+      selectThread(autoSelectThreadId);
+    } else if (!activeThreadId) {
+      var mainThread = threads.find(function(t) { return t.name === 'main'; });
+      if (mainThread && mainThread.id) {
+        selectThread(mainThread.id);
+      } else {
+        renderThreadList();
+      }
+    } else {
+      renderThreadList();
+    }
+  }
+
+  function renderThreadList() {
+    if (threads.length === 0) {
+      threadList.innerHTML = '<div class="empty-state">No threads</div>';
+      return;
+    }
+
+    threadList.innerHTML = threads.map(function(t) {
+      var isActive = t.id && t.id === activeThreadId;
+      var icon = t.name === 'main' ? '#' : '&bull;';
+      var meta = '';
+      if (t.messageCount > 0) meta += t.messageCount + ' msgs';
+
+      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
+        + '<div class="thread-item-icon">' + icon + '</div>'
+        + '<div class="thread-item-content">'
+          + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
+          + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
+        + '</div>'
+        + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
+        + '</div>';
+    }).join('');
+
+    threadList.querySelectorAll('.thread-item').forEach(function(el) {
+      el.onclick = function() {
+        var tid = el.dataset.id;
+        if (tid) selectThread(tid);
+      };
+    });
+  }
+
+  function selectThread(threadId) {
+    activeThreadId = threadId;
+
+    // Update header
+    var threadName = 'main';
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === threadId) { threadName = threads[i].name; break; }
+    }
+    chatHeader.querySelector('.chat-title').textContent =
+      (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
+
+    // Highlight in sidebar
+    renderThreadList();
+
+    // Enable input
+    chatInput.disabled = false;
+    chatSend.disabled = false;
+
+    // Load messages
+    loadThreadMessages(threadId);
+
+    // Update inspector
+    updateInspector();
+  }
+
+  function clearChat() {
+    chatMessages.innerHTML = '<div class="empty-state">Select a thread from the sidebar</div>';
+    chatInput.disabled = true;
+    chatSend.disabled = true;
+    chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
+    chatStatus.textContent = '';
+  }
 
   // WebSocket connection
   function connectWs() {
@@ -860,24 +859,27 @@ const SIMULATOR_SCRIPT = `
     ws.onclose = function() { setTimeout(connectWs, 2000); };
   }
 
-  function handleWsEvent(event) {
+  async function handleWsEvent(event) {
     if (event.type === 'snapshot') {
       for (var i = 0; i < event.conversations.length; i++) {
         var conv = event.conversations[i];
         conversations[conv.id] = conv;
       }
-      renderConvList();
-      if (activeConvId) renderChat();
+      // After snapshot, resolve conversation if bot is selected
+      if (selectedBot) await resolveConversation();
       if (!deepLinkHandled) {
         deepLinkHandled = true;
-        handleDeepLink();
+        await handleDeepLink();
       }
       return;
     }
 
     if (event.type === 'conversation_created') {
       conversations[event.conversation.id] = event.conversation;
-      renderConvList();
+      // If this matches our current user+bot, set as active
+      if (event.conversation.userId === selectedUserId && event.conversation.botName === selectedBot) {
+        activeConvId = event.conversation.id;
+      }
       return;
     }
 
@@ -886,16 +888,32 @@ const SIMULATOR_SCRIPT = `
       if (conv) {
         conv.messages.push(event.message);
         if (event.conversationId === activeConvId) {
-          // Only append if no thread filter is active, or the message belongs to the active thread
+          // Only append if the message belongs to the active thread
           var msgThread = event.message.threadId || null;
           if (!activeThreadId || msgThread === activeThreadId) {
-            // Remove streaming bubble — final formatted message replaces it
             if (event.message.sender === 'bot') removeStreamingBubble();
             appendMessage(event.message, conv.type);
           }
           updateInspector();
         }
-        renderConvList();
+        // Update in-memory thread message count so sidebar stays current
+        var msgThreadId = event.message.threadId || null;
+        var countTarget = msgThreadId;
+        // Messages with null threadId belong to "main" thread
+        if (!countTarget) {
+          for (var mi = 0; mi < threads.length; mi++) {
+            if (threads[mi].name === 'main') { countTarget = threads[mi].id; break; }
+          }
+        }
+        if (countTarget) {
+          for (var ti = 0; ti < threads.length; ti++) {
+            if (threads[ti].id === countTarget) {
+              threads[ti].messageCount = (threads[ti].messageCount || 0) + 1;
+              break;
+            }
+          }
+        }
+        renderThreadList();
         addActivityItem(event.message.sender === 'bot' ? 'bot_reply' : 'user_msg', event.message.text.slice(0, 80));
       }
       return;
@@ -903,7 +921,6 @@ const SIMULATOR_SCRIPT = `
 
     if (event.type === 'text_delta') {
       if (event.conversationId !== activeConvId) return;
-      // Thread filtering: only show deltas for the active thread
       var deltaThread = event.threadId || null;
       if (activeThreadId && deltaThread !== activeThreadId) return;
       appendStreamingDelta(event.delta);
@@ -922,7 +939,6 @@ const SIMULATOR_SCRIPT = `
         conv.status = event.status;
         if (event.conversationId === activeConvId) {
           chatStatus.textContent = event.status || '';
-          // Clear streaming bubble when status is cleared (safety net for errors)
           if (!event.status) removeStreamingBubble();
           updateTypingIndicator(event.status);
         }
@@ -931,105 +947,29 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Deep-link from dashboard: /chat?user=<id>&bot=<name>&username=<name>&thread=<threadId>
-  function handleDeepLink() {
+  // Deep-link: /chat?bot=jarvis&thread=<id>
+  async function handleDeepLink() {
     var params = new URLSearchParams(window.location.search);
-    var userId = params.get('user');
     var botName = params.get('bot');
-    var username = params.get('username');
     var threadParam = params.get('thread');
-    if (!userId || !botName) return;
+    if (!botName) return;
 
-    // Find existing conversation for this user+bot
-    var convs = Object.values(conversations);
-    var match = null;
-    for (var i = 0; i < convs.length; i++) {
-      if (convs[i].userId === userId && convs[i].botName === botName) {
-        match = convs[i];
-        break;
-      }
-    }
-    if (match) {
-      selectConversation(match.id, threadParam || undefined);
-      return;
-    }
-
-    // Create a new web conversation
-    fetch('/chat/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'web', botName: botName, userId: userId, username: username || 'user' }),
-    }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.conversation) {
-        conversations[data.conversation.id] = data.conversation;
-        selectConversation(data.conversation.id, threadParam || undefined);
-        renderConvList();
-      }
-    });
+    await selectBot(botName, threadParam || undefined);
   }
 
   // Send message
   async function sendMessage() {
-    if (!activeConvId || !chatInput.value.trim()) return;
+    if (!activeConvId || !activeThreadId || !chatInput.value.trim()) return;
+
     var text = chatInput.value.trim();
     chatInput.value = '';
     chatInput.style.height = 'auto';
-    var payload = { text: text };
-    if (activeThreadId) payload.threadId = activeThreadId;
+    var payload = { text: text, threadId: activeThreadId };
     await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-  }
-
-  // Select conversation
-  function selectConversation(id, preselectedThreadId) {
-    activeConvId = id;
-    activeThreadId = null;
-    activeThreads = [];
-    chatInput.disabled = false;
-    chatSend.disabled = false;
-    renderConvList();
-    renderChat();
-    updateInspector();
-    loadThreadsForConv(preselectedThreadId);
-  }
-
-  // Load threads for the active conversation
-  async function loadThreadsForConv(preselectedThreadId) {
-    var conv = conversations[activeConvId];
-    if (!conv) { threadPicker.style.display = 'none'; return; }
-    try {
-      var res = await fetch('/chat/threads/' + encodeURIComponent(conv.userId) + '/' + encodeURIComponent(conv.botName));
-      var data = await res.json();
-      activeThreads = data.threads || [];
-    } catch {
-      activeThreads = [];
-    }
-
-    if (activeThreads.length <= 1 && !preselectedThreadId) {
-      // Single thread or no threads — no picker needed, but set activeThreadId if there's one
-      threadPicker.style.display = 'none';
-      if (activeThreads.length === 1) activeThreadId = activeThreads[0].id;
-      return;
-    }
-
-    // Build picker options: "All messages" + each thread
-    threadPicker.innerHTML = '<option value="">All messages</option>' +
-      activeThreads.map(function(t) {
-        var label = t.name || 'main';
-        if (t.isActive) label += ' (active)';
-        return '<option value="' + escapeAttr(t.id) + '">' + escapeHtml(label) + '</option>';
-      }).join('');
-    threadPicker.style.display = 'inline-block';
-
-    // Pre-select thread if specified
-    if (preselectedThreadId) {
-      threadPicker.value = preselectedThreadId;
-      activeThreadId = preselectedThreadId;
-      loadThreadMessages(preselectedThreadId);
-    }
   }
 
   // Load messages filtered by thread from DB
@@ -1063,83 +1003,15 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Thread picker change handler
-  threadPicker.onchange = function() {
-    var val = threadPicker.value;
-    loadThreadMessages(val || null);
-  };
-
-  // Render conversation list (sorted by most recent message)
-  function renderConvList() {
-    var convs = Object.values(conversations);
-    if (selectedBot) {
-      convs = convs.filter(function(c) { return c.botName === selectedBot; });
+  function typePlatformLabel(type) {
+    switch(type) {
+      case 'telegram_dm': return 'Telegram';
+      case 'slack_dm': return 'Slack DM';
+      case 'slack_channel': return 'Slack Channel';
+      case 'slack_assistant': return 'Slack Assistant';
+      case 'web': return 'Web';
+      default: return type;
     }
-    if (convs.length === 0) {
-      convList.innerHTML = '<div class="empty-state">' + (selectedBot ? 'No conversations for ' + escapeHtml(selectedBot) : 'No conversations yet') + '</div>';
-      return;
-    }
-
-    convs.sort(function(a, b) {
-      var aTime = a.messages.length > 0 ? a.messages[a.messages.length - 1].timestamp : 0;
-      var bTime = b.messages.length > 0 ? b.messages[b.messages.length - 1].timestamp : 0;
-      return bTime - aTime;
-    });
-
-    convList.innerHTML = convs.map(function(c) {
-      var isActive = c.id === activeConvId;
-      var initial = (c.username || c.userId || '?')[0].toUpperCase();
-      var badge = platformBadgeHtml(c.type);
-      var lastMsg = c.messages.length > 0
-        ? c.messages[c.messages.length - 1].text.slice(0, 30)
-        : '';
-      var lastTime = c.messages.length > 0
-        ? timeAgo(c.messages[c.messages.length - 1].timestamp)
-        : '';
-
-      var aName = c.username || c.userId || '?';
-      return '<div class="conv-item' + (isActive ? ' active' : '') + '" data-id="' + c.id + '">'
-        + '<div class="conv-item-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
-        + '<div class="conv-item-content">'
-          + '<div class="conv-item-name">' + escapeHtml(c.username || c.userId) + '</div>'
-          + '<div class="conv-item-meta">'
-            + badge
-            + ' <span>' + escapeHtml(c.botName) + '</span>'
-            + (lastMsg ? ' <span class="conv-item-preview">&middot; ' + escapeHtml(lastMsg) + '</span>' : '')
-          + '</div>'
-        + '</div>'
-        + (lastTime ? '<div class="conv-item-time">' + escapeHtml(lastTime) + '</div>' : '')
-        + '</div>';
-    }).join('');
-
-    convList.querySelectorAll('.conv-item').forEach(function(el) {
-      el.onclick = function() { selectConversation(el.dataset.id); };
-    });
-  }
-
-  // Render full chat view
-  function renderChat() {
-    var conv = conversations[activeConvId];
-    if (!conv) return;
-
-    chatHeader.querySelector('.chat-title').textContent = (conv.username || conv.userId) + ' \\u00b7 ' + conv.botName;
-    chatStatus.textContent = conv.status || '';
-
-    chatMessages.innerHTML = '';
-
-    // Cross-platform banner for non-web conversations
-    if (conv.type !== 'web') {
-      var banner = document.createElement('div');
-      banner.className = 'cross-platform-banner';
-      banner.textContent = 'Conversation from ' + typePlatformLabel(conv.type) + ' \\u2014 replies sent via web';
-      chatMessages.appendChild(banner);
-    }
-
-    for (var i = 0; i < conv.messages.length; i++) {
-      appendMessage(conv.messages[i], conv.type);
-    }
-    updateTypingIndicator(conv.status);
-    scrollToBottom();
   }
 
   // Append a single message to the chat
@@ -1149,7 +1021,7 @@ const SIMULATOR_SCRIPT = `
 
     var isWeb = convType === 'web';
     var isTg = convType.startsWith('telegram');
-    var platformClass = isWeb ? ' web' : (isTg ? ' telegram' : ' slack');
+    var platformClass = isWeb ? ' web web-content' : (isTg ? ' telegram' : ' slack');
     var div = document.createElement('div');
     div.className = 'msg msg-' + msg.sender + (msg.sender === 'bot' ? platformClass : '');
 
@@ -1192,16 +1064,14 @@ const SIMULATOR_SCRIPT = `
     var conv = conversations[activeConvId];
     var isWeb = conv && conv.type === 'web';
     if (!bubble) {
-      // Remove typing indicator — streaming text replaces it
       var typing = chatMessages.querySelector('.typing-indicator');
       if (typing) typing.remove();
       bubble = document.createElement('div');
-      bubble.className = 'msg-streaming' + (isWeb ? ' web' : '');
+      bubble.className = 'msg-streaming' + (isWeb ? ' web web-content' : '');
       chatMessages.appendChild(bubble);
     }
     if (isWeb) {
       streamingRawText += delta;
-      // Throttle HTML re-rendering to once per animation frame to avoid O(n^2) cost
       if (!streamingRafPending) {
         streamingRafPending = true;
         requestAnimationFrame(function() {
@@ -1219,7 +1089,6 @@ const SIMULATOR_SCRIPT = `
 
   function removeStreamingBubble() {
     var bubble = chatMessages.querySelector('.msg-streaming');
-    // Flush any pending rAF render before removing
     if (bubble && streamingRawText && bubble.classList.contains('web')) {
       bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
     }
@@ -1234,32 +1103,33 @@ const SIMULATOR_SCRIPT = `
 
   // Update inspector panel
   function updateInspector() {
-    var conv = conversations[activeConvId];
-    if (!conv) return;
+    if (!selectedUserId || !selectedBot) return;
 
-    var initial = (conv.username || conv.userId || '?')[0].toUpperCase();
-    var badge = platformBadgeHtml(conv.type);
-    var statusText = conv.status || 'idle';
+    var initial = (selectedUsername || selectedUserId || '?')[0].toUpperCase();
+    var statusText = '';
+    if (activeConvId) {
+      var conv = conversations[activeConvId];
+      if (conv) statusText = conv.status || 'idle';
+    }
 
-    var aName = conv.username || conv.userId || '?';
+    var aName = selectedUsername || selectedUserId || '?';
     inspectorContent.innerHTML =
       '<div class="ins-user-header">'
         + '<div class="ins-user-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
         + '<div class="ins-user-info">'
-          + '<div class="ins-user-name">' + escapeHtml(conv.username || conv.userId) + ' ' + badge + '</div>'
-          + '<div class="ins-user-id">' + escapeHtml(conv.userId) + '</div>'
+          + '<div class="ins-user-name">' + escapeHtml(selectedUsername || selectedUserId) + '</div>'
+          + '<div class="ins-user-id">' + escapeHtml(selectedUserId) + '</div>'
         + '</div>'
       + '</div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(conv.botName) + '</span></div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Messages</span><span class="ins-info-value">' + conv.messages.length + '</span></div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText) + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
       + '<hr class="ins-divider">';
 
-    // Load context sections if user changed
-    var contextKey = conv.userId + ':' + conv.botName;
+    var contextKey = selectedUserId + ':' + selectedBot;
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
-      loadInspectorContext(conv.userId, conv.botName);
+      loadInspectorContext(selectedUserId, selectedBot);
     }
   }
 
@@ -1364,6 +1234,10 @@ const SIMULATOR_SCRIPT = `
       inlineCodes.push('<code>' + escapeHtml(code) + '</code>');
       return '\\x00INLINE' + idx + '\\x00';
     });
+
+    // Convert Slack mrkdwn links <url|text> to markdown [text](url) before escaping
+    result = result.replace(/<(https?:\\/\\/[^|>]+)\\|([^>]+)>/g, '[$2]($1)');
+    result = result.replace(/<(https?:\\/\\/[^>]+)>/g, '[$1]($1)');
 
     // Escape HTML entities
     result = result.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1549,7 +1423,18 @@ const SIMULATOR_SCRIPT = `
   };
 
   // Init
-  loadBotList();
-  connectWs();
+  async function init() {
+    var botNames = await loadBotList();
+    try {
+      var res = await fetch('/chat/config');
+      chatConfig = await res.json();
+    } catch { chatConfig = { mode: 'discovery', users: [] }; }
+    connectWs();
+
+    // Auto-select: use stored bot if valid, otherwise first bot
+    var initialBot = selectedBot && botNames.indexOf(selectedBot) !== -1 ? selectedBot : (botNames[0] || '');
+    if (initialBot) selectBot(initialBot);
+  }
+  init();
 })();
 `;

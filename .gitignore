@@ -39,5 +39,8 @@ backups/
 # Bot-level env files
 bots/*/.env
 
+# Chat config (contains user IDs)
+chat.config.json
+
 # Finder (MacOS) folder config
 .DS_Store

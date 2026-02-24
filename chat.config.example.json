@@ -1,0 +1,6 @@
+{
+  "users": [
+    { "id": "telegram-user-id", "name": "your-username", "bot": "jarvis" },
+    { "id": "slack-user-id", "name": "Your Name", "bot": "capra" }
+  ]
+}
