@@ -171,8 +171,9 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       conversation.userId,
       conversation.botName,
       platform,
-      50,
+      200,
       threadId || undefined,
+      true,
     );
     return c.json({
       messages: msgs.map((m) => ({

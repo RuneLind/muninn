@@ -1,7 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { makeMessage } from "../test/fixtures.ts";
-import { saveMessage, getRecentMessages, getRecentAlerts } from "./messages.ts";
+import { saveMessage, getRecentMessages, getRecentAlerts, getSimMessages } from "./messages.ts";
+import { createThread } from "./threads.ts";
 
 setupTestDb();
 
@@ -100,6 +101,36 @@ describe("messages", () => {
     expect(msg!.durationMs).toBe(1000);
     expect(msg!.model).toBe("opus");
     expect(msg!.timestamp).toBeGreaterThan(0);
+  });
+
+  describe("getSimMessages", () => {
+    test("allPlatforms returns messages across all platforms", async () => {
+      const thread = await createThread("u1", "bot1", "cross-platform");
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", platform: "web", content: "web msg", threadId: thread.id }));
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", platform: "slack_assistant", content: "slack msg", threadId: thread.id }));
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", platform: "telegram", content: "tg msg", threadId: thread.id }));
+
+      // Without allPlatforms — only web
+      const webOnly = await getSimMessages("u1", "bot1", "web", 50, thread.id);
+      expect(webOnly).toHaveLength(1);
+      expect(webOnly[0]!.content).toBe("web msg");
+
+      // With allPlatforms — all three
+      const all = await getSimMessages("u1", "bot1", "web", 50, thread.id, true);
+      expect(all).toHaveLength(3);
+      expect(all.map((m) => m.content)).toEqual(["web msg", "slack msg", "tg msg"]);
+    });
+
+    test("allPlatforms without threadId returns all messages", async () => {
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", platform: "web", content: "w" }));
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", platform: "telegram", content: "t" }));
+
+      const all = await getSimMessages("u1", "bot1", "web", 50, undefined, true);
+      expect(all.length).toBeGreaterThanOrEqual(2);
+      const contents = all.map((m) => m.content);
+      expect(contents).toContain("w");
+      expect(contents).toContain("t");
+    });
   });
 
   describe("getRecentAlerts", () => {

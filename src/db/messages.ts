@@ -127,33 +127,30 @@ export async function getSimMessages(
   platform: string,
   limit = 50,
   threadId?: string,
+  allPlatforms?: boolean,
 ): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null }[]> {
   const sql = getDb();
-  const rows = threadId
-    ? await sql`
-        SELECT id, role, content, created_at, thread_id
-        FROM messages
-        WHERE user_id = ${userId}
-          AND bot_name = ${botName}
-          AND platform = ${platform}
-          AND (
-            thread_id = ${threadId}
-            OR (thread_id IS NULL AND EXISTS (
-              SELECT 1 FROM threads t WHERE t.id = ${threadId} AND t.name = 'main'
-            ))
-          )
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `
-    : await sql`
-        SELECT id, role, content, created_at, thread_id
-        FROM messages
-        WHERE user_id = ${userId}
-          AND bot_name = ${botName}
-          AND platform = ${platform}
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `;
+
+  const platformFilter = allPlatforms ? sql`` : sql`AND platform = ${platform}`;
+  const threadFilter = threadId
+    ? sql`AND (
+        thread_id = ${threadId}
+        OR (thread_id IS NULL AND EXISTS (
+          SELECT 1 FROM threads t WHERE t.id = ${threadId} AND t.name = 'main'
+        ))
+      )`
+    : sql``;
+
+  const rows = await sql`
+    SELECT id, role, content, created_at, thread_id
+    FROM messages
+    WHERE user_id = ${userId}
+      AND bot_name = ${botName}
+      ${platformFilter}
+      ${threadFilter}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
   return rows
     .map((r) => ({
       id: r.id,

@@ -757,10 +757,8 @@ const SIMULATOR_SCRIPT = `
       threads = [];
     }
 
-    // Sort: "main" always first, then by updatedAt desc
+    // Sort by most recent activity
     threads.sort(function(a, b) {
-      if (a.name === 'main') return -1;
-      if (b.name === 'main') return 1;
       return (b.updatedAt || 0) - (a.updatedAt || 0);
     });
 
