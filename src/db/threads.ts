@@ -144,22 +144,33 @@ export async function getThreadMessageCount(threadId: string): Promise<number> {
   return row?.cnt ?? 0;
 }
 
-/** List all threads for a user+bot, with message counts. */
+/** List all threads for a user+bot, with message counts and last-message activity time. */
 export async function listThreads(userId: string, botName: string): Promise<Thread[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT t.*, COALESCE(m.cnt, 0) AS message_count
+    SELECT t.*,
+      COALESCE(m.cnt, 0) AS message_count,
+      m.last_activity
     FROM threads t
     LEFT JOIN (
-      SELECT thread_id, COUNT(*) AS cnt
+      SELECT
+        COALESCE(thread_id, (
+          SELECT id FROM threads t2
+          WHERE t2.user_id = ${userId} AND t2.bot_name = ${botName} AND t2.name = 'main'
+        )) AS tid,
+        COUNT(*) AS cnt,
+        MAX(created_at) AS last_activity
       FROM messages
-      WHERE thread_id IS NOT NULL
-      GROUP BY thread_id
-    ) m ON m.thread_id = t.id
+      WHERE user_id = ${userId} AND bot_name = ${botName}
+      GROUP BY tid
+    ) m ON m.tid = t.id
     WHERE t.user_id = ${userId} AND t.bot_name = ${botName}
-    ORDER BY t.updated_at DESC
+    ORDER BY m.last_activity DESC NULLS LAST
   `;
-  return rows.map(rowToThread);
+  return rows.map((r) => ({
+    ...rowToThread(r),
+    updatedAt: r.last_activity ? new Date(r.last_activity as string).getTime() : new Date(r.updated_at as string).getTime(),
+  }));
 }
 
 /** Get or create a thread for a Slack channel thread. Returns the thread id.
