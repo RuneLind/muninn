@@ -281,6 +281,43 @@ describe("SimulatorState", () => {
       expect(events[0]!.type).toBe("stream_clear");
       expect((events[0] as Extract<SimEvent, { type: "stream_clear" }>).conversationId).toBe(conv.id);
     });
+
+    test("broadcasts stream_clear with threadId", () => {
+      const conv = state.createConversation({
+        type: "web",
+        botName: "jarvis",
+        userId: "123",
+        username: "testuser",
+      });
+
+      const events: SimEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishStreamClear(conv.id, "thread-42");
+
+      expect(events).toHaveLength(1);
+      const event = events[0] as Extract<SimEvent, { type: "stream_clear" }>;
+      expect(event.conversationId).toBe(conv.id);
+      expect(event.threadId).toBe("thread-42");
+    });
+
+    test("broadcasts stream_clear with null threadId", () => {
+      const conv = state.createConversation({
+        type: "web",
+        botName: "jarvis",
+        userId: "123",
+        username: "testuser",
+      });
+
+      const events: SimEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishStreamClear(conv.id, null);
+
+      expect(events).toHaveLength(1);
+      const event = events[0] as Extract<SimEvent, { type: "stream_clear" }>;
+      expect(event.threadId).toBeNull();
+    });
   });
 
   describe("setStatus", () => {

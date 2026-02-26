@@ -94,7 +94,7 @@ export async function processSimulatorMessage(
   // null = clear streaming bubble (e.g. tool calls started)
   const onTextDelta = (delta: string | null): void => {
     if (delta === null) {
-      simulatorState.publishStreamClear(conversationId);
+      simulatorState.publishStreamClear(conversationId, threadId ?? null);
     } else {
       simulatorState.publishTextDelta(conversationId, delta, threadId ?? null);
     }

@@ -40,9 +40,11 @@ export function renderSimulatorPage(): string {
         <span class="chat-title">Select a thread</span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
-      ${requestProgressHtml()}
-      <div class="chat-messages" id="chatMessages">
-        <div class="empty-state">Select a thread from the sidebar</div>
+      <div class="chat-body">
+        ${requestProgressHtml()}
+        <div class="chat-messages" id="chatMessages">
+          <div class="empty-state">Select a thread from the sidebar</div>
+        </div>
       </div>
       <div class="chat-input">
         <textarea id="chatInput" placeholder="Type a message..." rows="1" disabled></textarea>
@@ -188,9 +190,20 @@ const SIMULATOR_STYLES = `
       background: var(--bg-inset);
       overflow: hidden;
     }
+    .chat-body {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
 
-    /* Curtain request progress — slides down from below the chat header */
+    /* Curtain request progress — overlays chat messages, slides down from header */
     .sim-chat .request-progress {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
       z-index: 10;
       border-radius: 0;
       border: none;
@@ -844,6 +857,9 @@ const SIMULATOR_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     chatStatus.textContent = '';
+    // Reset streaming state so stale text doesn't leak into next thread
+    streamingRawText = '';
+    streamingRafPending = false;
   }
 
   // WebSocket connection
@@ -889,7 +905,10 @@ const SIMULATOR_SCRIPT = `
           // Only append if the message belongs to the active thread
           var msgThread = event.message.threadId || null;
           if (!activeThreadId || msgThread === activeThreadId) {
-            if (event.message.sender === 'bot') removeStreamingBubble();
+            if (event.message.sender === 'bot') {
+              removeIntermediates();
+              removeStreamingBubble();
+            }
             appendMessage(event.message, conv.type);
           }
           updateInspector();
@@ -921,13 +940,17 @@ const SIMULATOR_SCRIPT = `
       if (event.conversationId !== activeConvId) return;
       var deltaThread = event.threadId || null;
       if (activeThreadId && deltaThread !== activeThreadId) return;
+      // Dismiss waterfall when text is streaming — it slides back on next tool call
+      dismissRequestProgress();
       appendStreamingDelta(event.delta);
       return;
     }
 
     if (event.type === 'stream_clear') {
       if (event.conversationId !== activeConvId) return;
-      removeStreamingBubble();
+      var clearThread = event.threadId || null;
+      if (activeThreadId && clearThread !== activeThreadId) return;
+      promoteStreamingBubble();
       return;
     }
 
@@ -937,7 +960,11 @@ const SIMULATOR_SCRIPT = `
         conv.status = event.status;
         if (event.conversationId === activeConvId) {
           chatStatus.textContent = event.status || '';
-          if (!event.status) removeStreamingBubble();
+          if (!event.status) {
+            removeIntermediates();
+            removeStreamingBubble();
+            dismissRequestProgress();
+          }
           updateTypingIndicator(event.status);
         }
       }
@@ -974,6 +1001,9 @@ const SIMULATOR_SCRIPT = `
   async function loadThreadMessages(threadId) {
     if (!activeConvId) return;
     activeThreadId = threadId || null;
+    // Reset streaming state when switching threads
+    streamingRawText = '';
+    streamingRafPending = false;
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
@@ -1080,19 +1110,52 @@ const SIMULATOR_SCRIPT = `
         });
       }
     } else {
+      streamingRawText += delta;
       bubble.textContent += delta;
       scrollToBottom();
     }
   }
 
-  function removeStreamingBubble() {
+  // Promote streaming bubble to a permanent intermediate message (kept visible during tool calls)
+  function promoteStreamingBubble() {
     var bubble = chatMessages.querySelector('.msg-streaming');
-    if (bubble && streamingRawText && bubble.classList.contains('web')) {
+    if (!bubble || !streamingRawText.trim()) {
+      // Nothing meaningful to promote — just clean up
+      if (bubble) bubble.remove();
+      streamingRawText = '';
+      streamingRafPending = false;
+      return;
+    }
+    var conv = conversations[activeConvId];
+    var isWeb = bubble.classList.contains('web');
+    // Finalize HTML content
+    if (isWeb) {
       bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
     }
+    // Convert from streaming to permanent intermediate message with platform class
+    bubble.classList.remove('msg-streaming');
+    bubble.classList.add('msg', 'msg-bot', 'msg-intermediate');
+    if (!isWeb && conv) {
+      var isTg = conv.type.startsWith('telegram');
+      bubble.classList.add(isTg ? 'telegram' : 'slack');
+    }
+    streamingRawText = '';
+    streamingRafPending = false;
+  }
+
+  function removeStreamingBubble() {
+    var bubble = chatMessages.querySelector('.msg-streaming');
     if (bubble) bubble.remove();
     streamingRawText = '';
     streamingRafPending = false;
+  }
+
+  // Remove all intermediate messages (called before final message or on status clear)
+  function removeIntermediates() {
+    var intermediates = chatMessages.querySelectorAll('.msg-intermediate');
+    for (var i = 0; i < intermediates.length; i++) {
+      intermediates[i].remove();
+    }
   }
 
   function scrollToBottom() {
