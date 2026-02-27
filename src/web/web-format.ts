@@ -29,9 +29,11 @@ export function formatWebHtml(text: string): string {
     return `\x00INLINE${idx}\x00`;
   });
 
-  // Convert Slack mrkdwn links <url|text> → markdown [text](url) before escaping
+  // Defensive normalization: Claude occasionally outputs Slack-style links (<url|text>)
+  // instead of standard markdown [text](url). Convert them before HTML-escaping so they
+  // go through the normal markdown link path. This is NOT an intermediate Slack→HTML
+  // conversion — the primary input is always raw markdown from the AI connector.
   result = result.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "[$2]($1)");
-  // Convert bare Slack links <url> → markdown [url](url)
   result = result.replace(/<(https?:\/\/[^>]+)>/g, "[$1]($1)");
 
   // Escape HTML entities in regular text (code blocks already escaped above).
@@ -91,6 +93,12 @@ export function formatWebHtml(text: string): string {
 
   // Clean up excessive blank lines
   result = result.replace(/\n{3,}/g, "\n\n");
+
+  // Collapse blank lines around block-level elements — their CSS handles spacing,
+  // and pre-wrap would otherwise render the \n as extra visible line breaks.
+  const blockRe = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
+  result = result.replace(new RegExp(`\\n+(</?${blockRe}[>\\s])`, "g"), "\n$1");
+  result = result.replace(new RegExp(`(</${blockRe}>|<hr>)\\n+`, "g"), "$1\n");
 
   return result.trim();
 }

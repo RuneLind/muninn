@@ -269,9 +269,11 @@ const SIMULATOR_STYLES = `
     .msg-bot a:hover { text-decoration-color: var(--accent-light); }
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
-    /* Shared web rich-content styles (used by both .msg-bot.web and .msg-streaming.web) */
+    /* Shared web rich-content styles (used by both .msg-bot.web and .msg-streaming.web)
+       Since .msg uses white-space:pre-wrap, \n\n around block elements already adds a
+       blank line. Use minimal/negative margins on blocks to avoid double-spacing. */
     .web-content h2, .web-content h3, .web-content h4, .web-content h5, .web-content h6 {
-      margin: 0.6em 0 0.3em; font-weight: 600; line-height: 1.3;
+      margin: -0.2em 0 0; font-weight: 600; line-height: 1.3;
     }
     .web-content h2 { font-size: 1.25em; }
     .web-content h3 { font-size: 1.15em; }
@@ -283,7 +285,7 @@ const SIMULATOR_STYLES = `
       padding: 10px 12px;
       overflow-x: auto;
       white-space: pre;
-      margin: 8px 0;
+      margin: 0;
       font-size: 13px;
       line-height: 1.4;
     }
@@ -296,13 +298,13 @@ const SIMULATOR_STYLES = `
     }
     .web-content blockquote {
       border-left: 3px solid var(--accent);
-      margin: 8px 0;
+      margin: 0;
       padding: 4px 12px;
       color: var(--text-muted);
       white-space: normal;
     }
     .web-content ul, .web-content ol {
-      margin: 6px 0;
+      margin: 0;
       padding-left: 24px;
       white-space: normal;
     }
@@ -310,11 +312,11 @@ const SIMULATOR_STYLES = `
     .web-content hr {
       border: none;
       border-top: 1px solid var(--border-primary);
-      margin: 12px 0;
+      margin: 0;
     }
     .web-content table {
       border-collapse: collapse;
-      margin: 8px 0;
+      margin: 0;
       font-size: 13px;
       width: 100%;
       white-space: normal;
@@ -328,6 +330,7 @@ const SIMULATOR_STYLES = `
       background: var(--bg-surface);
       font-weight: 600;
     }
+    .web-content p { margin: 0; }
     .web-content strong { font-weight: 600; }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
@@ -1332,7 +1335,9 @@ const SIMULATOR_SCRIPT = `
       return '\\x00INLINE' + idx + '\\x00';
     });
 
-    // Convert Slack mrkdwn links <url|text> to markdown [text](url) before escaping
+    // Defensive normalization: Claude occasionally outputs Slack-style links (<url|text>)
+    // instead of standard markdown. Not an intermediate Slack→HTML conversion — input is
+    // always raw markdown from the AI connector.
     result = result.replace(/<(https?:\\/\\/[^|>]+)\\|([^>]+)>/g, '[$2]($1)');
     result = result.replace(/<(https?:\\/\\/[^>]+)>/g, '[$1]($1)');
 
@@ -1441,6 +1446,12 @@ const SIMULATOR_SCRIPT = `
 
     // Clean up excessive blank lines
     result = result.replace(/\\n{3,}/g, '\\n\\n');
+
+    // Collapse blank lines around block-level elements — their CSS handles spacing,
+    // and pre-wrap would otherwise render the \\n as extra visible line breaks.
+    var blockRe = '(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)';
+    result = result.replace(new RegExp('\\\\n+(</?' + blockRe + '[>\\\\s])', 'g'), '\\n$1');
+    result = result.replace(new RegExp('(</' + blockRe + '>|<hr>)\\\\n+', 'g'), '$1\\n');
 
     return result.trim();
   }

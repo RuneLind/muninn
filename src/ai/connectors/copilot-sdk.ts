@@ -161,8 +161,10 @@ export async function executePrompt(
   });
 
   try {
+    // SDK timeout is longer so our manual timeout fires first (with session.abort + error).
+    // The SDK timeout is a safety net for internal cleanup if our timeout somehow fails.
     const response = await Promise.race([
-      session.sendAndWait({ prompt }),
+      session.sendAndWait({ prompt }, timeoutMs + 5000),
       timeoutPromise,
     ]);
     clearTimeout(timeoutTimer!);

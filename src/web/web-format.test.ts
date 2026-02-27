@@ -240,4 +240,45 @@ describe("formatWebHtml", () => {
     expect(result).not.toContain("<a ");
     expect(result).toContain("&lt;div&gt;");
   });
+
+  test("collapses multiple newlines before block elements to single newline", () => {
+    const input = "Some text\n\n## Heading\n\nMore text";
+    const result = formatWebHtml(input);
+    // \n\n before <h3> should collapse to \n<h3>
+    expect(result).toContain("Some text\n<h3>Heading</h3>\nMore text");
+  });
+
+  test("collapses newlines around lists", () => {
+    const input = "Intro\n\n- item 1\n- item 2\n\nAfter";
+    const result = formatWebHtml(input);
+    expect(result).toContain("Intro\n<ul>");
+    expect(result).toContain("</ul>\nAfter");
+  });
+
+  test("collapses newlines around blockquotes", () => {
+    const input = "Before\n\n> quoted\n\nAfter";
+    const result = formatWebHtml(input);
+    expect(result).toContain("Before\n<blockquote>");
+    expect(result).toContain("</blockquote>\nAfter");
+  });
+
+  test("collapses newlines around code blocks", () => {
+    const input = "Before\n\n```\ncode\n```\n\nAfter";
+    const result = formatWebHtml(input);
+    expect(result).toContain("Before\n<pre>");
+    expect(result).toContain("</pre>\nAfter");
+  });
+
+  test("collapses newlines around hr", () => {
+    const input = "Above\n\n---\n\nBelow";
+    const result = formatWebHtml(input);
+    expect(result).toContain("Above\n<hr>\nBelow");
+  });
+
+  test("collapses newlines around tables", () => {
+    const input = "Intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nAfter";
+    const result = formatWebHtml(input);
+    expect(result).toContain("Intro\n<table>");
+    expect(result).toContain("</table>\nAfter");
+  });
 });
