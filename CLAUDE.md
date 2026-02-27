@@ -117,7 +117,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## Jarvis Project
 
-Personal AI assistant — multi-bot Telegram platform backed by Claude CLI, with a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
+Personal AI assistant — multi-bot Telegram platform with pluggable AI connectors (Claude CLI or Copilot SDK), a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
 
 ### Running
 
@@ -135,10 +135,10 @@ bun run dev:chat            # Chat-only (no scheduler, port 3011)
                     │        Single javrvis process    │
                     │                                  │
 Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
-                    │    → Claude CLI (cwd: bots/jarvis)│
+                    │    → AI connector (claude-cli)    │
                     │                                  │
 Telegram user B ───►│  Grammy Bot 2 (Capra)            │
-                    │    → Claude CLI (cwd: bots/capra) │
+                    │    → AI connector (copilot-sdk)   │
                     │                                  │
                     │  Shared: DB, Dashboard, Scheduler │
                     └─────────────────────────────────┘
@@ -146,11 +146,11 @@ Telegram user B ───►│  Grammy Bot 2 (Capra)            │
 
 Each bot lives in `bots/<name>/` with its own:
 - `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
-- `config.json` — per-bot overrides (model, thinking tokens, timeout)
+- `config.json` — per-bot overrides (connector, model, thinking tokens, timeout)
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.json` — tool permissions
 
-Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately from the dev project root.
+Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"` or `"copilot-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions.
 
 A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOKEN_<NAME>` env var.
 
@@ -160,7 +160,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 |---|---|---|
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
-| AI | `src/ai/` | Claude executor (stream-json + tool tracking), prompt builder, embeddings |
+| AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK connectors, prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
@@ -177,7 +177,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 bots/
 ├── jarvis/
 │   ├── CLAUDE.md                ← persona + rules
-│   ├── config.json              ← model, thinking, timeout overrides
+│   ├── config.json              ← connector, model, thinking, timeout overrides
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.json  ← tool permissions
@@ -195,7 +195,8 @@ All fields are optional — falls back to global `.env` values:
 
 ```json
 {
-  "model": "sonnet",
+  "connector": "copilot-sdk",
+  "model": "claude-sonnet-4-6",
   "thinkingMaxTokens": 16000,
   "timeoutMs": 180000
 }
@@ -203,7 +204,8 @@ All fields are optional — falls back to global `.env` values:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | `CLAUDE_MODEL` env | Claude model (e.g. "opus", "sonnet") |
+| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"` or `"copilot-sdk"` |
+| `model` | string | `CLAUDE_MODEL` env | Claude model (e.g. "claude-sonnet-4-6") |
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking) |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 
@@ -243,7 +245,7 @@ PostgreSQL + pgvector via Docker (single container).
 ### Adding a New Bot
 
 1. Create `bots/<name>/CLAUDE.md` with the bot's persona
-2. Optionally add `bots/<name>/config.json` (model, thinking, timeout overrides)
+2. Optionally add `bots/<name>/config.json` (connector, model, thinking, timeout overrides)
 3. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.json`
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
@@ -272,9 +274,10 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
 - Conversation threads: per-user+bot named threads for chat isolation; memories/goals/tasks shared across threads. Commands: `/topic`, `/topics`, `/deltopic`. Pre-migration messages (NULL thread_id) visible only in `main` thread.
 - Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + thread-scoped conversation history
-- Claude CLI isolation: each bot spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there
-- Claude CLI output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
-- MCP tool tracking: tool calls extracted from stream-json `assistant` messages, per-tool timing from timestamped line reads, displayed as child spans in traces waterfall
+- AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli` or `copilot-sdk`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.
+- Claude CLI connector: spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there. Output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
+- Copilot SDK connector: shared `CopilotClient` singleton (lazy-loaded), per-request sessions. Reads `.mcp.json` and converts to SDK format. Emits `assistant.intent` events shown as inline chat bubbles.
+- MCP tool tracking: tool calls extracted from stream events (stream-json for CLI, session events for SDK), per-tool timing, displayed as child spans in traces waterfall
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
 - Watcher email checking: Haiku spawned with bot's cwd for Gmail MCP access
