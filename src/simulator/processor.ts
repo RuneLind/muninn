@@ -100,6 +100,10 @@ export async function processSimulatorMessage(
     }
   };
 
+  const onIntent = (intentText: string): void => {
+    simulatorState.publishIntent(conversationId, intentText, threadId ?? null);
+  };
+
   try {
     await processMessage({
       text,
@@ -115,6 +119,7 @@ export async function processSimulatorMessage(
       recentChannelMessages,
       threadId,
       onTextDelta,
+      onIntent,
     });
   } finally {
     simulatorState.setStatus(conversationId, "");

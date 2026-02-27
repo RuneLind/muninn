@@ -524,6 +524,20 @@ const SIMULATOR_STYLES = `
     }
     /* .msg-streaming.web inherits from .web-content — no duplicate rules needed */
 
+    /* Intent bubble — shows what the AI plans to do */
+    .msg-intent {
+      align-self: flex-start;
+      max-width: 85%;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-style: italic;
+      color: var(--text-muted);
+      background: color-mix(in srgb, var(--accent) 6%, transparent);
+      border-left: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      border-radius: 4px;
+      line-height: 1.4;
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -954,6 +968,14 @@ const SIMULATOR_SCRIPT = `
       return;
     }
 
+    if (event.type === 'intent') {
+      if (event.conversationId !== activeConvId) return;
+      var intentThread = event.threadId || null;
+      if (activeThreadId && intentThread !== activeThreadId) return;
+      showIntentBubble(event.text);
+      return;
+    }
+
     if (event.type === 'status') {
       var conv = conversations[event.conversationId];
       if (conv) {
@@ -1148,6 +1170,20 @@ const SIMULATOR_SCRIPT = `
     if (bubble) bubble.remove();
     streamingRawText = '';
     streamingRafPending = false;
+  }
+
+  // Show or update an intent bubble (what the AI plans to do)
+  function showIntentBubble(text) {
+    var existing = chatMessages.querySelector('.msg-intent');
+    if (existing) {
+      existing.textContent = text;
+    } else {
+      var bubble = document.createElement('div');
+      bubble.className = 'msg-intent msg-intermediate';
+      bubble.textContent = text;
+      chatMessages.appendChild(bubble);
+    }
+    scrollToBottom();
   }
 
   // Remove all intermediate messages (called before final message or on status clear)

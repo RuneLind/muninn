@@ -12,7 +12,7 @@ import { getTasksDueNow, updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { callHaiku } from "./executor.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { resolveConnector } from "../ai/connector.ts";
 import { buildBriefingPrompt } from "./briefing-prompt.ts";
 import { runWatchers } from "../watchers/runner.ts";
 import { Tracer } from "../tracing/index.ts";
@@ -228,7 +228,7 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
       goalsCount: meta.goalsCount, tasksCount: meta.scheduledTasksCount, alertsCount: meta.alertsCount,
     });
 
-    const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt, createProgressCallback("running_task"));
+    const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, systemPrompt, createProgressCallback("running_task"));
 
     const totalMs = Math.round(performance.now() - t0);
     log.info("Briefing generated in {ms}ms (model: {model}, input: {input}, output: {output}, turns: {turns})", {

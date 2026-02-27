@@ -32,8 +32,8 @@ const mockBuildPrompt = mock(() => Promise.resolve({
 const mockSaveMessage = mock(() => Promise.resolve("msg-1"));
 const mockActivityPush = mock();
 
-mock.module("../ai/executor.ts", () => ({
-  executeClaudePrompt: mockExecuteClaudePrompt,
+mock.module("../ai/connector.ts", () => ({
+  resolveConnector: () => mockExecuteClaudePrompt,
 }));
 
 mock.module("../ai/prompt-builder.ts", () => ({

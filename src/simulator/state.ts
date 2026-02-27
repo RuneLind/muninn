@@ -29,7 +29,8 @@ export type SimEvent =
   | { type: "status"; conversationId: string; status: string }
   | { type: "conversation_created"; conversation: SimConversation }
   | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
-  | { type: "stream_clear"; conversationId: string; threadId?: string | null };
+  | { type: "stream_clear"; conversationId: string; threadId?: string | null }
+  | { type: "intent"; conversationId: string; text: string; threadId?: string | null };
 
 type EventSubscriber = (event: SimEvent) => void;
 
@@ -134,6 +135,11 @@ export class SimulatorState {
   /** Signal subscribers to clear any streaming bubble (e.g. when tool calls start) */
   publishStreamClear(conversationId: string, threadId?: string | null): void {
     this.publish({ type: "stream_clear", conversationId, threadId });
+  }
+
+  /** Broadcast an intent update (what the AI plans to do) */
+  publishIntent(conversationId: string, text: string, threadId?: string | null): void {
+    this.publish({ type: "intent", conversationId, text, threadId });
   }
 
   /**

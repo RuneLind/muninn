@@ -25,6 +25,8 @@ export interface ChannelListeningConfig {
   topicHints?: string[];
 }
 
+export type ConnectorType = "claude-cli" | "copilot-sdk";
+
 export interface BotConfig {
   name: string;
   /** Absolute path to the bot folder — used as cwd for Claude CLI spawns */
@@ -35,6 +37,8 @@ export interface BotConfig {
   slackBotToken?: string;
   slackAppToken?: string;
   slackAllowedUserIds: string[];
+  /** AI connector backend — defaults to "claude-cli" */
+  connector?: ConnectorType;
   /** Claude model override (e.g. "opus", "sonnet") — falls back to global CLAUDE_MODEL */
   model?: string;
   /** Max thinking tokens for extended thinking — set 0 to disable, undefined = CLI default */
@@ -123,10 +127,16 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
+        }
+        // Validate connector type
+        const validConnectors: ConnectorType[] = ["claude-cli", "copilot-sdk"];
+        if (botSettings.connector && !validConnectors.includes(botSettings.connector as ConnectorType)) {
+          log.warn("Bot \"{name}\" has unknown connector \"{connector}\" — valid values: {valid}", { name, connector: String(botSettings.connector), valid: validConnectors.join(", ") });
+          delete botSettings.connector;
         }
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
@@ -149,6 +159,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       slackBotToken,
       slackAppToken,
       slackAllowedUserIds,
+      connector: botSettings.connector as ConnectorType | undefined,
       model: botSettings.model as string | undefined,
       thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
       timeoutMs: botSettings.timeoutMs as number | undefined,
@@ -157,6 +168,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     });
 
     const configParts: string[] = [];
+    if (botSettings.connector) configParts.push(`connector: ${botSettings.connector}`);
     if (botSettings.model) configParts.push(`model: ${botSettings.model}`);
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);

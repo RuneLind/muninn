@@ -2,7 +2,7 @@ import { InputFile } from "grammy";
 import type { Context } from "grammy";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { resolveConnector } from "../ai/connector.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
 import type { UserIdentity } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
@@ -108,7 +108,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
       log.info("Calling Claude for voice (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
       t.start("claude");
-      const result = await executeClaudePrompt(userPrompt, config, botConfig, systemPrompt, createProgressCallback("calling_claude", username));
+      const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, systemPrompt, createProgressCallback("calling_claude", username));
       t.end("claude", {
         model: result.model,
         inputTokens: result.inputTokens,

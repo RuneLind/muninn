@@ -26,6 +26,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@github/copilot-sdk": "^0.1.26",
     "@huggingface/transformers": "^3.8.1",
     "@logtape/file": "^2.0.2",
     "@logtape/logtape": "^2.0.2",

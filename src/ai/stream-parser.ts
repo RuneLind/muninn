@@ -20,7 +20,8 @@ export type StreamProgressEvent =
   | { type: "tool_start"; name: string; displayName: string; input?: string }
   | { type: "tool_end"; name: string; displayName: string }
   | { type: "text" }
-  | { type: "text_delta"; text: string };
+  | { type: "text_delta"; text: string }
+  | { type: "intent"; text: string };
 
 export type StreamProgressCallback = (event: StreamProgressEvent) => void;
 
