@@ -378,7 +378,11 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
             await say(msg);
           }
         },
-        setStatus: async (_status: string) => {},
+        setStatus: async (status: string) => {
+          if (thinkingTs && status) {
+            await client.chat.update({ channel, ts: thinkingTs, text: `_${status}_` }).catch(() => {});
+          }
+        },
         postToChannel: makePostToChannel(client, botConfig.name),
         platform: "slack_dm",
         threadId: dmThreadId,

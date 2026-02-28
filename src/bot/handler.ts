@@ -34,6 +34,29 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       });
     };
 
+    // Tool status: send one message, edit it to append each new line, delete when done.
+    // Serialized via promise chain to prevent race conditions (two rapid tool_start events
+    // could both see statusMsgId as undefined and send two messages).
+    let statusMsgId: number | undefined;
+    let statusLines: string[] = [];
+    let statusChain: Promise<void> = Promise.resolve();
+    const chatId = ctx.chat!.id;
+
+    const onToolStatus = (line: string) => {
+      statusChain = statusChain.then(async () => {
+        statusLines.push(line);
+        const text = statusLines.map(l => `⏳ ${l}`).join("\n");
+        try {
+          if (!statusMsgId) {
+            const msg = await ctx.api.sendMessage(chatId, text);
+            statusMsgId = msg.message_id;
+          } else {
+            await ctx.api.editMessageText(chatId, statusMsgId, text).catch(() => {});
+          }
+        } catch { /* ignore send/edit failures */ }
+      });
+    };
+
     try {
       const threadId = await getActiveThreadId(userId, botConfig.name);
       await processMessage({
@@ -46,6 +69,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
         config,
         say,
         threadId,
+        onToolStatus,
       });
     } catch (error) {
       // processMessage handles its own errors and calls say() with the error message,
@@ -54,6 +78,11 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
       await ctx.reply(`Something went wrong: ${msg}`).catch(() => {});
     } finally {
       clearInterval(typingInterval);
+      // Wait for any pending status edits before deleting
+      await statusChain.catch(() => {});
+      if (statusMsgId) {
+        ctx.api.deleteMessage(chatId, statusMsgId).catch(() => {});
+      }
     }
   };
 }

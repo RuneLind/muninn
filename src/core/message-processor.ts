@@ -16,6 +16,7 @@ import { formatWebHtml } from "../web/web-format.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
+import { getToolStatus } from "../ai/tool-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("core", "processor");
@@ -45,6 +46,8 @@ export interface ProcessMessageParams {
   onTextDelta?: (delta: string | null) => void;
   /** Callback for AI intent updates (what the model plans to do) */
   onIntent?: (text: string) => void;
+  /** Callback for tool status updates (appended as separate lines, not replaced) */
+  onToolStatus?: (text: string) => void;
 }
 
 export interface ProcessMessageResult {
@@ -66,7 +69,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const {
     text, userId, username, userIdentity, platform, botConfig, config,
     say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
-    onTextDelta, onIntent,
+    onTextDelta, onIntent, onToolStatus,
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
@@ -115,16 +118,25 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
     const baseProgress = createProgressCallback("calling_claude", username);
-    const hasStreamCallbacks = onTextDelta || onIntent;
+    const hasStreamCallbacks = onTextDelta || onIntent || onToolStatus || setStatus;
     const progressCallback = hasStreamCallbacks
       ? (event: import("../ai/stream-parser.ts").StreamProgressEvent) => {
           if (event.type === "text_delta") {
             onTextDelta?.(event.text);
           } else if (event.type === "intent") {
             onIntent?.(event.text);
+            if (setStatus) setStatus(event.text).catch(() => {});
           } else {
-            // Clear streaming bubble when tools start (text was intermediate)
-            if (event.type === "tool_start") onTextDelta?.(null);
+            if (event.type === "tool_start") {
+              // Clear streaming bubble when tools start (text was intermediate)
+              onTextDelta?.(null);
+              // Emit human-friendly tool status (appended as separate lines)
+              const statusText = getToolStatus(event.name, event.input);
+              if (statusText) {
+                onToolStatus?.(statusText);
+                if (setStatus) setStatus(statusText).catch(() => {});
+              }
+            }
             baseProgress(event);
           }
         }

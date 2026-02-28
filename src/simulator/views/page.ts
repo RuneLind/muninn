@@ -541,6 +541,18 @@ const SIMULATOR_STYLES = `
       line-height: 1.4;
     }
 
+    /* Tool status line — each tool call gets its own line */
+    .msg-tool-status {
+      align-self: flex-start;
+      max-width: 85%;
+      padding: 3px 12px;
+      font-size: 12px;
+      font-style: italic;
+      color: var(--text-muted);
+      opacity: 0.7;
+      line-height: 1.4;
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -979,6 +991,14 @@ const SIMULATOR_SCRIPT = `
       return;
     }
 
+    if (event.type === 'tool_status') {
+      if (event.conversationId !== activeConvId) return;
+      var tsThread = event.threadId || null;
+      if (activeThreadId && tsThread !== activeThreadId) return;
+      appendToolStatus(event.text);
+      return;
+    }
+
     if (event.type === 'status') {
       var conv = conversations[event.conversationId];
       if (conv) {
@@ -1186,6 +1206,15 @@ const SIMULATOR_SCRIPT = `
       bubble.textContent = text;
       chatMessages.appendChild(bubble);
     }
+    scrollToBottom();
+  }
+
+  // Append a tool status line (each tool gets its own line, not replaced)
+  function appendToolStatus(text) {
+    var line = document.createElement('div');
+    line.className = 'msg-tool-status msg-intermediate';
+    line.textContent = text;
+    chatMessages.appendChild(line);
     scrollToBottom();
   }
 

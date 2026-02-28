@@ -30,7 +30,8 @@ export type SimEvent =
   | { type: "conversation_created"; conversation: SimConversation }
   | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
-  | { type: "intent"; conversationId: string; text: string; threadId?: string | null };
+  | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
+  | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null };
 
 type EventSubscriber = (event: SimEvent) => void;
 
@@ -140,6 +141,11 @@ export class SimulatorState {
   /** Broadcast an intent update (what the AI plans to do) */
   publishIntent(conversationId: string, text: string, threadId?: string | null): void {
     this.publish({ type: "intent", conversationId, text, threadId });
+  }
+
+  /** Broadcast a tool status update (appended as separate lines in the UI) */
+  publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
+    this.publish({ type: "tool_status", conversationId, text, threadId });
   }
 
   /**

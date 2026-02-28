@@ -104,6 +104,10 @@ export async function processSimulatorMessage(
     simulatorState.publishIntent(conversationId, intentText, threadId ?? null);
   };
 
+  const onToolStatus = (statusText: string): void => {
+    simulatorState.publishToolStatus(conversationId, statusText, threadId ?? null);
+  };
+
   try {
     await processMessage({
       text,
@@ -120,6 +124,7 @@ export async function processSimulatorMessage(
       threadId,
       onTextDelta,
       onIntent,
+      onToolStatus,
     });
   } finally {
     simulatorState.setStatus(conversationId, "");
