@@ -20,8 +20,6 @@
       "mcp__gmail__delete_filter",
       "mcp__gmail__create_filter_from_template",
       "mcp__gmail__download_attachment",
-      "WebFetch",
-      "Read",
       "mcp__google-calendar__list-calendars",
       "mcp__google-calendar__list-events",
       "mcp__google-calendar__search-events",
@@ -34,7 +32,12 @@
       "mcp__google-calendar__get-current-time",
       "mcp__google-calendar__respond-to-event",
       "mcp__google-calendar__manage-accounts",
-      "mcp__jetbrains__list_directory_tree"
+      "WebFetch",
+      "Read",
+      "Edit(//Users/rune/source/private/javrvis/**)",
+      "Write(//Users/rune/source/private/javrvis/**)",
+      "Glob",
+      "Grep"
     ]
   },
   "enableAllProjectMcpServers": true,
