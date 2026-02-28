@@ -281,4 +281,5 @@ describe("formatWebHtml", () => {
     expect(result).toContain("Intro\n<table>");
     expect(result).toContain("</table>\nAfter");
   });
+
 });

@@ -214,3 +214,4 @@ function convertTables(text: string): string {
 function parsePipeCells(line: string): string[] {
   return line.replace(/^\||\|$/g, "").split("|");
 }
+

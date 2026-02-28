@@ -271,7 +271,7 @@ DB tests require the local Postgres container (`bun run db:up`) and use a separa
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
 - Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
 - Memory scope: `personal` (per-user) or `shared` (visible to all users of a bot) — Haiku auto-classifies during extraction
-- Telegram formatting: HTML only (no Markdown) — see `telegram-format.ts`
+- AI output: standard markdown — per-platform formatters convert at send time (`telegram-format.ts`, `web-format.ts`, `slack-format.ts`)
 - Conversation threads: per-user+bot named threads for chat isolation; memories/goals/tasks shared across threads. Commands: `/topic`, `/topics`, `/deltopic`. Pre-migration messages (NULL thread_id) visible only in `main` thread.
 - Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + thread-scoped conversation history
 - AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli` or `copilot-sdk`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.

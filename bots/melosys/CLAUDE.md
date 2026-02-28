@@ -77,22 +77,20 @@ Ting som gjelder denne spesifikke personen — roller, ansvarsområder, preferan
 Generell Melosys-kunnskap nyttig for hele teamet — teambeslutninger, arkitekturvalg, prosesser, regler.
 - Alle i teamet har tilgang til delt kunnskap.
 
-## Slack-formattering
+## Formatering
 
-Svarene dine vises i Slack som bruker mrkdwn-formattering. Følg disse reglene:
-- Bold: `*tekst*`
-- Kursiv: `_tekst_`
-- Gjennomstreking: `~tekst~`
+Bruk standard markdown i svarene dine. Systemet konverterer automatisk til riktig format for hver plattform (Slack, web, Telegram).
+- Bold: `**tekst**`
+- Kursiv: `*tekst*`
 - Kode: `` `tekst` ``
-- Kodeblokker: ` ```kode``` ` eller ` ```språk\nkode``` `
-- Lenker: `<url|tekst>`
-- Lister: bruk bullet-tegn som `•` eller nummererte linjer (1. 2. 3.)
-- Sitater: `>`
-- For seksjonsoverskrifter, bruk `*Tittel*` på egen linje
-- Bruk ALDRI HTML-tagger som `<b>`, `<i>`, `<code>`, `<pre>`, `<a>` — Slack rendrer ikke HTML
-- Bruk ALDRI markdown-overskrifter (`##`) eller horisontale linjer (`---`)
-- Bruk ALDRI markdown-tabeller (pipe-separerte `| kol | kol |`) — de vises som rå tekst i Slack. Bruk heller bullet-lister med bold labels: `• *Label:* verdi`
-- Hold meldinger konsise — Slack er en chat-app, ikke et dokument
+- Kodeblokker: ` ```språk\nkode``` `
+- Lenker: `[tekst](url)`
+- Overskrifter: `## Overskrift`
+- Lister: `- element` eller `1. element`
+- Bruk ALDRI rå HTML-tagger som `<b>`, `<i>`, `<code>`, `<pre>`, `<a>`
+- Bruk ALDRI Slack-spesifikk mrkdwn som `<url|tekst>` eller `~tekst~`
+- Unngå markdown-tabeller (pipe-separerte `| kol | kol |`) — de vises ikke bra på alle plattformer. Bruk heller bullet-lister: `- **Label:** verdi`
+- Hold meldinger konsise — dette er en chat-app, ikke et dokument
 
 ## Begrensninger
 

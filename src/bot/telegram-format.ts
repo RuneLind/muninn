@@ -1,7 +1,6 @@
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
- * Acts as a safety net — the system prompt asks for HTML,
- * but Claude sometimes slips back into markdown.
+ * The AI outputs standard markdown; this converts to Telegram's HTML subset.
  */
 export function formatTelegramHtml(text: string): string {
   let result = text;
