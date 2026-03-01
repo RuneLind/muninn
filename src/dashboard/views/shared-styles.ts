@@ -86,7 +86,7 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "knowledge" | "logs" | "mcp-debug" | "chat",
+  activePage: "dashboard" | "traces" | "search" | "knowledge" | "logs" | "mcp-debug" | "chat" | "youtube",
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
   return `
@@ -131,6 +131,7 @@ export function renderNav(
         <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
         <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">MemSearch</a>
         <a href="/knowledge" class="nav-link${activePage === "knowledge" ? " active" : ""}">Knowledge</a>
+        <a href="/youtube" class="nav-link${activePage === "youtube" ? " active" : ""}">YouTube</a>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>
