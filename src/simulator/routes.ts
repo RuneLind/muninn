@@ -24,6 +24,11 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     return c.html(renderSimulatorPage());
   });
 
+  // Knowledge viewable collections config for index document links
+  app.get("/knowledge-config", (c) => {
+    return c.json({ viewableCollections: config.knowledgeViewableCollections });
+  });
+
   // Serve chat config (mode: "config" with users, or mode: "discovery")
   app.get("/config", async (c) => {
     const chatCfg = await loadChatConfig();

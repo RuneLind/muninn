@@ -37,7 +37,11 @@
       "Edit(//Users/rune/source/private/javrvis/**)",
       "Write(//Users/rune/source/private/javrvis/**)",
       "Glob",
-      "Grep"
+      "Grep",
+      "mcp__knowledge__search_knowledge",
+      "mcp__knowledge__get_document",
+      "mcp__knowledge__list_tags",
+      "mcp__knowledge__list_collections"
     ]
   },
   "enableAllProjectMcpServers": true,

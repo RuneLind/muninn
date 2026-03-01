@@ -3,6 +3,7 @@ import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "../../das
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "../../dashboard/views/components/request-progress-ui.ts";
 import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/components/bot-selector.ts";
 import { helpersScript } from "../../dashboard/views/components/helpers.ts";
+import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "../../dashboard/views/components/doc-panel.ts";
 
 export function renderSimulatorPage(): string {
   return `<!DOCTYPE html>
@@ -65,6 +66,9 @@ export function renderSimulatorPage(): string {
     </div>
   </div>
 
+  ${docPanelHtml()}
+
+  ${MARKED_CDN_SCRIPT}
   <script>
     ${helpersScript()}
     ${agentStatusScript()}
@@ -572,6 +576,30 @@ const SIMULATOR_STYLES = `
     @keyframes typing {
       0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
       30% { opacity: 1; transform: scale(1); }
+    }
+
+    /* Document overlay (knowledge index viewer) */
+    ${docPanelStyles("docSlideIn")}
+
+    /* Index link button appended next to matching URLs */
+    .index-link-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      margin-left: 6px;
+      padding: 1px 6px;
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light) !important;
+      font-size: 11px;
+      border-radius: 3px;
+      text-decoration: none !important;
+      cursor: pointer;
+      vertical-align: baseline;
+      border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    }
+    .index-link-inline:hover {
+      background: color-mix(in srgb, var(--accent) 25%, transparent);
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     }
 `;
 
@@ -1100,6 +1128,7 @@ const SIMULATOR_SCRIPT = `
 
     if (msg.sender === 'bot' && (isWeb || isTg)) {
       div.innerHTML = sanitizeHtml(msg.text, isWeb);
+      augmentIndexLinks(div);
     } else if (msg.sender === 'bot') {
       div.innerHTML = renderSlackMrkdwn(msg.text);
     } else {
@@ -1176,6 +1205,7 @@ const SIMULATOR_SCRIPT = `
     // Finalize HTML content
     if (isWeb) {
       bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
+      augmentIndexLinks(bubble);
     }
     // Convert from streaming to permanent intermediate message with platform class
     bubble.classList.remove('msg-streaming');
@@ -1546,6 +1576,75 @@ const SIMULATOR_SCRIPT = `
     return tmp.innerHTML;
   }
 
+  // --- Knowledge Index Links ---
+  var knowledgeUrlMap = {};
+
+  function normalizeUrl(url) {
+    try {
+      var u = new URL(url);
+      var normalized = u.hostname.replace(/^www\\./, '') + u.pathname.replace(/\\/$/, '');
+      if (u.hostname.includes('youtube.com') && u.searchParams.has('v')) {
+        normalized += '?v=' + u.searchParams.get('v');
+      }
+      if (u.hostname.includes('youtu.be')) {
+        normalized = 'youtube.com/watch?v=' + u.pathname.slice(1);
+      }
+      return normalized;
+    } catch { return url; }
+  }
+
+  async function loadKnowledgeUrlMaps() {
+    try {
+      var res = await fetch('/chat/knowledge-config');
+      if (!res.ok) return;
+      var cfg = await res.json();
+      var cols = cfg.viewableCollections || [];
+      await Promise.all(cols.map(function(col) {
+        return fetch('/api/knowledge/collection/' + encodeURIComponent(col) + '/documents')
+          .then(function(r) { return r.ok ? r.json() : null; })
+          .then(function(data) {
+            if (!data) return;
+            var docs = data.documents || [];
+            for (var j = 0; j < docs.length; j++) {
+              if (docs[j].url) {
+                knowledgeUrlMap[normalizeUrl(docs[j].url)] = { collection: col, docId: docs[j].id };
+              }
+            }
+          })
+          .catch(function() {});
+      }));
+      // Re-augment any messages already rendered before the map was ready
+      var msgs = document.querySelectorAll('.msg-bot');
+      for (var k = 0; k < msgs.length; k++) augmentIndexLinks(msgs[k]);
+    } catch {}
+  }
+
+  function augmentIndexLinks(container) {
+    if (Object.keys(knowledgeUrlMap).length === 0) return;
+    var links = container.querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i];
+      if (a.nextElementSibling && a.nextElementSibling.classList.contains('index-link-inline')) continue;
+      var match = knowledgeUrlMap[normalizeUrl(a.href)];
+      if (match) {
+        var btn = document.createElement('a');
+        btn.className = 'index-link-inline';
+        btn.href = '#';
+        btn.textContent = 'Index';
+        btn.dataset.collection = match.collection;
+        btn.dataset.docid = match.docId;
+        btn.dataset.url = a.href;
+        btn.onclick = function(e) {
+          e.preventDefault();
+          openDocPanel(this.dataset.collection, this.dataset.docid, this.dataset.url);
+        };
+        a.parentNode.insertBefore(btn, a.nextSibling);
+      }
+    }
+  }
+
+  ${docPanelScript()}
+
   // Event listeners
   chatSend.onclick = sendMessage;
   chatInput.onkeydown = function(e) {
@@ -1567,6 +1666,7 @@ const SIMULATOR_SCRIPT = `
       chatConfig = await res.json();
     } catch { chatConfig = { mode: 'discovery', users: [] }; }
     connectWs();
+    loadKnowledgeUrlMaps();
 
     // Auto-select: use stored bot if valid, otherwise first bot
     var initialBot = selectedBot && botNames.indexOf(selectedBot) !== -1 ? selectedBot : (botNames[0] || '');

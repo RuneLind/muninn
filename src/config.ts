@@ -35,6 +35,7 @@ export function loadConfig() {
       optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true",
     logDir: optionalEnv("LOG_DIR", "./logs"),
     knowledgeApiUrl: optionalEnv("KNOWLEDGE_API_URL", "http://localhost:8321"),
+    knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
     tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
     promptSnapshotsRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_RETENTION_DAYS", 3),

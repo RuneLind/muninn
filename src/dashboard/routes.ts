@@ -7,6 +7,7 @@ import { renderDashboardPage } from "./views/page.ts";
 import { renderTracesPage } from "./views/traces-page.ts";
 import { renderSearchPage } from "./views/search-page.ts";
 import { renderKnowledgePage } from "./views/knowledge-page.ts";
+import { renderKnowledgeDocumentPage } from "./views/knowledge-document-page.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
 import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "./mcp-client.ts";
@@ -391,6 +392,12 @@ export function createDashboardRoutes(config: Config): Hono {
     return c.html(renderKnowledgePage());
   });
 
+  app.get("/knowledge/document/:collection/*", (c) => {
+    const collection = c.req.param("collection");
+    const docId = c.req.path.split(`/knowledge/document/${collection}/`)[1] || "";
+    return c.html(renderKnowledgeDocumentPage(collection, decodeURIComponent(docId)));
+  });
+
   app.get("/api/knowledge/health", async (c) => {
     try {
       const controller = new AbortController();
@@ -448,13 +455,30 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/knowledge/document/:collection/:docId", async (c) => {
+  app.get("/api/knowledge/collection/:name/documents", async (c) => {
+    try {
+      const name = c.req.param("name");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/collection/${encodeURIComponent(name)}/documents`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
+      const data = await res.json();
+      return c.json(data);
+    } catch (err) {
+      log.warn("Knowledge collection documents fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  app.get("/api/knowledge/document/:collection/*", async (c) => {
     try {
       const collection = c.req.param("collection");
-      const docId = c.req.param("docId");
+      const docId = c.req.path.split(`/api/knowledge/document/${collection}/`)[1] || "";
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/document/${collection}/${docId}`, { signal: controller.signal });
+      // docId is already URL-encoded from the client request path — pass through as-is
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/document/${encodeURIComponent(collection)}/${docId}`, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
       const data = await res.json();

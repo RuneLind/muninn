@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escScript } from "./components/helpers.ts";
+import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 
 export function renderKnowledgePage(): string {
   return `<!DOCTYPE html>
@@ -191,15 +192,29 @@ export function renderKnowledgePage(): string {
     .result-title {
       font-size: 14px;
       font-weight: 500;
-      margin-bottom: 8px;
-    }
-    .result-title a {
       color: var(--text-secondary);
-      text-decoration: none;
+      margin-bottom: 4px;
     }
-    .result-title a:hover {
+    .result-links {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .result-links a {
+      color: var(--accent);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .result-links a:hover {
       color: var(--accent-light);
       text-decoration: underline;
+    }
+    .result-links .link-icon {
+      font-size: 11px;
+      opacity: 0.7;
     }
 
     .result-summary {
@@ -328,6 +343,8 @@ export function renderKnowledgePage(): string {
       vertical-align: middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    ${docPanelStyles()}
   </style>
 </head>
 <body>
@@ -369,6 +386,10 @@ export function renderKnowledgePage(): string {
     </div>
     <span class="search-timing" id="searchTiming"></span>
   </div>
+
+  ${docPanelHtml()}
+
+  ${MARKED_CDN_SCRIPT}
 
   <div class="content">
     <div id="resultCount" class="result-count"></div>
@@ -610,9 +631,11 @@ export function renderKnowledgePage(): string {
             : highlightQuery(preview, query);
         }
         const safeUrl = r.url && /^https?:\\/\\//i.test(r.url) ? r.url : '';
-        const titleHtml = safeUrl
-          ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener">' + esc(r.title || 'Untitled') + '</a>'
-          : esc(r.title || 'Untitled');
+        const docId = r.id || '';
+        const linksHtml = '<div class="result-links">' +
+          (safeUrl ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener"><span class="link-icon">&#x1F310;</span> Web</a>' : '') +
+          (docId ? '<a href="#" class="index-link" data-collection="' + esc(r.collection) + '" data-docid="' + esc(docId) + '" data-url="' + esc(safeUrl) + '"><span class="link-icon">&#x1F4C4;</span> Index</a>' : '') +
+        '</div>';
 
         const chunksHtml = chunks.map((c, ci) => {
           let chunkBarPct = 0;
@@ -646,7 +669,8 @@ export function renderKnowledgePage(): string {
               '<span class="badge badge-collection">' + esc(r.collection) + '</span>' +
             '</div>' +
           '</div>' +
-          '<div class="result-title">' + titleHtml + '</div>' +
+          '<div class="result-title">' + esc(r.title || 'Untitled') + '</div>' +
+          linksHtml +
           '<div class="result-summary">' + bestChunkPreview + '</div>' +
           (chunks.length > 0
             ? renderChunksToggle(chunks, chunksHtml)
@@ -667,6 +691,17 @@ export function renderKnowledgePage(): string {
         ? count + ' chunks' + suffix + ' — click to collapse'
         : count + ' chunk' + (count !== 1 ? 's' : '') + ' matched' + suffix + ' — click to expand';
     }
+
+    ${docPanelScript()}
+
+    // Delegated click handler for index links
+    document.addEventListener('click', (e) => {
+      const link = e.target.closest('.index-link');
+      if (link) {
+        e.preventDefault();
+        openDocPanel(link.dataset.collection, link.dataset.docid, link.dataset.url);
+      }
+    });
 
     // Enter key triggers search
     document.getElementById('searchInput').addEventListener('keydown', (e) => {
