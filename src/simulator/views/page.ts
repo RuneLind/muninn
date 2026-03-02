@@ -1053,6 +1053,18 @@ const SIMULATOR_SCRIPT = `
     if (!botName) return;
 
     await selectBot(botName, threadParam || undefined);
+
+    // Check for pending research message (e.g. from Chrome extension)
+    if (threadParam && activeConvId && activeThreadId) {
+      try {
+        var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
+        var pendingData = await pendingRes.json();
+        if (pendingData.text) {
+          chatInput.value = pendingData.text;
+          sendMessage();
+        }
+      } catch {}
+    }
   }
 
   // Send message
@@ -1600,7 +1612,7 @@ const SIMULATOR_SCRIPT = `
       var cfg = await res.json();
       var cols = cfg.viewableCollections || [];
       await Promise.all(cols.map(function(col) {
-        return fetch('/api/knowledge/collection/' + encodeURIComponent(col) + '/documents')
+        return fetch('/api/search/collection/' + encodeURIComponent(col) + '/documents')
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(data) {
             if (!data) return;

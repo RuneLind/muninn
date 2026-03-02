@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escScript } from "./components/helpers.ts";
+import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 
 export function renderSearchPage(): string {
   return `<!DOCTYPE html>
@@ -24,8 +25,22 @@ export function renderSearchPage(): string {
       border-radius: 10px;
       padding: 16px;
     }
-    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; }
+    .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; transition: font-size 0.2s; }
+    .stat-value.text-value { font-size: 18px; }
     .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+
+    /* Error Banner */
+    .error-banner {
+      display: none;
+      margin: 0 24px 12px;
+      padding: 12px 16px;
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+      border-radius: 8px;
+      color: var(--status-error);
+      font-size: 13px;
+    }
+    .error-banner.visible { display: block; }
 
     /* Search Area */
     .search-area {
@@ -91,30 +106,6 @@ export function renderSearchPage(): string {
     }
     .filters select:focus { outline: none; border-color: var(--accent); }
 
-    .mode-pills {
-      display: flex;
-      gap: 0;
-      border: 1px solid var(--border-secondary);
-      border-radius: 6px;
-      overflow: hidden;
-    }
-    .mode-pill {
-      background: var(--bg-surface);
-      color: var(--text-muted);
-      border: none;
-      padding: 5px 12px;
-      font-size: 12px;
-      cursor: pointer;
-      transition: all 0.2s;
-      border-right: 1px solid var(--border-secondary);
-    }
-    .mode-pill:last-child { border-right: none; }
-    .mode-pill:hover { color: var(--accent-light); }
-    .mode-pill.active {
-      background: color-mix(in srgb, var(--accent) 20%, transparent);
-      color: var(--accent);
-    }
-
     .search-timing {
       margin-left: auto;
       color: var(--text-faint);
@@ -140,12 +131,11 @@ export function renderSearchPage(): string {
       border: 1px solid var(--border-primary);
       border-radius: 10px;
       padding: 16px;
-      cursor: pointer;
       transition: all 0.2s;
     }
     .result-card:hover {
       border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-      background: var(--bg-gradient-end);
+      background: color-mix(in srgb, var(--bg-panel) 50%, var(--bg-gradient-end));
     }
 
     .result-header {
@@ -197,15 +187,39 @@ export function renderSearchPage(): string {
       font-size: 11px;
       font-weight: 500;
     }
-    .badge-bot { background: color-mix(in srgb, var(--status-warning) 15%, transparent); color: var(--status-warning); }
-    .badge-user { background: color-mix(in srgb, var(--status-info) 15%, transparent); color: var(--status-info); }
-    .badge-scope-personal { background: color-mix(in srgb, var(--status-magenta) 15%, transparent); color: var(--status-magenta); }
-    .badge-scope-shared { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); }
-    .badge-tag { background: color-mix(in srgb, white 6%, transparent); color: var(--text-muted); }
+    .badge-collection { background: color-mix(in srgb, var(--status-cyan) 15%, transparent); color: var(--status-cyan); }
+
+    .result-title {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+    .result-links {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .result-links a {
+      color: var(--accent);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .result-links a:hover {
+      color: var(--accent-light);
+      text-decoration: underline;
+    }
+    .result-links .link-icon {
+      font-size: 11px;
+      opacity: 0.7;
+    }
 
     .result-summary {
-      color: var(--text-tertiary);
-      font-size: 14px;
+      color: var(--text-soft);
+      font-size: 13px;
       line-height: 1.5;
       margin-bottom: 8px;
     }
@@ -216,38 +230,83 @@ export function renderSearchPage(): string {
       border-radius: 2px;
     }
 
-    .result-content {
-      color: var(--text-muted);
+    /* Expandable chunks */
+    .result-chunks-toggle {
+      color: var(--accent);
       font-size: 12px;
-      line-height: 1.5;
+      cursor: pointer;
+      border: none;
+      background: none;
+      padding: 4px 0;
+    }
+    .result-chunks-toggle:hover { color: var(--accent-light); }
+
+    .result-chunks {
       max-height: 0;
       overflow: hidden;
       transition: max-height 0.3s;
     }
-    .result-card.expanded .result-content {
-      max-height: 400px;
-      margin-bottom: 8px;
-    }
-    .result-content pre {
-      background: var(--bg-page);
-      padding: 10px;
-      border-radius: 6px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 12px;
-      line-height: 1.5;
+    .result-card.expanded .result-chunks {
+      max-height: 2000px;
     }
 
-    .result-footer {
-      display: flex;
-      gap: 6px;
-      align-items: center;
-      flex-wrap: wrap;
+    .chunk-card {
+      background: var(--bg-page);
+      border: 1px solid var(--bg-surface);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-top: 8px;
     }
-    .result-date {
+    .chunk-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .chunk-score {
+      color: var(--accent-light);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .chunk-score-bar {
+      width: 40px;
+      height: 3px;
+      background: var(--border-primary);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .chunk-score-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
+    .chunk-heading {
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: color-mix(in srgb, var(--accent) 50%, var(--accent-light));
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
+    }
+    .chunk-label {
       color: var(--text-faint);
       font-size: 11px;
       margin-left: auto;
+    }
+    .chunk-content {
+      color: var(--text-soft);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .chunk-content mark {
+      background: color-mix(in srgb, var(--accent) 30%, transparent);
+      color: var(--text-secondary);
+      padding: 0 2px;
+      border-radius: 2px;
     }
 
     .empty {
@@ -285,174 +344,70 @@ export function renderSearchPage(): string {
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Detail Modal */
-    .modal-backdrop {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.7);
-      z-index: 1000;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal-backdrop.visible { display: flex; }
-    .modal {
-      background: var(--bg-panel);
-      border: 1px solid var(--border-secondary);
-      border-radius: 12px;
-      width: 90vw;
-      max-width: 700px;
-      max-height: 85vh;
-      display: flex;
-      flex-direction: column;
-    }
-    .modal-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 20px;
-      border-bottom: 1px solid var(--border-primary);
-    }
-    .modal-header h3 { font-size: 14px; color: var(--text-primary); }
-    .modal-close {
-      background: none;
-      border: none;
-      color: var(--text-dim);
-      cursor: pointer;
-      font-size: 20px;
-      padding: 4px 8px;
-    }
-    .modal-close:hover { color: var(--text-primary); }
-    .modal-body {
-      flex: 1;
-      overflow: auto;
-      padding: 16px 20px;
-    }
-    .modal-field { margin-bottom: 16px; }
-    .modal-field-label {
-      color: var(--text-dim);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 4px;
-    }
-    .modal-field-value {
-      color: var(--text-tertiary);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-    .modal-field-value pre {
-      background: var(--bg-page);
-      padding: 12px;
-      border-radius: 6px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 12px;
-      line-height: 1.5;
-    }
-    .modal-tags {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
+    ${docPanelStyles()}
   </style>
 </head>
 <body>
   ${renderNav("search")}
 
+  <div class="error-banner" id="errorBanner">
+    Knowledge API at <code>localhost:8321</code> is unreachable. Start it with:
+    <code>cd ../documents-vector-search && uv run knowledge_api_server.py</code>
+  </div>
+
   <div class="stats-bar" id="statsBar">
-    <div class="stat-card"><div class="stat-value" id="statTotal">-</div><div class="stat-label">Total Memories</div></div>
-    <div class="stat-card"><div class="stat-value" id="statEmbedded">-</div><div class="stat-label">With Embeddings</div></div>
-    <div class="stat-card"><div class="stat-value" id="statUsers">-</div><div class="stat-label">Users</div></div>
-    <div class="stat-card"><div class="stat-value" id="statTags">-</div><div class="stat-label">Unique Tags</div></div>
+    <div class="stat-card"><div class="stat-value" id="statCollections">-</div><div class="stat-label" id="statCollectionsLabel">Collections</div></div>
+    <div class="stat-card"><div class="stat-value" id="statDocuments">-</div><div class="stat-label">Documents</div></div>
+    <div class="stat-card"><div class="stat-value" id="statChunks">-</div><div class="stat-label">Chunks</div></div>
+    <div class="stat-card"><div class="stat-value" id="statEmbeddings">-</div><div class="stat-label">Embeddings</div></div>
   </div>
 
   <div class="search-area">
     <div class="search-input-row">
-      <input type="text" class="search-input" id="searchInput" placeholder="Search memories... (semantic + keyword)" autofocus>
+      <input type="text" class="search-input" id="searchInput" placeholder="Search knowledge base... (vector similarity)" autofocus>
       <button class="search-btn" id="searchBtn" onclick="doSearch()">Search</button>
     </div>
   </div>
 
   <div class="filters">
     <div class="filter-group">
-      <span class="filter-label">Bot:</span>
-      <select id="filterBot">
-        <option value="">All bots</option>
+      <span class="filter-label">Collection:</span>
+      <select id="filterCollection">
+        <option value="">All collections</option>
       </select>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Scope:</span>
-      <select id="filterScope">
-        <option value="">All</option>
-        <option value="personal">Personal</option>
-        <option value="shared">Shared</option>
-      </select>
-    </div>
-    <div class="filter-group">
-      <span class="filter-label">Mode:</span>
-      <div class="mode-pills">
-        <button class="mode-pill active" data-mode="hybrid" onclick="setMode('hybrid')">Hybrid</button>
-        <button class="mode-pill" data-mode="semantic" onclick="setMode('semantic')">Semantic</button>
-        <button class="mode-pill" data-mode="text" onclick="setMode('text')">Text</button>
-      </div>
     </div>
     <div class="filter-group">
       <span class="filter-label">Results:</span>
       <select id="filterLimit">
-        <option value="10">10</option>
-        <option value="25" selected>25</option>
+        <option value="10" selected>10</option>
+        <option value="25">25</option>
         <option value="50">50</option>
       </select>
     </div>
     <span class="search-timing" id="searchTiming"></span>
   </div>
 
+  ${docPanelHtml()}
+
+  ${MARKED_CDN_SCRIPT}
+
   <div class="content">
     <div id="resultCount" class="result-count"></div>
     <div id="results" class="results-list">
       <div class="empty">
-        <div class="empty-icon">&#x1F50D;</div>
-        Search across all memories using semantic similarity and keyword matching
-        <div class="empty-hint">Try: "user preferences", "calendar events", "project deadlines"</div>
+        <div class="empty-icon">&#x1F4DA;</div>
+        Search company knowledge using vector similarity
+        <div class="empty-hint">Try: "onboarding process", "AWS best practices", "team structure"</div>
       </div>
-    </div>
-  </div>
-
-  <div class="modal-backdrop" id="modalBackdrop" onclick="closeModal(event)">
-    <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 id="modalTitle">Memory Detail</h3>
-        <button class="modal-close" onclick="closeModal()">&times;</button>
-      </div>
-      <div class="modal-body" id="modalBody"></div>
     </div>
   </div>
 
   <script>
-    let searchMode = 'hybrid';
     let searchResults = [];
+    let allCollections = [];
+    let apiAvailable = false;
 
     ${escScript()}
-
-    function fmtDate(epochMs) {
-      const d = new Date(epochMs);
-      const now = new Date();
-      const diffMs = now - d;
-      const diffDays = Math.floor(diffMs / 86400000);
-      if (diffDays === 0) return 'Today ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-      if (diffDays === 1) return 'Yesterday';
-      if (diffDays < 7) return diffDays + ' days ago';
-      if (diffDays < 30) return Math.floor(diffDays / 7) + 'w ago';
-      return d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric', year: 'numeric' });
-    }
-
-    function setMode(mode) {
-      searchMode = mode;
-      document.querySelectorAll('.mode-pill').forEach(p => {
-        p.classList.toggle('active', p.dataset.mode === mode);
-      });
-    }
 
     function highlightQuery(text, query) {
       if (!query || !text) return esc(text);
@@ -465,20 +420,125 @@ export function renderSearchPage(): string {
       } catch { return escaped; }
     }
 
-    function scoreClass(score) {
-      if (score >= 0.025) return 'score-high';
-      if (score >= 0.015) return 'score-medium';
-      return 'score-low';
+    function truncate(text, maxLen) {
+      if (!text) return '';
+      if (text.length <= maxLen) return text;
+      return text.slice(0, maxLen).trimEnd() + '...';
     }
 
-    function scorePercent(score) {
-      // RRF scores are typically 0-0.033, normalize to 0-100
-      return Math.min(Math.round(score / 0.033 * 100), 100);
+    function headingSuffix(headings) {
+      if (!headings || headings.length === 0) return '';
+      const shown = headings.slice(0, 3);
+      return ' (' + shown.join(', ') + (headings.length > 3 ? ', ...' : '') + ')';
+    }
+
+    function stripBreadcrumb(text) {
+      if (!text) return '';
+      const lines = text.split('\\n');
+      if (lines[0].startsWith('[') && lines[0].includes(']')) {
+        return lines.slice(1).join('\\n').replace(/^\\n+/, '');
+      }
+      return text;
+    }
+
+    async function checkApiHealth() {
+      try {
+        const res = await fetch('/api/search/health');
+        if (!res.ok) throw new Error('not ok');
+        apiAvailable = true;
+        document.getElementById('errorBanner').classList.remove('visible');
+        document.getElementById('searchBtn').disabled = false;
+        return true;
+      } catch {
+        apiAvailable = false;
+        document.getElementById('errorBanner').classList.add('visible');
+        document.getElementById('searchBtn').disabled = true;
+        return false;
+      }
+    }
+
+    function updateStats(selectedName) {
+      const colLabel = document.getElementById('statCollectionsLabel');
+      const colValue = document.getElementById('statCollections');
+      if (!selectedName) {
+        // All collections — show totals
+        let totalDocs = 0, totalChunks = 0, totalEmbeddings = 0;
+        allCollections.forEach(c => {
+          totalDocs += c.document_count || 0;
+          totalChunks += c.chunk_count || 0;
+          totalEmbeddings += c.embedding_count || 0;
+        });
+        colLabel.textContent = 'Collections';
+        colValue.textContent = allCollections.length;
+        colValue.title = '';
+        colValue.classList.remove('text-value');
+        document.getElementById('statDocuments').textContent = totalDocs.toLocaleString();
+        document.getElementById('statChunks').textContent = totalChunks.toLocaleString();
+        document.getElementById('statEmbeddings').textContent = totalEmbeddings.toLocaleString();
+      } else {
+        const c = allCollections.find(x => x.name === selectedName);
+        if (!c) return;
+        // Show updated time in place of collection count
+        if (c.updatedTime) {
+          const d = new Date(c.updatedTime);
+          const relative = formatRelativeTime(d);
+          colLabel.textContent = 'Updated';
+          colValue.textContent = relative;
+          colValue.title = d.toLocaleString();
+          colValue.classList.add('text-value');
+        } else {
+          colLabel.textContent = 'Collection';
+          colValue.textContent = '1';
+          colValue.title = '';
+          colValue.classList.remove('text-value');
+        }
+        document.getElementById('statDocuments').textContent = (c.document_count || 0).toLocaleString();
+        document.getElementById('statChunks').textContent = (c.chunk_count || 0).toLocaleString();
+        document.getElementById('statEmbeddings').textContent = (c.embedding_count || 0).toLocaleString();
+      }
+    }
+
+    function formatRelativeTime(date) {
+      const now = new Date();
+      const diffMs = now - date;
+      const diffMin = Math.floor(diffMs / 60000);
+      if (diffMin < 1) return 'just now';
+      if (diffMin < 60) return diffMin + 'm ago';
+      const diffHrs = Math.floor(diffMin / 60);
+      if (diffHrs < 24) return diffHrs + 'h ago';
+      const diffDays = Math.floor(diffHrs / 24);
+      if (diffDays < 30) return diffDays + 'd ago';
+      return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+
+    async function loadCollections() {
+      try {
+        const res = await fetch('/api/search/collections');
+        if (!res.ok) return;
+        const data = await res.json();
+        allCollections = data.collections || [];
+
+        updateStats('');
+
+        // Populate dropdown
+        const select = document.getElementById('filterCollection');
+        allCollections.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.name;
+          opt.textContent = c.name + ' (' + (c.document_count || 0) + ' docs)';
+          select.appendChild(opt);
+        });
+
+        // Update stats when collection changes
+        select.addEventListener('change', () => updateStats(select.value));
+      } catch (e) {
+        console.error('Failed to load collections', e);
+      }
     }
 
     async function doSearch() {
       const query = document.getElementById('searchInput').value.trim();
-      if (!query) return;
+      if (!query || !apiAvailable) return;
 
       const btn = document.getElementById('searchBtn');
       const resultsEl = document.getElementById('results');
@@ -487,7 +547,7 @@ export function renderSearchPage(): string {
 
       btn.disabled = true;
       btn.textContent = 'Searching...';
-      resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Generating embedding & searching...</div>';
+      resultsEl.innerHTML = '<div class="loading"><span class="spinner"></span>Searching knowledge base...</div>';
       countEl.textContent = '';
       timingEl.textContent = '';
 
@@ -496,15 +556,17 @@ export function renderSearchPage(): string {
       try {
         const params = new URLSearchParams();
         params.set('q', query);
-        params.set('mode', searchMode);
         params.set('limit', document.getElementById('filterLimit').value);
-        const bot = document.getElementById('filterBot').value;
-        if (bot) params.set('bot', bot);
-        const scope = document.getElementById('filterScope').value;
-        if (scope) params.set('scope', scope);
+        const collection = document.getElementById('filterCollection').value;
+        if (collection) params.append('collection', collection);
 
-        const res = await fetch('/api/search?' + params);
+        const res = await fetch('/api/search/search?' + params);
         const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Search failed');
+        }
+
         searchResults = data.results || [];
 
         const elapsed = Math.round(performance.now() - startTime);
@@ -512,7 +574,7 @@ export function renderSearchPage(): string {
 
         if (searchResults.length === 0) {
           countEl.textContent = '';
-          resultsEl.innerHTML = '<div class="empty">No results found for "' + esc(query) + '"<div class="empty-hint">Try different keywords or switch search mode</div></div>';
+          resultsEl.innerHTML = '<div class="empty">No results found for "' + esc(query) + '"<div class="empty-hint">Try different keywords or a different collection</div></div>';
           return;
         }
 
@@ -527,86 +589,129 @@ export function renderSearchPage(): string {
       }
     }
 
+    function renderChunksToggle(chunks, chunksHtml) {
+      const uniqueHeadings = [...new Set(chunks.map(c => c.heading).filter(Boolean))];
+      const suffix = headingSuffix(uniqueHeadings.map(h => esc(h)));
+      const toggleLabel = chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' matched' + suffix;
+      return '<button class="result-chunks-toggle" onclick="toggleChunks(this)" data-headings="' + esc(JSON.stringify(uniqueHeadings)) + '">' +
+        toggleLabel + ' — click to expand</button>' +
+        '<div class="result-chunks">' + chunksHtml + '</div>';
+    }
+
     function renderResults(results, query) {
+      // Relevance: 0-1 scale, higher = better. Find min/max for relative bar width.
+      const scores = results.map(r => r.relevance).filter(s => s != null);
+
+      const minScore = Math.min(...scores);
+      const maxScore = Math.max(...scores);
+      const scoreRange = maxScore - minScore || 1;
+
       const el = document.getElementById('results');
       el.innerHTML = results.map((r, i) => {
-        const score = r.similarity || 0;
-        const pct = scorePercent(score);
-        const cls = scoreClass(score);
-        const scopeBadge = r.scope === 'shared'
-          ? '<span class="badge badge-scope-shared">shared</span>'
-          : '<span class="badge badge-scope-personal">personal</span>';
-        const tags = (r.tags || []).map(t => '<span class="badge badge-tag">' + esc(t) + '</span>').join('');
+        const chunks = r.matchedChunks || [];
+        const bestScore = r.relevance != null ? r.relevance : null;
 
-        return '<div class="result-card" data-index="' + i + '" onclick="toggleExpand(this)">' +
+        // Relative bar: higher relevance = wider bar
+        let barPct = 0;
+        let barClass = 'score-low';
+        if (bestScore !== null && scores.length > 1) {
+          barPct = Math.round(((bestScore - minScore) / scoreRange) * 100);
+          barClass = barPct >= 70 ? 'score-high' : barPct >= 40 ? 'score-medium' : 'score-low';
+        } else if (bestScore !== null) {
+          barPct = 100;
+          barClass = 'score-high';
+        }
+
+        let bestChunkPreview = '';
+        if (chunks.length > 0) {
+          const stripped = stripBreadcrumb(chunks[0].content);
+          const preview = truncate(stripped, 200);
+          bestChunkPreview = chunks[0].heading
+            ? '<strong>' + esc(chunks[0].heading) + ':</strong> ' + highlightQuery(preview, query)
+            : highlightQuery(preview, query);
+        }
+        const safeUrl = r.url && /^https?:\\/\\//i.test(r.url) ? r.url : '';
+        const docId = r.id || '';
+        const linksHtml = '<div class="result-links">' +
+          (safeUrl ? '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener"><span class="link-icon">&#x1F310;</span> Web</a>' : '') +
+          (docId ? '<a href="#" class="index-link" data-collection="' + esc(r.collection) + '" data-docid="' + esc(docId) + '" data-url="' + esc(safeUrl) + '"><span class="link-icon">&#x1F4C4;</span> Index</a>' : '') +
+        '</div>';
+
+        const chunksHtml = chunks.map((c, ci) => {
+          let chunkBarPct = 0;
+          if (scores.length > 1) {
+            chunkBarPct = Math.round(((c.relevance - minScore) / scoreRange) * 100);
+          } else {
+            chunkBarPct = 100;
+          }
+          const chunkBarClass = chunkBarPct >= 70 ? 'score-high' : chunkBarPct >= 40 ? 'score-medium' : 'score-low';
+          const headingBadge = c.heading
+            ? '<span class="chunk-heading" title="' + esc(c.heading) + '">' + esc(c.heading) + '</span>'
+            : '';
+          return '<div class="chunk-card">' +
+            '<div class="chunk-header">' +
+              '<span class="chunk-score">' + (c.relevance != null ? c.relevance.toFixed(3) : '—') + '</span>' +
+              '<div class="chunk-score-bar"><div class="chunk-score-fill ' + chunkBarClass + '" style="width:' + chunkBarPct + '%"></div></div>' +
+              headingBadge +
+              '<span class="chunk-label">chunk ' + (ci + 1) + '</span>' +
+            '</div>' +
+            '<div class="chunk-content">' + highlightQuery(stripBreadcrumb(c.content), query) + '</div>' +
+          '</div>';
+        }).join('');
+
+        return '<div class="result-card" data-index="' + i + '">' +
           '<div class="result-header">' +
-            '<span class="result-score">' + score.toFixed(4) + '</span>' +
-            '<div class="result-score-bar"><div class="result-score-fill ' + cls + '" style="width:' + pct + '%"></div></div>' +
+            (bestScore !== null
+              ? '<span class="result-score">' + bestScore.toFixed(3) + '</span>' +
+                '<div class="result-score-bar"><div class="result-score-fill ' + barClass + '" style="width:' + barPct + '%"></div></div>'
+              : '') +
             '<div class="result-meta">' +
-              (r.botName ? '<span class="badge badge-bot">' + esc(r.botName) + '</span>' : '') +
-              '<span class="badge badge-user">' + esc(r.username || r.userId) + '</span>' +
-              scopeBadge +
+              '<span class="badge badge-collection">' + esc(r.collection) + '</span>' +
             '</div>' +
           '</div>' +
-          '<div class="result-summary">' + highlightQuery(r.summary, query) + '</div>' +
-          '<div class="result-content"><pre>' + highlightQuery(r.content, query) + '</pre></div>' +
-          '<div class="result-footer">' +
-            tags +
-            '<span class="result-date">' + fmtDate(r.createdAt) + '</span>' +
-          '</div>' +
+          '<div class="result-title">' + esc(r.title || 'Untitled') + '</div>' +
+          linksHtml +
+          '<div class="result-summary">' + bestChunkPreview + '</div>' +
+          (chunks.length > 0
+            ? renderChunksToggle(chunks, chunksHtml)
+            : '') +
         '</div>';
       }).join('');
     }
 
-    function toggleExpand(card) {
-      card.classList.toggle('expanded');
+    function toggleChunks(btn) {
+      const card = btn.closest('.result-card');
+      const expanded = card.classList.toggle('expanded');
+      const count = card.querySelectorAll('.chunk-card').length;
+      let suffix = '';
+      try {
+        suffix = headingSuffix(JSON.parse(btn.dataset.headings || '[]'));
+      } catch {}
+      btn.textContent = expanded
+        ? count + ' chunks' + suffix + ' — click to collapse'
+        : count + ' chunk' + (count !== 1 ? 's' : '') + ' matched' + suffix + ' — click to expand';
     }
 
-    function closeModal(event) {
-      if (event && event.target !== event.currentTarget) return;
-      document.getElementById('modalBackdrop').classList.remove('visible');
-    }
+    ${docPanelScript()}
+
+    // Delegated click handler for index links
+    document.addEventListener('click', (e) => {
+      const link = e.target.closest('.index-link');
+      if (link) {
+        e.preventDefault();
+        openDocPanel(link.dataset.collection, link.dataset.docid, link.dataset.url);
+      }
+    });
 
     // Enter key triggers search
     document.getElementById('searchInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doSearch();
     });
 
-    // Escape closes modal
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') closeModal();
-    });
-
-    // Load stats and bot filter
-    async function loadStats() {
-      try {
-        const res = await fetch('/api/search-stats');
-        const stats = await res.json();
-        document.getElementById('statTotal').textContent = stats.totalMemories;
-        document.getElementById('statEmbedded').textContent = stats.withEmbeddings;
-        document.getElementById('statUsers').textContent = stats.uniqueUsers;
-        document.getElementById('statTags').textContent = stats.uniqueTags;
-      } catch (e) { console.error('Failed to load search stats', e); }
-    }
-
-    async function loadBots() {
-      try {
-        const res = await fetch('/api/trace-filters');
-        if (!res.ok) return;
-        const { bots } = await res.json();
-        const select = document.getElementById('filterBot');
-        (bots || []).forEach(b => {
-          const opt = document.createElement('option');
-          opt.value = b;
-          opt.textContent = b;
-          select.appendChild(opt);
-        });
-      } catch (e) { console.error('Failed to load bots', e); }
-    }
-
     // Init
-    loadStats();
-    loadBots();
+    checkApiHealth().then(ok => {
+      if (ok) loadCollections();
+    });
   </script>
 </body>
 </html>`;

@@ -14,6 +14,54 @@
         "KNOWLEDGE_COLLECTIONS": "melosys-confluence-v3",
         "KNOWLEDGE_DESCRIPTION": "Melosys/NAV technical documentation — EU/EEA social security coordination (trygdekoordinering), EESSI BUCs and SEDs, regulations 883/2004 and 987/2009, folketrygdloven, architecture and development guides"
       }
+    },
+    "serena-api": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "/Users/rune/source/nav/melosys-api",
+        "--open-web-dashboard",
+        "False"
+      ]
+    },
+    "serena-web": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "/Users/rune/source/nav/melosys-web",
+        "--open-web-dashboard",
+        "False"
+      ]
+    },
+    "serena-eessi": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "/Users/rune/source/nav/melosys-eessi",
+        "--open-web-dashboard",
+        "False"
+      ]
     }
   }
 }

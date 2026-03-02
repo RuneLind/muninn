@@ -176,6 +176,10 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
     userMessage: async ({ message, say, setStatus }) => {
       const text = "text" in message ? (message.text ?? "") : "";
       const userId = "user" in message ? (message.user ?? "unknown") : "unknown";
+
+      // Show thinking indicator immediately (before resolving user, building prompt, etc.)
+      await setStatus("Tenker...").catch(() => {});
+
       const userInfo = await resolveSlackUser(app, userId);
 
       log.info("Assistant message from {username} ({userId}): \"{preview}\"", { botName: bn, username: userInfo.name, userId, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });

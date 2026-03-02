@@ -5,12 +5,16 @@ import { getLog } from "../logging.ts";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { renderTracesPage } from "./views/traces-page.ts";
+import { renderMemsearchPage } from "./views/memsearch-page.ts";
 import { renderSearchPage } from "./views/search-page.ts";
-import { renderKnowledgePage } from "./views/knowledge-page.ts";
-import { renderKnowledgeDocumentPage } from "./views/knowledge-document-page.ts";
+import { renderSearchDocumentPage } from "./views/search-document-page.ts";
 import { renderYouTubePage } from "./views/youtube-page.ts";
+import { renderResearchPage } from "./views/research-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../youtube/state.ts";
 import { summarizeVideo } from "../youtube/summarizer.ts";
+import { simulatorState } from "../simulator/state.ts";
+import { loadChatConfig } from "../simulator/chat-config.ts";
+import { setPendingMessage } from "../simulator/pending-messages.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
 import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "./mcp-client.ts";
@@ -25,7 +29,7 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
-import { getAllThreadsForBot } from "../db/threads.ts";
+import { getAllThreadsForBot, createThread } from "../db/threads.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getUserSettings } from "../db/user-settings.ts";
 import { agentStatus } from "./agent-status.ts";
@@ -268,13 +272,13 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  // --- Search page ---
+  // --- MemSearch page ---
 
-  app.get("/search", (c) => {
-    return c.html(renderSearchPage());
+  app.get("/memsearch", (c) => {
+    return c.html(renderMemsearchPage());
   });
 
-  app.get("/api/search", async (c) => {
+  app.get("/api/memsearch", async (c) => {
     try {
       const query = c.req.query("q");
       if (!query || query.trim().length === 0) {
@@ -308,7 +312,7 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/search-stats", async (c) => {
+  app.get("/api/memsearch-stats", async (c) => {
     try {
       const botName = c.req.query("bot") || undefined;
       const stats = await getSearchStats(botName);
@@ -387,21 +391,21 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  // --- Knowledge page (proxy to Knowledge API) ---
+  // --- Search page (proxy to Knowledge API) ---
 
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/knowledge", (c) => {
-    return c.html(renderKnowledgePage());
+  app.get("/search", (c) => {
+    return c.html(renderSearchPage());
   });
 
-  app.get("/knowledge/document/:collection/*", (c) => {
+  app.get("/search/document/:collection/*", (c) => {
     const collection = c.req.param("collection");
-    const docId = c.req.path.split(`/knowledge/document/${collection}/`)[1] || "";
-    return c.html(renderKnowledgeDocumentPage(collection, decodeURIComponent(docId)));
+    const docId = c.req.path.split(`/search/document/${collection}/`)[1] || "";
+    return c.html(renderSearchDocumentPage(collection, decodeURIComponent(docId)));
   });
 
-  app.get("/api/knowledge/health", async (c) => {
+  app.get("/api/search/health", async (c) => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
@@ -416,7 +420,7 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/knowledge/collections", async (c) => {
+  app.get("/api/search/collections", async (c) => {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
@@ -431,7 +435,7 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/knowledge/search", async (c) => {
+  app.get("/api/search/search", async (c) => {
     try {
       const query = c.req.query("q");
       if (!query || query.trim().length === 0) {
@@ -458,7 +462,7 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/knowledge/collection/:name/documents", async (c) => {
+  app.get("/api/search/collection/:name/documents", async (c) => {
     try {
       const name = c.req.param("name");
       const controller = new AbortController();
@@ -474,10 +478,10 @@ export function createDashboardRoutes(config: Config): Hono {
     }
   });
 
-  app.get("/api/knowledge/document/:collection/*", async (c) => {
+  app.get("/api/search/document/:collection/*", async (c) => {
     try {
       const collection = c.req.param("collection");
-      const docId = c.req.path.split(`/api/knowledge/document/${collection}/`)[1] || "";
+      const docId = c.req.path.split(`/api/search/document/${collection}/`)[1] || "";
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
       // docId is already URL-encoded from the client request path — pass through as-is
@@ -490,6 +494,198 @@ export function createDashboardRoutes(config: Config): Hono {
       log.warn("Knowledge document fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Knowledge API unreachable" }, 503);
     }
+  });
+
+  // --- Research page ---
+
+  app.get("/research", (c) => {
+    return c.html(renderResearchPage());
+  });
+
+  // Research: list available bots
+  app.get("/api/research/bots", (c) => {
+    const bots = discoverAllBots().map((b) => ({ name: b.name }));
+    return c.json({ bots });
+  });
+
+  // Research: get KNOWLEDGE_COLLECTIONS for a bot from its .mcp.json
+  app.get("/api/research/bot-collections", async (c) => {
+    const botName = c.req.query("bot");
+    if (!botName) return c.json({ collections: [] });
+
+    const bot = discoverAllBots().find((b) => b.name === botName);
+    if (!bot) return c.json({ collections: [] });
+
+    const mcpConfig = await loadMcpConfig(bot.dir);
+    if (!mcpConfig?.mcpServers) return c.json({ collections: [] });
+
+    // Look for KNOWLEDGE_COLLECTIONS in any server's env
+    for (const server of Object.values(mcpConfig.mcpServers) as Array<{ env?: Record<string, string> }>) {
+      const knowledgeCollections = server?.env?.KNOWLEDGE_COLLECTIONS;
+      if (knowledgeCollections) {
+        const names = knowledgeCollections.split(",").map((s: string) => s.trim()).filter(Boolean);
+        return c.json({ collections: names });
+      }
+    }
+    return c.json({ collections: [] });
+  });
+
+  // Research browse: tags for a collection
+  app.get("/api/research/tags", async (c) => {
+    const collection = c.req.query("collection");
+    if (!collection) return c.json({ error: "Missing collection parameter" }, 400);
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/tags?collection=${encodeURIComponent(collection)}`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
+      return c.json(await res.json());
+    } catch (err) {
+      log.warn("Research tags API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  // Research browse: documents in a collection
+  app.get("/api/research/documents", async (c) => {
+    const collection = c.req.query("collection");
+    if (!collection) return c.json({ error: "Missing collection parameter" }, 400);
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/collection/${encodeURIComponent(collection)}/documents`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
+      return c.json(await res.json());
+    } catch (err) {
+      log.warn("Research documents API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  // Research browse: single document
+  app.get("/api/research/document/:collection/*", async (c) => {
+    try {
+      const collection = c.req.param("collection");
+      const docId = c.req.path.split(`/api/research/document/${collection}/`)[1] || "";
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/document/${encodeURIComponent(collection)}/${docId}`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
+      return c.json(await res.json());
+    } catch (err) {
+      log.warn("Research document fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  // Research browse: similar search
+  app.get("/api/research/similar", async (c) => {
+    const q = c.req.query("q");
+    const collection = c.req.query("collection");
+    if (!q) return c.json({ error: "Missing query parameter" }, 400);
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const params = new URLSearchParams({ q, limit: "6" });
+      if (collection) params.set("collection", collection);
+      const res = await fetch(`${KNOWLEDGE_API_URL}/api/search?${params}`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
+      return c.json(await res.json());
+    } catch (err) {
+      log.warn("Research similar search failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+  });
+
+  // Research chat: CORS preflight for Chrome extension
+  app.options("/api/research/chat", (c) => {
+    log.info("CORS preflight for /api/research/chat from {origin}", { origin: c.req.header("origin") || "unknown" });
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  });
+
+  // Research chat: create thread + send first message via bot chat
+  app.post("/api/research/chat", async (c) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    const origin = c.req.header("origin") || c.req.header("referer") || "unknown";
+    log.info("POST /api/research/chat from {origin}", { origin });
+
+    const body = await c.req.json<{ bot?: string; title?: string; text: string }>();
+    if (!body.text) {
+      return c.json({ error: "Missing required field: text" }, 400);
+    }
+
+    const rawTitle = body.title || body.text.slice(0, 80) + (body.text.length > 80 ? "..." : "");
+    // Thread names max 50 chars — truncate with ellipsis
+    const title = rawTitle.length > 50 ? rawTitle.slice(0, 47) + "..." : rawTitle;
+
+    // Find the requested bot
+    const allBots = discoverAllBots();
+    if (allBots.length === 0) {
+      return c.json({ error: "No bots configured" }, 500);
+    }
+    const botConfig = (body.bot && allBots.find((b) => b.name === body.bot)) || allBots[0]!;
+
+    // Resolve userId/username from chat.config.json for this bot
+    const chatConfig = await loadChatConfig();
+    const chatUser = chatConfig?.users.find((u) => u.bot === botConfig.name);
+    if (!chatUser) {
+      return c.json({ error: `No chat user configured for bot "${botConfig.name}" in chat.config.json` }, 400);
+    }
+
+    // Find or create conversation in simulator state
+    let conversation = simulatorState.getConversations().find(
+      (conv) => conv.userId === chatUser.id && conv.botName === botConfig.name && conv.type === "web",
+    );
+    if (!conversation) {
+      conversation = simulatorState.createConversation({
+        type: "web",
+        botName: botConfig.name,
+        userId: chatUser.id,
+        username: chatUser.name,
+      });
+    }
+
+    // Create a dedicated thread for this research
+    const thread = await createThread(chatUser.id, botConfig.name, title);
+
+    // Build research prompt
+    const prompt = `Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon.
+
+Gi en oppsummering av:
+- Hva oppgaven handler om
+- Relevant dokumentasjon du finner i kunnskapsbasen
+- Koblinger til eksisterende arbeid eller lignende oppgaver
+- Eventuelle mangler eller uklarheter
+
+---
+
+${body.text}`;
+
+    log.info("Research chat created: {title} | bot={bot} | thread={threadId}", {
+      title,
+      bot: botConfig.name,
+      threadId: thread.id,
+    });
+
+    // Store pending message — chat page will pick it up and send via normal pipeline
+    setPendingMessage(thread.id, prompt);
+
+    return c.json({
+      threadId: thread.id,
+      conversationId: conversation.id,
+      chatUrl: `/chat?bot=${encodeURIComponent(botConfig.name)}&thread=${encodeURIComponent(thread.id)}`,
+    });
   });
 
   // --- MCP Debug page ---

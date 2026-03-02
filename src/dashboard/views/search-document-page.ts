@@ -2,7 +2,7 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escScript } from "./components/helpers.ts";
 import { markdownContentStyles, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 
-export function renderKnowledgeDocumentPage(collection: string, docId: string): string {
+export function renderSearchDocumentPage(collection: string, docId: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,10 +81,10 @@ export function renderKnowledgeDocumentPage(collection: string, docId: string): 
   </style>
 </head>
 <body>
-  ${renderNav("knowledge")}
+  ${renderNav("search")}
 
   <div class="doc-header">
-    <a href="/knowledge">&larr; Back to search</a>
+    <a href="/search">&larr; Back to search</a>
     <div class="doc-meta">
       <span class="badge badge-collection" id="docCollection"></span>
       <span id="docUrl"></span>
@@ -109,7 +109,7 @@ export function renderKnowledgeDocumentPage(collection: string, docId: string): 
       const el = document.getElementById('docContent');
       try {
         const encodedDocId = docId.split('/').map(encodeURIComponent).join('/');
-        const res = await fetch('/api/knowledge/document/' + encodeURIComponent(collection) + '/' + encodedDocId);
+        const res = await fetch('/api/search/document/' + encodeURIComponent(collection) + '/' + encodedDocId);
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
           el.innerHTML = '<div class="error-msg">Failed to load document: ' + esc(data.error || res.statusText) + '</div>';

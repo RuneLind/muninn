@@ -6,7 +6,10 @@
       "mcp__knowledge__get_document",
       "mcp__knowledge__get_notion_page",
       "mcp__knowledge__list_collections",
-      "WebFetch"
+      "WebFetch",
+      "mcp__serena-api__*",
+      "mcp__serena-web__*",
+      "mcp__serena-eessi__*"
     ]
   },
   "enableAllProjectMcpServers": true

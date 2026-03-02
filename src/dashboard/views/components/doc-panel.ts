@@ -162,7 +162,7 @@ export function docPanelScript(): string {
       document.body.style.overflow = 'hidden';
 
       var encodedDocId = docId.split('/').map(encodeURIComponent).join('/');
-      fetch('/api/knowledge/document/' + encodeURIComponent(collection) + '/' + encodedDocId)
+      fetch('/api/search/document/' + encodeURIComponent(collection) + '/' + encodedDocId)
         .then(function(res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
           return res.json();

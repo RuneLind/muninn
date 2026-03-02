@@ -97,6 +97,7 @@ export function tooltipScript(): string {
 
     // Delegated tooltip handlers
     document.addEventListener('mouseenter', (e) => {
+      if (!e.target || !e.target.closest) return;
       const target = e.target.closest('[data-tip]');
       if (!target) return;
 
@@ -114,6 +115,7 @@ export function tooltipScript(): string {
     }, true);
 
     document.addEventListener('mouseleave', (e) => {
+      if (!e.target || !e.target.closest) return;
       const target = e.target.closest('[data-tip]');
       if (target) hideTooltip();
     }, true);

@@ -8,6 +8,7 @@ import { listThreads, createThread } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { loadChatConfig } from "./chat-config.ts";
+import { consumePendingMessage } from "./pending-messages.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("simulator");
@@ -189,6 +190,13 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
         threadId: m.threadId,
       })),
     });
+  });
+
+  // Consume a pending research message (one-time use)
+  app.get("/pending/:threadId", (c) => {
+    const threadId = c.req.param("threadId");
+    const text = consumePendingMessage(threadId);
+    return c.json({ text });
   });
 
   // Send a message in a conversation (triggers Claude processing)
