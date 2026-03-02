@@ -788,7 +788,7 @@ export function createDashboardRoutes(config: Config): Hono {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
-      const params = new URLSearchParams({ q, collection: YT_COLLECTION, limit: "6" });
+      const params = new URLSearchParams({ q, collection: YT_COLLECTION, limit: "7" });
       const res = await fetch(`${KNOWLEDGE_API_URL}/api/search?${params}`, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);

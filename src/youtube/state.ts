@@ -16,6 +16,8 @@ export interface SimilarArticle {
   title: string;
   url: string;
   snippet?: string;
+  relevance?: number;
+  id?: string;
 }
 
 export interface YouTubeJob {

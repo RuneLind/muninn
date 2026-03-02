@@ -170,12 +170,27 @@ export function renderYouTubePage(): string {
       background: var(--bg-surface);
       font-size: 13px;
     }
-    .similar-item a {
+    .similar-item-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .similar-item-header a {
       color: var(--accent-light);
       text-decoration: none;
       font-weight: 500;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
-    .similar-item a:hover { text-decoration: underline; }
+    .similar-item-header a:hover { text-decoration: underline; }
+    .similar-relevance {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-weight: 600;
+      flex-shrink: 0;
+    }
     .similar-snippet {
       font-size: 12px;
       color: var(--text-dim);
@@ -185,6 +200,14 @@ export function renderYouTubePage(): string {
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    .similar-view-md {
+      font-size: 12px;
+      color: var(--accent-light);
+      text-decoration: none;
+      cursor: pointer;
+      opacity: 0.7;
+    }
+    .similar-view-md:hover { opacity: 1; text-decoration: underline; }
 
     /* --- Error display --- */
     .error-banner {
@@ -418,6 +441,7 @@ export function renderYouTubePage(): string {
 
     var accumulatedText = '';
     var currentJobId = null;
+    var currentJobTitle = null;
     var eventSource = null;
 
     var STATUS_LABELS = {
@@ -454,18 +478,57 @@ export function renderYouTubePage(): string {
       badge.style.display = 'inline-block';
     }
 
+    function cleanSnippet(text) {
+      if (!text) return '';
+      // Strip [collection > path > title] prefix and tags: line
+      return text.replace(/^\\[.*?\\]\\s*/, '').replace(/^tags:.*\\n?/m, '').trim();
+    }
+
     function renderSimilar(articles) {
       if (!articles || articles.length === 0) return;
       var panel = document.getElementById('similarPanel');
       var list = document.getElementById('similarList');
       list.innerHTML = articles.map(function(a) {
-        var snippet = (a.snippet || '').replace(/^\[.*?\]\\n?/, '').replace(/^tags:.*\\n?/, '');
+        // Search API returns matchedChunks, ingest returns snippet
+        var rawSnippet = a.snippet || (a.matchedChunks && a.matchedChunks[0] ? a.matchedChunks[0].content : '');
+        var snippet = cleanSnippet(rawSnippet);
+        var pct = typeof a.relevance === 'number' ? Math.round(a.relevance * 100) : null;
+        var hasDocId = !!a.id;
+        var displayTitle = (a.title || '').replace(/\\.md$/, '');
         return '<div class="similar-item">' +
-          '<a href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.title.replace(/\.md$/, '')) + '</a>' +
+          '<div class="similar-item-header">' +
+            '<a href="' + esc(a.url || '#') + '" target="_blank" rel="noopener">' + esc(displayTitle) + '</a>' +
+            (pct !== null ? '<span class="similar-relevance">' + pct + '%</span>' : '') +
+          '</div>' +
           (snippet ? '<div class="similar-snippet">' + esc(snippet) + '</div>' : '') +
-          '</div>';
+          (hasDocId ? '<a class="similar-view-md" href="#" data-doc-id="' + esc(a.id) + '" data-doc-url="' + esc(a.url || '') + '">View article</a>' : '') +
+        '</div>';
       }).join('');
       panel.classList.add('visible');
+      // Wire up view-md links
+      list.querySelectorAll('.similar-view-md').forEach(function(link) {
+        link.addEventListener('click', function(e) {
+          e.preventDefault();
+          openYouTubeDoc(link.getAttribute('data-doc-id'), link.getAttribute('data-doc-url'));
+        });
+      });
+    }
+
+    async function loadJobSimilar(title) {
+      if (!title) return;
+      try {
+        var res = await fetch('/api/youtube/similar?q=' + encodeURIComponent(title));
+        if (!res.ok) return;
+        var data = await res.json();
+        var normalizedTitle = title.toLowerCase().trim();
+        var results = (data.results || []).filter(function(r) {
+          var rTitle = (r.title || '').replace(/\\.md$/, '').toLowerCase().trim();
+          return rTitle !== normalizedTitle;
+        }).slice(0, 5);
+        if (results.length > 0) {
+          renderSimilar(results);
+        }
+      } catch {}
     }
 
     function showError(message) {
@@ -516,7 +579,9 @@ export function renderYouTubePage(): string {
 
       eventSource.addEventListener('similar', function(e) {
         var data = JSON.parse(e.data);
-        renderSimilar(data.articles);
+        // Ingest returned similar articles — fetch scored results from search API
+        renderSimilar(data.articles); // show immediately as fallback
+        loadJobSimilar(currentJobTitle); // replace with scored results
       });
 
       eventSource.addEventListener('complete', function() {
@@ -539,6 +604,7 @@ export function renderYouTubePage(): string {
     }
 
     function showJob(jobId, title, url) {
+      currentJobTitle = title;
       var card = document.getElementById('jobCard');
       card.style.display = '';
       var titleEl = document.getElementById('jobTitle');
@@ -860,6 +926,8 @@ export function renderYouTubePage(): string {
           connectSSE(jobId);
         } else {
           finalizeSummary();
+          // Fetch scored similar results for completed jobs
+          loadJobSimilar(job.title || job.url);
         }
       } catch {
         // ignore — job may have expired
