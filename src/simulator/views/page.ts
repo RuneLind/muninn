@@ -262,6 +262,39 @@ const SIMULATOR_STYLES = `
       color: var(--chat-user-text);
       border-bottom-right-radius: 2px;
     }
+    .msg-research-card {
+      align-self: stretch;
+      max-width: 100%;
+      background: var(--bg-card, var(--bg-surface));
+      border: 1px solid var(--border-primary);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      padding: 0;
+      white-space: normal;
+    }
+    .research-card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--border-primary);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .research-card-label { color: var(--accent-light, var(--accent)); }
+    .research-card-body {
+      padding: 10px 14px;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .research-card-body h2, .research-card-body h3, .research-card-body h4 { color: var(--text-primary); }
+    .research-card-body a { color: var(--accent-light); text-decoration: underline; }
     .msg-bot {
       align-self: flex-start;
       background: var(--chat-assistant-bg);
@@ -1128,6 +1161,31 @@ const SIMULATOR_SCRIPT = `
   }
 
   // Append a single message to the chat
+  var RESEARCH_MARKER = '<!-- research:jira -->';
+
+  function parseResearchContent(text) {
+    // Extract Jira content after the --- separator
+    var parts = text.split('\\n---\\n');
+    var jiraContent = parts.length > 1 ? parts.slice(1).join('\\n---\\n').trim() : text.replace(RESEARCH_MARKER, '').trim();
+    // Extract title from first heading or line
+    var lines = jiraContent.split('\\n');
+    var title = '';
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.startsWith('#')) { title = line.replace(/^#+\\s*/, ''); break; }
+      if (line) { title = line.length > 80 ? line.slice(0, 77) + '...' : line; break; }
+    }
+    return { title: title || 'Jira Task', content: jiraContent };
+  }
+
+  function renderResearchCard(parsed) {
+    var renderedBody = sanitizeHtml(formatWebHtml(parsed.content), true);
+    return '<div class="research-card-header">' +
+      '<span class="research-card-label">Jira Research</span>' +
+      '</div>' +
+      '<div class="research-card-body web-content">' + renderedBody + '</div>';
+  }
+
   function appendMessage(msg, convType) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
@@ -1136,14 +1194,23 @@ const SIMULATOR_SCRIPT = `
     var isTg = convType.startsWith('telegram');
     var platformClass = isWeb ? ' web web-content' : (isTg ? ' telegram' : ' slack');
     var div = document.createElement('div');
-    div.className = 'msg msg-' + msg.sender + (msg.sender === 'bot' ? platformClass : '');
 
-    if (msg.sender === 'bot' && (isWeb || isTg)) {
+    // Detect research card messages (marker survives DB round-trip)
+    var isResearch = msg.sender === 'user' && msg.text.indexOf(RESEARCH_MARKER) === 0;
+
+    if (isResearch) {
+      div.className = 'msg msg-research-card';
+      var parsed = parseResearchContent(msg.text);
+      div.innerHTML = renderResearchCard(parsed);
+    } else if (msg.sender === 'bot' && (isWeb || isTg)) {
+      div.className = 'msg msg-bot' + platformClass;
       div.innerHTML = sanitizeHtml(msg.text, isWeb);
       augmentIndexLinks(div);
     } else if (msg.sender === 'bot') {
+      div.className = 'msg msg-bot' + platformClass;
       div.innerHTML = renderSlackMrkdwn(msg.text);
     } else {
+      div.className = 'msg msg-user';
       div.textContent = msg.text;
     }
 

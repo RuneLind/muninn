@@ -659,8 +659,9 @@ export function createDashboardRoutes(config: Config): Hono {
     // Create a dedicated thread for this research
     const thread = await createThread(chatUser.id, botConfig.name, title);
 
-    // Build research prompt
-    const prompt = `Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon.
+    // Build research prompt with machine-parseable marker for research card rendering
+    const prompt = `<!-- research:jira -->
+Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon.
 
 Gi en oppsummering av:
 - Hva oppgaven handler om
@@ -679,7 +680,37 @@ ${body.text}`;
     });
 
     // Store pending message — chat page will pick it up and send via normal pipeline
-    setPendingMessage(thread.id, prompt);
+    setPendingMessage(thread.id, prompt, { jiraContent: body.text, title: rawTitle });
+
+    // Index Jira content in knowledge base (fire-and-forget)
+    const issueKeyMatch = rawTitle.match(/^([A-Z]+-\d+)/);
+    if (issueKeyMatch) {
+      const ingestJira = async () => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 15_000);
+          const res = await fetch(`${config.knowledgeApiUrl}/api/jira/ingest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              issueKey: issueKeyMatch[1],
+              title: rawTitle,
+              description: body.text,
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          if (res.ok) {
+            log.info("Jira indexed: {issueKey}", { issueKey: issueKeyMatch[1] });
+          } else {
+            log.warn("Jira ingest returned {status}", { status: res.status });
+          }
+        } catch (err) {
+          log.warn("Jira ingest failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
+      };
+      ingestJira();
+    }
 
     return c.json({
       threadId: thread.id,

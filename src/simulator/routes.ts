@@ -195,8 +195,9 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Consume a pending research message (one-time use)
   app.get("/pending/:threadId", (c) => {
     const threadId = c.req.param("threadId");
-    const text = consumePendingMessage(threadId);
-    return c.json({ text });
+    const pending = consumePendingMessage(threadId);
+    if (!pending) return c.json({ text: null });
+    return c.json({ text: pending.text, jiraContent: pending.jiraContent, title: pending.title });
   });
 
   // Send a message in a conversation (triggers Claude processing)
