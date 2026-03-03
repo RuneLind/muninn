@@ -285,6 +285,13 @@ const SIMULATOR_STYLES = `
       letter-spacing: 0.5px;
     }
     .research-card-label { color: var(--accent-light, var(--accent)); }
+    .research-card-title {
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: none;
+      letter-spacing: 0;
+    }
     .research-card-body {
       padding: 10px 14px;
       font-size: 13px;
@@ -293,7 +300,16 @@ const SIMULATOR_STYLES = `
       max-height: 400px;
       overflow-y: auto;
     }
-    .research-card-body h2, .research-card-body h3, .research-card-body h4 { color: var(--text-primary); }
+    .research-card-body h2, .research-card-body h3, .research-card-body h4 {
+      color: var(--text-primary);
+      margin: 12px 0 6px 0;
+    }
+    .research-card-body h2:first-child, .research-card-body h3:first-child { margin-top: 0; }
+    .research-card-body ol, .research-card-body ul {
+      margin: 6px 0;
+      padding-left: 24px;
+    }
+    .research-card-body li { margin-bottom: 4px; }
     .research-card-body a { color: var(--accent-light); text-decoration: underline; }
     .msg-bot {
       align-self: flex-start;
@@ -1180,8 +1196,10 @@ const SIMULATOR_SCRIPT = `
 
   function renderResearchCard(parsed) {
     var renderedBody = sanitizeHtml(formatWebHtml(parsed.content), true);
+    var titleHtml = parsed.title ? '<span class="research-card-title">' + escapeHtml(parsed.title) + '</span>' : '';
     return '<div class="research-card-header">' +
       '<span class="research-card-label">Jira Research</span>' +
+      titleHtml +
       '</div>' +
       '<div class="research-card-body web-content">' + renderedBody + '</div>';
   }

@@ -9,6 +9,7 @@ export function initDb(config: Config): postgres.Sql {
     max: 5,
     idle_timeout: 20,
     connect_timeout: 10,
+    max_lifetime: 60 * 30,
   });
   return sql;
 }
