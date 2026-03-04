@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { Scalar } from "@scalar/hono-api-reference";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
+import { spec } from "./openapi-spec.ts";
 import { activityLog } from "./activity-log.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { renderTracesPage } from "./views/traces-page.ts";
@@ -45,6 +47,9 @@ function parseIntParam(value: string | undefined, defaultVal: number, max: numbe
 
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
+
+  app.get("/api/openapi.json", (c) => c.json(spec));
+  app.get("/docs", Scalar({ url: "/api/openapi.json", pageTitle: "Javrvis API" }));
 
   app.get("/", (c) => {
     return c.html(renderDashboardPage());
