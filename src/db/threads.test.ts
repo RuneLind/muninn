@@ -9,9 +9,11 @@ import {
   switchThread,
   listThreads,
   deleteThread,
+  deleteThreadById,
   getOrCreateSlackThread,
   getAllThreadsForBot,
 } from "./threads.ts";
+import { saveMemory, getMemoriesForUser } from "./memories.ts";
 
 setupTestDb();
 
@@ -188,16 +190,30 @@ describe("threads", () => {
       expect(active!.name).toBe("main");
     });
 
-    test("orphans messages when thread is deleted", async () => {
+    test("deletes messages when thread is deleted", async () => {
       const thread = await switchThread("u1", "bot1", "work");
       await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "in work thread", threadId: thread.id }));
 
       await deleteThread("u1", "bot1", "work");
 
-      // Message should still exist but without thread_id
+      // Message should be deleted along with the thread
       const messages = await getRecentMessages("u1", 10, "bot1");
-      expect(messages).toHaveLength(1);
-      expect(messages[0]!.text).toBe("in work thread");
+      expect(messages).toHaveLength(0);
+    });
+
+    test("deletes associated memories when thread is deleted", async () => {
+      const thread = await switchThread("u1", "bot1", "researchx");
+      const msgId = await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "source", threadId: thread.id }));
+      await saveMemory({
+        userId: "u1", botName: "bot1",
+        content: "memory to delete", summary: "delete me", tags: ["test"],
+        sourceMessageId: msgId,
+      });
+
+      await deleteThread("u1", "bot1", "researchx");
+
+      const remaining = await getMemoriesForUser("u1", 100, "bot1");
+      expect(remaining.find((m) => m.content === "memory to delete")).toBeUndefined();
     });
 
     test("does not affect other threads", async () => {
@@ -210,6 +226,81 @@ describe("threads", () => {
       const threads = await listThreads("u1", "bot1");
       const names = threads.map((t) => t.name).sort();
       expect(names).toEqual(["main", "play"]);
+    });
+  });
+
+  describe("deleteThreadById", () => {
+    test("deletes a thread and its messages", async () => {
+      const thread = await switchThread("u1", "bot1", "temp");
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "msg in temp", threadId: thread.id }));
+
+      const deleted = await deleteThreadById(thread.id);
+      expect(deleted).not.toBeNull();
+      expect(deleted!.name).toBe("temp");
+
+      // Thread should be gone
+      const threads = await listThreads("u1", "bot1");
+      expect(threads.find((t) => t.name === "temp")).toBeUndefined();
+
+      // Messages should also be gone
+      const msgs = await getRecentMessages("u1", 10, "bot1");
+      expect(msgs.find((m) => m.text === "msg in temp")).toBeUndefined();
+    });
+
+    test("deletes associated memories", async () => {
+      const thread = await switchThread("u1", "bot1", "research");
+      const msgId = await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "source msg", threadId: thread.id }));
+
+      await saveMemory({
+        userId: "u1",
+        botName: "bot1",
+        content: "memory from research",
+        summary: "research memory",
+        tags: ["test"],
+        sourceMessageId: msgId,
+      });
+
+      const deleted = await deleteThreadById(thread.id);
+      expect(deleted).not.toBeNull();
+
+      // Memory linked to thread messages should be gone
+      const remaining = await getMemoriesForUser("u1", 100, "bot1");
+      expect(remaining.find((m) => m.content === "memory from research")).toBeUndefined();
+    });
+
+    test("returns null for main thread", async () => {
+      const mainId = await ensureDefaultThread("u1", "bot1");
+      const result = await deleteThreadById(mainId);
+      expect(result).toBeNull();
+    });
+
+    test("returns null for non-existent thread", async () => {
+      const result = await deleteThreadById("00000000-0000-0000-0000-000000000000");
+      expect(result).toBeNull();
+    });
+
+    test("activates main when deleting active thread", async () => {
+      await ensureDefaultThread("u1", "bot1");
+      const thread = await switchThread("u1", "bot1", "active-temp");
+
+      await deleteThreadById(thread.id);
+
+      const active = await getActiveThread("u1", "bot1");
+      expect(active).not.toBeNull();
+      expect(active!.name).toBe("main");
+    });
+
+    test("does not affect other threads' messages", async () => {
+      const t1 = await switchThread("u1", "bot1", "keep");
+      const t2 = await switchThread("u1", "bot1", "remove");
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "keep this", threadId: t1.id }));
+      await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "remove this", threadId: t2.id }));
+
+      await deleteThreadById(t2.id);
+
+      const msgs = await getRecentMessages("u1", 10, "bot1", t1.id);
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0]!.text).toBe("keep this");
     });
   });
 

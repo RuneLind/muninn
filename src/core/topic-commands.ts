@@ -68,7 +68,7 @@ export async function handleDelTopicCommand(
   const deleted = await deleteThread(userId, botName, arg);
   if (deleted) {
     log.info("User {userId} deleted topic \"{topic}\"", { userId, topic: arg });
-    await reply(`Deleted topic: *${arg}*\nSwitched back to *main*.`);
+    await reply(`Deleted topic: *${arg}* (messages and memories removed).\nSwitched back to *main*.`);
   } else {
     await reply(`Topic not found: \`${arg}\``);
   }

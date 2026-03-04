@@ -238,7 +238,8 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
   }));
 }
 
-/** Delete a thread (archive — messages remain but thread is removed). */
+/** Delete a thread by name, including its messages and associated memories.
+ *  Cannot delete the "main" thread. If the deleted thread was active, switches to main. */
 export async function deleteThread(userId: string, botName: string, name: string): Promise<boolean> {
   const sql = getDb();
   const normalized = name.toLowerCase().trim();
@@ -258,7 +259,12 @@ export async function deleteThread(userId: string, botName: string, name: string
 
     if (!target) return false;
 
-    // FK has ON DELETE SET NULL — messages are automatically orphaned
+    // Cascade: memories → messages → thread
+    await tx`
+      DELETE FROM memories
+      WHERE source_message_id IN (SELECT id FROM messages WHERE thread_id = ${target.id})
+    `;
+    await tx`DELETE FROM messages WHERE thread_id = ${target.id}`;
     await tx`DELETE FROM threads WHERE id = ${target.id}`;
 
     // If deleted thread was active, activate main thread within the same transaction
@@ -273,5 +279,48 @@ export async function deleteThread(userId: string, botName: string, name: string
     }
 
     return true;
+  });
+}
+
+/** Delete a thread by ID, including its messages and associated memories.
+ *  Returns the deleted thread info, or null if not found / is main. */
+export async function deleteThreadById(threadId: string): Promise<Thread | null> {
+  const sql = getDb();
+
+  return await sql.begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+
+    const [target] = await tx`
+      SELECT * FROM threads WHERE id = ${threadId}
+    `;
+
+    if (!target) return null;
+    if ((target.name as string) === "main") return null;
+
+    const thread = rowToThread(target);
+
+    // Delete memories linked to messages in this thread (FK has no ON DELETE cascade)
+    await tx`
+      DELETE FROM memories
+      WHERE source_message_id IN (SELECT id FROM messages WHERE thread_id = ${threadId})
+    `;
+
+    // Delete messages in the thread
+    await tx`DELETE FROM messages WHERE thread_id = ${threadId}`;
+
+    // Delete the thread itself
+    await tx`DELETE FROM threads WHERE id = ${threadId}`;
+
+    // If deleted thread was active, activate main thread
+    if (target.is_active) {
+      await tx`
+        INSERT INTO threads (user_id, bot_name, name, is_active)
+        VALUES (${thread.userId}, ${thread.botName}, 'main', true)
+        ON CONFLICT (user_id, bot_name, name) DO UPDATE
+          SET is_active = true
+      `;
+    }
+
+    return thread;
   });
 }

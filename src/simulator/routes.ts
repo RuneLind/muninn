@@ -6,7 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import { simulatorState, type ConversationType } from "./state.ts";
 import { processSimulatorMessage } from "./processor.ts";
 import { renderSimulatorPage } from "./views/page.ts";
-import { listThreads, createThread } from "../db/threads.ts";
+import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { loadChatConfig } from "./chat-config.ts";
@@ -162,6 +162,24 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     const allThreads = await listThreads(userId, botName);
     const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
     return c.json({ threads });
+  });
+
+  // Delete a thread by ID (including messages and associated memories)
+  app.delete("/threads/:id", async (c) => {
+    const id = c.req.param("id");
+    try {
+      const deleted = await deleteThreadById(id);
+      if (!deleted) {
+        return c.json({ error: "Thread not found or is the main thread" }, 404);
+      }
+      log.info("Deleted thread {threadId} ({threadName}) for user {userId}", {
+        threadId: deleted.id, threadName: deleted.name, userId: deleted.userId,
+      });
+      return c.json({ ok: true, thread: deleted });
+    } catch (err) {
+      log.error("Failed to delete thread: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to delete thread" }, 500);
+    }
   });
 
   // Get messages for a conversation, optionally filtered by thread

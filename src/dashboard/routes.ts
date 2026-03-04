@@ -29,7 +29,7 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
-import { getAllThreadsForBot, createThread } from "../db/threads.ts";
+import { getAllThreadsForBot, createThread, deleteThreadById } from "../db/threads.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getUserSettings } from "../db/user-settings.ts";
 import { agentStatus } from "./agent-status.ts";
@@ -138,6 +138,23 @@ export function createDashboardRoutes(config: Config): Hono {
     } catch (err) {
       log.error("Failed to fetch threads: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch threads" }, 500);
+    }
+  });
+
+  app.delete("/api/threads/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      const deleted = await deleteThreadById(id);
+      if (!deleted) {
+        return c.json({ error: "Thread not found or is the main thread" }, 404);
+      }
+      log.info("Deleted thread {threadId} ({threadName}) for user {userId}", {
+        threadId: deleted.id, threadName: deleted.name, userId: deleted.userId,
+      });
+      return c.json({ ok: true, thread: deleted });
+    } catch (err) {
+      log.error("Failed to delete thread: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to delete thread" }, 500);
     }
   });
 
