@@ -311,6 +311,34 @@ const SIMULATOR_STYLES = `
     }
     .research-card-body li { margin-bottom: 4px; }
     .research-card-body a { color: var(--accent-light); text-decoration: underline; }
+    .research-actions {
+      display: flex;
+      gap: 8px;
+      padding: 12px 0 4px;
+      align-self: stretch;
+      max-width: 100%;
+    }
+    .research-actions button {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-card, var(--bg-surface));
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .research-actions button:hover {
+      background: var(--accent);
+      color: var(--bg-primary);
+      border-color: var(--accent);
+    }
+    .research-actions button .btn-icon { font-size: 14px; }
+    .research-actions.used button { opacity: 0.5; pointer-events: none; }
     .msg-bot {
       align-self: flex-start;
       background: var(--chat-assistant-bg);
@@ -735,6 +763,10 @@ const SIMULATOR_SCRIPT = `
   var conversations = {};       // Still needed for WS routing
   var activeConvId = null;      // 1:1 with selected user+bot binding
   var activeThreadId = null;    // Currently selected thread
+  var isResearchThread = false; // True when active thread has a research card
+  var researchBotReplies = 0;   // Counts bot replies in research thread (actions shown after first)
+  var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
+  var reportExists = false;     // Whether a saved report file exists for current issue
   var threads = [];             // Thread list for current user+bot
   var bots = [];
   var ws = null;
@@ -1116,14 +1148,23 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Send message
+  // Send message (optional connector override for routing through a specific AI backend)
+  var pendingConnector = null;
   async function sendMessage() {
     if (!activeConvId || !activeThreadId || !chatInput.value.trim()) return;
+
+    // Dismiss research action buttons when sending any message
+    var researchActions = chatMessages.querySelector('.research-actions');
+    if (researchActions) researchActions.remove();
 
     var text = chatInput.value.trim();
     chatInput.value = '';
     chatInput.style.height = 'auto';
     var payload = { text: text, threadId: activeThreadId };
+    if (pendingConnector) {
+      payload.connector = pendingConnector;
+      pendingConnector = null;
+    }
     await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1135,9 +1176,13 @@ const SIMULATOR_SCRIPT = `
   async function loadThreadMessages(threadId) {
     if (!activeConvId) return;
     activeThreadId = threadId || null;
-    // Reset streaming state when switching threads
+    // Reset streaming and research state when switching threads
     streamingRawText = '';
     streamingRafPending = false;
+    isResearchThread = false;
+    researchBotReplies = 0;
+    researchIssueKey = null;
+    reportExists = false;
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
@@ -1183,6 +1228,10 @@ const SIMULATOR_SCRIPT = `
     // Extract Jira content after the --- separator
     var parts = text.split('\\n---\\n');
     var jiraContent = parts.length > 1 ? parts.slice(1).join('\\n---\\n').trim() : text.replace(RESEARCH_MARKER, '').trim();
+    // Extract issue key (e.g. "MELOSYS-7546") from content — may appear after # heading prefix
+    var issueKey = null;
+    var keyMatch = jiraContent.match(/^(?:#+ *)?([A-Z]+-\\d+)/);
+    if (keyMatch) issueKey = keyMatch[1];
     // Extract title from first heading or line
     var lines = jiraContent.split('\\n');
     var title = '';
@@ -1191,7 +1240,7 @@ const SIMULATOR_SCRIPT = `
       if (line.startsWith('#')) { title = line.replace(/^#+\\s*/, ''); break; }
       if (line) { title = line.length > 80 ? line.slice(0, 77) + '...' : line; break; }
     }
-    return { title: title || 'Jira Task', content: jiraContent };
+    return { title: title || 'Jira Task', content: jiraContent, issueKey: issueKey };
   }
 
   function renderResearchCard(parsed) {
@@ -1204,6 +1253,201 @@ const SIMULATOR_SCRIPT = `
       '<div class="research-card-body web-content">' + renderedBody + '</div>';
   }
 
+  function checkReportExists(botName, issueKey) {
+    if (!botName || !issueKey) return;
+    fetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
+      .then(function(res) {
+        reportExists = res.ok;
+        // Refresh action buttons if they're currently showing
+        var existing = chatMessages.querySelector('.research-actions');
+        if (existing && reportExists) {
+          var phase = researchBotReplies >= 2 ? 'investigation' : 'analysis';
+          showResearchActions(phase);
+        }
+      })
+      .catch(function() { reportExists = false; });
+  }
+
+  function showResearchActions(phase) {
+    // Remove any existing action buttons
+    var existing = chatMessages.querySelector('.research-actions');
+    if (existing) existing.remove();
+
+    var actions = document.createElement('div');
+    actions.className = 'research-actions';
+
+    // Phase 1 (after analysis): Investigate Code + Start Building + Save Report
+    // Phase 2 (after investigation): Start Building + Save Report
+    if (phase === 'analysis') {
+      var investigateBtn = document.createElement('button');
+      investigateBtn.innerHTML = '<span class="btn-icon">&#x1F50D;</span> Investigate Code';
+      investigateBtn.onclick = function() {
+        actions.classList.add('used');
+        chatInput.value = 'Based on the Jira analysis above, investigate the relevant code in the codebase. Find the files and functions that would need to change, show the current implementation, and identify any potential challenges.';
+        sendMessage();
+      };
+      actions.appendChild(investigateBtn);
+    }
+
+    var buildBtn = document.createElement('button');
+    buildBtn.innerHTML = '<span class="btn-icon">&#x1F680;</span> Start Building';
+    buildBtn.onclick = async function() {
+      actions.classList.add('used');
+      if (!reportExists && researchIssueKey) {
+        await saveResearchReport();
+      }
+      pendingConnector = 'copilot-sdk';
+      var reportRef = researchIssueKey ? './reports/' + researchIssueKey + '.md' : '';
+      chatInput.value = reportRef
+        ? 'Read the research report at ' + reportRef + ' for full context. Then implement the changes step by step.'
+        : 'Based on the analysis and code investigation above, start implementing this Jira task. Build the solution step by step, creating and modifying the necessary files.';
+      sendMessage();
+    };
+    actions.appendChild(buildBtn);
+
+    var saveBtn = document.createElement('button');
+    saveBtn.innerHTML = '<span class="btn-icon">&#x1F4CB;</span> Create Workplan';
+    saveBtn.onclick = function() {
+      saveResearchReport();
+    };
+    actions.appendChild(saveBtn);
+
+    if (reportExists && researchIssueKey) {
+      var previewBtn = document.createElement('button');
+      previewBtn.innerHTML = '<span class="btn-icon">&#x1F4C4;</span> Preview Workplan';
+      previewBtn.onclick = function() {
+        previewResearchReport();
+      };
+      actions.appendChild(previewBtn);
+    }
+
+    chatMessages.appendChild(actions);
+    scrollToBottom();
+  }
+
+  async function saveResearchReport() {
+    if (!activeConvId || !activeThreadId || !selectedBot) return;
+    // Use issue key or fall back to thread-based name
+    var issueKey = researchIssueKey || ('research-' + activeThreadId.slice(0, 8));
+
+    // Fetch raw messages from DB (preserves markdown formatting, links, code blocks)
+    var url = '/chat/conversations/' + activeConvId + '/messages?raw=true';
+    if (activeThreadId) url += '&thread=' + encodeURIComponent(activeThreadId);
+    var res = await fetch(url);
+    var data = await res.json();
+    var msgs = data.messages || [];
+
+    // Separate into jira content, analysis response, investigation response
+    var jiraContent = '';
+    var analysisResponse = '';
+    var investigationResponse = '';
+    var botReplyCount = 0;
+    var foundResearch = false;
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (m.sender === 'user' && m.text.indexOf(RESEARCH_MARKER) === 0) {
+        foundResearch = true;
+        var parsed = parseResearchContent(m.text);
+        jiraContent = parsed.content;
+      } else if (foundResearch && m.sender === 'bot') {
+        botReplyCount++;
+        if (botReplyCount === 1) analysisResponse = m.text;
+        else if (botReplyCount === 2) investigationResponse = m.text;
+      }
+    }
+
+    // Extract title from jira content first line
+    var titleLine = issueKey;
+    if (jiraContent) {
+      var lines = jiraContent.split('\\n');
+      for (var j = 0; j < lines.length; j++) {
+        var ln = lines[j].trim();
+        if (ln.startsWith('#')) { titleLine = issueKey + ': ' + ln.replace(/^#+\\s*/, ''); break; }
+        if (ln) { titleLine = ln.length > 100 ? ln.slice(0, 97) + '...' : ln; break; }
+      }
+    }
+
+    var now = new Date().toISOString().split('T')[0];
+    var sections = [];
+    sections.push('# ' + titleLine);
+    sections.push('> Generated on ' + now);
+    sections.push('');
+    if (jiraContent) {
+      sections.push('## Task Description');
+      sections.push('');
+      sections.push(jiraContent);
+      sections.push('');
+    }
+    if (analysisResponse) {
+      sections.push('## Research Findings');
+      sections.push('');
+      sections.push(analysisResponse);
+      sections.push('');
+    }
+    if (investigationResponse) {
+      sections.push('## Code Analysis');
+      sections.push('');
+      sections.push(investigationResponse);
+      sections.push('');
+    }
+    sections.push('---');
+    sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Generated:** ' + new Date().toISOString());
+
+    var report = sections.join('\\n');
+
+    // Save to backend
+    try {
+      var saveRes = await fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(issueKey), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: report }),
+      });
+      if (saveRes.ok) {
+        reportExists = true;
+        // Update researchIssueKey if it was a fallback
+        if (!researchIssueKey) researchIssueKey = issueKey;
+        // Refresh action buttons to show Preview
+        var phase = researchBotReplies >= 2 ? 'investigation' : 'analysis';
+        showResearchActions(phase);
+        // Brief visual feedback on the save button
+        var btn = chatMessages.querySelector('.research-actions button:nth-child(' + (phase === 'analysis' ? '3' : '2') + ')');
+        if (btn) {
+          var orig = btn.innerHTML;
+          btn.innerHTML = '<span class="btn-icon">&#x2705;</span> Saved!';
+          setTimeout(function() { btn.innerHTML = orig; }, 2000);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to save report:', err);
+    }
+  }
+
+  function previewResearchReport() {
+    if (!selectedBot || !researchIssueKey) return;
+    var overlay = document.getElementById('docOverlay');
+    var titleEl = document.getElementById('docPanelTitle');
+    var linksEl = document.getElementById('docPanelLinks');
+    var bodyEl = document.getElementById('docPanelBody');
+
+    titleEl.textContent = researchIssueKey + ' Workplan';
+    linksEl.innerHTML = '';
+    bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading report...</div>';
+    overlay.classList.add('visible');
+    document.body.style.overflow = 'hidden';
+
+    fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(researchIssueKey))
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function(data) {
+        bodyEl.innerHTML = renderMarkdown(data.content);
+      })
+      .catch(function(err) {
+        bodyEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load report: ' + esc(err.message) + '</div>';
+      });
+  }
+
   function appendMessage(msg, convType) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
@@ -1214,12 +1458,18 @@ const SIMULATOR_SCRIPT = `
     var div = document.createElement('div');
 
     // Detect research card messages (marker survives DB round-trip)
-    var isResearch = msg.sender === 'user' && msg.text.indexOf(RESEARCH_MARKER) === 0;
+    var isResearchMsg = msg.sender === 'user' && msg.text.indexOf(RESEARCH_MARKER) === 0;
 
-    if (isResearch) {
+    if (isResearchMsg) {
+      isResearchThread = true;
+      researchBotReplies = 0;
       div.className = 'msg msg-research-card';
       var parsed = parseResearchContent(msg.text);
       div.innerHTML = renderResearchCard(parsed);
+      if (parsed.issueKey) {
+        researchIssueKey = parsed.issueKey;
+        checkReportExists(selectedBot, parsed.issueKey);
+      }
     } else if (msg.sender === 'bot' && (isWeb || isTg)) {
       div.className = 'msg msg-bot' + platformClass;
       div.innerHTML = sanitizeHtml(msg.text, isWeb);
@@ -1232,12 +1482,27 @@ const SIMULATOR_SCRIPT = `
       div.textContent = msg.text;
     }
 
+    // Track bot replies in research thread
+    if (isResearchThread && msg.sender === 'bot') {
+      researchBotReplies++;
+    }
+
     var time = document.createElement('div');
     time.className = 'msg-time';
     time.textContent = new Date(msg.timestamp).toLocaleTimeString();
     div.appendChild(time);
 
     chatMessages.appendChild(div);
+
+    // Show action buttons after bot replies in a research thread
+    if (isResearchThread && msg.sender === 'bot') {
+      if (researchBotReplies === 1) {
+        showResearchActions('analysis');
+      } else if (researchBotReplies === 2) {
+        showResearchActions('investigation');
+      }
+    }
+
     scrollToBottom();
   }
 

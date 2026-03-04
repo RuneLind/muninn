@@ -17,11 +17,17 @@ export async function processSimulatorMessage(
   botConfig: BotConfig,
   config: Config,
   threadId?: string,
+  connectorOverride?: "copilot-sdk" | "claude-cli",
 ): Promise<void> {
   const conversation = simulatorState.getConversation(conversationId);
   if (!conversation) {
     throw new Error(`Conversation ${conversationId} not found`);
   }
+
+  // Apply connector override (e.g. "Start Building" routes through Copilot SDK)
+  const effectiveBotConfig = connectorOverride
+    ? { ...botConfig, connector: connectorOverride as BotConfig["connector"] }
+    : botConfig;
 
   // Messages sent from the chat page are stored as "web" platform, even when
   // continuing a conversation that originated on Telegram or Slack.
@@ -114,7 +120,7 @@ export async function processSimulatorMessage(
       userId: conversation.userId,
       username: conversation.username,
       platform,
-      botConfig,
+      botConfig: effectiveBotConfig,
       config,
       say,
       setStatus,

@@ -39,6 +39,9 @@ backups/
 # Bot-level env files
 bots/*/.env
 
+# Generated research reports/workplans
+bots/*/reports/
+
 # Chat config (contains user IDs)
 chat.config.json
 

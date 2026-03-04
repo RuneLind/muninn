@@ -661,12 +661,13 @@ export function createDashboardRoutes(config: Config): Hono {
 
     // Build research prompt with machine-parseable marker for research card rendering
     const prompt = `<!-- research:jira -->
-Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon.
+Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon og relaterte Jira-saker.
 
 Gi en oppsummering av:
 - Hva oppgaven handler om
 - Relevant dokumentasjon du finner i kunnskapsbasen
-- Koblinger til eksisterende arbeid eller lignende oppgaver
+- Relaterte Jira-saker (epic, linked issues, lignende oppgaver)
+- Koblinger til eksisterende arbeid
 - Eventuelle mangler eller uklarheter
 
 ---

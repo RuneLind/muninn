@@ -11,8 +11,8 @@
       ],
       "env": {
         "KNOWLEDGE_API_URL": "http://localhost:8321",
-        "KNOWLEDGE_COLLECTIONS": "melosys-confluence-v3",
-        "KNOWLEDGE_DESCRIPTION": "Melosys/NAV technical documentation — EU/EEA social security coordination (trygdekoordinering), EESSI BUCs and SEDs, regulations 883/2004 and 987/2009, folketrygdloven, architecture and development guides"
+        "KNOWLEDGE_COLLECTIONS": "melosys-confluence-v3,jira-issues",
+        "KNOWLEDGE_DESCRIPTION": "Melosys/NAV technical documentation — EU/EEA social security coordination (trygdekoordinering), EESSI BUCs and SEDs, regulations 883/2004 and 987/2009, folketrygdloven, architecture and development guides and Jira issues"
       }
     },
     "serena-api": {

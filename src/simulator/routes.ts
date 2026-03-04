@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { resolve, dirname } from "node:path";
+import { mkdir } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { simulatorState, type ConversationType } from "./state.ts";
@@ -171,6 +173,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     }
 
     const threadId = c.req.query("thread");
+    const raw = c.req.query("raw") === "true";
     const platform = conversationTypeToPlatform(conversation.type);
     const isWeb = conversation.type === "web";
     const msgs = await getSimMessages(
@@ -185,7 +188,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       messages: msgs.map((m) => ({
         id: m.id,
         sender: m.role === "user" ? "user" : "bot",
-        text: isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
+        text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
         timestamp: m.createdAt,
         threadId: m.threadId,
       })),
@@ -208,7 +211,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       return c.json({ error: "Conversation not found" }, 404);
     }
 
-    const body = await c.req.json<{ text: string; threadId?: string }>();
+    const body = await c.req.json<{ text: string; threadId?: string; connector?: string }>();
     if (!body.text) {
       return c.json({ error: "text is required" }, 400);
     }
@@ -218,8 +221,12 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       return c.json({ error: `Bot "${conversation.botName}" not found` }, 404);
     }
 
+    const connectorOverride = body.connector === "copilot-sdk" || body.connector === "claude-cli"
+      ? body.connector as "copilot-sdk" | "claude-cli"
+      : undefined;
+
     // Process asynchronously — response comes via WebSocket
-    processSimulatorMessage(id, body.text, bot, config, body.threadId).catch((err) => {
+    processSimulatorMessage(id, body.text, bot, config, body.threadId, connectorOverride).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       simulatorState.addMessage(id, {
@@ -232,6 +239,53 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     });
 
     return c.json({ status: "processing" }, 202);
+  });
+
+  // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
+  const VALID_ISSUE_KEY = /^[A-Z]+-\d+$|^research-[a-f0-9]{8}$/;
+
+  // Save a research report file to bots/<botName>/reports/<issueKey>.md
+  app.post("/reports/:botName/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+
+    const body = await c.req.json<{ content: string }>();
+    if (!body.content) return c.json({ error: "content is required" }, 400);
+
+    const reportPath = resolve(bot.dir, "reports", `${issueKey}.md`);
+    await mkdir(dirname(reportPath), { recursive: true });
+    await Bun.write(reportPath, body.content);
+    log.info("Saved research report {path}", { botName, path: reportPath });
+    return c.json({ ok: true, path: `reports/${issueKey}.md` }, 201);
+  });
+
+  // Get a research report
+  app.get("/reports/:botName/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+
+    const file = Bun.file(resolve(bot.dir, "reports", `${issueKey}.md`));
+    if (!(await file.exists())) return c.json({ error: "Report not found" }, 404);
+    const content = await file.text();
+    return c.json({ content });
+  });
+
+  // Check if a research report exists (lightweight)
+  app.on("HEAD", "/reports/:botName/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.body(null, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.body(null, 404);
+
+    const file = Bun.file(resolve(bot.dir, "reports", `${issueKey}.md`));
+    return c.body(null, (await file.exists()) ? 200 : 404);
   });
 
   return app;

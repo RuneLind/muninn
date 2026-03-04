@@ -1,6 +1,6 @@
 {
   "model": "claude-sonnet-4-6",
-  "thinkingMaxTokens": 16000,
-  "timeoutMs": 300000,
+  "thinkingMaxTokens": 40000,
+  "timeoutMs": 1000000,
   "connector": "copilot-sdk"
 }
