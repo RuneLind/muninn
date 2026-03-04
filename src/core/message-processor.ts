@@ -113,9 +113,12 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   try {
     agentStatus.set("calling_claude", username);
     agentStatus.updatePhase("calling_claude");
+    const connectorType = botConfig.connector ?? "claude-cli";
+    const connectorLabel = connectorType === "copilot-sdk" ? "Copilot SDK" : "Claude Code";
+    agentStatus.setConnectorLabel(connectorLabel);
     const effectiveModel = botConfig.model ?? config.claudeModel;
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
-    log.info("Calling Claude (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
+    log.info("Calling {connector} (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
     const baseProgress = createProgressCallback("calling_claude", username);
     const hasStreamCallbacks = onTextDelta || onIntent || onToolStatus || setStatus;

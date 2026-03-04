@@ -35,6 +35,7 @@ export interface RequestProgress {
   botName: string;
   username?: string;
   phase: AgentPhase;
+  connectorLabel?: string;
   startedAt: number;
   tools: ToolProgress[];
   completed?: boolean;
@@ -103,6 +104,13 @@ class AgentStatusTracker {
   updatePhase(phase: AgentPhase) {
     if (this.activeRequest) {
       this.activeRequest.phase = phase;
+      this.notifyProgress();
+    }
+  }
+
+  setConnectorLabel(label: string) {
+    if (this.activeRequest) {
+      this.activeRequest.connectorLabel = label;
       this.notifyProgress();
     }
   }

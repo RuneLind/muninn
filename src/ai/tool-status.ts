@@ -37,6 +37,25 @@ const searchDetail = (input: string | undefined) => {
   return query ? truncate(query, 60) : undefined;
 };
 
+/** Generic detail extractor — tries common field names across any tool, then first string value */
+const genericDetail = (input: string | undefined) => {
+  const value = extractField(
+    input,
+    "query", "search", "q", "text", "pattern", "regex", "command", "name",
+    "symbol", "symbol_name", "path", "file", "file_path", "uri", "url", "title",
+  );
+  if (value) return truncate(value, 60);
+  // Last resort: grab the first short string value from the JSON
+  return firstStringValue(input);
+};
+
+/** Extract the first short string value from JSON input */
+function firstStringValue(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const match = input.match(/"[^"]*"\s*:\s*"([^"]{2,80})"/);
+  return match?.[1] ? truncate(match[1], 60) : undefined;
+}
+
 /** Extract document name/title from input — tries title first, falls back to ID fields */
 const docDetail = (input: string | undefined) => {
   const title = extractField(input, "title", "name", "document_name", "doc_title");
@@ -110,6 +129,15 @@ export function parseToolName(name: string): { server: string; tool: string } | 
     }
   }
 
+  // Heuristic for multi-dash server names (e.g. serena-api-search_for_pattern):
+  // MCP tool names use underscores, server names use dashes. Split at the last dash
+  // before the first underscore to correctly separate "serena-api" from "search_for_pattern".
+  const underscoreIdx = name.indexOf("_");
+  if (underscoreIdx > 0) {
+    const dashIdx = name.lastIndexOf("-", underscoreIdx);
+    if (dashIdx > 0) return { server: name.slice(0, dashIdx), tool: name.slice(dashIdx + 1) };
+  }
+
   // Fallback: split on first dash
   const dashIdx = name.indexOf("-");
   if (dashIdx > 0) return { server: name.slice(0, dashIdx), tool: name.slice(dashIdx + 1) };
@@ -127,8 +155,10 @@ export function getToolStatus(toolName: string, input?: string): string | undefi
 
   const parsed = parseToolName(toolName);
   if (!parsed) {
-    // Non-MCP / unparseable tool
-    return `Using ${toolName.replace(/_/g, " ")}...`;
+    // Non-MCP / unparseable tool — still try to extract detail
+    const label = `Using ${toolName.replace(/_/g, " ")}`;
+    const detail = genericDetail(input);
+    return formatStatus(label, detail);
   }
 
   const { server, tool } = parsed;
@@ -145,6 +175,8 @@ export function getToolStatus(toolName: string, input?: string): string | undefi
   const serverStatus = SERVER_STATUS[server];
   if (serverStatus) return `${serverStatus}...`;
 
-  // 3. Generate from tool part
-  return `Using ${tool.replace(/_/g, " ")}...`;
+  // 3. Fallback: use waterfall-style "tool (server)" format with detail
+  const label = `${tool} (${server})`;
+  const detail = genericDetail(input);
+  return formatStatus(label, detail);
 }

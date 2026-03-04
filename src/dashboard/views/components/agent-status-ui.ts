@@ -84,6 +84,11 @@ export function agentStatusScript(): string {
     function updateAgentStatusFromProgress(progress) {
       const detailEl = document.getElementById('agentDetail');
       if (!detailEl || !progress || progress.completed) return;
+      // Update phase label with connector name when available
+      if (progress.phase === 'calling_claude' && progress.connectorLabel) {
+        const phaseEl = document.getElementById('agentPhase');
+        if (phaseEl) phaseEl.textContent = 'Calling ' + progress.connectorLabel;
+      }
       const toolCount = progress.tools.length;
       if (toolCount > 0) {
         const lastTool = progress.tools[progress.tools.length - 1];

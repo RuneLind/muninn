@@ -228,7 +228,10 @@ export function requestProgressScript(): string {
         ? fmtMs(progress.completedAt - progress.startedAt)
         : fmtMs(now - progress.startedAt);
 
-      const phaseLabel = (typeof phaseLabels !== 'undefined' && phaseLabels[progress.phase]) || progress.phase;
+      let phaseLabel = (typeof phaseLabels !== 'undefined' && phaseLabels[progress.phase]) || progress.phase;
+      if (progress.phase === 'calling_claude' && progress.connectorLabel) {
+        phaseLabel = 'Calling ' + progress.connectorLabel;
+      }
       const toolCount = progress.toolCount ?? progress.tools.length;
       const userHtml = progress.username ? '<span class="rp-user">@' + escapeHtml(progress.username) + '</span>' : '';
 

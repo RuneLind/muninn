@@ -16,8 +16,14 @@ describe("parseToolName", () => {
     expect(parseToolName("gmail-search_emails")).toEqual({ server: "gmail", tool: "search_emails" });
   });
 
-  test("Copilot SDK format with multi-dash server name", () => {
+  test("Copilot SDK format with multi-dash server name (known)", () => {
     expect(parseToolName("google-calendar-list_events")).toEqual({ server: "google-calendar", tool: "list_events" });
+  });
+
+  test("Copilot SDK format with multi-dash server name (unknown, underscore heuristic)", () => {
+    expect(parseToolName("serena-api-search_for_pattern")).toEqual({ server: "serena-api", tool: "search_for_pattern" });
+    expect(parseToolName("serena-web-find_symbol")).toEqual({ server: "serena-web", tool: "find_symbol" });
+    expect(parseToolName("serena-eessi-read_file")).toEqual({ server: "serena-eessi", tool: "read_file" });
   });
 
   test("unknown server with dash format", () => {
@@ -83,14 +89,47 @@ describe("getToolStatus", () => {
     expect(getToolStatus("knowledge-reindex")).toBe("Searching knowledge...");
   });
 
-  test("generic fallback for unknown MCP servers", () => {
-    expect(getToolStatus("mcp__notion__search_pages")).toBe("Using search pages...");
-    expect(getToolStatus("notion-search_pages")).toBe("Using search pages...");
+  test("generic fallback for unknown MCP servers uses waterfall format", () => {
+    expect(getToolStatus("mcp__notion__search_pages")).toBe("search_pages (notion)...");
+    expect(getToolStatus("notion-search_pages")).toBe("search_pages (notion)...");
+    expect(getToolStatus("mcp__serena-api__find_symbol")).toBe("find_symbol (serena-api)...");
+  });
+
+  test("generic fallback includes detail from common input fields", () => {
+    expect(getToolStatus("mcp__serena-api__find_symbol", '{"name": "Pensjonsopptjening"}')).toBe(
+      "find_symbol (serena-api): Pensjonsopptjening",
+    );
+    expect(getToolStatus("mcp__serena-api__search_for_pattern", '{"pattern": "VARSLE_PENSJONSOPPTJENING"}')).toBe(
+      "search_for_pattern (serena-api): VARSLE_PENSJONSOPPTJENING",
+    );
+    expect(getToolStatus("mcp__serena-api__read_file", '{"path": "src/main/kotlin/Service.kt"}')).toBe(
+      "read_file (serena-api): src/main/kotlin/Service.kt",
+    );
+  });
+
+  test("generic fallback works with Copilot SDK dash format (serena)", () => {
+    expect(getToolStatus("serena-api-search_for_pattern", '{"regex": "VARSLE_PENSJONSOPPTJENING"}')).toBe(
+      "search_for_pattern (serena-api): VARSLE_PENSJONSOPPTJENING",
+    );
+    expect(getToolStatus("serena-web-find_symbol", '{"name": "AnnullerSak"}')).toBe(
+      "find_symbol (serena-web): AnnullerSak",
+    );
+  });
+
+  test("generic fallback uses first string value when no known field matches", () => {
+    expect(getToolStatus("mcp__serena-api__custom_action", '{"foobar": "SomeValue"}')).toBe(
+      "custom_action (serena-api): SomeValue",
+    );
   });
 
   test("non-MCP tool fallback", () => {
     expect(getToolStatus("WebSearch")).toBe("Using WebSearch...");
     expect(getToolStatus("some_custom_tool")).toBe("Using some custom tool...");
+  });
+
+  test("non-MCP tool includes detail when input has known fields", () => {
+    expect(getToolStatus("Bash", '{"command": "git status"}')).toBe("Using Bash: git status");
+    expect(getToolStatus("Read", '{"path": "src/index.ts"}')).toBe("Using Read: src/index.ts");
   });
 
   test("skips report_intent", () => {

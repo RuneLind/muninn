@@ -104,9 +104,12 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     try {
       agentStatus.set("calling_claude", username);
       agentStatus.updatePhase("calling_claude");
+      const connectorType = botConfig.connector ?? "claude-cli";
+      const connectorLabel = connectorType === "copilot-sdk" ? "Copilot SDK" : "Claude Code";
+      agentStatus.setConnectorLabel(connectorLabel);
       const effectiveModel = botConfig.model ?? config.claudeModel;
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
-      log.info("Calling Claude for voice (model: {model}, timeout: {timeout}ms)...", { ...props, model: effectiveModel, timeout: effectiveTimeout });
+      log.info("Calling {connector} for voice (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
       t.start("claude");
       const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, systemPrompt, createProgressCallback("calling_claude", username));
       t.end("claude", {
