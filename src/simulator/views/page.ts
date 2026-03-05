@@ -1348,8 +1348,8 @@ const SIMULATOR_SCRIPT = `
   }
 
   function checkReportExists(botName, issueKey) {
-    if (!botName || !issueKey) return;
-    fetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
+    if (!botName || !issueKey || !selectedUserId) return;
+    fetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
       .then(function(res) {
         reportExists = res.ok;
         // Refresh action buttons if they're currently showing
@@ -1391,7 +1391,7 @@ const SIMULATOR_SCRIPT = `
         await saveResearchReport();
       }
       pendingConnector = 'copilot-sdk';
-      var reportRef = researchIssueKey ? './reports/' + researchIssueKey + '.md' : '';
+      var reportRef = researchIssueKey && selectedUserId ? './reports/' + selectedUserId + '/' + researchIssueKey + '.md' : '';
       chatInput.value = reportRef
         ? 'Read the research report at ' + reportRef + ' for full context. Then implement the changes step by step.'
         : 'Based on the analysis and code investigation above, start implementing this Jira task. Build the solution step by step, creating and modifying the necessary files.';
@@ -1420,7 +1420,7 @@ const SIMULATOR_SCRIPT = `
   }
 
   async function saveResearchReport() {
-    if (!activeConvId || !activeThreadId || !selectedBot) return;
+    if (!activeConvId || !activeThreadId || !selectedBot || !selectedUserId) return;
     // Use issue key or fall back to thread-based name
     var issueKey = researchIssueKey || ('research-' + activeThreadId.slice(0, 8));
 
@@ -1491,7 +1491,7 @@ const SIMULATOR_SCRIPT = `
 
     // Save to backend
     try {
-      var saveRes = await fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(issueKey), {
+      var saveRes = await fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: report }),
@@ -1517,7 +1517,7 @@ const SIMULATOR_SCRIPT = `
   }
 
   function previewResearchReport() {
-    if (!selectedBot || !researchIssueKey) return;
+    if (!selectedBot || !selectedUserId || !researchIssueKey) return;
     var overlay = document.getElementById('docOverlay');
     var titleEl = document.getElementById('docPanelTitle');
     var linksEl = document.getElementById('docPanelLinks');
@@ -1529,7 +1529,7 @@ const SIMULATOR_SCRIPT = `
     overlay.classList.add('visible');
     document.body.style.overflow = 'hidden';
 
-    fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(researchIssueKey))
+    fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(researchIssueKey))
       .then(function(res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();

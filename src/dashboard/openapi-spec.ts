@@ -1279,7 +1279,7 @@ export const spec = {
       },
     },
 
-    "/chat/reports/{botName}/{issueKey}": {
+    "/chat/reports/{botName}/{userId}/{issueKey}": {
       get: {
         tags: ["Simulator"],
         summary: "Get research report",
@@ -1287,6 +1287,7 @@ export const spec = {
         operationId: "getChatReport",
         parameters: [
           pathId("botName", "Bot name"),
+          pathId("userId", "User ID"),
           pathId("issueKey", "Jira issue key (e.g. PROJ-123)"),
         ],
         responses: {
@@ -1298,10 +1299,11 @@ export const spec = {
       post: {
         tags: ["Simulator"],
         summary: "Save research report",
-        description: "Saves a research report as a markdown file in bots/<bot>/reports/.",
+        description: "Saves a research report as a markdown file in bots/<bot>/reports/<userId>/.",
         operationId: "postChatReport",
         parameters: [
           pathId("botName", "Bot name"),
+          pathId("userId", "User ID"),
           pathId("issueKey", "Jira issue key (e.g. PROJ-123)"),
         ],
         requestBody: {

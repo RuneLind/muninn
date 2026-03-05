@@ -261,11 +261,14 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
 
   // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
   const VALID_ISSUE_KEY = /^[A-Z]+-\d+$|^research-[a-f0-9]{8}$/;
+  const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
 
-  // Save a research report file to bots/<botName>/reports/<issueKey>.md
-  app.post("/reports/:botName/:issueKey", async (c) => {
+  // Save a research report file to bots/<botName>/reports/<userId>/<issueKey>.md
+  app.post("/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
     const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
@@ -273,36 +276,40 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     const body = await c.req.json<{ content: string }>();
     if (!body.content) return c.json({ error: "content is required" }, 400);
 
-    const reportPath = resolve(bot.dir, "reports", `${issueKey}.md`);
+    const reportPath = resolve(bot.dir, "reports", userId, `${issueKey}.md`);
     await mkdir(dirname(reportPath), { recursive: true });
     await Bun.write(reportPath, body.content);
-    log.info("Saved research report {path}", { botName, path: reportPath });
-    return c.json({ ok: true, path: `reports/${issueKey}.md` }, 201);
+    log.info("Saved research report {path}", { botName, userId, path: reportPath });
+    return c.json({ ok: true, path: `reports/${userId}/${issueKey}.md` }, 201);
   });
 
   // Get a research report
-  app.get("/reports/:botName/:issueKey", async (c) => {
+  app.get("/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
     const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
 
-    const file = Bun.file(resolve(bot.dir, "reports", `${issueKey}.md`));
+    const file = Bun.file(resolve(bot.dir, "reports", userId, `${issueKey}.md`));
     if (!(await file.exists())) return c.json({ error: "Report not found" }, 404);
     const content = await file.text();
     return c.json({ content });
   });
 
   // Check if a research report exists (lightweight)
-  app.on("HEAD", "/reports/:botName/:issueKey", async (c) => {
+  app.on("HEAD", "/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
     const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.body(null, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.body(null, 400);
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.body(null, 404);
 
-    const file = Bun.file(resolve(bot.dir, "reports", `${issueKey}.md`));
+    const file = Bun.file(resolve(bot.dir, "reports", userId, `${issueKey}.md`));
     return c.body(null, (await file.exists()) ? 200 : 404);
   });
 
