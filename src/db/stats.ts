@@ -259,6 +259,17 @@ export async function getUsersSummary(botName?: string): Promise<UserSummary[]> 
       FROM messages m
       WHERE m.role = 'user' ${andBot}
       GROUP BY m.user_id, m.username
+      UNION ALL
+      SELECT
+        t.user_id, t.user_id AS username, 'web' AS platform,
+        0 AS message_count,
+        max(t.created_at) AS last_active,
+        min(t.created_at) AS first_seen
+      FROM threads t
+      WHERE NOT EXISTS (
+        SELECT 1 FROM messages m WHERE m.user_id = t.user_id AND m.role = 'user' ${andBot}
+      ) ${andBot}
+      GROUP BY t.user_id, t.bot_name
     ),
     user_memories AS (
       SELECT user_id, count(*)::int AS cnt FROM memories ${whereBot} GROUP BY user_id

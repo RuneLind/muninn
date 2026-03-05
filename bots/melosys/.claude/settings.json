@@ -9,7 +9,8 @@
       "WebFetch",
       "mcp__serena-api__*",
       "mcp__serena-web__*",
-      "mcp__serena-eessi__*"
+      "mcp__serena-eessi__*",
+      "mcp__serena-fakturering__*"
     ]
   },
   "enableAllProjectMcpServers": true

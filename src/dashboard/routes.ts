@@ -15,7 +15,7 @@ import { renderResearchPage } from "./views/research-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../youtube/state.ts";
 import { summarizeVideo } from "../youtube/summarizer.ts";
 import { simulatorState } from "../simulator/state.ts";
-import { loadChatConfig } from "../simulator/chat-config.ts";
+import { loadChatConfig, addChatUser } from "../simulator/chat-config.ts";
 import { setPendingMessage } from "../simulator/pending-messages.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
@@ -31,7 +31,7 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
-import { getAllThreadsForBot, createThread, deleteThreadById } from "../db/threads.ts";
+import { getAllThreadsForBot, createThread, deleteThreadById, ensureDefaultThread } from "../db/threads.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getUserSettings } from "../db/user-settings.ts";
 import { agentStatus } from "./agent-status.ts";
@@ -171,6 +171,30 @@ export function createDashboardRoutes(config: Config): Hono {
     } catch (err) {
       log.error("Failed to fetch users: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch users" }, 500);
+    }
+  });
+
+  app.post("/api/users", async (c) => {
+    try {
+      const body = await c.req.json<{ userId: string; username: string; botName: string }>();
+      if (!body.userId || !body.username || !body.botName) {
+        return c.json({ error: "userId, username, and botName are required" }, 400);
+      }
+      const allBots = discoverAllBots();
+      if (!allBots.some((b) => b.name === body.botName)) {
+        return c.json({ error: `Bot "${body.botName}" not found` }, 400);
+      }
+      // Create a default "main" thread so the user appears in getUsersSummary
+      await ensureDefaultThread(body.userId, body.botName);
+      // Add to chat.config.json so the chat page can resolve this user
+      await addChatUser({ id: body.userId, name: body.username, bot: body.botName });
+      log.info("Created user {userId} ({username}) for bot {botName}", {
+        userId: body.userId, username: body.username, botName: body.botName,
+      });
+      return c.json({ ok: true, user: { userId: body.userId, username: body.username, botName: body.botName } }, 201);
+    } catch (err) {
+      log.error("Failed to create user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to create user" }, 500);
     }
   });
 
@@ -642,7 +666,7 @@ export function createDashboardRoutes(config: Config): Hono {
     const origin = c.req.header("origin") || c.req.header("referer") || "unknown";
     log.info("POST /api/research/chat from {origin}", { origin });
 
-    const body = await c.req.json<{ bot?: string; title?: string; text: string }>();
+    const body = await c.req.json<{ bot?: string; title?: string; text: string; userId?: string }>();
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
     }
@@ -659,8 +683,12 @@ export function createDashboardRoutes(config: Config): Hono {
     const botConfig = (body.bot && allBots.find((b) => b.name === body.bot)) || allBots[0]!;
 
     // Resolve userId/username from chat.config.json for this bot
+    // If userId is provided, use that specific user; otherwise use the last user for the bot
     const chatConfig = await loadChatConfig();
-    const chatUser = chatConfig?.users.find((u) => u.bot === botConfig.name);
+    const botUsers = (chatConfig?.users ?? []).filter((u) => u.bot === botConfig.name);
+    const chatUser = body.userId
+      ? botUsers.find((u) => u.id === body.userId) ?? botUsers[botUsers.length - 1]
+      : botUsers[botUsers.length - 1];
     if (!chatUser) {
       return c.json({ error: `No chat user configured for bot "${botConfig.name}" in chat.config.json` }, 400);
     }
@@ -738,7 +766,7 @@ ${body.text}`;
     return c.json({
       threadId: thread.id,
       conversationId: conversation.id,
-      chatUrl: `/chat?bot=${encodeURIComponent(botConfig.name)}&thread=${encodeURIComponent(thread.id)}`,
+      chatUrl: `/chat?bot=${encodeURIComponent(botConfig.name)}&thread=${encodeURIComponent(thread.id)}&user=${encodeURIComponent(chatUser.id)}`,
     });
   });
 

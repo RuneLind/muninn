@@ -96,6 +96,58 @@ export function layoutStyles(): string {
       letter-spacing: 0.5px;
       flex-shrink: 0;
     }
+    .add-user-btn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-primary);
+      color: var(--text-secondary);
+      border-radius: 4px;
+      width: 24px;
+      height: 24px;
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-left: 8px;
+    }
+    .add-user-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .create-user-form {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-primary);
+      background: var(--bg-secondary);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .create-user-form input {
+      padding: 6px 8px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 12px;
+    }
+    .create-user-form .form-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    .create-user-form button {
+      padding: 4px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border-primary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .create-user-form .btn-create {
+      background: var(--accent-primary);
+      color: white;
+      border-color: var(--accent-primary);
+    }
+    .create-user-form .btn-cancel {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+    }
     .md-master-body {
       flex: 1;
       overflow-y: auto;

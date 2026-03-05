@@ -229,6 +229,45 @@ export function connectionScript(): string {
       const row = e.target.closest('[data-user-select]');
       if (row) selectUser(row.dataset.userSelect);
     });
+
+    // Create user button
+    document.getElementById('addUserBtn').addEventListener('click', () => {
+      const existing = document.getElementById('createUserForm');
+      if (existing) { existing.remove(); return; }
+      const form = document.createElement('div');
+      form.id = 'createUserForm';
+      form.className = 'create-user-form';
+      form.innerHTML = '<input id="newUserId" placeholder="User ID (e.g. Slack ID)" />' +
+        '<input id="newUserName" placeholder="Display name" />' +
+        '<input id="newUserBot" placeholder="Bot name" value="' + escapeAttr(selectedBot || '') + '" />' +
+        '<div class="form-actions">' +
+          '<button class="btn-cancel" id="cancelCreateUser">Cancel</button>' +
+          '<button class="btn-create" id="confirmCreateUser">Create</button>' +
+        '</div>';
+      const header = document.querySelector('[data-section="users"] .md-master-header');
+      header.after(form);
+      document.getElementById('newUserId').focus();
+      document.getElementById('cancelCreateUser').addEventListener('click', () => form.remove());
+      document.getElementById('confirmCreateUser').addEventListener('click', async () => {
+        const userId = document.getElementById('newUserId').value.trim();
+        const username = document.getElementById('newUserName').value.trim();
+        const botName = document.getElementById('newUserBot').value.trim();
+        if (!userId || !username || !botName) return;
+        try {
+          const res = await fetch('/api/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, username, botName }),
+          });
+          if (!res.ok) { const err = await res.json(); alert(err.error || 'Failed'); return; }
+          form.remove();
+          // Refresh users list
+          const usersRes = await fetch('/api/users' + botParam()).then(r => r.json()).catch(() => ({ users: [] }));
+          renderUsers(usersRes.users || []);
+          selectUser(userId);
+        } catch (err) { alert('Failed to create user: ' + err.message); }
+      });
+    });
     // --- Event Delegation ---
     document.addEventListener('click', (e) => {
       // Slack user clicks

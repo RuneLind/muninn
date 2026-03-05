@@ -26,6 +26,10 @@ export function renderSimulatorPage(): string {
   <div class="sim-layout">
     <!-- Left: Threads sidebar -->
     <div class="sim-sidebar">
+      <div class="sidebar-user-selector" id="userSelectorContainer" style="display:none">
+        <label>User</label>
+        <select id="userSelector"></select>
+      </div>
       <div class="sidebar-header">
         <h3>Threads</h3>
         <button class="new-thread-btn" id="newThreadBtn">+ New Thread</button>
@@ -102,6 +106,31 @@ const SIMULATOR_STYLES = `
       display: flex;
       flex-direction: column;
       overflow: hidden;
+    }
+    .sidebar-user-selector {
+      padding: 10px 16px 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sidebar-user-selector label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .sidebar-user-selector select {
+      flex: 1;
+      padding: 4px 6px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 12px;
+      min-width: 0;
     }
     .sidebar-header {
       padding: 12px 16px 8px;
@@ -814,8 +843,8 @@ const SIMULATOR_SCRIPT = `
       p.classList.toggle('active', p.dataset.bot === name);
     });
 
-    // Resolve user for this bot from config
-    resolveUserForBot(name);
+    // Load users for this bot and populate selector
+    await loadUsersForBot(name);
 
     // Resolve or create conversation for this user+bot
     await resolveConversation();
@@ -826,18 +855,65 @@ const SIMULATOR_SCRIPT = `
     await loadThreads(autoSelectThreadId);
   }
 
-  function resolveUserForBot(botName) {
-    selectedUserId = null;
-    selectedUsername = null;
-    if (!chatConfig || !chatConfig.users) return;
-    for (var i = 0; i < chatConfig.users.length; i++) {
-      if (chatConfig.users[i].bot === botName) {
-        selectedUserId = chatConfig.users[i].id;
-        selectedUsername = chatConfig.users[i].name;
-        return;
+  async function loadUsersForBot(botName) {
+    var container = document.getElementById('userSelectorContainer');
+    var selector = document.getElementById('userSelector');
+
+    // Fetch users from DB + chat config
+    var dbUsers = [];
+    try {
+      var res = await fetch('/api/users?bot=' + encodeURIComponent(botName));
+      var data = await res.json();
+      dbUsers = data.users || [];
+    } catch {}
+
+    // Also include chat config users (they may not have messages yet)
+    var configUsers = (chatConfig && chatConfig.users || []).filter(function(u) { return u.bot === botName; });
+    var merged = [];
+    var seen = {};
+    // DB users first (they have real data)
+    dbUsers.forEach(function(u) {
+      if (!seen[u.userId]) {
+        seen[u.userId] = true;
+        merged.push({ id: u.userId, name: u.username || u.userId });
       }
+    });
+    // Then config users not already in DB
+    configUsers.forEach(function(u) {
+      if (!seen[u.id]) {
+        seen[u.id] = true;
+        merged.push({ id: u.id, name: u.name });
+      }
+    });
+
+    if (merged.length === 0) {
+      container.style.display = 'none';
+      selectedUserId = null;
+      selectedUsername = null;
+      return;
     }
+
+    container.style.display = 'flex';
+
+    // Restore last selected user for this bot
+    var storedUserId = null;
+    try { storedUserId = localStorage.getItem('javrvis-chat-user-' + botName); } catch {}
+
+    selector.innerHTML = merged.map(function(u) {
+      return '<option value="' + escapeAttr(u.id) + '"' +
+        (u.id === storedUserId ? ' selected' : '') +
+        '>' + escapeHtml(u.name) + '</option>';
+    }).join('');
+
+    // Select stored or first
+    var match = storedUserId && merged.find(function(u) { return u.id === storedUserId; });
+    var active = match || merged[0];
+    selector.value = active.id;
+    selectedUserId = active.id;
+    selectedUsername = active.name;
+    try { localStorage.setItem('javrvis-chat-user-' + botName, active.id); } catch {}
   }
+
 
   async function resolveConversation() {
     if (!selectedBot || !selectedUserId) {
@@ -871,6 +947,20 @@ const SIMULATOR_SCRIPT = `
   document.getElementById('botSelector').addEventListener('click', function(e) {
     var pill = e.target.closest('.bot-pill');
     if (pill) selectBot(pill.dataset.bot);
+  });
+
+  // User selector change
+  document.getElementById('userSelector').addEventListener('change', async function(e) {
+    var userId = e.target.value;
+    var opt = e.target.selectedOptions[0];
+    selectedUserId = userId;
+    selectedUsername = opt ? opt.textContent : userId;
+    try { localStorage.setItem('javrvis-chat-user-' + selectedBot, userId); } catch {}
+    // Re-resolve conversation and threads for new user
+    await resolveConversation();
+    activeThreadId = null;
+    clearChat();
+    await loadThreads();
   });
 
   // New thread creation
@@ -908,10 +998,8 @@ const SIMULATOR_SCRIPT = `
       threads = [];
     }
 
-    // Sort by most recent activity
-    threads.sort(function(a, b) {
-      return (b.updatedAt || 0) - (a.updatedAt || 0);
-    });
+    // DB already sorts by last_activity DESC NULLS LAST — threads with
+    // messages first (most recent activity on top), empty threads at bottom.
 
     // Threads should always exist (created during hydration), but handle edge case
     if (threads.length === 0) {
@@ -1126,12 +1214,18 @@ const SIMULATOR_SCRIPT = `
     }
   }
 
-  // Deep-link: /chat?bot=jarvis&thread=<id>
+  // Deep-link: /chat?bot=jarvis&thread=<id>&user=<userId>
   async function handleDeepLink() {
     var params = new URLSearchParams(window.location.search);
     var botName = params.get('bot');
     var threadParam = params.get('thread');
+    var userParam = params.get('user');
     if (!botName) return;
+
+    // If a user is specified in the URL, pre-set it before selectBot loads users
+    if (userParam) {
+      try { localStorage.setItem('javrvis-chat-user-' + botName, userParam); } catch {}
+    }
 
     await selectBot(botName, threadParam || undefined);
 

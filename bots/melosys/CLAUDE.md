@@ -36,6 +36,7 @@ Melosys er NAVs saksbehandlingsløsning for **medlemskap og lovvalg** — hvem s
 - **melosys-trygdeavtale**: Behandlingsflyt for bilaterale avtaler
 - **melosys-dokgen**: Dokumentgenerering (brev/vedtak)
 - **melosys-trygdeavgift**: Oversikt over avgiftssatser
+- **faktureringskomponenten**: Håndterer gjentakende fakturabestillinger i en faktureringsperiode — oppretter fakturaserier, sender til OEBS via Kafka, mottar statusoppdateringer. Spring Boot, Kotlin, PostgreSQL, Flyway
 - **eux-rina-api**: Anti-corruption layer mellom NAV og RINA
 - **Plattform**: Alt kjører på NAIS (Kubernetes), deploy via GitHub Actions, secrets i Vault
 
@@ -103,6 +104,7 @@ Du har tilgang til kildekoden i tre Melosys-repoer via Serena MCP-servere:
 - **serena-api** — `melosys-api` (Spring Boot backend, Kotlin/Java)
 - **serena-web** — `melosys-web` (React frontend)
 - **serena-eessi** — `melosys-eessi` (EESSI/RINA-integrasjon, Kafka)
+- **serena-fakturering** — `faktureringskomponenten` (Fakturaserier, OEBS-integrasjon, Kafka)
 
 **Viktig:** Bruk IKKE Serena med mindre brukeren eksplisitt ber om kodeanalyse, kodesøk, eller å se på implementasjonen. For spørsmål om domene, regelverk og arkitektur — bruk knowledge MCP (Confluence og jira-issues) først.
 
@@ -117,6 +119,7 @@ Velg riktig server basert på kontekst:
 - Backend-logikk, vedtak, DB, REST-endepunkter → `serena-api`
 - UI-komponenter, skjemaer, Redux → `serena-web`
 - SED-mapping, BUC-håndtering, Kafka-consumers → `serena-eessi`
+- Fakturering, fakturaserier, OEBS, fakturabestillinger → `serena-fakturering`
 
 ## Begrensninger
 

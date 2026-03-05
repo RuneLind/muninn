@@ -62,6 +62,22 @@
         "--open-web-dashboard",
         "False"
       ]
+    },
+    "serena-fakturering": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "/Users/rune/source/nav/faktureringskomponenten",
+        "--open-web-dashboard",
+        "False"
+      ]
     }
   }
 }

@@ -60,6 +60,7 @@ export function renderDashboardPage(): string {
         <div class="md-master">
           <div class="md-master-header">
             Users <span class="count" id="usersCount">0</span>
+            <button class="add-user-btn" id="addUserBtn" title="Create user">+</button>
           </div>
           <div class="md-master-body" id="usersMasterList">
             <div class="panel-empty">Loading...</div>

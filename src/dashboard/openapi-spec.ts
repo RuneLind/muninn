@@ -221,6 +221,21 @@ export const spec = {
           "500": errorResponse,
         },
       },
+      post: {
+        tags: ["Users"],
+        summary: "Create user",
+        description: "Create a new user by provisioning a default thread and adding to chat config.",
+        operationId: "createUser",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["userId", "username", "botName"], properties: { userId: { type: "string", description: "Platform user ID (e.g. Slack ID)" }, username: { type: "string", description: "Display name" }, botName: { type: "string", description: "Bot name" } } } } },
+        },
+        responses: {
+          "201": { description: "User created" },
+          "400": errorResponse,
+          "500": errorResponse,
+        },
+      },
     },
 
     "/api/users/{userId}/overview": {

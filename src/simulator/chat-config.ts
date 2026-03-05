@@ -52,6 +52,27 @@ export async function loadChatConfig(): Promise<ChatConfig | null> {
   }
 }
 
+/** Add a user to chat.config.json (creates file if needed). Updates cache. */
+export async function addChatUser(user: ChatUser): Promise<void> {
+  // Force re-read from disk to get latest state
+  cached = undefined;
+  const current = await loadChatConfig();
+  const users = [...(current?.users ?? [])];
+
+  // Replace existing entry for same bot+id, or add new
+  const existing = users.findIndex((u) => u.bot === user.bot && u.id === user.id);
+  if (existing >= 0) {
+    users[existing] = user;
+  } else {
+    users.push(user);
+  }
+
+  const config: ChatConfig = { users };
+  await Bun.write("chat.config.json", JSON.stringify(config, null, 2) + "\n");
+  cached = config;
+  log.info("Updated chat.config.json: added user {id} for bot {bot}", { id: user.id, bot: user.bot });
+}
+
 /** Clear cached config (for testing or hot-reload). */
 export function clearChatConfigCache(): void {
   cached = undefined;
