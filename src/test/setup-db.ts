@@ -14,6 +14,7 @@ const ALL_TABLES = [
   "messages",
   "threads",
   "user_settings",
+  "users",
 ];
 
 let dbInitialized = false;

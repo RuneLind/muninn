@@ -788,7 +788,6 @@ const SIMULATOR_SCRIPT = `
   }
 
   // State
-  var chatConfig = null;        // { mode, users } from /chat/config
   var conversations = {};       // Still needed for WS routing
   var activeConvId = null;      // 1:1 with selected user+bot binding
   var activeThreadId = null;    // Currently selected thread
@@ -859,32 +858,15 @@ const SIMULATOR_SCRIPT = `
     var container = document.getElementById('userSelectorContainer');
     var selector = document.getElementById('userSelector');
 
-    // Fetch users from DB + chat config
-    var dbUsers = [];
+    // Fetch users from DB
+    var merged = [];
     try {
       var res = await fetch('/api/users?bot=' + encodeURIComponent(botName));
       var data = await res.json();
-      dbUsers = data.users || [];
-    } catch {}
-
-    // Also include chat config users (they may not have messages yet)
-    var configUsers = (chatConfig && chatConfig.users || []).filter(function(u) { return u.bot === botName; });
-    var merged = [];
-    var seen = {};
-    // DB users first (they have real data)
-    dbUsers.forEach(function(u) {
-      if (!seen[u.userId]) {
-        seen[u.userId] = true;
+      (data.users || []).forEach(function(u) {
         merged.push({ id: u.userId, name: u.username || u.userId });
-      }
-    });
-    // Then config users not already in DB
-    configUsers.forEach(function(u) {
-      if (!seen[u.id]) {
-        seen[u.id] = true;
-        merged.push({ id: u.id, name: u.name });
-      }
-    });
+      });
+    } catch {}
 
     if (merged.length === 0) {
       container.style.display = 'none';
@@ -2117,10 +2099,6 @@ const SIMULATOR_SCRIPT = `
   // Init
   async function init() {
     var botNames = await loadBotList();
-    try {
-      var res = await fetch('/chat/config');
-      chatConfig = await res.json();
-    } catch { chatConfig = { mode: 'discovery', users: [] }; }
     connectWs();
     loadKnowledgeUrlMaps();
 

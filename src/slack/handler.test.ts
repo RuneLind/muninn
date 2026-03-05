@@ -70,6 +70,10 @@ mock.module("../scheduler/detector.ts", () => ({
   extractScheduleAsync: mock(),
 }));
 
+mock.module("../db/users.ts", () => ({
+  ensureUser: mock(() => Promise.resolve()),
+}));
+
 mock.module("../dashboard/activity-log.ts", () => ({
   activityLog: { push: mockActivityPush },
 }));
@@ -81,6 +85,7 @@ mock.module("../dashboard/agent-status.ts", () => ({
     updatePhase: mock(),
     completeRequest: mock(),
     clearRequest: mock(),
+    setConnectorLabel: mock(),
   },
   createProgressCallback: mock(() => () => {}),
 }));
@@ -94,6 +99,7 @@ mock.module("../tracing/index.ts", () => ({
     traceId = "mock-trace-id";
     start() { return "mock-span-id"; }
     end() { return 0; }
+    addChildSpan() {}
     event() {}
     finish() {}
     error() {}

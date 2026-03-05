@@ -17,6 +17,7 @@ import { Tracer } from "../tracing/index.ts";
 import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
+import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("core", "processor");
@@ -75,6 +76,12 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const isTelegram = platform.startsWith("telegram");
   const t = new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
   const props = { botName: botConfig.name, userId, username, platform };
+
+  // Ensure user exists in DB (creates on first encounter, updates last_seen_at)
+  const displayName = typeof userIdentity === "object" ? userIdentity.displayName : undefined;
+  ensureUser({ id: userId, username: username || userId, displayName, platform }).catch((err) => {
+    log.warn("Failed to ensure user: {error}", { ...props, error: err instanceof Error ? err.message : String(err) });
+  });
 
   activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
   agentStatus.set("receiving", username);

@@ -5,6 +5,36 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
+-- Users: canonical source of user identity
+-- ============================================================================
+CREATE TABLE users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  display_name TEXT,
+  platform TEXT NOT NULL DEFAULT 'web',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_users_platform ON users(platform);
+CREATE INDEX idx_users_last_seen ON users(last_seen_at DESC);
+
+CREATE OR REPLACE FUNCTION update_users_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER users_updated_at
+  BEFORE UPDATE ON users
+  FOR EACH ROW
+  EXECUTE FUNCTION update_users_updated_at();
+
+-- ============================================================================
 -- Threads: isolated conversation contexts per topic
 -- (must be created before messages, which has a FK reference)
 -- ============================================================================

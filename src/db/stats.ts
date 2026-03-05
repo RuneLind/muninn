@@ -244,32 +244,20 @@ export interface UserSummary {
 export async function getUsersSummary(botName?: string): Promise<UserSummary[]> {
   const sql = getDb();
 
-  const whereBot = botName ? `WHERE bot_name = $1` : "";
   const andBot = botName ? `AND bot_name = $1` : "";
+  const whereBot = botName ? `WHERE bot_name = $1` : "";
   const params = botName ? [botName] : [];
 
+  // Users table is the authority — LEFT JOIN to get counts from domain tables
   const rows = await sql.unsafe(`
-    WITH user_msgs AS (
-      SELECT
-        m.user_id, m.username,
-        mode() WITHIN GROUP (ORDER BY m.platform) AS platform,
-        count(DISTINCT m.id)::int AS message_count,
-        max(m.created_at) AS last_active,
-        min(m.created_at) AS first_seen
-      FROM messages m
-      WHERE m.role = 'user' ${andBot}
-      GROUP BY m.user_id, m.username
-      UNION ALL
-      SELECT
-        t.user_id, t.user_id AS username, 'web' AS platform,
-        0 AS message_count,
-        max(t.created_at) AS last_active,
-        min(t.created_at) AS first_seen
-      FROM threads t
-      WHERE NOT EXISTS (
-        SELECT 1 FROM messages m WHERE m.user_id = t.user_id AND m.role = 'user' ${andBot}
-      ) ${andBot}
-      GROUP BY t.user_id, t.bot_name
+    WITH user_msg_stats AS (
+      SELECT user_id,
+        count(*)::int AS message_count,
+        max(created_at) AS last_msg_at,
+        min(created_at) AS first_msg_at
+      FROM messages
+      WHERE role = 'user' ${andBot}
+      GROUP BY user_id
     ),
     user_memories AS (
       SELECT user_id, count(*)::int AS cnt FROM memories ${whereBot} GROUP BY user_id
@@ -288,25 +276,31 @@ export async function getUsersSummary(botName?: string): Promise<UserSummary[]> 
       FROM messages WHERE role = 'assistant' ${andBot} GROUP BY user_id
     )
     SELECT
-      um.user_id, um.username, um.platform, um.message_count, um.last_active, um.first_seen,
+      u.id AS user_id, u.username, u.platform,
+      coalesce(ums.message_count, 0)::int AS message_count,
+      coalesce(ums.last_msg_at, u.last_seen_at, u.created_at) AS last_active,
+      coalesce(ums.first_msg_at, u.created_at) AS first_seen,
       coalesce(umem.cnt, 0)::int AS memory_count,
       coalesce(ut.cnt, 0)::int AS thread_count,
       coalesce(ug.cnt, 0)::int AS active_goal_count,
       coalesce(ust.cnt, 0)::int AS scheduled_task_count,
       coalesce(utok.total, 0)::bigint AS total_tokens
-    FROM user_msgs um
-    LEFT JOIN user_memories umem USING (user_id)
-    LEFT JOIN user_threads ut USING (user_id)
-    LEFT JOIN user_goals ug USING (user_id)
-    LEFT JOIN user_tasks ust USING (user_id)
-    LEFT JOIN user_tokens utok USING (user_id)
-    ORDER BY um.last_active DESC
+    FROM users u
+    LEFT JOIN user_msg_stats ums ON ums.user_id = u.id
+    LEFT JOIN user_memories umem ON umem.user_id = u.id
+    LEFT JOIN user_threads ut ON ut.user_id = u.id
+    LEFT JOIN user_goals ug ON ug.user_id = u.id
+    LEFT JOIN user_tasks ust ON ust.user_id = u.id
+    LEFT JOIN user_tokens utok ON utok.user_id = u.id
+    WHERE u.is_active = true
+    ${botName ? `AND EXISTS (SELECT 1 FROM threads t WHERE t.user_id = u.id AND t.bot_name = $1)` : ""}
+    ORDER BY last_active DESC
   `, params);
 
   return rows.map((r) => ({
     userId: r.user_id,
     username: r.username ?? r.user_id,
-    platform: r.platform ?? "telegram",
+    platform: r.platform ?? "web",
     messageCount: Number(r.message_count),
     memoryCount: Number(r.memory_count),
     threadCount: Number(r.thread_count),

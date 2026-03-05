@@ -1,145 +1,65 @@
-import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
-import { loadChatConfig, clearChatConfigCache, type ChatConfig } from "./chat-config.ts";
+import { test, expect, describe, beforeEach } from "bun:test";
+import { loadChatConfig, addChatUser } from "./chat-config.ts";
+import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "../db/client.ts";
 
-describe("loadChatConfig", () => {
-  beforeEach(() => {
-    clearChatConfigCache();
+setupTestDb();
+
+describe("loadChatConfig (DB-backed)", () => {
+  test("returns null when no users exist for bot", async () => {
+    const result = await loadChatConfig("nonexistent-bot");
+    expect(result).toBeNull();
   });
 
-  afterEach(() => {
-    clearChatConfigCache();
+  test("returns users with thread bindings", async () => {
+    await addChatUser({ id: "test-chat-1", name: "Alice", bot: "jarvis" });
+    const result = await loadChatConfig("jarvis");
+    expect(result).not.toBeNull();
+    const alice = result!.users.find((u) => u.id === "test-chat-1");
+    expect(alice).toBeDefined();
+    expect(alice!.name).toBe("Alice");
+    expect(alice!.bot).toBe("jarvis");
   });
 
-  test("returns null when file does not exist", async () => {
-    // chat.config.json should not exist in the test environment (gitignored)
-    // If it does exist locally, this test validates the real config loads fine
+  test("filters by bot when botName provided", async () => {
+    await addChatUser({ id: "test-chat-2", name: "Bob", bot: "jarvis" });
+    await addChatUser({ id: "test-chat-3", name: "Charlie", bot: "capra" });
+
+    const jarvisUsers = await loadChatConfig("jarvis");
+    const jarvisIds = (jarvisUsers?.users ?? []).map((u) => u.id);
+    expect(jarvisIds).toContain("test-chat-2");
+    expect(jarvisIds).not.toContain("test-chat-3");
+  });
+
+  test("returns all users when no bot filter", async () => {
+    await addChatUser({ id: "test-chat-4", name: "Dave", bot: "jarvis" });
     const result = await loadChatConfig();
-    // Result depends on whether the file exists — just verify it doesn't throw
-    expect(result === null || (result && Array.isArray(result.users))).toBe(true);
-  });
-
-  test("caches result on subsequent calls", async () => {
-    const first = await loadChatConfig();
-    const second = await loadChatConfig();
-    // Should be the exact same reference (cached)
-    expect(first).toBe(second);
-  });
-
-  test("clearChatConfigCache resets cache so next call re-reads", async () => {
-    const first = await loadChatConfig();
-    clearChatConfigCache();
-    // After clearing, the function should re-read (not necessarily return a different value,
-    // but the cache mechanism is exercised)
-    const second = await loadChatConfig();
-    // Both should be structurally equal (same file on disk)
-    if (first === null) {
-      expect(second).toBeNull();
-    } else {
-      expect(second).not.toBeNull();
-    }
+    expect(result).not.toBeNull();
+    const dave = result!.users.find((u) => u.id === "test-chat-4");
+    expect(dave).toBeDefined();
   });
 });
 
-describe("loadChatConfig validation", () => {
-  // These tests mock Bun.file to control what the config loader sees
-  let origBunFile: typeof Bun.file;
+describe("addChatUser", () => {
+  test("creates user in DB and ensures default thread", async () => {
+    await addChatUser({ id: "test-chat-5", name: "Eve", bot: "jarvis" });
 
-  beforeEach(() => {
-    clearChatConfigCache();
-    origBunFile = Bun.file;
+    const sql = getDb();
+    const [user] = await sql`SELECT * FROM users WHERE id = 'test-chat-5'`;
+    expect(user).toBeDefined();
+    expect(user!.username).toBe("Eve");
+    expect(user!.platform).toBe("web");
+
+    const [thread] = await sql`SELECT * FROM threads WHERE user_id = 'test-chat-5' AND bot_name = 'jarvis' AND name = 'main'`;
+    expect(thread).toBeDefined();
   });
 
-  afterEach(() => {
-    clearChatConfigCache();
-    // Restore original
-    (Bun as any).file = origBunFile;
-  });
+  test("updates username on re-add", async () => {
+    await addChatUser({ id: "test-chat-6", name: "Frank", bot: "jarvis" });
+    await addChatUser({ id: "test-chat-6", name: "Franklin", bot: "jarvis" });
 
-  function mockBunFile(content: unknown, exists = true) {
-    (Bun as any).file = () => ({
-      exists: async () => exists,
-      json: async () => content,
-    });
-  }
-
-  test("returns null for missing file", async () => {
-    mockBunFile(null, false);
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("returns null for empty users array", async () => {
-    mockBunFile({ users: [] });
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("returns null for null content", async () => {
-    mockBunFile(null);
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("returns null for non-array users", async () => {
-    mockBunFile({ users: "not-an-array" });
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("returns null for missing users key", async () => {
-    mockBunFile({ other: "data" });
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("filters out invalid entries", async () => {
-    mockBunFile({
-      users: [
-        { id: "123", name: "Alice", bot: "jarvis" }, // valid
-        { id: 456, name: "Bob", bot: "capra" }, // id is number, invalid
-        { name: "Charlie", bot: "jarvis" }, // missing id
-        { id: "789", bot: "capra" }, // missing name
-        { id: "101", name: "Dave" }, // missing bot
-        null, // null entry
-        "string-entry", // non-object
-      ],
-    });
-
-    const result = await loadChatConfig();
-    expect(result).not.toBeNull();
-    expect(result!.users).toHaveLength(1);
-    expect(result!.users[0]!.id).toBe("123");
-    expect(result!.users[0]!.name).toBe("Alice");
-    expect(result!.users[0]!.bot).toBe("jarvis");
-  });
-
-  test("returns null when all entries are invalid", async () => {
-    mockBunFile({
-      users: [
-        { id: 123, name: "Bad" }, // invalid types
-        null,
-      ],
-    });
-    expect(await loadChatConfig()).toBeNull();
-  });
-
-  test("returns valid config with multiple users", async () => {
-    mockBunFile({
-      users: [
-        { id: "u1", name: "Alice", bot: "jarvis" },
-        { id: "u2", name: "Bob", bot: "capra" },
-      ],
-    });
-
-    const result = await loadChatConfig();
-    expect(result).not.toBeNull();
-    expect(result!.users).toHaveLength(2);
-    expect(result!.users[0]!.bot).toBe("jarvis");
-    expect(result!.users[1]!.bot).toBe("capra");
-  });
-
-  test("returns null when json() throws", async () => {
-    (Bun as any).file = () => ({
-      exists: async () => true,
-      json: async () => {
-        throw new Error("parse error");
-      },
-    });
-    expect(await loadChatConfig()).toBeNull();
+    const sql = getDb();
+    const [user] = await sql`SELECT * FROM users WHERE id = 'test-chat-6'`;
+    expect(user!.username).toBe("Franklin");
   });
 });

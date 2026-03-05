@@ -224,7 +224,7 @@ export const spec = {
       post: {
         tags: ["Users"],
         summary: "Create user",
-        description: "Create a new user by provisioning a default thread and adding to chat config.",
+        description: "Create a new user in the users table and provision a default thread.",
         operationId: "createUser",
         requestBody: {
           required: true,
@@ -1056,18 +1056,6 @@ export const spec = {
     },
 
     // ===================== Simulator (/chat prefix) =====================
-
-    "/chat/config": {
-      get: {
-        tags: ["Simulator"],
-        summary: "Chat config",
-        description: "Chat configuration — user mappings from chat.config.json or auto-discovered.",
-        operationId: "getChatConfig",
-        responses: {
-          "200": { description: "Config with users and mode" },
-        },
-      },
-    },
 
     "/chat/knowledge-config": {
       get: {

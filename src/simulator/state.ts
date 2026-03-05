@@ -1,7 +1,5 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
-import { ensureDefaultThread } from "../db/threads.ts";
-import type { ChatUser } from "./chat-config.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -146,42 +144,6 @@ export class SimulatorState {
   /** Broadcast a tool status update (appended as separate lines in the UI) */
   publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
     this.publish({ type: "tool_status", conversationId, text, threadId });
-  }
-
-  /**
-   * Hydrate conversations from chat.config.json user-bot bindings.
-   * Creates one SimConversation per binding with no messages preloaded.
-   */
-  async hydrateFromConfig(users: ChatUser[]): Promise<number> {
-    let count = 0;
-
-    const entries = await Promise.all(users.map(async (user) => {
-      const id = await deterministicId(`${user.id}:${user.bot}:web`);
-      return { id, user };
-    }));
-
-    const threadPromises: Promise<unknown>[] = [];
-    for (const { id, user } of entries) {
-      if (this.conversations.has(id)) continue;
-
-      const conversation: SimConversation = {
-        id,
-        type: "web",
-        botName: user.bot,
-        userId: user.id,
-        username: user.name,
-        messages: [],
-      };
-      this.conversations.set(id, conversation);
-
-      // Ensure "main" thread exists in DB for this user+bot
-      threadPromises.push(ensureDefaultThread(user.id, user.bot));
-
-      count++;
-    }
-
-    await Promise.all(threadPromises);
-    return count;
   }
 
   /**

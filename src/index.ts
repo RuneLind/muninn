@@ -41,21 +41,23 @@ warmupEmbeddings();
 // Load persisted activity events from DB
 await activityLog.loadFromDb();
 
-// Hydrate chat conversations — config-first, DB fallback (best-effort — don't block startup)
+// Migrate chat.config.json to DB (one-time, best-effort)
+try {
+  const { migrateChatConfigFile } = await import("./simulator/chat-config.ts");
+  const migrated = await migrateChatConfigFile();
+  if (migrated > 0) {
+    log.info("Migrated {count} users from chat.config.json to DB", { count: migrated });
+  }
+} catch (err) {
+  log.warn("Failed to migrate chat config: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
+
+// Hydrate chat conversations from DB (best-effort — don't block startup)
 try {
   const { simulatorState } = await import("./simulator/state.ts");
-  const { loadChatConfig } = await import("./simulator/chat-config.ts");
-  const chatConfig = await loadChatConfig();
-  if (chatConfig) {
-    const hydratedCount = await simulatorState.hydrateFromConfig(chatConfig.users);
-    if (hydratedCount > 0) {
-      log.info("Hydrated {count} conversations from chat config", { count: hydratedCount });
-    }
-  } else {
-    const hydratedCount = await simulatorState.hydrateFromDb();
-    if (hydratedCount > 0) {
-      log.info("Hydrated {count} conversations from DB", { count: hydratedCount });
-    }
+  const hydratedCount = await simulatorState.hydrateFromDb();
+  if (hydratedCount > 0) {
+    log.info("Hydrated {count} conversations from DB", { count: hydratedCount });
   }
 } catch (err) {
   log.warn("Failed to hydrate chat conversations: {error}", { error: err instanceof Error ? err.message : String(err) });

@@ -217,7 +217,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `threads` (per-user+bot conversation isolation), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
+- Tables: `users` (canonical user identity), `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `threads` (per-user+bot conversation isolation), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
 
 ### Configuration (.env)
 

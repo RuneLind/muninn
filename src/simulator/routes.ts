@@ -9,7 +9,6 @@ import { renderSimulatorPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
-import { loadChatConfig } from "./chat-config.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { getLog } from "../logging.ts";
 
@@ -30,26 +29,6 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Knowledge viewable collections config for index document links
   app.get("/knowledge-config", (c) => {
     return c.json({ viewableCollections: config.knowledgeViewableCollections });
-  });
-
-  // Serve chat config (mode: "config" with users, or mode: "discovery")
-  app.get("/config", async (c) => {
-    const chatCfg = await loadChatConfig();
-    if (chatCfg) {
-      return c.json({ mode: "config", users: chatCfg.users });
-    }
-    // Fallback: derive users from existing conversations
-    const convs = simulatorState.getConversations();
-    const seen = new Set<string>();
-    const users: { id: string; name: string; bot: string }[] = [];
-    for (const conv of convs) {
-      const key = `${conv.userId}:${conv.botName}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        users.push({ id: conv.userId, name: conv.username, bot: conv.botName });
-      }
-    }
-    return c.json({ mode: "discovery", users });
   });
 
   // List available bots
