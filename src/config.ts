@@ -25,7 +25,7 @@ function optionalEnvInt(name: string, defaultValue: number): number {
 
 export function loadConfig() {
   return {
-    dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3000),
+    dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),
     databaseUrl: requireEnv("DATABASE_URL"),

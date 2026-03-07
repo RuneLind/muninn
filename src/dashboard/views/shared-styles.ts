@@ -82,6 +82,19 @@ export const SHARED_STYLES = `
     .nav-link { color: var(--text-muted); text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; transition: all 0.2s; }
     .nav-link:hover { color: var(--accent-light); background: color-mix(in srgb, var(--accent) 10%, transparent); }
     .nav-link.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+
+    .error-banner {
+      display: none;
+      margin: 0 24px 12px;
+      padding: 12px 16px;
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+      border-radius: 8px;
+      color: var(--status-error);
+      font-size: 13px;
+    }
+    .error-banner.visible { display: block; }
+    .error-banner code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 `;
 
 /** Shared header HTML with nav links */
@@ -122,7 +135,7 @@ export function renderNav(
   </script>
   <header>
     <div class="header-left">
-      <h1><span>J</span>arvis</h1>
+      <h1><span>M</span>uninn</h1>
       <nav>
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
         <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>

@@ -63,7 +63,7 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DATABASE_URL` | Yes | — | Postgres connection string |
-| `DASHBOARD_PORT` | No | `3000` | Web dashboard port |
+| `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout in ms |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | Path to whisper-cpp model file |

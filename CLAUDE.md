@@ -231,7 +231,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `TELEGRAM_BOT_TOKEN_<NAME>` | Yes (per bot) | — | From @BotFather (e.g. `TELEGRAM_BOT_TOKEN_JARVIS`) |
 | `TELEGRAM_ALLOWED_USER_IDS_<NAME>` | Yes (per bot) | — | Comma-separated Telegram user IDs (e.g. `TELEGRAM_ALLOWED_USER_IDS_JARVIS`) |
 | `DATABASE_URL` | Yes | — | Postgres connection string |
-| `DASHBOARD_PORT` | No | `3000` | Web dashboard port |
+| `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout (ms) |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | whisper-cpp model file |

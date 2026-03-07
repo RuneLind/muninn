@@ -9,7 +9,7 @@ export function renderResearchPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - Research</title>
+  <title>Muninn - Research</title>
   <style>
     ${SHARED_STYLES}
     ${botSelectorStyles()}
@@ -116,6 +116,11 @@ export function renderResearchPage(): string {
 <body>
   ${renderNav("research", { headerLeftExtra: botSelectorHtml() })}
 
+  <div class="error-banner" id="errorBanner">
+    Knowledge API is not available. This feature requires an external knowledge/vector search server.
+    Set <code>KNOWLEDGE_API_URL</code> in your <code>.env</code> file to connect.
+  </div>
+
   <div class="page-content">
     <div class="collection-selector">
       <select id="collectionSelect" onchange="loadCollection(this.value)">
@@ -198,7 +203,11 @@ export function renderResearchPage(): string {
     async function loadCollections() {
       try {
         var res = await fetch('/api/search/collections');
-        if (!res.ok) return;
+        if (!res.ok) {
+          document.getElementById('errorBanner').classList.add('visible');
+          return;
+        }
+        document.getElementById('errorBanner').classList.remove('visible');
         var data = await res.json();
         collections = data.collections || [];
 
@@ -220,7 +229,10 @@ export function renderResearchPage(): string {
           select.appendChild(opt);
         });
         if (prevVal) { select.value = prevVal; }
-      } catch (e) { console.error('Failed to load collections', e); }
+      } catch (e) {
+        console.error('Failed to load collections', e);
+        document.getElementById('errorBanner').classList.add('visible');
+      }
     }
 
     async function loadCollection(name) {

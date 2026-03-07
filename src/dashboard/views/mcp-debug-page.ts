@@ -7,7 +7,7 @@ export function renderMcpDebugPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - MCP Debug</title>
+  <title>Muninn - MCP Debug</title>
   <style>
     ${SHARED_STYLES}
 

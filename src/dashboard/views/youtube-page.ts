@@ -8,7 +8,7 @@ export function renderYouTubePage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - YouTube Summarizer</title>
+  <title>Muninn - YouTube Summarizer</title>
   <style>
     ${SHARED_STYLES}
 
@@ -209,17 +209,6 @@ export function renderYouTubePage(): string {
     }
     .similar-view-md:hover { opacity: 1; text-decoration: underline; }
 
-    /* --- Error display --- */
-    .error-banner {
-      display: none;
-      padding: 12px 20px;
-      background: color-mix(in srgb, var(--status-error) 10%, transparent);
-      border-top: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
-      color: var(--status-error);
-      font-size: 13px;
-    }
-    .error-banner.visible { display: block; }
-
     /* --- Recent jobs list --- */
     .recent-section {
       margin-top: 32px;
@@ -385,6 +374,11 @@ export function renderYouTubePage(): string {
 <body>
   ${renderNav("youtube")}
 
+  <div class="error-banner" id="knowledgeBanner">
+    Knowledge API is not available. Summarization requires an external knowledge/vector search server.
+    Set <code>KNOWLEDGE_API_URL</code> in your <code>.env</code> file to connect.
+  </div>
+
   <div class="page-content">
     <!-- Manual submit form -->
     <div class="submit-form">
@@ -405,7 +399,7 @@ export function renderYouTubePage(): string {
       <div class="summary-area empty" id="summaryArea">
         Waiting for summary...
       </div>
-      <div class="error-banner" id="errorBanner"></div>
+      <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
       <div class="similar-panel" id="similarPanel">
         <h3>Similar Videos</h3>
         <div class="similar-list" id="similarList"></div>
@@ -894,6 +888,14 @@ export function renderYouTubePage(): string {
 
     // --- Init ---
     async function init() {
+      // Check knowledge API availability
+      try {
+        var healthRes = await fetch('/api/search/health');
+        if (!healthRes.ok) document.getElementById('knowledgeBanner').classList.add('visible');
+      } catch (e) {
+        document.getElementById('knowledgeBanner').classList.add('visible');
+      }
+
       loadRecentJobs();
       loadLibrary();
 

@@ -8,7 +8,7 @@ export function renderSearchPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - Search</title>
+  <title>Muninn - Search</title>
   <style>
     ${SHARED_STYLES}
 
@@ -30,17 +30,6 @@ export function renderSearchPage(): string {
     .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
 
     /* Error Banner */
-    .error-banner {
-      display: none;
-      margin: 0 24px 12px;
-      padding: 12px 16px;
-      background: color-mix(in srgb, var(--status-error) 10%, transparent);
-      border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
-      border-radius: 8px;
-      color: var(--status-error);
-      font-size: 13px;
-    }
-    .error-banner.visible { display: block; }
 
     /* Search Area */
     .search-area {
@@ -351,8 +340,8 @@ export function renderSearchPage(): string {
   ${renderNav("search")}
 
   <div class="error-banner" id="errorBanner">
-    Knowledge API at <code>localhost:8321</code> is unreachable. Start it with:
-    <code>cd ../documents-vector-search && uv run knowledge_api_server.py</code>
+    Knowledge API is not available. This feature requires an external knowledge/vector search server.
+    Set <code>KNOWLEDGE_API_URL</code> in your <code>.env</code> file to connect.
   </div>
 
   <div class="stats-bar" id="statsBar">

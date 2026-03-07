@@ -1,20 +1,5 @@
 {
   "mcpServers": {
-    "knowledge": {
-      "type": "stdio",
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/path/to/documents-vector-search",
-        "run",
-        "knowledge_api_mcp_adapter.py"
-      ],
-      "env": {
-        "KNOWLEDGE_API_URL": "http://localhost:8321",
-        "KNOWLEDGE_COLLECTIONS": "youtube-summaries",
-        "KNOWLEDGE_DESCRIPTION": "YouTube video summaries and notes"
-      }
-    },
     "gmail": {
       "type": "stdio",
       "command": "npx",
