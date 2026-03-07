@@ -6,7 +6,7 @@
  * standard markdown, so we convert the old messages.
  *
  * Run via migration runner: bun db/migrate.ts
- * Run standalone:           bun db/migrations/017-convert-html-to-markdown.ts [--dry-run]
+ * Run standalone:           bun db/migrations/017-convert-html-to-markdown.ts
  */
 import type postgres from "postgres";
 

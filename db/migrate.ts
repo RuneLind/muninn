@@ -109,8 +109,12 @@ export async function runMigrations(databaseUrl: string, opts?: { baseline?: boo
     console.log(`${pending.length} pending migration(s):\n`);
     for (const m of pending) {
       console.log(`  → ${m.filename}`);
-      await runMigration(sql, m);
-      await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
+      // Wrap in transaction so partial failures don't leave the DB in a broken state
+      await sql.begin(async (tx) => {
+        const txSql = tx as unknown as postgres.Sql;
+        await runMigration(txSql, m);
+        await txSql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
+      });
       console.log(`    applied`);
     }
     console.log(`\nDone. Applied ${pending.length} migration(s).`);

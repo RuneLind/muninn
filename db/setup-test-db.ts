@@ -8,9 +8,7 @@
  *
  * Usage:
  *   bun db/setup-test-db.ts
- *
- * This runs automatically as a bun test preload (see bunfig.toml),
- * or can be run manually before tests.
+ *   bun run db:setup:test
  */
 import postgres from "postgres";
 import { join } from "node:path";
