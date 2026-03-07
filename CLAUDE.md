@@ -250,6 +250,68 @@ PostgreSQL + pgvector via Docker (single container).
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
 
+## Serena Code Analysis (MCP Proxy)
+
+Serena provides code search and analysis tools (find_symbol, search_for_pattern, etc.) for large codebases. Instead of spawning Serena per chat session, instances run as persistent HTTP servers managed from the dashboard.
+
+### How it works
+
+1. Open the **Serena** page in the dashboard (`/serena`)
+2. Click **Start** on the instances you need (or **Start All**)
+3. Each instance spawns Serena with `--transport streamable-http` on a dedicated port
+4. The bot's `.mcp.json` has `type: "http"` entries pointing directly to these ports
+5. The copilot-sdk connects to Serena over HTTP — no proxy, no per-session spawning
+6. Click **Stop** when done to free resources
+
+### Configuration
+
+Serena instances are defined in the bot's `config.json` under a `serena` key:
+
+```json
+{
+  "serena": [
+    { "name": "serena-api", "displayName": "Melosys API", "projectPath": "/path/to/project", "port": 9121 }
+  ]
+}
+```
+
+The matching `.mcp.json` entry points to the instance's HTTP endpoint:
+
+```json
+{
+  "serena-api": { "type": "http", "url": "http://127.0.0.1:9121/mcp" }
+}
+```
+
+### Manual usage
+
+To start a Serena instance manually (outside javrvis):
+
+```bash
+uvx --from "git+https://github.com/oraios/serena" serena start-mcp-server \
+  --transport streamable-http \
+  --port 9121 \
+  --host 127.0.0.1 \
+  --context claude-code \
+  --project /path/to/project \
+  --open-web-dashboard False
+```
+
+To pre-index a project (faster startup):
+
+```bash
+uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/project --timeout 300
+```
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/serena/manager.ts` | SerenaManager singleton — start/stop/index lifecycle |
+| `src/serena/config.ts` | Config types + discovery from bot config.json |
+| `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
+| `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
+
 ## Slack Bot
 When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.
 

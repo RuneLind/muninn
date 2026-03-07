@@ -8,6 +8,7 @@ import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
+import { serenaManager } from "./serena/manager.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import type { App as SlackApp } from "@slack/bolt";
@@ -31,6 +32,9 @@ if (botConfigs.length === 0) {
 // Module-level references for shutdown handler
 const telegramBotMap = new Map<string, Bot>();
 const slackAppList: SlackApp[] = [];
+
+// Discover Serena instances from bot configs (lazy — doesn't start them)
+serenaManager.init();
 
 // Initialize database
 initDb(config);
@@ -157,6 +161,7 @@ async function shutdown() {
   }
 
   server.stop();
+  await serenaManager.stopAll();
   await disconnectAllMcp();
   await closeDb();
   process.exit(0);

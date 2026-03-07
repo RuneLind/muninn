@@ -19,7 +19,9 @@ import { loadChatConfig, addChatUser } from "../simulator/chat-config.ts";
 import { setPendingMessage } from "../simulator/pending-messages.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
+import { renderSerenaPage } from "./views/serena-page.ts";
 import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "./mcp-client.ts";
+import { serenaManager } from "../serena/manager.ts";
 import { discoverAllBots } from "../bots/config.ts";
 import { getRecentMessages } from "../db/messages.ts";
 import { getActiveGoals } from "../db/goals.ts";
@@ -850,6 +852,60 @@ ${body.text}`;
       log.error("MCP disconnect failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: err instanceof Error ? err.message : "Disconnect failed" }, 500);
     }
+  });
+
+  // --- Serena MCP Proxy ---
+
+  app.get("/serena", (c) => {
+    return c.html(renderSerenaPage());
+  });
+
+  app.get("/api/serena/instances", (c) => {
+    const instances = serenaManager.getInstances().map((inst) => ({
+      name: inst.config.name,
+      displayName: inst.config.displayName,
+      projectPath: inst.config.projectPath,
+      port: inst.config.port,
+      botName: inst.botName,
+      status: inst.status,
+      error: inst.error,
+      startedAt: inst.startedAt,
+      mcpUrl: inst.mcpUrl,
+      dashboardUrl: inst.dashboardUrl,
+    }));
+    return c.json(instances);
+  });
+
+  app.post("/api/serena/:name/start", async (c) => {
+    const name = c.req.param("name");
+    if (!serenaManager.getInstance(name)) return c.json({ error: `Unknown Serena instance: ${name}` }, 404);
+    try {
+      await serenaManager.start(name);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/serena/:name/stop", async (c) => {
+    const name = c.req.param("name");
+    if (!serenaManager.getInstance(name)) return c.json({ error: `Unknown Serena instance: ${name}` }, 404);
+    try {
+      await serenaManager.stop(name);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  app.post("/api/serena/:name/index", async (c) => {
+    const name = c.req.param("name");
+    const instance = serenaManager.getInstance(name);
+    if (!instance) return c.json({ error: `Unknown Serena instance: ${name}` }, 404);
+    if (instance.status === "running" || instance.status === "starting") return c.json({ error: `Stop ${name} before re-indexing` }, 400);
+    // Fire and forget — indexing runs in the background, errors logged inside
+    serenaManager.index(name).catch(() => {});
+    return c.json({ ok: true });
   });
 
   // --- Per-user endpoints (backward compat) ---

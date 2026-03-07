@@ -16,68 +16,20 @@
       }
     },
     "serena-api": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/oraios/serena",
-        "serena",
-        "start-mcp-server",
-        "--context",
-        "claude-code",
-        "--project",
-        "/Users/rune/source/nav/melosys-api",
-        "--open-web-dashboard",
-        "False"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:9121/mcp"
     },
     "serena-web": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/oraios/serena",
-        "serena",
-        "start-mcp-server",
-        "--context",
-        "claude-code",
-        "--project",
-        "/Users/rune/source/nav/melosys-web",
-        "--open-web-dashboard",
-        "False"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:9122/mcp"
     },
     "serena-eessi": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/oraios/serena",
-        "serena",
-        "start-mcp-server",
-        "--context",
-        "claude-code",
-        "--project",
-        "/Users/rune/source/nav/melosys-eessi",
-        "--open-web-dashboard",
-        "False"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:9123/mcp"
     },
     "serena-fakturering": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/oraios/serena",
-        "serena",
-        "start-mcp-server",
-        "--context",
-        "claude-code",
-        "--project",
-        "/Users/rune/source/nav/faktureringskomponenten",
-        "--open-web-dashboard",
-        "False"
-      ]
+      "type": "http",
+      "url": "http://127.0.0.1:9124/mcp"
     }
   }
 }

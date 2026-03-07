@@ -1,5 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { join } from "node:path";
 import { getLog } from "../logging.ts";
 
@@ -7,10 +9,11 @@ const log = getLog("dashboard", "mcp");
 
 interface McpServerConfig {
   type?: string;
-  command: string;
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  url?: string;
 }
 
 interface McpConfig {
@@ -19,7 +22,7 @@ interface McpConfig {
 
 interface ActiveConnection {
   client: Client;
-  transport: StdioClientTransport;
+  transport: Transport;
   tools: ToolInfo[];
   serverName: string;
   botName: string;
@@ -83,13 +86,22 @@ export async function connectToServer(
     bot: botName,
   });
 
-  const transport = new StdioClientTransport({
-    command: serverConfig.command,
-    args: serverConfig.args,
-    env: { ...process.env, ...serverConfig.env } as Record<string, string>,
-    cwd: serverConfig.cwd,
-    stderr: "pipe",
-  });
+  const isRemote = serverConfig.type === "http" || serverConfig.type === "sse";
+  let transport: Transport;
+
+  if (isRemote) {
+    if (!serverConfig.url) throw new Error(`MCP server ${serverName} has type ${serverConfig.type} but no url`);
+    transport = new StreamableHTTPClientTransport(new URL(serverConfig.url));
+  } else {
+    if (!serverConfig.command) throw new Error(`MCP server ${serverName} has no command`);
+    transport = new StdioClientTransport({
+      command: serverConfig.command,
+      args: serverConfig.args,
+      env: { ...process.env, ...serverConfig.env } as Record<string, string>,
+      cwd: serverConfig.cwd,
+      stderr: "pipe",
+    });
+  }
 
   const client = new Client(
     { name: "javrvis-mcp-debug", version: "1.0.0" },

@@ -59,6 +59,95 @@ describe("parseMcpConfig", () => {
     }
   });
 
+  test("converts http entries to remote server format", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: {
+        "serena-api": {
+          type: "http",
+          url: "http://127.0.0.1:9121/mcp",
+        },
+        "serena-sse": {
+          type: "sse",
+          url: "http://127.0.0.1:9122/sse",
+          headers: { Authorization: "Bearer test" },
+        },
+      },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+    try {
+      const result = parseMcpConfig(dir);
+      expect(result).toEqual({
+        "serena-api": {
+          type: "http",
+          url: "http://127.0.0.1:9121/mcp",
+          headers: undefined,
+          tools: ["*"],
+        },
+        "serena-sse": {
+          type: "sse",
+          url: "http://127.0.0.1:9122/sse",
+          headers: { Authorization: "Bearer test" },
+          tools: ["*"],
+        },
+      });
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("skips http entry without url", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: {
+        broken: { type: "http" },
+        valid: { command: "node", args: ["server.js"] },
+      },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+    try {
+      const result = parseMcpConfig(dir);
+      expect(Object.keys(result)).toEqual(["valid"]);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("skips stdio entry without command", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: {
+        broken: { args: ["--flag"] },
+        valid: { type: "http", url: "http://localhost:9000/mcp" },
+      },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+    try {
+      const result = parseMcpConfig(dir);
+      expect(Object.keys(result)).toEqual(["valid"]);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("handles mixed local and remote entries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: {
+        gmail: { command: "npx", args: ["-y", "gmail-mcp"] },
+        serena: { type: "http", url: "http://127.0.0.1:9121/mcp" },
+      },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+    try {
+      const result = parseMcpConfig(dir);
+      expect(result.gmail!.type).toBe("local");
+      expect(result.serena!.type).toBe("http");
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
   test("returns empty object for invalid JSON", () => {
     const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
     writeFileSync(join(dir, ".mcp.json"), "not json{{{");
