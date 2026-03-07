@@ -399,7 +399,7 @@ export function renderYouTubePage(): string {
       <div class="summary-area empty" id="summaryArea">
         Waiting for summary...
       </div>
-      <div class="error-banner" id="errorBanner"></div>
+      <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
       <div class="similar-panel" id="similarPanel">
         <h3>Similar Videos</h3>
         <div class="similar-list" id="similarList"></div>
