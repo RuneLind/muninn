@@ -51,7 +51,7 @@ async function getAppliedMigrations(sql: postgres.Sql): Promise<Set<string>> {
 
 async function discoverMigrations(): Promise<MigrationFile[]> {
   const files = await readdir(MIGRATIONS_DIR);
-  return files
+  const migrations = files
     .filter((f) => /^\d{3}-/.test(f) && !f.includes(".test."))
     .filter((f) => f.endsWith(".sql") || f.endsWith(".ts"))
     .sort()
@@ -60,6 +60,18 @@ async function discoverMigrations(): Promise<MigrationFile[]> {
       if (!match) throw new Error(`Unexpected migration filename: ${f}`);
       return { version: match[1]!, name: match[2]!, filename: f, ext: match[3]! };
     });
+
+  // Check for duplicate version numbers
+  const seen = new Map<string, string>();
+  for (const m of migrations) {
+    const existing = seen.get(m.version);
+    if (existing) {
+      throw new Error(`Duplicate migration version ${m.version}: ${existing} and ${m.filename}`);
+    }
+    seen.set(m.version, m.filename);
+  }
+
+  return migrations;
 }
 
 async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
