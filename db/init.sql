@@ -350,3 +350,12 @@ CREATE TABLE prompt_snapshots (
 
 CREATE UNIQUE INDEX idx_prompt_snapshots_trace ON prompt_snapshots (trace_id);
 CREATE INDEX idx_prompt_snapshots_created ON prompt_snapshots (created_at DESC);
+
+-- ============================================================================
+-- Schema migrations: tracks which migrations have been applied
+-- ============================================================================
+CREATE TABLE schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -123,6 +123,8 @@ Personal AI assistant — multi-bot Telegram platform with pluggable AI connecto
 
 ```bash
 bun run db:up               # Start Postgres (requires Docker)
+bun run db:migrate:baseline # Mark existing migrations as applied (first time only)
+bun run db:migrate          # Apply pending migrations
 bun run dev                 # Dev with --watch
 bun run start               # Production
 bun run dev:chat            # Chat-only (no scheduler, port 3011)
@@ -213,9 +215,12 @@ All fields are optional — falls back to global `.env` values:
 
 PostgreSQL + pgvector via Docker (single container).
 
-- URL: `postgresql://muninn:muninn@127.0.0.1:5434/muninn`
-- Schema: `db/init.sql` (runs automatically on first `docker compose up`)
+- URL: `postgresql://muninn:muninn@127.0.0.1:5435/muninn`
+- Schema: `db/init.sql` (full consolidated schema, applied by Docker on first start)
+- Migrations: `db/migrations/` (numbered `.sql` and `.ts` files, tracked in `schema_migrations` table)
 - Start: `bun run db:up` / Stop: `bun run db:down`
+- Migrate: `bun run db:migrate` / Status: `bun run db:migrate:status` / Baseline: `bun run db:migrate:baseline`
+- Test DB: `bun run db:setup:test` (creates `muninn_test`, applies schema + baseline)
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
 - Tables: `users` (canonical user identity), `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `threads` (per-user+bot conversation isolation), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
 
@@ -326,7 +331,7 @@ bun run test:db           # DB integration tests
 bun run test:handlers     # Handler tests (with mocks)
 ```
 
-DB tests require the local Postgres container (`bun run db:up`) and use a separate `muninn_test` database. Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
+DB tests require the local Postgres container (`bun run db:up`) and a test database (`bun run db:setup:test`). Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
 
 ### Conventions
 

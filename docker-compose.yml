@@ -3,7 +3,7 @@ services:
     image: pgvector/pgvector:pg17
     container_name: muninn-postgres
     ports:
-      - "5434:5432"
+      - "5435:5432"
     environment:
       POSTGRES_USER: muninn
       POSTGRES_PASSWORD: muninn

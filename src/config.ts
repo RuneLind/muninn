@@ -1,7 +1,12 @@
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
+    throw new Error(
+      `Missing required environment variable: ${name}\n\n` +
+      `  Create a .env file from the example:\n` +
+      `    cp .env.example .env\n\n` +
+      `  Then edit .env with your values.`,
+    );
   }
   return value;
 }

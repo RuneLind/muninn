@@ -5,15 +5,10 @@
  * (<b>, <i>, etc.), which was stored as-is in the DB. Now all AI output is
  * standard markdown, so we convert the old messages.
  *
- * Run: bun db/migrations/017-convert-html-to-markdown.ts
- * Dry run: bun db/migrations/017-convert-html-to-markdown.ts --dry-run
+ * Run via migration runner: bun db/migrate.ts
+ * Run standalone:           bun db/migrations/017-convert-html-to-markdown.ts
  */
-import postgres from "postgres";
-
-const DRY_RUN = process.argv.includes("--dry-run");
-
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
-const sql = postgres(DATABASE_URL, { max: 1 });
+import type postgres from "postgres";
 
 export function convertTelegramHtmlToMarkdown(text: string): string {
   let result = text;
@@ -57,36 +52,31 @@ export function convertTelegramHtmlToMarkdown(text: string): string {
   return result;
 }
 
-async function migrate() {
-  const rows = await sql`
+export async function migrate(db: postgres.Sql) {
+  const rows = await db`
     SELECT id, content
     FROM messages
     WHERE role = 'assistant'
       AND content ~ '<(b|i|em|strong|code|pre|a )'
   `;
 
-  console.log(`Found ${rows.length} messages with HTML tags${DRY_RUN ? " (dry run)" : ""}`);
+  console.log(`Found ${rows.length} messages with HTML tags`);
 
   let updated = 0;
   for (const row of rows) {
     const converted = convertTelegramHtmlToMarkdown(row.content);
     if (converted === row.content) continue;
-
-    if (DRY_RUN) {
-      console.log(`\n--- ${row.id} ---`);
-      console.log(`BEFORE: ${row.content.slice(0, 120)}`);
-      console.log(`AFTER:  ${converted.slice(0, 120)}`);
-    } else {
-      await sql`UPDATE messages SET content = ${converted} WHERE id = ${row.id}`;
-    }
+    await db`UPDATE messages SET content = ${converted} WHERE id = ${row.id}`;
     updated++;
   }
 
-  console.log(`\n${DRY_RUN ? "Would update" : "Updated"} ${updated} of ${rows.length} messages`);
-  await sql.end();
+  console.log(`Updated ${updated} of ${rows.length} messages`);
 }
 
-migrate().catch((err) => {
-  console.error("Migration failed:", err);
-  sql.end().then(() => process.exit(1));
-});
+// Standalone execution
+if (import.meta.main) {
+  const { default: pg } = await import("postgres");
+  const url = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+  const sql = pg(url, { max: 1 });
+  await migrate(sql).finally(() => sql.end());
+}

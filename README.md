@@ -30,10 +30,12 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
    bun install
    ```
 
-2. Start local database:
+2. Start the database and apply schema:
    ```bash
-   bun run db:up
+   bun run db:up              # Start Postgres via Docker
+   bun run db:migrate:baseline # Mark existing migrations as applied
    ```
+   On first start, Docker automatically applies `db/init.sql` (the full consolidated schema). The baseline command records all migrations as applied so future migrations run cleanly.
 
 3. Configure environment:
    ```bash
@@ -299,12 +301,79 @@ Send a voice message and the bot will transcribe it (whisper-cli), process it th
 ### Tracing & Tool Tracking
 Every request creates a trace — a tree of timed spans (prompt build, Claude execution, DB saves, send). The Claude executor uses `--output-format stream-json --verbose` to capture MCP tool calls (Gmail, Calendar, etc.) from the NDJSON event stream. Each tool call becomes a child span with its own timing, visible in the traces dashboard waterfall as orange bars. See [`docs/tracing-and-tool-tracking.md`](docs/tracing-and-tool-tracking.md) for details.
 
-## Testing
+## Database
 
-Tests require the local Postgres container running (`bun run db:up`). A separate `muninn_test` database is used automatically.
+PostgreSQL with pgvector, running in Docker.
+
+### Schema
+
+`db/init.sql` is the full consolidated schema — it creates all tables, indexes, triggers, and extensions. Docker applies it automatically on first container creation via `docker-entrypoint-initdb.d`.
+
+Incremental changes go in `db/migrations/` as numbered files (e.g. `021-add-feature.sql`). Both `.sql` and `.ts` migrations are supported. TS migrations must export a `migrate(sql: postgres.Sql): Promise<void>` function.
+
+### Migration runner
+
+A Flyway-style migration runner tracks applied migrations in a `schema_migrations` table:
 
 ```bash
-bun run test              # Run all tests (341 tests across 29 files)
+bun run db:migrate            # Apply pending migrations
+bun run db:migrate:status     # Show which migrations are applied/pending
+bun run db:migrate:baseline   # Mark all migrations as applied (for fresh DBs from init.sql)
+```
+
+### Creating a new migration
+
+1. Create a numbered file in `db/migrations/`:
+   ```bash
+   # SQL migration (schema changes)
+   touch db/migrations/021-my-change.sql
+
+   # TS migration (data transforms)
+   touch db/migrations/021-my-change.ts
+   ```
+
+2. For SQL: write your DDL/DML statements directly.
+
+3. For TypeScript: export a `migrate` function:
+   ```ts
+   import type postgres from "postgres";
+
+   export async function migrate(db: postgres.Sql) {
+     await db`UPDATE ...`;
+   }
+   ```
+
+4. Run it:
+   ```bash
+   bun run db:migrate
+   ```
+
+5. Update `db/init.sql` to include the change (so fresh installs get the full schema).
+
+### Backup & Restore
+
+```bash
+bun run db:backup    # Saves to backups/muninn_backup_<timestamp>.sql
+bun run db:restore   # Restores from latest backup in backups/
+```
+
+Backups are full `pg_dump` exports stored in the `backups/` directory.
+
+## Testing
+
+Tests require the local Postgres container (`bun run db:up`). A separate `muninn_test` database is used for isolation.
+
+### First-time test setup
+
+```bash
+bun run db:up            # Start Postgres (if not already running)
+bun run db:setup:test    # Create muninn_test DB and apply schema
+```
+
+### Running tests
+
+```bash
+bun run test              # All tests
 bun run test:unit         # Unit tests only (pure functions, no DB)
 bun run test:db           # DB integration tests only
 bun run test:handlers     # Handler/integration tests (with mocks)
@@ -313,21 +382,14 @@ bun run test:coverage     # Run with coverage report
 
 Tests are split into two `bun` invocations because `bun:test` runs all files in the same process, and `mock.module()` calls leak between files. Group 1 (unit + DB) runs first, then group 2 (mock-based handler tests).
 
+If the schema changes, re-run `bun run db:setup:test` to rebuild the test database.
+
 ### Test structure
 
 - `src/test/setup-db.ts` — Shared DB setup (connects to `muninn_test`, truncates tables between tests)
 - `src/test/fixtures.ts` — Test data factories (`makeMessage()`, `makeMemory()`, `makeGoal()`, etc.)
 - `src/test/mock-grammy.ts` — Grammy test helpers (fake bot with API transformer, fake updates)
 - `*.test.ts` — Test files co-located with their source files
-
-## Database Backup & Restore
-
-```bash
-bun run db:backup    # Saves to backups/muninn_backup_<timestamp>.sql
-bun run db:restore   # Restores from latest backup in backups/
-```
-
-Backups are full `pg_dump` exports stored in the `backups/` directory.
 
 ## Gmail MCP Re-Authentication
 

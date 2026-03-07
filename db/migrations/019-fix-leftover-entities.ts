@@ -4,24 +4,19 @@
  * Migration 017 converted HTML tags to markdown but didn't decode
  * HTML entities (&amp;, &lt;, &gt;, &quot;). This fixes those.
  *
- * Run: bun db/migrations/019-fix-leftover-entities.ts
- * Dry run: bun db/migrations/019-fix-leftover-entities.ts --dry-run
+ * Run via migration runner: bun db/migrate.ts
+ * Run standalone:           bun db/migrations/019-fix-leftover-entities.ts
  */
-import postgres from "postgres";
+import type postgres from "postgres";
 
-const DRY_RUN = process.argv.includes("--dry-run");
-
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
-const sql = postgres(DATABASE_URL, { max: 1 });
-
-async function migrate() {
-  const rows = await sql`
+export async function migrate(db: postgres.Sql) {
+  const rows = await db`
     SELECT id, content FROM messages
     WHERE role = 'assistant'
       AND (content LIKE '%&amp;%' OR content LIKE '%&lt;%' OR content LIKE '%&gt;%' OR content LIKE '%&quot;%')
   `;
 
-  console.log(`Found ${rows.length} messages with HTML entities${DRY_RUN ? " (dry run)" : ""}`);
+  console.log(`Found ${rows.length} messages with HTML entities`);
 
   let updated = 0;
   for (const row of rows) {
@@ -32,22 +27,17 @@ async function migrate() {
     converted = converted.replace(/&quot;/g, '"');
 
     if (converted === row.content) continue;
-
-    if (DRY_RUN) {
-      const entities = row.content.match(/&(amp|lt|gt|quot);/g) ?? [];
-      console.log(`\n--- ${row.id} ---`);
-      console.log(`Entities: ${[...new Set(entities)].join(", ")} (${entities.length} total)`);
-    } else {
-      await sql`UPDATE messages SET content = ${converted} WHERE id = ${row.id}`;
-    }
+    await db`UPDATE messages SET content = ${converted} WHERE id = ${row.id}`;
     updated++;
   }
 
-  console.log(`\n${DRY_RUN ? "Would update" : "Updated"} ${updated} of ${rows.length} messages`);
-  await sql.end();
+  console.log(`Updated ${updated} of ${rows.length} messages`);
 }
 
-migrate().catch((err) => {
-  console.error("Migration failed:", err);
-  sql.end().then(() => process.exit(1));
-});
+// Standalone execution
+if (import.meta.main) {
+  const { default: pg } = await import("postgres");
+  const url = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+  const sql = pg(url, { max: 1 });
+  await migrate(sql).finally(() => sql.end());
+}
