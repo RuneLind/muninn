@@ -94,7 +94,7 @@ export async function migrate(db: postgres.Sql) {
 // Standalone execution
 if (import.meta.main) {
   const { default: pg } = await import("postgres");
-  const url = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
+  const url = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
   const sql = pg(url, { max: 1 });
   await migrate(sql).finally(() => sql.end());
 }

@@ -114,6 +114,10 @@ for (const botConfig of botConfigs) {
         activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
         log.info("{botName} Telegram is live — bot: @{botUsername}, dashboard: http://localhost:{port}", { botName: botConfig.name, botUsername: botInfo.username, port: server.port });
       },
+    }).catch((err) => {
+      log.error("{botName} Telegram failed to start: {error} — check TELEGRAM_BOT_TOKEN_{env}", { botName: botConfig.name, error: err.message, env: botConfig.name.toUpperCase() });
+      activityLog.push("error", `${botConfig.name} Telegram failed: ${err.message} — is the bot token valid?`);
+      telegramBotMap.delete(botConfig.name);
     });
   }
 

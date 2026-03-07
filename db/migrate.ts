@@ -80,7 +80,7 @@ async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
 }
 
 export async function runMigrations(databaseUrl: string, opts?: { baseline?: boolean }) {
-  const sql = postgres(databaseUrl, { max: 1 });
+  const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
   try {
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
@@ -121,10 +121,10 @@ export async function runMigrations(databaseUrl: string, opts?: { baseline?: boo
 
 // --- CLI entrypoint ---
 if (import.meta.main) {
-  const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
+  const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
 
   if (STATUS) {
-    const sql = postgres(DATABASE_URL, { max: 1 });
+    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -138,7 +138,7 @@ if (import.meta.main) {
     console.log(`\n${applied.size} applied, ${pending.length} pending`);
     await sql.end();
   } else if (DRY_RUN) {
-    const sql = postgres(DATABASE_URL, { max: 1 });
+    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();

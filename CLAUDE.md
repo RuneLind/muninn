@@ -215,7 +215,7 @@ All fields are optional — falls back to global `.env` values:
 
 PostgreSQL + pgvector via Docker (single container).
 
-- URL: `postgresql://muninn:muninn@127.0.0.1:5434/muninn`
+- URL: `postgresql://muninn:muninn@127.0.0.1:5435/muninn`
 - Schema: `db/init.sql` (full consolidated schema, applied by Docker on first start)
 - Migrations: `db/migrations/` (numbered `.sql` and `.ts` files, tracked in `schema_migrations` table)
 - Start: `bun run db:up` / Stop: `bun run db:down`

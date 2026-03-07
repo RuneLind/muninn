@@ -16,9 +16,9 @@ import postgres from "postgres";
 import { join } from "node:path";
 import { runMigrations } from "./migrate.ts";
 
-const ADMIN_URL = "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
+const ADMIN_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
 const TEST_DB = "muninn_test";
-const TEST_URL = `postgresql://muninn:muninn@127.0.0.1:5434/${TEST_DB}`;
+const TEST_URL = `postgresql://muninn:muninn@127.0.0.1:5435/${TEST_DB}`;
 
 async function setupTestDb() {
   // Connect to default DB to create the test DB
