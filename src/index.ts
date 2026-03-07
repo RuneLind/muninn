@@ -98,6 +98,7 @@ const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
   websocket: sim.simulatorWebSocket,
 });
 
+log.info("Dashboard: http://localhost:{port}", { port: server.port });
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
 
 // Start real Telegram/Slack bots + scheduler
