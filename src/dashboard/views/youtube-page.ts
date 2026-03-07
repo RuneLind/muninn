@@ -209,17 +209,6 @@ export function renderYouTubePage(): string {
     }
     .similar-view-md:hover { opacity: 1; text-decoration: underline; }
 
-    /* --- Error display --- */
-    .error-banner {
-      display: none;
-      padding: 12px 20px;
-      background: color-mix(in srgb, var(--status-error) 10%, transparent);
-      border-top: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
-      color: var(--status-error);
-      font-size: 13px;
-    }
-    .error-banner.visible { display: block; }
-
     /* --- Recent jobs list --- */
     .recent-section {
       margin-top: 32px;
@@ -384,6 +373,11 @@ export function renderYouTubePage(): string {
 </head>
 <body>
   ${renderNav("youtube")}
+
+  <div class="error-banner" id="knowledgeBanner">
+    Knowledge API is not available. Summarization requires an external knowledge/vector search server.
+    Set <code>KNOWLEDGE_API_URL</code> in your <code>.env</code> file to connect.
+  </div>
 
   <div class="page-content">
     <!-- Manual submit form -->
@@ -894,6 +888,14 @@ export function renderYouTubePage(): string {
 
     // --- Init ---
     async function init() {
+      // Check knowledge API availability
+      try {
+        var healthRes = await fetch('/api/search/health');
+        if (!healthRes.ok) document.getElementById('knowledgeBanner').classList.add('visible');
+      } catch (e) {
+        document.getElementById('knowledgeBanner').classList.add('visible');
+      }
+
       loadRecentJobs();
       loadLibrary();
 
