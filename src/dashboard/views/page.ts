@@ -25,7 +25,7 @@ export function renderDashboardPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis Dashboard</title>
+  <title>Muninn Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
     ${SHARED_STYLES}

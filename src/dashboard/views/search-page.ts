@@ -8,7 +8,7 @@ export function renderSearchPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - Search</title>
+  <title>Muninn - Search</title>
   <style>
     ${SHARED_STYLES}
 

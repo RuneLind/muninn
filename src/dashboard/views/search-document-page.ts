@@ -8,7 +8,7 @@ export function renderSearchDocumentPage(collection: string, docId: string): str
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - Document</title>
+  <title>Muninn - Document</title>
   <style>
     ${SHARED_STYLES}
 
@@ -117,7 +117,7 @@ export function renderSearchDocumentPage(collection: string, docId: string): str
         }
         const doc = await res.json();
 
-        document.title = 'Jarvis - ' + (doc.id || docId).replace(/\\.md$/,'');
+        document.title = 'Muninn - ' + (doc.id || docId).replace(/\\.md$/,'');
 
         if (doc.url && /^https?:\\/\\//i.test(doc.url)) {
           document.getElementById('docUrl').innerHTML = '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px">Open web page &rarr;</a>';

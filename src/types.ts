@@ -58,14 +58,14 @@ export interface ClaudeResult {
   toolCalls?: ToolCall[];
 }
 
-export interface JarvisMessage {
+export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   timestamp: number;
   userId?: string;
 }
 
-export interface ConversationMessage extends JarvisMessage {
+export interface ConversationMessage extends ChatMessage {
   id: string;
   username?: string;
   costUsd?: number;

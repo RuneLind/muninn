@@ -9,7 +9,7 @@ export function renderResearchPage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - Research</title>
+  <title>Muninn - Research</title>
   <style>
     ${SHARED_STYLES}
     ${botSelectorStyles()}

@@ -8,7 +8,7 @@ export function renderYouTubePage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Jarvis - YouTube Summarizer</title>
+  <title>Muninn - YouTube Summarizer</title>
   <style>
     ${SHARED_STYLES}
 

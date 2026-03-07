@@ -122,7 +122,7 @@ export function renderNav(
   </script>
   <header>
     <div class="header-left">
-      <h1><span>J</span>arvis</h1>
+      <h1><span>M</span>uninn</h1>
       <nav>
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
         <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
