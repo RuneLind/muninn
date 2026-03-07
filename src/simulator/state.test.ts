@@ -175,8 +175,8 @@ describe("SimulatorState", () => {
 
     test("separates channels by bot", () => {
       const jarvisGeneral = state.findOrCreateChannel("jarvis", "#general", "123", "testuser");
-      const capraGeneral = state.findOrCreateChannel("capra", "#general", "123", "testuser");
-      expect(jarvisGeneral.id).not.toBe(capraGeneral.id);
+      const otherBotGeneral = state.findOrCreateChannel("jira-assistant", "#general", "123", "testuser");
+      expect(jarvisGeneral.id).not.toBe(otherBotGeneral.id);
     });
   });
 

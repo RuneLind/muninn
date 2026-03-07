@@ -805,7 +805,7 @@ const SIMULATOR_SCRIPT = `
   var selectedUsername = null;   // Display name
 
   // Bot selector init (synced with dashboard/traces/logs via localStorage)
-  try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
+  try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
 
   // DOM refs
   var threadList = document.getElementById('threadList');
@@ -837,7 +837,7 @@ const SIMULATOR_SCRIPT = `
 
   async function selectBot(name, autoSelectThreadId) {
     selectedBot = name;
-    try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+    try { localStorage.setItem('muninn-selected-bot', name); } catch {}
     document.querySelectorAll('.bot-pill').forEach(function(p) {
       p.classList.toggle('active', p.dataset.bot === name);
     });
@@ -879,7 +879,7 @@ const SIMULATOR_SCRIPT = `
 
     // Restore last selected user for this bot
     var storedUserId = null;
-    try { storedUserId = localStorage.getItem('javrvis-chat-user-' + botName); } catch {}
+    try { storedUserId = localStorage.getItem('muninn-chat-user-' + botName); } catch {}
 
     selector.innerHTML = merged.map(function(u) {
       return '<option value="' + escapeAttr(u.id) + '"' +
@@ -893,7 +893,7 @@ const SIMULATOR_SCRIPT = `
     selector.value = active.id;
     selectedUserId = active.id;
     selectedUsername = active.name;
-    try { localStorage.setItem('javrvis-chat-user-' + botName, active.id); } catch {}
+    try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
   }
 
 
@@ -937,7 +937,7 @@ const SIMULATOR_SCRIPT = `
     var opt = e.target.selectedOptions[0];
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
-    try { localStorage.setItem('javrvis-chat-user-' + selectedBot, userId); } catch {}
+    try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
     // Re-resolve conversation and threads for new user
     await resolveConversation();
     activeThreadId = null;
@@ -1206,7 +1206,7 @@ const SIMULATOR_SCRIPT = `
 
     // If a user is specified in the URL, pre-set it before selectBot loads users
     if (userParam) {
-      try { localStorage.setItem('javrvis-chat-user-' + botName, userParam); } catch {}
+      try { localStorage.setItem('muninn-chat-user-' + botName, userParam); } catch {}
     }
 
     await selectBot(botName, threadParam || undefined);

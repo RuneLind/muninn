@@ -14,10 +14,10 @@ Systemet består av tre uavhengige prosjekter som snakker sammen via HTTP:
 
 **Knowledge API** (documents-vector-search) er en FastAPI-server som eier all indeksering og søk. Den kjører FAISS-vektorsøk og BM25-nøkkelordsøk i parallell, kombinerer resultatene med Reciprocal Rank Fusion, og rerangerer med en cross-encoder. Mer om dette senere.
 
-**Javrvis** er AI-agenten som orkestrerer alt. Den henter transkripsjoner, sender dem til Claude for oppsummering, lagrer resultatet som strukturert markdown, og indekserer det i kunnskapsbasen. Den driver også research workbenchen — dashboardet der du kan forske på tvers av alle kildene dine.
+**Muninn** er AI-agenten som orkestrerer alt. Den henter transkripsjoner, sender dem til Claude for oppsummering, lagrer resultatet som strukturert markdown, og indekserer det i kunnskapsbasen. Den driver også research workbenchen — dashboardet der du kan forske på tvers av alle kildene dine.
 
 ```
-Chrome Extension ──▶ Javrvis (AI-agent) ──▶ Knowledge API (vektorsøk)
+Chrome Extension ──▶ Muninn (AI-agent) ──▶ Knowledge API (vektorsøk)
   "Summarize"          oppsummerer             indekserer + søker
                        analyserer               13 collections
                        streamer                  10.000+ dokumenter
@@ -27,7 +27,7 @@ Chrome Extension ──▶ Javrvis (AI-agent) ──▶ Knowledge API (vektorsø
 
 Flyten er enkel. Du er på YouTube og ser en video om, la oss si, streaming tool use i Claude. Du klikker «Summarize» i Chrome-extensionen. Bak kulissene skjer dette:
 
-Extensionen sender video-ID og tittel til javrvis. Javrvis henter transkripsjonen, sender den til Claude med en oppsummeringsprompt, og Claude returnerer en strukturert markdown-oppsummering med overskrifter, uthevede nøkkelbegreper og kategorisering. Resultatet lagres som en markdown-fil med YAML-frontmatter:
+Extensionen sender video-ID og tittel til muninn. Muninn henter transkripsjonen, sender den til Claude med en oppsummeringsprompt, og Claude returnerer en strukturert markdown-oppsummering med overskrifter, uthevede nøkkelbegreper og kategorisering. Resultatet lagres som en markdown-fil med YAML-frontmatter:
 
 ```markdown
 ---
@@ -51,7 +51,7 @@ I dag har jeg 238 oppsummeringer på tvers av 13 kategorier — fra Claude Code-
 
 Dette er den virkelig interessante delen. YouTube-oppsummeringene er nyttige alene, men verdien eksploderer når du kombinerer dem med andre kunnskapskilder.
 
-Research workbenchen er en side i javrvis-dashboardet der du limer inn en artikkel, en Jira-sak, eller en vilkårlig tekst — og lar AI forske på den på tvers av alle kildene dine.
+Research workbenchen er en side i muninn-dashboardet der du limer inn en artikkel, en Jira-sak, eller en vilkårlig tekst — og lar AI forske på den på tvers av alle kildene dine.
 
 Prosessen har tre faser, og alt streames live til nettleseren via Server-Sent Events (SSE):
 
@@ -79,7 +79,7 @@ Embedding-modellen (`multilingual-e5-base`) støtter over 100 språk. Det betyr 
 
 ## Domenekunnskap gjør søkene bedre
 
-Et subtilt men viktig designvalg: spørringsgeneratoren bruker botens persona. Javrvis er en multi-bot-plattform der hver bot har sin egen personlighet, sine egne verktøy og sine egne kunnskapskilder. Når du velger en bot i research-UIet, populeres relevante collections automatisk, og Claude bruker botens domenekunnskap til å formulere bedre søk.
+Et subtilt men viktig designvalg: spørringsgeneratoren bruker botens persona. Muninn er en multi-bot-plattform der hver bot har sin egen personlighet, sine egne verktøy og sine egne kunnskapskilder. Når du velger en bot i research-UIet, populeres relevante collections automatisk, og Claude bruker botens domenekunnskap til å formulere bedre søk.
 
 En personlig assistent-bot søker i YouTube-oppsummeringer, helsedokumenter og karrierenotater. En jobbassistent-bot søker i Confluence, Notion og Jira. Samme research-motor, helt forskjellig kontekst — og dermed forskjellige søk og forskjellige funn.
 
@@ -90,17 +90,17 @@ Systemet har i dag 13 collections med over 10 000 dokumenter og rundt 60 000 sø
 | Collection | Dokumenter | Kilde |
 |-----------|-----------|-------|
 | YouTube-oppsummeringer | 238 | Chrome ext → Claude → markdown |
-| Notion (Capra) | 8 425 | Notion API, inkrementell oppdatering |
-| Confluence (Melosys) | 289 | Confluence API |
-| Claude Code-sesjoner | 1 220 | Sesjonslogger |
-| Anthropic-docs | — | GitHub/docs |
-| Jira (Melosys) | — | Jira API |
+| Notion | 8 425 | Notion API, incremental updates |
+| Confluence | 289 | Confluence API |
+| Claude Code sessions | 1 220 | Session logs |
+| Anthropic docs | — | GitHub/docs |
+| Jira | — | Jira API |
 
 Alle collections deler én embedding-modell, noe som sparer omtrent 180 MB RAM per collection. Inkrementelle oppdateringer betyr at nye Notion-sider og Confluence-endringer plukkes opp uten full re-indeksering.
 
 ## Lite kode, mye AI
 
-Det mest overraskende med dette prosjektet er hvor lite kode som trengs. Chrome-extensionen er rundt 200 linjer JavaScript. Research-modulen i javrvis er rundt 300 linjer TypeScript. Vektorsøk-serveren er rundt 500 linjer Python.
+Det mest overraskende med dette prosjektet er hvor lite kode som trengs. Chrome-extensionen er rundt 200 linjer JavaScript. Research-modulen i muninn er rundt 300 linjer TypeScript. Vektorsøk-serveren er rundt 500 linjer Python.
 
 Claude gjør det tunge arbeidet — oppsummering, spørringsgenerering og analyse — mens koden orkestrerer flyten og håndterer data. SSE-strømming, pub/sub for live-oppdateringer, parallelle søk med `Promise.allSettled`, og en in-memory jobbstore med 1-times TTL. Enkle byggeklosser som sammen gir et kraftig verktøy.
 

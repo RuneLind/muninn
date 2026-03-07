@@ -1,7 +1,7 @@
 /**
  * Migration: Convert stored Slack mrkdwn messages to standard markdown.
  *
- * Slack bots (Capra, Melosys) were instructed to output Slack mrkdwn
+ * Slack bots were instructed to output Slack mrkdwn
  * (*bold*, ~strike~, <url|text>), which was stored as-is in the DB.
  * Now all bots output standard markdown. This migrates old messages.
  *
@@ -18,7 +18,7 @@ import postgres from "postgres";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis";
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
 const sql = postgres(DATABASE_URL, { max: 1 });
 
 export function convertSlackMrkdwnToMarkdown(text: string): string {
@@ -76,7 +76,7 @@ async function migrate() {
     SELECT id, bot_name, content
     FROM messages
     WHERE role = 'assistant'
-      AND bot_name IN ('capra', 'melosys')
+      AND bot_name IN ('jira-assistant')
       AND (
         content ~ '\\*[A-Z][^*]+\\*'
         OR content ~ '<https?://[^>]+\\|[^>]+>'

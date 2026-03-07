@@ -115,7 +115,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ---
 
-## Jarvis Project
+## Muninn Project
 
 Personal AI assistant — multi-bot Telegram platform with pluggable AI connectors (Claude CLI or Copilot SDK), a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
 
@@ -132,12 +132,12 @@ bun run dev:chat            # Chat-only (no scheduler, port 3011)
 
 ```
                     ┌─────────────────────────────────┐
-                    │        Single javrvis process    │
+                    │        Single muninn process    │
                     │                                  │
 Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
                     │    → AI connector (claude-cli)    │
                     │                                  │
-Telegram user B ───►│  Grammy Bot 2 (Capra)            │
+Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
                     │    → AI connector (copilot-sdk)   │
                     │                                  │
                     │  Shared: DB, Dashboard, Scheduler │
@@ -181,7 +181,7 @@ bots/
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.json  ← tool permissions
-├── capra/
+├── jira-assistant/
 │   ├── CLAUDE.md
 │   ├── config.json
 │   ├── .mcp.json
@@ -213,7 +213,7 @@ All fields are optional — falls back to global `.env` values:
 
 PostgreSQL + pgvector via Docker (single container).
 
-- URL: `postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis`
+- URL: `postgresql://muninn:muninn@127.0.0.1:5434/muninn`
 - Schema: `db/init.sql` (runs automatically on first `docker compose up`)
 - Start: `bun run db:up` / Stop: `bun run db:down`
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
@@ -270,7 +270,7 @@ Serena instances are defined in the bot's `config.json` under a `serena` key:
 ```json
 {
   "serena": [
-    { "name": "serena-api", "displayName": "Melosys API", "projectPath": "/path/to/project", "port": 9121 }
+    { "name": "serena-api", "displayName": "Backend API", "projectPath": "/path/to/project", "port": 9121 }
   ]
 }
 ```
@@ -285,7 +285,7 @@ The matching `.mcp.json` entry points to the instance's HTTP endpoint:
 
 ### Manual usage
 
-To start a Serena instance manually (outside javrvis):
+To start a Serena instance manually (outside muninn):
 
 ```bash
 uvx --from "git+https://github.com/oraios/serena" serena start-mcp-server \
@@ -326,7 +326,7 @@ bun run test:db           # DB integration tests
 bun run test:handlers     # Handler tests (with mocks)
 ```
 
-DB tests require the local Postgres container (`bun run db:up`) and use a separate `javrvis_test` database. Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
+DB tests require the local Postgres container (`bun run db:up`) and use a separate `muninn_test` database. Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
 
 ### Conventions
 
@@ -352,7 +352,7 @@ Uses [LogTape](https://github.com/dahlia/logtape) for structured logging. **Neve
 
 ```typescript
 import { getLog } from "../logging.ts";
-const log = getLog("subsystem", "subpath"); // → category ["javrvis", "subsystem", "subpath"]
+const log = getLog("subsystem", "subpath"); // → category ["muninn", "subsystem", "subpath"]
 ```
 
 **Levels:**

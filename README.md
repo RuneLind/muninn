@@ -1,4 +1,4 @@
-# Jarvis
+# Muninn
 
 Multi-bot Telegram platform backed by Claude CLI — each bot gets its own persona, MCP tools, and permissions, all running in a single process with shared DB, dashboard, and scheduler.
 
@@ -81,13 +81,13 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 
 ```
                     ┌─────────────────────────────────┐
-                    │        Single javrvis process    │
+                    │        Single muninn process    │
                     │                                  │
 Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
                     │    → Claude CLI (cwd: bots/jarvis)│
                     │                                  │
-Telegram user B ───►│  Grammy Bot 2 (Capra)            │
-                    │    → Claude CLI (cwd: bots/capra) │
+Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
+                    │    → Copilot SDK                  │
                     │                                  │
                     │  Shared: DB, Dashboard, Scheduler │
                     └─────────────────────────────────┘
@@ -112,8 +112,9 @@ bots/
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.local.json  ← tool permissions
-├── capra/                        ← future bot
+├── jira-assistant/                ← example team bot
 │   ├── CLAUDE.md
+│   ├── config.json
 │   ├── .mcp.json
 │   └── .claude/
 │       └── settings.local.json
@@ -240,13 +241,13 @@ docker compose --profile prod up -d
 
 This starts:
 - **postgres** — pgvector/pg17 with the schema from `db/init.sql`
-- **app** — Bun + ffmpeg + Claude CLI, running as non-root `javrvis` user
+- **app** — Bun + ffmpeg + Claude CLI, running as non-root `muninn` user
 
 ### Volume Mounts
 
 | Mount | Container Path | Description |
 |---|---|---|
-| `~/.claude` | `/home/javrvis/.claude` (read-only) | Claude CLI authentication credentials |
+| `~/.claude` | `/home/muninn/.claude` (read-only) | Claude CLI authentication credentials |
 | `./bots` | `/app/bots` (read-only) | Bot persona, MCP config, and permissions |
 
 Bot configuration is mounted (not baked in) so you can change personas and MCP tools without rebuilding the image.
@@ -256,7 +257,7 @@ Bot configuration is mounted (not baked in) so you can change personas and MCP t
 The app container reads `.env` via `env_file`, with `DATABASE_URL` overridden to point at the Postgres container:
 
 ```
-DATABASE_URL=postgresql://javrvis:javrvis@postgres:5432/javrvis
+DATABASE_URL=postgresql://muninn:muninn@postgres:5432/muninn
 ```
 
 The dashboard port maps `DASHBOARD_PORT` (default 3010) on the host to port 3000 inside the container.
@@ -300,7 +301,7 @@ Every request creates a trace — a tree of timed spans (prompt build, Claude ex
 
 ## Testing
 
-Tests require the local Postgres container running (`bun run db:up`). A separate `javrvis_test` database is used automatically.
+Tests require the local Postgres container running (`bun run db:up`). A separate `muninn_test` database is used automatically.
 
 ```bash
 bun run test              # Run all tests (341 tests across 29 files)
@@ -314,7 +315,7 @@ Tests are split into two `bun` invocations because `bun:test` runs all files in 
 
 ### Test structure
 
-- `src/test/setup-db.ts` — Shared DB setup (connects to `javrvis_test`, truncates tables between tests)
+- `src/test/setup-db.ts` — Shared DB setup (connects to `muninn_test`, truncates tables between tests)
 - `src/test/fixtures.ts` — Test data factories (`makeMessage()`, `makeMemory()`, `makeGoal()`, etc.)
 - `src/test/mock-grammy.ts` — Grammy test helpers (fake bot with API transformer, fake updates)
 - `*.test.ts` — Test files co-located with their source files
@@ -322,7 +323,7 @@ Tests are split into two `bun` invocations because `bun:test` runs all files in 
 ## Database Backup & Restore
 
 ```bash
-bun run db:backup    # Saves to backups/javrvis_backup_<timestamp>.sql
+bun run db:backup    # Saves to backups/muninn_backup_<timestamp>.sql
 bun run db:restore   # Restores from latest backup in backups/
 ```
 
@@ -333,23 +334,13 @@ Backups are full `pg_dump` exports stored in the `backups/` directory.
 The Gmail MCP server (`@gongrzhe/server-gmail-autoauth-mcp`) uses OAuth tokens that expire periodically. When you see `invalid_grant` errors, re-authenticate:
 
 ```bash
-# Jarvis (personal Gmail)
-GOOGLE_OAUTH_CREDENTIALS=/Users/rune/.gmail-mcp/gcp-oauth.keys.json \
-  npx -y @gongrzhe/server-gmail-autoauth-mcp auth
-
-# Capra (rli@capraconsulting.no) — uses HOME override for credential isolation
-HOME=/Users/rune/.gmail-mcp-capra \
+GOOGLE_OAUTH_CREDENTIALS=/path/to/gcp-oauth.keys.json \
   npx -y @gongrzhe/server-gmail-autoauth-mcp auth
 ```
 
 This opens a browser for Google OAuth login. **Requires port 3000 to be free** (used for the OAuth callback).
 
 After re-auth, restart Claude Code so the MCP server picks up the new token.
-
-| Bot | Account | Credentials path |
-|---|---|---|
-| Jarvis | Personal Gmail | `~/.gmail-mcp/credentials.json` |
-| Capra | rli@capraconsulting.no | `~/.gmail-mcp-capra/.gmail-mcp/credentials.json` |
 
 ## Security
 

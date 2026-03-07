@@ -2,11 +2,11 @@
 
 **Status:** Roadmap — no improvements implemented yet (as of 2026-02-18)
 
-Comparison of Javrvis memory system with OpenClaw's approach, with concrete improvements identified.
+Comparison of Muninn memory system with OpenClaw's approach, with concrete improvements identified.
 
-## Current State: What Javrvis Does Well
+## Current State: What Muninn Does Well
 
-| Feature | Javrvis | OpenClaw |
+| Feature | Muninn | OpenClaw |
 |---|---|---|
 | **Extraction** | Async Haiku summarization per message | No extraction — indexes raw files |
 | **Scope** | `personal` / `shared` classification | Single namespace |
@@ -14,7 +14,7 @@ Comparison of Javrvis memory system with OpenClaw's approach, with concrete impr
 | **Search** | Reciprocal Rank Fusion (RRF) | Weighted blend (0.7 vec + 0.3 keyword) |
 | **Storage** | PostgreSQL + pgvector (production-grade) | SQLite + sqlite-vec (local-only) |
 
-Javrvis's approach of *creating* memories from conversations is stronger than just chunking raw files — it distills signal from noise.
+Muninn's approach of *creating* memories from conversations is stronger than just chunking raw files — it distills signal from noise.
 
 ---
 
@@ -38,7 +38,7 @@ Javrvis's approach of *creating* memories from conversations is stronger than ju
 
 **Priority**: High — biggest capability uplift
 
-**Problem**: Javrvis only *passively* injects the top 5 memories during prompt building. The bot can't search for something specific if the initial 5 don't cover it.
+**Problem**: Muninn only *passively* injects the top 5 memories during prompt building. The bot can't search for something specific if the initial 5 don't cover it.
 
 **Inspiration**: OpenClaw gives the AI agent `memory_search` and `memory_get` tools so it can actively query its memory mid-conversation.
 
@@ -61,7 +61,7 @@ Option 1 is cleanest. The MCP server would:
 
 **Priority**: Medium — better relevance with zero additional cost
 
-**Problem**: A 6-month-old memory ranks the same as yesterday's. Neither Javrvis nor OpenClaw has this.
+**Problem**: A 6-month-old memory ranks the same as yesterday's. Neither Muninn nor OpenClaw has this.
 
 **Solution**: Add a recency factor to the RRF score in `searchMemoriesHybrid()`.
 
@@ -112,7 +112,7 @@ This gives a 10% boost to memories from the last week, decaying linearly to 0% a
 
 **Priority**: Medium — performance optimization
 
-**Problem**: Javrvis recomputes the query embedding every time, even for repeated or similar queries.
+**Problem**: Muninn recomputes the query embedding every time, even for repeated or similar queries.
 
 **Inspiration**: OpenClaw caches computed embeddings by hash with LRU pruning.
 

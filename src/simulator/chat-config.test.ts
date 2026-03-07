@@ -23,7 +23,7 @@ describe("loadChatConfig (DB-backed)", () => {
 
   test("filters by bot when botName provided", async () => {
     await addChatUser({ id: "test-chat-2", name: "Bob", bot: "jarvis" });
-    await addChatUser({ id: "test-chat-3", name: "Charlie", bot: "capra" });
+    await addChatUser({ id: "test-chat-3", name: "Charlie", bot: "jira-assistant" });
 
     const jarvisUsers = await loadChatConfig("jarvis");
     const jarvisIds = (jarvisUsers?.users ?? []).map((u) => u.id);

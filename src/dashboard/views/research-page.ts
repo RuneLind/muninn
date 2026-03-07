@@ -149,7 +149,7 @@ export function renderResearchPage(): string {
         var bots = data.bots || [];
 
         // Restore from localStorage
-        try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
+        try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
 
         var container = document.getElementById('botSelector');
         container.innerHTML = bots.map(function(b) {
@@ -172,7 +172,7 @@ export function renderResearchPage(): string {
 
     function selectBot(name) {
       selectedBot = name;
-      try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+      try { localStorage.setItem('muninn-selected-bot', name); } catch {}
       document.querySelectorAll('#botSelector .bot-pill').forEach(function(p) {
         p.classList.toggle('active', p.dataset.bot === name);
       });

@@ -23,7 +23,7 @@ Every Slack message enters through one of four paths in `index.ts`. All four cal
 
 ### 2. @mention in channel (`app_mention`)
 - Platform: `slack_channel`
-- Triggered by: `@Heidrun` in a channel message
+- Triggered by: `@BotName` in a channel message
 - `say()`: `client.chat.postMessage()` in thread
 - `setStatus()`: `client.assistant.threads.setStatus()` (thinking bubble)
 - `postToChannel`: `makePostToChannel(client, tag)` — `client` from event context
@@ -80,7 +80,7 @@ When `postToChannel` is provided to `handleMessage()`:
 ## Text Normalization
 
 Before processing, handler.ts converts Slack's internal channel references:
-- `<#C0ADMP9CYG7|heidrun-agent-testing>` → `#heidrun-agent-testing`
+- `<#C0ADMP9CYG7|bot-testing>` → `#bot-testing`
 - `<#C0ADMP9CYG7>` → `#C0ADMP9CYG7` (no name available)
 
 This matters because Claude sees `#channel-name` in the user's message and uses it in `<slack-post channel="#channel-name">`.

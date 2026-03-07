@@ -1,4 +1,4 @@
-# Javrvis Architecture Review
+# Muninn Architecture Review
 
 Full codebase review covering architecture, DB layer, AI/executor, bot handlers, background processing, dashboard, and code quality.
 

@@ -1,6 +1,6 @@
 # Voice Pipeline
 
-How Javrvis handles voice messages — speech-to-text via whisper-cli, processing through the standard message pipeline, and text-to-speech via macOS `say` with codec conversion for Telegram.
+How Muninn handles voice messages — speech-to-text via whisper-cli, processing through the standard message pipeline, and text-to-speech via macOS `say` with codec conversion for Telegram.
 
 ## Overview
 

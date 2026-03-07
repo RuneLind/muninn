@@ -1,10 +1,10 @@
 # Claude CLI Streaming & Tool Monitoring
 
-How Javrvis spawns Claude CLI in headless mode, parses the NDJSON stream, and tracks MCP tool usage with per-tool timing — all without an API key.
+How Muninn spawns Claude CLI in headless mode, parses the NDJSON stream, and tracks MCP tool usage with per-tool timing — all without an API key.
 
 ## Overview
 
-Javrvis runs Claude CLI as a subprocess in print mode (`-p`) with `--output-format stream-json`. This gives structured NDJSON output that the stream parser processes line-by-line, extracting the response text, token usage, and every MCP tool call with timing. Tool calls become child spans in the tracing system and show up as orange bars in the dashboard waterfall.
+Muninn runs Claude CLI as a subprocess in print mode (`-p`) with `--output-format stream-json`. This gives structured NDJSON output that the stream parser processes line-by-line, extracting the response text, token usage, and every MCP tool call with timing. Tool calls become child spans in the tracing system and show up as orange bars in the dashboard waterfall.
 
 ```
 User message

@@ -104,7 +104,7 @@ export async function connectToServer(
   }
 
   const client = new Client(
-    { name: "javrvis-mcp-debug", version: "1.0.0" },
+    { name: "muninn-mcp-debug", version: "1.0.0" },
     { capabilities: {} },
   );
 

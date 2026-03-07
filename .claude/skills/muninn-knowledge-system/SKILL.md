@@ -1,7 +1,7 @@
 ---
-name: javrvis-knowledge-system
+name: muninn-knowledge-system
 description: >
-  Deep knowledge of the Javrvis AI assistant's knowledge pipeline — async Haiku calls,
+  Deep knowledge of the Muninn AI assistant's knowledge pipeline — async Haiku calls,
   memory extraction, goal detection, schedule detection, prompt assembly, embeddings,
   token tracking, and the unified scheduler. Use when: (1) Understanding how the knowledge
   system works end-to-end, (2) Improving or debugging any Haiku pipeline (memory, goals, schedules),
@@ -13,7 +13,7 @@ description: >
   "how does memory work", "how does Jarvis learn", "add a new extractor".
 ---
 
-# Javrvis Knowledge System
+# Muninn Knowledge System
 
 ## Architecture Overview
 

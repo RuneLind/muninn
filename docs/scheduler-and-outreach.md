@@ -1,6 +1,6 @@
 # Scheduler & Proactive Outreach
 
-How Javrvis runs background automation — scheduled tasks, goal reminders, email/news watchers, and daily briefings — all from a single unified scheduler tick per bot.
+How Muninn runs background automation — scheduled tasks, goal reminders, email/news watchers, and daily briefings — all from a single unified scheduler tick per bot.
 
 ## Overview
 
@@ -106,7 +106,7 @@ Due: Friday, February 20, 8:00 AM
 When a goal has had no activity for 3+ days, a check-in message is sent (max 1 per tick to avoid spam). Haiku generates a supportive, non-nagging message:
 
 ```
-📋 Goal check-in: Write blog post about Javrvis
+📋 Goal check-in: Write blog post about Muninn
 How's this going?
 ```
 

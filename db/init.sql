@@ -1,4 +1,4 @@
--- Javrvis database schema
+-- Muninn database schema
 -- Consolidated from supabase/migrations/00001-00005
 
 -- Enable pgvector extension

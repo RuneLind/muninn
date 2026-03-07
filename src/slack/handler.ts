@@ -51,7 +51,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
     if (!rawText) return;
 
     // Convert Slack channel/user references to readable names
-    // Slack sends <#C0ADMP9CYG7|heidrun-agent-testing> and <@U12345|username>
+    // Slack sends <#C0ADMP9CYG7|channel-name> and <@U12345|username>
     const text = rawText
       .replace(/<#[A-Z0-9]+\|([^>]+)>/g, "#$1")
       .replace(/<#([A-Z0-9]+)>/g, "#$1");

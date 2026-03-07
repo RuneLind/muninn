@@ -1,25 +1,25 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: javrvis-postgres
+    container_name: muninn-postgres
     ports:
       - "5434:5432"
     environment:
-      POSTGRES_USER: javrvis
-      POSTGRES_PASSWORD: javrvis
-      POSTGRES_DB: javrvis
+      POSTGRES_USER: muninn
+      POSTGRES_PASSWORD: muninn
+      POSTGRES_DB: muninn
     volumes:
-      - javrvis-pgdata:/var/lib/postgresql/data
+      - muninn-pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U javrvis"]
+      test: ["CMD-SHELL", "pg_isready -U muninn"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   app:
     build: .
-    container_name: javrvis-app
+    container_name: muninn-app
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,14 +27,14 @@ services:
       - "${DASHBOARD_PORT:-3010}:3000"
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://javrvis:javrvis@postgres:5432/javrvis
+      DATABASE_URL: postgresql://muninn:muninn@postgres:5432/muninn
       DASHBOARD_PORT: "3000"  # Override .env inside container — host port mapped via ports above
     volumes:
-      - ~/.claude:/home/javrvis/.claude:ro
+      - ~/.claude:/home/muninn/.claude:ro
       - ./bots:/app/bots:ro
     restart: unless-stopped
     profiles:
       - prod
 
 volumes:
-  javrvis-pgdata:
+  muninn-pgdata:

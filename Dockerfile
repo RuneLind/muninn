@@ -6,12 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN groupadd -g 1001 javrvis && useradd -u 1001 -g javrvis -m javrvis
+RUN groupadd -g 1001 muninn && useradd -u 1001 -g muninn -m muninn
 
-# Install Claude CLI as javrvis user
-USER javrvis
+# Install Claude CLI as muninn user
+USER muninn
 RUN curl -fsSL https://claude.ai/install.sh | sh
-ENV PATH="/home/javrvis/.local/bin:$PATH"
+ENV PATH="/home/muninn/.local/bin:$PATH"
 
 # Switch back to root for dependency install (needs write access to /app)
 USER root
@@ -26,8 +26,8 @@ COPY db ./db
 COPY tsconfig.json ./
 
 # Set ownership and switch to non-root user
-RUN chown -R javrvis:javrvis /app
-USER javrvis
+RUN chown -R muninn:muninn /app
+USER muninn
 
 # bots/ is mounted as volume (not baked in)
 # so persona/MCP config can change without rebuild

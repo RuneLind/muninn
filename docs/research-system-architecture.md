@@ -1,6 +1,6 @@
 # Research & Knowledge System — Technical Documentation
 
-Technical documentation for the YouTube research and knowledge system spanning three repositories: **javrvis** (research workbench + AI orchestration), **documents-vector-search** (Knowledge API + vector indexing), and **youtube-transcripts** (transcript collection + Chrome extension).
+Technical documentation for the YouTube research and knowledge system spanning three repositories: **muninn** (research workbench + AI orchestration), **documents-vector-search** (Knowledge API + vector indexing), and **youtube-transcripts** (transcript collection + Chrome extension).
 
 ---
 
@@ -8,7 +8,7 @@ Technical documentation for the YouTube research and knowledge system spanning t
 
 ```
 ┌──────────────────────────┐      ┌─────────────────────────────────┐      ┌──────────────────────────┐
-│  youtube-transcripts      │      │  documents-vector-search         │      │  javrvis                  │
+│  youtube-transcripts      │      │  documents-vector-search         │      │  muninn                  │
 │                           │      │  (Knowledge API)                 │      │  (AI Agent + Dashboard)   │
 │  • 238 markdown summaries │      │                                  │      │                           │
 │  • 13 categories          │◀────▶│  • FastAPI on :8321              │◀────▶│  • Research workbench     │
@@ -22,7 +22,7 @@ Technical documentation for the YouTube research and knowledge system spanning t
 
 | Repo | Path | Language | Purpose |
 |------|------|----------|---------|
-| javrvis | `~/source/private/javrvis` | TypeScript (Bun) | AI agent, dashboard, research workbench |
+| muninn | `~/source/private/muninn` | TypeScript (Bun) | AI agent, dashboard, research workbench |
 | documents-vector-search | `~/source/private/documents-vector-search` | Python (FastAPI) | Vector indexing, search API, collection management |
 | youtube-transcripts | `~/source/private/youtube-transcripts` | Markdown + JS | Transcript storage, Chrome extension |
 
@@ -84,15 +84,15 @@ Manifest V3 extension targeting YouTube.com and localhost:3010.
 **Files:**
 - `manifest.json` — MV3 config
 - `content.js` — detects YouTube video pages, extracts videoId + title
-- `background.js` — service worker, submits videos to javrvis, opens dashboard
+- `background.js` — service worker, submits videos to muninn, opens dashboard
 - `popup.html/js` — "Summarize" button UI
-- `options.html/js` — settings page (javrvis URL, default `http://localhost:3010`)
+- `options.html/js` — settings page (muninn URL, default `http://localhost:3010`)
 
 **Flow:**
 ```
 content.js detects video → stores {videoId, url, title} in tabState
   → popup.js shows "Summarize" button
-  → click → background.js POST to javrvis /api/youtube/summarize
+  → click → background.js POST to muninn /api/youtube/summarize
   → response: {job_id, dashboard_url}
   → chrome.tabs.create opens dashboard to stream progress
 ```
@@ -120,7 +120,7 @@ Raw Documents (Confluence/Notion/Jira/YouTube/Files)
   ↓ Indexers (FAISS vector + BM25 keyword)
   ↓ Persister (writes to ./data/collections/)
   ↓ Knowledge API Server (HTTP search + document retrieval)
-  ↓ Consumers (javrvis research, MCP tools, Chrome extension)
+  ↓ Consumers (muninn research, MCP tools, Chrome extension)
 ```
 
 ### Knowledge API Server
@@ -140,7 +140,7 @@ Loads embedding model and FAISS indexes once at startup. Search latency <50ms af
 | `GET` | `/api/collections` | List loaded collections with stats |
 | `GET` | `/api/tags?collection=...` | Tag distribution per collection |
 | `GET` | `/api/collection/{name}/documents` | List documents in collection |
-| `GET` | `/api/graph/{node_id}` | Knowledge graph node (melosys domain) |
+| `GET` | `/api/graph/{node_id}` | Knowledge graph node |
 | `GET` | `/api/notion/page/{notion_id}` | Notion page content (API with local fallback) |
 | `POST` | `/api/collections/{name}/update` | Trigger background incremental update |
 
@@ -200,16 +200,11 @@ Query
 | Collection | Docs | Source | Update Strategy |
 |-----------|------|--------|-----------------|
 | `youtube-summaries` | 238 | Chrome ext → Claude → MD | Manual (one-click) |
-| `capra-notion` / `capra-notion-v9` | 8,425 | Notion API | Incremental |
-| `melosys-confluence-v3` | 289 | Confluence API | Incremental |
+| `notion-docs` | 8,425 | Notion API | Incremental |
+| `confluence-docs` | 289 | Confluence API | Incremental |
 | `claude-sessions` | 1,220 | Claude Code session logs | Batch |
 | `anthropic-docs` | — | GitHub/docs | Batch |
-| `melosys-jira` | — | Jira API | Incremental |
-| `humahr-handbook` | 10 | Local files | Manual |
-| `emma-hubbard-v2` | 75 | Transcriptions | Batch |
-| `melosys-vakt` | — | Local files | Manual |
-| `nav-begreper-eessi` | — | Local files | Manual |
-| `fs-notes` | — | Local files | Manual |
+| `jira-issues` | — | Jira API | Incremental |
 
 ### Collection Creation & Update
 
@@ -249,7 +244,7 @@ The HTTP client adapter (`knowledge_api_mcp_adapter.py`) is preferred — near-z
 
 ---
 
-## 3. javrvis Research Module
+## 3. muninn Research Module
 
 The research module uses a **chat-based approach** — instead of a custom agent pipeline, the Chrome extension creates a named chat thread and sends the Jira ticket as the first message. The bot responds using its full MCP tools (knowledge search, etc.) and the user can continue chatting for follow-ups.
 
@@ -331,7 +326,7 @@ knowledgeApiUrl: optionalEnv("KNOWLEDGE_API_URL", "http://localhost:8321")
 Chrome extension detects YouTube video
   → User clicks "Summarize"
   → POST /api/youtube/summarize { title, url, video_id }
-  → Javrvis fetches transcript (youtube-transcript-api)
+  → Muninn fetches transcript (youtube-transcript-api)
   → Claude summarizes + categorizes
   → Markdown saved to youtube-transcripts/{category}/{filename}.md
   → POST to Knowledge API for indexing (FAISS + BM25)
@@ -346,7 +341,7 @@ Chrome extension detects Jira ticket
   → User clicks "Analyze"
   → POST /api/research/chat { bot, title, text }
   → Response: { threadId, chatUrl }
-  → Opens /chat?bot=melosys&thread={threadId}
+  → Opens /chat?bot=jira-assistant&thread={threadId}
   → Chat page loads, WebSocket connects
   → handleDeepLink() picks up pending message → auto-sends
   → Bot responds using MCP tools (knowledge search, etc.)
@@ -369,18 +364,18 @@ User selects collection in browse mode
 
 ### Prerequisites
 
-- Knowledge API running: `cd ~/source/private/documents-vector-search && uv run knowledge_api_server.py --collections youtube-summaries capra-notion-v9 melosys-confluence-v3 --port 8321`
-- Javrvis database: `bun run db:up`
+- Knowledge API running: `cd /path/to/documents-vector-search && uv run knowledge_api_server.py --collections youtube-summaries confluence-docs jira-issues --port 8321`
+- Muninn database: `bun run db:up`
 
 ### Starting Research
 
 ```bash
 # Start Knowledge API (separate terminal)
 cd ~/source/private/documents-vector-search
-uv run knowledge_api_server.py --collections youtube-summaries capra-notion-v9 --port 8321
+uv run knowledge_api_server.py --collections youtube-summaries confluence-docs jira-issues --port 8321
 
-# Start javrvis with dashboard
-cd ~/source/private/javrvis
+# Start muninn with dashboard
+cd ~/source/private/muninn
 bun run dev
 
 # Open research page
@@ -413,6 +408,6 @@ Documented in `youtube-transcripts/KNOWLEDGE_SYSTEM_PLAN.md`:
 |-------|-------|--------|
 | 1 | Add Anthropic Docs collection (RAG over Claude Code docs) | Planned |
 | 2 | Build unified knowledge graph across collections | Planned |
-| 3 | Javrvis knowledge dashboard (search + graph visualization) | Partially done (research page) |
+| 3 | Muninn knowledge dashboard (search + graph visualization) | Partially done (research page) |
 | 4 | On-demand indexing (Jira, Confluence, web pages from Chrome) | Planned |
 | 5 | Auto-indexing pipeline (watch for new updates) | Planned |

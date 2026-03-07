@@ -232,7 +232,7 @@ export function renderLogsPage(): string {
     // --- Bot selector ---
     let selectedBot = '';
     (function initBotSelector() {
-      try { selectedBot = localStorage.getItem('javrvis-selected-bot') || ''; } catch {}
+      try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
       loadBotList();
     })();
 
@@ -251,7 +251,7 @@ export function renderLogsPage(): string {
 
     function selectBot(name) {
       selectedBot = name;
-      try { localStorage.setItem('javrvis-selected-bot', name); } catch {}
+      try { localStorage.setItem('muninn-selected-bot', name); } catch {}
       document.querySelectorAll('.bot-pill').forEach(p => {
         p.classList.toggle('active', p.dataset.bot === name);
       });

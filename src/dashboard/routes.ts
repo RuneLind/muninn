@@ -51,7 +51,7 @@ export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
 
   app.get("/api/openapi.json", (c) => c.json(spec));
-  app.get("/docs", Scalar({ url: "/api/openapi.json", pageTitle: "Javrvis API" }));
+  app.get("/docs", Scalar({ url: "/api/openapi.json", pageTitle: "Muninn API" }));
 
   app.get("/", (c) => {
     return c.html(renderDashboardPage());

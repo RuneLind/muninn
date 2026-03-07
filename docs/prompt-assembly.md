@@ -1,6 +1,6 @@
 # Prompt Assembly
 
-How Javrvis assembles the full prompt from 6 context sources in parallel — persona, memories, goals, scheduled tasks, alerts, and conversation history — while keeping latency under 1 second. External knowledge (RAG) is accessed on-demand via MCP tools, not injected into every prompt.
+How Muninn assembles the full prompt from 6 context sources in parallel — persona, memories, goals, scheduled tasks, alerts, and conversation history — while keeping latency under 1 second. External knowledge (RAG) is accessed on-demand via MCP tools, not injected into every prompt.
 
 ## Overview
 
@@ -80,7 +80,7 @@ Top 5 memories from hybrid search (RRF of full-text + vector), split by scope:
 ```
 Your memories about this user:
 - Prefers dark mode for all applications [preferences, ui]
-- Working on the Javrvis project, uses Bun [projects, tech]
+- Working on the Muninn project, uses Bun [projects, tech]
 
 Shared team knowledge:
 - Sprint planning is every Monday at 10am [process, meetings]
@@ -93,7 +93,7 @@ All non-completed goals for this user:
 ```
 User's active goals:
 - Ship authentication feature (deadline: Fri, Feb 20) [work]
-- Write blog post about Javrvis [writing, personal]
+- Write blog post about Muninn [writing, personal]
 ```
 
 ### 6. Scheduled Tasks

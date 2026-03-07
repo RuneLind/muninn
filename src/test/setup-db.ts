@@ -1,7 +1,7 @@
 import { beforeAll, afterAll, beforeEach } from "bun:test";
 import { initDb, getDb } from "../db/client.ts";
 
-const TEST_DATABASE_URL = "postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis_test";
+const TEST_DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5434/muninn_test";
 
 const ALL_TABLES = [
   "traces",

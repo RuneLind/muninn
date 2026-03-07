@@ -11,7 +11,7 @@ import postgres from "postgres";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 
-const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://javrvis:javrvis@127.0.0.1:5434/javrvis";
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5434/muninn";
 const sql = postgres(DATABASE_URL, { max: 1 });
 
 async function migrate() {

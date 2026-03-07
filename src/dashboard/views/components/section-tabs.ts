@@ -98,13 +98,13 @@ export function sectionTabsScript(): string {
       history.replaceState(null, '', tab.hash);
 
       // Save to localStorage
-      try { localStorage.setItem('javrvis-active-tab', sectionId); } catch {}
+      try { localStorage.setItem('muninn-active-tab', sectionId); } catch {}
     }
 
     function initSectionTabs() {
       // Determine initial tab: hash > localStorage > default
       const hash = location.hash.replace('#', '');
-      const saved = (() => { try { return localStorage.getItem('javrvis-active-tab'); } catch { return null; } })();
+      const saved = (() => { try { return localStorage.getItem('muninn-active-tab'); } catch { return null; } })();
       const matchedHash = SECTION_TABS.find(t => t.id === hash);
       const matchedSaved = SECTION_TABS.find(t => t.id === saved);
       const initial = matchedHash ? hash : (matchedSaved ? saved : 'overview');

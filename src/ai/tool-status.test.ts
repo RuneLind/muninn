@@ -51,7 +51,7 @@ describe("getToolStatus", () => {
   });
 
   test("includes search query detail when input provided", () => {
-    const input = '{"query": "trygdeavtaler med Sverige", "collection": "melosys"}';
+    const input = '{"query": "authentication flow", "collection": "team-docs"}';
     expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
       "Searching knowledge base: trygdeavtaler med Sverige",
     );
@@ -61,8 +61,8 @@ describe("getToolStatus", () => {
   });
 
   test("includes email search detail", () => {
-    const input = '{"query": "invoice from Capra"}';
-    expect(getToolStatus("gmail-search_emails", input)).toBe("Searching email: invoice from Capra");
+    const input = '{"query": "invoice from Acme Corp"}';
+    expect(getToolStatus("gmail-search_emails", input)).toBe("Searching email: invoice from Acme Corp");
   });
 
   test("includes document detail (title preferred over id)", () => {

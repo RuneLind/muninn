@@ -275,7 +275,7 @@ describe("Slack handler", () => {
       const handler = createSlackMessageHandler(config, botConfig);
 
       await handler({
-        text: "post to <#C0ADMP9CYG7|heidrun-agent-testing>",
+        text: "post to <#C0ADMP9CYG7|bot-testing>",
         userId: "U123",
         username: "testuser",
         say: sayMock,
@@ -284,7 +284,7 @@ describe("Slack handler", () => {
 
       // buildPrompt({ currentMessage, ... }) — extract from options object
       const userMessage = (mockBuildPrompt.mock.calls[0] as any[])[0].currentMessage;
-      expect(userMessage).toBe("post to #heidrun-agent-testing");
+      expect(userMessage).toBe("post to #bot-testing");
     });
 
     test("converts <#ID> without name to #ID", async () => {

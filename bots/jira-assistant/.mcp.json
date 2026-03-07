@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "knowledge": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/documents-vector-search",
+        "run",
+        "knowledge_api_mcp_adapter.py"
+      ],
+      "env": {
+        "KNOWLEDGE_API_URL": "http://localhost:8321",
+        "KNOWLEDGE_COLLECTIONS": "your-confluence-docs,jira-issues",
+        "KNOWLEDGE_DESCRIPTION": "Team documentation — Confluence pages, architecture guides, and Jira issues"
+      }
+    },
+    "serena-backend": {
+      "type": "http",
+      "url": "http://127.0.0.1:9121/mcp"
+    },
+    "serena-frontend": {
+      "type": "http",
+      "url": "http://127.0.0.1:9122/mcp"
+    }
+  }
+}

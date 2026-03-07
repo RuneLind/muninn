@@ -1,6 +1,6 @@
 # Multi-Bot Architecture
 
-How Javrvis runs multiple AI bots in a single process — each with its own persona, MCP tools, permissions, and conversation history — while sharing a database, dashboard, and scheduler.
+How Muninn runs multiple AI bots in a single process — each with its own persona, MCP tools, permissions, and conversation history — while sharing a database, dashboard, and scheduler.
 
 ## Overview
 
@@ -8,16 +8,16 @@ Every bot is a folder under `bots/<name>/`. The system auto-discovers bots at st
 
 ```
                     ┌─────────────────────────────────┐
-                    │        Single javrvis process    │
+                    │        Single muninn process    │
                     │                                  │
 Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
                     │    → Claude CLI (cwd: bots/jarvis)│
                     │                                  │
-Telegram user B ───►│  Grammy Bot 2 (Capra)            │
-                    │    → Claude CLI (cwd: bots/capra) │
+Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
+                    │    → Copilot SDK                  │
                     │                                  │
-Slack user C ──────►│  Slack Bot 1 (Capra)             │
-                    │    → Claude CLI (cwd: bots/capra) │
+Slack user C ──────►│  Slack Bot 1 (Jira Assistant)    │
+                    │    → Copilot SDK                  │
                     │                                  │
                     │  Shared: DB, Dashboard, Scheduler │
                     └─────────────────────────────────┘
@@ -38,7 +38,7 @@ A bot needs at least one platform token to be active. Bots without tokens still 
 
 ```typescript
 interface BotConfig {
-  name: string;                       // "jarvis", "capra"
+  name: string;                       // "jarvis", "jira-assistant"
   dir: string;                        // Absolute path to bots/<name>/
   persona: string;                    // Contents of CLAUDE.md
   telegramBotToken?: string;
@@ -64,10 +64,10 @@ bots/
 │   ├── .mcp.json                    ← MCP servers: Gmail, Calendar (optional)
 │   └── .claude/
 │       └── settings.json            ← Tool permissions (optional)
-├── capra/
+├── jira-assistant/
 │   ├── CLAUDE.md
 │   ├── config.json
-│   ├── .mcp.json                    ← MCP servers: Knowledge, Gmail (optional)
+│   ├── .mcp.json                    ← MCP servers: Knowledge, Serena (optional)
 │   └── .claude/
 │       └── settings.json
 ```

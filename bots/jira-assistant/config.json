@@ -1,0 +1,10 @@
+{
+  "model": "claude-sonnet-4-6",
+  "thinkingMaxTokens": 16000,
+  "timeoutMs": 180000,
+  "connector": "copilot-sdk",
+  "serena": [
+    { "name": "serena-backend", "displayName": "Backend API", "projectPath": "/path/to/your/backend", "port": 9121 },
+    { "name": "serena-frontend", "displayName": "Frontend App", "projectPath": "/path/to/your/frontend", "port": 9122 }
+  ]
+}

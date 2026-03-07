@@ -44,7 +44,7 @@ Add the knowledge MCP server to the bot's `.mcp.json` with `KNOWLEDGE_COLLECTION
       ],
       "env": {
         "KNOWLEDGE_API_URL": "http://localhost:8321",
-        "KNOWLEDGE_COLLECTIONS": "capra-notion-v9,humahr-handbook"
+        "KNOWLEDGE_COLLECTIONS": "confluence-docs,jira-issues"
       }
     }
   }

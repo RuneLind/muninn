@@ -296,7 +296,7 @@ describe("traces", () => {
   describe("getTraceFilterOptions", () => {
     test("returns distinct bot names and trace types", async () => {
       await saveSpan(makeRootSpan({ botName: "jarvis", name: "telegram_text" }));
-      await saveSpan(makeRootSpan({ botName: "capra", name: "slack_message" }));
+      await saveSpan(makeRootSpan({ botName: "jira-assistant", name: "slack_message" }));
       await saveSpan(makeRootSpan({ botName: "jarvis", name: "telegram_text" })); // duplicate
 
       // Child span — should not appear in types (parent_id IS NULL filter)
@@ -311,7 +311,7 @@ describe("traces", () => {
       });
 
       const options = await getTraceFilterOptions();
-      expect(options.bots.sort()).toEqual(["capra", "jarvis"]);
+      expect(options.bots.sort()).toEqual(["jarvis", "jira-assistant"]);
       expect(options.types.sort()).toEqual(["slack_message", "telegram_text"]);
     });
 

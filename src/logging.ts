@@ -4,12 +4,12 @@ import { getTimeRotatingFileSink } from "@logtape/file";
 /**
  * Create a logger for a subsystem.
  *
- *   const log = getLog("ai", "executor");  // category: ["javrvis", "ai", "executor"]
+ *   const log = getLog("ai", "executor");  // category: ["muninn", "ai", "executor"]
  *
  * Unconfigured loggers (e.g. in tests) are silent no-ops — no setupLogging() needed.
  */
 export function getLog(...path: string[]) {
-  return getLogger(["javrvis", ...path]);
+  return getLogger(["muninn", ...path]);
 }
 
 // ── ANSI colors ──────────────────────────────────────────────────────────────
@@ -39,8 +39,8 @@ function formatMessage(record: LogRecord): string {
 function consoleSink(record: LogRecord): void {
   const style = LEVEL_STYLES[record.level] ?? { label: record.level.toUpperCase().padEnd(5), color: "" };
 
-  // Category path: skip "javrvis" prefix, join rest with "/"
-  const cat = record.category.slice(1); // drop "javrvis"
+  // Category path: skip "muninn" prefix, join rest with "/"
+  const cat = record.category.slice(1); // drop "muninn"
   const catStr = cat.length > 0 ? cat.join("/") : "root";
 
   // If botName is in properties, prepend as [jarvis]
@@ -106,7 +106,7 @@ export async function setupLogging(logDir: string = "./logs"): Promise<void> {
     sinks,
     loggers: [
       {
-        category: ["javrvis"],
+        category: ["muninn"],
         sinks: Object.keys(sinks),
         lowestLevel: "info",
       },

@@ -1,6 +1,6 @@
 # Memory & Learning System
 
-How Javrvis learns from conversations — extracting memories asynchronously, storing them with vector embeddings, and retrieving them via hybrid search at prompt time.
+How Muninn learns from conversations — extracting memories asynchronously, storing them with vector embeddings, and retrieving them via hybrid search at prompt time.
 
 ## Overview
 
@@ -192,7 +192,7 @@ Memories are formatted in the system prompt with scope separation:
 ```
 Your memories about this user:
 - Prefers dark mode for all applications [preferences, ui]
-- Working on the Javrvis project, uses Bun [projects, tech]
+- Working on the Muninn project, uses Bun [projects, tech]
 
 Shared team knowledge:
 - Sprint planning is every Monday at 10am [process, meetings]

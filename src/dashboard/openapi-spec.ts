@@ -1,5 +1,5 @@
 /**
- * OpenAPI 3.1.0 specification for the Javrvis Dashboard API.
+ * OpenAPI 3.1.0 specification for the Muninn Dashboard API.
  *
  * Covers all JSON API endpoints from both dashboard routes (/) and
  * simulator routes (/chat). Excludes HTML pages, CORS OPTIONS, WebSocket,
@@ -50,9 +50,9 @@ const errorResponse = {
 export const spec = {
   openapi: "3.1.0",
   info: {
-    title: "Javrvis API",
+    title: "Muninn API",
     version: "1.0.0",
-    description: "Dashboard and Chat API for the Javrvis multi-bot AI assistant platform.",
+    description: "Dashboard and Chat API for the Muninn multi-bot AI assistant platform.",
   },
   servers: [{ url: "/", description: "Current host" }],
 

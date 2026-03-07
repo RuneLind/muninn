@@ -161,14 +161,14 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         ? (await resolveSlackUser(app, startUserId)).name
         : undefined;
       const greeting = userName
-        ? `Hei ${userName}! Jeg er Heidrun, hvordan kan jeg hjelpe deg?`
-        : `Hei! Jeg er Heidrun, hvordan kan jeg hjelpe deg?`;
+        ? `Hi ${userName}! How can I help you?`
+        : `Hi! How can I help you?`;
       await say(greeting);
       await setSuggestedPrompts({
         prompts: [
-          { title: "Hva kan du hjelpe meg med?", message: "Hva kan du hjelpe meg med?" },
-          { title: "Gjør en analyse av anbud, i forhold til hvilken kompentanse Capra har", message: "Gjør en analyse av anbud, i forhold til hvilken kompentanse Capra har" },
-          { title: "Hjelp meg å skrive et nytt anbud", message: "Hjelp meg å skrive et nytt anbud" }
+          { title: "What can you help me with?", message: "What can you help me with?" },
+          { title: "Search for recent Jira issues about authentication", message: "Search for recent Jira issues about authentication" },
+          { title: "Summarize the project architecture", message: "Summarize the project architecture" }
         ],
       });
     },
@@ -230,7 +230,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
       ? await fetchThreadMessages(client, event.channel, event.thread_ts)
       : await fetchChannelMessages(client, event.channel);
 
-    // Resolve Javrvis thread for conversation isolation
+    // Resolve Muninn thread for conversation isolation
     const threadId = await getOrCreateSlackThread(userId, botConfig.name, event.channel, threadTs);
 
     // Show native Slack thinking indicator (same as Assistant DM experience)
@@ -303,8 +303,8 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
 
       log.info("Thread follow-up from {username} ({userId}) in {channel}: \"{preview}\"", { botName: bn, username: userInfo.name, userId, channel: channelName, preview: cleanText.slice(0, 80) + (cleanText.length > 80 ? "..." : "") });
 
-      // Resolve Javrvis thread for conversation isolation (reuses same thread as the @mention)
-      const javrvisThreadId = await getOrCreateSlackThread(userId, botConfig.name, channel, threadTs);
+      // Resolve Muninn thread for conversation isolation (reuses same thread as the @mention)
+      const muninnThreadId = await getOrCreateSlackThread(userId, botConfig.name, channel, threadTs);
 
       // Show native Slack thinking indicator
       try {
@@ -340,7 +340,7 @@ export async function createSlackApp(config: Config, botConfig: BotConfig): Prom
         channelContext: channelName,
         recentChannelMessages,
         platform: "slack_channel",
-        threadId: javrvisThreadId,
+        threadId: muninnThreadId,
       });
 
       return;

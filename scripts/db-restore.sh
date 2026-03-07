@@ -1,9 +1,9 @@
 #!/bin/bash
-# Restore Javrvis PostgreSQL database from backup
+# Restore Muninn PostgreSQL database from backup
 set -euo pipefail
 
 BACKUP_DIR="$(dirname "$0")/../backups"
-CONTAINER="javrvis-postgres"
+CONTAINER="muninn-postgres"
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
   echo "Error: Container '${CONTAINER}' is not running. Run 'bun run db:up' first."
@@ -13,10 +13,10 @@ fi
 # If no argument, show available backups and use the latest
 if [ -z "${1:-}" ]; then
   echo "Available backups:"
-  ls -1t "$BACKUP_DIR"/javrvis_backup_*.sql 2>/dev/null | while read -r f; do
+  ls -1t "$BACKUP_DIR"/muninn_backup_*.sql 2>/dev/null | while read -r f; do
     echo "  $(basename "$f")  ($(wc -c < "$f" | tr -d ' ') bytes)"
   done
-  FILEPATH=$(ls -1t "$BACKUP_DIR"/javrvis_backup_*.sql 2>/dev/null | head -1)
+  FILEPATH=$(ls -1t "$BACKUP_DIR"/muninn_backup_*.sql 2>/dev/null | head -1)
   if [ -z "$FILEPATH" ]; then
     echo "No backups found in backups/"
     exit 1
@@ -40,7 +40,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 echo "Truncating tables..."
-docker exec -i "$CONTAINER" psql -U javrvis javrvis -c "
+docker exec -i "$CONTAINER" psql -U muninn muninn -c "
   DO \$\$
   DECLARE r RECORD;
   BEGIN
@@ -51,6 +51,6 @@ docker exec -i "$CONTAINER" psql -U javrvis javrvis -c "
 "
 
 echo "Restoring from $(basename "$FILEPATH")..."
-docker exec -i "$CONTAINER" psql -U javrvis javrvis < "$FILEPATH"
+docker exec -i "$CONTAINER" psql -U muninn muninn < "$FILEPATH"
 
 echo "Restore complete."

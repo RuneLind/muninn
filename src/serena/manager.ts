@@ -73,7 +73,7 @@ class SerenaManager {
     try {
       const port = instance.config.port;
 
-      // Kill any stale process left on this port from a previous javrvis run
+      // Kill any stale process left on this port from a previous muninn run
       await this.killStaleProcess(port);
 
       // Spawn Serena with native streamable-http transport

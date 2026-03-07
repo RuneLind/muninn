@@ -5,14 +5,14 @@
       "command": "uv",
       "args": [
         "--directory",
-        "/Users/rune/source/private/documents-vector-search",
+        "/path/to/documents-vector-search",
         "run",
         "knowledge_api_mcp_adapter.py"
       ],
       "env": {
         "KNOWLEDGE_API_URL": "http://localhost:8321",
         "KNOWLEDGE_COLLECTIONS": "youtube-summaries",
-        "KNOWLEDGE_DESCRIPTION": "youtube summaries of rune's tagged videos"
+        "KNOWLEDGE_DESCRIPTION": "YouTube video summaries and notes"
       }
     },
     "gmail": {
@@ -23,7 +23,7 @@
         "@gongrzhe/server-gmail-autoauth-mcp"
       ],
       "env": {
-        "GOOGLE_OAUTH_CREDENTIALS": "/Users/rune/.gmail-mcp/gcp-oauth.keys.json"
+        "GOOGLE_OAUTH_CREDENTIALS": "/path/to/gcp-oauth.keys.json"
       }
     },
     "google-calendar": {
@@ -34,7 +34,7 @@
         "@cocal/google-calendar-mcp"
       ],
       "env": {
-        "GOOGLE_OAUTH_CREDENTIALS": "/Users/rune/.gmail-mcp/gcp-oauth.keys.json"
+        "GOOGLE_OAUTH_CREDENTIALS": "/path/to/gcp-oauth.keys.json"
       }
     }
   }
