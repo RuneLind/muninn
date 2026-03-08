@@ -172,6 +172,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Tracing | `src/tracing/` | Request tracing with span hierarchy, tool call child spans |
 | Dashboard | `src/dashboard/` | Hono server with SSE activity feed, traces waterfall + REST APIs |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
+| Extensions | `extensions/` | Chrome extensions (Jira research, YouTube summarizer) — each subfolder is a standalone extension |
 
 ### Bot Folder Structure
 

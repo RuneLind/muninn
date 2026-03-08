@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     showReloadMessage();
   }
 
-  $('#btn-index').addEventListener('click', handleAnalyze);
+  $('#btn-index').addEventListener('click', () => handleAnalyze());
   $('#open-options').addEventListener('click', (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
@@ -108,7 +108,14 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   const dialog = document.createElement('div');
   dialog.id = 'thread-exists';
   dialog.style.cssText = 'margin-top:8px;padding:8px 12px;background:#fef3c7;border-radius:6px;';
-  dialog.innerHTML = `<div style="font-size:12px;margin-bottom:6px;">Tråd <b>${threadName}</b> finnes allerede.</div>`;
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:12px;margin-bottom:6px;';
+  label.textContent = 'Tråd ';
+  const bold = document.createElement('b');
+  bold.textContent = threadName;
+  label.appendChild(bold);
+  label.appendChild(document.createTextNode(' finnes allerede.'));
+  dialog.appendChild(label);
 
   const btnRow = document.createElement('div');
   btnRow.style.cssText = 'display:flex;gap:6px;';
@@ -150,7 +157,7 @@ async function handleAnalyze(overrideUserId, forceNew) {
       } catch (e) { /* use cached */ }
     }
 
-    const settings = await chrome.storage.sync.get({ javrvisUrl: 'http://localhost:3010', userId: '' });
+    const settings = await chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '' });
     const title = issueData.issueKey;
     const text = formatIssueAsText(issueData);
 
@@ -160,7 +167,7 @@ async function handleAnalyze(overrideUserId, forceNew) {
     if (userId) payload.userId = userId;
     if (forceNew) payload.forceNew = true;
 
-    const response = await fetch(`${settings.javrvisUrl}/api/research/chat`, {
+    const response = await fetch(`${settings.muninnUrl}/api/research/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -187,7 +194,7 @@ async function handleAnalyze(overrideUserId, forceNew) {
         result.existingThreadName,
         // Reuse: open the existing thread directly
         () => {
-          const chatUrl = `${settings.javrvisUrl}/chat?bot=${encodeURIComponent(result.botName)}&thread=${encodeURIComponent(result.existingThreadId)}&user=${encodeURIComponent(resolvedUserId)}`;
+          const chatUrl = `${settings.muninnUrl}/chat?bot=${encodeURIComponent(result.botName)}&thread=${encodeURIComponent(result.existingThreadId)}&user=${encodeURIComponent(resolvedUserId)}`;
           chrome.tabs.create({ url: chatUrl });
           window.close();
         },
@@ -204,7 +211,7 @@ async function handleAnalyze(overrideUserId, forceNew) {
     }
 
     // Open chat page
-    chrome.tabs.create({ url: `${settings.javrvisUrl}${result.chatUrl}` });
+    chrome.tabs.create({ url: `${settings.muninnUrl}${result.chatUrl}` });
     window.close();
   } catch (err) {
     status.className = 'status-msg error';

@@ -5,8 +5,7 @@
   "description": "Send Jira-oppgaver til kunnskapsbasen for analyse og søk",
   "permissions": [
     "storage",
-    "activeTab",
-    "scripting"
+    "activeTab"
   ],
   "host_permissions": [
     "https://jira.adeo.no/*",

@@ -3,11 +3,8 @@
  * Extracts full issue content from DOM — no Jira API needed since user is already authenticated.
  */
 
-let currentIssueKey = null;
-
 const issueKey = getIssueKey();
 if (issueKey) {
-  currentIssueKey = issueKey;
   notifyIssuePage(issueKey);
 }
 

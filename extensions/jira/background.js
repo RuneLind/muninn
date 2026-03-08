@@ -1,21 +1,10 @@
 /**
  * Background service worker.
- * Caches Jira issue page state per tab for the popup to query.
+ * Listens for messages from content script to keep the message port open.
  */
 
-const tabState = {};
-
-chrome.runtime.onMessage.addListener((message, sender) => {
-  const tabId = sender.tab?.id;
-
-  if (message.type === 'JIRA_ISSUE_PAGE' && tabId) {
-    tabState[tabId] = message;
-  }
-
-  // No async response needed — must not leave port hanging
+chrome.runtime.onMessage.addListener(() => {
+  // Content script sends JIRA_ISSUE_PAGE on navigation.
+  // No response needed — just prevent "message port closed" warnings.
   return false;
-});
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  delete tabState[tabId];
 });
