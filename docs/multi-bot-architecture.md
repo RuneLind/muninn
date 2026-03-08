@@ -38,7 +38,7 @@ A bot needs at least one platform token to be active. Bots without tokens still 
 
 ```typescript
 interface BotConfig {
-  name: string;                       // "jarvis", "mybot"
+  name: string;                       // "jarvis", "jira-assistant"
   dir: string;                        // Absolute path to bots/<name>/
   persona: string;                    // Contents of CLAUDE.md
   telegramBotToken?: string;
