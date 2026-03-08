@@ -50,7 +50,7 @@ When clicked on a Jira page:
 
 ### Background (`background.js`)
 
-Caches issue data per tab so the popup can retrieve it without re-querying the DOM.
+Minimal service worker that listens for content script messages to prevent "message port closed" warnings. The popup queries the content script directly via `sendToTab()`.
 
 ## API
 
