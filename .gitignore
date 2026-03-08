@@ -36,8 +36,9 @@ models/
 # Database backups
 backups/
 
-# Bot-level env files
-bots/*/.env
+# Private bot folders (keep jarvis/ as example)
+bots/*
+!bots/jarvis/
 
 # Generated research reports/workplans
 bots/*/reports/
