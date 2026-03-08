@@ -18,6 +18,8 @@ import { runWatchers } from "../watchers/runner.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
+import { saveMessage } from "../db/messages.ts";
+import { getActiveThreadId } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler");
@@ -162,6 +164,11 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
       agentStatus.set("sending_telegram", task.title);
       agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
+      const threadId = await getActiveThreadId(task.userId, tag);
+      await saveMessage({
+        userId: task.userId, botName: tag, role: "assistant", content: message,
+        source: `task:${task.taskType}`, platform: "telegram", threadId: threadId ?? undefined,
+      });
       await updateTaskLastRun(task);
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
@@ -256,6 +263,11 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      const threadId = await getActiveThreadId(goal.userId, tag);
+      await saveMessage({
+        userId: goal.userId, botName: tag, role: "assistant", content: message,
+        source: "goal:reminder", platform: "telegram", threadId: threadId ?? undefined,
+      });
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       await updateGoalReminderSentAt(goal.id);
@@ -284,6 +296,11 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");
       await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      const ciThreadId = await getActiveThreadId(goal.userId, tag);
+      await saveMessage({
+        userId: goal.userId, botName: tag, role: "assistant", content: message,
+        source: "goal:checkin", platform: "telegram", threadId: ciThreadId ?? undefined,
+      });
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
       await updateGoalCheckedAt(goal.id);

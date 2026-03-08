@@ -8,6 +8,7 @@ import { checkNews } from "./news.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
+import { getActiveThreadId } from "../db/threads.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
@@ -110,13 +111,17 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         agentStatus.set("sending_telegram", watcher.name);
         await api.sendMessage(watcher.userId, message, { parse_mode: "HTML" });
 
-        // Persist alert in messages so Claude can reference it in conversation
+        // Persist alert in messages so Claude can reference it in conversation.
+        // Save to the user's active thread so the alert is visible in context.
+        const threadId = await getActiveThreadId(watcher.userId, tag);
         await saveMessage({
           userId: watcher.userId,
           botName: tag,
           role: "assistant",
           content: message,
           source: `watcher:${watcher.type}`,
+          platform: "telegram",
+          threadId: threadId ?? undefined,
         });
 
         activityLog.push(
