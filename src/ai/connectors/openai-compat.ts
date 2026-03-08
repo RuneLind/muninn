@@ -85,6 +85,13 @@ export async function executePrompt(
   let outputTokens = 0;
   let reportedModel = model;
 
+  // Track tool calls the model tries to make (we can't execute them, but capture the output)
+  const pendingToolCalls = new Map<
+    number,
+    { name: string; arguments: string }
+  >();
+  let hasToolCalls = false;
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -116,9 +123,39 @@ export async function executePrompt(
           }
 
           const delta = chunk.choices?.[0]?.delta;
+
+          // Regular text content
           if (delta?.content) {
             resultText += delta.content;
             onProgress?.({ type: "text_delta", text: delta.content });
+          }
+
+          // Qwen3 thinking/reasoning tokens (logged but not included in response)
+          if (delta?.reasoning_content) {
+            log.debug("Thinking: {text}", {
+              botName: botConfig.name,
+              text: delta.reasoning_content.slice(0, 200),
+            });
+          }
+
+          // Tool calls — model wants to call functions but we can't execute them.
+          // Capture the generated text so the response isn't empty.
+          if (delta?.tool_calls) {
+            hasToolCalls = true;
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index ?? 0;
+              if (tc.function?.name) {
+                pendingToolCalls.set(idx, {
+                  name: tc.function.name,
+                  arguments: tc.function.arguments ?? "",
+                });
+              } else if (tc.function?.arguments) {
+                const existing = pendingToolCalls.get(idx);
+                if (existing) {
+                  existing.arguments += tc.function.arguments;
+                }
+              }
+            }
           }
 
           if (chunk.usage) {
@@ -131,6 +168,16 @@ export async function executePrompt(
   } finally {
     reader.releaseLock();
     clearTimeout(timeoutTimer);
+  }
+
+  // If the model generated tool calls instead of text, extract the content
+  // so the response isn't empty
+  if (hasToolCalls && !resultText.trim()) {
+    log.warn(
+      "Model generated {count} tool call(s) instead of text — extracting content",
+      { botName: botConfig.name, count: pendingToolCalls.size },
+    );
+    resultText = extractToolCallText(pendingToolCalls);
   }
 
   const wallClockMs = performance.now() - wallStart;
@@ -157,4 +204,36 @@ export async function executePrompt(
     inputTokens,
     outputTokens,
   };
+}
+
+/**
+ * When the model generates tool_calls instead of text content,
+ * extract the arguments as readable text so the response isn't empty.
+ * Many local models will generate tool calls even without explicit tool definitions.
+ */
+function extractToolCallText(
+  toolCalls: Map<number, { name: string; arguments: string }>,
+): string {
+  const parts: string[] = [];
+  for (const [, tc] of toolCalls) {
+    // Try to extract meaningful text from the arguments JSON
+    try {
+      const args = JSON.parse(tc.arguments);
+      // Common patterns: { content: "..." }, { text: "..." }, { message: "..." }
+      const text = args.content ?? args.text ?? args.message ?? args.response;
+      if (typeof text === "string") {
+        parts.push(text);
+        continue;
+      }
+    } catch {
+      // Not valid JSON — use raw arguments if they look like text
+      if (tc.arguments && !tc.arguments.startsWith("{")) {
+        parts.push(tc.arguments);
+        continue;
+      }
+    }
+    // Fallback: show function name + args for debugging
+    parts.push(`[tool_call: ${tc.name}(${tc.arguments})]`);
+  }
+  return parts.join("\n\n");
 }
