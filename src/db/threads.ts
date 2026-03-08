@@ -68,6 +68,17 @@ export async function getActiveThreadId(userId: string, botName: string): Promis
   return ensureDefaultThread(userId, botName);
 }
 
+/** Check if a thread with the given name exists for a user+bot. */
+export async function findThreadByName(userId: string, botName: string, name: string): Promise<Thread | null> {
+  const sql = getDb();
+  const normalized = name.toLowerCase().trim();
+  const [row] = await sql`
+    SELECT * FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized}
+  `;
+  return row ? rowToThread(row) : null;
+}
+
 /** Create a new thread without deactivating others. For web UI thread creation. */
 export async function createThread(userId: string, botName: string, name: string): Promise<Thread> {
   const sql = getDb();
