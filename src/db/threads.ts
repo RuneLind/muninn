@@ -144,9 +144,14 @@ export async function getThreadMessageCount(threadId: string): Promise<number> {
   return row?.cnt ?? 0;
 }
 
-/** List all threads for a user+bot, with message counts and last-message activity time. */
-export async function listThreads(userId: string, botName: string): Promise<Thread[]> {
+/** List all threads for a user+bot, with message counts and last-message activity time.
+ *  When excludePlatform is specified, messages from that platform are excluded from
+ *  activity/count calculations (e.g. exclude 'telegram' to sort by non-Telegram activity). */
+export async function listThreads(userId: string, botName: string, excludePlatform?: string): Promise<Thread[]> {
   const sql = getDb();
+  const platformFilter = excludePlatform
+    ? sql`AND (platform IS NULL OR platform != ${excludePlatform})`
+    : sql``;
   const rows = await sql`
     SELECT t.*,
       COALESCE(m.cnt, 0) AS message_count,
@@ -162,6 +167,7 @@ export async function listThreads(userId: string, botName: string): Promise<Thre
         MAX(created_at) AS last_activity
       FROM messages
       WHERE user_id = ${userId} AND bot_name = ${botName}
+        ${platformFilter}
       GROUP BY tid
     ) m ON m.tid = t.id
     WHERE t.user_id = ${userId} AND t.bot_name = ${botName}
