@@ -3,27 +3,27 @@ import { resolve, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { simulatorState, type ConversationType } from "./state.ts";
-import { processSimulatorMessage } from "./processor.ts";
-import { renderSimulatorPage } from "./views/page.ts";
+import { chatState, type ConversationType } from "./state.ts";
+import { processChatMessage } from "./processor.ts";
+import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { getLog } from "../logging.ts";
 
-const log = getLog("simulator");
+const log = getLog("chat");
 
 /**
- * Creates the simulator Hono sub-router.
+ * Creates the chat Hono sub-router.
  * Mounted at /chat on the main dashboard server.
  */
-export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): Hono {
+export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono {
   const app = new Hono();
 
-  // Serve the simulator UI page
+  // Serve the chat UI page
   app.get("/", (c) => {
-    return c.html(renderSimulatorPage());
+    return c.html(renderChatPage());
   });
 
   // Knowledge viewable collections config for index document links
@@ -70,7 +70,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       return c.json({ error: "channelName is required for slack_channel type" }, 400);
     }
 
-    const conversation = simulatorState.createConversation({
+    const conversation = chatState.createConversation({
       type: body.type,
       botName: body.botName,
       userId: body.userId ?? "sim-user-1",
@@ -83,7 +83,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
 
   // List all conversations
   app.get("/conversations", (c) => {
-    const conversations = simulatorState.getConversations().map((conv) => ({
+    const conversations = chatState.getConversations().map((conv) => ({
       id: conv.id,
       type: conv.type,
       botName: conv.botName,
@@ -99,7 +99,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Get a specific conversation with messages
   app.get("/conversations/:id", (c) => {
     const id = c.req.param("id");
-    const conversation = simulatorState.getConversation(id);
+    const conversation = chatState.getConversation(id);
     if (!conversation) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -109,7 +109,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Delete a specific conversation
   app.delete("/conversations/:id", (c) => {
     const id = c.req.param("id");
-    const deleted = simulatorState.deleteConversation(id);
+    const deleted = chatState.deleteConversation(id);
     if (!deleted) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -164,7 +164,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Get messages for a conversation, optionally filtered by thread
   app.get("/conversations/:id/messages", async (c) => {
     const id = c.req.param("id");
-    const conversation = simulatorState.getConversation(id);
+    const conversation = chatState.getConversation(id);
     if (!conversation) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -203,7 +203,7 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
   // Send a message in a conversation (triggers Claude processing)
   app.post("/conversations/:id/messages", async (c) => {
     const id = c.req.param("id");
-    const conversation = simulatorState.getConversation(id);
+    const conversation = chatState.getConversation(id);
     if (!conversation) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -223,16 +223,16 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
       : undefined;
 
     // Process asynchronously — response comes via WebSocket
-    processSimulatorMessage(id, body.text, bot, config, body.threadId, connectorOverride).catch((err) => {
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
-      simulatorState.addMessage(id, {
+      chatState.addMessage(id, {
         id: crypto.randomUUID(),
         timestamp: Date.now(),
         sender: "bot",
         text: `Error: ${err instanceof Error ? err.message : String(err)}`,
       });
-      simulatorState.setStatus(id, "");
+      chatState.setStatus(id, "");
     });
 
     return c.json({ status: "processing" }, 202);

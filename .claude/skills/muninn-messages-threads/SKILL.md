@@ -1,5 +1,5 @@
 ---
-description: "Conventions for message storage, platform formatting, thread management, and outbound message persistence in Muninn. Use when: (1) Saving messages to the database from any code path (watchers, scheduler, handlers), (2) Formatting messages for display on Telegram, Slack, or web, (3) Working with thread ordering or the listThreads query, (4) Adding new outbound message sources (watchers, scheduled tasks, alerts), (5) Modifying the web chat simulator (resolveConversation, message loading, rendering), (6) Writing Haiku prompts that generate user-facing text, (7) Debugging why messages look wrong on a specific platform, (8) Debugging why thread ordering puts the wrong thread on top, (9) Working with the Jira Chrome extension research thread flow (user resolution, thread collision). Triggers: 'formatting', 'thread ordering', 'saveMessage', 'formatTelegramHtml', 'formatWebHtml', 'watcher message', 'scheduler message', 'web chat', 'platform format', 'markdown storage', 'thread activity', 'research chat', 'jira plugin', 'chrome extension', 'findThreadByName', 'forceNew'."
+description: "Conventions for message storage, platform formatting, thread management, and outbound message persistence in Muninn. Use when: (1) Saving messages to the database from any code path (watchers, scheduler, handlers), (2) Formatting messages for display on Telegram, Slack, or web, (3) Working with thread ordering or the listThreads query, (4) Adding new outbound message sources (watchers, scheduled tasks, alerts), (5) Modifying the web chat (resolveConversation, message loading, rendering), (6) Writing Haiku prompts that generate user-facing text, (7) Debugging why messages look wrong on a specific platform, (8) Debugging why thread ordering puts the wrong thread on top, (9) Working with the Jira Chrome extension research thread flow (user resolution, thread collision). Triggers: 'formatting', 'thread ordering', 'saveMessage', 'formatTelegramHtml', 'formatWebHtml', 'watcher message', 'scheduler message', 'web chat', 'platform format', 'markdown storage', 'thread activity', 'research chat', 'jira plugin', 'chrome extension', 'findThreadByName', 'forceNew'."
 ---
 
 # Muninn Messages & Threads
@@ -106,13 +106,13 @@ If `threadId` is omitted, the message gets `NULL` in the DB. It won't appear in 
 - `src/scheduler/runner.ts` — scheduled tasks, goal reminders, goal check-ins
 - `src/core/message-processor.ts` — main chat messages (already correct)
 
-## 3. Web Chat Simulator
+## 3. Web Chat
 
 The web chat at `/chat` has specific conventions to render messages from all platforms correctly.
 
 ### resolveConversation must match type === 'web'
 
-In `src/simulator/views/page.ts`, the `resolveConversation()` function finds or creates a conversation for the selected user+bot. It must filter by `type === 'web'`:
+In `src/chat/views/page.ts`, the `resolveConversation()` function finds or creates a conversation for the selected user+bot. It must filter by `type === 'web'`:
 
 ```javascript
 // Correct — only matches web conversations
@@ -128,8 +128,8 @@ Why: `hydrateFromDb()` creates conversations for each `(userId, botName, platfor
 
 When loading persisted messages from the DB:
 
-1. **Server** (`src/simulator/routes.ts`): `formatWebHtml(m.content)` is applied to assistant messages when `isWeb === true`
-2. **Client** (`src/simulator/views/page.ts`): `sanitizeHtml(msg.text, isWeb)` strips disallowed tags
+1. **Server** (`src/chat/routes.ts`): `formatWebHtml(m.content)` is applied to assistant messages when `isWeb === true`
+2. **Client** (`src/chat/views/page.ts`): `sanitizeHtml(msg.text, isWeb)` strips disallowed tags
 
 The `sanitizeHtml` function uses two tag whitelists:
 - `_tgTags`: `b, strong, i, em, u, s, del, code, pre, a, br, span`
@@ -172,8 +172,8 @@ This prevents the old bug where `createThread`'s `ON CONFLICT` upsert silently r
 |---|---|
 | `src/dashboard/routes.ts` | `/api/research/chat` handler — user resolution, thread collision, pending message |
 | `src/db/threads.ts` | `findThreadByName()`, `createThread()` |
-| `src/simulator/pending-messages.ts` | In-memory store bridging POST → chat page (5-min TTL) |
-| `src/simulator/views/page.ts` | `handleDeepLink()` — consumes pending message and auto-sends |
+| `src/chat/pending-messages.ts` | In-memory store bridging POST → chat page (5-min TTL) |
+| `src/chat/views/page.ts` | `handleDeepLink()` — consumes pending message and auto-sends |
 
 ## Quick Checklist
 

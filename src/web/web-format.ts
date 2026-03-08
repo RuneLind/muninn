@@ -3,7 +3,7 @@
  * Similar approach to formatTelegramHtml (extract code blocks, convert, restore)
  * but supports the full range of HTML elements the browser can render.
  *
- * NOTE: A client-side JS port exists in src/simulator/views/page.ts (formatWebHtml)
+ * NOTE: A client-side JS port exists in src/chat/views/page.ts (formatWebHtml)
  * for streaming rendering — keep both in sync when modifying.
  */
 export function formatWebHtml(text: string): string {

@@ -14,9 +14,9 @@ import { renderYouTubePage } from "./views/youtube-page.ts";
 import { renderResearchPage } from "./views/research-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../youtube/state.ts";
 import { summarizeVideo } from "../youtube/summarizer.ts";
-import { simulatorState } from "../simulator/state.ts";
-import { loadChatConfig, addChatUser } from "../simulator/chat-config.ts";
-import { setPendingMessage } from "../simulator/pending-messages.ts";
+import { chatState } from "../chat/state.ts";
+import { loadChatConfig, addChatUser } from "../chat/chat-config.ts";
+import { setPendingMessage } from "../chat/pending-messages.ts";
 import { renderLogsPage } from "./views/logs-page.ts";
 import { renderMcpDebugPage } from "./views/mcp-debug-page.ts";
 import { renderSerenaPage } from "./views/serena-page.ts";
@@ -732,12 +732,12 @@ export function createDashboardRoutes(config: Config): Hono {
         : title + suffix;
     }
 
-    // Find or create conversation in simulator state
-    let conversation = simulatorState.getConversations().find(
+    // Find or create conversation in chat state
+    let conversation = chatState.getConversations().find(
       (conv) => conv.userId === chatUser.id && conv.botName === botConfig.name && conv.type === "web",
     );
     if (!conversation) {
-      conversation = simulatorState.createConversation({
+      conversation = chatState.createConversation({
         type: "web",
         botName: botConfig.name,
         userId: chatUser.id,

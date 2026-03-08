@@ -16,17 +16,17 @@ bun run dev:chat        # Chat-focused — scheduler off, port 3011
 
 ## State Management
 
-Conversations are managed in-memory by `SimulatorState`:
+Conversations are managed in-memory by `ChatState`:
 
 ```typescript
-class SimulatorState {
-  private conversations = new Map<string, SimConversation>();
+class ChatState {
+  private conversations = new Map<string, ChatConversation>();
   private subscribers = new Set<EventSubscriber>();
 
-  createConversation(params): SimConversation;
+  createConversation(params): ChatConversation;
   addMessage(conversationId, message): void;
   setStatus(conversationId, status): void;
-  findOrCreateChannel(botName, channel, userId, username): SimConversation;
+  findOrCreateChannel(botName, channel, userId, username): ChatConversation;
 }
 ```
 
@@ -50,11 +50,11 @@ Chat messages go through the exact same `processMessage()` pipeline as real plat
 ```typescript
 // Instead of Telegram/Slack API calls:
 const say = async (message: string) => {
-  simulatorState.addMessage(conversationId, { sender: "bot", text: message });
+  chatState.addMessage(conversationId, { sender: "bot", text: message });
 };
 
 const setStatus = async (status: string) => {
-  simulatorState.setStatus(conversationId, status);
+  chatState.setStatus(conversationId, status);
 };
 ```
 
@@ -70,10 +70,10 @@ This means chat conversations get:
 The browser UI connects via WebSocket for real-time updates:
 
 ```typescript
-type SimEvent =
-  | { type: "message"; conversationId: string; message: SimMessage }
+type ChatEvent =
+  | { type: "message"; conversationId: string; message: ChatMessage }
   | { type: "status"; conversationId: string; status: string }
-  | { type: "conversation_created"; conversation: SimConversation };
+  | { type: "conversation_created"; conversation: ChatConversation };
 ```
 
 When Claude is thinking, status events update the UI in real-time ("Building prompt...", "Thinking...", "Sending...").
@@ -96,10 +96,10 @@ Slack `<slack-post channel="#name">` directives work in the chat UI. When Claude
 
 | File | Purpose |
 |---|---|
-| `src/simulator/index.ts` | Module exports |
-| `src/simulator/state.ts` | `SimulatorState` — in-memory conversations + pub/sub |
-| `src/simulator/processor.ts` | Bridges simulator state to `processMessage()` |
-| `src/simulator/routes.ts` | Hono REST API routes |
-| `src/simulator/ws.ts` | WebSocket handler for real-time updates |
-| `src/simulator/views/` | Browser UI HTML |
+| `src/chat/index.ts` | Module exports |
+| `src/chat/state.ts` | `ChatState` — in-memory conversations + pub/sub |
+| `src/chat/processor.ts` | Bridges chat state to `processMessage()` |
+| `src/chat/routes.ts` | Hono REST API routes |
+| `src/chat/ws.ts` | WebSocket handler for real-time updates |
+| `src/chat/views/` | Browser UI HTML |
 | `src/bots/config.ts` | `discoverAllBots()` — token-free discovery |

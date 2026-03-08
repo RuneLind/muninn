@@ -47,7 +47,7 @@ await activityLog.loadFromDb();
 
 // Migrate chat.config.json to DB (one-time, best-effort)
 try {
-  const { migrateChatConfigFile } = await import("./simulator/chat-config.ts");
+  const { migrateChatConfigFile } = await import("./chat/chat-config.ts");
   const migrated = await migrateChatConfigFile();
   if (migrated > 0) {
     log.info("Migrated {count} users from chat.config.json to DB", { count: migrated });
@@ -58,8 +58,8 @@ try {
 
 // Hydrate chat conversations from DB (best-effort — don't block startup)
 try {
-  const { simulatorState } = await import("./simulator/state.ts");
-  const hydratedCount = await simulatorState.hydrateFromDb();
+  const { chatState } = await import("./chat/state.ts");
+  const hydratedCount = await chatState.hydrateFromDb();
   if (hydratedCount > 0) {
     log.info("Hydrated {count} conversations from DB", { count: hydratedCount });
   }
@@ -73,15 +73,15 @@ const app = new Hono();
 app.route("/", dashboard);
 
 // Always mount chat routes — uses ALL bots (not just those with platform tokens)
-const sim = await import("./simulator/index.ts");
-const simulator = sim.createSimulatorRoutes(allBotConfigs, config);
-app.route("/chat", simulator);
+const chat = await import("./chat/index.ts");
+const chatRoutes = chat.createChatRoutes(allBotConfigs, config);
+app.route("/chat", chatRoutes);
 // Redirect old /simulator paths for bookmarks/compat
 app.all("/simulator/*", (c) => c.redirect(c.req.path.replace("/simulator", "/chat"), 301));
 app.all("/simulator", (c) => c.redirect("/chat", 301));
 
 // Start server — with WebSocket support for chat
-const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
+const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   port: config.dashboardPort,
   idleTimeout: 255, // max value, needed for SSE connections
   fetch(req, server) {
@@ -95,7 +95,7 @@ const server = Bun.serve<import("./simulator/index.ts").SimulatorWsData>({
     }
     return app.fetch(req);
   },
-  websocket: sim.simulatorWebSocket,
+  websocket: chat.chatWebSocket,
 });
 
 log.info("Dashboard: http://localhost:{port}", { port: server.port });

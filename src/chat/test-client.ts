@@ -1,4 +1,4 @@
-import type { SimConversation, ConversationType } from "./state.ts";
+import type { ChatConversation, ConversationType } from "./state.ts";
 
 /**
  * HTTP client for the chat API — reusable in integration tests.
@@ -28,7 +28,7 @@ export class ChatTestClient {
       const body = await res.text();
       throw new Error(`Failed to create conversation: ${res.status} ${body}`);
     }
-    const data = await res.json() as { conversation: SimConversation };
+    const data = await res.json() as { conversation: ChatConversation };
     return data.conversation.id;
   }
 
@@ -44,12 +44,12 @@ export class ChatTestClient {
     }
   }
 
-  async getConversation(conversationId: string): Promise<SimConversation> {
+  async getConversation(conversationId: string): Promise<ChatConversation> {
     const res = await fetch(`${this.baseUrl}/chat/conversations/${conversationId}`);
     if (!res.ok) {
       throw new Error(`Failed to get conversation: ${res.status}`);
     }
-    const data = await res.json() as { conversation: SimConversation };
+    const data = await res.json() as { conversation: ChatConversation };
     return data.conversation;
   }
 

@@ -3,7 +3,7 @@ import { ensureDefaultThread } from "../db/threads.ts";
 import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
 
-const log = getLog("simulator", "chat-config");
+const log = getLog("chat", "chat-config");
 
 export interface ChatUser {
   id: string;
