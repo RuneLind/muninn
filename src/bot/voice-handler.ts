@@ -105,7 +105,7 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       agentStatus.set("calling_claude", username);
       agentStatus.updatePhase("calling_claude");
       const connectorType = botConfig.connector ?? "claude-cli";
-      const connectorLabel = connectorType === "copilot-sdk" ? "Copilot SDK" : "Claude Code";
+      const connectorLabel = connectorType === "copilot-sdk" ? "Copilot SDK" : connectorType === "openai-compat" ? "OpenAI-compat" : "Claude Code";
       agentStatus.setConnectorLabel(connectorLabel);
       const effectiveModel = botConfig.model ?? config.claudeModel;
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;

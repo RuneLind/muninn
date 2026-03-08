@@ -25,7 +25,7 @@ export interface ChannelListeningConfig {
   topicHints?: string[];
 }
 
-export type ConnectorType = "claude-cli" | "copilot-sdk";
+export type ConnectorType = "claude-cli" | "copilot-sdk" | "openai-compat";
 
 export interface BotConfig {
   name: string;
@@ -45,6 +45,8 @@ export interface BotConfig {
   thinkingMaxTokens?: number;
   /** Claude timeout override in ms — falls back to global CLAUDE_TIMEOUT_MS */
   timeoutMs?: number;
+  /** Base URL for OpenAI-compatible API (e.g. "http://localhost:1234/v1") */
+  baseUrl?: string;
   /** Per-tool-group user restrictions — tools not listed here are available to all */
   restrictedTools?: RestrictedTools;
   /** Channel listening config — passive relevance-based responses in active channels */
@@ -127,13 +129,13 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
         }
         // Validate connector type
-        const validConnectors: ConnectorType[] = ["claude-cli", "copilot-sdk"];
+        const validConnectors: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
         if (botSettings.connector && !validConnectors.includes(botSettings.connector as ConnectorType)) {
           log.warn("Bot \"{name}\" has unknown connector \"{connector}\" — valid values: {valid}", { name, connector: String(botSettings.connector), valid: validConnectors.join(", ") });
           delete botSettings.connector;
@@ -163,6 +165,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       model: botSettings.model as string | undefined,
       thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
       timeoutMs: botSettings.timeoutMs as number | undefined,
+      baseUrl: botSettings.baseUrl as string | undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
     });
@@ -172,6 +175,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.model) configParts.push(`model: ${botSettings.model}`);
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
+    if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
 
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;
 
