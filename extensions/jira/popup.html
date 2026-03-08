@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Send til analyse</h1>
+    </header>
+
+    <div id="not-jira" class="message hidden">
+      <p>Naviger til en Jira-sak for å sende til analyse.</p>
+    </div>
+
+    <div id="issue-info" class="hidden">
+      <div class="issue-key" id="issue-key"></div>
+      <div class="issue-title" id="issue-title"></div>
+      <div class="issue-meta" id="issue-meta"></div>
+      <div class="controls">
+        <button id="btn-index" class="primary">Send til analyse</button>
+      </div>
+      <div id="status" class="status-msg hidden"></div>
+    </div>
+  </div>
+
+  <footer>
+    <a href="#" id="open-options">Settings</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
