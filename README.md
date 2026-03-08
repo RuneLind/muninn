@@ -82,17 +82,17 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 ### Multi-Bot Process
 
 ```
-                    ┌─────────────────────────────────┐
-                    │        Single muninn process    │
-                    │                                  │
-Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
-                    │    → Claude CLI (cwd: bots/jarvis)│
-                    │                                  │
-Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
-                    │    → Copilot SDK                  │
-                    │                                  │
-                    │  Shared: DB, Dashboard, Scheduler │
-                    └─────────────────────────────────┘
+                    ┌────────────────────────────────────┐
+                    │       Single muninn process        │
+                    │                                    │
+Telegram user A ───►│  Grammy Bot 1 (Jarvis)             │
+                    │    → Claude CLI (cwd: bots/jarvis) │
+                    │                                    │
+Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
+                    │    → Claude CLI or Copilot SDK     │
+                    │                                    │
+                    │  Shared: DB, Dashboard, Scheduler  │
+                    └────────────────────────────────────┘
 ```
 
 ### Bot Isolation via `cwd`
@@ -109,18 +109,16 @@ This keeps bot sessions completely isolated from each other and from interactive
 
 ```
 bots/
-├── jarvis/
+├── jarvis/                      ← example bot (included)
 │   ├── CLAUDE.md                ← persona + rules
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.local.json  ← tool permissions
-├── jira-assistant/                ← example team bot
-│   ├── CLAUDE.md
-│   ├── config.json
-│   ├── .mcp.json
-│   └── .claude/
-│       └── settings.local.json
+├── your-bot/                    ← add your own here
+│   └── ...
 ```
+
+> See [`docs/examples/jira-assistant/`](docs/examples/jira-assistant/) for a complete team bot example with Serena code search and Copilot SDK connector.
 
 ### Key Paths
 

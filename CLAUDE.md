@@ -133,17 +133,17 @@ bun run dev:chat            # Chat-only (no scheduler, port 3011)
 ### Multi-Bot Architecture
 
 ```
-                    ┌─────────────────────────────────┐
-                    │        Single muninn process    │
-                    │                                  │
-Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
-                    │    → AI connector (claude-cli)    │
-                    │                                  │
-Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
-                    │    → AI connector (copilot-sdk)   │
-                    │                                  │
-                    │  Shared: DB, Dashboard, Scheduler │
-                    └─────────────────────────────────┘
+                    ┌────────────────────────────────────┐
+                    │       Single muninn process        │
+                    │                                    │
+Telegram user A ───►│  Grammy Bot 1 (Jarvis)             │
+                    │    → AI connector (claude-cli)     │
+                    │                                    │
+Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
+                    │    → AI connector (copilot-sdk)    │
+                    │                                    │
+                    │  Shared: DB, Dashboard, Scheduler  │
+                    └────────────────────────────────────┘
 ```
 
 Each bot lives in `bots/<name>/` with its own:
@@ -177,18 +177,14 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 
 ```
 bots/
-├── jarvis/
+├── jarvis/                      ← example bot (included)
 │   ├── CLAUDE.md                ← persona + rules
 │   ├── config.json              ← connector, model, thinking, timeout overrides
 │   ├── .mcp.json                ← Gmail, Calendar MCPs
 │   └── .claude/
 │       └── settings.json  ← tool permissions
-├── jira-assistant/
-│   ├── CLAUDE.md
-│   ├── config.json
-│   ├── .mcp.json
-│   └── .claude/
-│       └── settings.json
+├── your-bot/                    ← add your own here
+│   └── ...
 ```
 
 #### Per-bot config.json
