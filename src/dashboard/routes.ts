@@ -688,13 +688,6 @@ export function createDashboardRoutes(config: Config): Hono {
     // Resolve userId — require explicit userId when multiple users exist
     const chatConfig = await loadChatConfig(botConfig.name);
     const botUsers = chatConfig?.users ?? [];
-    const resolveUser = (): typeof botUsers[number] | null => {
-      if (body.userId) {
-        return botUsers.find((u) => u.id === body.userId) ?? null;
-      }
-      if (botUsers.length === 1) return botUsers[0]!;
-      return null;
-    };
     if (body.userId && !botUsers.find((u) => u.id === body.userId)) {
       return c.json({
         error: `User "${body.userId}" not found for bot "${botConfig.name}"`,
@@ -709,7 +702,9 @@ export function createDashboardRoutes(config: Config): Hono {
         users: botUsers.map((u) => ({ id: u.id, name: u.name })),
       }, 400);
     }
-    const chatUser = resolveUser();
+    const chatUser = body.userId
+      ? botUsers.find((u) => u.id === body.userId)!
+      : botUsers[0];
     if (!chatUser) {
       return c.json({ error: `No user found for bot "${botConfig.name}"` }, 400);
     }
@@ -724,7 +719,7 @@ export function createDashboardRoutes(config: Config): Hono {
         existingThreadName: existingThread.name,
         userId: chatUser.id,
         botName: botConfig.name,
-      });
+      }, 409);
     }
 
     // If forceNew and thread exists, append timestamp to make name unique
@@ -769,7 +764,7 @@ Gi en oppsummering av:
 ${body.text}`;
 
     log.info("Research chat created: {title} | bot={bot} | thread={threadId}", {
-      title,
+      title: threadTitle,
       bot: botConfig.name,
       threadId: thread.id,
     });
