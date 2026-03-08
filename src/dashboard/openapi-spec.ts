@@ -813,6 +813,8 @@ export const spec = {
                   bot: { type: "string", description: "Bot name (defaults to first)" },
                   title: { type: "string", description: "Thread title (defaults to text excerpt)" },
                   text: { type: "string", description: "Research prompt / Jira content" },
+                  userId: { type: "string", description: "User ID — required when multiple users exist for the bot" },
+                  forceNew: { type: "boolean", description: "Create a new thread with timestamp suffix even if one with the same name exists" },
                 },
                 required: ["text"],
               },
@@ -821,7 +823,8 @@ export const spec = {
         },
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { threadId: { type: "string" }, conversationId: { type: "string" }, chatUrl: { type: "string" } } } } } },
-          "400": errorResponse,
+          "400": { description: "Missing userId or user not found", content: { "application/json": { schema: { type: "object", properties: { error: { type: "string" }, needsUser: { type: "boolean" }, users: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } } } } } } } },
+          "409": { description: "Thread already exists", content: { "application/json": { schema: { type: "object", properties: { threadExists: { type: "boolean" }, existingThreadId: { type: "string" }, existingThreadName: { type: "string" }, userId: { type: "string" }, botName: { type: "string" } } } } } },
           "500": errorResponse,
         },
       },

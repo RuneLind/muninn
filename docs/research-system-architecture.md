@@ -263,7 +263,7 @@ The research module uses a **chat-based approach** — instead of a custom agent
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/research/chat` | Create thread + store pending message `{bot?, title?, text}` → `{threadId, chatUrl}` |
+| `POST` | `/api/research/chat` | Create thread + store pending message `{bot?, title?, text, userId?, forceNew?}` → `{threadId, chatUrl}` / `409 {threadExists}` / `400 {needsUser, users[]}` |
 | `GET` | `/api/research/bots` | List available bots |
 | `GET` | `/api/research/bot-collections?bot=<name>` | Collections from bot's `.mcp.json` |
 | `GET` | `/api/research/tags?collection=<name>` | Proxy to Knowledge API |
@@ -339,8 +339,10 @@ Chrome extension detects YouTube video
 ```
 Chrome extension detects Jira ticket
   → User clicks "Analyze"
-  → POST /api/research/chat { bot, title, text }
-  → Response: { threadId, chatUrl }
+  → POST /api/research/chat { bot, title, text, userId?, forceNew? }
+  → If multiple users and no userId: 400 { needsUser, users[] } → extension shows picker
+  → If thread exists and no forceNew: 409 { threadExists } → extension asks reuse/new
+  → Success: { threadId, chatUrl }
   → Opens /chat?bot=jira-assistant&thread={threadId}
   → Chat page loads, WebSocket connects
   → handleDeepLink() picks up pending message → auto-sends

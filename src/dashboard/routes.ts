@@ -33,7 +33,7 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../db/stats.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import { getRecentTraces, getTrace, getTraceStats, getTraceFilterOptions } from "../db/traces.ts";
-import { getAllThreadsForBot, createThread, deleteThreadById } from "../db/threads.ts";
+import { getAllThreadsForBot, createThread, deleteThreadById, findThreadByName } from "../db/threads.ts";
 import { getPromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getUserSettings } from "../db/user-settings.ts";
 import { agentStatus } from "./agent-status.ts";
@@ -666,7 +666,10 @@ export function createDashboardRoutes(config: Config): Hono {
     const origin = c.req.header("origin") || c.req.header("referer") || "unknown";
     log.info("POST /api/research/chat from {origin}", { origin });
 
-    const body = await c.req.json<{ bot?: string; title?: string; text: string; userId?: string }>();
+    const body = await c.req.json<{
+      bot?: string; title?: string; text: string;
+      userId?: string; forceNew?: boolean;
+    }>();
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
     }
@@ -682,15 +685,51 @@ export function createDashboardRoutes(config: Config): Hono {
     }
     const botConfig = (body.bot && allBots.find((b) => b.name === body.bot)) || allBots[0]!;
 
-    // Resolve userId/username from users table for this bot
-    // If userId is provided, use that specific user; otherwise use the last user for the bot
+    // Resolve userId — require explicit userId when multiple users exist
     const chatConfig = await loadChatConfig(botConfig.name);
     const botUsers = chatConfig?.users ?? [];
+    if (body.userId && !botUsers.find((u) => u.id === body.userId)) {
+      return c.json({
+        error: `User "${body.userId}" not found for bot "${botConfig.name}"`,
+        needsUser: true,
+        users: botUsers.map((u) => ({ id: u.id, name: u.name })),
+      }, 400);
+    }
+    if (!body.userId && botUsers.length > 1) {
+      return c.json({
+        error: "Multiple users available — please specify userId",
+        needsUser: true,
+        users: botUsers.map((u) => ({ id: u.id, name: u.name })),
+      }, 400);
+    }
     const chatUser = body.userId
-      ? botUsers.find((u) => u.id === body.userId) ?? botUsers[botUsers.length - 1]
-      : botUsers[botUsers.length - 1];
+      ? botUsers.find((u) => u.id === body.userId)!
+      : botUsers[0];
     if (!chatUser) {
       return c.json({ error: `No user found for bot "${botConfig.name}"` }, 400);
+    }
+
+    // Check if thread with this name already exists (unless forceNew requested)
+    const normalizedTitle = title.toLowerCase().trim();
+    const existingThread = await findThreadByName(chatUser.id, botConfig.name, normalizedTitle);
+    if (existingThread && !body.forceNew) {
+      return c.json({
+        threadExists: true,
+        existingThreadId: existingThread.id,
+        existingThreadName: existingThread.name,
+        userId: chatUser.id,
+        botName: botConfig.name,
+      }, 409);
+    }
+
+    // If forceNew and thread exists, append timestamp to make name unique
+    let threadTitle = title;
+    if (existingThread && body.forceNew) {
+      const now = new Date();
+      const suffix = `-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
+      threadTitle = title.length + suffix.length > 50
+        ? title.slice(0, 50 - suffix.length) + suffix
+        : title + suffix;
     }
 
     // Find or create conversation in simulator state
@@ -707,7 +746,7 @@ export function createDashboardRoutes(config: Config): Hono {
     }
 
     // Create a dedicated thread for this research
-    const thread = await createThread(chatUser.id, botConfig.name, title);
+    const thread = await createThread(chatUser.id, botConfig.name, threadTitle);
 
     // Build research prompt with machine-parseable marker for research card rendering
     const prompt = `<!-- research:jira -->
@@ -725,7 +764,7 @@ Gi en oppsummering av:
 ${body.text}`;
 
     log.info("Research chat created: {title} | bot={bot} | thread={threadId}", {
-      title,
+      title: threadTitle,
       bot: botConfig.name,
       threadId: thread.id,
     });
