@@ -27,9 +27,9 @@ function contentHash(alert: WatcherAlert): string | null {
   const text = alert.summary;
   if (!text) return null;
 
-  // Extract sender from summary: "<b>Fra:</b> Sender Name — ..." or "From: Sender — ..."
-  const senderMatch = text.match(/(?:Fra|From)[:\s<b>/]*\s*(.+?)\s*[—\-–]/i);
-  const sender = senderMatch?.[1]?.replace(/<[^>]+>/g, "").trim().toLowerCase() ?? "";
+  // Extract sender from summary: "**Fra:** Sender Name — ..." or "From: Sender — ..."
+  const senderMatch = text.match(/(?:Fra|From)[:\s*]*\s*(.+?)\s*[—\-–]/i);
+  const sender = senderMatch?.[1]?.trim().toLowerCase() ?? "";
 
   // Extract proper nouns from the rest (after the —)
   const afterDash = text.split(/[—\-–]/).slice(1).join(" ");
@@ -42,8 +42,7 @@ function contentHash(alert: WatcherAlert): string | null {
 
 /** Extract proper nouns: ALL-CAPS words, mid-sentence capitalized words, long numbers */
 function extractProperNouns(text: string): string[] {
-  const clean = text.replace(/<[^>]+>/g, "");
-  const words = clean.split(/[\s,;:—–\-\(\)\/]+/).filter((w) => w.length > 1);
+  const words = text.split(/[\s,;:—–\-\(\)\/]+/).filter((w) => w.length > 1);
   const tokens: string[] = [];
   let skippedFirst = false;
   for (const word of words) {
@@ -123,7 +122,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
           content: markdown,
           source: `watcher:${watcher.type}`,
           platform: "telegram",
-          threadId: threadId ?? undefined,
+          threadId,
         });
 
         activityLog.push(

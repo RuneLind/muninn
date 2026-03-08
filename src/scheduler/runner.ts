@@ -168,7 +168,7 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
       const threadId = await getActiveThreadId(task.userId, tag);
       await saveMessage({
         userId: task.userId, botName: tag, role: "assistant", content: markdown,
-        source: `task:${task.taskType}`, platform: "telegram", threadId: threadId ?? undefined,
+        source: `task:${task.taskType}`, platform: "telegram", threadId,
       });
       await updateTaskLastRun(task);
       agentStatus.completeRequest(requestId, {});
@@ -267,7 +267,7 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
       const threadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
         userId: goal.userId, botName: tag, role: "assistant", content: markdown,
-        source: "goal:reminder", platform: "telegram", threadId: threadId ?? undefined,
+        source: "goal:reminder", platform: "telegram", threadId,
       });
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
@@ -300,7 +300,7 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
       const ciThreadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
         userId: goal.userId, botName: tag, role: "assistant", content: markdown,
-        source: "goal:checkin", platform: "telegram", threadId: ciThreadId ?? undefined,
+        source: "goal:checkin", platform: "telegram", threadId: ciThreadId,
       });
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
