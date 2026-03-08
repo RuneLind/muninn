@@ -98,7 +98,7 @@ describe("buildBriefingPrompt", () => {
 
   test("includes formatting instructions", async () => {
     const { systemPrompt } = await buildBriefingPrompt(baseTask, persona, "jarvis");
-    expect(systemPrompt).toContain("Telegram HTML");
+    expect(systemPrompt).toContain("markdown");
   });
 
   test("uses task prompt as user prompt", async () => {

@@ -63,7 +63,7 @@ export async function buildBriefingPrompt(
       "Søk nyheter med WebSearch hvis task-promptet ber om det.",
       "Ikke si at du ikke har tilgang til sanntidsinformasjon — du har det via verktøy.",
     ].join("\n"),
-    "Formater svaret med Telegram HTML (<b>, <i> only). Hold det konsist men informativt.",
+    "Formater svaret med standard markdown (**bold**, *italic*, lister). Hold det konsist men informativt.",
   ];
 
   if (memories.length > 0) {

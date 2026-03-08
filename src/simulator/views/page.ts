@@ -902,15 +902,17 @@ const SIMULATOR_SCRIPT = `
       activeConvId = null;
       return;
     }
-    // Find existing conversation for this userId+botName
+    // Always use a 'web' type conversation so messages get web HTML formatting.
+    // Other platform conversations (telegram_dm, slack_*) may exist from hydration
+    // but should not be used for the web chat UI.
     var convs = Object.values(conversations);
     for (var i = 0; i < convs.length; i++) {
-      if (convs[i].userId === selectedUserId && convs[i].botName === selectedBot) {
+      if (convs[i].userId === selectedUserId && convs[i].botName === selectedBot && convs[i].type === 'web') {
         activeConvId = convs[i].id;
         return;
       }
     }
-    // Create one if not found
+    // Create a web conversation if not found
     activeConvId = null;
     try {
       var res = await fetch('/chat/conversations', {
@@ -980,7 +982,7 @@ const SIMULATOR_SCRIPT = `
       threads = [];
     }
 
-    // DB already sorts by last_activity DESC NULLS LAST — threads with
+    // DB sorts by last_activity DESC NULLS LAST — threads with
     // messages first (most recent activity on top), empty threads at bottom.
 
     // Threads should always exist (created during hydration), but handle edge case

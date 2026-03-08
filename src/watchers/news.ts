@@ -40,7 +40,7 @@ export async function checkNews(watcher: Watcher): Promise<WatcherAlert[]> {
     source: "news",
     sender: item.sourceName,
     subject: item.title,
-    summary: `<b>${escapeHtml(item.sourceName)}</b> — ${escapeHtml(item.title)}\n${item.link}`,
+    summary: `**${item.sourceName}** — ${item.title}\n${item.link}`,
     urgency: "low" as const,
   }));
 }
@@ -101,11 +101,4 @@ function decodeEntities(text: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'");
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
