@@ -134,14 +134,11 @@ export function createSimulatorRoutes(botConfigs: BotConfig[], config: Config): 
     }
   });
 
-  // List threads for a user+bot (excludes slack: threads).
-  // Exclude Telegram activity from ordering so web threads with recent web
-  // activity appear on top instead of threads dominated by Telegram messages.
+  // List threads for a user+bot (excludes slack: threads)
   app.get("/threads/:userId/:botName", async (c) => {
     const userId = c.req.param("userId");
     const botName = c.req.param("botName");
-    const excludePlatform = c.req.query("excludePlatform") || undefined;
-    const allThreads = await listThreads(userId, botName, excludePlatform);
+    const allThreads = await listThreads(userId, botName);
     const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
     return c.json({ threads });
   });

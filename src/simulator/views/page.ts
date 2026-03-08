@@ -975,16 +975,15 @@ const SIMULATOR_SCRIPT = `
     }
 
     try {
-      // Exclude Telegram activity from thread ordering so web threads sort to the top
-      var res = await fetch('/chat/threads/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot) + '?excludePlatform=telegram');
+      var res = await fetch('/chat/threads/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
       var data = await res.json();
       threads = data.threads || [];
     } catch {
       threads = [];
     }
 
-    // DB sorts by last_activity DESC NULLS LAST (excluding Telegram) — threads with
-    // recent web activity first, empty threads at bottom.
+    // DB sorts by last_activity DESC NULLS LAST — threads with
+    // messages first (most recent activity on top), empty threads at bottom.
 
     // Threads should always exist (created during hydration), but handle edge case
     if (threads.length === 0) {

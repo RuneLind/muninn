@@ -145,13 +145,10 @@ export async function getThreadMessageCount(threadId: string): Promise<number> {
 }
 
 /** List all threads for a user+bot, with message counts and last-message activity time.
- *  When excludePlatform is specified, messages from that platform are excluded from
- *  activity/count calculations (e.g. exclude 'telegram' to sort by non-Telegram activity). */
-export async function listThreads(userId: string, botName: string, excludePlatform?: string): Promise<Thread[]> {
+ *  Messages with NULL thread_id (e.g. from watchers/scheduled tasks) are excluded from
+ *  activity calculations so they don't inflate the "main" thread's last-activity time. */
+export async function listThreads(userId: string, botName: string): Promise<Thread[]> {
   const sql = getDb();
-  const platformFilter = excludePlatform
-    ? sql`AND (platform IS NULL OR platform != ${excludePlatform})`
-    : sql``;
   const rows = await sql`
     SELECT t.*,
       COALESCE(m.cnt, 0) AS message_count,
@@ -159,16 +156,13 @@ export async function listThreads(userId: string, botName: string, excludePlatfo
     FROM threads t
     LEFT JOIN (
       SELECT
-        COALESCE(thread_id, (
-          SELECT id FROM threads t2
-          WHERE t2.user_id = ${userId} AND t2.bot_name = ${botName} AND t2.name = 'main'
-        )) AS tid,
+        thread_id AS tid,
         COUNT(*) AS cnt,
         MAX(created_at) AS last_activity
       FROM messages
       WHERE user_id = ${userId} AND bot_name = ${botName}
-        ${platformFilter}
-      GROUP BY tid
+        AND thread_id IS NOT NULL
+      GROUP BY thread_id
     ) m ON m.tid = t.id
     WHERE t.user_id = ${userId} AND t.bot_name = ${botName}
     ORDER BY m.last_activity DESC NULLS LAST
