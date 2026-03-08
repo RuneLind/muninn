@@ -7,20 +7,20 @@ How Muninn runs multiple AI bots in a single process — each with its own perso
 Every bot is a folder under `bots/<name>/`. The system auto-discovers bots at startup by scanning this directory for folders with a `CLAUDE.md` file and a matching platform token environment variable. Each bot gets its own Grammy/Slack instance, but they all share a single PostgreSQL database, dashboard, and scheduler.
 
 ```
-                    ┌────────────────────────────────────┐
-                    │       Single muninn process        │
-                    │                                    │
-Telegram user A ───►│  Grammy Bot 1 (Jarvis)             │
-                    │    → Claude CLI (cwd: bots/jarvis) │
-                    │                                    │
-Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
-                    │    → Claude CLI or Copilot SDK     │
-                    │                                    │
-Slack user C ──────►│  Slack Bot 1 (Your Bot)            │
-                    │    → Claude CLI or Copilot SDK     │
-                    │                                    │
-                    │  Shared: DB, Dashboard, Scheduler  │
-                    └────────────────────────────────────┘
+                    ┌─────────────────────────────────┐
+                    │        Single muninn process    │
+                    │                                  │
+Telegram user A ───►│  Grammy Bot 1 (Jarvis)           │
+                    │    → Claude CLI (cwd: bots/jarvis)│
+                    │                                  │
+Telegram user B ───►│  Grammy Bot 2 (Jira Assistant)   │
+                    │    → Copilot SDK                  │
+                    │                                  │
+Slack user C ──────►│  Slack Bot 1 (Jira Assistant)    │
+                    │    → Copilot SDK                  │
+                    │                                  │
+                    │  Shared: DB, Dashboard, Scheduler │
+                    └─────────────────────────────────┘
 ```
 
 ## Bot Discovery
@@ -64,8 +64,12 @@ bots/
 │   ├── .mcp.json                    ← MCP servers: Gmail, Calendar (optional)
 │   └── .claude/
 │       └── settings.json            ← Tool permissions (optional)
-├── your-bot/                        ← Add your own here
-│   └── ...
+├── jira-assistant/
+│   ├── CLAUDE.md
+│   ├── config.json
+│   ├── .mcp.json                    ← MCP servers: Knowledge, Serena (optional)
+│   └── .claude/
+│       └── settings.json
 ```
 
 ## CLI Isolation via `cwd`

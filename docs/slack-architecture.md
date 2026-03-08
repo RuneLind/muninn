@@ -78,7 +78,7 @@ sequenceDiagram
     Note over H: Append SLACK_POST_CAPABILITY<br/>if postToChannel provided
 
     H->>C: executeClaudePrompt()
-    Note over C: Spawned with cwd: bots/<name>/<br/>Auto-discovers .mcp.json,<br/>settings, history
+    Note over C: Spawned with cwd: bots/jira-assistant/<br/>Auto-discovers .mcp.json,<br/>settings, history
     C-->>H: Response (JSON)
 
     H->>DB: Save assistant response
