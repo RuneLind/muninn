@@ -2,7 +2,7 @@
  * OpenAPI 3.1.0 specification for the Muninn Dashboard API.
  *
  * Covers all JSON API endpoints from both dashboard routes (/) and
- * simulator routes (/chat). Excludes HTML pages, CORS OPTIONS, WebSocket,
+ * chat routes (/chat). Excludes HTML pages, CORS OPTIONS, WebSocket,
  * and SSE streaming endpoints.
  */
 
@@ -71,7 +71,7 @@ export const spec = {
     { name: "Research", description: "Research workbench" },
     { name: "MCP Debug", description: "MCP server debugging" },
     { name: "YouTube", description: "YouTube summarizer and browse" },
-    { name: "Simulator", description: "Chat simulator (mounted at /chat)" },
+    { name: "Chat", description: "Chat API (mounted at /chat)" },
   ],
 
   components: {
@@ -1058,11 +1058,11 @@ export const spec = {
       },
     },
 
-    // ===================== Simulator (/chat prefix) =====================
+    // ===================== Chat (/chat prefix) =====================
 
     "/chat/knowledge-config": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Knowledge viewable collections",
         description: "Collections config for rendering document links in chat.",
         operationId: "getChatKnowledgeConfig",
@@ -1074,7 +1074,7 @@ export const spec = {
 
     "/chat/bots": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "List chat bots",
         description: "Available bots with platform and model info.",
         operationId: "getChatBots",
@@ -1086,18 +1086,18 @@ export const spec = {
 
     "/chat/conversations": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "List conversations",
-        description: "All simulator conversations with status and message count.",
+        description: "All chat conversations with status and message count.",
         operationId: "getChatConversations",
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { conversations: { type: "array", items: { $ref: "#/components/schemas/Conversation" } } } } } } },
         },
       },
       post: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Create conversation",
-        description: "Creates a new simulator conversation for a bot/user/platform combination.",
+        description: "Creates a new chat conversation for a bot/user/platform combination.",
         operationId: "postChatConversation",
         requestBody: {
           required: true,
@@ -1127,7 +1127,7 @@ export const spec = {
 
     "/chat/conversations/{id}": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Get conversation",
         description: "Full conversation with all messages.",
         operationId: "getChatConversation",
@@ -1138,9 +1138,9 @@ export const spec = {
         },
       },
       delete: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Delete conversation",
-        description: "Delete a simulator conversation.",
+        description: "Delete a chat conversation.",
         operationId: "deleteChatConversation",
         parameters: [pathId("id", "Conversation ID")],
         responses: {
@@ -1152,7 +1152,7 @@ export const spec = {
 
     "/chat/conversations/{id}/messages": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Get conversation messages",
         description: "Messages for a conversation, optionally filtered by thread.",
         operationId: "getChatMessages",
@@ -1167,7 +1167,7 @@ export const spec = {
         },
       },
       post: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Send message",
         description: "Send a message in a conversation — triggers async Claude processing. Response comes via WebSocket.",
         operationId: "postChatMessage",
@@ -1198,7 +1198,7 @@ export const spec = {
 
     "/chat/threads": {
       post: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Create thread",
         description: "Create a new conversation thread for a user+bot.",
         operationId: "postChatThread",
@@ -1228,7 +1228,7 @@ export const spec = {
 
     "/chat/threads/{userId}/{botName}": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "List user threads",
         description: "Threads for a user+bot combination (excludes Slack threads).",
         operationId: "getChatUserThreads",
@@ -1244,7 +1244,7 @@ export const spec = {
 
     "/chat/threads/{id}": {
       delete: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Delete thread (chat)",
         description: "Deletes a thread with cascade — same as DELETE /api/threads/{id}.",
         operationId: "deleteChatThread",
@@ -1259,7 +1259,7 @@ export const spec = {
 
     "/chat/pending/{threadId}": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Consume pending message",
         description: "Consumes a one-time pending research message for a thread.",
         operationId: "getChatPending",
@@ -1272,7 +1272,7 @@ export const spec = {
 
     "/chat/reports/{botName}/{userId}/{issueKey}": {
       get: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Get research report",
         description: "Retrieve a saved research report markdown file.",
         operationId: "getChatReport",
@@ -1288,7 +1288,7 @@ export const spec = {
         },
       },
       post: {
-        tags: ["Simulator"],
+        tags: ["Chat"],
         summary: "Save research report",
         description: "Saves a research report as a markdown file in bots/<bot>/reports/<userId>/.",
         operationId: "postChatReport",

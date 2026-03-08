@@ -1,11 +1,11 @@
 import { test, expect, describe, beforeEach } from "bun:test";
-import { SimulatorState, MAX_CONVERSATIONS, type SimEvent, type SimMessage } from "./state.ts";
+import { ChatState, MAX_CONVERSATIONS, type ChatEvent, type ChatMessage } from "./state.ts";
 
-describe("SimulatorState", () => {
-  let state: SimulatorState;
+describe("ChatState", () => {
+  let state: ChatState;
 
   beforeEach(() => {
-    state = new SimulatorState();
+    state = new ChatState();
   });
 
   describe("createConversation", () => {
@@ -68,7 +68,7 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const msg: SimMessage = {
+      const msg: ChatMessage = {
         id: "msg-1",
         timestamp: Date.now(),
         sender: "user",
@@ -81,7 +81,7 @@ describe("SimulatorState", () => {
     });
 
     test("ignores message for non-existent conversation", () => {
-      const msg: SimMessage = {
+      const msg: ChatMessage = {
         id: "msg-1",
         timestamp: Date.now(),
         sender: "user",
@@ -94,7 +94,7 @@ describe("SimulatorState", () => {
 
   describe("subscribe/publish", () => {
     test("subscriber receives events", () => {
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.createConversation({
@@ -109,7 +109,7 @@ describe("SimulatorState", () => {
     });
 
     test("unsubscribe stops events", () => {
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       const unsub = state.subscribe((event) => events.push(event));
 
       state.createConversation({
@@ -132,7 +132,7 @@ describe("SimulatorState", () => {
     });
 
     test("subscriber error does not affect other subscribers", () => {
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
 
       // Bad subscriber that throws
       state.subscribe(() => {
@@ -227,14 +227,14 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.publishTextDelta(conv.id, "Hello ", "thread-1");
 
       expect(events).toHaveLength(1);
       expect(events[0]!.type).toBe("text_delta");
-      const delta = events[0] as Extract<SimEvent, { type: "text_delta" }>;
+      const delta = events[0] as Extract<ChatEvent, { type: "text_delta" }>;
       expect(delta.conversationId).toBe(conv.id);
       expect(delta.delta).toBe("Hello ");
       expect(delta.threadId).toBe("thread-1");
@@ -251,7 +251,7 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.publishTextDelta(conv.id, "Hello ");
@@ -272,14 +272,14 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.publishStreamClear(conv.id);
 
       expect(events).toHaveLength(1);
       expect(events[0]!.type).toBe("stream_clear");
-      expect((events[0] as Extract<SimEvent, { type: "stream_clear" }>).conversationId).toBe(conv.id);
+      expect((events[0] as Extract<ChatEvent, { type: "stream_clear" }>).conversationId).toBe(conv.id);
     });
 
     test("broadcasts stream_clear with threadId", () => {
@@ -290,13 +290,13 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.publishStreamClear(conv.id, "thread-42");
 
       expect(events).toHaveLength(1);
-      const event = events[0] as Extract<SimEvent, { type: "stream_clear" }>;
+      const event = events[0] as Extract<ChatEvent, { type: "stream_clear" }>;
       expect(event.conversationId).toBe(conv.id);
       expect(event.threadId).toBe("thread-42");
     });
@@ -309,13 +309,13 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.publishStreamClear(conv.id, null);
 
       expect(events).toHaveLength(1);
-      const event = events[0] as Extract<SimEvent, { type: "stream_clear" }>;
+      const event = events[0] as Extract<ChatEvent, { type: "stream_clear" }>;
       expect(event.threadId).toBeNull();
     });
   });
@@ -329,7 +329,7 @@ describe("SimulatorState", () => {
         username: "testuser",
       });
 
-      const events: SimEvent[] = [];
+      const events: ChatEvent[] = [];
       state.subscribe((event) => events.push(event));
 
       state.setStatus(conv.id, "Thinking...");

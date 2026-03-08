@@ -254,9 +254,9 @@ The research module uses a **chat-based approach** — instead of a custom agent
 |------|---------|
 | `src/dashboard/views/research-page.ts` | Research page UI — browse mode (collection picker, tags, documents) |
 | `src/dashboard/routes.ts` | Research API endpoints (browse proxies + chat creation) |
-| `src/simulator/pending-messages.ts` | Temporary store for pending research messages |
-| `src/simulator/routes.ts` | GET /pending/:threadId endpoint |
-| `src/simulator/views/page.ts` | Chat page with deep-link and auto-send support |
+| `src/chat/pending-messages.ts` | Temporary store for pending research messages |
+| `src/chat/routes.ts` | GET /pending/:threadId endpoint |
+| `src/chat/views/page.ts` | Chat page with deep-link and auto-send support |
 | `src/config.ts` | `knowledgeApiUrl` config |
 
 ### API Endpoints

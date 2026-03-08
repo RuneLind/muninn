@@ -5,7 +5,7 @@ import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/compon
 import { helpersScript } from "../../dashboard/views/components/helpers.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "../../dashboard/views/components/doc-panel.ts";
 
-export function renderSimulatorPage(): string {
+export function renderChatPage(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,7 +17,7 @@ export function renderSimulatorPage(): string {
     ${agentStatusStyles()}
     ${requestProgressStyles()}
     ${botSelectorStyles()}
-    ${SIMULATOR_STYLES}
+    ${CHAT_STYLES}
   </style>
 </head>
 <body>
@@ -78,13 +78,13 @@ export function renderSimulatorPage(): string {
     ${agentStatusScript()}
     ${requestProgressScript()}
     ${CHAT_SSE_SCRIPT}
-    ${SIMULATOR_SCRIPT}
+    ${CHAT_SCRIPT}
   </script>
 </body>
 </html>`;
 }
 
-const SIMULATOR_STYLES = `
+const CHAT_STYLES = `
     body {
       display: flex;
       flex-direction: column;
@@ -769,7 +769,7 @@ const CHAT_SSE_SCRIPT = `
 })();
 `;
 
-const SIMULATOR_SCRIPT = `
+const CHAT_SCRIPT = `
 (function() {
   // Avatar color from name
   var _avatarPalette = [

@@ -1,17 +1,17 @@
-import { simulatorState } from "./state.ts";
+import { chatState } from "./state.ts";
 import type { ServerWebSocket } from "bun";
 
-export interface SimulatorWsData {
+export interface ChatWsData {
   unsubscribe: (() => void) | null;
 }
 
 /** WebSocket handlers for Bun.serve's websocket option */
-export const simulatorWebSocket = {
-  open(ws: ServerWebSocket<SimulatorWsData>) {
+export const chatWebSocket = {
+  open(ws: ServerWebSocket<ChatWsData>) {
     // Snapshot FIRST (before subscribe, so no events can slip in before it)
-    const conversations = simulatorState.getConversations();
+    const conversations = chatState.getConversations();
 
-    const unsub = simulatorState.subscribe((event) => {
+    const unsub = chatState.subscribe((event) => {
       try {
         ws.send(JSON.stringify(event));
       } catch {
@@ -23,11 +23,11 @@ export const simulatorWebSocket = {
     ws.send(JSON.stringify({ type: "snapshot", conversations }));
   },
 
-  close(ws: ServerWebSocket<SimulatorWsData>) {
+  close(ws: ServerWebSocket<ChatWsData>) {
     ws.data.unsubscribe?.();
   },
 
-  message(_ws: ServerWebSocket<SimulatorWsData>, _msg: string | Buffer) {
+  message(_ws: ServerWebSocket<ChatWsData>, _msg: string | Buffer) {
     // No client-to-server messages needed yet
   },
 };

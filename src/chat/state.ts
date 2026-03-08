@@ -3,18 +3,18 @@ import { formatWebHtml } from "../web/web-format.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
-export interface SimConversation {
+export interface ChatConversation {
   id: string;
   type: ConversationType;
   botName: string;
   userId: string;
   username: string;
   channelName?: string;
-  messages: SimMessage[];
+  messages: ChatMessage[];
   status?: string;
 }
 
-export interface SimMessage {
+export interface ChatMessage {
   id: string;
   timestamp: number;
   sender: "user" | "bot";
@@ -22,16 +22,16 @@ export interface SimMessage {
   threadId?: string | null;
 }
 
-export type SimEvent =
-  | { type: "message"; conversationId: string; message: SimMessage }
+export type ChatEvent =
+  | { type: "message"; conversationId: string; message: ChatMessage }
   | { type: "status"; conversationId: string; status: string }
-  | { type: "conversation_created"; conversation: SimConversation }
+  | { type: "conversation_created"; conversation: ChatConversation }
   | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null };
 
-type EventSubscriber = (event: SimEvent) => void;
+type EventSubscriber = (event: ChatEvent) => void;
 
 /** Deterministic conversation ID from a composite key (e.g. "userId:botName:platform"). */
 async function deterministicId(key: string): Promise<string> {
@@ -43,13 +43,13 @@ async function deterministicId(key: string): Promise<string> {
 }
 
 /**
- * In-memory state for simulated conversations.
+ * In-memory state for chat conversations.
  * Publishes events to WebSocket subscribers.
  */
 export const MAX_CONVERSATIONS = 50;
 
-export class SimulatorState {
-  private conversations = new Map<string, SimConversation>();
+export class ChatState {
+  private conversations = new Map<string, ChatConversation>();
   private subscribers = new Set<EventSubscriber>();
 
   subscribe(fn: EventSubscriber): () => void {
@@ -57,7 +57,7 @@ export class SimulatorState {
     return () => this.subscribers.delete(fn);
   }
 
-  private publish(event: SimEvent): void {
+  private publish(event: ChatEvent): void {
     for (const fn of this.subscribers) {
       try {
         fn(event);
@@ -73,7 +73,7 @@ export class SimulatorState {
     userId: string;
     username: string;
     channelName?: string;
-  }): SimConversation {
+  }): ChatConversation {
     // Prune oldest conversations when limit exceeded
     while (this.conversations.size >= MAX_CONVERSATIONS) {
       const oldest = this.conversations.keys().next().value;
@@ -81,7 +81,7 @@ export class SimulatorState {
     }
 
     const id = crypto.randomUUID();
-    const conversation: SimConversation = {
+    const conversation: ChatConversation = {
       id,
       type: params.type,
       botName: params.botName,
@@ -104,15 +104,15 @@ export class SimulatorState {
     this.conversations.clear();
   }
 
-  getConversation(id: string): SimConversation | undefined {
+  getConversation(id: string): ChatConversation | undefined {
     return this.conversations.get(id);
   }
 
-  getConversations(): SimConversation[] {
+  getConversations(): ChatConversation[] {
     return Array.from(this.conversations.values());
   }
 
-  addMessage(conversationId: string, message: SimMessage): void {
+  addMessage(conversationId: string, message: ChatMessage): void {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) return;
     conversation.messages.push(message);
@@ -170,7 +170,7 @@ export class SimulatorState {
       const msgs = await getSimMessages(row.userId, row.botName, row.platform);
 
       const isWebPlatform = type === "web";
-      const conversation: SimConversation = {
+      const conversation: ChatConversation = {
         id,
         type,
         botName: row.botName,
@@ -193,7 +193,7 @@ export class SimulatorState {
   }
 
   /** Find or create a channel conversation for cross-channel posting */
-  findOrCreateChannel(botName: string, channelName: string, userId: string, username: string): SimConversation {
+  findOrCreateChannel(botName: string, channelName: string, userId: string, username: string): ChatConversation {
     // Look for an existing channel conversation with this name and bot
     for (const conv of this.conversations.values()) {
       if (conv.type === "slack_channel" && conv.botName === botName && conv.channelName === channelName) {
@@ -223,5 +223,5 @@ function platformToConversationType(platform: string): ConversationType | null {
   }
 }
 
-/** Singleton simulator state */
-export const simulatorState = new SimulatorState();
+/** Singleton chat state */
+export const chatState = new ChatState();

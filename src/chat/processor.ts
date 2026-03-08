@@ -3,15 +3,15 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 
-import { simulatorState, type SimMessage } from "./state.ts";
+import { chatState, type ChatMessage } from "./state.ts";
 
 /**
- * Bridges the simulator state to the core message processor.
+ * Bridges the chat state to the core message processor.
  *
  * Creates platform-appropriate say/setStatus/postToChannel callbacks
- * that write to simulator state and broadcast via WebSocket.
+ * that write to chat state and broadcast via WebSocket.
  */
-export async function processSimulatorMessage(
+export async function processChatMessage(
   conversationId: string,
   text: string,
   botConfig: BotConfig,
@@ -19,7 +19,7 @@ export async function processSimulatorMessage(
   threadId?: string,
   connectorOverride?: "copilot-sdk" | "claude-cli",
 ): Promise<void> {
-  const conversation = simulatorState.getConversation(conversationId);
+  const conversation = chatState.getConversation(conversationId);
   if (!conversation) {
     throw new Error(`Conversation ${conversationId} not found`);
   }
@@ -45,51 +45,51 @@ export async function processSimulatorMessage(
     : undefined;
 
   // Add user message to state (after gathering context)
-  const userMessage: SimMessage = {
+  const userMessage: ChatMessage = {
     id: crypto.randomUUID(),
     timestamp: Date.now(),
     sender: "user",
     text,
     threadId: threadId ?? null,
   };
-  simulatorState.addMessage(conversationId, userMessage);
+  chatState.addMessage(conversationId, userMessage);
 
   // Create say callback — adds bot message to conversation state
   // Note: does NOT clear status here — status is cleared after processMessage completes
   // to avoid flickering during multi-chunk Telegram responses
   const say = async (message: string): Promise<void> => {
-    const botMessage: SimMessage = {
+    const botMessage: ChatMessage = {
       id: crypto.randomUUID(),
       timestamp: Date.now(),
       sender: "bot",
       text: message,
       threadId: threadId ?? null,
     };
-    simulatorState.addMessage(conversationId, botMessage);
+    chatState.addMessage(conversationId, botMessage);
   };
 
   // Create setStatus callback — updates conversation status
   const setStatus = async (status: string): Promise<void> => {
-    simulatorState.setStatus(conversationId, status);
+    chatState.setStatus(conversationId, status);
   };
 
   // Create postToChannel callback for Slack conversation types
   const postToChannel = isSlack
     ? async (channel: string, message: string): Promise<void> => {
         // Find or create the target channel conversation
-        const channelConv = simulatorState.findOrCreateChannel(
+        const channelConv = chatState.findOrCreateChannel(
           conversation.botName,
           channel,
           conversation.userId,
           conversation.username,
         );
-        const botMessage: SimMessage = {
+        const botMessage: ChatMessage = {
           id: crypto.randomUUID(),
           timestamp: Date.now(),
           sender: "bot",
           text: message,
         };
-        simulatorState.addMessage(channelConv.id, botMessage);
+        chatState.addMessage(channelConv.id, botMessage);
       }
     : undefined;
 
@@ -100,18 +100,18 @@ export async function processSimulatorMessage(
   // null = clear streaming bubble (e.g. tool calls started)
   const onTextDelta = (delta: string | null): void => {
     if (delta === null) {
-      simulatorState.publishStreamClear(conversationId, threadId ?? null);
+      chatState.publishStreamClear(conversationId, threadId ?? null);
     } else {
-      simulatorState.publishTextDelta(conversationId, delta, threadId ?? null);
+      chatState.publishTextDelta(conversationId, delta, threadId ?? null);
     }
   };
 
   const onIntent = (intentText: string): void => {
-    simulatorState.publishIntent(conversationId, intentText, threadId ?? null);
+    chatState.publishIntent(conversationId, intentText, threadId ?? null);
   };
 
   const onToolStatus = (statusText: string): void => {
-    simulatorState.publishToolStatus(conversationId, statusText, threadId ?? null);
+    chatState.publishToolStatus(conversationId, statusText, threadId ?? null);
   };
 
   try {
@@ -133,6 +133,6 @@ export async function processSimulatorMessage(
       onToolStatus,
     });
   } finally {
-    simulatorState.setStatus(conversationId, "");
+    chatState.setStatus(conversationId, "");
   }
 }

@@ -5,7 +5,7 @@
  * Run separately from unit tests:
  *
  *   bun run dev &
- *   bun test src/simulator/integration.test.ts
+ *   bun test src/chat/integration.test.ts
  *
  * Requires:
  * - The app running
