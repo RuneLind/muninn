@@ -58,7 +58,7 @@ async function handleSummarize() {
       videoInfo = freshInfo;
     }
 
-    // Submit to javrvis — opens dashboard in new tab
+    // Submit to Muninn — opens dashboard in new tab
     await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
         type: 'SUMMARIZE',
