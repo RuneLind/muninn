@@ -24,7 +24,7 @@ CRITICAL:
 - "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.
 
 Return ONLY a JSON array (no markdown fences):
-[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"<b>Fra:</b> sender — subject brief","urgency":"high|medium|low"}]
+[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
 
   const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName);

@@ -20,6 +20,7 @@ import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler");
@@ -160,13 +161,13 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
     try {
       agentStatus.set("running_task", task.title);
       const requestId = agentStatus.startRequest(botConfig.name, "running_task");
-      const message = await executeTask(task, config, botConfig);
+      const markdown = await executeTask(task, config, botConfig);
       agentStatus.set("sending_telegram", task.title);
       agentStatus.updatePhase("sending_telegram");
-      await api.sendMessage(task.userId, message, { parse_mode: "HTML" });
+      await api.sendMessage(task.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const threadId = await getActiveThreadId(task.userId, tag);
       await saveMessage({
-        userId: task.userId, botName: tag, role: "assistant", content: message,
+        userId: task.userId, botName: tag, role: "assistant", content: markdown,
         source: `task:${task.taskType}`, platform: "telegram", threadId: threadId ?? undefined,
       });
       await updateTaskLastRun(task);
@@ -198,8 +199,8 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
   switch (task.taskType) {
     case "reminder":
       return await callHaiku(
-        `Generate a brief, natural Telegram reminder message (2-3 sentences max). Use Telegram HTML formatting (<b>, <i> only). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
-        `<b>Reminder:</b> ${task.title}`,
+        `Generate a brief, natural reminder message (2-3 sentences max). Use markdown formatting (**bold**, *italic*). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
+        `**Reminder:** ${task.title}`,
         "reminder",
         cwd,
         botConfig.name,
@@ -209,10 +210,10 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
       return await generateBriefing(task, config, botConfig);
 
     case "custom":
-      if (!task.prompt) return `<b>${task.title}</b>`;
+      if (!task.prompt) return `**${task.title}**`;
       return await callHaiku(
-        `${task.prompt}\n\nRespond using Telegram HTML formatting (<b>, <i> only). Keep it concise.`,
-        `<b>${task.title}</b>`,
+        `${task.prompt}\n\nRespond using markdown formatting (**bold**, *italic*). Keep it concise.`,
+        `**${task.title}**`,
         "task",
         cwd,
         botConfig.name,
@@ -247,7 +248,7 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
   } catch (err) {
     log.error("Briefing generation failed, using fallback: {error}", { botName: botConfig.name, error: err instanceof Error ? err.message : String(err) });
     const timeOfDay = task.scheduleHour < 12 ? "morning" : task.scheduleHour < 17 ? "afternoon" : "evening";
-    return `<b>Good ${timeOfDay}!</b>\nI wasn't able to generate your full briefing this time. Check back later!`;
+    return `**Good ${timeOfDay}!**\nI wasn't able to generate your full briefing this time. Check back later!`;
   }
 }
 
@@ -259,13 +260,13 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
     try {
       agentStatus.set("checking_goals", goal.title);
       const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
-      const message = await generateReminderMessage(goal, botConfig);
+      const markdown = await generateReminderMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");
-      await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      await api.sendMessage(goal.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const threadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
-        userId: goal.userId, botName: tag, role: "assistant", content: message,
+        userId: goal.userId, botName: tag, role: "assistant", content: markdown,
         source: "goal:reminder", platform: "telegram", threadId: threadId ?? undefined,
       });
       agentStatus.completeRequest(requestId, {});
@@ -292,13 +293,13 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
     try {
       agentStatus.set("checking_goals", goal.title);
       const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
-      const message = await generateCheckinMessage(goal, botConfig);
+      const markdown = await generateCheckinMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");
-      await api.sendMessage(goal.userId, message, { parse_mode: "HTML" });
+      await api.sendMessage(goal.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const ciThreadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
-        userId: goal.userId, botName: tag, role: "assistant", content: message,
+        userId: goal.userId, botName: tag, role: "assistant", content: markdown,
         source: "goal:checkin", platform: "telegram", threadId: ciThreadId ?? undefined,
       });
       agentStatus.completeRequest(requestId, {});
@@ -330,8 +331,8 @@ async function generateReminderMessage(goal: Goal, botConfig: BotConfig): Promis
     : "soon";
 
   return await callHaiku(
-    `Generate a brief, natural Telegram reminder message (2-3 sentences max) about an approaching deadline. Use Telegram HTML formatting (<b>, <i> only). Be helpful and motivating, not pushy. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nDeadline: ${deadlineStr}\nTags: ${goal.tags.join(", ") || "none"}`,
-    `⏰ <b>Deadline approaching:</b> ${goal.title}\nDue: ${deadlineStr}`,
+    `Generate a brief, natural reminder message (2-3 sentences max) about an approaching deadline. Use markdown formatting (**bold**, *italic*). Be helpful and motivating, not pushy. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nDeadline: ${deadlineStr}\nTags: ${goal.tags.join(", ") || "none"}`,
+    `**Deadline approaching:** ${goal.title}\nDue: ${deadlineStr}`,
     "checkin",
     botConfig.dir,
     botConfig.name,
@@ -345,8 +346,8 @@ async function generateCheckinMessage(goal: Goal, botConfig: BotConfig): Promise
   });
 
   return await callHaiku(
-    `Generate a brief, natural Telegram check-in message (2-3 sentences max) asking about progress on a goal. Use Telegram HTML formatting (<b>, <i> only). Be conversational and supportive, not nagging. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nSet on: ${createdStr}\nTags: ${goal.tags.join(", ") || "none"}`,
-    `📋 <b>Goal check-in:</b> ${goal.title}\nHow's this going?`,
+    `Generate a brief, natural check-in message (2-3 sentences max) asking about progress on a goal. Use markdown formatting (**bold**, *italic*). Be conversational and supportive, not nagging. Don't use emojis excessively.\n\nGoal: "${goal.title}"\n${goal.description ? `Context: ${goal.description}` : ""}\nSet on: ${createdStr}\nTags: ${goal.tags.join(", ") || "none"}`,
+    `**Goal check-in:** ${goal.title}\nHow's this going?`,
     "checkin",
     botConfig.dir,
     botConfig.name,

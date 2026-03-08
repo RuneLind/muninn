@@ -9,6 +9,7 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
@@ -107,18 +108,19 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       });
 
       if (newAlerts.length > 0) {
-        const message = formatAlerts(watcher, newAlerts);
+        // Format as markdown (stored in DB), convert to Telegram HTML for send
+        const markdown = formatAlerts(watcher, newAlerts);
         agentStatus.set("sending_telegram", watcher.name);
-        await api.sendMessage(watcher.userId, message, { parse_mode: "HTML" });
+        await api.sendMessage(watcher.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
 
-        // Persist alert in messages so Claude can reference it in conversation.
+        // Persist markdown in messages so Claude can reference it in conversation.
         // Save to the user's active thread so the alert is visible in context.
         const threadId = await getActiveThreadId(watcher.userId, tag);
         await saveMessage({
           userId: watcher.userId,
           botName: tag,
           role: "assistant",
-          content: message,
+          content: markdown,
           source: `watcher:${watcher.type}`,
           platform: "telegram",
           threadId: threadId ?? undefined,
@@ -176,7 +178,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 
 function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
   const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : "\u{1F514}";
-  const header = `${icon} <b>${watcher.name}</b>\n`;
+  const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";
     return `${urgencyTag} ${a.summary}`;
