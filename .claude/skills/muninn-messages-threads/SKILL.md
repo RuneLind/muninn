@@ -1,5 +1,5 @@
 ---
-description: "Conventions for message storage, platform formatting, thread management, and outbound message persistence in Muninn. Use when: (1) Saving messages to the database from any code path (watchers, scheduler, handlers), (2) Formatting messages for display on Telegram, Slack, or web, (3) Working with thread ordering or the listThreads query, (4) Adding new outbound message sources (watchers, scheduled tasks, alerts), (5) Modifying the web chat simulator (resolveConversation, message loading, rendering), (6) Writing Haiku prompts that generate user-facing text, (7) Debugging why messages look wrong on a specific platform, (8) Debugging why thread ordering puts the wrong thread on top. Triggers: 'formatting', 'thread ordering', 'saveMessage', 'formatTelegramHtml', 'formatWebHtml', 'watcher message', 'scheduler message', 'web chat', 'platform format', 'markdown storage', 'thread activity'."
+description: "Conventions for message storage, platform formatting, thread management, and outbound message persistence in Muninn. Use when: (1) Saving messages to the database from any code path (watchers, scheduler, handlers), (2) Formatting messages for display on Telegram, Slack, or web, (3) Working with thread ordering or the listThreads query, (4) Adding new outbound message sources (watchers, scheduled tasks, alerts), (5) Modifying the web chat simulator (resolveConversation, message loading, rendering), (6) Writing Haiku prompts that generate user-facing text, (7) Debugging why messages look wrong on a specific platform, (8) Debugging why thread ordering puts the wrong thread on top, (9) Working with the Jira Chrome extension research thread flow (user resolution, thread collision). Triggers: 'formatting', 'thread ordering', 'saveMessage', 'formatTelegramHtml', 'formatWebHtml', 'watcher message', 'scheduler message', 'web chat', 'platform format', 'markdown storage', 'thread activity', 'research chat', 'jira plugin', 'chrome extension', 'findThreadByName', 'forceNew'."
 ---
 
 # Muninn Messages & Threads
@@ -140,6 +140,40 @@ If `isWeb` is false (wrong conversation type), headings, lists, and tables are s
 ### Streaming messages
 
 For real-time streaming, the client-side `formatWebHtml()` (a JS port in `page.ts`) is used directly on accumulated deltas. A note at the top of `src/web/web-format.ts` reminds to keep both copies in sync.
+
+## 4. Research Thread Creation (Jira Chrome Extension)
+
+The `/api/research/chat` endpoint (`src/dashboard/routes.ts`) creates threads for Jira tasks sent from the Chrome extension. It has specific safeguards to prevent two past bugs: wrong user selection and silent thread reuse.
+
+### User resolution
+
+The endpoint requires an explicit `userId` when multiple users exist for a bot. It never silently falls back to a default user.
+
+| Scenario | Behavior |
+|---|---|
+| `userId` provided + matches | Use that user |
+| `userId` provided + no match | **400** with `{ needsUser: true, users: [...] }` |
+| `userId` omitted + 1 user exists | Auto-select the only user |
+| `userId` omitted + multiple users | **400** with `{ needsUser: true, users: [...] }` |
+| No users at all | **400** error |
+
+### Thread collision detection
+
+Before creating a thread, the endpoint checks if one with the same name already exists via `findThreadByName()` (`src/db/threads.ts`). If it does:
+
+- Without `forceNew`: returns **409** with `{ threadExists: true, existingThreadId, existingThreadName }` — the client decides whether to reuse or create new
+- With `forceNew: true`: creates a new thread with a timestamp suffix (e.g., `melosys-1234-2026-03-08-1430`)
+
+This prevents the old bug where `createThread`'s `ON CONFLICT` upsert silently reused an existing thread, causing new messages to land in an old conversation.
+
+### Key files
+
+| File | Purpose |
+|---|---|
+| `src/dashboard/routes.ts` | `/api/research/chat` handler — user resolution, thread collision, pending message |
+| `src/db/threads.ts` | `findThreadByName()`, `createThread()` |
+| `src/simulator/pending-messages.ts` | In-memory store bridging POST → chat page (5-min TTL) |
+| `src/simulator/views/page.ts` | `handleDeepLink()` — consumes pending message and auto-sends |
 
 ## Quick Checklist
 
