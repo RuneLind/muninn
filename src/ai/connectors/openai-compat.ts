@@ -86,6 +86,7 @@ export async function executePrompt(
   // Tracking
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalApiMs = 0;
   let reportedModel = model;
   let turnCount = 0;
   const trackedToolCalls: Array<{
@@ -142,6 +143,7 @@ export async function executePrompt(
 
     totalInputTokens += streamResult!.inputTokens;
     totalOutputTokens += streamResult!.outputTokens;
+    totalApiMs += streamResult!.apiMs;
     if (streamResult!.reportedModel !== model) {
       reportedModel = streamResult!.reportedModel;
     }
@@ -165,7 +167,7 @@ export async function executePrompt(
         result: streamResult!.resultText,
         costUsd: 0,
         durationMs: Math.round(wallClockMs),
-        durationApiMs: Math.round(wallClockMs),
+        durationApiMs: Math.round(totalApiMs),
         wallClockMs,
         numTurns: turnCount,
         model: reportedModel,
@@ -258,7 +260,7 @@ export async function executePrompt(
     result: "(Exceeded maximum tool call turns)",
     costUsd: 0,
     durationMs: Math.round(wallClockMs),
-    durationApiMs: Math.round(wallClockMs),
+    durationApiMs: Math.round(totalApiMs),
     wallClockMs,
     numTurns: turnCount,
     model: reportedModel,
@@ -506,10 +508,10 @@ async function doStreamRequest(
 
   let resultText = stripThinkBlocks(rawText);
 
-  // Wrap reasoning in collapsible <details> block for the final saved message
+  // Prepend reasoning as a blockquote — works on all platforms (web, Telegram, Slack)
   if (reasoningText.trim() && resultText.trim()) {
-    const thinkingHtml = reasoningText.trim().split("\n").join("\n> ");
-    resultText = `<details><summary>Thinking</summary>\n\n> ${thinkingHtml}\n\n</details>\n\n${resultText}`;
+    const thinkingQuoted = reasoningText.trim().split("\n").join("\n> ");
+    resultText = `> **Thinking**\n> ${thinkingQuoted}\n\n${resultText}`;
   } else if (reasoningText.trim() && !resultText.trim()) {
     // Model only produced reasoning, no answer — show the thinking as the response
     resultText = reasoningText.trim();
