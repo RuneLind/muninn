@@ -201,7 +201,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // Extract memories, goals, and schedules async (fire-and-forget)
     // Skip for research/analysis flows (e.g. Jira task analysis) — these are
     // machine-generated prompts, not personal conversations worth extracting from.
-    const isResearch = text.includes("<!-- research:jira -->");
+    const isResearch = text.includes("<!-- research:");
     if (!isResearch) {
       const traceCtx = t.context;
       extractMemoryAsync(

@@ -46,16 +46,20 @@ mock.module("../db/messages.ts", () => ({
   getRecentAlerts: mock(() => Promise.resolve([])),
 }));
 
+const mockExtractMemory = mock();
+const mockExtractGoal = mock();
+const mockExtractSchedule = mock();
+
 mock.module("../memory/extractor.ts", () => ({
-  extractMemoryAsync: mock(),
+  extractMemoryAsync: mockExtractMemory,
 }));
 
 mock.module("../goals/detector.ts", () => ({
-  extractGoalAsync: mock(),
+  extractGoalAsync: mockExtractGoal,
 }));
 
 mock.module("../scheduler/detector.ts", () => ({
-  extractScheduleAsync: mock(),
+  extractScheduleAsync: mockExtractSchedule,
 }));
 
 mock.module("../db/users.ts", () => ({
@@ -123,6 +127,9 @@ describe("processMessage", () => {
     mockBuildPrompt.mockClear();
     mockSaveMessage.mockClear();
     mockActivityPush.mockClear();
+    mockExtractMemory.mockClear();
+    mockExtractGoal.mockClear();
+    mockExtractSchedule.mockClear();
   });
 
   test("processes message and calls say with formatted response", async () => {
@@ -351,6 +358,38 @@ describe("processMessage", () => {
     for (const call of calls) {
       expect((call[0] as string).length).toBeLessThanOrEqual(4096);
     }
+  });
+
+  test("skips extraction pipelines for research prompts", async () => {
+    await processMessage({
+      text: "<!-- research:jira -->\nAnalyse this Jira task...",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config,
+      say: sayMock,
+    });
+
+    expect(mockExtractMemory).not.toHaveBeenCalled();
+    expect(mockExtractGoal).not.toHaveBeenCalled();
+    expect(mockExtractSchedule).not.toHaveBeenCalled();
+  });
+
+  test("runs extraction pipelines for normal messages", async () => {
+    await processMessage({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "slack_dm",
+      botConfig,
+      config,
+      say: sayMock,
+    });
+
+    expect(mockExtractMemory).toHaveBeenCalledTimes(1);
+    expect(mockExtractGoal).toHaveBeenCalledTimes(1);
+    expect(mockExtractSchedule).toHaveBeenCalledTimes(1);
   });
 
   test("saves platform to message DB entries", async () => {
