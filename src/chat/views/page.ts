@@ -266,8 +266,9 @@ const CHAT_STYLES = `
       background: var(--bg-panel);
     }
     .chat-title { font-size: 14px; font-weight: 500; }
-    .chat-status { font-size: 12px; color: var(--accent); }
+    .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
     .chat-status:empty { display: none; }
+    .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
     .chat-messages {
       flex: 1;
       overflow-y: auto;
@@ -666,9 +667,9 @@ const CHAT_STYLES = `
       color: var(--text-muted);
     }
     .msg-tool-status .tool-detail {
-      color: color-mix(in srgb, var(--text-tertiary) 80%, var(--accent));
+      color: var(--accent-light, #a8b4ff);
       font-style: normal;
-      opacity: 0.8;
+      opacity: 0.9;
     }
 
     /* Typing indicator */
@@ -1074,7 +1075,7 @@ const CHAT_SCRIPT = `
     chatInput.disabled = true;
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
-    chatStatus.textContent = '';
+    setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
     streamingRafPending = false;
@@ -1126,6 +1127,7 @@ const CHAT_SCRIPT = `
             if (event.message.sender === 'bot') {
               removeIntermediates();
               removeStreamingBubble();
+              setChatStatusText('');
             }
             appendMessage(event.message, conv.type);
           }
@@ -1193,7 +1195,7 @@ const CHAT_SCRIPT = `
       if (conv) {
         conv.status = event.status;
         if (event.conversationId === activeConvId) {
-          chatStatus.textContent = event.status || '';
+          setChatStatusText(event.status || '');
           if (!event.status) {
             removeIntermediates();
             removeStreamingBubble();
@@ -1685,6 +1687,22 @@ const CHAT_SCRIPT = `
       chatMessages.appendChild(bubble);
     }
     scrollToBottom();
+  }
+
+  // Set the chat header status text with label/detail styling
+  function setChatStatusText(text) {
+    if (!text) {
+      chatStatus.innerHTML = '';
+      return;
+    }
+    var colonIdx = text.indexOf(': ');
+    if (colonIdx > 0 && colonIdx < 60) {
+      chatStatus.innerHTML =
+        '<span class="status-label">' + escapeHtml(text.slice(0, colonIdx)) + ': </span>' +
+        '<span class="status-detail">' + escapeHtml(text.slice(colonIdx + 2)) + '</span>';
+    } else {
+      chatStatus.textContent = text;
+    }
   }
 
   // Append a tool status line (each tool gets its own line, not replaced)
