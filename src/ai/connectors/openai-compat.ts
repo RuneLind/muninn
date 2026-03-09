@@ -440,25 +440,31 @@ async function doStreamRequest(
           if (delta?.content) {
             rawText += delta.content;
 
-            // When content arrives after reasoning, add a visual separator
-            if (reasoningStreamStarted && !reasoningEnded && delta.content.trim()) {
-              reasoningEnded = true;
-              onProgress?.({ type: "text_delta", text: "\n\n---\n\n" });
-            }
-
             if (!insideThink) {
               if (delta.content.includes("<think>")) {
                 insideThink = true;
                 const before = delta.content.split("<think>")[0];
                 if (before) onProgress?.({ type: "text_delta", text: before });
               } else {
+                // When visible content arrives after dedicated reasoning, add separator
+                if (reasoningStreamStarted && !reasoningEnded && delta.content.trim()) {
+                  reasoningEnded = true;
+                  onProgress?.({ type: "text_delta", text: "\n\n---\n\n" });
+                }
                 onProgress?.({ type: "text_delta", text: delta.content });
               }
             }
             if (insideThink && delta.content.includes("</think>")) {
               insideThink = false;
               const after = delta.content.split("</think>").pop()!;
-              if (after) onProgress?.({ type: "text_delta", text: after });
+              if (after) {
+                // Separator when transitioning from <think> to visible content after reasoning
+                if (reasoningStreamStarted && !reasoningEnded) {
+                  reasoningEnded = true;
+                  onProgress?.({ type: "text_delta", text: "\n\n---\n\n" });
+                }
+                onProgress?.({ type: "text_delta", text: after });
+              }
             }
           }
 
