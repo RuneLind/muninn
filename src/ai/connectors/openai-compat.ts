@@ -388,6 +388,9 @@ async function doStreamRequest(
 
   // Track <think> blocks (Qwen3 thinking tokens in content)
   let insideThink = false;
+  // Accumulate reasoning text for inclusion in result
+  let reasoningText = "";
+  let reasoningStreamStarted = false;
 
   // Track tool calls from the model
   const pendingToolCalls = new Map<
@@ -446,10 +449,12 @@ async function doStreamRequest(
           // Reasoning tokens via dedicated field (Ollama: "reasoning", others: "reasoning_content")
           const reasoning = delta?.reasoning ?? delta?.reasoning_content;
           if (reasoning) {
-            log.debug("Thinking: {text}", {
-              botName: botConfig.name,
-              text: reasoning.slice(0, 200),
-            });
+            reasoningText += reasoning;
+            // Stream thinking as intent events so the UI shows what the model is considering
+            if (!reasoningStreamStarted) {
+              reasoningStreamStarted = true;
+              onProgress?.({ type: "intent", text: "Thinking..." });
+            }
           }
 
           // Tool calls from the model
@@ -484,7 +489,17 @@ async function doStreamRequest(
     clearTimeout(timeoutTimer);
   }
 
-  const resultText = stripThinkBlocks(rawText);
+  let resultText = stripThinkBlocks(rawText);
+
+  // Prepend reasoning as a blockquote if the model produced separate thinking
+  if (reasoningText.trim() && resultText.trim()) {
+    const thinkingSummary = reasoningText.trim();
+    resultText = `> **Thinking**\n> ${thinkingSummary.split("\n").join("\n> ")}\n\n${resultText}`;
+  } else if (reasoningText.trim() && !resultText.trim()) {
+    // Model only produced reasoning, no answer — show the thinking as the response
+    resultText = reasoningText.trim();
+  }
+
   const toolCalls: ParsedToolCall[] = Array.from(pendingToolCalls.values())
     .filter((tc) => tc.name);
 
