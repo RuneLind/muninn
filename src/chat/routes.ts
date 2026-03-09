@@ -38,6 +38,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       hasTelegram: !!b.telegramBotToken,
       hasSlack: !!b.slackBotToken,
       model: b.model,
+      showWaterfall: b.showWaterfall !== false,
     }));
     return c.json({ bots });
   });
