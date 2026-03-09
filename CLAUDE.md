@@ -148,11 +148,11 @@ Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
 
 Each bot lives in `bots/<name>/` with its own:
 - `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
-- `config.json` — per-bot overrides (connector, model, thinking tokens, timeout)
+- `config.json` — per-bot overrides (connector, model, thinking tokens, timeout, baseUrl)
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.json` — tool permissions
 
-Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"` or `"copilot-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions.
+Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"`, `"copilot-sdk"`, or `"openai-compat"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions. The OpenAI-compat connector calls any OpenAI-compatible API (Ollama, LM Studio, vLLM) with MCP tool execution and streaming.
 
 A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOKEN_<NAME>` env var.
 
@@ -162,7 +162,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 |---|---|---|
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
-| AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK connectors, prompt builder, embeddings |
+| AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK + OpenAI-compat connectors, prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
@@ -203,10 +203,11 @@ All fields are optional — falls back to global `.env` values:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"` or `"copilot-sdk"` |
-| `model` | string | `CLAUDE_MODEL` env | Claude model (e.g. "claude-sonnet-4-6") |
-| `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking) |
+| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, or `"openai-compat"` |
+| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. "claude-sonnet-4-6", "qwen3.5:35b") |
+| `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking). For openai-compat: used as max_tokens. |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
+| `baseUrl` | string | — | Base URL for OpenAI-compatible API (e.g. `"http://localhost:11434/v1"`) |
 
 ### Database
 
@@ -338,9 +339,10 @@ DB tests require the local Postgres container (`bun run db:up`) and a test datab
 - AI output: standard markdown — per-platform formatters convert at send time (`telegram-format.ts`, `web-format.ts`, `slack-format.ts`)
 - Conversation threads: per-user+bot named threads for chat isolation; memories/goals/tasks shared across threads. Commands: `/topic`, `/topics`, `/deltopic`. Pre-migration messages (NULL thread_id) visible only in `main` thread.
 - Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + thread-scoped conversation history
-- AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli` or `copilot-sdk`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.
+- AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli`, `copilot-sdk`, or `openai-compat`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.
 - Claude CLI connector: spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there. Output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
 - Copilot SDK connector: shared `CopilotClient` singleton (lazy-loaded), per-request sessions. Reads `.mcp.json` and converts to SDK format. Emits `assistant.intent` events shown as inline chat bubbles.
+- OpenAI-compat connector: calls any OpenAI-compatible API (Ollama, LM Studio, vLLM). Agent loop with MCP tool execution — loads tools from `.mcp.json`, sends as OpenAI `tools` parameter, executes tool_calls against MCP servers in a multi-turn loop. Handles Qwen3/Ollama thinking tokens (`reasoning` field + `<think>` tag stripping). Retries on empty responses (3x with 2s delay).
 - MCP tool tracking: tool calls extracted from stream events (stream-json for CLI, session events for SDK), per-tool timing, displayed as child spans in traces waterfall
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`

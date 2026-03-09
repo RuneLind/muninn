@@ -27,6 +27,11 @@ describe("resolveConnector", () => {
     expect(typeof connector).toBe("function");
   });
 
+  test("returns a lazy wrapper for openai-compat", () => {
+    const connector = resolveConnector({ ...baseBotConfig, connector: "openai-compat" });
+    expect(typeof connector).toBe("function");
+  });
+
   test("throws for unknown connector type", () => {
     expect(() => resolveConnector({ ...baseBotConfig, connector: "unknown" as any })).toThrow(
       "Unknown connector type: unknown",

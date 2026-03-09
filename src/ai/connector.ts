@@ -26,6 +26,10 @@ const connectorLoaders: Record<ConnectorType, () => Promise<AiConnector>> = {
     const mod = await import("./connectors/copilot-sdk.ts");
     return mod.executePrompt;
   },
+  "openai-compat": async () => {
+    const mod = await import("./connectors/openai-compat.ts");
+    return mod.executePrompt;
+  },
 };
 
 /** Resolve the AI connector function for a given bot config. */
