@@ -1978,7 +1978,7 @@ const CHAT_SCRIPT = `
 
   // Sanitize HTML — allow safe tags and attributes
   var _tgTags = ['b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'pre', 'a', 'br', 'span'];
-  var _webTags = _tgTags.concat(['h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'p']);
+  var _webTags = _tgTags.concat(['h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'p', 'details', 'summary']);
 
   function sanitizeHtml(html, isWeb) {
     var allowedTags = isWeb ? _webTags : _tgTags;

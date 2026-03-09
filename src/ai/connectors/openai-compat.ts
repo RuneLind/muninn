@@ -391,6 +391,7 @@ async function doStreamRequest(
   // Accumulate reasoning text for inclusion in result
   let reasoningText = "";
   let reasoningStreamStarted = false;
+  let reasoningEnded = false;
 
   // Track tool calls from the model
   const pendingToolCalls = new Map<
@@ -430,6 +431,12 @@ async function doStreamRequest(
           if (delta?.content) {
             rawText += delta.content;
 
+            // When content arrives after reasoning, add a visual separator
+            if (reasoningStreamStarted && !reasoningEnded && delta.content.trim()) {
+              reasoningEnded = true;
+              onProgress?.({ type: "text_delta", text: "\n\n---\n\n" });
+            }
+
             if (!insideThink) {
               if (delta.content.includes("<think>")) {
                 insideThink = true;
@@ -450,11 +457,12 @@ async function doStreamRequest(
           const reasoning = delta?.reasoning ?? delta?.reasoning_content;
           if (reasoning) {
             reasoningText += reasoning;
-            // Stream thinking as intent events so the UI shows what the model is considering
+            // Stream thinking text in real-time so user sees the model's thought process
             if (!reasoningStreamStarted) {
               reasoningStreamStarted = true;
-              onProgress?.({ type: "intent", text: "Thinking..." });
+              onProgress?.({ type: "text_delta", text: "*Thinking...*\n\n" });
             }
+            onProgress?.({ type: "text_delta", text: reasoning });
           }
 
           // Tool calls from the model
@@ -491,10 +499,10 @@ async function doStreamRequest(
 
   let resultText = stripThinkBlocks(rawText);
 
-  // Prepend reasoning as a blockquote if the model produced separate thinking
+  // Wrap reasoning in collapsible <details> block for the final saved message
   if (reasoningText.trim() && resultText.trim()) {
-    const thinkingSummary = reasoningText.trim();
-    resultText = `> **Thinking**\n> ${thinkingSummary.split("\n").join("\n> ")}\n\n${resultText}`;
+    const thinkingHtml = reasoningText.trim().split("\n").join("\n> ");
+    resultText = `<details><summary>Thinking</summary>\n\n> ${thinkingHtml}\n\n</details>\n\n${resultText}`;
   } else if (reasoningText.trim() && !resultText.trim()) {
     // Model only produced reasoning, no answer — show the thinking as the response
     resultText = reasoningText.trim();
