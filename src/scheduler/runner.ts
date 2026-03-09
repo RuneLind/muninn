@@ -10,7 +10,7 @@ import {
 } from "../db/goals.ts";
 import { getTasksDueNow, updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
-import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
+import { agentStatus, createProgressCallback, setConnectorInfo } from "../dashboard/agent-status.ts";
 import { callHaiku } from "./executor.ts";
 import { resolveConnector } from "../ai/connector.ts";
 import { buildBriefingPrompt } from "./briefing-prompt.ts";
@@ -161,6 +161,7 @@ async function runScheduledTasksFromList(api: Api, config: Config, botConfig: Bo
     try {
       agentStatus.set("running_task", task.title);
       const requestId = agentStatus.startRequest(botConfig.name, "running_task");
+      setConnectorInfo(botConfig, config.claudeModel);
       const markdown = await executeTask(task, config, botConfig);
       agentStatus.set("sending_telegram", task.title);
       agentStatus.updatePhase("sending_telegram");
@@ -260,6 +261,7 @@ async function runGoalRemindersFromList(api: Api, botConfig: BotConfig, reminder
     try {
       agentStatus.set("checking_goals", goal.title);
       const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      setConnectorInfo(botConfig);
       const markdown = await generateReminderMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");
@@ -293,6 +295,7 @@ async function runGoalCheckinsFromList(api: Api, botConfig: BotConfig, staleGoal
     try {
       agentStatus.set("checking_goals", goal.title);
       const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      setConnectorInfo(botConfig);
       const markdown = await generateCheckinMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
       agentStatus.updatePhase("sending_telegram");

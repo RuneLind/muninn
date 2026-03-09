@@ -230,7 +230,9 @@ export function requestProgressScript(): string {
 
       let phaseLabel = (typeof phaseLabels !== 'undefined' && phaseLabels[progress.phase]) || progress.phase;
       if (progress.phase === 'calling_claude' && progress.connectorLabel) {
-        phaseLabel = 'Calling ' + progress.connectorLabel;
+        let connLabel = progress.connectorLabel;
+        if (progress.model) connLabel += ' (' + progress.model + ')';
+        phaseLabel = 'Calling ' + connLabel;
       }
       const toolCount = progress.toolCount ?? progress.tools.length;
       const userHtml = progress.username ? '<span class="rp-user">@' + escapeHtml(progress.username) + '</span>' : '';

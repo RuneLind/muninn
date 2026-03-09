@@ -15,7 +15,7 @@ import { formatTelegramHtml, stripHtml } from "./telegram-format.ts";
 import { transcribeVoice } from "../voice/stt.ts";
 import { synthesizeVoice } from "../voice/tts.ts";
 import { Tracer } from "../tracing/index.ts";
-import { agentStatus, createProgressCallback } from "../dashboard/agent-status.ts";
+import { agentStatus, createProgressCallback, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getActiveThreadId } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
@@ -104,9 +104,8 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     try {
       agentStatus.set("calling_claude", username);
       agentStatus.updatePhase("calling_claude");
-      const connectorType = botConfig.connector ?? "claude-cli";
-      const connectorLabel = connectorType === "copilot-sdk" ? "Copilot SDK" : connectorType === "openai-compat" ? "OpenAI-compat" : "Claude Code";
-      agentStatus.setConnectorLabel(connectorLabel);
+      setConnectorInfo(botConfig, config.claudeModel);
+      const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
       const effectiveModel = botConfig.model ?? config.claudeModel;
       const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
       log.info("Calling {connector} for voice (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });

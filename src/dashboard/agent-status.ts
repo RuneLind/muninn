@@ -36,6 +36,7 @@ export interface RequestProgress {
   username?: string;
   phase: AgentPhase;
   connectorLabel?: string;
+  model?: string;
   startedAt: number;
   tools: ToolProgress[];
   completed?: boolean;
@@ -111,6 +112,13 @@ class AgentStatusTracker {
   setConnectorLabel(label: string) {
     if (this.activeRequest) {
       this.activeRequest.connectorLabel = label;
+      this.notifyProgress();
+    }
+  }
+
+  setModel(model: string) {
+    if (this.activeRequest) {
+      this.activeRequest.model = model;
       this.notifyProgress();
     }
   }
@@ -192,6 +200,23 @@ class AgentStatusTracker {
 }
 
 export const agentStatus = new AgentStatusTracker();
+
+/** Get human-readable connector label from connector type */
+export function getConnectorLabel(connectorType: string): string {
+  switch (connectorType) {
+    case "copilot-sdk": return "Copilot SDK";
+    case "openai-compat": return "OpenAI";
+    default: return "Claude Code";
+  }
+}
+
+/** Set connector label + model on the active request from bot config */
+export function setConnectorInfo(botConfig: { connector?: string; model?: string }, fallbackModel?: string) {
+  const label = getConnectorLabel(botConfig.connector ?? "claude-cli");
+  agentStatus.setConnectorLabel(label);
+  const model = botConfig.model ?? fallbackModel;
+  if (model) agentStatus.setModel(model);
+}
 
 /** Create a progress callback that updates agent status with tool details */
 export function createProgressCallback(phase: AgentPhase, username?: string): StreamProgressCallback {

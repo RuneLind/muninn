@@ -78,8 +78,11 @@ mock.module("../dashboard/agent-status.ts", () => ({
     completeRequest: mock(),
     clearRequest: mock(),
     setConnectorLabel: mock(),
+    setModel: mock(),
   },
   createProgressCallback: mock(() => () => {}),
+  setConnectorInfo: mock(),
+  getConnectorLabel: mock(() => "Claude Code"),
 }));
 
 mock.module("../db/prompt-snapshots.ts", () => ({

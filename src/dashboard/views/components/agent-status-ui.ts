@@ -52,7 +52,7 @@ export function agentStatusScript(): string {
       receiving: 'Receiving message',
       transcribing: 'Transcribing voice',
       building_prompt: 'Building prompt',
-      calling_claude: 'Calling Claude',
+      calling_claude: 'Calling AI',
       saving_response: 'Saving response',
       sending_telegram: 'Sending to Telegram',
       sending_slack: 'Sending to Slack',
@@ -81,13 +81,28 @@ export function agentStatusScript(): string {
       }
     }
 
+    function connectorWithModel(progress) {
+      let label = progress.connectorLabel || 'AI';
+      if (progress.model) label += ' (' + progress.model + ')';
+      return label;
+    }
+
     function updateAgentStatusFromProgress(progress) {
       const detailEl = document.getElementById('agentDetail');
-      if (!detailEl || !progress || progress.completed) return;
+      if (!detailEl || !progress) return;
+      if (progress.completed) {
+        // Show connector + model on idle after completion
+        const phaseEl = document.getElementById('agentPhase');
+        if (phaseEl) phaseEl.textContent = 'Idle';
+        if (progress.connectorLabel) {
+          detailEl.textContent = ' \u2014 ' + connectorWithModel(progress);
+        }
+        return;
+      }
       // Update phase label with connector name when available
       if (progress.phase === 'calling_claude' && progress.connectorLabel) {
         const phaseEl = document.getElementById('agentPhase');
-        if (phaseEl) phaseEl.textContent = 'Calling ' + progress.connectorLabel;
+        if (phaseEl) phaseEl.textContent = 'Calling ' + connectorWithModel(progress);
       }
       const toolCount = progress.tools.length;
       if (toolCount > 0) {
