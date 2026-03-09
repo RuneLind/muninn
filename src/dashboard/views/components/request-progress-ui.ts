@@ -135,7 +135,7 @@ export function requestProgressStyles(): string {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 300px;
+      max-width: 600px;
     }
 
     /* Now marker */

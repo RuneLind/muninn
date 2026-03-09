@@ -654,13 +654,21 @@ const CHAT_STYLES = `
     /* Tool status line — each tool call gets its own line */
     .msg-tool-status {
       align-self: flex-start;
-      max-width: 85%;
+      max-width: 90%;
       padding: 3px 12px;
       font-size: 12px;
       font-style: italic;
       color: var(--text-muted);
       opacity: 0.7;
       line-height: 1.4;
+    }
+    .msg-tool-status .tool-label {
+      color: var(--text-muted);
+    }
+    .msg-tool-status .tool-detail {
+      color: color-mix(in srgb, var(--text-tertiary) 80%, var(--accent));
+      font-style: normal;
+      opacity: 0.8;
     }
 
     /* Typing indicator */
@@ -1680,10 +1688,23 @@ const CHAT_SCRIPT = `
   }
 
   // Append a tool status line (each tool gets its own line, not replaced)
+  // Splits "Label: detail" into styled spans for visual distinction
   function appendToolStatus(text) {
     var line = document.createElement('div');
     line.className = 'msg-tool-status msg-intermediate';
-    line.textContent = text;
+    var colonIdx = text.indexOf(': ');
+    if (colonIdx > 0 && colonIdx < 60) {
+      var labelSpan = document.createElement('span');
+      labelSpan.className = 'tool-label';
+      labelSpan.textContent = text.slice(0, colonIdx) + ': ';
+      var detailSpan = document.createElement('span');
+      detailSpan.className = 'tool-detail';
+      detailSpan.textContent = text.slice(colonIdx + 2);
+      line.appendChild(labelSpan);
+      line.appendChild(detailSpan);
+    } else {
+      line.textContent = text;
+    }
     chatMessages.appendChild(line);
     scrollToBottom();
   }
