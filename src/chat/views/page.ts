@@ -2098,6 +2098,16 @@ const CHAT_SCRIPT = `
     chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
   };
 
+  // Gate waterfall overlay on per-bot showWaterfall config
+  var _origUpdateRP = updateRequestProgress;
+  updateRequestProgress = function(progress) {
+    if (progress && progress.botName) {
+      var bot = bots.find(function(b) { return b.name === progress.botName; });
+      if (bot && bot.showWaterfall === false) return;
+    }
+    _origUpdateRP(progress);
+  };
+
   // Init
   async function init() {
     var botNames = await loadBotList();

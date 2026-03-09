@@ -51,6 +51,8 @@ export interface BotConfig {
   restrictedTools?: RestrictedTools;
   /** Channel listening config — passive relevance-based responses in active channels */
   channelListening?: ChannelListeningConfig;
+  /** Show the request progress waterfall overlay in the web chat (default true) */
+  showWaterfall?: boolean;
 }
 
 /**
@@ -129,7 +131,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -168,6 +170,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       baseUrl: botSettings.baseUrl as string | undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
+      showWaterfall: botSettings.showWaterfall as boolean | undefined,
     });
 
     const configParts: string[] = [];
