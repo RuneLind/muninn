@@ -286,7 +286,10 @@ async function loadToolsForBot(
   const openaiTools: OpenAITool[] = [];
   const toolServerMap = new Map<string, string>();
 
-  for (const [serverName, serverConfig] of Object.entries(mcpConfig.mcpServers)) {
+  let failedServers = 0;
+  const serverEntries = Object.entries(mcpConfig.mcpServers);
+
+  for (const [serverName, serverConfig] of serverEntries) {
     try {
       const { tools } = await connectToServer(botConfig.name, serverName, serverConfig);
       for (const tool of tools) {
@@ -299,6 +302,7 @@ async function loadToolsForBot(
         server: serverName,
       });
     } catch (e) {
+      failedServers++;
       log.warn("Failed to connect to MCP server {server}: {error}", {
         botName: botConfig.name,
         server: serverName,
@@ -308,7 +312,10 @@ async function loadToolsForBot(
   }
 
   const result = { openaiTools, toolServerMap };
-  toolCache.set(botConfig.name, result);
+  // Only cache if all servers connected — failed servers may come online later
+  if (failedServers === 0) {
+    toolCache.set(botConfig.name, result);
+  }
   return result;
 }
 
