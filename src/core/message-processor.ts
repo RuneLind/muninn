@@ -199,22 +199,27 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     t.end("db_save_response");
 
     // Extract memories, goals, and schedules async (fire-and-forget)
-    const traceCtx = t.context;
-    extractMemoryAsync(
-      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId },
-      config,
-      traceCtx,
-    );
-    extractGoalAsync(
-      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId, platform },
-      config,
-      traceCtx,
-    );
-    extractScheduleAsync(
-      { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, platform },
-      config,
-      traceCtx,
-    );
+    // Skip for research/analysis flows (e.g. Jira task analysis) — these are
+    // machine-generated prompts, not personal conversations worth extracting from.
+    const isResearch = text.includes("<!-- research:jira -->");
+    if (!isResearch) {
+      const traceCtx = t.context;
+      extractMemoryAsync(
+        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId },
+        config,
+        traceCtx,
+      );
+      extractGoalAsync(
+        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId, platform },
+        config,
+        traceCtx,
+      );
+      extractScheduleAsync(
+        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, platform },
+        config,
+        traceCtx,
+      );
+    }
 
     // Handle Slack channel post directives
     let responseText = result.result;
