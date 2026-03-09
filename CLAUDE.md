@@ -208,6 +208,7 @@ All fields are optional — falls back to global `.env` values:
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking). For openai-compat: used as max_tokens. |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (e.g. `"http://localhost:11434/v1"`) |
+| `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
 
 ### Database
 
