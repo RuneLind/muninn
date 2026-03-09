@@ -71,7 +71,7 @@ export function agentStatusScript(): string {
       if (status.phase === 'idle') {
         el.classList.remove('working');
         phaseEl.textContent = 'Idle';
-        detailEl.textContent = '';
+        // Don't clear detailEl here — updateAgentStatusFromProgress sets connector+model on completion
         userEl.textContent = '';
       } else {
         el.classList.add('working');
@@ -89,7 +89,12 @@ export function agentStatusScript(): string {
 
     function updateAgentStatusFromProgress(progress) {
       const detailEl = document.getElementById('agentDetail');
-      if (!detailEl || !progress) return;
+      if (!detailEl) return;
+      if (!progress) {
+        // Request cleared (auto-clear after 30s or dismissed) — clear connector info
+        detailEl.textContent = '';
+        return;
+      }
       if (progress.completed) {
         // Show connector + model on idle after completion
         const phaseEl = document.getElementById('agentPhase');

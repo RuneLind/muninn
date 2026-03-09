@@ -197,6 +197,9 @@ export function requestProgressScript(): string {
         panel.classList.remove('visible', 'completed');
         stopRpAnim();
         rpLastProgress = null;
+        if (typeof updateAgentStatusFromProgress === 'function') {
+          updateAgentStatusFromProgress(null);
+        }
         return;
       }
 
