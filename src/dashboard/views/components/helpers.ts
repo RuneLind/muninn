@@ -9,7 +9,7 @@ export function escScript(): string {
 }
 
 const TOOL_INPUT_PRIORITY_KEYS = ['query', 'pattern', 'prompt', 'text', 'command', 'url', 'file_path', 'path', 'subject', 'q', 'search', 'message', 'name', 'skill'];
-const TOOL_INPUT_MAX_LENGTH = 60;
+const TOOL_INPUT_MAX_LENGTH = 140;
 
 /** Extract a short readable summary from tool input (JSON string or object). Exported for testing. */
 export function extractToolInputLabel(input: unknown): string {

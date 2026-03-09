@@ -53,10 +53,10 @@ describe("getToolStatus", () => {
   test("includes search query detail when input provided", () => {
     const input = '{"query": "authentication flow", "collection": "team-docs"}';
     expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
-      "Searching knowledge base: trygdeavtaler med Sverige",
+      "Searching knowledge base: authentication flow",
     );
     expect(getToolStatus("mcp__knowledge__search_knowledge", input)).toBe(
-      "Searching knowledge base: trygdeavtaler med Sverige",
+      "Searching knowledge base: authentication flow",
     );
   });
 
@@ -76,10 +76,10 @@ describe("getToolStatus", () => {
   });
 
   test("truncates long search queries", () => {
-    const longQuery = "a".repeat(100);
+    const longQuery = "a".repeat(200);
     const input = `{"query": "${longQuery}"}`;
     const result = getToolStatus("knowledge-search_knowledge", input)!;
-    expect(result.length).toBeLessThan(100);
+    expect(result.length).toBeLessThan(180);
     expect(result).toContain("…");
   });
 

@@ -28,15 +28,15 @@ describe("extractToolInputLabel", () => {
     expect(extractToolInputLabel('{"query":"","count":5,"label":"found"}')).toBe("found");
   });
 
-  test("truncates at 60 characters", () => {
-    const long = "a".repeat(80);
+  test("truncates at 140 characters", () => {
+    const long = "a".repeat(160);
     const result = extractToolInputLabel({ query: long });
-    expect(result).toBe("a".repeat(57) + "...");
-    expect(result.length).toBe(60);
+    expect(result).toBe("a".repeat(137) + "...");
+    expect(result.length).toBe(140);
   });
 
-  test("does not truncate string exactly 60 chars", () => {
-    const exact = "a".repeat(60);
+  test("does not truncate string exactly 140 chars", () => {
+    const exact = "a".repeat(140);
     expect(extractToolInputLabel({ query: exact })).toBe(exact);
   });
 

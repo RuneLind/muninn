@@ -34,7 +34,7 @@ function truncate(text: string, max: number): string {
 /** Extract query/search detail from input */
 const searchDetail = (input: string | undefined) => {
   const query = extractField(input, "query", "search", "q", "text");
-  return query ? truncate(query, 60) : undefined;
+  return query ? truncate(query, 140) : undefined;
 };
 
 /** Generic detail extractor — tries common field names across any tool, then first string value */
@@ -44,7 +44,7 @@ const genericDetail = (input: string | undefined) => {
     "query", "search", "q", "text", "pattern", "regex", "command", "name",
     "symbol", "symbol_name", "path", "file", "file_path", "uri", "url", "title",
   );
-  if (value) return truncate(value, 60);
+  if (value) return truncate(value, 140);
   // Last resort: grab the first short string value from the JSON
   return firstStringValue(input);
 };
@@ -53,15 +53,15 @@ const genericDetail = (input: string | undefined) => {
 function firstStringValue(input: string | undefined): string | undefined {
   if (!input) return undefined;
   const match = input.match(/"[^"]*"\s*:\s*"([^"]{2,80})"/);
-  return match?.[1] ? truncate(match[1], 60) : undefined;
+  return match?.[1] ? truncate(match[1], 140) : undefined;
 }
 
 /** Extract document name/title from input — tries title first, falls back to ID fields */
 const docDetail = (input: string | undefined) => {
   const title = extractField(input, "title", "name", "document_name", "doc_title");
-  if (title) return truncate(title, 60);
+  if (title) return truncate(title, 140);
   const id = extractField(input, "document_id", "doc_id", "id", "collection_id");
-  return id ? truncate(id, 60) : undefined;
+  return id ? truncate(id, 140) : undefined;
 };
 
 /** Tool entries keyed by normalized "server/tool" */
