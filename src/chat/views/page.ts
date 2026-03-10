@@ -42,8 +42,10 @@ export function renderChatPage(): string {
     <!-- Center: Chat view -->
     <div class="sim-chat">
       <div class="chat-header" id="chatHeader">
-        <span class="chat-title">Select a thread</span>
-        <div class="chat-description" id="chatDescription"></div>
+        <div class="chat-header-left">
+          <span class="chat-title">Select a thread</span>
+          <div class="chat-description" id="chatDescription"></div>
+        </div>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -272,12 +274,14 @@ const CHAT_STYLES = `
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
       background: var(--bg-panel);
     }
+    .chat-header-left { min-width: 0; }
     .chat-title { font-size: 14px; font-weight: 500; }
-    .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; }
+    .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
-    .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; margin-left: auto; }
+    .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
     .chat-messages {
