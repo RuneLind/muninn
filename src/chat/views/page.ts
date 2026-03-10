@@ -42,7 +42,10 @@ export function renderChatPage(): string {
     <!-- Center: Chat view -->
     <div class="sim-chat">
       <div class="chat-header" id="chatHeader">
-        <span class="chat-title">Select a thread</span>
+        <div class="chat-header-left">
+          <span class="chat-title">Select a thread</span>
+          <div class="chat-description" id="chatDescription"></div>
+        </div>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -199,6 +202,14 @@ const CHAT_STYLES = `
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .thread-item-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
+    }
     .thread-item-meta {
       display: flex;
       align-items: center;
@@ -263,10 +274,14 @@ const CHAT_STYLES = `
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
       background: var(--bg-panel);
     }
+    .chat-header-left { min-width: 0; }
     .chat-title { font-size: 14px; font-weight: 500; }
-    .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+    .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+    .chat-description:empty { display: none; }
+    .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
     .chat-messages {
@@ -1031,6 +1046,7 @@ const CHAT_SCRIPT = `
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
           + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
+          + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
         + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
@@ -1050,11 +1066,13 @@ const CHAT_SCRIPT = `
 
     // Update header
     var threadName = 'main';
+    var threadDesc = '';
     for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId) { threadName = threads[i].name; break; }
+      if (threads[i].id === threadId) { threadName = threads[i].name; threadDesc = threads[i].description || ''; break; }
     }
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
+    document.getElementById('chatDescription').textContent = threadDesc;
 
     // Highlight in sidebar
     renderThreadList();
@@ -1075,6 +1093,7 @@ const CHAT_SCRIPT = `
     chatInput.disabled = true;
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
+    document.getElementById('chatDescription').textContent = '';
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';

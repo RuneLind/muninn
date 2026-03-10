@@ -9,6 +9,7 @@ export interface Thread {
   userId: string;
   botName: string;
   name: string;
+  description?: string;
   isActive: boolean;
   createdAt: number;
   updatedAt: number;
@@ -21,6 +22,7 @@ function rowToThread(r: Record<string, unknown>): Thread {
     userId: r.user_id as string,
     botName: r.bot_name as string,
     name: r.name as string,
+    description: (r.description as string) ?? undefined,
     isActive: r.is_active as boolean,
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
@@ -80,7 +82,7 @@ export async function findThreadByName(userId: string, botName: string, name: st
 }
 
 /** Create a new thread without deactivating others. For web UI thread creation. */
-export async function createThread(userId: string, botName: string, name: string): Promise<Thread> {
+export async function createThread(userId: string, botName: string, name: string, description?: string): Promise<Thread> {
   const sql = getDb();
   const normalized = name.toLowerCase().trim();
 
@@ -94,10 +96,13 @@ export async function createThread(userId: string, botName: string, name: string
     throw new Error("Thread name cannot contain newlines or tabs");
   }
 
+  const desc = description?.trim() || null;
   const [row] = await sql`
-    INSERT INTO threads (user_id, bot_name, name, is_active)
-    VALUES (${userId}, ${botName}, ${normalized}, false)
-    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
+    INSERT INTO threads (user_id, bot_name, name, description, is_active)
+    VALUES (${userId}, ${botName}, ${normalized}, ${desc}, false)
+    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET
+      updated_at = now(),
+      description = COALESCE(EXCLUDED.description, threads.description)
     RETURNING *
   `;
   return rowToThread(row!);

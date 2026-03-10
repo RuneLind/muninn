@@ -161,7 +161,8 @@ async function handleAnalyze(overrideUserId, forceNew) {
     const title = issueData.issueKey;
     const text = formatIssueAsText(issueData);
 
-    const payload = { bot: 'melosys', title, text };
+    const description = issueData.summary || issueData.title || '';
+    const payload = { bot: 'melosys', title, text, description };
     // userId priority: override (from picker) > settings > omit
     const userId = overrideUserId || settings.userId;
     if (userId) payload.userId = userId;
