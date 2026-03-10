@@ -62,6 +62,15 @@ export function agentStatusScript(): string {
       running_watcher: 'Running watcher',
     };
 
+    // Last known connector info — kept across status/progress events
+    let _lastConnectorInfo = null;
+
+    function connectorWithModel(info) {
+      let label = info.connectorLabel || 'AI';
+      if (info.model) label += ' (' + info.model + ')';
+      return label;
+    }
+
     function updateAgentStatus(status) {
       const el = document.getElementById('agentStatus');
       const phaseEl = document.getElementById('agentPhase');
@@ -71,44 +80,50 @@ export function agentStatusScript(): string {
       if (status.phase === 'idle') {
         el.classList.remove('working');
         phaseEl.textContent = 'Idle';
-        // Don't clear detailEl here — updateAgentStatusFromProgress sets connector+model on completion
+        // Show last connector+model info on idle (cleared when request auto-clears)
+        if (_lastConnectorInfo) {
+          detailEl.textContent = ' \u2014 ' + connectorWithModel(_lastConnectorInfo);
+        }
         userEl.textContent = '';
       } else {
         el.classList.add('working');
-        phaseEl.textContent = phaseLabels[status.phase] || status.phase;
+        let label = phaseLabels[status.phase] || status.phase;
+        // Use connector info for AI-calling phases
+        if (status.phase === 'calling_claude' && _lastConnectorInfo && _lastConnectorInfo.connectorLabel) {
+          label = 'Calling ' + connectorWithModel(_lastConnectorInfo);
+        }
+        phaseEl.textContent = label;
         detailEl.textContent = status.detail ? ' \u2014 ' + status.detail : '';
         userEl.textContent = status.username ? '(@' + status.username + ')' : '';
       }
     }
 
-    function connectorWithModel(progress) {
-      let label = progress.connectorLabel || 'AI';
-      if (progress.model) label += ' (' + progress.model + ')';
-      return label;
-    }
-
     function updateAgentStatusFromProgress(progress) {
-      const detailEl = document.getElementById('agentDetail');
-      if (!detailEl) return;
       if (!progress) {
-        // Request cleared (auto-clear after 30s or dismissed) — clear connector info
-        detailEl.textContent = '';
+        // Request cleared — clear connector info
+        _lastConnectorInfo = null;
+        const detailEl = document.getElementById('agentDetail');
+        if (detailEl) detailEl.textContent = '';
         return;
       }
+      // Store connector info for use by updateAgentStatus
+      if (progress.connectorLabel) {
+        _lastConnectorInfo = { connectorLabel: progress.connectorLabel, model: progress.model };
+      }
+      // Re-render phase label with connector info
+      const phaseEl = document.getElementById('agentPhase');
+      const detailEl = document.getElementById('agentDetail');
       if (progress.completed) {
-        // Show connector + model on idle after completion
-        const phaseEl = document.getElementById('agentPhase');
         if (phaseEl) phaseEl.textContent = 'Idle';
-        if (progress.connectorLabel) {
-          detailEl.textContent = ' \u2014 ' + connectorWithModel(progress);
+        if (detailEl && _lastConnectorInfo) {
+          detailEl.textContent = ' \u2014 ' + connectorWithModel(_lastConnectorInfo);
         }
         return;
       }
-      // Update phase label with connector name when available
-      if (progress.phase === 'calling_claude' && progress.connectorLabel) {
-        const phaseEl = document.getElementById('agentPhase');
-        if (phaseEl) phaseEl.textContent = 'Calling ' + connectorWithModel(progress);
+      if (progress.phase === 'calling_claude' && _lastConnectorInfo) {
+        if (phaseEl) phaseEl.textContent = 'Calling ' + connectorWithModel(_lastConnectorInfo);
       }
+      if (!detailEl) return;
       const toolCount = progress.tools.length;
       if (toolCount > 0) {
         const lastTool = progress.tools[progress.tools.length - 1];
