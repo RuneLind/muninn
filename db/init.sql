@@ -43,6 +43,7 @@ CREATE TABLE threads (
   user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL,
   name TEXT NOT NULL,
+  description TEXT,
   is_active BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
