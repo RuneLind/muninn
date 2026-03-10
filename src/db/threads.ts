@@ -100,7 +100,9 @@ export async function createThread(userId: string, botName: string, name: string
   const [row] = await sql`
     INSERT INTO threads (user_id, bot_name, name, description, is_active)
     VALUES (${userId}, ${botName}, ${normalized}, ${desc}, false)
-    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
+    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET
+      updated_at = now(),
+      description = COALESCE(EXCLUDED.description, threads.description)
     RETURNING *
   `;
   return rowToThread(row!);
