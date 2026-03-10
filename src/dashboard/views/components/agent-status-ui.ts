@@ -52,7 +52,7 @@ export function agentStatusScript(): string {
       receiving: 'Receiving message',
       transcribing: 'Transcribing voice',
       building_prompt: 'Building prompt',
-      calling_claude: 'Calling Claude',
+      calling_claude: 'Calling AI',
       saving_response: 'Saving response',
       sending_telegram: 'Sending to Telegram',
       sending_slack: 'Sending to Slack',
@@ -61,6 +61,15 @@ export function agentStatusScript(): string {
       checking_goals: 'Checking goals',
       running_watcher: 'Running watcher',
     };
+
+    // Last known connector info — kept across status/progress events
+    let _lastConnectorInfo = null;
+
+    function connectorWithModel(info) {
+      let label = info.connectorLabel || 'AI';
+      if (info.model) label += ' (' + info.model + ')';
+      return label;
+    }
 
     function updateAgentStatus(status) {
       const el = document.getElementById('agentStatus');
@@ -71,30 +80,55 @@ export function agentStatusScript(): string {
       if (status.phase === 'idle') {
         el.classList.remove('working');
         phaseEl.textContent = 'Idle';
-        detailEl.textContent = '';
+        // Show last connector+model info on idle (cleared when request auto-clears)
+        if (_lastConnectorInfo) {
+          detailEl.textContent = ' \u2014 ' + connectorWithModel(_lastConnectorInfo);
+        }
         userEl.textContent = '';
       } else {
         el.classList.add('working');
-        phaseEl.textContent = phaseLabels[status.phase] || status.phase;
+        let label = phaseLabels[status.phase] || status.phase;
+        // Use connector info for AI-calling phases
+        if (status.phase === 'calling_claude' && _lastConnectorInfo && _lastConnectorInfo.connectorLabel) {
+          label = 'Calling ' + connectorWithModel(_lastConnectorInfo);
+        }
+        phaseEl.textContent = label;
         detailEl.textContent = status.detail ? ' \u2014 ' + status.detail : '';
         userEl.textContent = status.username ? '(@' + status.username + ')' : '';
       }
     }
 
     function updateAgentStatusFromProgress(progress) {
-      const detailEl = document.getElementById('agentDetail');
-      if (!detailEl || !progress || progress.completed) return;
-      // Update phase label with connector name when available
-      if (progress.phase === 'calling_claude' && progress.connectorLabel) {
-        const phaseEl = document.getElementById('agentPhase');
-        if (phaseEl) phaseEl.textContent = 'Calling ' + progress.connectorLabel;
+      if (!progress) {
+        // Request cleared — clear connector info
+        _lastConnectorInfo = null;
+        const detailEl = document.getElementById('agentDetail');
+        if (detailEl) detailEl.textContent = '';
+        return;
       }
+      // Store connector info for use by updateAgentStatus
+      if (progress.connectorLabel) {
+        _lastConnectorInfo = { connectorLabel: progress.connectorLabel, model: progress.model };
+      }
+      // Re-render phase label with connector info
+      const phaseEl = document.getElementById('agentPhase');
+      const detailEl = document.getElementById('agentDetail');
+      if (progress.completed) {
+        if (phaseEl) phaseEl.textContent = 'Idle';
+        if (detailEl && _lastConnectorInfo) {
+          detailEl.textContent = ' \u2014 ' + connectorWithModel(_lastConnectorInfo);
+        }
+        return;
+      }
+      if (progress.phase === 'calling_claude' && _lastConnectorInfo) {
+        if (phaseEl) phaseEl.textContent = 'Calling ' + connectorWithModel(_lastConnectorInfo);
+      }
+      if (!detailEl) return;
       const toolCount = progress.tools.length;
       if (toolCount > 0) {
         const lastTool = progress.tools[progress.tools.length - 1];
         const activeName = lastTool && !lastTool.endedAt ? lastTool.displayName : '';
-        const countSuffix = toolCount > 1 ? ' (' + toolCount + ' tools)' : '';
-        detailEl.textContent = activeName ? ' \u2014 ' + activeName + countSuffix : countSuffix;
+        detailEl.textContent = activeName ? ' \u2014 ' + activeName : '';
       }
     }
 `;

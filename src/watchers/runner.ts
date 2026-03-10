@@ -6,7 +6,7 @@ import { isQuietHours } from "./quiet-hours.ts";
 import { checkEmail } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
-import { agentStatus } from "../dashboard/agent-status.ts";
+import { agentStatus, setConnectorInfo } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -87,6 +87,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       agentStatus.set("running_watcher", watcher.name);
       const requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
+      setConnectorInfo(botConfig);
 
       const alerts = await runChecker(watcher, botConfig.dir, tag);
 

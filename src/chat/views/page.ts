@@ -2142,7 +2142,13 @@ const CHAT_SCRIPT = `
   updateRequestProgress = function(progress) {
     if (progress && progress.botName) {
       var bot = bots.find(function(b) { return b.name === progress.botName; });
-      if (bot && bot.showWaterfall === false) return;
+      if (bot && bot.showWaterfall === false) {
+        // Still update agent status (connector + model) even when waterfall is hidden
+        if (typeof updateAgentStatusFromProgress === 'function') {
+          updateAgentStatusFromProgress(progress);
+        }
+        return;
+      }
     }
     _origUpdateRP(progress);
   };
