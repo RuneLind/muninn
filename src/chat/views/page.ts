@@ -307,6 +307,12 @@ const CHAT_STYLES = `
       color: var(--chat-user-text);
       border-bottom-right-radius: 2px;
     }
+    .msg-prompt {
+      background: color-mix(in srgb, var(--chat-user-bg) 50%, transparent);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-style: italic;
+    }
     .msg-research-card {
       align-self: stretch;
       max-width: 100%;
@@ -336,6 +342,14 @@ const CHAT_STYLES = `
       font-weight: 600;
       text-transform: none;
       letter-spacing: 0;
+    }
+    .research-card-prompt {
+      padding: 8px 14px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border-primary);
+      white-space: pre-wrap;
     }
     .research-card-body {
       padding: 10px 14px;
@@ -1332,9 +1346,16 @@ const CHAT_SCRIPT = `
   var RESEARCH_MARKER = '<!-- research:jira -->';
 
   function parseResearchContent(text) {
-    // Extract Jira content after the --- separator
+    // Extract prompt instruction and Jira content, split by --- separator
     var parts = text.split('\\n---\\n');
-    var jiraContent = parts.length > 1 ? parts.slice(1).join('\\n---\\n').trim() : text.replace(RESEARCH_MARKER, '').trim();
+    var promptInstruction = '';
+    var jiraContent;
+    if (parts.length > 1) {
+      promptInstruction = parts[0].replace(RESEARCH_MARKER, '').trim();
+      jiraContent = parts.slice(1).join('\\n---\\n').trim();
+    } else {
+      jiraContent = text.replace(RESEARCH_MARKER, '').trim();
+    }
     // Extract issue key (e.g. "MELOSYS-7546") from content — may appear after # heading prefix
     var issueKey = null;
     var keyMatch = jiraContent.match(/^(?:#+ *)?([A-Z]+-\\d+)/);
@@ -1347,16 +1368,18 @@ const CHAT_SCRIPT = `
       if (line.startsWith('#')) { title = line.replace(/^#+\\s*/, ''); break; }
       if (line) { title = line.length > 80 ? line.slice(0, 77) + '...' : line; break; }
     }
-    return { title: title || 'Jira Task', content: jiraContent, issueKey: issueKey };
+    return { title: title || 'Jira Task', content: jiraContent, issueKey: issueKey, prompt: promptInstruction };
   }
 
   function renderResearchCard(parsed) {
     var renderedBody = sanitizeHtml(formatWebHtml(parsed.content), true);
     var titleHtml = parsed.title ? '<span class="research-card-title">' + escapeHtml(parsed.title) + '</span>' : '';
+    var promptHtml = parsed.prompt ? '<div class="research-card-prompt">' + escapeHtml(parsed.prompt) + '</div>' : '';
     return '<div class="research-card-header">' +
       '<span class="research-card-label">Jira Research</span>' +
       titleHtml +
       '</div>' +
+      promptHtml +
       '<div class="research-card-body web-content">' + renderedBody + '</div>';
   }
 
@@ -1390,7 +1413,9 @@ const CHAT_SCRIPT = `
       investigateBtn.innerHTML = '<span class="btn-icon">&#x1F50D;</span> Investigate Code';
       investigateBtn.onclick = function() {
         actions.classList.add('used');
-        chatInput.value = 'Based on the Jira analysis above, investigate the relevant code in the codebase. Find the files and functions that would need to change, show the current implementation, and identify any potential challenges.';
+        var bot = bots.find(function(b) { return b.name === selectedBot; });
+        var defaultPrompt = 'Based on the Jira analysis above, investigate the relevant code in the codebase. Find the files and functions that would need to change, show the current implementation, and identify any potential challenges.';
+        chatInput.value = '<!-- prompt:investigate -->' + ((bot && bot.prompts && bot.prompts.investigateCode) || defaultPrompt);
         sendMessage();
       };
       actions.appendChild(investigateBtn);
@@ -1584,6 +1609,9 @@ const CHAT_SCRIPT = `
     } else if (msg.sender === 'bot') {
       div.className = 'msg msg-bot' + platformClass;
       div.innerHTML = renderSlackMrkdwn(msg.text);
+    } else if (msg.sender === 'user' && msg.text.indexOf('<!-- prompt:') === 0) {
+      div.className = 'msg msg-user msg-prompt';
+      div.textContent = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
     } else {
       div.className = 'msg msg-user';
       div.textContent = msg.text;

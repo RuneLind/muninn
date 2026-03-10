@@ -40,6 +40,15 @@ import { agentStatus } from "./agent-status.ts";
 
 const log = getLog("dashboard");
 
+const DEFAULT_JIRA_ANALYSIS_PROMPT = `Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon og relaterte Jira-saker.
+
+Gi en oppsummering av:
+- Hva oppgaven handler om
+- Relevant dokumentasjon du finner i kunnskapsbasen
+- Relaterte Jira-saker (epic, linked issues, lignende oppgaver)
+- Koblinger til eksisterende arbeid
+- Eventuelle mangler eller uklarheter`;
+
 /** Parse a numeric query param with fallback and bounds clamping. */
 function parseIntParam(value: string | undefined, defaultVal: number, max: number): number {
   const parsed = parseInt(value ?? String(defaultVal), 10);
@@ -749,19 +758,8 @@ export function createDashboardRoutes(config: Config): Hono {
     const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description);
 
     // Build research prompt with machine-parseable marker for research card rendering
-    const prompt = `<!-- research:jira -->
-Analyser denne Jira-oppgaven. Bruk verktøyene dine til å søke i kunnskapsbasen etter relevant dokumentasjon og relaterte Jira-saker.
-
-Gi en oppsummering av:
-- Hva oppgaven handler om
-- Relevant dokumentasjon du finner i kunnskapsbasen
-- Relaterte Jira-saker (epic, linked issues, lignende oppgaver)
-- Koblinger til eksisterende arbeid
-- Eventuelle mangler eller uklarheter
-
----
-
-${body.text}`;
+    const jiraPrompt = botConfig.prompts?.jiraAnalysis ?? DEFAULT_JIRA_ANALYSIS_PROMPT;
+    const prompt = `<!-- research:jira -->\n${jiraPrompt}\n\n---\n\n${body.text}`;
 
     log.info("Research chat created: {title} | bot={bot} | thread={threadId}", {
       title: threadTitle,

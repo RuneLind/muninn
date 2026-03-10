@@ -39,6 +39,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       hasSlack: !!b.slackBotToken,
       model: b.model,
       showWaterfall: b.showWaterfall !== false,
+      prompts: b.prompts,
     }));
     return c.json({ bots });
   });
