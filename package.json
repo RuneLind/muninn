@@ -21,7 +21,9 @@
     "db:migrate:baseline": "bun db/migrate.ts --baseline",
     "db:setup:test": "bun db/setup-test-db.ts",
     "db:backup": "bash scripts/db-backup.sh",
-    "db:restore": "bash scripts/db-restore.sh"
+    "db:restore": "bash scripts/db-restore.sh",
+    "config:sync": "bash scripts/sync-config.sh",
+    "config:restore": "bash scripts/restore-config.sh"
   },
   "devDependencies": {
     "@types/bun": "latest"
