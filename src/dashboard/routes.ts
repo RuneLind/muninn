@@ -49,8 +49,6 @@ Gi en oppsummering av:
 - Koblinger til eksisterende arbeid
 - Eventuelle mangler eller uklarheter`;
 
-const DEFAULT_INVESTIGATE_CODE_PROMPT = "Based on the Jira analysis above, investigate the relevant code in the codebase. Find the files and functions that would need to change, show the current implementation, and identify any potential challenges.";
-
 /** Parse a numeric query param with fallback and bounds clamping. */
 function parseIntParam(value: string | undefined, defaultVal: number, max: number): number {
   const parsed = parseInt(value ?? String(defaultVal), 10);
