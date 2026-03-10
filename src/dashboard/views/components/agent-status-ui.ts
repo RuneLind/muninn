@@ -128,8 +128,7 @@ export function agentStatusScript(): string {
       if (toolCount > 0) {
         const lastTool = progress.tools[progress.tools.length - 1];
         const activeName = lastTool && !lastTool.endedAt ? lastTool.displayName : '';
-        const countSuffix = toolCount > 1 ? ' (' + toolCount + ' tools)' : '';
-        detailEl.textContent = activeName ? ' \u2014 ' + activeName + countSuffix : countSuffix;
+        detailEl.textContent = activeName ? ' \u2014 ' + activeName : '';
       }
     }
 `;
