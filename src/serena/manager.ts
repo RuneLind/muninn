@@ -77,6 +77,9 @@ class SerenaManager {
       // Kill any stale process left on this port from a previous muninn run
       await this.killStaleProcess(port);
 
+      // Snapshot existing dashboard ports so we can detect the new one
+      const dashboardPortsBefore = await this.snapshotDashboardPorts();
+
       // Spawn Serena with native streamable-http transport
       const proc = Bun.spawn([
         "uvx", "--from", "git+https://github.com/oraios/serena",
@@ -94,7 +97,6 @@ class SerenaManager {
 
       instance.proc = proc;
       instance.mcpUrl = `http://127.0.0.1:${port}/mcp`;
-      instance.dashboardUrl = `http://127.0.0.1:24282/dashboard/index.html`;
 
       // Wait for the MCP endpoint to become reachable
       const ready = await this.waitForReady(instance.mcpUrl, proc, READY_TIMEOUT_MS);
@@ -113,6 +115,11 @@ class SerenaManager {
 
       instance.startedAt = Date.now();
       instance.status = "running";
+
+      // Detect the Serena dashboard port (auto-assigned starting from 24282).
+      // Small delay — dashboard thread starts slightly after MCP endpoint.
+      await Bun.sleep(2000);
+      instance.dashboardUrl = await this.detectDashboardUrl(dashboardPortsBefore);
 
       // Monitor for unexpected exit
       proc.exited.then((code) => {
@@ -248,6 +255,50 @@ class SerenaManager {
     return Array.from(this.instances.values())
       .filter((i) => i.status === "running" && i.mcpUrl)
       .map((i) => ({ name: i.config.name, mcpUrl: i.mcpUrl! }));
+  }
+
+  /**
+   * Detect the Serena dashboard port by recording which ports in the 24282+ range
+   * are new since before the instance started.
+   */
+  private async detectDashboardUrl(portsBefore: Set<number>): Promise<string | undefined> {
+    const DASHBOARD_BASE = 24282;
+    const MAX_SCAN = 10;
+    try {
+      for (let port = DASHBOARD_BASE; port < DASHBOARD_BASE + MAX_SCAN; port++) {
+        if (portsBefore.has(port)) continue; // Was already in use before we started
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/dashboard/index.html`, {
+            signal: AbortSignal.timeout(1000),
+          });
+          if (res.ok || res.status === 304) {
+            log.info("Detected Serena dashboard on port {port}", { port });
+            return `http://127.0.0.1:${port}/dashboard/index.html`;
+          }
+        } catch {
+          // Not listening — try next port
+        }
+      }
+    } catch (e) {
+      log.warn("Dashboard detection failed: {error}", { error: e instanceof Error ? e.message : String(e) });
+    }
+    return undefined;
+  }
+
+  /** Snapshot which dashboard-range ports are already in use before starting an instance. */
+  private async snapshotDashboardPorts(): Promise<Set<number>> {
+    const used = new Set<number>();
+    const DASHBOARD_BASE = 24282;
+    const MAX_SCAN = 10;
+    for (let port = DASHBOARD_BASE; port < DASHBOARD_BASE + MAX_SCAN; port++) {
+      try {
+        await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
+        used.add(port);
+      } catch {
+        // Not in use
+      }
+    }
+    return used;
   }
 
   private killProc(instance: SerenaInstance): void {
