@@ -190,6 +190,36 @@ export function renderSerenaPage(): string {
       color: var(--text-dim);
       margin-bottom: 12px;
     }
+
+    .proxy-banner {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 14px 20px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .proxy-banner.running {
+      border-color: color-mix(in srgb, var(--status-success) 40%, transparent);
+    }
+    .proxy-info {
+      flex: 1;
+    }
+    .proxy-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+    .proxy-meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 2px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
   </style>
 </head>
 <body>
@@ -207,6 +237,7 @@ export function renderSerenaPage(): string {
       </div>
     </div>
 
+    <div id="proxyBanner"></div>
     <div class="section-label" id="sectionLabel"></div>
     <div id="instanceList">
       <div class="empty-state">Loading...</div>
@@ -217,6 +248,7 @@ export function renderSerenaPage(): string {
     ${escScript()}
 
     var instances = [];
+    var proxyInfo = null;
     var refreshTimer = null;
 
     function formatUptime(startedAt) {
@@ -227,7 +259,28 @@ export function renderSerenaPage(): string {
       return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
     }
 
+    function renderProxy() {
+      var el = document.getElementById('proxyBanner');
+      if (!proxyInfo || !proxyInfo.running) {
+        el.innerHTML = '';
+        return;
+      }
+      el.innerHTML = '<div class="proxy-banner running">' +
+        '<div class="status-dot running"></div>' +
+        '<div class="proxy-info">' +
+          '<div class="proxy-title">Tool Proxy</div>' +
+          '<div class="proxy-meta">' +
+            '<span class="status-badge running">running</span>' +
+            '<span class="meta-item">' + proxyInfo.toolCount + ' tools</span>' +
+            '<span class="meta-item">' + proxyInfo.serverCount + ' servers</span>' +
+            '<span class="meta-item"><a href="' + esc(proxyInfo.mcpUrl) + '" target="_blank" class="instance-link">MCP</a></span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }
+
     function render() {
+      renderProxy();
       var el = document.getElementById('instanceList');
       var label = document.getElementById('sectionLabel');
       var btnStart = document.getElementById('btnStartAll');
@@ -292,7 +345,9 @@ export function renderSerenaPage(): string {
       try {
         var res = await fetch('/api/serena/instances');
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        instances = await res.json();
+        var data = await res.json();
+        instances = data.instances || data;
+        proxyInfo = data.proxy || null;
         render();
       } catch (e) {
         console.error('Failed to refresh Serena instances', e);

@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Subprocess } from "bun";
 import type { SerenaInstanceConfig } from "./config.ts";
 import { discoverSerenaConfigs } from "./config.ts";
+import { serenaToolProxy } from "./tool-proxy.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("serena", "manager");
@@ -124,6 +125,9 @@ class SerenaManager {
       });
 
       log.info("Serena {name} started on port {port}", { name, port });
+
+      // Refresh tool proxy catalog (fire-and-forget)
+      this.refreshToolProxy().catch(() => {});
     } catch (e) {
       instance.status = "error";
       instance.error = String(e);
@@ -147,6 +151,9 @@ class SerenaManager {
     instance.startedAt = undefined;
     instance.mcpUrl = undefined;
     instance.dashboardUrl = undefined;
+
+    // Refresh tool proxy catalog (fire-and-forget)
+    this.refreshToolProxy().catch(() => {});
   }
 
   async index(name: string): Promise<void> {
@@ -207,6 +214,40 @@ class SerenaManager {
     );
     // Force-stop all instances, bypassing pending guards (shutdown path)
     await Promise.allSettled(active.map((i) => this.stop(i.config.name, true)));
+    // Stop the tool proxy
+    await serenaToolProxy.stop();
+  }
+
+  /** Get the tool proxy instance for status/control */
+  getToolProxy() {
+    return serenaToolProxy;
+  }
+
+  /** Start/stop proxy and refresh its tool catalog based on running instances */
+  private async refreshToolProxy(): Promise<void> {
+    const running = this.getRunningInstances();
+
+    if (running.length === 0) {
+      // No instances running — stop proxy if it's running
+      if (serenaToolProxy.isRunning) {
+        await serenaToolProxy.stop();
+      }
+      return;
+    }
+
+    // Ensure proxy is running
+    if (!serenaToolProxy.isRunning) {
+      await serenaToolProxy.start();
+    }
+
+    // Refresh catalog with currently running instances
+    await serenaToolProxy.refreshCatalog(running);
+  }
+
+  private getRunningInstances(): Array<{ name: string; mcpUrl: string }> {
+    return Array.from(this.instances.values())
+      .filter((i) => i.status === "running" && i.mcpUrl)
+      .map((i) => ({ name: i.config.name, mcpUrl: i.mcpUrl! }));
   }
 
   private killProc(instance: SerenaInstance): void {
