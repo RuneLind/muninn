@@ -64,8 +64,44 @@ const docDetail = (input: string | undefined) => {
   return id ? truncate(id, 140) : undefined;
 };
 
+/** Extract detail for proxy call_tool — show inner tool + server + detail */
+const proxyCallToolDetail = (input: string | undefined): string | undefined => {
+  if (!input) return undefined;
+  const tool = extractField(input, "tool");
+  const server = extractField(input, "server");
+  // Dig into the nested "arguments" object for the actual search detail
+  const argsMatch = input.match(/"arguments"\s*:\s*\{([^}]*)\}/);
+  const argsJson = argsMatch?.[1];
+  const innerDetail = argsJson
+    ? extractField(`{${argsJson}}`, "name_path_pattern", "name_path", "substring_pattern", "pattern", "name", "file_mask", "relative_path", "body")
+    : undefined;
+  const parts: string[] = [];
+  if (server) parts.push(server);
+  if (innerDetail) parts.push(truncate(innerDetail, 80));
+  return parts.length > 0 ? parts.join(": ") : tool ?? undefined;
+};
+
+/** Extract detail for proxy search_tools */
+const proxySearchToolsDetail = (input: string | undefined): string | undefined => {
+  return extractField(input, "query");
+};
+
 /** Tool entries keyed by normalized "server/tool" */
 const TOOL_STATUS: Record<string, ToolStatusEntry> = {
+  // Serena Tool Proxy (code MCP)
+  "code/call_tool": {
+    label: "Code analysis",
+    detail: (input) => {
+      const tool = extractField(input, "tool");
+      const detail = proxyCallToolDetail(input);
+      // Show "find_symbol: serena-web: Feilmelding" instead of generic "call_tool"
+      if (tool && detail) return `${tool.replace(/_/g, " ")}: ${detail}`;
+      if (tool) return tool.replace(/_/g, " ");
+      return detail;
+    },
+  },
+  "code/search_tools": { label: "Discovering code tools", detail: proxySearchToolsDetail },
+
   // Knowledge MCP
   "knowledge/search_knowledge": { label: "Searching knowledge base", detail: searchDetail },
   "knowledge/get_document": { label: "Loading document", detail: docDetail },
