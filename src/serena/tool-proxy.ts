@@ -106,7 +106,7 @@ export class SerenaToolProxy {
     this.catalog.clear();
 
     // Close all sessions
-    for (const [id, session] of this.sessions) {
+    for (const [, session] of this.sessions) {
       try {
         await session.server.close();
       } catch {
@@ -227,6 +227,10 @@ export class SerenaToolProxy {
   }
 
   private async handleNewSession(req: Request): Promise<Response> {
+    // Declare server before transport so the onsessioninitialized closure
+    // doesn't depend on temporal dead zone timing.
+    let server: McpServer;
+
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
@@ -246,7 +250,7 @@ export class SerenaToolProxy {
       }
     };
 
-    const server = this.createMcpServer();
+    server = this.createMcpServer();
     await server.connect(transport);
 
     return transport.handleRequest(req);
@@ -367,9 +371,16 @@ export class SerenaToolProxy {
     }
 
     try {
-      const result = await callTool(PROXY_BOT, serverName, toolName, args);
-      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return { content: [{ type: "text" as const, text }] };
+      const result = await callTool(PROXY_BOT, serverName, toolName, args) as {
+        content?: Array<{ type: string; text?: string }>;
+        isError?: boolean;
+      };
+      // Extract text from MCP CallToolResult to avoid double-wrapping
+      const text = result?.content?.map((c) => c.text ?? "").join("\n") || JSON.stringify(result, null, 2);
+      return {
+        content: [{ type: "text" as const, text }],
+        ...(result?.isError && { isError: true }),
+      };
     } catch (e) {
       return {
         content: [{

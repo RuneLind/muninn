@@ -232,13 +232,23 @@ class SerenaManager {
 
   /** Guard to prevent concurrent refreshToolProxy calls */
   private proxyRefreshing = false;
+  private proxyRefreshPending = false;
 
   /** Start/stop proxy and refresh its tool catalog based on running instances */
   private async refreshToolProxy(): Promise<void> {
-    if (this.proxyRefreshing) return;
+    if (this.proxyRefreshing) {
+      // Another refresh is in progress — queue a re-run so changes aren't lost
+      this.proxyRefreshPending = true;
+      return;
+    }
     this.proxyRefreshing = true;
     try {
       await this.doRefreshToolProxy();
+      // If a refresh was requested while we were busy, run again
+      while (this.proxyRefreshPending) {
+        this.proxyRefreshPending = false;
+        await this.doRefreshToolProxy();
+      }
     } finally {
       this.proxyRefreshing = false;
     }
