@@ -230,8 +230,21 @@ class SerenaManager {
     return serenaToolProxy;
   }
 
+  /** Guard to prevent concurrent refreshToolProxy calls */
+  private proxyRefreshing = false;
+
   /** Start/stop proxy and refresh its tool catalog based on running instances */
   private async refreshToolProxy(): Promise<void> {
+    if (this.proxyRefreshing) return;
+    this.proxyRefreshing = true;
+    try {
+      await this.doRefreshToolProxy();
+    } finally {
+      this.proxyRefreshing = false;
+    }
+  }
+
+  private async doRefreshToolProxy(): Promise<void> {
     const running = this.getRunningInstances();
 
     if (running.length === 0) {
@@ -290,14 +303,15 @@ class SerenaManager {
     const used = new Set<number>();
     const DASHBOARD_BASE = 24282;
     const MAX_SCAN = 10;
-    for (let port = DASHBOARD_BASE; port < DASHBOARD_BASE + MAX_SCAN; port++) {
+    const checks = Array.from({ length: MAX_SCAN }, (_, i) => DASHBOARD_BASE + i).map(async (port) => {
       try {
-        await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(500) });
+        await fetch(`http://127.0.0.1:${port}/dashboard/index.html`, { signal: AbortSignal.timeout(500) });
         used.add(port);
       } catch {
         // Not in use
       }
-    }
+    });
+    await Promise.allSettled(checks);
     return used;
   }
 

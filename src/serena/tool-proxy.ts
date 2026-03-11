@@ -5,7 +5,6 @@ import {
   connectToServer,
   callTool,
   disconnectServer,
-  type ToolInfo,
 } from "../dashboard/mcp-client.ts";
 import { getLog } from "../logging.ts";
 
@@ -234,7 +233,18 @@ export class SerenaToolProxy {
         this.sessions.set(id, { transport, server });
         log.info("New MCP session {session}", { session: id.slice(0, 8) });
       },
+      onsessionclosed: (id) => {
+        this.sessions.delete(id);
+        log.info("MCP session closed {session}", { session: id.slice(0, 8) });
+      },
     });
+
+    // Clean up session when transport closes (client disconnect, etc.)
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        this.sessions.delete(transport.sessionId);
+      }
+    };
 
     const server = this.createMcpServer();
     await server.connect(transport);
