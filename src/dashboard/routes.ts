@@ -898,6 +898,7 @@ export function createDashboardRoutes(config: Config): Hono {
   });
 
   app.get("/api/serena/instances", (c) => {
+    const proxy = serenaManager.getToolProxy();
     const instances = serenaManager.getInstances().map((inst) => ({
       name: inst.config.name,
       displayName: inst.config.displayName,
@@ -910,7 +911,15 @@ export function createDashboardRoutes(config: Config): Hono {
       mcpUrl: inst.mcpUrl,
       dashboardUrl: inst.dashboardUrl,
     }));
-    return c.json(instances);
+    return c.json({
+      instances,
+      proxy: {
+        running: proxy.isRunning,
+        mcpUrl: proxy.isRunning ? proxy.mcpUrl : null,
+        toolCount: proxy.toolCount,
+        serverCount: proxy.serverCount,
+      },
+    });
   });
 
   app.post("/api/serena/:name/start", async (c) => {

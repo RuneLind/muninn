@@ -255,6 +255,14 @@ PostgreSQL + pgvector via Docker (single container).
 4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
 5. Restart — the bot is auto-discovered
 
+### Config Sync
+
+Bot folders (except jarvis) and `.env` are gitignored and tracked in a separate private repo (`~/source/private/muninn-config`). After changing any bot config, persona, or MCP settings, sync with:
+
+```bash
+bun run config:sync -- --commit
+```
+
 ## Serena Code Analysis (MCP Proxy)
 
 Serena provides code search and analysis tools (find_symbol, search_for_pattern, etc.) for large codebases. Instead of spawning Serena per chat session, instances run as persistent HTTP servers managed from the dashboard.

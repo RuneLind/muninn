@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Subprocess } from "bun";
 import type { SerenaInstanceConfig } from "./config.ts";
 import { discoverSerenaConfigs } from "./config.ts";
+import { serenaToolProxy } from "./tool-proxy.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("serena", "manager");
@@ -76,6 +77,9 @@ class SerenaManager {
       // Kill any stale process left on this port from a previous muninn run
       await this.killStaleProcess(port);
 
+      // Snapshot existing dashboard ports so we can detect the new one
+      const dashboardPortsBefore = await this.snapshotDashboardPorts();
+
       // Spawn Serena with native streamable-http transport
       const proc = Bun.spawn([
         "uvx", "--from", "git+https://github.com/oraios/serena",
@@ -93,7 +97,6 @@ class SerenaManager {
 
       instance.proc = proc;
       instance.mcpUrl = `http://127.0.0.1:${port}/mcp`;
-      instance.dashboardUrl = `http://127.0.0.1:24282/dashboard/index.html`;
 
       // Wait for the MCP endpoint to become reachable
       const ready = await this.waitForReady(instance.mcpUrl, proc, READY_TIMEOUT_MS);
@@ -113,6 +116,11 @@ class SerenaManager {
       instance.startedAt = Date.now();
       instance.status = "running";
 
+      // Detect the Serena dashboard port (auto-assigned starting from 24282).
+      // Small delay — dashboard thread starts slightly after MCP endpoint.
+      await Bun.sleep(2000);
+      instance.dashboardUrl = await this.detectDashboardUrl(dashboardPortsBefore);
+
       // Monitor for unexpected exit
       proc.exited.then((code) => {
         if (instance.status === "running") {
@@ -124,6 +132,9 @@ class SerenaManager {
       });
 
       log.info("Serena {name} started on port {port}", { name, port });
+
+      // Refresh tool proxy catalog (fire-and-forget)
+      this.refreshToolProxy().catch(() => {});
     } catch (e) {
       instance.status = "error";
       instance.error = String(e);
@@ -147,6 +158,9 @@ class SerenaManager {
     instance.startedAt = undefined;
     instance.mcpUrl = undefined;
     instance.dashboardUrl = undefined;
+
+    // Refresh tool proxy catalog (fire-and-forget)
+    this.refreshToolProxy().catch(() => {});
   }
 
   async index(name: string): Promise<void> {
@@ -207,6 +221,108 @@ class SerenaManager {
     );
     // Force-stop all instances, bypassing pending guards (shutdown path)
     await Promise.allSettled(active.map((i) => this.stop(i.config.name, true)));
+    // Stop the tool proxy
+    await serenaToolProxy.stop();
+  }
+
+  /** Get the tool proxy instance for status/control */
+  getToolProxy() {
+    return serenaToolProxy;
+  }
+
+  /** Guard to prevent concurrent refreshToolProxy calls */
+  private proxyRefreshing = false;
+  private proxyRefreshPending = false;
+
+  /** Start/stop proxy and refresh its tool catalog based on running instances */
+  private async refreshToolProxy(): Promise<void> {
+    if (this.proxyRefreshing) {
+      // Another refresh is in progress — queue a re-run so changes aren't lost
+      this.proxyRefreshPending = true;
+      return;
+    }
+    this.proxyRefreshing = true;
+    try {
+      await this.doRefreshToolProxy();
+      // If a refresh was requested while we were busy, run again
+      while (this.proxyRefreshPending) {
+        this.proxyRefreshPending = false;
+        await this.doRefreshToolProxy();
+      }
+    } finally {
+      this.proxyRefreshing = false;
+    }
+  }
+
+  private async doRefreshToolProxy(): Promise<void> {
+    const running = this.getRunningInstances();
+
+    if (running.length === 0) {
+      // No instances running — stop proxy if it's running
+      if (serenaToolProxy.isRunning) {
+        await serenaToolProxy.stop();
+      }
+      return;
+    }
+
+    // Ensure proxy is running
+    if (!serenaToolProxy.isRunning) {
+      await serenaToolProxy.start();
+    }
+
+    // Refresh catalog with currently running instances
+    await serenaToolProxy.refreshCatalog(running);
+  }
+
+  private getRunningInstances(): Array<{ name: string; mcpUrl: string }> {
+    return Array.from(this.instances.values())
+      .filter((i) => i.status === "running" && i.mcpUrl)
+      .map((i) => ({ name: i.config.name, mcpUrl: i.mcpUrl! }));
+  }
+
+  /**
+   * Detect the Serena dashboard port by recording which ports in the 24282+ range
+   * are new since before the instance started.
+   */
+  private async detectDashboardUrl(portsBefore: Set<number>): Promise<string | undefined> {
+    const DASHBOARD_BASE = 24282;
+    const MAX_SCAN = 10;
+    try {
+      for (let port = DASHBOARD_BASE; port < DASHBOARD_BASE + MAX_SCAN; port++) {
+        if (portsBefore.has(port)) continue; // Was already in use before we started
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/dashboard/index.html`, {
+            signal: AbortSignal.timeout(1000),
+          });
+          if (res.ok || res.status === 304) {
+            log.info("Detected Serena dashboard on port {port}", { port });
+            return `http://127.0.0.1:${port}/dashboard/index.html`;
+          }
+        } catch {
+          // Not listening — try next port
+        }
+      }
+    } catch (e) {
+      log.warn("Dashboard detection failed: {error}", { error: e instanceof Error ? e.message : String(e) });
+    }
+    return undefined;
+  }
+
+  /** Snapshot which dashboard-range ports are already in use before starting an instance. */
+  private async snapshotDashboardPorts(): Promise<Set<number>> {
+    const used = new Set<number>();
+    const DASHBOARD_BASE = 24282;
+    const MAX_SCAN = 10;
+    const checks = Array.from({ length: MAX_SCAN }, (_, i) => DASHBOARD_BASE + i).map(async (port) => {
+      try {
+        await fetch(`http://127.0.0.1:${port}/dashboard/index.html`, { signal: AbortSignal.timeout(500) });
+        used.add(port);
+      } catch {
+        // Not in use
+      }
+    });
+    await Promise.allSettled(checks);
+    return used;
   }
 
   private killProc(instance: SerenaInstance): void {
