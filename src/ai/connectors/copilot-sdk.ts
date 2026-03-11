@@ -6,8 +6,8 @@ import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { getLog } from "../../logging.ts";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { resolve } from "node:path";
+import { discoverSerenaConfigs } from "../../serena/config.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
@@ -251,22 +251,17 @@ export async function executePrompt(
  * Creates a "verify-code" agent with grep/diff/read tools for verifying
  * claims that Serena alone can't verify (reference-following, file diffing).
  */
-function buildCustomAgents(botConfig: BotConfig): CustomAgentConfig[] {
-  const configPath = join(botConfig.dir, "config.json");
-  let projectPaths = "";
-  try {
-    const raw = JSON.parse(readFileSync(configPath, "utf-8"));
-    if (Array.isArray(raw.serena)) {
-      projectPaths = raw.serena
-        .filter((s: { projectPath?: string; displayName?: string }) => s.projectPath && s.displayName)
-        .map((s: { displayName: string; projectPath: string }) => `- **${s.displayName}**: \`${s.projectPath}\``)
-        .join("\n");
-    }
-  } catch {
-    // No config.json or no serena entries
-  }
+export function buildCustomAgents(botConfig: BotConfig): CustomAgentConfig[] {
+  // Reuse the shared Serena config discovery (validates name, projectPath, port)
+  const botsDir = resolve(botConfig.dir, "..");
+  const allConfigs = discoverSerenaConfigs(botsDir);
+  const botSerena = allConfigs.find((c) => c.botName === botConfig.name);
 
-  if (!projectPaths) return [];
+  if (!botSerena?.instances.length) return [];
+
+  const projectPaths = botSerena.instances
+    .map((s) => `- **${s.displayName}**: \`${s.projectPath}\``)
+    .join("\n");
 
   return [{
     name: "verify-code",
