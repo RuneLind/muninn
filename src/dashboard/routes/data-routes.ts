@@ -1,5 +1,4 @@
 import type { Hono } from "hono";
-import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { spec } from "../openapi-spec.ts";
 import { Scalar } from "@scalar/hono-api-reference";
@@ -20,7 +19,7 @@ import { parseIntParam } from "./route-utils.ts";
 
 const log = getLog("dashboard");
 
-export function registerDataRoutes(app: Hono, _config: Config): void {
+export function registerDataRoutes(app: Hono): void {
   app.get("/api/openapi.json", (c) => c.json(spec));
   app.get("/docs", Scalar({ url: "/api/openapi.json", pageTitle: "Muninn API" }));
 

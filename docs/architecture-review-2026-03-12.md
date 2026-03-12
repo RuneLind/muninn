@@ -14,11 +14,12 @@ The issues are **local complexity hotspots**, not systemic architectural problem
 
 ## High Priority
 
-### 1. `src/core/message-processor.ts` — God function (~400 lines) ✅ DONE
+### 1. `src/core/message-processor.ts` — God function (~400 lines) ⚠️ PARTIAL
 
 - Mixes tracing, activity logging, prompt building, AI execution, memory/goal extraction, and platform-specific formatting in one procedural pipeline
 - Voice handler duplicates ~80% of the same logic
 - **Fix**: Decompose into phases: `buildContext()` → `callAI()` → `extractMetadata()` → `formatResponse()` → `persistResult()`. Voice handler reuses the same pipeline.
+- **Done so far**: Voice handler now reuses processMessage() via optional `tracer` param, eliminating duplication. The god function decomposition itself remains as future work.
 
 ### 2. `src/dashboard/routes.ts` — Mega-file (500+ lines, 50+ handlers) ✅ DONE
 

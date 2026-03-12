@@ -14,12 +14,6 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
 const MAX_TOOL_TURNS = 10;
 
-interface ParsedToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
-
 type ChatMessage =
   | { role: "system"; content: string }
   | { role: "user"; content: string }

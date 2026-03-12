@@ -19,7 +19,7 @@ export function createDashboardRoutes(config: Config): Hono {
     return c.html(renderDashboardPage());
   });
 
-  registerDataRoutes(app, config);
+  registerDataRoutes(app);
   registerTracesRoutes(app);
   registerMemsearchRoutes(app);
   registerLogsRoutes(app, config);
