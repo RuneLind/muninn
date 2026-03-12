@@ -4,7 +4,7 @@ import { spec } from "../openapi-spec.ts";
 import { Scalar } from "@scalar/hono-api-reference";
 import { activityLog } from "../activity-log.ts";
 import { discoverAllBots } from "../../bots/config.ts";
-import { loadChatConfig, addChatUser } from "../../chat/chat-config.ts";
+import { addChatUser } from "../../chat/chat-config.ts";
 import { getRecentMessages } from "../../db/messages.ts";
 import { getActiveGoals } from "../../db/goals.ts";
 import { getAllGoals } from "../../db/goals.ts";
