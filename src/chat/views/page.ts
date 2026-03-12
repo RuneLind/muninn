@@ -226,6 +226,26 @@ const CHAT_STYLES = `
       white-space: nowrap;
       flex-shrink: 0;
     }
+    .thread-item-delete {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 14px;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 0;
+      line-height: 1;
+      transition: background 0.15s, color 0.15s;
+    }
+    .thread-item:hover .thread-item-delete { display: flex; }
+    .thread-item:hover .thread-item-time { display: none; }
+    .thread-item-delete:hover { background: color-mix(in srgb, #e53935 15%, transparent); color: #e53935; }
 
     /* Chat */
     .sim-chat {
@@ -1056,6 +1076,10 @@ const CHAT_SCRIPT = `
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
+      var deleteBtn = t.name !== 'main'
+        ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
+        : '';
+
       return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
@@ -1064,6 +1088,7 @@ const CHAT_SCRIPT = `
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
         + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
+        + deleteBtn
         + '</div>';
     }).join('');
 
@@ -1071,6 +1096,32 @@ const CHAT_SCRIPT = `
       el.onclick = function() {
         var tid = el.dataset.id;
         if (tid) selectThread(tid);
+      };
+    });
+
+    threadList.querySelectorAll('.thread-item-delete').forEach(function(btn) {
+      btn.onclick = function(e) {
+        e.stopPropagation();
+        var threadId = btn.dataset.deleteId;
+        if (!threadId) return;
+        var threadName = '';
+        for (var i = 0; i < threads.length; i++) {
+          if (threads[i].id === threadId) { threadName = threads[i].name; break; }
+        }
+        if (!confirm('Delete thread "' + threadName + '" and all its messages?')) return;
+        fetch('/chat/threads/' + encodeURIComponent(threadId), { method: 'DELETE' })
+          .then(function(res) {
+            if (!res.ok) throw new Error('Failed to delete');
+            threads = threads.filter(function(t) { return t.id !== threadId; });
+            if (activeThreadId === threadId) {
+              var mainThread = threads.find(function(t) { return t.name === 'main'; });
+              if (mainThread) { selectThread(mainThread.id); }
+              else { clearChat(); renderThreadList(); }
+            } else {
+              renderThreadList();
+            }
+          })
+          .catch(function() { alert('Could not delete thread'); });
       };
     });
   }
