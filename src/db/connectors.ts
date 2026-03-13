@@ -125,41 +125,74 @@ export async function deleteConnector(id: string): Promise<boolean> {
   }
 }
 
-/** Seed connector entries from bot configs on first run (if table is empty). */
+/** Seed connector entries from bot configs if table is empty.
+ *  Also ensures a copilot-sdk entry always exists.
+ *  Deduplicates by connector_type + model + base_url. */
 export async function seedConnectorsFromBotConfigs(botConfigs: BotConfig[]): Promise<number> {
   const sql = getDb();
 
   return await sql.begin(async (_tx) => {
     const tx = _tx as unknown as Sql;
     const [row] = await tx`SELECT COUNT(*)::int AS count FROM connectors`;
-    if ((row as Record<string, unknown>).count as number > 0) return 0;
+    if ((row as Record<string, unknown>).count as number > 0) {
+      // Even if table is populated, ensure copilot-sdk entry exists
+      await ensureCopilotConnector(tx);
+      return 0;
+    }
 
+    const seen = new Set<string>();
     let created = 0;
-    for (const bot of botConfigs) {
-      const connectorType = bot.connector ?? "claude-cli";
-      const name = `${bot.name}-default`;
-      const description = `Auto-seeded from ${bot.name}/config.json`;
 
-      await tx`
-        INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, timeout_ms)
-        VALUES (
-          ${name},
-          ${description},
-          ${connectorType},
-          ${bot.model ?? null},
-          ${bot.baseUrl ?? null},
-          ${bot.thinkingMaxTokens ?? null},
-          ${bot.timeoutMs ?? null}
-        )
-      `;
-      created++;
-      log.info("Seeded connector \"{name}\" ({type}, model: {model})", {
-        name,
-        type: connectorType,
-        model: bot.model ?? "default",
+    // Seed from bot configs
+    for (const bot of botConfigs) {
+      created += await seedOne(tx, seen, {
+        connectorType: bot.connector ?? "claude-cli",
+        model: bot.model ?? null,
+        baseUrl: bot.baseUrl ?? null,
+        thinkingMaxTokens: bot.thinkingMaxTokens ?? null,
+        timeoutMs: bot.timeoutMs ?? null,
       });
     }
 
+    // Always include a copilot-sdk entry
+    created += await seedOne(tx, seen, {
+      connectorType: "copilot-sdk",
+      model: "claude-sonnet-4-6",
+      baseUrl: null,
+      thinkingMaxTokens: null,
+      timeoutMs: null,
+    });
+
     return created;
   });
+}
+
+async function seedOne(
+  tx: Sql,
+  seen: Set<string>,
+  config: { connectorType: string; model: string | null; baseUrl: string | null; thinkingMaxTokens: number | null; timeoutMs: number | null },
+): Promise<number> {
+  const key = `${config.connectorType}|${config.model ?? ""}|${config.baseUrl ?? ""}`;
+  if (seen.has(key)) return 0;
+  seen.add(key);
+
+  let name = config.connectorType;
+  if (config.model) name += ` ${config.model}`;
+
+  await tx`
+    INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, timeout_ms)
+    VALUES (${name}, ${"Auto-seeded"}, ${config.connectorType}, ${config.model}, ${config.baseUrl}, ${config.thinkingMaxTokens}, ${config.timeoutMs})
+  `;
+  log.info("Seeded connector \"{name}\" ({type})", { name, type: config.connectorType });
+  return 1;
+}
+
+async function ensureCopilotConnector(tx: Sql): Promise<void> {
+  const [existing] = await tx`SELECT 1 FROM connectors WHERE connector_type = 'copilot-sdk' LIMIT 1`;
+  if (existing) return;
+  await tx`
+    INSERT INTO connectors (name, description, connector_type, model)
+    VALUES ('copilot-sdk claude-sonnet-4-6', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-4-6')
+  `;
+  log.info("Seeded missing copilot-sdk connector");
 }
