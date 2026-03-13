@@ -49,6 +49,9 @@ export interface ProcessMessageParams {
   onIntent?: (text: string) => void;
   /** Callback for tool status updates (appended as separate lines, not replaced) */
   onToolStatus?: (text: string) => void;
+  /** External tracer — if provided, processMessage uses it instead of creating a new one.
+   *  The caller is responsible for calling tracer.finish() after processMessage returns. */
+  tracer?: Tracer;
 }
 
 export interface ProcessMessageResult {
@@ -74,7 +77,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
-  const t = new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
+  const externalTracer = !!params.tracer;
+  const t = params.tracer ?? new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
   const props = { botName: botConfig.name, userId, username, platform };
 
   // Ensure user exists in DB (creates on first encounter, updates last_seen_at)
@@ -314,7 +318,9 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCount,
     });
     agentStatus.set("idle");
-    t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+    if (!externalTracer) {
+      t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+    }
 
     // Timing breakdown
     const s = t.summary();
@@ -339,7 +345,9 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   } catch (error) {
     agentStatus.clearRequest();
     agentStatus.set("idle");
-    t.error(error instanceof Error ? error : String(error));
+    if (!externalTracer) {
+      t.error(error instanceof Error ? error : String(error));
+    }
 
     const errorMessage = error instanceof Error ? error.message : String(error);
     const s = t.summary();
