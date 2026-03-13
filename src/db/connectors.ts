@@ -1,6 +1,9 @@
+import type postgres from "postgres";
 import { getDb } from "./client.ts";
 import type { BotConfig, ConnectorType } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
+
+type Sql = postgres.Sql;
 
 const log = getLog("db", "connectors");
 
@@ -125,34 +128,38 @@ export async function deleteConnector(id: string): Promise<boolean> {
 /** Seed connector entries from bot configs on first run (if table is empty). */
 export async function seedConnectorsFromBotConfigs(botConfigs: BotConfig[]): Promise<number> {
   const sql = getDb();
-  const [row] = await sql`SELECT COUNT(*)::int AS count FROM connectors`;
-  if ((row as Record<string, unknown>).count as number > 0) return 0;
 
-  let created = 0;
-  for (const bot of botConfigs) {
-    const connectorType = bot.connector ?? "claude-cli";
-    const name = `${bot.name}-default`;
-    const description = `Auto-seeded from ${bot.name}/config.json`;
+  return await sql.begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    const [row] = await tx`SELECT COUNT(*)::int AS count FROM connectors`;
+    if ((row as Record<string, unknown>).count as number > 0) return 0;
 
-    await sql`
-      INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, timeout_ms)
-      VALUES (
-        ${name},
-        ${description},
-        ${connectorType},
-        ${bot.model ?? null},
-        ${bot.baseUrl ?? null},
-        ${bot.thinkingMaxTokens ?? null},
-        ${bot.timeoutMs ?? null}
-      )
-    `;
-    created++;
-    log.info("Seeded connector \"{name}\" ({type}, model: {model})", {
-      name,
-      type: connectorType,
-      model: bot.model ?? "default",
-    });
-  }
+    let created = 0;
+    for (const bot of botConfigs) {
+      const connectorType = bot.connector ?? "claude-cli";
+      const name = `${bot.name}-default`;
+      const description = `Auto-seeded from ${bot.name}/config.json`;
 
-  return created;
+      await tx`
+        INSERT INTO connectors (name, description, connector_type, model, base_url, thinking_max_tokens, timeout_ms)
+        VALUES (
+          ${name},
+          ${description},
+          ${connectorType},
+          ${bot.model ?? null},
+          ${bot.baseUrl ?? null},
+          ${bot.thinkingMaxTokens ?? null},
+          ${bot.timeoutMs ?? null}
+        )
+      `;
+      created++;
+      log.info("Seeded connector \"{name}\" ({type}, model: {model})", {
+        name,
+        type: connectorType,
+        model: bot.model ?? "default",
+      });
+    }
+
+    return created;
+  });
 }
