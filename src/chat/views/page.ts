@@ -46,6 +46,7 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
+        <span class="chat-connector-badge" id="connectorBadge"></span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -301,6 +302,37 @@ const CHAT_STYLES = `
     .chat-title { font-size: 14px; font-weight: 500; }
     .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
+    .chat-connector-badge {
+      font-size: 10px;
+      color: var(--text-muted);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      border-radius: 4px;
+      padding: 2px 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      cursor: default;
+      position: relative;
+    }
+    .chat-connector-badge:empty { display: none; }
+    .chat-connector-badge .badge-tooltip {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: var(--text-primary);
+      white-space: nowrap;
+      z-index: 100;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      line-height: 1.6;
+    }
+    .chat-connector-badge:hover .badge-tooltip { display: block; }
+    .chat-connector-badge .badge-tooltip .tt-label { color: var(--text-muted); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
@@ -885,8 +917,10 @@ const CHAT_SCRIPT = `
       var botNames = bots.map(function(b) { return b.name; });
 
       // No "All Bots" pill — a bot must always be selected
-      container.innerHTML = botNames.map(function(b) {
-        return '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + escapeAttr(b) + '">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>';
+      container.innerHTML = bots.map(function(b) {
+        var tip = b.connector || 'claude-cli';
+        if (b.model) tip += ' · ' + b.model;
+        return '<button class="bot-pill' + (selectedBot === b.name ? ' active' : '') + '" data-bot="' + escapeAttr(b.name) + '" title="' + escapeAttr(tip) + '">' + escapeHtml(b.name.charAt(0).toUpperCase() + b.name.slice(1)) + '</button>';
       }).join('');
 
       return botNames;
@@ -1138,6 +1172,7 @@ const CHAT_SCRIPT = `
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
+    updateConnectorBadge();
 
     // Highlight in sidebar
     renderThreadList();
@@ -1159,6 +1194,7 @@ const CHAT_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
+    document.getElementById('connectorBadge').innerHTML = '';
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
@@ -1849,7 +1885,7 @@ const CHAT_SCRIPT = `
     }
 
     var aName = selectedUsername || selectedUserId || '?';
-    inspectorContent.innerHTML =
+    var html =
       '<div class="ins-user-header">'
         + '<div class="ins-user-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
         + '<div class="ins-user-info">'
@@ -1857,16 +1893,52 @@ const CHAT_SCRIPT = `
           + '<div class="ins-user-id">' + escapeHtml(selectedUserId) + '</div>'
         + '</div>'
       + '</div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>';
+
+    var botInfo = getBotInfo();
+    if (botInfo) {
+      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(botInfo.connector) + '</span></div>';
+      if (botInfo.model) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(botInfo.model) + '</span></div>';
+      if (botInfo.baseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(botInfo.baseUrl) + '</span></div>';
+    }
+
+    html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
       + '<hr class="ins-divider">';
+    inspectorContent.innerHTML = html;
 
     var contextKey = selectedUserId + ':' + selectedBot;
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
     }
+  }
+
+  function getBotInfo() {
+    if (!selectedBot || !bots.length) return null;
+    for (var i = 0; i < bots.length; i++) {
+      if (bots[i].name === selectedBot) return bots[i];
+    }
+    return null;
+  }
+
+  function updateConnectorBadge() {
+    var badge = document.getElementById('connectorBadge');
+    if (!badge) return;
+    var bot = getBotInfo();
+    if (!bot) { badge.innerHTML = ''; return; }
+
+    var label = bot.connector || 'claude-cli';
+    var shortModel = bot.model || '';
+    // Show compact label: "connector · model"
+    var text = label;
+    if (shortModel) text += ' \\u00b7 ' + shortModel;
+
+    var tooltip = '<span class="tt-label">Connector:</span> ' + escapeHtml(label);
+    if (bot.model) tooltip += '<br><span class="tt-label">Model:</span> ' + escapeHtml(bot.model);
+    if (bot.baseUrl) tooltip += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(bot.baseUrl);
+
+    badge.innerHTML = escapeHtml(text) + '<div class="badge-tooltip">' + tooltip + '</div>';
   }
 
   function loadInspectorContext(userId, botName) {

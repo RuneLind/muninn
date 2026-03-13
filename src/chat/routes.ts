@@ -37,7 +37,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       name: b.name,
       hasTelegram: !!b.telegramBotToken,
       hasSlack: !!b.slackBotToken,
-      model: b.model,
+      connector: b.connector ?? "claude-cli",
+      model: b.model ?? null,
+      baseUrl: b.baseUrl ?? null,
       showWaterfall: b.showWaterfall !== false,
       prompts: b.prompts,
     }));
