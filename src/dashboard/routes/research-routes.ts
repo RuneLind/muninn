@@ -8,6 +8,7 @@ import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
+import { listConnectors } from "../../db/connectors.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
 
 const log = getLog("dashboard");
@@ -226,8 +227,23 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       });
     }
 
-    // Validate connectorId if provided
-    const connectorId = body.connectorId && isValidUuid(body.connectorId) ? body.connectorId : undefined;
+    // Resolve connectorId: explicit > match bot's config > none
+    let connectorId: string | undefined;
+    if (body.connectorId && isValidUuid(body.connectorId)) {
+      connectorId = body.connectorId;
+    } else {
+      // Auto-match from bot config: find a connector with same type+model
+      try {
+        const botType = botConfig.connector ?? "claude-cli";
+        const botModel = botConfig.model ?? null;
+        const all = await listConnectors();
+        const match = all.find((c) =>
+          c.connectorType === botType &&
+          (c.model ?? null) === botModel,
+        );
+        if (match) connectorId = match.id;
+      } catch {}
+    }
 
     // Create a dedicated thread for this research
     const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
