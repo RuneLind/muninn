@@ -18,7 +18,7 @@ import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
 import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
 import type { ConnectorType } from "../../bots/config.ts";
-import { parseIntParam } from "./route-utils.ts";
+import { parseIntParam, isValidUuid } from "./route-utils.ts";
 
 const log = getLog("dashboard");
 
@@ -324,6 +324,7 @@ export function registerDataRoutes(app: Hono): void {
   app.put("/api/connectors/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid connector ID" }, 400);
       const body = await c.req.json<{
         name?: string;
         description?: string | null;
@@ -361,6 +362,7 @@ export function registerDataRoutes(app: Hono): void {
   app.delete("/api/connectors/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid connector ID" }, 400);
       const deleted = await deleteConnector(id);
       if (!deleted) {
         return c.json({ error: "Connector not found" }, 404);

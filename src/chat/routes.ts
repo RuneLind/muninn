@@ -11,6 +11,7 @@ import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
+import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("chat");
@@ -45,7 +46,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       prompts: b.prompts,
     }));
     let connectors: Awaited<ReturnType<typeof listConnectors>> = [];
-    try { connectors = await listConnectors(); } catch {}
+    try { connectors = await listConnectors(); } catch (err) {
+      log.warn("Failed to load connectors: {error}", { error: err instanceof Error ? err.message : String(err) });
+    }
     return c.json({ bots, connectors });
   });
 
@@ -132,6 +135,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const bot = botConfigs.find((b) => b.name === body.botName);
     if (!bot) {
       return c.json({ error: `Bot "${body.botName}" not found` }, 404);
+    }
+    if (body.connectorId && !isValidUuid(body.connectorId)) {
+      return c.json({ error: "Invalid connectorId" }, 400);
     }
     try {
       const thread = await createThread(body.userId, body.botName, body.name, body.description, body.connectorId);
@@ -237,7 +243,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
         if (thread?.connectorId) {
           threadConnector = await getConnector(thread.connectorId);
         }
-      } catch {}
+      } catch (err) {
+        log.warn("Failed to resolve thread connector: {error}", { error: err instanceof Error ? err.message : String(err) });
+      }
     }
 
     // Process asynchronously — response comes via WebSocket

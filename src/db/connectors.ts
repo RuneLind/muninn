@@ -110,13 +110,16 @@ export async function updateConnector(
 
 export async function deleteConnector(id: string): Promise<boolean> {
   const sql = getDb();
-  // Check if any threads reference this connector
-  const [ref] = await sql`SELECT 1 FROM threads WHERE connector_id = ${id} LIMIT 1`;
-  if (ref) {
-    throw new Error("Cannot delete connector: it is referenced by one or more threads");
+  try {
+    const result = await sql`DELETE FROM connectors WHERE id = ${id}`;
+    return result.count > 0;
+  } catch (err: unknown) {
+    // FK violation — threads reference this connector
+    if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23503") {
+      throw new Error("Cannot delete connector: it is referenced by one or more threads");
+    }
+    throw err;
   }
-  const result = await sql`DELETE FROM connectors WHERE id = ${id}`;
-  return result.count > 0;
 }
 
 /** Seed connector entries from bot configs on first run (if table is empty). */
