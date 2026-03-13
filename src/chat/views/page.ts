@@ -2136,10 +2136,16 @@ const CHAT_SCRIPT = `
       defaultLabel = dl;
     }
     connectorDropdown.innerHTML = '<option value="">' + escapeHtml(defaultLabel) + '</option>';
+    // Deduplicate: skip connectors with same type+model as bot default or a previous entry
+    var seen = {};
+    var botKey = (bot ? (bot.connector || 'claude-cli') + '|' + (bot.model || '') : '');
+    if (botKey) seen[botKey] = true;
     connectors.forEach(function(c) {
+      var key = c.connectorType + '|' + (c.model || '');
+      if (seen[key]) return;
+      seen[key] = true;
       var label = c.connectorType;
       if (c.model) label += ' \\u00b7 ' + c.model;
-      if (c.name) label += ' (' + c.name + ')';
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = label;
