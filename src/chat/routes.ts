@@ -6,7 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import { chatState, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
-import { listThreads, createThread, deleteThreadById, getThreadById } from "../db/threads.ts";
+import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -154,6 +154,22 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const allThreads = await listThreads(userId, botName);
     const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
     return c.json({ threads });
+  });
+
+  // Update a thread's connector
+  app.patch("/threads/:id/connector", async (c) => {
+    const id = c.req.param("id");
+    if (!isValidUuid(id)) return c.json({ error: "Invalid thread ID" }, 400);
+    const body = await c.req.json<{ connectorId: string | null }>();
+    if (body.connectorId && !isValidUuid(body.connectorId)) {
+      return c.json({ error: "Invalid connectorId" }, 400);
+    }
+    try {
+      await updateThreadConnector(id, body.connectorId ?? null);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
   });
 
   // Delete a thread by ID (including messages and associated memories)

@@ -1360,9 +1360,42 @@ const CHAT_SCRIPT = `
     // Update header
     var threadName = 'main';
     var threadDesc = '';
+    var threadHasConnector = false;
     for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId) { threadName = threads[i].name; threadDesc = threads[i].description || ''; break; }
+      if (threads[i].id === threadId) {
+        threadName = threads[i].name;
+        threadDesc = threads[i].description || '';
+        threadHasConnector = !!threads[i].connectorId;
+        break;
+      }
     }
+
+    // Auto-stamp: if thread has no connector and sidebar has one selected, assign it
+    if (!threadHasConnector && selectedConnectorId && threadName !== 'main') {
+      fetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectorId: selectedConnectorId }),
+      }).then(function() {
+        // Update local thread data so the UI reflects it
+        for (var j = 0; j < threads.length; j++) {
+          if (threads[j].id === threadId) {
+            threads[j].connectorId = selectedConnectorId;
+            // Find connector name from connectors list
+            for (var k = 0; k < connectors.length; k++) {
+              if (connectors[k].id === selectedConnectorId) {
+                threads[j].connectorName = connectors[k].name;
+                break;
+              }
+            }
+            break;
+          }
+        }
+        renderThreadList();
+        syncConnectorDropdown();
+      }).catch(function() {});
+    }
+
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
