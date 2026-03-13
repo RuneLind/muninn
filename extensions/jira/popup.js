@@ -138,6 +138,18 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   $('#issue-info').appendChild(dialog);
 }
 
+// Auto-resolve userId: try to fetch users for the bot and pick the right one
+async function resolveUserId(muninnUrl, botName) {
+  try {
+    const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(botName)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const users = data.users || [];
+    if (users.length === 1) return users[0].userId || users[0].id;
+  } catch {}
+  return null;
+}
+
 async function handleAnalyze(overrideUserId, forceNew) {
   const btn = $('#btn-index');
   const status = $('#status');
@@ -157,14 +169,18 @@ async function handleAnalyze(overrideUserId, forceNew) {
       } catch (e) { /* use cached */ }
     }
 
-    const settings = await chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '' });
+    const settings = await chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '', lastUserId: '' });
     const title = issueData.issueKey;
     const text = formatIssueAsText(issueData);
 
     const description = issueData.summary || issueData.title || '';
     const payload = { bot: 'melosys', title, text, description };
-    // userId priority: override (from picker) > settings > omit
-    const userId = overrideUserId || settings.userId;
+
+    // userId priority: override (from picker) > settings > last used > auto-resolve (single user) > omit
+    let userId = overrideUserId || settings.userId || settings.lastUserId;
+    if (!userId) {
+      userId = await resolveUserId(settings.muninnUrl, 'melosys');
+    }
     if (userId) payload.userId = userId;
     if (forceNew) payload.forceNew = true;
 
@@ -181,6 +197,8 @@ async function handleAnalyze(overrideUserId, forceNew) {
       status.className = 'status-msg hidden';
       btn.disabled = false;
       showUserPicker(result.users, (selectedUserId) => {
+        // Remember selection for next time
+        chrome.storage.sync.set({ lastUserId: selectedUserId });
         handleAnalyze(selectedUserId, forceNew);
       });
       return;
@@ -210,6 +228,9 @@ async function handleAnalyze(overrideUserId, forceNew) {
     if (!response.ok) {
       throw new Error(result.error || result.detail || `Error: ${response.status}`);
     }
+
+    // Remember the userId that worked for next time
+    if (userId) chrome.storage.sync.set({ lastUserId: userId });
 
     // Open chat page
     chrome.tabs.create({ url: `${settings.muninnUrl}${result.chatUrl}` });
