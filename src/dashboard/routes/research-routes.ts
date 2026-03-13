@@ -148,6 +148,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const body = await c.req.json<{
       bot?: string; title?: string; text: string;
       userId?: string; forceNew?: boolean; description?: string;
+      connectorId?: string;
     }>();
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
@@ -225,7 +226,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     }
 
     // Create a dedicated thread for this research
-    const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description);
+    const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, body.connectorId);
 
     // Build research prompt with machine-parseable marker for research card rendering
     const jiraPrompt = botConfig.prompts?.jiraAnalysis ?? DEFAULT_JIRA_ANALYSIS_PROMPT;

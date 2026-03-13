@@ -1304,21 +1304,28 @@ const CHAT_SCRIPT = `
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
+      // Build hover tooltip lines
+      var tipLines = [t.name];
+      if (t.description) tipLines.push(t.description);
+      if (t.connectorName) tipLines.push('Model: ' + t.connectorName);
+      if (meta) tipLines.push(meta);
+      var tip = tipLines.join('\\n');
+
       var connBadge = '';
       if (t.connectorName) {
-        var connLabel = t.connectorModel || t.connectorType || '';
-        connBadge = '<span class="thread-item-connector" title="' + escapeAttr(t.connectorName) + '">' + escapeHtml(connLabel) + '</span>';
+        connBadge = '<span class="thread-item-connector">' + escapeHtml(t.connectorName) + '</span>';
       }
 
       var deleteBtn = t.name !== 'main'
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
 
-      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
+      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '" title="' + escapeAttr(tip) + '">'
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
-          + '<div class="thread-item-name">' + escapeHtml(t.name) + connBadge + '</div>'
+          + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
           + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
+          + (connBadge ? '<div class="thread-item-meta">' + connBadge + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
         + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
@@ -1786,10 +1793,31 @@ const CHAT_SCRIPT = `
       }
     }
 
+    // Resolve connector name for the active thread
+    var reportConnector = '';
+    if (activeThreadId) {
+      for (var ci = 0; ci < threads.length; ci++) {
+        if (threads[ci].id === activeThreadId && threads[ci].connectorName) {
+          reportConnector = threads[ci].connectorName;
+          break;
+        }
+      }
+    }
+    if (!reportConnector) {
+      var bot = getBotInfo();
+      if (bot) reportConnector = (bot.connector || 'claude-cli') + (bot.model ? ' ' + bot.model : '');
+    }
+
     var now = new Date().toISOString().split('T')[0];
     var sections = [];
+    sections.push('---');
+    sections.push('issue: ' + issueKey);
+    sections.push('bot: ' + selectedBot);
+    sections.push('model: ' + reportConnector);
+    sections.push('date: ' + now);
+    sections.push('---');
+    sections.push('');
     sections.push('# ' + titleLine);
-    sections.push('> Generated on ' + now);
     sections.push('');
     if (jiraContent) {
       sections.push('## Task Description');
@@ -1810,7 +1838,7 @@ const CHAT_SCRIPT = `
       sections.push('');
     }
     sections.push('---');
-    sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Generated:** ' + new Date().toISOString());
+    sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Model:** ' + reportConnector + ' | **Generated:** ' + new Date().toISOString());
 
     var report = sections.join('\\n');
 
