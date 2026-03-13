@@ -91,6 +91,13 @@ export async function getThreadById(threadId: string): Promise<Thread | null> {
   return row ? rowToThread(row) : null;
 }
 
+/** Update a thread's connector_id. Pass null to clear. Returns false if thread not found. */
+export async function updateThreadConnector(threadId: string, connectorId: string | null): Promise<boolean> {
+  const sql = getDb();
+  const result = await sql`UPDATE threads SET connector_id = ${connectorId} WHERE id = ${threadId}`;
+  return result.count > 0;
+}
+
 /** Check if a thread with the given name exists for a user+bot. */
 export async function findThreadByName(userId: string, botName: string, name: string): Promise<Thread | null> {
   const sql = getDb();

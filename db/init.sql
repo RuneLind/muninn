@@ -63,6 +63,9 @@ CREATE TRIGGER connectors_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION update_connectors_updated_at();
 
+CREATE UNIQUE INDEX idx_connectors_unique_config
+  ON connectors (connector_type, COALESCE(model, ''), COALESCE(base_url, ''));
+
 -- ============================================================================
 -- Threads: isolated conversation contexts per topic
 -- (must be created before messages, which has a FK reference)

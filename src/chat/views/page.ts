@@ -30,6 +30,10 @@ export function renderChatPage(): string {
         <label>User</label>
         <select id="userSelector"></select>
       </div>
+      <div class="sidebar-connector" id="connectorSelector" style="display:none">
+        <label>Model</label>
+        <select id="connectorDropdown"></select>
+      </div>
       <div class="sidebar-header">
         <h3>Threads</h3>
         <button class="new-thread-btn" id="newThreadBtn">+ New Thread</button>
@@ -46,7 +50,6 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
-        <span class="chat-connector-badge" id="connectorBadge"></span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -333,37 +336,32 @@ const CHAT_STYLES = `
     .chat-title { font-size: 14px; font-weight: 500; }
     .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
-    .chat-connector-badge {
-      font-size: 10px;
-      color: var(--text-muted);
-      background: color-mix(in srgb, var(--accent) 10%, transparent);
-      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-      border-radius: 4px;
-      padding: 2px 8px;
-      white-space: nowrap;
-      flex-shrink: 0;
-      cursor: default;
-      position: relative;
+    .sidebar-connector {
+      padding: 8px 16px 6px;
+      border-bottom: 1px solid var(--border-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
-    .chat-connector-badge:empty { display: none; }
-    .chat-connector-badge .badge-tooltip {
-      display: none;
-      position: absolute;
-      top: calc(100% + 6px);
-      right: 0;
-      background: var(--bg-panel);
-      border: 1px solid var(--border-primary);
-      border-radius: 6px;
-      padding: 8px 12px;
+    .sidebar-connector label {
       font-size: 11px;
-      color: var(--text-primary);
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
       white-space: nowrap;
-      z-index: 100;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-      line-height: 1.6;
     }
-    .chat-connector-badge:hover .badge-tooltip { display: block; }
-    .chat-connector-badge .badge-tooltip .tt-label { color: var(--text-muted); }
+    .sidebar-connector select {
+      flex: 1;
+      padding: 4px 6px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      font-size: 12px;
+      min-width: 0;
+    }
+    .sidebar-connector select:focus { outline: none; border-color: var(--accent); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
@@ -920,15 +918,14 @@ const CHAT_STYLES = `
     }
     .thread-modal-save:hover { background: var(--accent-hover); }
 
-    /* Thread connector badge in sidebar */
-    .thread-item-connector {
-      font-size: 9px;
-      color: var(--text-faint);
-      background: color-mix(in srgb, var(--accent) 8%, transparent);
-      border-radius: 3px;
-      padding: 1px 5px;
-      margin-left: 4px;
+    /* Thread model label in sidebar */
+    .thread-item-model {
+      font-size: 10px;
+      color: var(--accent-muted);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
     }
 `;
 
@@ -1072,6 +1069,9 @@ const CHAT_SCRIPT = `
     // Load users for this bot and populate selector
     await loadUsersForBot(name);
 
+    // Update connector dropdown (bot default label changes per bot)
+    populateConnectorDropdown();
+
     // Resolve or create conversation for this user+bot
     await resolveConversation();
 
@@ -1195,7 +1195,9 @@ const CHAT_SCRIPT = `
       opt.textContent = label;
       threadModalConnector.appendChild(opt);
     });
-    threadConnectorHint.textContent = '';
+    // Pre-fill from sidebar connector selection
+    threadModalConnector.value = selectedConnectorId;
+    threadModalConnector.dispatchEvent(new Event('change'));
     threadModal.classList.add('visible');
     threadModalName.focus();
   }
@@ -1301,12 +1303,6 @@ const CHAT_SCRIPT = `
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
-      var connBadge = '';
-      if (t.connectorName) {
-        var connLabel = t.connectorModel || t.connectorType || '';
-        connBadge = '<span class="thread-item-connector" title="' + escapeAttr(t.connectorName) + '">' + escapeHtml(connLabel) + '</span>';
-      }
-
       var deleteBtn = t.name !== 'main'
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
@@ -1314,8 +1310,9 @@ const CHAT_SCRIPT = `
       return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
-          + '<div class="thread-item-name">' + escapeHtml(t.name) + connBadge + '</div>'
+          + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
           + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
+          + (t.connectorName ? '<div class="thread-item-model">' + escapeHtml(t.connectorName) + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
         + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
@@ -1369,7 +1366,7 @@ const CHAT_SCRIPT = `
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
-    updateConnectorBadge();
+    syncConnectorDropdown();
 
     // Highlight in sidebar
     renderThreadList();
@@ -1391,7 +1388,7 @@ const CHAT_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
-    document.getElementById('connectorBadge').innerHTML = '';
+    connectorDropdown.value = selectedConnectorId;
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
@@ -1542,6 +1539,32 @@ const CHAT_SCRIPT = `
 
     // Check for pending research message (e.g. from Chrome extension)
     if (threadParam && activeConvId && activeThreadId) {
+      // Stamp connector from sidebar selection if thread has none
+      if (selectedConnectorId) {
+        var needsStamp = true;
+        for (var ti = 0; ti < threads.length; ti++) {
+          if (threads[ti].id === activeThreadId && threads[ti].connectorId) { needsStamp = false; break; }
+        }
+        if (needsStamp) {
+          try {
+            await fetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/connector', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ connectorId: selectedConnectorId }),
+            });
+            for (var tj = 0; tj < threads.length; tj++) {
+              if (threads[tj].id === activeThreadId) {
+                threads[tj].connectorId = selectedConnectorId;
+                for (var tk = 0; tk < connectors.length; tk++) {
+                  if (connectors[tk].id === selectedConnectorId) { threads[tj].connectorName = connectors[tk].name; break; }
+                }
+                break;
+              }
+            }
+            renderThreadList();
+          } catch {}
+        }
+      }
       try {
         var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
         var pendingData = await pendingRes.json();
@@ -1783,10 +1806,31 @@ const CHAT_SCRIPT = `
       }
     }
 
+    // Resolve connector name for the active thread
+    var reportConnector = '';
+    if (activeThreadId) {
+      for (var ci = 0; ci < threads.length; ci++) {
+        if (threads[ci].id === activeThreadId && threads[ci].connectorName) {
+          reportConnector = threads[ci].connectorName;
+          break;
+        }
+      }
+    }
+    if (!reportConnector) {
+      var bot = getBotInfo();
+      if (bot) reportConnector = (bot.connector || 'claude-cli') + (bot.model ? ' ' + bot.model : '');
+    }
+
     var now = new Date().toISOString().split('T')[0];
     var sections = [];
+    sections.push('---');
+    sections.push('issue: ' + issueKey);
+    sections.push('bot: ' + selectedBot);
+    sections.push('model: ' + reportConnector);
+    sections.push('date: ' + now);
+    sections.push('---');
+    sections.push('');
     sections.push('# ' + titleLine);
-    sections.push('> Generated on ' + now);
     sections.push('');
     if (jiraContent) {
       sections.push('## Task Description');
@@ -1807,7 +1851,7 @@ const CHAT_SCRIPT = `
       sections.push('');
     }
     sections.push('---');
-    sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Generated:** ' + new Date().toISOString());
+    sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Model:** ' + reportConnector + ' | **Generated:** ' + new Date().toISOString());
 
     var report = sections.join('\\n');
 
@@ -2119,47 +2163,66 @@ const CHAT_SCRIPT = `
     return null;
   }
 
-  function updateConnectorBadge() {
-    var badge = document.getElementById('connectorBadge');
-    if (!badge) return;
-    var bot = getBotInfo();
-    if (!bot) { badge.innerHTML = ''; return; }
+  // --- Connector dropdown ---
+  var connectorDropdown = document.getElementById('connectorDropdown');
+  var connectorSelector = document.getElementById('connectorSelector');
+  var selectedConnectorId = '';  // '' = bot default
 
-    // Check if active thread has a connector override
-    var threadConn = null;
+  function connectorStorageKey() {
+    return 'muninn-connector-' + (selectedBot || 'default');
+  }
+
+  function populateConnectorDropdown() {
+    var bot = getBotInfo();
+    var defaultLabel = 'Bot default';
+    if (bot) {
+      var dl = bot.connector || 'claude-cli';
+      if (bot.model) dl += ' \\u00b7 ' + bot.model;
+      defaultLabel = dl;
+    }
+    connectorDropdown.innerHTML = '<option value="">' + escapeHtml(defaultLabel) + '</option>';
+    connectors.forEach(function(c) {
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      connectorDropdown.appendChild(opt);
+    });
+    connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
+
+    // Restore per-bot selection; reset if stored ID no longer exists
+    try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
+    connectorDropdown.value = selectedConnectorId;
+    if (connectorDropdown.value !== selectedConnectorId) {
+      selectedConnectorId = '';
+      connectorDropdown.value = '';
+      try { localStorage.removeItem(connectorStorageKey()); } catch {}
+    }
+  }
+
+  connectorDropdown.addEventListener('change', function() {
+    selectedConnectorId = connectorDropdown.value;
+    try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
+  });
+
+  function syncConnectorDropdown() {
+    if (!connectors.length) return;
+
+    // If active thread has its own connector, show that; otherwise show the sidebar selection
+    var threadConnId = '';
     if (activeThreadId) {
       for (var i = 0; i < threads.length; i++) {
         if (threads[i].id === activeThreadId && threads[i].connectorId) {
-          var cId = threads[i].connectorId;
-          for (var j = 0; j < connectors.length; j++) {
-            if (connectors[j].id === cId) { threadConn = connectors[j]; break; }
-          }
+          threadConnId = threads[i].connectorId;
           break;
         }
       }
     }
 
-    var label, shortModel, tooltipParts;
-    if (threadConn) {
-      label = threadConn.connectorType;
-      shortModel = threadConn.model || '';
-      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(threadConn.name)
-        + '<br><span class="tt-label">Type:</span> ' + escapeHtml(label);
-      if (threadConn.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(threadConn.model);
-      if (threadConn.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(threadConn.baseUrl);
-      tooltipParts += '<br><span class="tt-label">Source:</span> thread override';
+    if (threadConnId) {
+      connectorDropdown.value = threadConnId;
     } else {
-      label = bot.connector || 'claude-cli';
-      shortModel = bot.model || '';
-      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(label);
-      if (bot.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(bot.model);
-      if (bot.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(bot.baseUrl);
-      tooltipParts += '<br><span class="tt-label">Source:</span> bot config';
+      connectorDropdown.value = selectedConnectorId;
     }
-
-    var text = label;
-    if (shortModel) text += ' \\u00b7 ' + shortModel;
-    badge.innerHTML = escapeHtml(text) + '<div class="badge-tooltip">' + tooltipParts + '</div>';
   }
 
   function loadInspectorContext(userId, botName) {

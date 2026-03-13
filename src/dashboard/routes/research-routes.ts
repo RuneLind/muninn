@@ -8,6 +8,7 @@ import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
+import { isValidUuid } from "../routes/route-utils.ts";
 
 const log = getLog("dashboard");
 
@@ -148,6 +149,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const body = await c.req.json<{
       bot?: string; title?: string; text: string;
       userId?: string; forceNew?: boolean; description?: string;
+      connectorId?: string;
     }>();
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
@@ -224,8 +226,11 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       });
     }
 
+    // Validate connectorId if provided (chat page stamps connector on thread select)
+    const connectorId = body.connectorId && isValidUuid(body.connectorId) ? body.connectorId : undefined;
+
     // Create a dedicated thread for this research
-    const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description);
+    const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
 
     // Build research prompt with machine-parseable marker for research card rendering
     const jiraPrompt = botConfig.prompts?.jiraAnalysis ?? DEFAULT_JIRA_ANALYSIS_PROMPT;
