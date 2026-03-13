@@ -30,6 +30,7 @@ export function renderChatPage(): string {
         <label>User</label>
         <select id="userSelector"></select>
       </div>
+      <div class="sidebar-connector" id="connectorBadge"></div>
       <div class="sidebar-header">
         <h3>Threads</h3>
         <button class="new-thread-btn" id="newThreadBtn">+ New Thread</button>
@@ -46,7 +47,6 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
-        <span class="chat-connector-badge" id="connectorBadge"></span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -333,24 +333,35 @@ const CHAT_STYLES = `
     .chat-title { font-size: 14px; font-weight: 500; }
     .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
-    .chat-connector-badge {
-      font-size: 10px;
+    .sidebar-connector {
+      display: none;
+      padding: 6px 16px;
+      font-size: 11px;
       color: var(--text-muted);
-      background: color-mix(in srgb, var(--accent) 10%, transparent);
-      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-      border-radius: 4px;
-      padding: 2px 8px;
-      white-space: nowrap;
-      flex-shrink: 0;
+      border-bottom: 1px solid var(--border-primary);
       cursor: default;
       position: relative;
     }
-    .chat-connector-badge:empty { display: none; }
-    .chat-connector-badge .badge-tooltip {
+    .sidebar-connector:not(:empty) { display: block; }
+    .sidebar-connector .conn-label {
+      color: var(--text-dim);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .sidebar-connector .conn-value {
+      color: var(--text-secondary);
+      font-size: 12px;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sidebar-connector .badge-tooltip {
       display: none;
       position: absolute;
-      top: calc(100% + 6px);
-      right: 0;
+      top: calc(100% + 4px);
+      left: 12px;
       background: var(--bg-panel);
       border: 1px solid var(--border-primary);
       border-radius: 6px;
@@ -362,8 +373,8 @@ const CHAT_STYLES = `
       box-shadow: 0 4px 12px rgba(0,0,0,0.3);
       line-height: 1.6;
     }
-    .chat-connector-badge:hover .badge-tooltip { display: block; }
-    .chat-connector-badge .badge-tooltip .tt-label { color: var(--text-muted); }
+    .sidebar-connector:hover .badge-tooltip { display: block; }
+    .sidebar-connector .badge-tooltip .tt-label { color: var(--text-muted); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
@@ -2159,7 +2170,7 @@ const CHAT_SCRIPT = `
 
     var text = label;
     if (shortModel) text += ' \\u00b7 ' + shortModel;
-    badge.innerHTML = escapeHtml(text) + '<div class="badge-tooltip">' + tooltipParts + '</div>';
+    badge.innerHTML = '<div class="conn-label">Model</div><div class="conn-value">' + escapeHtml(text) + '</div><div class="badge-tooltip">' + tooltipParts + '</div>';
   }
 
   function loadInspectorContext(userId, botName) {
