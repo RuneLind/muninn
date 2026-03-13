@@ -1372,7 +1372,7 @@ const CHAT_SCRIPT = `
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
-    updateConnectorBadge();
+    syncConnectorDropdown();
 
     // Highlight in sidebar
     renderThreadList();
@@ -2165,7 +2165,7 @@ const CHAT_SCRIPT = `
     try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
   });
 
-  function updateConnectorBadge() {
+  function syncConnectorDropdown() {
     if (!connectors.length) return;
 
     // If active thread has its own connector, show that; otherwise show the sidebar selection

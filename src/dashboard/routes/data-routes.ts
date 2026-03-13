@@ -316,6 +316,9 @@ export function registerDataRoutes(app: Hono): void {
       });
       return c.json({ connector }, 201);
     } catch (err) {
+      if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
+        return c.json({ error: "A connector with this type, model, and base URL already exists" }, 409);
+      }
       log.error("Failed to create connector: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to create connector" }, 500);
     }
@@ -354,6 +357,9 @@ export function registerDataRoutes(app: Hono): void {
       }
       return c.json({ connector });
     } catch (err) {
+      if (err && typeof err === "object" && "code" in err && (err as { code: string }).code === "23505") {
+        return c.json({ error: "A connector with this type, model, and base URL already exists" }, 409);
+      }
       log.error("Failed to update connector: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to update connector" }, 500);
     }
