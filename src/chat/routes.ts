@@ -6,10 +6,12 @@ import type { BotConfig } from "../bots/config.ts";
 import { chatState, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
-import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
+import { listThreads, createThread, deleteThreadById, getThreadById } from "../db/threads.ts";
+import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
+import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("chat");
@@ -31,17 +33,23 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ viewableCollections: config.knowledgeViewableCollections });
   });
 
-  // List available bots
-  app.get("/bots", (c) => {
+  // List available bots + connectors
+  app.get("/bots", async (c) => {
     const bots = botConfigs.map((b) => ({
       name: b.name,
       hasTelegram: !!b.telegramBotToken,
       hasSlack: !!b.slackBotToken,
-      model: b.model,
+      connector: b.connector ?? "claude-cli",
+      model: b.model ?? null,
+      baseUrl: b.baseUrl ?? null,
       showWaterfall: b.showWaterfall !== false,
       prompts: b.prompts,
     }));
-    return c.json({ bots });
+    let connectors: Awaited<ReturnType<typeof listConnectors>> = [];
+    try { connectors = await listConnectors(); } catch (err) {
+      log.warn("Failed to load connectors: {error}", { error: err instanceof Error ? err.message : String(err) });
+    }
+    return c.json({ bots, connectors });
   });
 
   // Create a new conversation
@@ -120,7 +128,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Create a new thread for a user+bot
   app.post("/threads", async (c) => {
-    const body = await c.req.json<{ userId: string; botName: string; name: string }>();
+    const body = await c.req.json<{ userId: string; botName: string; name: string; description?: string; connectorId?: string }>();
     if (!body.userId || !body.botName || !body.name) {
       return c.json({ error: "userId, botName, and name are required" }, 400);
     }
@@ -128,8 +136,11 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     if (!bot) {
       return c.json({ error: `Bot "${body.botName}" not found` }, 404);
     }
+    if (body.connectorId && !isValidUuid(body.connectorId)) {
+      return c.json({ error: "Invalid connectorId" }, 400);
+    }
     try {
-      const thread = await createThread(body.userId, body.botName, body.name);
+      const thread = await createThread(body.userId, body.botName, body.name, body.description, body.connectorId);
       return c.json({ thread }, 201);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -224,8 +235,21 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       ? body.connector as "copilot-sdk" | "claude-cli"
       : undefined;
 
+    // Look up thread's connector override (if any)
+    let threadConnector: Awaited<ReturnType<typeof getConnector>> = null;
+    if (body.threadId) {
+      try {
+        const thread = await getThreadById(body.threadId);
+        if (thread?.connectorId) {
+          threadConnector = await getConnector(thread.connectorId);
+        }
+      } catch (err) {
+        log.warn("Failed to resolve thread connector: {error}", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
     // Process asynchronously — response comes via WebSocket
-    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride).catch((err) => {
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       chatState.addMessage(id, {

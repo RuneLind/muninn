@@ -10,10 +10,15 @@ export interface Thread {
   botName: string;
   name: string;
   description?: string;
+  connectorId?: string;
   isActive: boolean;
   createdAt: number;
   updatedAt: number;
   messageCount?: number;
+  /** Joined from connectors table */
+  connectorName?: string;
+  connectorType?: string;
+  connectorModel?: string;
 }
 
 function rowToThread(r: Record<string, unknown>): Thread {
@@ -23,10 +28,14 @@ function rowToThread(r: Record<string, unknown>): Thread {
     botName: r.bot_name as string,
     name: r.name as string,
     description: (r.description as string) ?? undefined,
+    connectorId: (r.connector_id as string) ?? undefined,
     isActive: r.is_active as boolean,
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
     messageCount: r.message_count != null ? Number(r.message_count) : undefined,
+    connectorName: (r.connector_name as string) ?? undefined,
+    connectorType: (r.connector_type as string) ?? undefined,
+    connectorModel: (r.connector_model as string) ?? undefined,
   };
 }
 
@@ -70,6 +79,18 @@ export async function getActiveThreadId(userId: string, botName: string): Promis
   return ensureDefaultThread(userId, botName);
 }
 
+/** Get a single thread by ID (with connector info). */
+export async function getThreadById(threadId: string): Promise<Thread | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT t.*, c.name AS connector_name, c.connector_type, c.model AS connector_model
+    FROM threads t
+    LEFT JOIN connectors c ON c.id = t.connector_id
+    WHERE t.id = ${threadId}
+  `;
+  return row ? rowToThread(row) : null;
+}
+
 /** Check if a thread with the given name exists for a user+bot. */
 export async function findThreadByName(userId: string, botName: string, name: string): Promise<Thread | null> {
   const sql = getDb();
@@ -82,7 +103,7 @@ export async function findThreadByName(userId: string, botName: string, name: st
 }
 
 /** Create a new thread without deactivating others. For web UI thread creation. */
-export async function createThread(userId: string, botName: string, name: string, description?: string): Promise<Thread> {
+export async function createThread(userId: string, botName: string, name: string, description?: string, connectorId?: string): Promise<Thread> {
   const sql = getDb();
   const normalized = name.toLowerCase().trim();
 
@@ -97,12 +118,14 @@ export async function createThread(userId: string, botName: string, name: string
   }
 
   const desc = description?.trim() || null;
+  const cId = connectorId || null;
   const [row] = await sql`
-    INSERT INTO threads (user_id, bot_name, name, description, is_active)
-    VALUES (${userId}, ${botName}, ${normalized}, ${desc}, false)
+    INSERT INTO threads (user_id, bot_name, name, description, connector_id, is_active)
+    VALUES (${userId}, ${botName}, ${normalized}, ${desc}, ${cId}, false)
     ON CONFLICT (user_id, bot_name, name) DO UPDATE SET
       updated_at = now(),
-      description = COALESCE(EXCLUDED.description, threads.description)
+      description = COALESCE(EXCLUDED.description, threads.description),
+      connector_id = COALESCE(EXCLUDED.connector_id, threads.connector_id)
     RETURNING *
   `;
   return rowToThread(row!);
@@ -168,8 +191,12 @@ export async function listThreads(userId: string, botName: string): Promise<Thre
   const rows = await sql`
     SELECT t.*,
       COALESCE(m.cnt, 0) AS message_count,
-      m.last_activity
+      m.last_activity,
+      c.name AS connector_name,
+      c.connector_type,
+      c.model AS connector_model
     FROM threads t
+    LEFT JOIN connectors c ON c.id = t.connector_id
     LEFT JOIN (
       SELECT
         thread_id AS tid,

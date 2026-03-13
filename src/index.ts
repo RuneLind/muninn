@@ -42,6 +42,17 @@ initDb(config);
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
+// Seed connector entries from bot configs (first run only)
+try {
+  const { seedConnectorsFromBotConfigs } = await import("./db/connectors.ts");
+  const seeded = await seedConnectorsFromBotConfigs(allBotConfigs);
+  if (seeded > 0) {
+    log.info("Seeded {count} connectors from bot configs", { count: seeded });
+  }
+} catch (err) {
+  log.warn("Failed to seed connectors: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
+
 // Load persisted activity events from DB
 await activityLog.loadFromDb();
 

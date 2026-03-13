@@ -15,6 +15,8 @@ import { memoriesPanelStyles, memoriesPanelHtml, memoriesPanelScript } from "./c
 import { memoryPanelStyles, memoryPanelHtml, memoryPanelScript } from "./components/memory-panel.ts";
 import { automationPanelStyles, automationPanelHtml, automationPanelScript } from "./components/automation-panel.ts";
 import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components/slack-panel.ts";
+import { connectorPanelStyles, connectorPanelHtml, connectorPanelScript } from "./components/connector-panel.ts";
+import { memsearchPanelStyles, memsearchPanelHtml, memsearchPanelScript } from "./components/memsearch-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
 import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "./components/request-progress-ui.ts";
@@ -44,6 +46,8 @@ export function renderDashboardPage(): string {
     ${memoryPanelStyles()}
     ${automationPanelStyles()}
     ${slackPanelStyles()}
+    ${connectorPanelStyles()}
+    ${memsearchPanelStyles()}
     ${requestProgressStyles()}
     ${usageChartStyles()}
     ${activityFeedStyles()}
@@ -80,6 +84,12 @@ export function renderDashboardPage(): string {
     <div data-section="schedules-watchers">
       ${automationPanelHtml()}
     </div>
+    <div data-section="connectors">
+      ${connectorPanelHtml()}
+    </div>
+    <div data-section="memsearch">
+      ${memsearchPanelHtml()}
+    </div>
     <div data-section="slack">
       ${slackPanelHtml()}
     </div>
@@ -101,6 +111,8 @@ export function renderDashboardPage(): string {
     ${memoryPanelScript()}
     ${automationPanelScript()}
     ${slackPanelScript()}
+    ${connectorPanelScript()}
+    ${memsearchPanelScript()}
     ${usageChartScript()}
     ${activityFeedScript()}
     ${requestProgressScript()}

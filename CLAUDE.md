@@ -222,7 +222,7 @@ PostgreSQL + pgvector via Docker (single container).
 - Migrate: `bun run db:migrate` / Status: `bun run db:migrate:status` / Baseline: `bun run db:migrate:baseline`
 - Test DB: `bun run db:setup:test` (creates `muninn_test`, applies schema + baseline)
 - Backup: `bun run db:backup` / Restore: `bun run db:restore`
-- Tables: `users` (canonical user identity), `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `threads` (per-user+bot conversation isolation), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
+- Tables: `users` (canonical user identity), `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers`, `connectors` (named AI connector configurations), `threads` (per-user+bot conversation isolation, optional FK to connectors), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes)
 
 ### Configuration (.env)
 

@@ -358,7 +358,7 @@ export function renderMemsearchPage(): string {
   </style>
 </head>
 <body>
-  ${renderNav("memsearch")}
+  ${renderNav("dashboard")}
 
   <div class="stats-bar" id="statsBar">
     <div class="stat-card"><div class="stat-value" id="statTotal">-</div><div class="stat-label">Total Memories</div></div>

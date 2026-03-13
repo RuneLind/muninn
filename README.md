@@ -5,7 +5,7 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 ## Features
 
 - **Multi-Bot Architecture** — Multiple Telegram bots in one process, each with isolated persona, MCP tools, and Claude CLI history
-- **Claude AI** — Responses powered by Claude Code headless mode (`claude -p`) with per-bot `cwd` isolation
+- **Multiple AI Connectors** — Claude CLI, GitHub Copilot SDK, or any OpenAI-compatible API (Ollama, LM Studio, vLLM) — configurable per bot
 - **Semantic Memory** — Automatically extracts and recalls facts from conversations using local embeddings (Transformers.js) and hybrid search (FTS + pgvector)
 - **Goal Tracking** — Detects goals/commitments/deadlines from conversations, injects them into prompt context, and proactively sends reminders and check-ins
 - **Scheduled Tasks** — Cron-style or interval-based recurring tasks detected from conversation ("remind me every morning at 8") — supports reminders, AI-generated briefings, and custom prompts
@@ -82,17 +82,34 @@ Multi-bot Telegram platform backed by Claude CLI — each bot gets its own perso
 ### Multi-Bot Process
 
 ```
-                    ┌────────────────────────────────────┐
-                    │       Single muninn process        │
-                    │                                    │
-Telegram user A ───►│  Grammy Bot 1 (Jarvis)             │
-                    │    → Claude CLI (cwd: bots/jarvis) │
-                    │                                    │
-Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
-                    │    → Claude CLI or Copilot SDK     │
-                    │                                    │
-                    │  Shared: DB, Dashboard, Scheduler  │
-                    └────────────────────────────────────┘
+                    ┌──────────────────────────────────────┐
+                    │        Single muninn process         │
+                    │                                      │
+Telegram user A ───►│  Bot 1 (Jarvis)                      │
+                    │    → Claude CLI (cwd: bots/jarvis)   │
+                    │                                      │
+Telegram user B ───►│  Bot 2 (Team Assistant)              │
+                    │    → Copilot SDK                     │
+                    │                                      │
+Slack user C ──────►│  Bot 3 (Local)                       │
+                    │    → Ollama / LM Studio (openai API) │
+                    │                                      │
+                    │  Shared: DB, Dashboard, Scheduler    │
+                    └──────────────────────────────────────┘
+```
+
+### Bot Folder Structure
+
+```
+bots/
+├── jarvis/                      ← example bot (included)
+│   ├── CLAUDE.md                ← persona + rules
+│   ├── config.json              ← connector, model, timeout overrides
+│   ├── .mcp.json                ← Gmail, Calendar MCPs
+│   └── .claude/
+│       └── settings.local.json  ← tool permissions
+├── your-bot/                    ← add your own here
+│   └── ...
 ```
 
 ### Bot Isolation via `cwd`
@@ -105,18 +122,130 @@ Each bot folder is set as `cwd` when spawning Claude CLI. This means Claude CLI 
 
 This keeps bot sessions completely isolated from each other and from interactive dev sessions in the project root.
 
-### Bot Folder Structure
+## AI Connectors
 
+Each bot selects its AI backend via `connector` in `bots/<name>/config.json`. Three connectors are available:
+
+| Connector | Value | Description |
+|---|---|---|
+| Claude CLI | `"claude-cli"` | Spawns `claude -p` as subprocess (default) |
+| Copilot SDK | `"copilot-sdk"` | GitHub Copilot SDK with shared JSON-RPC client |
+| OpenAI-compat | `"openai-compat"` | Any OpenAI-compatible API (Ollama, LM Studio, vLLM) |
+
+### Per-bot config.json
+
+All fields are optional — falls back to global `.env` values:
+
+```json
+{
+  "connector": "claude-cli",
+  "model": "claude-sonnet-4-6",
+  "thinkingMaxTokens": 16000,
+  "timeoutMs": 180000,
+  "baseUrl": "http://localhost:11434/v1"
+}
 ```
-bots/
-├── jarvis/                      ← example bot (included)
-│   ├── CLAUDE.md                ← persona + rules
-│   ├── .mcp.json                ← Gmail, Calendar MCPs
-│   └── .claude/
-│       └── settings.local.json  ← tool permissions
-├── your-bot/                    ← add your own here
-│   └── ...
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, or `"openai-compat"` |
+| `model` | string | `CLAUDE_MODEL` env | Model name (e.g. `"claude-sonnet-4-6"`, `"qwen3:32b"`, `"llama3.1"`) |
+| `thinkingMaxTokens` | number | CLI default | Max thinking tokens. For openai-compat: used as `max_tokens`. |
+| `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
+| `baseUrl` | string | — | Base URL for OpenAI-compatible API (required for `openai-compat`) |
+| `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
+
+### Claude CLI (default)
+
+The default connector. Spawns Claude Code in headless mode with `--output-format stream-json --verbose`. Each bot's folder is used as `cwd`, so Claude auto-discovers persona, MCP tools, and settings.
+
+```json
+{
+  "model": "claude-opus-4-6",
+  "thinkingMaxTokens": 40000,
+  "timeoutMs": 300000
+}
 ```
+
+No `connector` field needed — defaults to `"claude-cli"`.
+
+### Copilot SDK
+
+Uses GitHub Copilot SDK with a shared singleton client. MCP tools from `.mcp.json` are converted to SDK format.
+
+```json
+{
+  "connector": "copilot-sdk",
+  "model": "claude-sonnet-4-6",
+  "thinkingMaxTokens": 16000,
+  "timeoutMs": 180000
+}
+```
+
+### OpenAI-compatible (Ollama, LM Studio, vLLM)
+
+Calls any OpenAI-compatible API endpoint. Includes a built-in agent loop with MCP tool execution — loads tools from `.mcp.json`, sends them as OpenAI `tools` parameter, and executes tool calls against MCP servers in a multi-turn loop.
+
+Supports thinking/reasoning tokens from Qwen3 and other models (both `reasoning` field and `<think>` tag stripping).
+
+#### Ollama example
+
+1. Start Ollama with a model:
+   ```bash
+   ollama pull qwen3:32b
+   ollama serve  # default port 11434
+   ```
+
+2. Create `bots/local/config.json`:
+   ```json
+   {
+     "connector": "openai-compat",
+     "model": "qwen3:32b",
+     "baseUrl": "http://localhost:11434/v1",
+     "thinkingMaxTokens": 8192,
+     "timeoutMs": 300000
+   }
+   ```
+
+3. Create `bots/local/CLAUDE.md` with the bot persona.
+
+4. Add env vars:
+   ```env
+   TELEGRAM_BOT_TOKEN_LOCAL=<token>
+   TELEGRAM_ALLOWED_USER_IDS_LOCAL=123456
+   ```
+
+5. Restart — the bot auto-discovers and connects via Ollama.
+
+#### LM Studio example
+
+```json
+{
+  "connector": "openai-compat",
+  "model": "meta-llama/llama-3.1-8b-instruct",
+  "baseUrl": "http://localhost:1234/v1",
+  "thinkingMaxTokens": 4096,
+  "timeoutMs": 120000
+}
+```
+
+#### Notes
+
+- `baseUrl` is required for `openai-compat` — the connector has no default endpoint
+- MCP tools from `.mcp.json` are automatically loaded and sent as OpenAI-format tools
+- Agent loop supports up to 10 tool-call turns per request
+- Empty responses are retried up to 3 times (handles LM Studio cold starts)
+- Set `OPENAI_API_KEY` env var if the endpoint requires authentication
+
+### Viewing bot configurations
+
+The dashboard API exposes bot connector configs:
+
+```bash
+curl http://localhost:3010/api/bots/config
+```
+
+Returns connector type, model, timeout, and base URL for each discovered bot.
 
 > See [`docs/examples/jira-assistant/`](docs/examples/jira-assistant/) for a complete team bot example with Serena code search and Copilot SDK connector.
 

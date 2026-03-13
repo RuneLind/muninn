@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { existsSync } from "node:fs";
 import { getLog } from "../../logging.ts";
 import { spec } from "../openapi-spec.ts";
 import { Scalar } from "@scalar/hono-api-reference";
@@ -15,7 +16,9 @@ import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview 
 import { getAllWatchers } from "../../db/watchers.ts";
 import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
 import { getUserSettings } from "../../db/user-settings.ts";
-import { parseIntParam } from "./route-utils.ts";
+import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
+import type { ConnectorType } from "../../bots/config.ts";
+import { parseIntParam, isValidUuid } from "./route-utils.ts";
 
 const log = getLog("dashboard");
 
@@ -34,6 +37,23 @@ export function registerDataRoutes(app: Hono): void {
       log.error("Failed to fetch bots: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch bots" }, 500);
     }
+  });
+
+  app.get("/api/bots/config", (c) => {
+    const bots = discoverAllBots().map((b) => ({
+      name: b.name,
+      connector: b.connector ?? "claude-cli",
+      model: b.model ?? null,
+      baseUrl: b.baseUrl ?? null,
+      timeoutMs: b.timeoutMs ?? null,
+      thinkingMaxTokens: b.thinkingMaxTokens ?? null,
+      hasMcp: existsSync(`${b.dir}/.mcp.json`),
+      platforms: [
+        ...(b.telegramBotToken ? ["telegram"] : []),
+        ...(b.slackBotToken ? ["slack"] : []),
+      ],
+    }));
+    return c.json({ bots });
   });
 
   app.get("/api/stats", async (c) => {
@@ -253,5 +273,108 @@ export function registerDataRoutes(app: Hono): void {
       events: activityLog.getRecent(50),
       stats: activityLog.stats,
     });
+  });
+
+  // --- Connector CRUD ---
+
+  app.get("/api/connectors", async (c) => {
+    try {
+      const connectors = await listConnectors();
+      return c.json({ connectors });
+    } catch (err) {
+      log.error("Failed to fetch connectors: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch connectors" }, 500);
+    }
+  });
+
+  app.post("/api/connectors", async (c) => {
+    try {
+      const body = await c.req.json<{
+        name: string;
+        description?: string;
+        connectorType: string;
+        model?: string;
+        baseUrl?: string;
+        thinkingMaxTokens?: number;
+        timeoutMs?: number;
+      }>();
+      if (!body.name || !body.connectorType) {
+        return c.json({ error: "name and connectorType are required" }, 400);
+      }
+      const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
+      if (!validTypes.includes(body.connectorType as ConnectorType)) {
+        return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
+      }
+      const connector = await createConnector({
+        name: body.name,
+        description: body.description,
+        connectorType: body.connectorType as ConnectorType,
+        model: body.model,
+        baseUrl: body.baseUrl,
+        thinkingMaxTokens: body.thinkingMaxTokens,
+        timeoutMs: body.timeoutMs,
+      });
+      return c.json({ connector }, 201);
+    } catch (err) {
+      log.error("Failed to create connector: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to create connector" }, 500);
+    }
+  });
+
+  app.put("/api/connectors/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid connector ID" }, 400);
+      const body = await c.req.json<{
+        name?: string;
+        description?: string | null;
+        connectorType?: string;
+        model?: string | null;
+        baseUrl?: string | null;
+        thinkingMaxTokens?: number | null;
+        timeoutMs?: number | null;
+      }>();
+      if (body.connectorType) {
+        const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
+        if (!validTypes.includes(body.connectorType as ConnectorType)) {
+          return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
+        }
+      }
+      const connector = await updateConnector(id, {
+        name: body.name,
+        description: body.description,
+        connectorType: body.connectorType as ConnectorType | undefined,
+        model: body.model,
+        baseUrl: body.baseUrl,
+        thinkingMaxTokens: body.thinkingMaxTokens,
+        timeoutMs: body.timeoutMs,
+      });
+      if (!connector) {
+        return c.json({ error: "Connector not found" }, 404);
+      }
+      return c.json({ connector });
+    } catch (err) {
+      log.error("Failed to update connector: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to update connector" }, 500);
+    }
+  });
+
+  app.delete("/api/connectors/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid connector ID" }, 400);
+      const deleted = await deleteConnector(id);
+      if (!deleted) {
+        return c.json({ error: "Connector not found" }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("referenced by")) {
+        return c.json({ error: msg }, 409);
+      }
+      log.error("Failed to delete connector: {error}", { error: msg });
+      return c.json({ error: "Failed to delete connector" }, 500);
+    }
   });
 }

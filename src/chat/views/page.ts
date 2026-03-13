@@ -46,6 +46,7 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
+        <span class="chat-connector-badge" id="connectorBadge"></span>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -69,6 +70,37 @@ export function renderChatPage(): string {
       <h3 class="ins-heading">Activity Feed</h3>
       <div class="activity-feed" id="activityFeed">
         <div class="empty-state">Waiting for events...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Thread creation modal -->
+  <div class="thread-modal-backdrop" id="threadModalBackdrop">
+    <div class="thread-modal" onclick="event.stopPropagation()">
+      <div class="thread-modal-header">
+        <h3>New Thread</h3>
+        <button class="thread-modal-close" id="threadModalClose">&times;</button>
+      </div>
+      <div class="thread-modal-body">
+        <div class="thread-form-group">
+          <label>Name *</label>
+          <input type="text" id="threadModalName" placeholder="Thread name" maxlength="50">
+        </div>
+        <div class="thread-form-group">
+          <label>Description</label>
+          <input type="text" id="threadModalDesc" placeholder="Optional description">
+        </div>
+        <div class="thread-form-group">
+          <label>Connector</label>
+          <select id="threadModalConnector">
+            <option value="">Bot default</option>
+          </select>
+          <div class="thread-form-hint" id="threadConnectorHint"></div>
+        </div>
+      </div>
+      <div class="thread-modal-footer">
+        <button class="thread-modal-cancel" id="threadModalCancel">Cancel</button>
+        <button class="thread-modal-save" id="threadModalSave">Create</button>
       </div>
     </div>
   </div>
@@ -301,6 +333,37 @@ const CHAT_STYLES = `
     .chat-title { font-size: 14px; font-weight: 500; }
     .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
+    .chat-connector-badge {
+      font-size: 10px;
+      color: var(--text-muted);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      border-radius: 4px;
+      padding: 2px 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
+      cursor: default;
+      position: relative;
+    }
+    .chat-connector-badge:empty { display: none; }
+    .chat-connector-badge .badge-tooltip {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: var(--text-primary);
+      white-space: nowrap;
+      z-index: 100;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      line-height: 1.6;
+    }
+    .chat-connector-badge:hover .badge-tooltip { display: block; }
+    .chat-connector-badge .badge-tooltip .tt-label { color: var(--text-muted); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
@@ -765,6 +828,108 @@ const CHAT_STYLES = `
       background: color-mix(in srgb, var(--accent) 25%, transparent);
       border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     }
+
+    /* Thread creation modal */
+    .thread-modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .thread-modal-backdrop.visible { display: flex; }
+    .thread-modal {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-secondary);
+      border-radius: 12px;
+      width: 90vw;
+      max-width: 420px;
+    }
+    .thread-modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border-primary);
+    }
+    .thread-modal-header h3 { font-size: 14px; color: var(--text-primary); margin: 0; }
+    .thread-modal-close {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 20px;
+      padding: 2px 6px;
+    }
+    .thread-modal-close:hover { color: var(--text-primary); }
+    .thread-modal-body { padding: 14px 18px; }
+    .thread-form-group { margin-bottom: 12px; }
+    .thread-form-group label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .thread-form-group input,
+    .thread-form-group select {
+      width: 100%;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      color: var(--text-secondary);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .thread-form-group input:focus,
+    .thread-form-group select:focus { outline: none; border-color: var(--accent); }
+    .thread-form-hint {
+      font-size: 11px;
+      color: var(--text-faint);
+      margin-top: 4px;
+    }
+    .thread-form-hint:empty { display: none; }
+    .thread-modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--border-primary);
+    }
+    .thread-modal-footer button {
+      padding: 7px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid var(--border-secondary);
+      transition: all 0.15s;
+    }
+    .thread-modal-cancel {
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+    }
+    .thread-modal-save {
+      background: var(--accent);
+      color: var(--text-primary);
+      border-color: var(--accent) !important;
+    }
+    .thread-modal-save:hover { background: var(--accent-hover); }
+
+    /* Thread connector badge in sidebar */
+    .thread-item-connector {
+      font-size: 9px;
+      color: var(--text-faint);
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border-radius: 3px;
+      padding: 1px 5px;
+      margin-left: 4px;
+      white-space: nowrap;
+    }
 `;
 
 /** Minimal SSE connection — subscribes to agent_status + request_progress events */
@@ -855,6 +1020,7 @@ const CHAT_SCRIPT = `
   var reportExists = false;     // Whether a saved report file exists for current issue
   var threads = [];             // Thread list for current user+bot
   var bots = [];
+  var connectors = [];  // Available connectors from DB
   var ws = null;
   var deepLinkHandled = false;
   var inspectorContextKey = null;
@@ -880,13 +1046,16 @@ const CHAT_SCRIPT = `
     try {
       var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
       bots = res.bots || [];
+      connectors = res.connectors || [];
 
       var container = document.getElementById('botSelector');
       var botNames = bots.map(function(b) { return b.name; });
 
       // No "All Bots" pill — a bot must always be selected
-      container.innerHTML = botNames.map(function(b) {
-        return '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + escapeAttr(b) + '">' + escapeHtml(b.charAt(0).toUpperCase() + b.slice(1)) + '</button>';
+      container.innerHTML = bots.map(function(b) {
+        var tip = b.connector || 'claude-cli';
+        if (b.model) tip += ' · ' + b.model;
+        return '<button class="bot-pill' + (selectedBot === b.name ? ' active' : '') + '" data-bot="' + escapeAttr(b.name) + '" title="' + escapeAttr(tip) + '">' + escapeHtml(b.name.charAt(0).toUpperCase() + b.name.slice(1)) + '</button>';
       }).join('');
 
       return botNames;
@@ -1005,25 +1174,81 @@ const CHAT_SCRIPT = `
     await loadThreads();
   });
 
-  // New thread creation
-  document.getElementById('newThreadBtn').onclick = function() {
+  // New thread creation — modal
+  var threadModal = document.getElementById('threadModalBackdrop');
+  var threadModalName = document.getElementById('threadModalName');
+  var threadModalDesc = document.getElementById('threadModalDesc');
+  var threadModalConnector = document.getElementById('threadModalConnector');
+  var threadConnectorHint = document.getElementById('threadConnectorHint');
+
+  function openThreadModal() {
     if (!selectedBot || !selectedUserId) return;
-    var name = prompt('Thread name:');
-    if (!name || !name.trim()) return;
+    threadModalName.value = '';
+    threadModalDesc.value = '';
+    // Populate connector dropdown
+    threadModalConnector.innerHTML = '<option value="">Bot default</option>';
+    connectors.forEach(function(c) {
+      var label = c.name;
+      if (c.model) label += ' (' + c.model + ')';
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = label;
+      threadModalConnector.appendChild(opt);
+    });
+    threadConnectorHint.textContent = '';
+    threadModal.classList.add('visible');
+    threadModalName.focus();
+  }
+
+  function closeThreadModal() {
+    threadModal.classList.remove('visible');
+  }
+
+  threadModalConnector.addEventListener('change', function() {
+    var id = threadModalConnector.value;
+    if (!id) { threadConnectorHint.textContent = ''; return; }
+    var c = connectors.find(function(x) { return x.id === id; });
+    if (c) {
+      var hint = c.connectorType;
+      if (c.model) hint += ' · ' + c.model;
+      threadConnectorHint.textContent = hint;
+    }
+  });
+
+  function submitThreadModal() {
+    var name = threadModalName.value.trim();
+    if (!name) { alert('Thread name is required'); return; }
+    var desc = threadModalDesc.value.trim() || undefined;
+    var connId = threadModalConnector.value || undefined;
+
     fetch('/chat/threads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: selectedUserId, botName: selectedBot, name: name.trim() }),
+      body: JSON.stringify({
+        userId: selectedUserId,
+        botName: selectedBot,
+        name: name,
+        description: desc,
+        connectorId: connId,
+      }),
     }).then(function(r) { return r.json(); }).then(function(data) {
       if (data.error) {
         alert('Failed to create thread: ' + data.error);
         return;
       }
+      closeThreadModal();
       if (data.thread) {
         loadThreads(data.thread.id);
       }
     }).catch(function() { alert('Failed to create thread'); });
-  };
+  }
+
+  document.getElementById('newThreadBtn').onclick = openThreadModal;
+  document.getElementById('threadModalClose').onclick = closeThreadModal;
+  document.getElementById('threadModalCancel').onclick = closeThreadModal;
+  document.getElementById('threadModalSave').onclick = submitThreadModal;
+  threadModal.onclick = function(e) { if (e.target === threadModal) closeThreadModal(); };
+  threadModalName.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitThreadModal(); });
 
   // Thread list
   async function loadThreads(autoSelectThreadId) {
@@ -1076,6 +1301,12 @@ const CHAT_SCRIPT = `
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
+      var connBadge = '';
+      if (t.connectorName) {
+        var connLabel = t.connectorModel || t.connectorType || '';
+        connBadge = '<span class="thread-item-connector" title="' + escapeAttr(t.connectorName) + '">' + escapeHtml(connLabel) + '</span>';
+      }
+
       var deleteBtn = t.name !== 'main'
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
@@ -1083,7 +1314,7 @@ const CHAT_SCRIPT = `
       return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
-          + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
+          + '<div class="thread-item-name">' + escapeHtml(t.name) + connBadge + '</div>'
           + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
@@ -1138,6 +1369,7 @@ const CHAT_SCRIPT = `
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
+    updateConnectorBadge();
 
     // Highlight in sidebar
     renderThreadList();
@@ -1159,6 +1391,7 @@ const CHAT_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
+    document.getElementById('connectorBadge').innerHTML = '';
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
@@ -1849,7 +2082,7 @@ const CHAT_SCRIPT = `
     }
 
     var aName = selectedUsername || selectedUserId || '?';
-    inspectorContent.innerHTML =
+    var html =
       '<div class="ins-user-header">'
         + '<div class="ins-user-avatar" style="' + avatarStyle(aName) + '">' + escapeHtml(initial) + '</div>'
         + '<div class="ins-user-info">'
@@ -1857,16 +2090,76 @@ const CHAT_SCRIPT = `
           + '<div class="ins-user-id">' + escapeHtml(selectedUserId) + '</div>'
         + '</div>'
       + '</div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>'
-      + '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
+      + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>';
+
+    var botInfo = getBotInfo();
+    if (botInfo) {
+      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(botInfo.connector) + '</span></div>';
+      if (botInfo.model) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(botInfo.model) + '</span></div>';
+      if (botInfo.baseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(botInfo.baseUrl) + '</span></div>';
+    }
+
+    html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
       + '<hr class="ins-divider">';
+    inspectorContent.innerHTML = html;
 
     var contextKey = selectedUserId + ':' + selectedBot;
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
     }
+  }
+
+  function getBotInfo() {
+    if (!selectedBot || !bots.length) return null;
+    for (var i = 0; i < bots.length; i++) {
+      if (bots[i].name === selectedBot) return bots[i];
+    }
+    return null;
+  }
+
+  function updateConnectorBadge() {
+    var badge = document.getElementById('connectorBadge');
+    if (!badge) return;
+    var bot = getBotInfo();
+    if (!bot) { badge.innerHTML = ''; return; }
+
+    // Check if active thread has a connector override
+    var threadConn = null;
+    if (activeThreadId) {
+      for (var i = 0; i < threads.length; i++) {
+        if (threads[i].id === activeThreadId && threads[i].connectorId) {
+          var cId = threads[i].connectorId;
+          for (var j = 0; j < connectors.length; j++) {
+            if (connectors[j].id === cId) { threadConn = connectors[j]; break; }
+          }
+          break;
+        }
+      }
+    }
+
+    var label, shortModel, tooltipParts;
+    if (threadConn) {
+      label = threadConn.connectorType;
+      shortModel = threadConn.model || '';
+      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(threadConn.name)
+        + '<br><span class="tt-label">Type:</span> ' + escapeHtml(label);
+      if (threadConn.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(threadConn.model);
+      if (threadConn.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(threadConn.baseUrl);
+      tooltipParts += '<br><span class="tt-label">Source:</span> thread override';
+    } else {
+      label = bot.connector || 'claude-cli';
+      shortModel = bot.model || '';
+      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(label);
+      if (bot.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(bot.model);
+      if (bot.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(bot.baseUrl);
+      tooltipParts += '<br><span class="tt-label">Source:</span> bot config';
+    }
+
+    var text = label;
+    if (shortModel) text += ' \\u00b7 ' + shortModel;
+    badge.innerHTML = escapeHtml(text) + '<div class="badge-tooltip">' + tooltipParts + '</div>';
   }
 
   function loadInspectorContext(userId, botName) {

@@ -5,6 +5,8 @@ const TABS = [
   { id: "users", label: "Users", hash: "#users" },
   { id: "memories-goals", label: "Memories & Goals", hash: "#memories-goals" },
   { id: "schedules-watchers", label: "Schedules & Watchers", hash: "#schedules-watchers" },
+  { id: "connectors", label: "Connectors", hash: "#connectors" },
+  { id: "memsearch", label: "MemSearch", hash: "#memsearch" },
   { id: "slack", label: "Slack", hash: "#slack" },
 ] as const;
 
@@ -78,6 +80,12 @@ export function sectionTabsScript(): string {
     const SECTION_TABS = ${JSON.stringify(TABS)};
     let activeSection = 'overview';
 
+    var sectionActivateCallbacks = {};
+
+    function onSectionActivate(sectionId, callback) {
+      sectionActivateCallbacks[sectionId] = callback;
+    }
+
     function switchSection(sectionId) {
       const tab = SECTION_TABS.find(t => t.id === sectionId);
       if (!tab) return;
@@ -99,6 +107,11 @@ export function sectionTabsScript(): string {
 
       // Save to localStorage
       try { localStorage.setItem('muninn-active-tab', sectionId); } catch {}
+
+      // Call activate callback if registered
+      if (sectionActivateCallbacks[sectionId]) {
+        sectionActivateCallbacks[sectionId]();
+      }
     }
 
     function initSectionTabs() {
