@@ -6,7 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import { chatState, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
-import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
+import { listThreads, createThread, deleteThreadById, getThreadById } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -233,8 +233,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     let threadConnector: Awaited<ReturnType<typeof getConnector>> = null;
     if (body.threadId) {
       try {
-        const allThreads = await listThreads(conversation.userId, conversation.botName);
-        const thread = allThreads.find((t) => t.id === body.threadId);
+        const thread = await getThreadById(body.threadId);
         if (thread?.connectorId) {
           threadConnector = await getConnector(thread.connectorId);
         }

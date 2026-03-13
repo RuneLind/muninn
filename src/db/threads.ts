@@ -79,6 +79,18 @@ export async function getActiveThreadId(userId: string, botName: string): Promis
   return ensureDefaultThread(userId, botName);
 }
 
+/** Get a single thread by ID (with connector info). */
+export async function getThreadById(threadId: string): Promise<Thread | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT t.*, c.name AS connector_name, c.connector_type, c.model AS connector_model
+    FROM threads t
+    LEFT JOIN connectors c ON c.id = t.connector_id
+    WHERE t.id = ${threadId}
+  `;
+  return row ? rowToThread(row) : null;
+}
+
 /** Check if a thread with the given name exists for a user+bot. */
 export async function findThreadByName(userId: string, botName: string, name: string): Promise<Thread | null> {
   const sql = getDb();
