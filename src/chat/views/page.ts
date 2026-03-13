@@ -1360,42 +1360,9 @@ const CHAT_SCRIPT = `
     // Update header
     var threadName = 'main';
     var threadDesc = '';
-    var threadHasConnector = false;
     for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId) {
-        threadName = threads[i].name;
-        threadDesc = threads[i].description || '';
-        threadHasConnector = !!threads[i].connectorId;
-        break;
-      }
+      if (threads[i].id === threadId) { threadName = threads[i].name; threadDesc = threads[i].description || ''; break; }
     }
-
-    // Auto-stamp: if thread has no connector and sidebar has one selected, assign it
-    if (!threadHasConnector && selectedConnectorId && threadName !== 'main') {
-      fetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ connectorId: selectedConnectorId }),
-      }).then(function() {
-        // Update local thread data so the UI reflects it
-        for (var j = 0; j < threads.length; j++) {
-          if (threads[j].id === threadId) {
-            threads[j].connectorId = selectedConnectorId;
-            // Find connector name from connectors list
-            for (var k = 0; k < connectors.length; k++) {
-              if (connectors[k].id === selectedConnectorId) {
-                threads[j].connectorName = connectors[k].name;
-                break;
-              }
-            }
-            break;
-          }
-        }
-        renderThreadList();
-        syncConnectorDropdown();
-      }).catch(function() {});
-    }
-
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
@@ -1572,6 +1539,32 @@ const CHAT_SCRIPT = `
 
     // Check for pending research message (e.g. from Chrome extension)
     if (threadParam && activeConvId && activeThreadId) {
+      // Stamp connector from sidebar selection if thread has none
+      if (selectedConnectorId) {
+        var needsStamp = true;
+        for (var ti = 0; ti < threads.length; ti++) {
+          if (threads[ti].id === activeThreadId && threads[ti].connectorId) { needsStamp = false; break; }
+        }
+        if (needsStamp) {
+          try {
+            await fetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/connector', {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ connectorId: selectedConnectorId }),
+            });
+            for (var tj = 0; tj < threads.length; tj++) {
+              if (threads[tj].id === activeThreadId) {
+                threads[tj].connectorId = selectedConnectorId;
+                for (var tk = 0; tk < connectors.length; tk++) {
+                  if (connectors[tk].id === selectedConnectorId) { threads[tj].connectorName = connectors[tk].name; break; }
+                }
+                break;
+              }
+            }
+            renderThreadList();
+          } catch {}
+        }
+      }
       try {
         var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
         var pendingData = await pendingRes.json();
