@@ -165,7 +165,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: "Invalid connectorId" }, 400);
     }
     try {
-      await updateThreadConnector(id, body.connectorId ?? null);
+      const updated = await updateThreadConnector(id, body.connectorId ?? null);
+      if (!updated) return c.json({ error: "Thread not found" }, 404);
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
