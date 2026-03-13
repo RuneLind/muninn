@@ -138,14 +138,15 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   $('#issue-info').appendChild(dialog);
 }
 
-// Auto-resolve userId: try to fetch users for the bot and pick the right one
+// Auto-resolve userId: pick the most recently active user for the bot
 async function resolveUserId(muninnUrl, botName) {
   try {
     const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(botName)}`);
     if (!res.ok) return null;
     const data = await res.json();
     const users = data.users || [];
-    if (users.length === 1) return users[0].userId || users[0].id;
+    // API returns users sorted by last_active DESC — first is most recent
+    if (users.length > 0) return users[0].userId || users[0].id;
   } catch {}
   return null;
 }
