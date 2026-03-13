@@ -1,6 +1,5 @@
 import type { Hono } from "hono";
 import { getLog } from "../../logging.ts";
-import { renderMemsearchPage } from "../views/memsearch-page.ts";
 import { dashboardSearchMemories, getSearchStats } from "../../db/memories.ts";
 import { generateEmbedding } from "../../ai/embeddings.ts";
 import { parseIntParam } from "./route-utils.ts";
@@ -8,8 +7,9 @@ import { parseIntParam } from "./route-utils.ts";
 const log = getLog("dashboard");
 
 export function registerMemsearchRoutes(app: Hono): void {
+  // Redirect standalone page to dashboard tab
   app.get("/memsearch", (c) => {
-    return c.html(renderMemsearchPage());
+    return c.redirect("/#memsearch", 302);
   });
 
   app.get("/api/memsearch", async (c) => {

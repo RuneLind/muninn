@@ -7,6 +7,7 @@ import { chatState, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById } from "../db/threads.ts";
+import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -31,8 +32,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ viewableCollections: config.knowledgeViewableCollections });
   });
 
-  // List available bots
-  app.get("/bots", (c) => {
+  // List available bots + connectors
+  app.get("/bots", async (c) => {
     const bots = botConfigs.map((b) => ({
       name: b.name,
       hasTelegram: !!b.telegramBotToken,
@@ -43,7 +44,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       showWaterfall: b.showWaterfall !== false,
       prompts: b.prompts,
     }));
-    return c.json({ bots });
+    let connectors: Awaited<ReturnType<typeof listConnectors>> = [];
+    try { connectors = await listConnectors(); } catch {}
+    return c.json({ bots, connectors });
   });
 
   // Create a new conversation
@@ -122,7 +125,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Create a new thread for a user+bot
   app.post("/threads", async (c) => {
-    const body = await c.req.json<{ userId: string; botName: string; name: string }>();
+    const body = await c.req.json<{ userId: string; botName: string; name: string; description?: string; connectorId?: string }>();
     if (!body.userId || !body.botName || !body.name) {
       return c.json({ error: "userId, botName, and name are required" }, 400);
     }
@@ -131,7 +134,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: `Bot "${body.botName}" not found` }, 404);
     }
     try {
-      const thread = await createThread(body.userId, body.botName, body.name);
+      const thread = await createThread(body.userId, body.botName, body.name, body.description, body.connectorId);
       return c.json({ thread }, 201);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -226,8 +229,20 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       ? body.connector as "copilot-sdk" | "claude-cli"
       : undefined;
 
+    // Look up thread's connector override (if any)
+    let threadConnector: Awaited<ReturnType<typeof getConnector>> = null;
+    if (body.threadId) {
+      try {
+        const allThreads = await listThreads(conversation.userId, conversation.botName);
+        const thread = allThreads.find((t) => t.id === body.threadId);
+        if (thread?.connectorId) {
+          threadConnector = await getConnector(thread.connectorId);
+        }
+      } catch {}
+    }
+
     // Process asynchronously — response comes via WebSocket
-    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride).catch((err) => {
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       chatState.addMessage(id, {

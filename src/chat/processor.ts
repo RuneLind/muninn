@@ -1,7 +1,8 @@
 import type { Config } from "../config.ts";
-import type { BotConfig } from "../bots/config.ts";
+import type { BotConfig, ConnectorType } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
+import type { Connector } from "../db/connectors.ts";
 
 import { chatState, type ChatMessage } from "./state.ts";
 
@@ -18,16 +19,27 @@ export async function processChatMessage(
   config: Config,
   threadId?: string,
   connectorOverride?: "copilot-sdk" | "claude-cli",
+  threadConnector?: Connector,
 ): Promise<void> {
   const conversation = chatState.getConversation(conversationId);
   if (!conversation) {
     throw new Error(`Conversation ${conversationId} not found`);
   }
 
-  // Apply connector override (e.g. "Start Building" routes through Copilot SDK)
-  const effectiveBotConfig = connectorOverride
-    ? { ...botConfig, connector: connectorOverride as BotConfig["connector"] }
-    : botConfig;
+  // Build effective config: thread connector > inline override > bot config.json
+  let effectiveBotConfig = botConfig;
+  if (threadConnector) {
+    effectiveBotConfig = {
+      ...botConfig,
+      connector: threadConnector.connectorType as ConnectorType,
+      model: threadConnector.model ?? botConfig.model,
+      baseUrl: threadConnector.baseUrl ?? botConfig.baseUrl,
+      thinkingMaxTokens: threadConnector.thinkingMaxTokens ?? botConfig.thinkingMaxTokens,
+      timeoutMs: threadConnector.timeoutMs ?? botConfig.timeoutMs,
+    };
+  } else if (connectorOverride) {
+    effectiveBotConfig = { ...botConfig, connector: connectorOverride as BotConfig["connector"] };
+  }
 
   // Messages sent from the chat page are stored as "web" platform, even when
   // continuing a conversation that originated on Telegram or Slack.

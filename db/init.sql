@@ -35,6 +35,35 @@ CREATE TRIGGER users_updated_at
   EXECUTE FUNCTION update_users_updated_at();
 
 -- ============================================================================
+-- Connectors: named AI connector configurations
+-- ============================================================================
+CREATE TABLE connectors (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  description TEXT,
+  connector_type TEXT NOT NULL,
+  model TEXT,
+  base_url TEXT,
+  thinking_max_tokens INTEGER,
+  timeout_ms INTEGER,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION update_connectors_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER connectors_updated_at
+  BEFORE UPDATE ON connectors
+  FOR EACH ROW
+  EXECUTE FUNCTION update_connectors_updated_at();
+
+-- ============================================================================
 -- Threads: isolated conversation contexts per topic
 -- (must be created before messages, which has a FK reference)
 -- ============================================================================
@@ -44,6 +73,7 @@ CREATE TABLE threads (
   bot_name TEXT NOT NULL,
   name TEXT NOT NULL,
   description TEXT,
+  connector_id UUID REFERENCES connectors(id),
   is_active BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
