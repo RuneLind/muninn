@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { existsSync } from "node:fs";
 import { getLog } from "../../logging.ts";
 import { spec } from "../openapi-spec.ts";
 import { Scalar } from "@scalar/hono-api-reference";
@@ -34,6 +35,23 @@ export function registerDataRoutes(app: Hono): void {
       log.error("Failed to fetch bots: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch bots" }, 500);
     }
+  });
+
+  app.get("/api/bots/config", (c) => {
+    const bots = discoverAllBots().map((b) => ({
+      name: b.name,
+      connector: b.connector ?? "claude-cli",
+      model: b.model ?? null,
+      baseUrl: b.baseUrl ?? null,
+      timeoutMs: b.timeoutMs ?? null,
+      thinkingMaxTokens: b.thinkingMaxTokens ?? null,
+      hasMcp: existsSync(`${b.dir}/.mcp.json`),
+      platforms: [
+        ...(b.telegramBotToken ? ["telegram"] : []),
+        ...(b.slackBotToken ? ["slack"] : []),
+      ],
+    }));
+    return c.json({ bots });
   });
 
   app.get("/api/stats", async (c) => {
