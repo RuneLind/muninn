@@ -188,11 +188,11 @@ async function seedOne(
 }
 
 async function ensureCopilotConnector(tx: Sql): Promise<void> {
-  const [existing] = await tx`SELECT 1 FROM connectors WHERE connector_type = 'copilot-sdk' LIMIT 1`;
-  if (existing) return;
-  await tx`
+  const [row] = await tx`
     INSERT INTO connectors (name, description, connector_type, model)
     VALUES ('copilot-sdk claude-sonnet-4-6', 'Auto-seeded', 'copilot-sdk', 'claude-sonnet-4-6')
+    ON CONFLICT (connector_type, COALESCE(model, ''), COALESCE(base_url, '')) DO NOTHING
+    RETURNING id
   `;
-  log.info("Seeded missing copilot-sdk connector");
+  if (row) log.info("Seeded missing copilot-sdk connector");
 }
