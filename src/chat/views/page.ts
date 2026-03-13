@@ -2127,6 +2127,10 @@ const CHAT_SCRIPT = `
   var connectorSelector = document.getElementById('connectorSelector');
   var selectedConnectorId = '';  // '' = bot default
 
+  function connectorStorageKey() {
+    return 'muninn-connector-' + (selectedBot || 'default');
+  }
+
   function populateConnectorDropdown() {
     var bot = getBotInfo();
     var defaultLabel = 'Bot default';
@@ -2152,15 +2156,21 @@ const CHAT_SCRIPT = `
       connectorDropdown.appendChild(opt);
     });
     connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
+
+    // Restore per-bot selection
+    try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
+    connectorDropdown.value = selectedConnectorId;
+    // If stored ID was deduplicated away, reset to default
+    if (connectorDropdown.value !== selectedConnectorId) {
+      selectedConnectorId = '';
+      connectorDropdown.value = '';
+    }
   }
 
   connectorDropdown.addEventListener('change', function() {
     selectedConnectorId = connectorDropdown.value;
-    try { localStorage.setItem('muninn-selected-connector', selectedConnectorId); } catch {}
+    try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
   });
-
-  // Restore last selected connector
-  try { selectedConnectorId = localStorage.getItem('muninn-selected-connector') || ''; } catch {}
 
   function updateConnectorBadge() {
     if (!connectors.length) return;
