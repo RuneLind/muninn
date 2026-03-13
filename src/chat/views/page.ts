@@ -2150,9 +2150,14 @@ const CHAT_SCRIPT = `
     });
     connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
 
-    // Restore per-bot selection
+    // Restore per-bot selection; reset if stored ID no longer exists
     try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
     connectorDropdown.value = selectedConnectorId;
+    if (connectorDropdown.value !== selectedConnectorId) {
+      selectedConnectorId = '';
+      connectorDropdown.value = '';
+      try { localStorage.removeItem(connectorStorageKey()); } catch {}
+    }
   }
 
   connectorDropdown.addEventListener('change', function() {
@@ -2566,7 +2571,6 @@ const CHAT_SCRIPT = `
   // Init
   async function init() {
     var botNames = await loadBotList();
-    populateConnectorDropdown();
     connectWs();
     loadKnowledgeUrlMaps();
 
