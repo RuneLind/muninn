@@ -918,15 +918,14 @@ const CHAT_STYLES = `
     }
     .thread-modal-save:hover { background: var(--accent-hover); }
 
-    /* Thread connector badge in sidebar */
-    .thread-item-connector {
-      font-size: 9px;
-      color: var(--text-faint);
-      background: color-mix(in srgb, var(--accent) 8%, transparent);
-      border-radius: 3px;
-      padding: 1px 5px;
-      margin-left: 4px;
+    /* Thread model label in sidebar */
+    .thread-item-model {
+      font-size: 10px;
+      color: var(--accent-muted);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 1px;
     }
 `;
 
@@ -1304,28 +1303,16 @@ const CHAT_SCRIPT = `
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
-      // Build hover tooltip lines
-      var tipLines = [t.name];
-      if (t.description) tipLines.push(t.description);
-      if (t.connectorName) tipLines.push('Model: ' + t.connectorName);
-      if (meta) tipLines.push(meta);
-      var tip = tipLines.join('\\n');
-
-      var connBadge = '';
-      if (t.connectorName) {
-        connBadge = '<span class="thread-item-connector">' + escapeHtml(t.connectorName) + '</span>';
-      }
-
       var deleteBtn = t.name !== 'main'
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
 
-      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '" title="' + escapeAttr(tip) + '">'
+      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
         + '<div class="thread-item-icon">' + icon + '</div>'
         + '<div class="thread-item-content">'
           + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
           + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
-          + (connBadge ? '<div class="thread-item-meta">' + connBadge + '</div>' : '')
+          + (t.connectorName ? '<div class="thread-item-model">' + escapeHtml(t.connectorName) + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
         + '</div>'
         + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
