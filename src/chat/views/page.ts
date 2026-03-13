@@ -30,7 +30,10 @@ export function renderChatPage(): string {
         <label>User</label>
         <select id="userSelector"></select>
       </div>
-      <div class="sidebar-connector" id="connectorBadge"></div>
+      <div class="sidebar-connector" id="connectorSelector" style="display:none">
+        <label>Model</label>
+        <select id="connectorDropdown"></select>
+      </div>
       <div class="sidebar-header">
         <h3>Threads</h3>
         <button class="new-thread-btn" id="newThreadBtn">+ New Thread</button>
@@ -334,47 +337,31 @@ const CHAT_STYLES = `
     .chat-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
     .chat-description:empty { display: none; }
     .sidebar-connector {
-      display: none;
-      padding: 6px 16px;
-      font-size: 11px;
-      color: var(--text-muted);
+      padding: 8px 16px 6px;
       border-bottom: 1px solid var(--border-primary);
-      cursor: default;
-      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
-    .sidebar-connector:not(:empty) { display: block; }
-    .sidebar-connector .conn-label {
-      color: var(--text-dim);
-      font-size: 10px;
+    .sidebar-connector label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
-    }
-    .sidebar-connector .conn-value {
-      color: var(--text-secondary);
-      font-size: 12px;
-      margin-top: 2px;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
-    .sidebar-connector .badge-tooltip {
-      display: none;
-      position: absolute;
-      top: calc(100% + 4px);
-      left: 12px;
-      background: var(--bg-panel);
+    .sidebar-connector select {
+      flex: 1;
+      padding: 4px 6px;
       border: 1px solid var(--border-primary);
-      border-radius: 6px;
-      padding: 8px 12px;
-      font-size: 11px;
+      border-radius: 4px;
+      background: var(--bg-surface);
       color: var(--text-primary);
-      white-space: nowrap;
-      z-index: 100;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-      line-height: 1.6;
+      font-size: 12px;
+      min-width: 0;
     }
-    .sidebar-connector:hover .badge-tooltip { display: block; }
-    .sidebar-connector .badge-tooltip .tt-label { color: var(--text-muted); }
+    .sidebar-connector select:focus { outline: none; border-color: var(--accent); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
@@ -1083,6 +1070,9 @@ const CHAT_SCRIPT = `
     // Load users for this bot and populate selector
     await loadUsersForBot(name);
 
+    // Update connector dropdown (bot default label changes per bot)
+    populateConnectorDropdown();
+
     // Resolve or create conversation for this user+bot
     await resolveConversation();
 
@@ -1206,7 +1196,9 @@ const CHAT_SCRIPT = `
       opt.textContent = label;
       threadModalConnector.appendChild(opt);
     });
-    threadConnectorHint.textContent = '';
+    // Pre-fill from sidebar connector selection
+    threadModalConnector.value = selectedConnectorId;
+    threadModalConnector.dispatchEvent(new Event('change'));
     threadModal.classList.add('visible');
     threadModalName.focus();
   }
@@ -1402,7 +1394,7 @@ const CHAT_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
-    document.getElementById('connectorBadge').innerHTML = '';
+    connectorDropdown.value = selectedConnectorId;
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
@@ -2130,47 +2122,59 @@ const CHAT_SCRIPT = `
     return null;
   }
 
-  function updateConnectorBadge() {
-    var badge = document.getElementById('connectorBadge');
-    if (!badge) return;
-    var bot = getBotInfo();
-    if (!bot) { badge.innerHTML = ''; return; }
+  // --- Connector dropdown ---
+  var connectorDropdown = document.getElementById('connectorDropdown');
+  var connectorSelector = document.getElementById('connectorSelector');
+  var selectedConnectorId = '';  // '' = bot default
 
-    // Check if active thread has a connector override
-    var threadConn = null;
+  function populateConnectorDropdown() {
+    var bot = getBotInfo();
+    var defaultLabel = 'Bot default';
+    if (bot) {
+      var dl = bot.connector || 'claude-cli';
+      if (bot.model) dl += ' \\u00b7 ' + bot.model;
+      defaultLabel = dl;
+    }
+    connectorDropdown.innerHTML = '<option value="">' + escapeHtml(defaultLabel) + '</option>';
+    connectors.forEach(function(c) {
+      var label = c.connectorType;
+      if (c.model) label += ' \\u00b7 ' + c.model;
+      if (c.name) label += ' (' + c.name + ')';
+      var opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = label;
+      connectorDropdown.appendChild(opt);
+    });
+    connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
+  }
+
+  connectorDropdown.addEventListener('change', function() {
+    selectedConnectorId = connectorDropdown.value;
+    try { localStorage.setItem('muninn-selected-connector', selectedConnectorId); } catch {}
+  });
+
+  // Restore last selected connector
+  try { selectedConnectorId = localStorage.getItem('muninn-selected-connector') || ''; } catch {}
+
+  function updateConnectorBadge() {
+    if (!connectors.length) return;
+
+    // If active thread has its own connector, show that; otherwise show the sidebar selection
+    var threadConnId = '';
     if (activeThreadId) {
       for (var i = 0; i < threads.length; i++) {
         if (threads[i].id === activeThreadId && threads[i].connectorId) {
-          var cId = threads[i].connectorId;
-          for (var j = 0; j < connectors.length; j++) {
-            if (connectors[j].id === cId) { threadConn = connectors[j]; break; }
-          }
+          threadConnId = threads[i].connectorId;
           break;
         }
       }
     }
 
-    var label, shortModel, tooltipParts;
-    if (threadConn) {
-      label = threadConn.connectorType;
-      shortModel = threadConn.model || '';
-      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(threadConn.name)
-        + '<br><span class="tt-label">Type:</span> ' + escapeHtml(label);
-      if (threadConn.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(threadConn.model);
-      if (threadConn.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(threadConn.baseUrl);
-      tooltipParts += '<br><span class="tt-label">Source:</span> thread override';
+    if (threadConnId) {
+      connectorDropdown.value = threadConnId;
     } else {
-      label = bot.connector || 'claude-cli';
-      shortModel = bot.model || '';
-      tooltipParts = '<span class="tt-label">Connector:</span> ' + escapeHtml(label);
-      if (bot.model) tooltipParts += '<br><span class="tt-label">Model:</span> ' + escapeHtml(bot.model);
-      if (bot.baseUrl) tooltipParts += '<br><span class="tt-label">Endpoint:</span> ' + escapeHtml(bot.baseUrl);
-      tooltipParts += '<br><span class="tt-label">Source:</span> bot config';
+      connectorDropdown.value = selectedConnectorId;
     }
-
-    var text = label;
-    if (shortModel) text += ' \\u00b7 ' + shortModel;
-    badge.innerHTML = '<div class="conn-label">Model</div><div class="conn-value">' + escapeHtml(text) + '</div><div class="badge-tooltip">' + tooltipParts + '</div>';
   }
 
   function loadInspectorContext(userId, botName) {
@@ -2558,6 +2562,7 @@ const CHAT_SCRIPT = `
   // Init
   async function init() {
     var botNames = await loadBotList();
+    populateConnectorDropdown();
     connectWs();
     loadKnowledgeUrlMaps();
 
