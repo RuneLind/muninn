@@ -2141,11 +2141,9 @@ const CHAT_SCRIPT = `
     }
     connectorDropdown.innerHTML = '<option value="">' + escapeHtml(defaultLabel) + '</option>';
     connectors.forEach(function(c) {
-      var label = c.connectorType;
-      if (c.model) label += ' \\u00b7 ' + c.model;
       var opt = document.createElement('option');
       opt.value = c.id;
-      opt.textContent = label;
+      opt.textContent = c.name;
       connectorDropdown.appendChild(opt);
     });
     connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
