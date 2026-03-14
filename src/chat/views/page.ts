@@ -2211,11 +2211,18 @@ const CHAT_SCRIPT = `
       + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>';
 
     var botInfo = getBotInfo();
-    if (botInfo) {
-      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(botInfo.connector) + '</span></div>';
-      if (botInfo.model) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(botInfo.model) + '</span></div>';
-      if (botInfo.baseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(botInfo.baseUrl) + '</span></div>';
+    // Resolve effective connector: thread/dropdown override > bot default
+    var effConnectorId = connectorDropdown ? connectorDropdown.value : '';
+    var effConnector = effConnectorId ? connectors.find(function(x) { return x.id === effConnectorId; }) : null;
+    var effConnectorType = effConnector ? effConnector.connectorType : (botInfo ? botInfo.connector : '');
+    var effModel = effConnector ? (effConnector.model || '') : (botInfo ? (botInfo.model || '') : '');
+    var effBaseUrl = effConnector ? (effConnector.baseUrl || '') : (botInfo ? (botInfo.baseUrl || '') : '');
+
+    if (effConnectorType) {
+      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(effConnectorType) + '</span></div>';
     }
+    if (effModel) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(effModel) + '</span></div>';
+    if (effBaseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(effBaseUrl) + '</span></div>';
 
     html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
@@ -2343,6 +2350,7 @@ const CHAT_SCRIPT = `
     if (activeThreadId && selectedConnectorId) {
       stampConnectorOnThread(activeThreadId, selectedConnectorId);
     }
+    updateInspector();
   });
 
   function syncConnectorDropdown() {
