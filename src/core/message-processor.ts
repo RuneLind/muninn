@@ -60,6 +60,10 @@ export interface ProcessMessageResult {
   durationMs: number;
   inputTokens: number;
   outputTokens: number;
+  costUsd: number;
+  model: string;
+  numTurns: number;
+  toolCalls?: { name: string; displayName: string; durationMs: number }[];
 }
 
 /**
@@ -269,6 +273,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
         costUsd: result.costUsd,
         startupMs: result.startupMs,
         apiMs: result.durationApiMs,
+        contextWindow: botConfig.contextWindow,
       })}</i>`;
       const total = html.length + footer.length;
       if (total <= 4096) {
@@ -341,6 +346,10 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       durationMs: Math.round(t.totalMs()),
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      costUsd: result.costUsd,
+      model: result.model,
+      numTurns: result.numTurns,
+      toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
     };
   } catch (error) {
     agentStatus.clearRequest();

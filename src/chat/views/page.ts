@@ -70,10 +70,7 @@ export function renderChatPage(): string {
         <div class="empty-state">Select a thread</div>
       </div>
       <div id="inspectorContext"></div>
-      <h3 class="ins-heading">Activity Feed</h3>
-      <div class="activity-feed" id="activityFeed">
-        <div class="empty-state">Waiting for events...</div>
-      </div>
+      <div id="inspectorToolUsage"></div>
     </div>
   </div>
 
@@ -561,6 +558,13 @@ const CHAT_STYLES = `
       color: var(--text-faint);
       margin-top: 4px;
     }
+    .msg-response-meta {
+      font-size: 10px;
+      color: var(--text-faint);
+      margin-top: 2px;
+      opacity: 0.7;
+      font-variant-numeric: tabular-nums;
+    }
     .chat-input {
       padding: 12px 16px;
       border-top: 1px solid var(--border-primary);
@@ -656,6 +660,18 @@ const CHAT_STYLES = `
     .ins-info-label { color: var(--text-faint); }
     .ins-info-value { color: var(--text-secondary); }
     .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 10px 0; }
+    .ins-context-bar {
+      height: 4px;
+      background: var(--bg-tertiary, #2a2a3a);
+      border-radius: 2px;
+      margin: 4px 0 2px;
+      overflow: hidden;
+    }
+    .ins-context-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
     .ins-section { margin-bottom: 12px; }
     .ins-section-title {
       font-size: 11px;
@@ -716,18 +732,15 @@ const CHAT_STYLES = `
       100% { background-position: -200% 0; }
     }
 
-    .activity-feed {
-      font-size: 12px;
-      max-height: 400px;
-      overflow-y: auto;
+    .ins-tool-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 2px 0;
+      font-size: 11px;
     }
-    .activity-item {
-      padding: 4px 0;
-      border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-muted);
-    }
-    .activity-item .act-type { color: var(--accent); font-weight: 500; }
-    .activity-item .act-time { color: var(--text-faint); font-size: 10px; }
+    .ins-tool-name { color: var(--text-muted); }
+    .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
     .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
@@ -1021,6 +1034,7 @@ const CHAT_SCRIPT = `
   var ws = null;
   var deepLinkHandled = false;
   var inspectorContextKey = null;
+  var lastResponseMeta = {};    // Per-conversationId last response_meta
   var selectedBot = '';         // From bot pills (localStorage-synced)
   var selectedUserId = null;    // Resolved from config for selected bot
   var selectedUsername = null;   // Display name
@@ -1035,7 +1049,7 @@ const CHAT_SCRIPT = `
   var chatSend = document.getElementById('chatSend');
   var chatHeader = document.getElementById('chatHeader');
   var chatStatus = document.getElementById('chatStatus');
-  var activityFeed = document.getElementById('activityFeed');
+  var inspectorToolUsage = document.getElementById('inspectorToolUsage');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
 
@@ -1454,6 +1468,7 @@ const CHAT_SCRIPT = `
               removeIntermediates();
               removeStreamingBubble();
               setChatStatusText('');
+              conv.status = '';
             }
             appendMessage(event.message, conv.type);
           }
@@ -1477,7 +1492,6 @@ const CHAT_SCRIPT = `
           }
         }
         renderThreadList();
-        addActivityItem(event.message.sender === 'bot' ? 'bot_reply' : 'user_msg', event.message.text.slice(0, 80));
       }
       return;
     }
@@ -1513,6 +1527,14 @@ const CHAT_SCRIPT = `
       var tsThread = event.threadId || null;
       if (activeThreadId && tsThread !== activeThreadId) return;
       appendToolStatus(event.text);
+      return;
+    }
+
+    if (event.type === 'response_meta') {
+      if (event.conversationId !== activeConvId) return;
+      var rmThread = event.threadId || null;
+      if (activeThreadId && rmThread !== activeThreadId) return;
+      showResponseMeta(event);
       return;
     }
 
@@ -2097,6 +2119,63 @@ const CHAT_SCRIPT = `
     scrollToBottom();
   }
 
+  // Show response metadata (context usage) below the last bot message
+  function showResponseMeta(meta) {
+    // Store for inspector panel
+    if (meta.conversationId) {
+      lastResponseMeta[meta.conversationId] = meta;
+      updateInspectorContextUsage(meta);
+      updateInspectorToolUsage(meta);
+      loadToolUsageStats(); // Refresh aggregate stats
+    }
+
+    // Find the last bot message to attach metadata to
+    var msgs = chatMessages.querySelectorAll('.msg-bot');
+    var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    if (!lastBot) return;
+
+    // Remove any existing meta bar on this message
+    var existing = lastBot.querySelector('.msg-response-meta');
+    if (existing) existing.remove();
+
+    var bar = document.createElement('div');
+    bar.className = 'msg-response-meta';
+
+    var parts = [];
+
+    // Context usage: "10,234 / 200,000" or just "10,234 tokens"
+    if (meta.inputTokens) {
+      if (meta.contextWindow) {
+        parts.push('ctx ' + fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow));
+      } else {
+        parts.push(fmtNum(meta.inputTokens) + ' in');
+      }
+    }
+    if (meta.outputTokens) {
+      parts.push(fmtNum(meta.outputTokens) + ' out');
+    }
+
+    // Duration
+    if (meta.durationMs) {
+      var secs = meta.durationMs / 1000;
+      parts.push(secs >= 10 ? Math.round(secs) + 's' : secs.toFixed(1) + 's');
+    }
+
+    // Cost (skip if zero — e.g. local models)
+    if (meta.costUsd && meta.costUsd > 0) {
+      parts.push('$' + meta.costUsd.toFixed(4));
+    }
+
+    bar.textContent = parts.join('  \u00b7  ');
+    lastBot.appendChild(bar);
+  }
+
+  function fmtNum(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+  }
+
   // Remove all intermediate messages (called before final message or on status clear)
   function removeIntermediates() {
     var intermediates = chatMessages.querySelectorAll('.msg-intermediate');
@@ -2132,22 +2211,65 @@ const CHAT_SCRIPT = `
       + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>';
 
     var botInfo = getBotInfo();
-    if (botInfo) {
-      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(botInfo.connector) + '</span></div>';
-      if (botInfo.model) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(botInfo.model) + '</span></div>';
-      if (botInfo.baseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(botInfo.baseUrl) + '</span></div>';
+    // Resolve effective connector: thread/dropdown override > bot default
+    var effConnectorId = connectorDropdown ? connectorDropdown.value : '';
+    var effConnector = effConnectorId ? connectors.find(function(x) { return x.id === effConnectorId; }) : null;
+    var effConnectorType = effConnector ? effConnector.connectorType : (botInfo ? botInfo.connector : '');
+    var effModel = effConnector ? (effConnector.model || '') : (botInfo ? (botInfo.model || '') : '');
+    var effBaseUrl = effConnector ? (effConnector.baseUrl || '') : (botInfo ? (botInfo.baseUrl || '') : '');
+
+    if (effConnectorType) {
+      html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(effConnectorType) + '</span></div>';
     }
+    if (effModel) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(effModel) + '</span></div>';
+    if (effBaseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(effBaseUrl) + '</span></div>';
 
     html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
+      + '<div id="insContextUsage"></div>'
       + '<hr class="ins-divider">';
     inspectorContent.innerHTML = html;
+
+    // Restore response meta if we have stored data for this conversation
+    if (activeConvId && lastResponseMeta[activeConvId]) {
+      updateInspectorContextUsage(lastResponseMeta[activeConvId]);
+      updateInspectorToolUsage(lastResponseMeta[activeConvId]);
+    }
 
     var contextKey = selectedUserId + ':' + selectedBot;
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
+      loadToolUsageStats();
+      loadContextUsage();
     }
+  }
+
+  // Update the context usage section in the inspector panel
+  function updateInspectorContextUsage(meta) {
+    var container = document.getElementById('insContextUsage');
+    if (!container) return;
+
+    var html = '';
+    if (meta.inputTokens) {
+      // Context usage bar + numbers
+      var label, pct;
+      if (meta.contextWindow) {
+        pct = Math.min(100, Math.round((meta.inputTokens / meta.contextWindow) * 100));
+        label = fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow);
+      } else {
+        pct = 0;
+        label = fmtNum(meta.inputTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
+      }
+
+      html += '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(label) + '</span></div>';
+
+      if (meta.contextWindow) {
+        var barColor = pct > 80 ? 'var(--status-error, #e74c3c)' : pct > 60 ? 'var(--status-warning, #f39c12)' : 'var(--accent, #7c6fe0)';
+        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+      }
+    }
+    container.innerHTML = html;
   }
 
   function getBotInfo() {
@@ -2228,6 +2350,7 @@ const CHAT_SCRIPT = `
     if (activeThreadId && selectedConnectorId) {
       stampConnectorOnThread(activeThreadId, selectedConnectorId);
     }
+    updateInspector();
   });
 
   function syncConnectorDropdown() {
@@ -2315,20 +2438,102 @@ const CHAT_SCRIPT = `
       });
   }
 
-  // Activity feed
-  function addActivityItem(type, text) {
-    if (activityFeed.querySelector('.empty-state')) {
-      activityFeed.innerHTML = '';
+  // Aggregate tool calls by name: { name → { count, totalMs } }
+  function aggregateToolCalls(toolCalls) {
+    var map = {};
+    for (var i = 0; i < toolCalls.length; i++) {
+      var tc = toolCalls[i];
+      var key = tc.displayName || tc.name;
+      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+      map[key].callCount++;
+      map[key].totalMs += tc.durationMs || 0;
     }
-    var div = document.createElement('div');
-    div.className = 'activity-item';
-    div.innerHTML = '<span class="act-time">' + new Date().toLocaleTimeString() + '</span> '
-      + '<span class="act-type">' + type + '</span> '
-      + escapeHtml(text);
-    activityFeed.insertBefore(div, activityFeed.firstChild);
-    while (activityFeed.children.length > 50) {
-      activityFeed.removeChild(activityFeed.lastChild);
+    // Sort by count desc, then by totalMs desc
+    return Object.keys(map).map(function(k) { return map[k]; })
+      .sort(function(a, b) { return b.callCount - a.callCount || b.totalMs - a.totalMs; });
+  }
+
+  function fmtToolTime(ms) {
+    var secs = ms / 1000;
+    if (secs >= 60) return Math.round(secs / 60) + 'm';
+    if (secs >= 1) return secs.toFixed(1) + 's';
+    return ms + 'ms';
+  }
+
+  function renderToolList(items) {
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i];
+      html += '<div class="ins-tool-item">'
+        + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
+        + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + fmtToolTime(t.totalMs) + '</span>'
+        + '</div>';
     }
+    return html;
+  }
+
+  // Update tool usage section in inspector panel — shows last-response tools + aggregate stats
+  function updateInspectorToolUsage(meta) {
+    if (!inspectorToolUsage) return;
+
+    var html = '';
+
+    // Last response tools (aggregated by name)
+    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
+      var lastAgg = aggregateToolCalls(meta.toolCalls);
+      html += '<hr class="ins-divider">'
+        + '<div class="ins-section"><div class="ins-section-title">Last Response (' + meta.toolCalls.length + ' calls)</div>'
+        + renderToolList(lastAgg) + '</div>';
+    }
+
+    // Aggregate tool usage (loaded from API)
+    if (aggregateToolUsage && aggregateToolUsage.length > 0) {
+      var totalCalls = 0;
+      for (var j = 0; j < aggregateToolUsage.length; j++) totalCalls += aggregateToolUsage[j].callCount;
+      html += '<hr class="ins-divider">'
+        + '<div class="ins-section"><div class="ins-section-title">All Tool Usage (' + totalCalls + ' calls)</div>'
+        + renderToolList(aggregateToolUsage) + '</div>';
+    }
+
+    inspectorToolUsage.innerHTML = html;
+  }
+
+  var aggregateToolUsage = null;
+
+  function loadToolUsageStats() {
+    if (!selectedUserId || !selectedBot) return;
+    fetch('/chat/tool-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        aggregateToolUsage = data.tools || [];
+        var meta = activeConvId ? lastResponseMeta[activeConvId] : null;
+        updateInspectorToolUsage(meta);
+      })
+      .catch(function() { aggregateToolUsage = null; });
+  }
+
+  function loadContextUsage() {
+    if (!selectedUserId || !selectedBot) return;
+    fetch('/chat/context-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && data.inputTokens) {
+          // Store as if it were a response_meta so inspector can display it
+          var syntheticMeta = {
+            inputTokens: data.inputTokens,
+            outputTokens: data.outputTokens,
+            contextWindow: data.contextWindow,
+            durationMs: data.durationMs,
+            costUsd: data.costUsd,
+            model: data.model,
+          };
+          if (activeConvId && !lastResponseMeta[activeConvId]) {
+            lastResponseMeta[activeConvId] = syntheticMeta;
+          }
+          updateInspectorContextUsage(syntheticMeta);
+        }
+      })
+      .catch(function() {});
   }
 
   // Client-side markdown → HTML formatter for web chat.

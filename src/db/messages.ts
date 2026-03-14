@@ -92,6 +92,35 @@ export interface SimConversationRow {
   username: string | null;
 }
 
+export interface LastResponseMeta {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  model: string;
+  durationMs: number;
+}
+
+/** Get token/cost data from the most recent assistant message for a user+bot */
+export async function getLastResponseMeta(userId: string, botName: string): Promise<LastResponseMeta | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT input_tokens, output_tokens, cost_usd, model, duration_ms
+    FROM messages
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND role = 'assistant'
+      AND input_tokens IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  if (!row) return null;
+  return {
+    inputTokens: Number(row.input_tokens ?? 0),
+    outputTokens: Number(row.output_tokens ?? 0),
+    costUsd: Number(row.cost_usd ?? 0),
+    model: row.model ?? "",
+    durationMs: Number(row.duration_ms ?? 0),
+  };
+}
+
 /**
  * Get distinct chat conversations from the DB, ordered by most recent activity.
  * Returns unique (user_id, bot_name, platform) tuples, limited to the 100 most

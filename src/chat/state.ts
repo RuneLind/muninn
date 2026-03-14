@@ -29,7 +29,8 @@ export type ChatEvent =
   | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null };
+  | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -155,6 +156,33 @@ export class ChatState {
   /** Broadcast a tool status update (appended as separate lines in the UI) */
   publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
     this.publish({ type: "tool_status", conversationId, text, threadId });
+  }
+
+  /** Broadcast response metadata (tokens, timing) after a response completes */
+  publishResponseMeta(conversationId: string, meta: {
+    threadId?: string | null;
+    inputTokens: number;
+    outputTokens: number;
+    contextWindow?: number;
+    durationMs: number;
+    costUsd: number;
+    model: string;
+    numTurns: number;
+    toolCalls?: { name: string; displayName: string; durationMs: number }[];
+  }): void {
+    this.publish({
+      type: "response_meta",
+      conversationId,
+      threadId: meta.threadId,
+      inputTokens: meta.inputTokens,
+      outputTokens: meta.outputTokens,
+      contextWindow: meta.contextWindow,
+      durationMs: meta.durationMs,
+      costUsd: meta.costUsd,
+      model: meta.model,
+      numTurns: meta.numTurns,
+      toolCalls: meta.toolCalls,
+    });
   }
 
   /**
