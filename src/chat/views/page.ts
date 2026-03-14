@@ -2234,6 +2234,7 @@ const CHAT_SCRIPT = `
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
       loadToolUsageStats();
+      loadContextUsage();
     }
   }
 
@@ -2482,6 +2483,30 @@ const CHAT_SCRIPT = `
         updateInspectorToolUsage(meta);
       })
       .catch(function() { aggregateToolUsage = null; });
+  }
+
+  function loadContextUsage() {
+    if (!selectedUserId || !selectedBot) return;
+    fetch('/chat/context-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data && data.inputTokens) {
+          // Store as if it were a response_meta so inspector can display it
+          var syntheticMeta = {
+            inputTokens: data.inputTokens,
+            outputTokens: data.outputTokens,
+            contextWindow: data.contextWindow,
+            durationMs: data.durationMs,
+            costUsd: data.costUsd,
+            model: data.model,
+          };
+          if (activeConvId && !lastResponseMeta[activeConvId]) {
+            lastResponseMeta[activeConvId] = syntheticMeta;
+          }
+          updateInspectorContextUsage(syntheticMeta);
+        }
+      })
+      .catch(function() {});
   }
 
   // Client-side markdown → HTML formatter for web chat.
