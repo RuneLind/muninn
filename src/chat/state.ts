@@ -51,6 +51,16 @@ export const MAX_CONVERSATIONS = 50;
 export class ChatState {
   private conversations = new Map<string, ChatConversation>();
   private subscribers = new Set<EventSubscriber>();
+  /** Per-bot preferred user ID (set by chat page user selector) */
+  private preferredUser = new Map<string, string>();
+
+  getPreferredUser(botName: string): string | undefined {
+    return this.preferredUser.get(botName);
+  }
+
+  setPreferredUser(botName: string, userId: string): void {
+    this.preferredUser.set(botName, userId);
+  }
 
   subscribe(fn: EventSubscriber): () => void {
     this.subscribers.add(fn);

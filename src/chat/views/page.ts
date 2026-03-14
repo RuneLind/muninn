@@ -1121,6 +1121,7 @@ const CHAT_SCRIPT = `
     selectedUserId = active.id;
     selectedUsername = active.name;
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
+    syncPreferredUser(botName, active.id);
   }
 
 
@@ -1160,6 +1161,16 @@ const CHAT_SCRIPT = `
     if (pill) selectBot(pill.dataset.bot);
   });
 
+  // Sync preferred user to server so extensions (Jira plugin) know which user is selected
+  function syncPreferredUser(botName, userId) {
+    if (!botName || !userId) return;
+    fetch('/chat/preferred-user/' + encodeURIComponent(botName), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userId }),
+    }).catch(function() {});
+  }
+
   // User selector change
   document.getElementById('userSelector').addEventListener('change', async function(e) {
     var userId = e.target.value;
@@ -1167,6 +1178,7 @@ const CHAT_SCRIPT = `
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
+    syncPreferredUser(selectedBot, userId);
     // Re-resolve conversation and threads for new user
     await resolveConversation();
     activeThreadId = null;

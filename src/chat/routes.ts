@@ -52,6 +52,22 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ bots, connectors });
   });
 
+  // Get preferred user for a bot (set by chat page user selector)
+  app.get("/preferred-user/:botName", (c) => {
+    const botName = c.req.param("botName");
+    const userId = chatState.getPreferredUser(botName);
+    return c.json({ userId: userId ?? null });
+  });
+
+  // Set preferred user for a bot (called by chat page on user selector change)
+  app.put("/preferred-user/:botName", async (c) => {
+    const botName = c.req.param("botName");
+    const body = await c.req.json<{ userId: string }>();
+    if (!body.userId) return c.json({ error: "userId is required" }, 400);
+    chatState.setPreferredUser(botName, body.userId);
+    return c.json({ ok: true });
+  });
+
   // Create a new conversation
   app.post("/conversations", async (c) => {
     const body = await c.req.json<{

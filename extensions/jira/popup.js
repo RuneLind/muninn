@@ -138,14 +138,22 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   $('#issue-info').appendChild(dialog);
 }
 
-// Auto-resolve userId: pick the most recently active user for the bot
+// Auto-resolve userId: prefer the user selected in the chat page, fall back to most recently active
 async function resolveUserId(muninnUrl, botName) {
+  // First check the preferred user set by the chat page
+  try {
+    const prefRes = await fetch(`${muninnUrl}/chat/preferred-user/${encodeURIComponent(botName)}`);
+    if (prefRes.ok) {
+      const prefData = await prefRes.json();
+      if (prefData.userId) return prefData.userId;
+    }
+  } catch {}
+  // Fall back to most recently active user
   try {
     const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(botName)}`);
     if (!res.ok) return null;
     const data = await res.json();
     const users = data.users || [];
-    // API returns users sorted by last_active DESC — first is most recent
     if (users.length > 0) return users[0].userId || users[0].id;
   } catch {}
   return null;
