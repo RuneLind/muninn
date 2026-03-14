@@ -1,6 +1,9 @@
 const $ = (sel) => document.querySelector(sel);
 
 let issueData = null;
+let allUsers = [];
+let muninnUrl = 'http://localhost:3010';
+const BOT_NAME = 'melosys';
 
 document.addEventListener('DOMContentLoaded', async () => {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -11,18 +14,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  // Ask content script for issue info
-  try {
-    const info = await sendToTab(tab.id, { type: 'GET_JIRA_INFO' });
-    if (info && info.issueKey) {
-      issueData = info;
-      showIssue(info);
-    } else {
-      showReloadMessage();
-    }
-  } catch (e) {
+  // Load settings and users in parallel with issue info
+  const settingsPromise = chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '', lastUserId: '' });
+  const issuePromise = sendToTab(tab.id, { type: 'GET_JIRA_INFO' }).catch(() => null);
+
+  const [settings, info] = await Promise.all([settingsPromise, issuePromise]);
+  muninnUrl = settings.muninnUrl;
+
+  if (info?.issueKey) {
+    issueData = info;
+    showIssue(info);
+  } else {
     showReloadMessage();
+    return;
   }
+
+  // Load users and populate dropdown
+  await loadUsers(settings);
 
   $('#btn-index').addEventListener('click', () => handleAnalyze());
   $('#open-options').addEventListener('click', (e) => {
@@ -74,30 +82,54 @@ function formatIssueAsText(data) {
   return text;
 }
 
-// Show a user picker when the server reports multiple users
-function showUserPicker(users, onSelect) {
-  // Remove any existing picker
-  const existing = $('#user-picker');
-  if (existing) existing.remove();
+// Load users from server and populate the dropdown
+async function loadUsers(settings) {
+  const select = $('#user-select');
+  const row = $('#user-selector-row');
 
-  const picker = document.createElement('div');
-  picker.id = 'user-picker';
-  picker.style.cssText = 'margin-top:8px;';
-  picker.innerHTML = '<div style="font-size:12px;font-weight:500;margin-bottom:6px;">Velg bruker:</div>';
+  // Fetch users list
+  try {
+    const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(BOT_NAME)}`);
+    if (res.ok) {
+      const data = await res.json();
+      allUsers = (data.users || []).map(u => ({ id: u.userId || u.id, name: u.username || u.userId || u.id }));
+    }
+  } catch {}
 
-  for (const user of users) {
-    const btn = document.createElement('button');
-    btn.className = 'primary';
-    btn.style.cssText = 'display:block;width:100%;margin-bottom:4px;text-align:left;font-size:12px;padding:6px 10px;';
-    btn.textContent = `${user.name} (${user.id})`;
-    btn.addEventListener('click', () => {
-      picker.remove();
-      onSelect(user.id);
-    });
-    picker.appendChild(btn);
-  }
+  if (allUsers.length === 0) return;
 
-  $('#issue-info').appendChild(picker);
+  // Determine which user to pre-select:
+  // 1. Preferred user from chat page (server-side)
+  // 2. Last used in extension
+  // 3. Settings userId
+  // 4. First user in list
+  let preferredId = null;
+  try {
+    const prefRes = await fetch(`${muninnUrl}/chat/preferred-user/${encodeURIComponent(BOT_NAME)}`);
+    if (prefRes.ok) {
+      const prefData = await prefRes.json();
+      if (prefData.userId) preferredId = prefData.userId;
+    }
+  } catch {}
+
+  const selectedId = preferredId || settings.lastUserId || settings.userId || allUsers[0].id;
+
+  // Populate dropdown
+  select.innerHTML = allUsers.map(u => {
+    const selected = u.id === selectedId ? ' selected' : '';
+    return `<option value="${u.id}"${selected}>${u.name} (${u.id})</option>`;
+  }).join('');
+
+  // If stored ID doesn't match any user, select first
+  if (!select.value) select.selectedIndex = 0;
+
+  row.style.display = 'flex';
+}
+
+// Get the currently selected user from the dropdown
+function getSelectedUserId() {
+  const select = $('#user-select');
+  return select?.value || null;
 }
 
 // Show a dialog when a thread with the same name already exists
@@ -138,28 +170,7 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   $('#issue-info').appendChild(dialog);
 }
 
-// Auto-resolve userId: prefer the user selected in the chat page, fall back to most recently active
-async function resolveUserId(muninnUrl, botName) {
-  // First check the preferred user set by the chat page
-  try {
-    const prefRes = await fetch(`${muninnUrl}/chat/preferred-user/${encodeURIComponent(botName)}`);
-    if (prefRes.ok) {
-      const prefData = await prefRes.json();
-      if (prefData.userId) return prefData.userId;
-    }
-  } catch {}
-  // Fall back to most recently active user
-  try {
-    const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(botName)}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const users = data.users || [];
-    if (users.length > 0) return users[0].userId || users[0].id;
-  } catch {}
-  return null;
-}
-
-async function handleAnalyze(overrideUserId, forceNew) {
+async function handleAnalyze(forceNew) {
   const btn = $('#btn-index');
   const status = $('#status');
 
@@ -178,22 +189,21 @@ async function handleAnalyze(overrideUserId, forceNew) {
       } catch (e) { /* use cached */ }
     }
 
-    const settings = await chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '', lastUserId: '' });
     const title = issueData.issueKey;
     const text = formatIssueAsText(issueData);
-
     const description = issueData.summary || issueData.title || '';
-    const payload = { bot: 'melosys', title, text, description };
+    const payload = { bot: BOT_NAME, title, text, description };
 
-    // userId priority: override (from picker) > settings > last used > auto-resolve (single user) > omit
-    let userId = overrideUserId || settings.userId || settings.lastUserId;
-    if (!userId) {
-      userId = await resolveUserId(settings.muninnUrl, 'melosys');
+    // Use the user from the dropdown
+    const userId = getSelectedUserId();
+    if (userId) {
+      payload.userId = userId;
+      // Remember for next time
+      chrome.storage.sync.set({ lastUserId: userId });
     }
-    if (userId) payload.userId = userId;
     if (forceNew) payload.forceNew = true;
 
-    const response = await fetch(`${settings.muninnUrl}/api/research/chat`, {
+    const response = await fetch(`${muninnUrl}/api/research/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -201,34 +211,21 @@ async function handleAnalyze(overrideUserId, forceNew) {
 
     const result = await response.json();
 
-    // Server asks us to pick a user
-    if (result.needsUser && result.users) {
-      status.className = 'status-msg hidden';
-      btn.disabled = false;
-      showUserPicker(result.users, (selectedUserId) => {
-        // Remember selection for next time
-        chrome.storage.sync.set({ lastUserId: selectedUserId });
-        handleAnalyze(selectedUserId, forceNew);
-      });
-      return;
-    }
-
     // Thread already exists — ask user what to do
     if (result.threadExists) {
       status.className = 'status-msg hidden';
       btn.disabled = false;
-      const resolvedUserId = userId || result.userId;
       showThreadExistsDialog(
         result.existingThreadName,
         // Reuse: open the existing thread directly
         () => {
-          const chatUrl = `${settings.muninnUrl}/chat?bot=${encodeURIComponent(result.botName)}&thread=${encodeURIComponent(result.existingThreadId)}&user=${encodeURIComponent(resolvedUserId)}`;
+          const chatUrl = `${muninnUrl}/chat?bot=${encodeURIComponent(result.botName)}&thread=${encodeURIComponent(result.existingThreadId)}&user=${encodeURIComponent(userId || result.userId)}`;
           chrome.tabs.create({ url: chatUrl });
           window.close();
         },
         // Create new with timestamp
         () => {
-          handleAnalyze(resolvedUserId, true);
+          handleAnalyze(true);
         },
       );
       return;
@@ -238,11 +235,8 @@ async function handleAnalyze(overrideUserId, forceNew) {
       throw new Error(result.error || result.detail || `Error: ${response.status}`);
     }
 
-    // Remember the userId that worked for next time
-    if (userId) chrome.storage.sync.set({ lastUserId: userId });
-
     // Open chat page
-    chrome.tabs.create({ url: `${settings.muninnUrl}${result.chatUrl}` });
+    chrome.tabs.create({ url: `${muninnUrl}${result.chatUrl}` });
     window.close();
   } catch (err) {
     status.className = 'status-msg error';

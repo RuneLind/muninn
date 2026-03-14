@@ -48,6 +48,29 @@ header h1 {
   margin-bottom: 10px;
 }
 
+.user-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.user-selector label {
+  font-size: 12px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.user-selector select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  font-size: 12px;
+  background: white;
+  color: #1a1a1a;
+}
+
 .controls {
   display: flex;
   gap: 8px;
