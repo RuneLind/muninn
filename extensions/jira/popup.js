@@ -114,11 +114,15 @@ async function loadUsers(settings) {
 
   const selectedId = preferredId || settings.lastUserId || settings.userId || allUsers[0].id;
 
-  // Populate dropdown
-  select.innerHTML = allUsers.map(u => {
-    const selected = u.id === selectedId ? ' selected' : '';
-    return `<option value="${u.id}"${selected}>${u.name} (${u.id})</option>`;
-  }).join('');
+  // Populate dropdown (use DOM API to avoid XSS from user names)
+  select.innerHTML = '';
+  for (const u of allUsers) {
+    const opt = document.createElement('option');
+    opt.value = u.id;
+    opt.textContent = `${u.name} (${u.id})`;
+    if (u.id === selectedId) opt.selected = true;
+    select.appendChild(opt);
+  }
 
   // If stored ID doesn't match any user, select first
   if (!select.value) select.selectedIndex = 0;

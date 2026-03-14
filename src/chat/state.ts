@@ -112,6 +112,7 @@ export class ChatState {
   /** Clear all conversations and state */
   clear(): void {
     this.conversations.clear();
+    this.preferredUser.clear();
   }
 
   getConversation(id: string): ChatConversation | undefined {
