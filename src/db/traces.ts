@@ -202,6 +202,7 @@ export async function getToolUsageStats(userId: string, botName: string): Promis
       AND attributes->>'toolName' IS NOT NULL
     GROUP BY name, attributes->>'toolName'
     ORDER BY call_count DESC
+    LIMIT 50
   `;
   return rows.map((r) => ({
     displayName: r.name,

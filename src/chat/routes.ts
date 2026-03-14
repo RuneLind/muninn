@@ -306,10 +306,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const bot = botConfigs.find((b) => b.name === botName);
     try {
       const meta = await getLastResponseMeta(userId, botName);
-      return c.json({
-        ...meta,
-        contextWindow: bot?.contextWindow ?? null,
-      });
+      if (!meta) return c.json({ inputTokens: 0, outputTokens: 0, contextWindow: bot?.contextWindow ?? null });
+      return c.json({ ...meta, contextWindow: bot?.contextWindow ?? null });
     } catch (err) {
       log.warn("Failed to load context usage: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ inputTokens: 0, outputTokens: 0, contextWindow: null });
