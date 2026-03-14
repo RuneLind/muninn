@@ -119,6 +119,7 @@ CREATE TABLE messages (
   model TEXT,
   input_tokens INTEGER,
   output_tokens INTEGER,
+  context_tokens INTEGER,
   source TEXT DEFAULT NULL,
   platform TEXT DEFAULT 'telegram',
   thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,

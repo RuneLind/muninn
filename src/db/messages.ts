@@ -12,6 +12,8 @@ export interface SaveMessageParams {
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** Last turn's input tokens — actual context window usage */
+  contextTokens?: number;
   source?: string;
   platform?: Platform;
   threadId?: string;
@@ -20,8 +22,8 @@ export interface SaveMessageParams {
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, source, platform, thread_id)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -95,6 +97,7 @@ export interface SimConversationRow {
 export interface LastResponseMeta {
   inputTokens: number;
   outputTokens: number;
+  contextTokens?: number;
   costUsd: number;
   model: string;
   durationMs: number;
@@ -104,7 +107,7 @@ export interface LastResponseMeta {
 export async function getLastResponseMeta(userId: string, botName: string): Promise<LastResponseMeta | null> {
   const sql = getDb();
   const [row] = await sql`
-    SELECT input_tokens, output_tokens, cost_usd, model, duration_ms
+    SELECT input_tokens, output_tokens, context_tokens, cost_usd, model, duration_ms
     FROM messages
     WHERE user_id = ${userId} AND bot_name = ${botName} AND role = 'assistant'
       AND input_tokens IS NOT NULL
@@ -115,6 +118,7 @@ export async function getLastResponseMeta(userId: string, botName: string): Prom
   return {
     inputTokens: Number(row.input_tokens ?? 0),
     outputTokens: Number(row.output_tokens ?? 0),
+    contextTokens: row.context_tokens ? Number(row.context_tokens) : undefined,
     costUsd: Number(row.cost_usd ?? 0),
     model: row.model ?? "",
     durationMs: Number(row.duration_ms ?? 0),

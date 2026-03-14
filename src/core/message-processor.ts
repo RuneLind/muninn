@@ -63,6 +63,8 @@ export interface ProcessMessageResult {
   costUsd: number;
   model: string;
   numTurns: number;
+  /** Last turn's input tokens — actual context window usage (vs cumulative inputTokens) */
+  contextTokens?: number;
   toolCalls?: { name: string; displayName: string; durationMs: number }[];
 }
 
@@ -200,6 +202,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       model: result.model,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
+      contextTokens: result.contextTokens,
       platform,
       threadId,
     });
@@ -268,7 +271,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     if (isTelegram) {
       const html = formatTelegramHtml(responseText);
       const footer = `\n\n<i>\u23F1 ${t.formatTelegram({
-        inputTokens: result.inputTokens,
+        inputTokens: result.contextTokens ?? result.inputTokens,
         outputTokens: result.outputTokens,
         costUsd: result.costUsd,
         startupMs: result.startupMs,
@@ -349,6 +352,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       costUsd: result.costUsd,
       model: result.model,
       numTurns: result.numTurns,
+      contextTokens: result.contextTokens,
       toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
     };
   } catch (error) {

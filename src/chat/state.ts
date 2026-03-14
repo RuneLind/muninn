@@ -30,7 +30,7 @@ export type ChatEvent =
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] };
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -163,6 +163,7 @@ export class ChatState {
     threadId?: string | null;
     inputTokens: number;
     outputTokens: number;
+    contextTokens?: number;
     contextWindow?: number;
     durationMs: number;
     costUsd: number;
@@ -176,6 +177,7 @@ export class ChatState {
       threadId: meta.threadId,
       inputTokens: meta.inputTokens,
       outputTokens: meta.outputTokens,
+      contextTokens: meta.contextTokens,
       contextWindow: meta.contextWindow,
       durationMs: meta.durationMs,
       costUsd: meta.costUsd,
