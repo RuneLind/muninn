@@ -178,6 +178,40 @@ export async function getTraceFilterOptions(): Promise<{ bots: string[]; types: 
   };
 }
 
+export interface ToolUsageStat {
+  displayName: string;
+  toolName: string;
+  callCount: number;
+  totalMs: number;
+  avgMs: number;
+}
+
+export async function getToolUsageStats(userId: string, botName: string): Promise<ToolUsageStat[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT
+      name,
+      attributes->>'toolName' as tool_name,
+      COUNT(*)::int as call_count,
+      SUM(duration_ms)::int as total_ms,
+      ROUND(AVG(duration_ms))::int as avg_ms
+    FROM traces
+    WHERE bot_name = ${botName}
+      AND user_id = ${userId}
+      AND parent_id IS NOT NULL
+      AND attributes->>'toolName' IS NOT NULL
+    GROUP BY name, attributes->>'toolName'
+    ORDER BY call_count DESC
+  `;
+  return rows.map((r) => ({
+    displayName: r.name,
+    toolName: r.tool_name,
+    callCount: Number(r.call_count),
+    totalMs: Number(r.total_ms),
+    avgMs: Number(r.avg_ms),
+  }));
+}
+
 export async function cleanupOldTraces(retentionDays: number): Promise<number> {
   const sql = getDb();
   const result = await sql`

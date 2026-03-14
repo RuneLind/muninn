@@ -2126,6 +2126,7 @@ const CHAT_SCRIPT = `
       lastResponseMeta[meta.conversationId] = meta;
       updateInspectorContextUsage(meta);
       updateInspectorToolUsage(meta);
+      loadToolUsageStats(); // Refresh aggregate stats
     }
 
     // Find the last bot message to attach metadata to
@@ -2232,6 +2233,7 @@ const CHAT_SCRIPT = `
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
+      loadToolUsageStats();
     }
   }
 
@@ -2427,29 +2429,59 @@ const CHAT_SCRIPT = `
       });
   }
 
-  // Update tool usage section in inspector panel
+  // Update tool usage section in inspector panel — shows last-response tools + aggregate stats
   function updateInspectorToolUsage(meta) {
     if (!inspectorToolUsage) return;
-    if (!meta.toolCalls || meta.toolCalls.length === 0) {
-      inspectorToolUsage.innerHTML = '';
-      return;
+
+    var html = '';
+
+    // Last response tools
+    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
+      html += '<hr class="ins-divider">'
+        + '<div class="ins-section"><div class="ins-section-title">Last Response Tools (' + meta.toolCalls.length + ')</div>';
+      for (var i = 0; i < meta.toolCalls.length; i++) {
+        var tc = meta.toolCalls[i];
+        var secs = tc.durationMs / 1000;
+        var timeStr = secs >= 1 ? secs.toFixed(1) + 's' : tc.durationMs + 'ms';
+        html += '<div class="ins-tool-item">'
+          + '<span class="ins-tool-name">' + escapeHtml(tc.displayName) + '</span>'
+          + '<span class="ins-tool-time">' + timeStr + '</span>'
+          + '</div>';
+      }
+      html += '</div>';
     }
 
-    var html = '<hr class="ins-divider">'
-      + '<div class="ins-section"><div class="ins-section-title">Tools (' + meta.toolCalls.length + ')</div>';
-
-    for (var i = 0; i < meta.toolCalls.length; i++) {
-      var tc = meta.toolCalls[i];
-      var secs = tc.durationMs / 1000;
-      var timeStr = secs >= 1 ? secs.toFixed(1) + 's' : tc.durationMs + 'ms';
-      html += '<div class="ins-tool-item">'
-        + '<span class="ins-tool-name">' + escapeHtml(tc.displayName) + '</span>'
-        + '<span class="ins-tool-time">' + timeStr + '</span>'
-        + '</div>';
+    // Aggregate tool usage (loaded from API)
+    if (aggregateToolUsage && aggregateToolUsage.length > 0) {
+      html += '<hr class="ins-divider">'
+        + '<div class="ins-section"><div class="ins-section-title">Total Tool Usage</div>';
+      for (var j = 0; j < aggregateToolUsage.length; j++) {
+        var t = aggregateToolUsage[j];
+        var totalSecs = t.totalMs / 1000;
+        var totalStr = totalSecs >= 60 ? Math.round(totalSecs / 60) + 'm' : totalSecs >= 1 ? totalSecs.toFixed(1) + 's' : t.totalMs + 'ms';
+        html += '<div class="ins-tool-item">'
+          + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
+          + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + totalStr + '</span>'
+          + '</div>';
+      }
+      html += '</div>';
     }
 
-    html += '</div>';
     inspectorToolUsage.innerHTML = html;
+  }
+
+  var aggregateToolUsage = null;
+
+  function loadToolUsageStats() {
+    if (!selectedUserId || !selectedBot) return;
+    fetch('/chat/tool-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        aggregateToolUsage = data.tools || [];
+        var meta = activeConvId ? lastResponseMeta[activeConvId] : null;
+        updateInspectorToolUsage(meta);
+      })
+      .catch(function() { aggregateToolUsage = null; });
   }
 
   // Client-side markdown → HTML formatter for web chat.

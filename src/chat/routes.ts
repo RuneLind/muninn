@@ -9,6 +9,7 @@ import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getSimMessages } from "../db/messages.ts";
+import { getToolUsageStats } from "../db/traces.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
@@ -296,6 +297,19 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     });
 
     return c.json({ status: "processing" }, 202);
+  });
+
+  // Aggregate tool usage stats from traces for a user+bot
+  app.get("/tool-usage/:userId/:botName", async (c) => {
+    const userId = c.req.param("userId");
+    const botName = c.req.param("botName");
+    try {
+      const tools = await getToolUsageStats(userId, botName);
+      return c.json({ tools });
+    } catch (err) {
+      log.warn("Failed to load tool usage: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ tools: [] });
+    }
   });
 
   // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
