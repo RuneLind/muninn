@@ -62,6 +62,8 @@ export interface ProcessMessageResult {
   outputTokens: number;
   costUsd: number;
   model: string;
+  numTurns: number;
+  toolCalls?: { name: string; displayName: string; durationMs: number }[];
 }
 
 /**
@@ -346,6 +348,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       outputTokens: result.outputTokens,
       costUsd: result.costUsd,
       model: result.model,
+      numTurns: result.numTurns,
+      toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
     };
   } catch (error) {
     agentStatus.clearRequest();

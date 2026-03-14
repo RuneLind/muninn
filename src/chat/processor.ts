@@ -155,6 +155,8 @@ export async function processChatMessage(
         durationMs: result.durationMs,
         costUsd: result.costUsd,
         model: result.model,
+        numTurns: result.numTurns,
+        toolCalls: result.toolCalls,
       });
     }
   } finally {

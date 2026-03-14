@@ -70,10 +70,7 @@ export function renderChatPage(): string {
         <div class="empty-state">Select a thread</div>
       </div>
       <div id="inspectorContext"></div>
-      <h3 class="ins-heading">Activity Feed</h3>
-      <div class="activity-feed" id="activityFeed">
-        <div class="empty-state">Waiting for events...</div>
-      </div>
+      <div id="inspectorToolUsage"></div>
     </div>
   </div>
 
@@ -735,18 +732,15 @@ const CHAT_STYLES = `
       100% { background-position: -200% 0; }
     }
 
-    .activity-feed {
-      font-size: 12px;
-      max-height: 400px;
-      overflow-y: auto;
+    .ins-tool-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 2px 0;
+      font-size: 11px;
     }
-    .activity-item {
-      padding: 4px 0;
-      border-bottom: 1px solid var(--border-subtle);
-      color: var(--text-muted);
-    }
-    .activity-item .act-type { color: var(--accent); font-weight: 500; }
-    .activity-item .act-time { color: var(--text-faint); font-size: 10px; }
+    .ins-tool-name { color: var(--text-muted); }
+    .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
     .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
@@ -1055,7 +1049,7 @@ const CHAT_SCRIPT = `
   var chatSend = document.getElementById('chatSend');
   var chatHeader = document.getElementById('chatHeader');
   var chatStatus = document.getElementById('chatStatus');
-  var activityFeed = document.getElementById('activityFeed');
+  var inspectorToolUsage = document.getElementById('inspectorToolUsage');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
 
@@ -1498,7 +1492,6 @@ const CHAT_SCRIPT = `
           }
         }
         renderThreadList();
-        addActivityItem(event.message.sender === 'bot' ? 'bot_reply' : 'user_msg', event.message.text.slice(0, 80));
       }
       return;
     }
@@ -2132,6 +2125,7 @@ const CHAT_SCRIPT = `
     if (meta.conversationId) {
       lastResponseMeta[meta.conversationId] = meta;
       updateInspectorContextUsage(meta);
+      updateInspectorToolUsage(meta);
     }
 
     // Find the last bot message to attach metadata to
@@ -2228,9 +2222,10 @@ const CHAT_SCRIPT = `
       + '<hr class="ins-divider">';
     inspectorContent.innerHTML = html;
 
-    // Restore context usage if we have stored meta for this conversation
+    // Restore response meta if we have stored data for this conversation
     if (activeConvId && lastResponseMeta[activeConvId]) {
       updateInspectorContextUsage(lastResponseMeta[activeConvId]);
+      updateInspectorToolUsage(lastResponseMeta[activeConvId]);
     }
 
     var contextKey = selectedUserId + ':' + selectedBot;
@@ -2432,20 +2427,29 @@ const CHAT_SCRIPT = `
       });
   }
 
-  // Activity feed
-  function addActivityItem(type, text) {
-    if (activityFeed.querySelector('.empty-state')) {
-      activityFeed.innerHTML = '';
+  // Update tool usage section in inspector panel
+  function updateInspectorToolUsage(meta) {
+    if (!inspectorToolUsage) return;
+    if (!meta.toolCalls || meta.toolCalls.length === 0) {
+      inspectorToolUsage.innerHTML = '';
+      return;
     }
-    var div = document.createElement('div');
-    div.className = 'activity-item';
-    div.innerHTML = '<span class="act-time">' + new Date().toLocaleTimeString() + '</span> '
-      + '<span class="act-type">' + type + '</span> '
-      + escapeHtml(text);
-    activityFeed.insertBefore(div, activityFeed.firstChild);
-    while (activityFeed.children.length > 50) {
-      activityFeed.removeChild(activityFeed.lastChild);
+
+    var html = '<hr class="ins-divider">'
+      + '<div class="ins-section"><div class="ins-section-title">Tools (' + meta.toolCalls.length + ')</div>';
+
+    for (var i = 0; i < meta.toolCalls.length; i++) {
+      var tc = meta.toolCalls[i];
+      var secs = tc.durationMs / 1000;
+      var timeStr = secs >= 1 ? secs.toFixed(1) + 's' : tc.durationMs + 'ms';
+      html += '<div class="ins-tool-item">'
+        + '<span class="ins-tool-name">' + escapeHtml(tc.displayName) + '</span>'
+        + '<span class="ins-tool-time">' + timeStr + '</span>'
+        + '</div>';
     }
+
+    html += '</div>';
+    inspectorToolUsage.innerHTML = html;
   }
 
   // Client-side markdown → HTML formatter for web chat.
