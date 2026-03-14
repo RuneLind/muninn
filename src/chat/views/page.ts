@@ -1121,6 +1121,7 @@ const CHAT_SCRIPT = `
     selectedUserId = active.id;
     selectedUsername = active.name;
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
+    syncPreferredUser(botName, active.id);
   }
 
 
@@ -1160,6 +1161,16 @@ const CHAT_SCRIPT = `
     if (pill) selectBot(pill.dataset.bot);
   });
 
+  // Sync preferred user to server so extensions (Jira plugin) know which user is selected
+  function syncPreferredUser(botName, userId) {
+    if (!botName || !userId) return;
+    fetch('/chat/preferred-user/' + encodeURIComponent(botName), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userId }),
+    }).catch(function() {});
+  }
+
   // User selector change
   document.getElementById('userSelector').addEventListener('change', async function(e) {
     var userId = e.target.value;
@@ -1167,6 +1178,7 @@ const CHAT_SCRIPT = `
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
+    syncPreferredUser(selectedBot, userId);
     // Re-resolve conversation and threads for new user
     await resolveConversation();
     activeThreadId = null;
@@ -1541,29 +1553,7 @@ const CHAT_SCRIPT = `
     if (threadParam && activeConvId && activeThreadId) {
       // Stamp connector from sidebar selection if thread has none
       if (selectedConnectorId) {
-        var needsStamp = true;
-        for (var ti = 0; ti < threads.length; ti++) {
-          if (threads[ti].id === activeThreadId && threads[ti].connectorId) { needsStamp = false; break; }
-        }
-        if (needsStamp) {
-          try {
-            await fetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/connector', {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ connectorId: selectedConnectorId }),
-            });
-            for (var tj = 0; tj < threads.length; tj++) {
-              if (threads[tj].id === activeThreadId) {
-                threads[tj].connectorId = selectedConnectorId;
-                for (var tk = 0; tk < connectors.length; tk++) {
-                  if (connectors[tk].id === selectedConnectorId) { threads[tj].connectorName = connectors[tk].name; break; }
-                }
-                break;
-              }
-            }
-            renderThreadList();
-          } catch {}
-        }
+        await stampConnectorOnThread(activeThreadId, selectedConnectorId);
       }
       try {
         var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
@@ -1584,6 +1574,11 @@ const CHAT_SCRIPT = `
     // Dismiss research action buttons when sending any message
     var researchActions = chatMessages.querySelector('.research-actions');
     if (researchActions) researchActions.remove();
+
+    // Stamp connector from sidebar selection if thread has none
+    if (selectedConnectorId) {
+      await stampConnectorOnThread(activeThreadId, selectedConnectorId);
+    }
 
     var text = chatInput.value.trim();
     chatInput.value = '';
@@ -2199,9 +2194,40 @@ const CHAT_SCRIPT = `
     }
   }
 
+  // Stamp a connector on a thread (if it doesn't already have that connector)
+  async function stampConnectorOnThread(threadId, connectorId) {
+    if (!threadId || !connectorId) return;
+    // Check if thread already has this connector
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === threadId && threads[i].connectorId === connectorId) return;
+    }
+    try {
+      await fetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectorId: connectorId }),
+      });
+      // Update local thread data
+      for (var j = 0; j < threads.length; j++) {
+        if (threads[j].id === threadId) {
+          threads[j].connectorId = connectorId;
+          for (var k = 0; k < connectors.length; k++) {
+            if (connectors[k].id === connectorId) { threads[j].connectorName = connectors[k].name; break; }
+          }
+          break;
+        }
+      }
+      renderThreadList();
+    } catch {}
+  }
+
   connectorDropdown.addEventListener('change', function() {
     selectedConnectorId = connectorDropdown.value;
     try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
+    // Stamp the new connector on the active thread immediately
+    if (activeThreadId && selectedConnectorId) {
+      stampConnectorOnThread(activeThreadId, selectedConnectorId);
+    }
   });
 
   function syncConnectorDropdown() {
