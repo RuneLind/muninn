@@ -1474,6 +1474,7 @@ const CHAT_SCRIPT = `
               removeIntermediates();
               removeStreamingBubble();
               setChatStatusText('');
+              conv.status = '';
             }
             appendMessage(event.message, conv.type);
           }
