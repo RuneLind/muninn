@@ -2438,42 +2438,61 @@ const CHAT_SCRIPT = `
       });
   }
 
+  // Aggregate tool calls by name: { name → { count, totalMs } }
+  function aggregateToolCalls(toolCalls) {
+    var map = {};
+    for (var i = 0; i < toolCalls.length; i++) {
+      var tc = toolCalls[i];
+      var key = tc.displayName || tc.name;
+      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+      map[key].callCount++;
+      map[key].totalMs += tc.durationMs || 0;
+    }
+    // Sort by count desc, then by totalMs desc
+    return Object.keys(map).map(function(k) { return map[k]; })
+      .sort(function(a, b) { return b.callCount - a.callCount || b.totalMs - a.totalMs; });
+  }
+
+  function fmtToolTime(ms) {
+    var secs = ms / 1000;
+    if (secs >= 60) return Math.round(secs / 60) + 'm';
+    if (secs >= 1) return secs.toFixed(1) + 's';
+    return ms + 'ms';
+  }
+
+  function renderToolList(items) {
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i];
+      html += '<div class="ins-tool-item">'
+        + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
+        + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + fmtToolTime(t.totalMs) + '</span>'
+        + '</div>';
+    }
+    return html;
+  }
+
   // Update tool usage section in inspector panel — shows last-response tools + aggregate stats
   function updateInspectorToolUsage(meta) {
     if (!inspectorToolUsage) return;
 
     var html = '';
 
-    // Last response tools
+    // Last response tools (aggregated by name)
     if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
+      var lastAgg = aggregateToolCalls(meta.toolCalls);
       html += '<hr class="ins-divider">'
-        + '<div class="ins-section"><div class="ins-section-title">Last Response Tools (' + meta.toolCalls.length + ')</div>';
-      for (var i = 0; i < meta.toolCalls.length; i++) {
-        var tc = meta.toolCalls[i];
-        var secs = tc.durationMs / 1000;
-        var timeStr = secs >= 1 ? secs.toFixed(1) + 's' : tc.durationMs + 'ms';
-        html += '<div class="ins-tool-item">'
-          + '<span class="ins-tool-name">' + escapeHtml(tc.displayName) + '</span>'
-          + '<span class="ins-tool-time">' + timeStr + '</span>'
-          + '</div>';
-      }
-      html += '</div>';
+        + '<div class="ins-section"><div class="ins-section-title">Last Response (' + meta.toolCalls.length + ' calls)</div>'
+        + renderToolList(lastAgg) + '</div>';
     }
 
     // Aggregate tool usage (loaded from API)
     if (aggregateToolUsage && aggregateToolUsage.length > 0) {
+      var totalCalls = 0;
+      for (var j = 0; j < aggregateToolUsage.length; j++) totalCalls += aggregateToolUsage[j].callCount;
       html += '<hr class="ins-divider">'
-        + '<div class="ins-section"><div class="ins-section-title">Total Tool Usage</div>';
-      for (var j = 0; j < aggregateToolUsage.length; j++) {
-        var t = aggregateToolUsage[j];
-        var totalSecs = t.totalMs / 1000;
-        var totalStr = totalSecs >= 60 ? Math.round(totalSecs / 60) + 'm' : totalSecs >= 1 ? totalSecs.toFixed(1) + 's' : t.totalMs + 'ms';
-        html += '<div class="ins-tool-item">'
-          + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
-          + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + totalStr + '</span>'
-          + '</div>';
-      }
-      html += '</div>';
+        + '<div class="ins-section"><div class="ins-section-title">All Tool Usage (' + totalCalls + ' calls)</div>'
+        + renderToolList(aggregateToolUsage) + '</div>';
     }
 
     inspectorToolUsage.innerHTML = html;
