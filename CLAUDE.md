@@ -209,6 +209,7 @@ All fields are optional — falls back to global `.env` values:
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
 | `baseUrl` | string | — | Base URL for OpenAI-compatible API (e.g. `"http://localhost:11434/v1"`) |
 | `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
+| `contextWindow` | number | — | Context window size in tokens (e.g. `32768`). Shown as usage in web chat and percentage in Telegram footer |
 | `prompts` | object | — | Configurable prompts: `jiraAnalysis` (Jira research instruction, content appended automatically), `investigateCode` (follow-up code investigation prompt) |
 
 ### Database

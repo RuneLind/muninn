@@ -561,6 +561,13 @@ const CHAT_STYLES = `
       color: var(--text-faint);
       margin-top: 4px;
     }
+    .msg-response-meta {
+      font-size: 10px;
+      color: var(--text-faint);
+      margin-top: 2px;
+      opacity: 0.7;
+      font-variant-numeric: tabular-nums;
+    }
     .chat-input {
       padding: 12px 16px;
       border-top: 1px solid var(--border-primary);
@@ -656,6 +663,18 @@ const CHAT_STYLES = `
     .ins-info-label { color: var(--text-faint); }
     .ins-info-value { color: var(--text-secondary); }
     .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 10px 0; }
+    .ins-context-bar {
+      height: 4px;
+      background: var(--bg-tertiary, #2a2a3a);
+      border-radius: 2px;
+      margin: 4px 0 2px;
+      overflow: hidden;
+    }
+    .ins-context-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
     .ins-section { margin-bottom: 12px; }
     .ins-section-title {
       font-size: 11px;
@@ -1021,6 +1040,7 @@ const CHAT_SCRIPT = `
   var ws = null;
   var deepLinkHandled = false;
   var inspectorContextKey = null;
+  var lastResponseMeta = {};    // Per-conversationId last response_meta
   var selectedBot = '';         // From bot pills (localStorage-synced)
   var selectedUserId = null;    // Resolved from config for selected bot
   var selectedUsername = null;   // Display name
@@ -1513,6 +1533,14 @@ const CHAT_SCRIPT = `
       var tsThread = event.threadId || null;
       if (activeThreadId && tsThread !== activeThreadId) return;
       appendToolStatus(event.text);
+      return;
+    }
+
+    if (event.type === 'response_meta') {
+      if (event.conversationId !== activeConvId) return;
+      var rmThread = event.threadId || null;
+      if (activeThreadId && rmThread !== activeThreadId) return;
+      showResponseMeta(event);
       return;
     }
 
@@ -2097,6 +2125,61 @@ const CHAT_SCRIPT = `
     scrollToBottom();
   }
 
+  // Show response metadata (context usage) below the last bot message
+  function showResponseMeta(meta) {
+    // Store for inspector panel
+    if (meta.conversationId) {
+      lastResponseMeta[meta.conversationId] = meta;
+      updateInspectorContextUsage(meta);
+    }
+
+    // Find the last bot message to attach metadata to
+    var msgs = chatMessages.querySelectorAll('.msg-bot');
+    var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    if (!lastBot) return;
+
+    // Remove any existing meta bar on this message
+    var existing = lastBot.querySelector('.msg-response-meta');
+    if (existing) existing.remove();
+
+    var bar = document.createElement('div');
+    bar.className = 'msg-response-meta';
+
+    var parts = [];
+
+    // Context usage: "10,234 / 200,000" or just "10,234 tokens"
+    if (meta.inputTokens) {
+      if (meta.contextWindow) {
+        parts.push('ctx ' + fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow));
+      } else {
+        parts.push(fmtNum(meta.inputTokens) + ' in');
+      }
+    }
+    if (meta.outputTokens) {
+      parts.push(fmtNum(meta.outputTokens) + ' out');
+    }
+
+    // Duration
+    if (meta.durationMs) {
+      var secs = meta.durationMs / 1000;
+      parts.push(secs >= 10 ? Math.round(secs) + 's' : secs.toFixed(1) + 's');
+    }
+
+    // Cost (skip if zero — e.g. local models)
+    if (meta.costUsd && meta.costUsd > 0) {
+      parts.push('$' + meta.costUsd.toFixed(4));
+    }
+
+    bar.textContent = parts.join('  \u00b7  ');
+    lastBot.appendChild(bar);
+  }
+
+  function fmtNum(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+  }
+
   // Remove all intermediate messages (called before final message or on status clear)
   function removeIntermediates() {
     var intermediates = chatMessages.querySelectorAll('.msg-intermediate');
@@ -2140,14 +2223,47 @@ const CHAT_SCRIPT = `
 
     html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
+      + '<div id="insContextUsage"></div>'
       + '<hr class="ins-divider">';
     inspectorContent.innerHTML = html;
+
+    // Restore context usage if we have stored meta for this conversation
+    if (activeConvId && lastResponseMeta[activeConvId]) {
+      updateInspectorContextUsage(lastResponseMeta[activeConvId]);
+    }
 
     var contextKey = selectedUserId + ':' + selectedBot;
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
     }
+  }
+
+  // Update the context usage section in the inspector panel
+  function updateInspectorContextUsage(meta) {
+    var container = document.getElementById('insContextUsage');
+    if (!container) return;
+
+    var html = '';
+    if (meta.inputTokens) {
+      // Context usage bar + numbers
+      var label, pct;
+      if (meta.contextWindow) {
+        pct = Math.min(100, Math.round((meta.inputTokens / meta.contextWindow) * 100));
+        label = fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow);
+      } else {
+        pct = 0;
+        label = fmtNum(meta.inputTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
+      }
+
+      html += '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(label) + '</span></div>';
+
+      if (meta.contextWindow) {
+        var barColor = pct > 80 ? 'var(--status-error, #e74c3c)' : pct > 60 ? 'var(--status-warning, #f39c12)' : 'var(--accent, #7c6fe0)';
+        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+      }
+    }
+    container.innerHTML = html;
   }
 
   function getBotInfo() {

@@ -43,6 +43,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       model: b.model ?? null,
       baseUrl: b.baseUrl ?? null,
       showWaterfall: b.showWaterfall !== false,
+      contextWindow: b.contextWindow ?? null,
       prompts: b.prompts,
     }));
     let connectors: Awaited<ReturnType<typeof listConnectors>> = [];

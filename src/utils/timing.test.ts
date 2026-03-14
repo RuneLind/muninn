@@ -58,6 +58,14 @@ describe("Timing", () => {
     expect(result).toContain("300 out");
   });
 
+  test("formatTelegram shows context percentage when contextWindow is set", () => {
+    const t = new Timing();
+    const result = t.formatTelegram({ inputTokens: 8000, outputTokens: 500, contextWindow: 32768 });
+    expect(result).toContain("ctx 24%");
+    expect(result).toContain("500 out");
+    expect(result).not.toContain("8.0k in");
+  });
+
   test("formatTelegram includes cost", () => {
     const t = new Timing();
     const result = t.formatTelegram({ costUsd: 0.0123 });

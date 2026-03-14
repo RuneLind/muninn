@@ -127,7 +127,7 @@ export async function processChatMessage(
   };
 
   try {
-    await processMessage({
+    const result = await processMessage({
       text,
       userId: conversation.userId,
       username: conversation.username,
@@ -144,6 +144,19 @@ export async function processChatMessage(
       onIntent,
       onToolStatus,
     });
+
+    // Publish response metadata to web clients (token usage, timing)
+    if (result) {
+      chatState.publishResponseMeta(conversationId, {
+        threadId: threadId ?? null,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        contextWindow: effectiveBotConfig.contextWindow,
+        durationMs: result.durationMs,
+        costUsd: result.costUsd,
+        model: result.model,
+      });
+    }
   } finally {
     chatState.setStatus(conversationId, "");
   }

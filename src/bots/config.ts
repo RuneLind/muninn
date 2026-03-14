@@ -47,6 +47,8 @@ export interface BotConfig {
   timeoutMs?: number;
   /** Base URL for OpenAI-compatible API (e.g. "http://localhost:1234/v1") */
   baseUrl?: string;
+  /** Context window size in tokens — used to show usage percentage (e.g. 32768 for local models) */
+  contextWindow?: number;
   /** Per-tool-group user restrictions — tools not listed here are available to all */
   restrictedTools?: RestrictedTools;
   /** Channel listening config — passive relevance-based responses in active channels */
@@ -140,7 +142,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -181,6 +183,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,
       prompts: botSettings.prompts as BotPrompts | undefined,
+      contextWindow: botSettings.contextWindow as number | undefined,
     });
 
     const configParts: string[] = [];

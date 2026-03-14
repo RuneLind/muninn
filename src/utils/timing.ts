@@ -10,6 +10,7 @@ export interface TimingExtras {
   costUsd?: number;
   startupMs?: number;
   apiMs?: number;
+  contextWindow?: number;
 }
 
 export class Timing {
@@ -60,7 +61,12 @@ export class Timing {
     if (s.tts) parts.push(`tts ${fmtDuration(s.tts)}`);
 
     if (extras?.inputTokens || extras?.outputTokens) {
-      parts.push(`${fmtTokens(extras.inputTokens ?? 0)} in, ${fmtTokens(extras.outputTokens ?? 0)} out`);
+      if (extras?.contextWindow && extras.inputTokens) {
+        const pct = Math.round((extras.inputTokens / extras.contextWindow) * 100);
+        parts.push(`ctx ${pct}%, ${fmtTokens(extras.outputTokens ?? 0)} out`);
+      } else {
+        parts.push(`${fmtTokens(extras.inputTokens ?? 0)} in, ${fmtTokens(extras.outputTokens ?? 0)} out`);
+      }
     }
 
     if (extras?.costUsd) {
