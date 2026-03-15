@@ -186,21 +186,26 @@ export interface ToolUsageStat {
   avgMs: number;
 }
 
-export async function getToolUsageStats(userId: string, botName: string): Promise<ToolUsageStat[]> {
+export async function getToolUsageStats(userId: string, botName: string, threadId?: string): Promise<ToolUsageStat[]> {
   const sql = getDb();
+  // When threadId is provided, scope to traces linked to messages in that thread via trace_id
+  const threadFilter = threadId
+    ? sql`AND t.trace_id IN (SELECT m.trace_id FROM messages m WHERE m.thread_id = ${threadId} AND m.trace_id IS NOT NULL)`
+    : sql``;
   const rows = await sql`
     SELECT
-      name,
-      attributes->>'toolName' as tool_name,
+      t.name,
+      t.attributes->>'toolName' as tool_name,
       COUNT(*)::int as call_count,
-      SUM(duration_ms)::int as total_ms,
-      ROUND(AVG(duration_ms))::int as avg_ms
-    FROM traces
-    WHERE bot_name = ${botName}
-      AND user_id = ${userId}
-      AND parent_id IS NOT NULL
-      AND attributes->>'toolName' IS NOT NULL
-    GROUP BY name, attributes->>'toolName'
+      SUM(t.duration_ms)::int as total_ms,
+      ROUND(AVG(t.duration_ms))::int as avg_ms
+    FROM traces t
+    WHERE t.bot_name = ${botName}
+      AND t.user_id = ${userId}
+      AND t.parent_id IS NOT NULL
+      AND t.attributes->>'toolName' IS NOT NULL
+      ${threadFilter}
+    GROUP BY t.name, t.attributes->>'toolName'
     ORDER BY call_count DESC
     LIMIT 50
   `;

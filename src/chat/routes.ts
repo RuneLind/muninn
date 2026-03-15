@@ -320,9 +320,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.get("/context-usage/:userId/:botName", async (c) => {
     const userId = c.req.param("userId");
     const botName = c.req.param("botName");
+    const threadId = c.req.query("thread");
     const bot = botConfigs.find((b) => b.name === botName);
     try {
-      const meta = await getLastResponseMeta(userId, botName);
+      const meta = await getLastResponseMeta(userId, botName, threadId);
       if (!meta) return c.json({ inputTokens: 0, outputTokens: 0, contextWindow: bot?.contextWindow ?? null });
       return c.json({ ...meta, contextWindow: bot?.contextWindow ?? null });
     } catch (err) {
@@ -335,8 +336,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.get("/tool-usage/:userId/:botName", async (c) => {
     const userId = c.req.param("userId");
     const botName = c.req.param("botName");
+    const threadId = c.req.query("thread");
     try {
-      const tools = await getToolUsageStats(userId, botName);
+      const tools = await getToolUsageStats(userId, botName, threadId);
       return c.json({ tools });
     } catch (err) {
       log.warn("Failed to load tool usage: {error}", { error: err instanceof Error ? err.message : String(err) });
