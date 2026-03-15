@@ -252,6 +252,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
         text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
         timestamp: m.createdAt,
         threadId: m.threadId,
+        traceId: m.traceId,
       })),
     });
   });

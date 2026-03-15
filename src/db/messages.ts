@@ -17,13 +17,15 @@ export interface SaveMessageParams {
   source?: string;
   platform?: Platform;
   threadId?: string;
+  /** Trace ID linking to the request's trace spans (tool call history) */
+  traceId?: string;
 }
 
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id, trace_id)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null}, ${msg.traceId ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -161,7 +163,7 @@ export async function getSimMessages(
   limit = 50,
   threadId?: string,
   allPlatforms?: boolean,
-): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null }[]> {
+): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null; traceId: string | null }[]> {
   const sql = getDb();
 
   const platformFilter = allPlatforms ? sql`` : sql`AND platform = ${platform}`;
@@ -175,7 +177,7 @@ export async function getSimMessages(
     : sql``;
 
   const rows = await sql`
-    SELECT id, role, content, created_at, thread_id
+    SELECT id, role, content, created_at, thread_id, trace_id
     FROM messages
     WHERE user_id = ${userId}
       AND bot_name = ${botName}
@@ -191,6 +193,7 @@ export async function getSimMessages(
       content: r.content as string,
       createdAt: new Date(r.created_at).getTime(),
       threadId: (r.thread_id as string) ?? null,
+      traceId: (r.trace_id as string) ?? null,
     }))
     .reverse();
 }

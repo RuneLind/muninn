@@ -180,6 +180,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           toolId: tool.id,
           toolName: tool.name,
           input: tool.input,
+          statusText: getToolStatus(tool.name, tool.input),
         }, tool.startOffsetMs);
       }
     }
@@ -205,6 +206,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       contextTokens: result.contextTokens,
       platform,
       threadId,
+      traceId: t.traceId,
     });
     t.end("db_save_response");
 

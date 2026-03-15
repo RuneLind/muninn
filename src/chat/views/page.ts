@@ -795,6 +795,44 @@ const CHAT_STYLES = `
       opacity: 0.9;
     }
 
+    /* Tool activity container — sits between user query and bot response */
+    .tool-activity {
+      margin: 4px 0;
+      align-self: flex-start;
+      max-width: 90%;
+    }
+    .tool-activity-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-muted);
+      padding: 4px 12px;
+      user-select: none;
+    }
+    .tool-activity-header:hover {
+      color: var(--text-secondary);
+    }
+    .tool-activity-label {
+      opacity: 0.7;
+    }
+    .tool-activity-toggle {
+      background: none;
+      border: none;
+      color: inherit;
+      font-size: 10px;
+      cursor: pointer;
+      padding: 0;
+      transition: transform 0.15s ease;
+    }
+    .tool-activity.collapsed .tool-activity-toggle {
+      transform: rotate(-90deg);
+    }
+    .tool-activity.collapsed .tool-activity-body {
+      display: none;
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -1030,6 +1068,10 @@ const CHAT_SCRIPT = `
   var reportExists = false;     // Whether a saved report file exists for current issue
   var threads = [];             // Thread list for current user+bot
   var bots = [];
+  // Suppress waterfall until we know the selected bot's config
+  window._suppressWaterfall = true;
+  var activeToolContainer = null;  // Current tool-activity container for live tool events
+  var activeToolCount = 0;         // Tool count in the active container
   var connectors = [];  // Available connectors from DB
   var ws = null;
   var deepLinkHandled = false;
@@ -1076,6 +1118,12 @@ const CHAT_SCRIPT = `
   async function selectBot(name, autoSelectThreadId) {
     selectedBot = name;
     try { localStorage.setItem('muninn-selected-bot', name); } catch {}
+
+    // Set global waterfall suppression flag for this bot
+    var bot = bots.find(function(b) { return b.name === name; });
+    window._suppressWaterfall = bot && bot.showWaterfall === false;
+    // Dismiss any visible waterfall when switching to a no-waterfall bot
+    if (window._suppressWaterfall) dismissRequestProgress();
     document.querySelectorAll('.bot-pill').forEach(function(p) {
       p.classList.toggle('active', p.dataset.bot === name);
     });
@@ -1464,6 +1512,7 @@ const CHAT_SCRIPT = `
           var msgThread = event.message.threadId || null;
           if (!activeThreadId || msgThread === activeThreadId) {
             if (event.message.sender === 'bot') {
+              collapseToolActivity();
               removeIntermediates();
               removeStreamingBubble();
               setChatStatusText('');
@@ -1544,6 +1593,7 @@ const CHAT_SCRIPT = `
         if (event.conversationId === activeConvId) {
           setChatStatusText(event.status || '');
           if (!event.status) {
+            collapseToolActivity();
             removeIntermediates();
             removeStreamingBubble();
             dismissRequestProgress();
@@ -1620,9 +1670,11 @@ const CHAT_SCRIPT = `
   async function loadThreadMessages(threadId) {
     if (!activeConvId) return;
     activeThreadId = threadId || null;
-    // Reset streaming and research state when switching threads
+    // Reset streaming, research, and tool activity state when switching threads
     streamingRawText = '';
     streamingRafPending = false;
+    activeToolContainer = null;
+    activeToolCount = 0;
     isResearchThread = false;
     researchBotReplies = 0;
     researchIssueKey = null;
@@ -1973,6 +2025,14 @@ const CHAT_SCRIPT = `
 
     chatMessages.appendChild(div);
 
+    // Load tool calls from trace for bots with showWaterfall=false
+    if (msg.sender === 'bot' && msg.traceId) {
+      var bot = bots.find(function(b) { return b.name === selectedBot; });
+      if (bot && bot.showWaterfall === false) {
+        loadToolCallsFromTrace(div, msg.traceId);
+      }
+    }
+
     // Show action buttons after bot replies in a research thread
     if (isResearchThread && msg.sender === 'bot') {
       if (researchBotReplies === 1) {
@@ -2066,16 +2126,64 @@ const CHAT_SCRIPT = `
     streamingRafPending = false;
   }
 
+  // Create or get the active tool-activity container for live tool events
+  function getOrCreateToolContainer() {
+    if (activeToolContainer) return activeToolContainer;
+    var container = document.createElement('div');
+    container.className = 'tool-activity';
+    var header = document.createElement('div');
+    header.className = 'tool-activity-header';
+    header.onclick = function() { toggleToolActivity(container); };
+    var label = document.createElement('span');
+    label.className = 'tool-activity-label';
+    label.textContent = 'Working...';
+    var toggle = document.createElement('span');
+    toggle.className = 'tool-activity-toggle';
+    toggle.textContent = '\\u25BC';
+    header.appendChild(label);
+    header.appendChild(toggle);
+    var body = document.createElement('div');
+    body.className = 'tool-activity-body';
+    container.appendChild(header);
+    container.appendChild(body);
+    chatMessages.appendChild(container);
+    activeToolContainer = container;
+    activeToolCount = 0;
+    return container;
+  }
+
+  function toggleToolActivity(container) {
+    container.classList.toggle('collapsed');
+    var toggle = container.querySelector('.tool-activity-toggle');
+    if (toggle) toggle.textContent = container.classList.contains('collapsed') ? '\\u25B6' : '\\u25BC';
+  }
+
+  function collapseToolActivity() {
+    if (!activeToolContainer) return;
+    activeToolContainer.classList.add('collapsed');
+    var toggle = activeToolContainer.querySelector('.tool-activity-toggle');
+    if (toggle) toggle.textContent = '\\u25B6';
+    // Update label with summary
+    var label = activeToolContainer.querySelector('.tool-activity-label');
+    if (label) {
+      label.textContent = 'Used ' + activeToolCount + ' tool' + (activeToolCount !== 1 ? 's' : '');
+    }
+    activeToolContainer = null;
+    activeToolCount = 0;
+  }
+
   // Show or update an intent bubble (what the AI plans to do)
   function showIntentBubble(text) {
-    var existing = chatMessages.querySelector('.msg-intent');
+    var container = getOrCreateToolContainer();
+    var body = container.querySelector('.tool-activity-body');
+    var existing = body.querySelector('.msg-intent');
     if (existing) {
       existing.textContent = text;
     } else {
       var bubble = document.createElement('div');
-      bubble.className = 'msg-intent msg-intermediate';
+      bubble.className = 'msg-intent';
       bubble.textContent = text;
-      chatMessages.appendChild(bubble);
+      body.appendChild(bubble);
     }
     scrollToBottom();
   }
@@ -2096,25 +2204,15 @@ const CHAT_SCRIPT = `
     }
   }
 
-  // Append a tool status line (each tool gets its own line, not replaced)
-  // Splits "Label: detail" into styled spans for visual distinction
+  // Append a tool status line to the active tool-activity container
   function appendToolStatus(text) {
-    var line = document.createElement('div');
-    line.className = 'msg-tool-status msg-intermediate';
-    var colonIdx = text.indexOf(': ');
-    if (colonIdx > 0 && colonIdx < 60) {
-      var labelSpan = document.createElement('span');
-      labelSpan.className = 'tool-label';
-      labelSpan.textContent = text.slice(0, colonIdx) + ': ';
-      var detailSpan = document.createElement('span');
-      detailSpan.className = 'tool-detail';
-      detailSpan.textContent = text.slice(colonIdx + 2);
-      line.appendChild(labelSpan);
-      line.appendChild(detailSpan);
-    } else {
-      line.textContent = text;
-    }
-    chatMessages.appendChild(line);
+    var container = getOrCreateToolContainer();
+    var body = container.querySelector('.tool-activity-body');
+    body.appendChild(createToolStatusLine(text));
+    activeToolCount++;
+    // Update header label with running count
+    var label = container.querySelector('.tool-activity-label');
+    if (label) label.textContent = 'Using ' + activeToolCount + ' tool' + (activeToolCount !== 1 ? 's' : '') + '...';
     scrollToBottom();
   }
 
@@ -2840,21 +2938,73 @@ const CHAT_SCRIPT = `
     chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
   };
 
-  // Gate waterfall overlay on per-bot showWaterfall config
-  var _origUpdateRP = updateRequestProgress;
-  updateRequestProgress = function(progress) {
-    if (progress && progress.botName) {
-      var bot = bots.find(function(b) { return b.name === progress.botName; });
-      if (bot && bot.showWaterfall === false) {
-        // Still update agent status (connector + model) even when waterfall is hidden
-        if (typeof updateAgentStatusFromProgress === 'function') {
-          updateAgentStatusFromProgress(progress);
-        }
-        return;
-      }
+  // Build a tool-status line DOM element from text
+  function createToolStatusLine(text) {
+    var line = document.createElement('div');
+    line.className = 'msg-tool-status';
+    var colonIdx = text.indexOf(': ');
+    if (colonIdx > 0 && colonIdx < 60) {
+      var labelSpan = document.createElement('span');
+      labelSpan.className = 'tool-label';
+      labelSpan.textContent = text.slice(0, colonIdx) + ': ';
+      var detailSpan = document.createElement('span');
+      detailSpan.className = 'tool-detail';
+      detailSpan.textContent = text.slice(colonIdx + 2);
+      line.appendChild(labelSpan);
+      line.appendChild(detailSpan);
+    } else {
+      line.textContent = text;
     }
-    _origUpdateRP(progress);
-  };
+    return line;
+  }
+
+  // Load tool calls from a persisted trace and render as a collapsed tool-activity container
+  function loadToolCallsFromTrace(messageDom, traceId) {
+    fetch('/api/traces/' + traceId)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var spans = data.spans || [];
+        var toolSpans = spans.filter(function(s) {
+          return s.parentId && s.attributes && s.attributes.toolName;
+        });
+        if (toolSpans.length === 0) return;
+
+        // Build collapsed tool-activity container
+        var container = document.createElement('div');
+        container.className = 'tool-activity collapsed';
+        var header = document.createElement('div');
+        header.className = 'tool-activity-header';
+        header.onclick = function() { toggleToolActivity(container); };
+        var label = document.createElement('span');
+        label.className = 'tool-activity-label';
+        // Calculate total duration from root span
+        var rootSpan = spans.find(function(s) { return !s.parentId; });
+        var durText = rootSpan && rootSpan.durationMs ? ' \\u00b7 ' + fmtMs(rootSpan.durationMs) : '';
+        label.textContent = 'Used ' + toolSpans.length + ' tool' + (toolSpans.length !== 1 ? 's' : '') + durText;
+        var toggle = document.createElement('span');
+        toggle.className = 'tool-activity-toggle';
+        toggle.textContent = '\\u25B6';
+        header.appendChild(label);
+        header.appendChild(toggle);
+        var body = document.createElement('div');
+        body.className = 'tool-activity-body';
+
+        for (var i = 0; i < toolSpans.length; i++) {
+          var s = toolSpans[i];
+          // Use human-friendly statusText if available, fall back to raw span name
+          var text = (s.attributes && s.attributes.statusText) || s.name;
+          if (s.durationMs) text += ' \\u00b7 ' + fmtMs(s.durationMs);
+          body.appendChild(createToolStatusLine(text));
+        }
+
+        container.appendChild(header);
+        container.appendChild(body);
+
+        // Insert before the bot message (between user query and bot response)
+        chatMessages.insertBefore(container, messageDom);
+      })
+      .catch(function() { /* silent — tool calls are supplementary */ });
+  }
 
   // Init
   async function init() {
