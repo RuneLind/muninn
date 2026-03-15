@@ -1191,11 +1191,12 @@ const CHAT_SCRIPT = `
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
-    // Re-resolve conversation and threads for new user
+    // Re-resolve conversation, threads, and connector preference for new user
     await resolveConversation();
     activeThreadId = null;
     clearChat();
     await loadThreads();
+    await populateConnectorDropdown();
   });
 
   // New thread creation — modal
@@ -2317,9 +2318,12 @@ const CHAT_SCRIPT = `
         }
       } catch {}
     }
-    // Fall back to localStorage if DB has no preference yet
+    // Fall back to localStorage if DB has no preference yet, and migrate to DB
     if (!selectedConnectorId) {
       try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
+      if (selectedConnectorId) {
+        syncPreferredConnector(selectedUserId, selectedBot, selectedConnectorId);
+      }
     }
     connectorDropdown.value = selectedConnectorId;
     if (connectorDropdown.value !== selectedConnectorId) {
