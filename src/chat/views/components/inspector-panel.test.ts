@@ -263,4 +263,14 @@ describe("computeContextUsage", () => {
     expect(result!.percentage).toBe(40);
     expect(result!.label).toBe("4.0k / 10.0k");
   });
+
+  test("uses contextTokens=0 literally instead of falling back to inputTokens", () => {
+    const result = computeContextUsage({
+      contextTokens: 0,
+      inputTokens: 5000,
+      contextWindow: 10000,
+    });
+    // contextTokens is explicitly 0 — should return null (no data), not fall back to inputTokens
+    expect(result).toBeNull();
+  });
 });

@@ -65,7 +65,7 @@ export function computeContextUsage(
   meta: ContextMeta | null,
 ): ContextUsageResult | null {
   if (!meta) return null;
-  const ctxTokens = meta.contextTokens || meta.inputTokens;
+  const ctxTokens = meta.contextTokens ?? meta.inputTokens;
   if (!ctxTokens) return null;
 
   let label: string;
@@ -121,7 +121,7 @@ export function inspectorPanelScript(): string {
 
     function computeContextUsage(meta) {
       if (!meta) return null;
-      var ctxTokens = meta.contextTokens || meta.inputTokens;
+      var ctxTokens = meta.contextTokens != null ? meta.contextTokens : meta.inputTokens;
       if (!ctxTokens) return null;
       var label, pct;
       if (meta.contextWindow) {
