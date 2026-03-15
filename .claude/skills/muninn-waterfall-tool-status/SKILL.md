@@ -225,17 +225,19 @@ Tool names are parsed differently per connector:
 
 ### Styled rendering
 
-Tool status lines split on `: ` for visual distinction:
+Tool status lines use `createToolStatusLine()` which splits on `: ` for visual distinction:
 ```html
-<div class="msg-tool-status msg-intermediate">
+<div class="msg-tool-status">
   <span class="tool-label">Code analysis: </span>
   <span class="tool-detail">find symbol MaksimalAvgift</span>
 </div>
 ```
 
+Both `appendToolStatus()` (live) and `loadToolCallsFromTrace()` (persisted) use this shared function.
+
 ## 6. Persistent Tool History (Traces)
 
-Tool calls from WebSocket events are ephemeral — lost on page refresh. The persistence layer links assistant messages to their traces via `trace_id`.
+The persistence layer links assistant messages to their traces via `trace_id`, so tool calls survive page refresh and thread switching.
 
 ### How it works
 
@@ -245,31 +247,40 @@ Tool calls from WebSocket events are ephemeral — lost on page refresh. The per
 Tracer created       t.traceId ──► saveMessage()     getSimMessages() returns traceId
   at request start                 (trace_id col)          │
                                                            ▼
-Tool calls saved                                   appendMessage() checks:
-  as child spans     ──► traces table                if (msg.traceId && showWaterfall===false)
-  in Tracer                                            loadToolCallsFromTrace(div, traceId)
+Tool calls saved     ──► traces table              appendMessage() checks:
+  as child spans         (with statusText attr)      if (msg.traceId && showWaterfall===false)
+  in Tracer                                            loadToolCallsFromTrace(botMsgDom, traceId)
                                                            │
                                                            ▼
                                                    fetch('/api/traces/' + traceId)
                                                      → filter spans with parentId + toolName
-                                                     → render as msg-tool-calls container
+                                                     → create collapsed tool-activity container
+                                                     → insert before bot message in DOM
 ```
 
 ### Key details
 
-- `trace_id UUID` column added to `messages` table (migration 026)
-- Only assistant messages get `trace_id` (set in `message-processor.ts` line 208)
-- `loadToolCallsFromTrace()` fetches child spans from `/api/traces/:traceId`, filters to those with `attributes.toolName`
-- Rendered inside a `msg-tool-calls` container (no `msg-intermediate` — these are permanent)
+- `trace_id UUID` column on `messages` table (migration 026)
+- Only assistant messages get `trace_id` (set in `message-processor.ts`)
+- `statusText` attribute saved on trace child spans — the human-friendly `getToolStatus()` output (e.g., "Searching knowledge base: query"). Old spans without `statusText` fall back to raw span name.
+- `loadToolCallsFromTrace()` creates a **collapsed tool-activity container** (same structure as live) and inserts it **before the bot message** in the DOM — between user query and bot response
 - Traces have 7-day retention (`TRACING_RETENTION_DAYS`) — older messages lose tool history gracefully (empty response, no rendering)
 - Only triggered for bots with `showWaterfall === false`
+
+### Inspector sidebar: per-thread stats
+
+The inspector panel's tool usage and context stats are scoped per thread:
+- `getToolUsageStats(userId, botName, threadId?)` — joins traces through `messages.trace_id` to filter by thread
+- `getLastResponseMeta(userId, botName, threadId?)` — finds the last assistant message in the thread
+- Both reload on every thread switch (not cached by user+bot key)
+- New/empty threads show no stats
 
 ### CSS classes
 
 | Class | Where | Lifecycle |
 |---|---|---|
 | `tool-activity` | Container between user msg and bot response | Permanent — persists after completion, collapsed |
-| `tool-activity collapsed` | Collapsed state | Body hidden, header shows summary |
+| `tool-activity collapsed` | Collapsed state | Body hidden via CSS, header shows summary, click to expand |
 | `msg-intent` | Intent bubble inside tool-activity-body | Replaced on new intent |
 | `msg-tool-status` | Tool status line inside tool-activity-body | Appended per tool call |
 | `msg-intermediate` | Streaming bubble only | Removed when response completes or status clears |
@@ -285,15 +296,22 @@ Tool calls saved                                   appendMessage() checks:
 - Check that `updateRequestProgress()` in request-progress-ui.ts has the `_suppressWaterfall` check
 
 **Tool use disappears on refresh:**
-- New messages: check `trace_id` is saved (requires server restart after code change)
-- Old messages: won't have `trace_id` — this is expected, no backfill
+- Check `trace_id` on the message: `SELECT trace_id FROM messages WHERE id = '...'`
+- If NULL: message was saved before trace_id support (backfill possible via timestamp matching with traces)
 - Check traces exist: `GET /api/traces/:traceId` — may have expired (7-day retention)
 - Check `loadToolCallsFromTrace()` runs — only for `showWaterfall === false` bots
+- Check `statusText` in trace attributes — if missing, raw span names are shown instead of friendly text
 
 **Tool status lines not showing during live request:**
 - Check WS connection is open (browser DevTools → Network → WS)
+- Check `activeToolContainer` is created — `getOrCreateToolContainer()` is called on first tool_status/intent event
 - Check `onToolStatus` callback is set in `processMessage()` — only for web chat, not Telegram
 - Check `getToolStatus()` returns a value (some tools like `report_intent` return `undefined`)
+
+**Inspector shows same stats for all threads:**
+- Check that `loadToolUsageStats()` and `loadContextUsage()` pass `activeThreadId` as query parameter
+- Check that `getToolUsageStats` and `getLastResponseMeta` filter by `threadId`
+- Check that messages have `trace_id` set — the thread filter joins through this column
 
 **Waterfall bars not updating:**
 - Check `rpAnimFrame` is set (RAF loop running)
