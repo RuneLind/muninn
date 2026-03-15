@@ -54,6 +54,8 @@ export class ChatState {
   private subscribers = new Set<EventSubscriber>();
   /** Per-bot preferred user ID (set by chat page user selector) */
   private preferredUser = new Map<string, string>();
+  /** Per-bot preferred connector ID (set by chat page connector selector) */
+  private preferredConnector = new Map<string, string>();
 
   getPreferredUser(botName: string): string | undefined {
     return this.preferredUser.get(botName);
@@ -61,6 +63,18 @@ export class ChatState {
 
   setPreferredUser(botName: string, userId: string): void {
     this.preferredUser.set(botName, userId);
+  }
+
+  getPreferredConnector(botName: string): string | undefined {
+    return this.preferredConnector.get(botName);
+  }
+
+  setPreferredConnector(botName: string, connectorId: string | null): void {
+    if (connectorId) {
+      this.preferredConnector.set(botName, connectorId);
+    } else {
+      this.preferredConnector.delete(botName);
+    }
   }
 
   subscribe(fn: EventSubscriber): () => void {
@@ -114,6 +128,7 @@ export class ChatState {
   clear(): void {
     this.conversations.clear();
     this.preferredUser.clear();
+    this.preferredConnector.clear();
   }
 
   getConversation(id: string): ChatConversation | undefined {

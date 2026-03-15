@@ -70,6 +70,25 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ ok: true });
   });
 
+  // Get preferred connector for a bot (set by chat page connector selector)
+  app.get("/preferred-connector/:botName", (c) => {
+    const botName = c.req.param("botName");
+    const connectorId = chatState.getPreferredConnector(botName);
+    return c.json({ connectorId: connectorId ?? null });
+  });
+
+  // Set preferred connector for a bot (called by chat page on connector selector change)
+  app.put("/preferred-connector/:botName", async (c) => {
+    const botName = c.req.param("botName");
+    const body = await c.req.json<{ connectorId: string | null }>();
+    const connectorId = body.connectorId || null;
+    if (connectorId && !isValidUuid(connectorId)) {
+      return c.json({ error: "Invalid connectorId" }, 400);
+    }
+    chatState.setPreferredConnector(botName, connectorId);
+    return c.json({ ok: true });
+  });
+
   // Create a new conversation
   app.post("/conversations", async (c) => {
     const body = await c.req.json<{

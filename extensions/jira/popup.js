@@ -2,6 +2,7 @@ const $ = (sel) => document.querySelector(sel);
 
 let issueData = null;
 let allUsers = [];
+let allConnectors = [];
 let muninnUrl = 'http://localhost:3010';
 const BOT_NAME = 'melosys';
 
@@ -29,8 +30,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  // Load users and populate dropdown
-  await loadUsers(settings);
+  // Load users and connectors, populate dropdowns
+  await Promise.all([loadUsers(settings), loadConnectors()]);
 
   $('#btn-index').addEventListener('click', () => handleAnalyze());
   $('#open-options').addEventListener('click', (e) => {
@@ -130,6 +131,50 @@ async function loadUsers(settings) {
   row.style.display = 'flex';
 }
 
+// Load connectors (models) from server and populate the dropdown
+async function loadConnectors() {
+  const select = $('#model-select');
+  const row = $('#model-selector-row');
+
+  // Fetch connectors and preferred connector from chat page in parallel
+  let preferredConnectorId = null;
+  try {
+    const [connRes, prefRes] = await Promise.all([
+      fetch(`${muninnUrl}/api/connectors`).catch(() => null),
+      fetch(`${muninnUrl}/chat/preferred-connector/${encodeURIComponent(BOT_NAME)}`).catch(() => null),
+    ]);
+    if (connRes?.ok) {
+      const data = await connRes.json();
+      allConnectors = data.connectors || [];
+    }
+    if (prefRes?.ok) {
+      const prefData = await prefRes.json();
+      if (prefData.connectorId) preferredConnectorId = prefData.connectorId;
+    }
+  } catch {}
+
+  if (allConnectors.length === 0) return;
+
+  // Pre-select: preferred from chat page > first in list
+  const selectedId = preferredConnectorId || allConnectors[0].id;
+
+  for (const c of allConnectors) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    if (c.id === selectedId) opt.selected = true;
+    select.appendChild(opt);
+  }
+
+  row.style.display = 'flex';
+}
+
+// Get the currently selected connector from the dropdown
+function getSelectedConnectorId() {
+  const select = $('#model-select');
+  return select?.value || null;
+}
+
 // Get the currently selected user from the dropdown
 function getSelectedUserId() {
   const select = $('#user-select');
@@ -202,8 +247,13 @@ async function handleAnalyze(forceNew) {
     const userId = getSelectedUserId();
     if (userId) {
       payload.userId = userId;
-      // Remember for next time
       chrome.storage.sync.set({ lastUserId: userId });
+    }
+
+    // Use the connector/model from the dropdown
+    const connectorId = getSelectedConnectorId();
+    if (connectorId) {
+      payload.connectorId = connectorId;
     }
     if (forceNew) payload.forceNew = true;
 
