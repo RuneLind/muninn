@@ -1,0 +1,266 @@
+import { test, expect, describe } from "bun:test";
+import {
+  aggregateToolCalls,
+  fmtToolTime,
+  fmtNum,
+  computeContextUsage,
+} from "./inspector-panel.ts";
+
+// ── aggregateToolCalls ─────────────────────────────────────────────────
+
+describe("aggregateToolCalls", () => {
+  test("empty array returns empty array", () => {
+    expect(aggregateToolCalls([])).toEqual([]);
+  });
+
+  test("single tool call returns one entry with count 1", () => {
+    const result = aggregateToolCalls([
+      { name: "Read", durationMs: 50 },
+    ]);
+    expect(result).toEqual([
+      { displayName: "Read", callCount: 1, totalMs: 50 },
+    ]);
+  });
+
+  test("multiple calls to same tool aggregates count and totalMs", () => {
+    const result = aggregateToolCalls([
+      { name: "Read", durationMs: 100 },
+      { name: "Read", durationMs: 200 },
+      { name: "Read", durationMs: 50 },
+    ]);
+    expect(result).toEqual([
+      { displayName: "Read", callCount: 3, totalMs: 350 },
+    ]);
+  });
+
+  test("different tools create separate entries", () => {
+    const result = aggregateToolCalls([
+      { name: "Read", durationMs: 100 },
+      { name: "Write", durationMs: 200 },
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result.find((t) => t.displayName === "Read")!.callCount).toBe(1);
+    expect(result.find((t) => t.displayName === "Write")!.callCount).toBe(1);
+  });
+
+  test("uses displayName over name when available", () => {
+    const result = aggregateToolCalls([
+      { name: "mcp__serena__search", displayName: "Serena Search", durationMs: 100 },
+      { name: "mcp__serena__search", displayName: "Serena Search", durationMs: 200 },
+    ]);
+    expect(result).toEqual([
+      { displayName: "Serena Search", callCount: 2, totalMs: 300 },
+    ]);
+  });
+
+  test("sorts by callCount descending", () => {
+    const result = aggregateToolCalls([
+      { name: "Write", durationMs: 500 },
+      { name: "Read", durationMs: 10 },
+      { name: "Read", durationMs: 10 },
+      { name: "Read", durationMs: 10 },
+    ]);
+    expect(result[0]!.displayName).toBe("Read");
+    expect(result[0]!.callCount).toBe(3);
+    expect(result[1]!.displayName).toBe("Write");
+    expect(result[1]!.callCount).toBe(1);
+  });
+
+  test("sorts by totalMs descending when callCount is equal", () => {
+    const result = aggregateToolCalls([
+      { name: "Read", durationMs: 100 },
+      { name: "Write", durationMs: 500 },
+    ]);
+    expect(result[0]!.displayName).toBe("Write");
+    expect(result[0]!.totalMs).toBe(500);
+    expect(result[1]!.displayName).toBe("Read");
+    expect(result[1]!.totalMs).toBe(100);
+  });
+
+  test("handles missing durationMs (treats as 0)", () => {
+    const result = aggregateToolCalls([
+      { name: "Read" },
+      { name: "Read", durationMs: 100 },
+    ]);
+    expect(result).toEqual([
+      { displayName: "Read", callCount: 2, totalMs: 100 },
+    ]);
+  });
+});
+
+// ── fmtToolTime ────────────────────────────────────────────────────────
+
+describe("fmtToolTime", () => {
+  test("returns 'Xms' for values under 1000", () => {
+    expect(fmtToolTime(500)).toBe("500ms");
+    expect(fmtToolTime(1)).toBe("1ms");
+  });
+
+  test("returns 'X.Xs' for values 1000-59999", () => {
+    expect(fmtToolTime(1500)).toBe("1.5s");
+    expect(fmtToolTime(30000)).toBe("30.0s");
+  });
+
+  test("returns 'Xm' for values >= 60000", () => {
+    expect(fmtToolTime(60000)).toBe("1m");
+    expect(fmtToolTime(120000)).toBe("2m");
+    expect(fmtToolTime(90000)).toBe("2m");
+  });
+
+  test("edge case: 0", () => {
+    expect(fmtToolTime(0)).toBe("0ms");
+  });
+
+  test("edge case: 999", () => {
+    expect(fmtToolTime(999)).toBe("999ms");
+  });
+
+  test("edge case: 1000", () => {
+    expect(fmtToolTime(1000)).toBe("1.0s");
+  });
+
+  test("edge case: 59999", () => {
+    expect(fmtToolTime(59999)).toBe("60.0s");
+  });
+
+  test("edge case: 60000", () => {
+    expect(fmtToolTime(60000)).toBe("1m");
+  });
+});
+
+// ── fmtNum ─────────────────────────────────────────────────────────────
+
+describe("fmtNum", () => {
+  test("returns raw string for values < 1000", () => {
+    expect(fmtNum(0)).toBe("0");
+    expect(fmtNum(42)).toBe("42");
+    expect(fmtNum(999)).toBe("999");
+  });
+
+  test("returns 'X.Xk' for values 1000-999999", () => {
+    expect(fmtNum(1000)).toBe("1.0k");
+    expect(fmtNum(1500)).toBe("1.5k");
+    expect(fmtNum(999999)).toBe("1000.0k");
+  });
+
+  test("returns 'X.XM' for values >= 1000000", () => {
+    expect(fmtNum(1000000)).toBe("1.0M");
+    expect(fmtNum(2500000)).toBe("2.5M");
+  });
+
+  test("edge case: 0", () => {
+    expect(fmtNum(0)).toBe("0");
+  });
+
+  test("edge case: 999", () => {
+    expect(fmtNum(999)).toBe("999");
+  });
+
+  test("edge case: 1000", () => {
+    expect(fmtNum(1000)).toBe("1.0k");
+  });
+
+  test("edge case: 999999", () => {
+    expect(fmtNum(999999)).toBe("1000.0k");
+  });
+
+  test("edge case: 1000000", () => {
+    expect(fmtNum(1000000)).toBe("1.0M");
+  });
+});
+
+// ── computeContextUsage ────────────────────────────────────────────────
+
+describe("computeContextUsage", () => {
+  test("returns null for null meta", () => {
+    expect(computeContextUsage(null)).toBeNull();
+  });
+
+  test("returns null for meta with no token counts", () => {
+    expect(computeContextUsage({})).toBeNull();
+    expect(computeContextUsage({ outputTokens: 500 })).toBeNull();
+  });
+
+  test("with contextWindow: calculates correct percentage", () => {
+    const result = computeContextUsage({
+      contextTokens: 5000,
+      contextWindow: 10000,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.percentage).toBe(50);
+    expect(result!.label).toBe("5.0k / 10.0k");
+    expect(result!.hasBar).toBe(true);
+  });
+
+  test("without contextWindow: shows 'in/out' format, pct=0", () => {
+    const result = computeContextUsage({
+      inputTokens: 3000,
+      outputTokens: 500,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.percentage).toBe(0);
+    expect(result!.label).toBe("3.0k in, 500 out");
+    expect(result!.hasBar).toBe(false);
+  });
+
+  test("color threshold: accent for <= 60%", () => {
+    const result = computeContextUsage({
+      contextTokens: 6000,
+      contextWindow: 10000,
+    });
+    expect(result!.barColor).toBe("accent");
+    expect(result!.percentage).toBe(60);
+  });
+
+  test("color threshold: warning for 61-80%", () => {
+    const result = computeContextUsage({
+      contextTokens: 7000,
+      contextWindow: 10000,
+    });
+    expect(result!.barColor).toBe("warning");
+    expect(result!.percentage).toBe(70);
+
+    const result80 = computeContextUsage({
+      contextTokens: 8000,
+      contextWindow: 10000,
+    });
+    expect(result80!.barColor).toBe("warning");
+    expect(result80!.percentage).toBe(80);
+  });
+
+  test("color threshold: error for > 80%", () => {
+    const result = computeContextUsage({
+      contextTokens: 8100,
+      contextWindow: 10000,
+    });
+    expect(result!.barColor).toBe("error");
+    expect(result!.percentage).toBe(81);
+  });
+
+  test("percentage capped at 100", () => {
+    const result = computeContextUsage({
+      contextTokens: 15000,
+      contextWindow: 10000,
+    });
+    expect(result!.percentage).toBe(100);
+  });
+
+  test("prefers contextTokens over inputTokens", () => {
+    const result = computeContextUsage({
+      contextTokens: 8000,
+      inputTokens: 3000,
+      contextWindow: 10000,
+    });
+    expect(result!.percentage).toBe(80);
+    expect(result!.label).toBe("8.0k / 10.0k");
+  });
+
+  test("falls back to inputTokens when contextTokens is missing", () => {
+    const result = computeContextUsage({
+      inputTokens: 4000,
+      contextWindow: 10000,
+    });
+    expect(result!.percentage).toBe(40);
+    expect(result!.label).toBe("4.0k / 10.0k");
+  });
+});
