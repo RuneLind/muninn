@@ -2875,8 +2875,9 @@ const CHAT_SCRIPT = `
         if (typeof updateAgentStatusFromProgress === 'function') {
           updateAgentStatusFromProgress(progress);
         }
-        // Render tool calls as inline lines instead of waterfall
-        renderInlineToolProgress(progress);
+        // Render tool calls as inline lines instead of waterfall (only while in-progress;
+        // completed requests use loadToolCallsFromTrace for persistent display)
+        if (!progress.completed) renderInlineToolProgress(progress);
         return;
       }
     }
@@ -2896,6 +2897,7 @@ const CHAT_SCRIPT = `
 
     var container = document.createElement('div');
     container.id = 'inlineToolProgress';
+    container.className = 'msg-intermediate';
 
     for (var i = 0; i < progress.tools.length; i++) {
       var t = progress.tools[i];
