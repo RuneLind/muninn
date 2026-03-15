@@ -3006,7 +3006,8 @@ const CHAT_SCRIPT = `
 
         for (var i = 0; i < toolSpans.length; i++) {
           var s = toolSpans[i];
-          var text = s.name;
+          // Use human-friendly statusText if available, fall back to raw span name
+          var text = (s.attributes && s.attributes.statusText) || s.name;
           if (s.durationMs) text += ' \\u00b7 ' + fmtMs(s.durationMs);
           body.appendChild(createToolStatusLine(text));
         }

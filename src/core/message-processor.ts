@@ -180,6 +180,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           toolId: tool.id,
           toolName: tool.name,
           input: tool.input,
+          statusText: getToolStatus(tool.name, tool.input),
         }, tool.startOffsetMs);
       }
     }
