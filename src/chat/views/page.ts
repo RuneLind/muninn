@@ -1185,6 +1185,16 @@ const CHAT_SCRIPT = `
     }).catch(function() {});
   }
 
+  // Sync preferred connector to server so extensions (Jira plugin) know which connector is selected
+  function syncPreferredConnector(botName, connectorId) {
+    if (!botName) return;
+    fetch('/chat/preferred-connector/' + encodeURIComponent(botName), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectorId: connectorId || null }),
+    }).catch(function() {});
+  }
+
   // User selector change
   document.getElementById('userSelector').addEventListener('change', async function(e) {
     var userId = e.target.value;
@@ -2316,6 +2326,7 @@ const CHAT_SCRIPT = `
       connectorDropdown.value = '';
       try { localStorage.removeItem(connectorStorageKey()); } catch {}
     }
+    syncPreferredConnector(selectedBot, selectedConnectorId);
   }
 
   // Stamp a connector on a thread (if it doesn't already have that connector)
@@ -2348,6 +2359,7 @@ const CHAT_SCRIPT = `
   connectorDropdown.addEventListener('change', function() {
     selectedConnectorId = connectorDropdown.value;
     try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
+    syncPreferredConnector(selectedBot, selectedConnectorId);
     // Stamp the new connector on the active thread immediately
     if (activeThreadId && selectedConnectorId) {
       stampConnectorOnThread(activeThreadId, selectedConnectorId);
