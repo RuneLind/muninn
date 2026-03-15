@@ -30,8 +30,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  // Load users and connectors, populate dropdowns
-  await Promise.all([loadUsers(settings), loadConnectors()]);
+  // Load users first (needed for connector preferences), then connectors
+  await loadUsers(settings);
+  await loadConnectors();
 
   $('#btn-index').addEventListener('click', () => handleAnalyze());
   $('#open-options').addEventListener('click', (e) => {
@@ -99,21 +100,8 @@ async function loadUsers(settings) {
 
   if (allUsers.length === 0) return;
 
-  // Determine which user to pre-select:
-  // 1. Preferred user from chat page (server-side)
-  // 2. Last used in extension
-  // 3. Settings userId
-  // 4. First user in list
-  let preferredId = null;
-  try {
-    const prefRes = await fetch(`${muninnUrl}/chat/preferred-user/${encodeURIComponent(BOT_NAME)}`);
-    if (prefRes.ok) {
-      const prefData = await prefRes.json();
-      if (prefData.userId) preferredId = prefData.userId;
-    }
-  } catch {}
-
-  const selectedId = preferredId || settings.lastUserId || settings.userId || allUsers[0].id;
+  // Pre-select: last used > settings > first in list
+  const selectedId = settings.lastUserId || settings.userId || allUsers[0].id;
 
   // Populate dropdown (use DOM API to avoid XSS from user names)
   select.innerHTML = '';
@@ -135,14 +123,18 @@ async function loadUsers(settings) {
 async function loadConnectors() {
   const select = $('#model-select');
   const row = $('#model-selector-row');
+  const userId = getSelectedUserId();
 
-  // Fetch connectors and preferred connector from chat page in parallel
+  // Fetch connectors and user's preferred connector from DB in parallel
   let preferredConnectorId = null;
   try {
-    const [connRes, prefRes] = await Promise.all([
-      fetch(`${muninnUrl}/api/connectors`).catch(() => null),
-      fetch(`${muninnUrl}/chat/preferred-connector/${encodeURIComponent(BOT_NAME)}`).catch(() => null),
-    ]);
+    const fetches = [fetch(`${muninnUrl}/api/connectors`).catch(() => null)];
+    if (userId) {
+      fetches.push(
+        fetch(`${muninnUrl}/chat/preferences/${encodeURIComponent(userId)}/${encodeURIComponent(BOT_NAME)}`).catch(() => null)
+      );
+    }
+    const [connRes, prefRes] = await Promise.all(fetches);
     if (connRes?.ok) {
       const data = await connRes.json();
       allConnectors = data.connectors || [];
@@ -155,7 +147,7 @@ async function loadConnectors() {
 
   if (allConnectors.length === 0) return;
 
-  // Pre-select: preferred from chat page > first in list
+  // Pre-select: preferred from DB > first in list
   const selectedId = preferredConnectorId || allConnectors[0].id;
 
   for (const c of allConnectors) {

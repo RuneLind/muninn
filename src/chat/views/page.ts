@@ -1084,7 +1084,7 @@ const CHAT_SCRIPT = `
     await loadUsersForBot(name);
 
     // Update connector dropdown (bot default label changes per bot)
-    populateConnectorDropdown();
+    await populateConnectorDropdown();
 
     // Resolve or create conversation for this user+bot
     await resolveConversation();
@@ -1135,7 +1135,6 @@ const CHAT_SCRIPT = `
     selectedUserId = active.id;
     selectedUsername = active.name;
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
-    syncPreferredUser(botName, active.id);
   }
 
 
@@ -1175,20 +1174,10 @@ const CHAT_SCRIPT = `
     if (pill) selectBot(pill.dataset.bot);
   });
 
-  // Sync preferred user to server so extensions (Jira plugin) know which user is selected
-  function syncPreferredUser(botName, userId) {
-    if (!botName || !userId) return;
-    fetch('/chat/preferred-user/' + encodeURIComponent(botName), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: userId }),
-    }).catch(function() {});
-  }
-
-  // Sync preferred connector to server so extensions (Jira plugin) know which connector is selected
-  function syncPreferredConnector(botName, connectorId) {
-    if (!botName) return;
-    fetch('/chat/preferred-connector/' + encodeURIComponent(botName), {
+  // Sync preferred connector to DB so extensions (Jira plugin) and page reloads get the same selection
+  function syncPreferredConnector(userId, botName, connectorId) {
+    if (!userId || !botName) return;
+    fetch('/chat/preferences/' + encodeURIComponent(userId) + '/' + encodeURIComponent(botName) + '/connector', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ connectorId: connectorId || null }),
@@ -1202,12 +1191,12 @@ const CHAT_SCRIPT = `
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
-    syncPreferredUser(selectedBot, userId);
-    // Re-resolve conversation and threads for new user
+    // Re-resolve conversation, threads, and connector preference for new user
     await resolveConversation();
     activeThreadId = null;
     clearChat();
     await loadThreads();
+    await populateConnectorDropdown();
   });
 
   // New thread creation — modal
@@ -2301,7 +2290,7 @@ const CHAT_SCRIPT = `
     return 'muninn-connector-' + (selectedBot || 'default');
   }
 
-  function populateConnectorDropdown() {
+  async function populateConnectorDropdown() {
     var bot = getBotInfo();
     var defaultLabel = 'Bot default';
     if (bot) {
@@ -2318,15 +2307,29 @@ const CHAT_SCRIPT = `
     });
     connectorSelector.style.display = connectors.length > 0 ? '' : 'none';
 
-    // Restore per-bot selection; reset if stored ID no longer exists
-    try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
+    // Restore from DB (single source of truth), fall back to localStorage for migration
+    selectedConnectorId = '';
+    if (selectedUserId && selectedBot) {
+      try {
+        var prefRes = await fetch('/chat/preferences/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
+        if (prefRes.ok) {
+          var prefData = await prefRes.json();
+          if (prefData.connectorId) selectedConnectorId = prefData.connectorId;
+        }
+      } catch {}
+    }
+    // Fall back to localStorage if DB has no preference yet, and migrate to DB
+    if (!selectedConnectorId) {
+      try { selectedConnectorId = localStorage.getItem(connectorStorageKey()) || ''; } catch {}
+      if (selectedConnectorId) {
+        syncPreferredConnector(selectedUserId, selectedBot, selectedConnectorId);
+      }
+    }
     connectorDropdown.value = selectedConnectorId;
     if (connectorDropdown.value !== selectedConnectorId) {
       selectedConnectorId = '';
       connectorDropdown.value = '';
-      try { localStorage.removeItem(connectorStorageKey()); } catch {}
     }
-    syncPreferredConnector(selectedBot, selectedConnectorId);
   }
 
   // Stamp a connector on a thread (if it doesn't already have that connector)
@@ -2359,7 +2362,7 @@ const CHAT_SCRIPT = `
   connectorDropdown.addEventListener('change', function() {
     selectedConnectorId = connectorDropdown.value;
     try { localStorage.setItem(connectorStorageKey(), selectedConnectorId); } catch {}
-    syncPreferredConnector(selectedBot, selectedConnectorId);
+    syncPreferredConnector(selectedUserId, selectedBot, selectedConnectorId);
     // Stamp the new connector on the active thread immediately
     if (activeThreadId && selectedConnectorId) {
       stampConnectorOnThread(activeThreadId, selectedConnectorId);

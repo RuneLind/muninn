@@ -8,6 +8,7 @@ import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
+import { getChatPreferences, setPreferredConnector } from "../db/chat-preferences.ts";
 import { getSimMessages, getLastResponseMeta } from "../db/messages.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -54,39 +55,35 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ bots, connectors });
   });
 
-  // Get preferred user for a bot (set by chat page user selector)
-  app.get("/preferred-user/:botName", (c) => {
-    const botName = c.req.param("botName");
-    const userId = chatState.getPreferredUser(botName);
-    return c.json({ userId: userId ?? null });
-  });
-
-  // Set preferred user for a bot (called by chat page on user selector change)
-  app.put("/preferred-user/:botName", async (c) => {
-    const botName = c.req.param("botName");
-    const body = await c.req.json<{ userId: string }>();
-    if (!body.userId) return c.json({ error: "userId is required" }, 400);
-    chatState.setPreferredUser(botName, body.userId);
-    return c.json({ ok: true });
-  });
-
-  // Get preferred connector for a bot (set by chat page connector selector)
-  app.get("/preferred-connector/:botName", (c) => {
-    const botName = c.req.param("botName");
-    const connectorId = chatState.getPreferredConnector(botName);
-    return c.json({ connectorId: connectorId ?? null });
-  });
-
-  // Set preferred connector for a bot (called by chat page on connector selector change)
-  app.put("/preferred-connector/:botName", async (c) => {
-    const botName = c.req.param("botName");
-    const body = await c.req.json<{ connectorId: string | null }>();
-    const connectorId = body.connectorId || null;
-    if (connectorId && !isValidUuid(connectorId)) {
-      return c.json({ error: "Invalid connectorId" }, 400);
+  // Get chat preferences for a user+bot (connector, persisted in DB)
+  app.get("/preferences/:userId/:botName", async (c) => {
+    try {
+      const userId = c.req.param("userId");
+      const botName = c.req.param("botName");
+      const prefs = await getChatPreferences(userId, botName);
+      return c.json({ connectorId: prefs.preferredConnectorId });
+    } catch (err) {
+      log.error("Failed to fetch chat preferences: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ connectorId: null });
     }
-    chatState.setPreferredConnector(botName, connectorId);
-    return c.json({ ok: true });
+  });
+
+  // Set preferred connector for a user+bot (persisted in DB)
+  app.put("/preferences/:userId/:botName/connector", async (c) => {
+    try {
+      const userId = c.req.param("userId");
+      const botName = c.req.param("botName");
+      const body = await c.req.json<{ connectorId: string | null }>();
+      const connectorId = body.connectorId || null;
+      if (connectorId && !isValidUuid(connectorId)) {
+        return c.json({ error: "Invalid connectorId" }, 400);
+      }
+      await setPreferredConnector(userId, botName, connectorId);
+      return c.json({ ok: true });
+    } catch (err) {
+      log.error("Failed to save chat preferences: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to save preferences" }, 500);
+    }
   });
 
   // Create a new conversation
