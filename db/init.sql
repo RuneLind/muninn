@@ -123,12 +123,14 @@ CREATE TABLE messages (
   source TEXT DEFAULT NULL,
   platform TEXT DEFAULT 'telegram',
   thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
+  trace_id UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_messages_user_created ON messages(user_id, created_at DESC);
 CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, created_at DESC);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at DESC);
+CREATE INDEX idx_messages_trace_id ON messages (trace_id) WHERE trace_id IS NOT NULL;
 
 -- ============================================================================
 -- Activity log: persisted version of the in-memory ring buffer

@@ -795,6 +795,13 @@ const CHAT_STYLES = `
       opacity: 0.9;
     }
 
+    /* Persisted tool calls below a message */
+    .msg-tool-calls {
+      margin-top: 8px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;
@@ -1975,6 +1982,14 @@ const CHAT_SCRIPT = `
 
     chatMessages.appendChild(div);
 
+    // Load tool calls from trace for bots with showWaterfall=false
+    if (msg.sender === 'bot' && msg.traceId) {
+      var bot = bots.find(function(b) { return b.name === selectedBot; });
+      if (bot && bot.showWaterfall === false) {
+        loadToolCallsFromTrace(div, msg.traceId);
+      }
+    }
+
     // Show action buttons after bot replies in a research thread
     if (isResearchThread && msg.sender === 'bot') {
       if (researchBotReplies === 1) {
@@ -2905,6 +2920,56 @@ const CHAT_SCRIPT = `
     }
     chatMessages.appendChild(container);
     scrollToBottom();
+  }
+
+  // Load tool calls from a persisted trace and render below a message
+  function loadToolCallsFromTrace(messageDom, traceId) {
+    fetch('/api/traces/' + traceId)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var spans = data.spans || [];
+        // Filter to tool call child spans (have parentId and toolName in attributes)
+        var toolSpans = spans.filter(function(s) {
+          return s.parentId && s.attributes && s.attributes.toolName;
+        });
+        if (toolSpans.length === 0) return;
+
+        var container = document.createElement('div');
+        container.className = 'msg-tool-calls';
+
+        for (var i = 0; i < toolSpans.length; i++) {
+          var s = toolSpans[i];
+          var line = document.createElement('div');
+          line.className = 'msg-tool-status';
+          var text = s.name;
+          if (s.durationMs) {
+            text += ' · ' + fmtMs(s.durationMs);
+          }
+          var colonIdx = text.indexOf(': ');
+          if (colonIdx > 0 && colonIdx < 60) {
+            var labelSpan = document.createElement('span');
+            labelSpan.className = 'tool-label';
+            labelSpan.textContent = text.slice(0, colonIdx) + ': ';
+            var detailSpan = document.createElement('span');
+            detailSpan.className = 'tool-detail';
+            detailSpan.textContent = text.slice(colonIdx + 2);
+            line.appendChild(labelSpan);
+            line.appendChild(detailSpan);
+          } else {
+            line.textContent = text;
+          }
+          container.appendChild(line);
+        }
+
+        // Insert before the timestamp
+        var timeEl = messageDom.querySelector('.msg-time');
+        if (timeEl) {
+          messageDom.insertBefore(container, timeEl);
+        } else {
+          messageDom.appendChild(container);
+        }
+      })
+      .catch(function() { /* silent — tool calls are supplementary */ });
   }
 
   // Init
