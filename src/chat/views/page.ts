@@ -2338,15 +2338,17 @@ const CHAT_SCRIPT = `
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
       loadInspectorContext(selectedUserId, selectedBot);
-      loadToolUsageStats();
-      loadContextUsage();
     }
+    // Always reload per-thread stats (tool usage + context usage)
+    loadToolUsageStats();
+    loadContextUsage();
   }
 
   // Update the context usage section in the inspector panel
   function updateInspectorContextUsage(meta) {
     var container = document.getElementById('insContextUsage');
     if (!container) return;
+    if (!meta) { container.innerHTML = ''; return; }
 
     var html = '';
     var ctxTokens = meta.contextTokens || meta.inputTokens;
@@ -2617,7 +2619,9 @@ const CHAT_SCRIPT = `
 
   function loadToolUsageStats() {
     if (!selectedUserId || !selectedBot) return;
-    fetch('/chat/tool-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+    var url = '/chat/tool-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot);
+    if (activeThreadId) url += '?thread=' + encodeURIComponent(activeThreadId);
+    fetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         aggregateToolUsage = data.tools || [];
@@ -2629,11 +2633,12 @@ const CHAT_SCRIPT = `
 
   function loadContextUsage() {
     if (!selectedUserId || !selectedBot) return;
-    fetch('/chat/context-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot))
+    var url = '/chat/context-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot);
+    if (activeThreadId) url += '?thread=' + encodeURIComponent(activeThreadId);
+    fetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (data && data.inputTokens) {
-          // Store as if it were a response_meta so inspector can display it
           var syntheticMeta = {
             inputTokens: data.inputTokens,
             outputTokens: data.outputTokens,
@@ -2643,10 +2648,10 @@ const CHAT_SCRIPT = `
             costUsd: data.costUsd,
             model: data.model,
           };
-          if (activeConvId && !lastResponseMeta[activeConvId]) {
-            lastResponseMeta[activeConvId] = syntheticMeta;
-          }
           updateInspectorContextUsage(syntheticMeta);
+        } else {
+          // No data for this thread — clear stale context display
+          updateInspectorContextUsage(null);
         }
       })
       .catch(function() {});

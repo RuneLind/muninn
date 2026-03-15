@@ -105,14 +105,16 @@ export interface LastResponseMeta {
   durationMs: number;
 }
 
-/** Get token/cost data from the most recent assistant message for a user+bot */
-export async function getLastResponseMeta(userId: string, botName: string): Promise<LastResponseMeta | null> {
+/** Get token/cost data from the most recent assistant message for a user+bot (optionally scoped to a thread) */
+export async function getLastResponseMeta(userId: string, botName: string, threadId?: string): Promise<LastResponseMeta | null> {
   const sql = getDb();
+  const threadFilter = threadId ? sql`AND thread_id = ${threadId}` : sql``;
   const [row] = await sql`
     SELECT input_tokens, output_tokens, context_tokens, cost_usd, model, duration_ms
     FROM messages
     WHERE user_id = ${userId} AND bot_name = ${botName} AND role = 'assistant'
       AND input_tokens IS NOT NULL
+      ${threadFilter}
     ORDER BY created_at DESC
     LIMIT 1
   `;
