@@ -190,6 +190,15 @@ export function requestProgressScript(): string {
     const RP_TICK_MS = 50;
 
     function updateRequestProgress(progress) {
+      // Global flag: suppress waterfall panel for bots with showWaterfall=false
+      // Set by chat page's selectBot() — checked here to avoid IIFE scope issues
+      if (window._suppressWaterfall) {
+        if (typeof updateAgentStatusFromProgress === 'function') {
+          updateAgentStatusFromProgress(progress);
+        }
+        return;
+      }
+
       const panel = document.getElementById('requestProgress');
       if (!panel) return;
 

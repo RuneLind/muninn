@@ -1037,8 +1037,8 @@ const CHAT_SCRIPT = `
   var reportExists = false;     // Whether a saved report file exists for current issue
   var threads = [];             // Thread list for current user+bot
   var bots = [];
-  var botsLoaded = false;
-  var pendingProgress = null;  // Queued request_progress before bots load
+  // Suppress waterfall until we know the selected bot's config
+  window._suppressWaterfall = true;
   var connectors = [];  // Available connectors from DB
   var ws = null;
   var deepLinkHandled = false;
@@ -1085,6 +1085,12 @@ const CHAT_SCRIPT = `
   async function selectBot(name, autoSelectThreadId) {
     selectedBot = name;
     try { localStorage.setItem('muninn-selected-bot', name); } catch {}
+
+    // Set global waterfall suppression flag for this bot
+    var bot = bots.find(function(b) { return b.name === name; });
+    window._suppressWaterfall = bot && bot.showWaterfall === false;
+    // Dismiss any visible waterfall when switching to a no-waterfall bot
+    if (window._suppressWaterfall) dismissRequestProgress();
     document.querySelectorAll('.bot-pill').forEach(function(p) {
       p.classList.toggle('active', p.dataset.bot === name);
     });
@@ -2857,73 +2863,6 @@ const CHAT_SCRIPT = `
     chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
   };
 
-  // Gate waterfall overlay on per-bot showWaterfall config
-  var _origUpdateRP = updateRequestProgress;
-  updateRequestProgress = function(progress) {
-    if (progress && progress.botName) {
-      // Before bots are loaded, queue progress — don't show waterfall yet
-      if (!botsLoaded) {
-        pendingProgress = progress;
-        if (typeof updateAgentStatusFromProgress === 'function') {
-          updateAgentStatusFromProgress(progress);
-        }
-        return;
-      }
-      var bot = bots.find(function(b) { return b.name === progress.botName; });
-      if (bot && bot.showWaterfall === false) {
-        // Still update agent status (connector + model) even when waterfall is hidden
-        if (typeof updateAgentStatusFromProgress === 'function') {
-          updateAgentStatusFromProgress(progress);
-        }
-        // Render tool calls as inline lines instead of waterfall (only while in-progress;
-        // completed requests use loadToolCallsFromTrace for persistent display)
-        if (!progress.completed) renderInlineToolProgress(progress);
-        return;
-      }
-    }
-    _origUpdateRP(progress);
-  };
-
-  // Render request progress as inline tool-status lines (for showWaterfall=false bots)
-  function renderInlineToolProgress(progress) {
-    if (!progress || !progress.tools || progress.tools.length === 0) return;
-    // Skip if live tool_status elements already exist (avoid duplicating WS events)
-    var liveToolLines = chatMessages.querySelectorAll('.msg-tool-status.msg-intermediate');
-    if (liveToolLines.length > 0) return;
-
-    // Remove previous inline progress container
-    var existing = document.getElementById('inlineToolProgress');
-    if (existing) existing.remove();
-
-    var container = document.createElement('div');
-    container.id = 'inlineToolProgress';
-    container.className = 'msg-intermediate';
-
-    for (var i = 0; i < progress.tools.length; i++) {
-      var t = progress.tools[i];
-      var line = document.createElement('div');
-      line.className = 'msg-tool-status';
-      var text = t.displayName;
-      if (t.input) text += ': ' + t.input;
-      var colonIdx = text.indexOf(': ');
-      if (colonIdx > 0 && colonIdx < 60) {
-        var labelSpan = document.createElement('span');
-        labelSpan.className = 'tool-label';
-        labelSpan.textContent = text.slice(0, colonIdx) + ': ';
-        var detailSpan = document.createElement('span');
-        detailSpan.className = 'tool-detail';
-        detailSpan.textContent = text.slice(colonIdx + 2);
-        line.appendChild(labelSpan);
-        line.appendChild(detailSpan);
-      } else {
-        line.textContent = text;
-      }
-      container.appendChild(line);
-    }
-    chatMessages.appendChild(container);
-    scrollToBottom();
-  }
-
   // Load tool calls from a persisted trace and render below a message
   function loadToolCallsFromTrace(messageDom, traceId) {
     fetch('/api/traces/' + traceId)
@@ -2977,16 +2916,8 @@ const CHAT_SCRIPT = `
   // Init
   async function init() {
     var botNames = await loadBotList();
-    botsLoaded = true;
     connectWs();
     loadKnowledgeUrlMaps();
-
-    // Replay any request_progress received before bots loaded
-    if (pendingProgress) {
-      var p = pendingProgress;
-      pendingProgress = null;
-      updateRequestProgress(p);
-    }
 
     // Auto-select: use stored bot if valid, otherwise first bot
     var initialBot = selectedBot && botNames.indexOf(selectedBot) !== -1 ? selectedBot : (botNames[0] || '');
