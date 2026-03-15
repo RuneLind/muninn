@@ -66,6 +66,7 @@ export async function executePrompt(
   // Tracking
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let lastTurnInputTokens = 0;
   let totalApiMs = 0;
   let reportedModel = model;
   let turnCount = 0;
@@ -121,7 +122,8 @@ export async function executePrompt(
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
 
-    totalInputTokens += streamResult!.inputTokens;
+    lastTurnInputTokens = streamResult!.inputTokens;
+    totalInputTokens += lastTurnInputTokens;
     totalOutputTokens += streamResult!.outputTokens;
     totalApiMs += streamResult!.apiMs;
     if (streamResult!.reportedModel !== model) {
@@ -153,6 +155,7 @@ export async function executePrompt(
         model: reportedModel,
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
+        contextTokens: lastTurnInputTokens || undefined,
         toolCalls: trackedToolCalls.length > 0 ? trackedToolCalls : undefined,
       };
     }
@@ -246,6 +249,7 @@ export async function executePrompt(
     model: reportedModel,
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
+    contextTokens: lastTurnInputTokens || undefined,
     toolCalls: trackedToolCalls.length > 0 ? trackedToolCalls : undefined,
   };
 }

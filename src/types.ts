@@ -55,6 +55,8 @@ export interface ClaudeResult {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Last turn's input tokens — actual context window consumption (vs cumulative inputTokens) */
+  contextTokens?: number;
   toolCalls?: ToolCall[];
 }
 

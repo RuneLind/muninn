@@ -2143,12 +2143,13 @@ const CHAT_SCRIPT = `
 
     var parts = [];
 
-    // Context usage: "10,234 / 200,000" or just "10,234 tokens"
-    if (meta.inputTokens) {
+    // Context usage: prefer contextTokens (last turn) over inputTokens (cumulative)
+    var ctxTokens = meta.contextTokens || meta.inputTokens;
+    if (ctxTokens) {
       if (meta.contextWindow) {
-        parts.push('ctx ' + fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow));
+        parts.push('ctx ' + fmtNum(ctxTokens) + ' / ' + fmtNum(meta.contextWindow));
       } else {
-        parts.push(fmtNum(meta.inputTokens) + ' in');
+        parts.push(fmtNum(ctxTokens) + ' in');
       }
     }
     if (meta.outputTokens) {
@@ -2251,15 +2252,16 @@ const CHAT_SCRIPT = `
     if (!container) return;
 
     var html = '';
-    if (meta.inputTokens) {
-      // Context usage bar + numbers
+    var ctxTokens = meta.contextTokens || meta.inputTokens;
+    if (ctxTokens) {
+      // Context usage bar + numbers — prefer contextTokens (last turn) over inputTokens (cumulative)
       var label, pct;
       if (meta.contextWindow) {
-        pct = Math.min(100, Math.round((meta.inputTokens / meta.contextWindow) * 100));
-        label = fmtNum(meta.inputTokens) + ' / ' + fmtNum(meta.contextWindow);
+        pct = Math.min(100, Math.round((ctxTokens / meta.contextWindow) * 100));
+        label = fmtNum(ctxTokens) + ' / ' + fmtNum(meta.contextWindow);
       } else {
         pct = 0;
-        label = fmtNum(meta.inputTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
+        label = fmtNum(ctxTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
       }
 
       html += '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(label) + '</span></div>';
@@ -2522,6 +2524,7 @@ const CHAT_SCRIPT = `
           var syntheticMeta = {
             inputTokens: data.inputTokens,
             outputTokens: data.outputTokens,
+            contextTokens: data.contextTokens,
             contextWindow: data.contextWindow,
             durationMs: data.durationMs,
             costUsd: data.costUsd,

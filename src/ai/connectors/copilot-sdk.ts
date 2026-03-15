@@ -96,6 +96,7 @@ export async function executePrompt(
   // Track usage from assistant.usage events
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let lastTurnInputTokens = 0;
   let reportedModel = model;
   let turnCount = 0;
 
@@ -149,7 +150,8 @@ export async function executePrompt(
       }
 
       case "assistant.usage":
-        totalInputTokens += event.data.inputTokens ?? 0;
+        lastTurnInputTokens = event.data.inputTokens ?? 0;
+        totalInputTokens += lastTurnInputTokens;
         totalOutputTokens += event.data.outputTokens ?? 0;
         if (event.data.model) reportedModel = event.data.model;
         break;
@@ -233,6 +235,7 @@ export async function executePrompt(
       model: reportedModel,
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
+      contextTokens: lastTurnInputTokens || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     };
   } catch (error) {
