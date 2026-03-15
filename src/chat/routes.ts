@@ -81,7 +81,11 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.put("/preferred-connector/:botName", async (c) => {
     const botName = c.req.param("botName");
     const body = await c.req.json<{ connectorId: string | null }>();
-    chatState.setPreferredConnector(botName, body.connectorId ?? null);
+    const connectorId = body.connectorId || null;
+    if (connectorId && !isValidUuid(connectorId)) {
+      return c.json({ error: "Invalid connectorId" }, 400);
+    }
+    chatState.setPreferredConnector(botName, connectorId);
     return c.json({ ok: true });
   });
 
