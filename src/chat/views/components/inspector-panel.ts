@@ -84,7 +84,8 @@ export function computeContextUsage(
 
 // ── Browser-injectable JS string ───────────────────────────────────────
 
-/** Returns all inspector panel helper functions as a browser-compatible JS string. */
+/** Returns all inspector panel helper functions as a browser-compatible JS string.
+ *  Phase 2 prep: will replace the duplicated inline functions in page.ts CHAT_SCRIPT IIFE. */
 export function inspectorPanelScript(): string {
   return `
     function aggregateToolCalls(toolCalls) {

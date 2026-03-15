@@ -20,13 +20,8 @@ mock.module("../logging.ts", () => ({
 // Re-import to get a fresh module with mocks applied
 const { activityLog } = await import("./activity-log.ts");
 
-// Helper to reset the activity log state between tests.
-// Since we only have the singleton, we drain events by creating a fresh-enough state.
-function resetLog() {
-  // Clear all events by getting them and shifting
-  const all = activityLog.getAll();
-  // We can't truly reset the singleton, but we can work with it sequentially
-}
+// Note: ActivityLog is a singleton with no reset method. Tests are written
+// to be order-independent by measuring existing state before asserting.
 
 describe("ActivityLog", () => {
   describe("push()", () => {
@@ -53,17 +48,18 @@ describe("ActivityLog", () => {
 
   describe("getRecent()", () => {
     test("returns last N events", () => {
-      // Push enough events to ensure we have some
+      // Push events with unique prefix so we can identify them
+      const prefix = `recent-test-${Date.now()}`;
       for (let i = 0; i < 5; i++) {
-        activityLog.push("message_in", `Message ${i}`);
+        activityLog.push("message_in", `${prefix}-${i}`);
       }
 
       const recent = activityLog.getRecent(3);
       expect(recent).toHaveLength(3);
-      // Should be the last 3
-      expect(recent[2]!.text).toBe("Message 4");
-      expect(recent[1]!.text).toBe("Message 3");
-      expect(recent[0]!.text).toBe("Message 2");
+      // Should contain our last 3 pushed events (most recent last)
+      expect(recent[2]!.text).toBe(`${prefix}-4`);
+      expect(recent[1]!.text).toBe(`${prefix}-3`);
+      expect(recent[0]!.text).toBe(`${prefix}-2`);
     });
 
     test("defaults to 50 events", () => {
@@ -162,7 +158,7 @@ describe("ActivityLog", () => {
       expect(typeof stats.avgResponseTime).toBe("number");
       expect(typeof stats.totalCost).toBe("number");
       expect(typeof stats.totalEvents).toBe("number");
-      expect(stats.totalEvents).toBe(500); // from the ring buffer test
+      expect(stats.totalEvents).toBeGreaterThan(0);
     });
 
     test("counts messages from today", () => {
