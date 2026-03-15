@@ -2208,22 +2208,7 @@ const CHAT_SCRIPT = `
   function appendToolStatus(text) {
     var container = getOrCreateToolContainer();
     var body = container.querySelector('.tool-activity-body');
-    var line = document.createElement('div');
-    line.className = 'msg-tool-status';
-    var colonIdx = text.indexOf(': ');
-    if (colonIdx > 0 && colonIdx < 60) {
-      var labelSpan = document.createElement('span');
-      labelSpan.className = 'tool-label';
-      labelSpan.textContent = text.slice(0, colonIdx) + ': ';
-      var detailSpan = document.createElement('span');
-      detailSpan.className = 'tool-detail';
-      detailSpan.textContent = text.slice(colonIdx + 2);
-      line.appendChild(labelSpan);
-      line.appendChild(detailSpan);
-    } else {
-      line.textContent = text;
-    }
-    body.appendChild(line);
+    body.appendChild(createToolStatusLine(text));
     activeToolCount++;
     // Update header label with running count
     var label = container.querySelector('.tool-activity-label');
