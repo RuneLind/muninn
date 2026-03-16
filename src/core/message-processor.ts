@@ -6,19 +6,19 @@ import { buildPrompt } from "../ai/prompt-builder.ts";
 import type { UserIdentity } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
-import { extractMemoryAsync } from "../memory/extractor.ts";
-import { extractGoalAsync } from "../goals/detector.ts";
-import { extractScheduleAsync } from "../scheduler/detector.ts";
-import { formatTelegramHtml } from "../bot/telegram-format.ts";
-import { splitMessage } from "../utils/split-message.ts";
-import { formatSlackMrkdwn } from "../slack/slack-format.ts";
-import { formatWebHtml } from "../web/web-format.ts";
 import { Tracer } from "../tracing/index.ts";
-import { agentStatus, createProgressCallback, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
+import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
+
+import { buildProgressCallback } from "./progress-callbacks.ts";
+import { runExtractionPipelines } from "./metadata-extractor.ts";
+import { slackPostCapability, handleChannelPosts, formatAndSend } from "./response-handler.ts";
+
+// Re-export extractChannelPosts so existing consumers don't break
+export { extractChannelPosts } from "./response-handler.ts";
 
 const log = getLog("core", "processor");
 
@@ -136,30 +136,10 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
     log.info("Calling {connector} (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude");
-    const baseProgress = createProgressCallback("calling_claude", username);
-    const hasStreamCallbacks = onTextDelta || onIntent || onToolStatus || setStatus;
-    const progressCallback = hasStreamCallbacks
-      ? (event: import("../ai/stream-parser.ts").StreamProgressEvent) => {
-          if (event.type === "text_delta") {
-            onTextDelta?.(event.text);
-          } else if (event.type === "intent") {
-            onIntent?.(event.text);
-            if (setStatus) setStatus(event.text).catch(() => {});
-          } else {
-            if (event.type === "tool_start") {
-              // Clear streaming bubble when tools start (text was intermediate)
-              onTextDelta?.(null);
-              // Emit human-friendly tool status (appended as separate lines)
-              const statusText = getToolStatus(event.name, event.input);
-              if (statusText) {
-                onToolStatus?.(statusText);
-                if (setStatus) setStatus(statusText).catch(() => {});
-              }
-            }
-            baseProgress(event);
-          }
-        }
-      : baseProgress;
+    const progressCallback = buildProgressCallback(
+      { onTextDelta, onIntent, onToolStatus, setStatus },
+      username,
+    );
     const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
     const toolCount = result.toolCalls?.length ?? 0;
     t.end("claude", {
@@ -215,53 +195,26 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // machine-generated prompts, not personal conversations worth extracting from.
     const isResearch = text.includes("<!-- research:");
     if (!isResearch) {
-      const traceCtx = t.context;
-      extractMemoryAsync(
-        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId },
+      runExtractionPipelines(
+        {
+          userId, botName: botConfig.name, botDir: botConfig.dir,
+          userMessage: text, assistantResponse: result.result,
+          sourceMessageId: messageId, platform,
+        },
         config,
-        traceCtx,
-      );
-      extractGoalAsync(
-        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, sourceMessageId: messageId, platform },
-        config,
-        traceCtx,
-      );
-      extractScheduleAsync(
-        { userId, botName: botConfig.name, botDir: botConfig.dir, userMessage: text, assistantResponse: result.result, platform },
-        config,
-        traceCtx,
+        t.context,
       );
     }
 
     // Handle Slack channel post directives
     let responseText = result.result;
     if (postToChannel) {
-      const { cleanText, posts } = extractChannelPosts(responseText);
-      if (posts.length > 0) {
-        log.info("extractChannelPosts: found {count} post(s), cleanText length={len}", { ...props, count: posts.length, len: cleanText.length });
-      }
-      if (posts.length === 0 && responseText.includes("<slack-post")) {
-        log.warn("Response contains \"<slack-post\" but no posts were extracted!", props);
-      }
-      const failedPosts: string[] = [];
-      for (const post of posts) {
-        try {
-          log.info("Posting to channel {channel}: \"{preview}\"", { ...props, channel: post.channel, preview: post.message.slice(0, 80) });
-          await postToChannel(post.channel, formatSlackMrkdwn(post.message));
-          activityLog.push("slack_channel_post", post.message, {
-            userId, username, botName: botConfig.name,
-            metadata: { channel: post.channel },
-          });
-        } catch (err) {
-          const errMsg = err instanceof Error ? err.message : String(err);
-          log.error("Failed to post to {channel}: {error}", { ...props, channel: post.channel, error: errMsg });
-          failedPosts.push(`${post.channel}: ${errMsg}`);
-        }
-      }
-      responseText = cleanText;
-      if (failedPosts.length > 0) {
-        responseText += `\n\n_Klarte ikke poste til kanal:_\n${failedPosts.map(f => `• ${f}`).join("\n")}`;
-      }
+      responseText = await handleChannelPosts(responseText, {
+        postToChannel,
+        botName: botConfig.name,
+        userId,
+        username,
+      });
     }
 
     // Format and send based on platform
@@ -270,34 +223,21 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     agentStatus.updatePhase(sendPhase);
     t.start("send");
 
-    if (isTelegram) {
-      const html = formatTelegramHtml(responseText);
-      const footer = `\n\n<i>\u23F1 ${t.formatTelegram({
-        inputTokens: result.contextTokens ?? result.inputTokens,
+    await formatAndSend({
+      responseText,
+      platform,
+      say,
+      tracer: t,
+      tokenStats: {
+        inputTokens: result.inputTokens,
+        contextTokens: result.contextTokens,
         outputTokens: result.outputTokens,
         costUsd: result.costUsd,
         startupMs: result.startupMs,
         apiMs: result.durationApiMs,
         contextWindow: botConfig.contextWindow,
-      })}</i>`;
-      const total = html.length + footer.length;
-      if (total <= 4096) {
-        await say(html + footer);
-      } else {
-        // Split HTML reserving space for footer in last chunk
-        const chunks = splitMessage(html, 4096 - footer.length);
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = i === chunks.length - 1 ? chunks[i]! + footer : chunks[i]!;
-          await say(chunk);
-        }
-      }
-    } else if (platform === "web") {
-      const html = formatWebHtml(responseText);
-      if (html.trim()) await say(html);
-    } else {
-      const mrkdwn = formatSlackMrkdwn(responseText);
-      if (mrkdwn.trim()) await say(mrkdwn);
-    }
+      },
+    });
 
     t.end("send");
 
@@ -394,57 +334,4 @@ function pad(ms: number | undefined): string {
 
 function fmtTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
-}
-
-/** System prompt addition that tells Claude it can post to Slack channels */
-function slackPostCapability(channelContext?: string): string {
-  const channelInfo = channelContext
-    ? `\nThe current conversation is happening in ${channelContext}.`
-    : "";
-  return `
-
-## Slack Channel Posting
-You can post messages directly to Slack channels using this directive in your response:${channelInfo}
-
-<slack-post channel="#channel-name">
-Your message here (supports full Slack mrkdwn formatting)
-</slack-post>
-
-Rules:
-- Use the channel name with # prefix (e.g. #general, #random, #tech-talk)
-- The directive will be extracted from your response and posted as a top-level message in the channel
-- Any text outside <slack-post> tags will be sent as your normal reply in the current conversation
-- You can include multiple <slack-post> directives for different channels
-- Only use this when the user explicitly asks you to post something in a channel`;
-}
-
-interface ChannelPost {
-  channel: string;
-  message: string;
-}
-
-/** Parse <slack-post channel="#name">content</slack-post> from Claude's response.
- *  Also handles incomplete tags (missing closing tag, e.g. from interrupted responses). */
-export function extractChannelPosts(text: string): { cleanText: string; posts: ChannelPost[] } {
-  const posts: ChannelPost[] = [];
-  // First pass: complete tags
-  let cleanText = text.replace(
-    /<slack-post\s+channel="([^"]+)">([\s\S]*?)<\/slack-post>/g,
-    (_match, channel: string, message: string) => {
-      posts.push({ channel: channel.trim(), message: message.trim() });
-      return "";
-    },
-  );
-  // Second pass: incomplete tags (no closing tag — use rest of text as message)
-  cleanText = cleanText.replace(
-    /<slack-post\s+channel="([^"]+)">([\s\S]*)$/g,
-    (_match, channel: string, message: string) => {
-      const trimmed = message.trim();
-      if (trimmed) {
-        posts.push({ channel: channel.trim(), message: trimmed });
-      }
-      return "";
-    },
-  );
-  return { cleanText: cleanText.trim(), posts };
 }
