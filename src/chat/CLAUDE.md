@@ -11,7 +11,7 @@
 | `chat-config.ts` | Chat user management via DB (ensureUser + ensureDefaultThread), config file migration |
 | `pending-messages.ts` | Temporary in-memory store for research messages from Chrome extension (5min TTL, consumed once) |
 | `views/page.ts` | Server-side HTML page generation for the chat UI |
-| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (inspector panel: pure helpers + DOM rendering + data loading), `web-format-client.ts` (client-side formatWebHtml/renderSlackMrkdwn/sanitizeHtml) |
+| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (inspector panel), `web-format-client.ts` (markdown/mrkdwn/sanitize), `connector-selector.ts` (connector dropdown), `research-card.ts` (Jira research cards), `streaming-ui.ts` (streaming deltas, tool status, response meta), `thread-manager.ts` (thread CRUD, modal, sidebar), `knowledge-links.ts` (URL normalization, doc panel links) |
 
 ## Architecture
 
