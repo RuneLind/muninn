@@ -11,7 +11,7 @@
 | `chat-config.ts` | Chat user management via DB (ensureUser + ensureDefaultThread), config file migration |
 | `pending-messages.ts` | Temporary in-memory store for research messages from Chrome extension (5min TTL, consumed once) |
 | `views/page.ts` | Server-side HTML page generation for the chat UI |
-| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (tool/trace inspector overlay) |
+| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (tool/trace inspector overlay), `web-format-client.ts` (client-side formatWebHtml/renderSlackMrkdwn/sanitizeHtml) |
 
 ## Architecture
 
@@ -38,7 +38,7 @@
 
 ## Web Format Sync Obligation
 
-Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page (`views/page.ts`) has a client-side copy of the same formatting logic for streaming text deltas. **Both must stay in sync** — if you change markdown-to-HTML conversion in one, update the other.
+Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page has a client-side copy in `views/components/web-format-client.ts` for streaming text deltas. **Both must stay in sync** — if you change markdown-to-HTML conversion in one, update the other.
 
 ## ConversationType
 

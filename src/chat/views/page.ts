@@ -5,6 +5,7 @@ import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/compon
 import { helpersScript } from "../../dashboard/views/components/helpers.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "../../dashboard/views/components/doc-panel.ts";
 import { chatStyles } from "./components/chat-styles.ts";
+import { webFormatClientScript } from "./components/web-format-client.ts";
 
 export function renderChatPage(): string {
   return `<!DOCTYPE html>
@@ -114,6 +115,7 @@ export function renderChatPage(): string {
     ${helpersScript()}
     ${agentStatusScript()}
     ${requestProgressScript()}
+    ${webFormatClientScript()}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
   </script>
@@ -1796,210 +1798,6 @@ const CHAT_SCRIPT = `
         }
       })
       .catch(function() {});
-  }
-
-  // Client-side markdown → HTML formatter for web chat.
-  // IMPORTANT: This is a manual port of src/web/web-format.ts — keep both in sync.
-  function formatWebHtml(text) {
-    var result = text.replace(/\\r\\n/g, '\\n');
-
-    // Preserve code blocks
-    var codeBlocks = [];
-    result = result.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\`\`\`/g, function(_, lang, code) {
-      var idx = codeBlocks.length;
-      var langClass = lang ? ' class="language-' + escapeHtml(lang) + '"' : '';
-      codeBlocks.push('<pre><code' + langClass + '>' + escapeHtml(code.replace(/\\s+$/, '')) + '</code></pre>');
-      return '\\x00CODEBLOCK' + idx + '\\x00';
-    });
-
-    // Preserve inline code
-    var inlineCodes = [];
-    result = result.replace(/\`([^\`]+)\`/g, function(_, code) {
-      var idx = inlineCodes.length;
-      inlineCodes.push('<code>' + escapeHtml(code) + '</code>');
-      return '\\x00INLINE' + idx + '\\x00';
-    });
-
-    // Defensive normalization: Claude occasionally outputs Slack-style links (<url|text>)
-    // instead of standard markdown. Not an intermediate Slack→HTML conversion — input is
-    // always raw markdown from the AI connector.
-    result = result.replace(/<(https?:\\/\\/[^|>]+)\\|([^>]+)>/g, '[$2]($1)');
-    result = result.replace(/<(https?:\\/\\/[^>]+)>/g, '[$1]($1)');
-
-    // Escape HTML entities
-    result = result.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-    // Tables
-    result = result.replace(/^(\\|.+\\|)\\n(\\|[\\s\\-:|]+\\|)\\n((?:\\|.+\\|\\n?)+)/gm, function(_, headerLine, _sep, bodyLines) {
-      var headers = headerLine.replace(/^\\||\\|$/g, '').split('|');
-      var rows = bodyLines.replace(/\\s+$/, '').split('\\n');
-      var thead = '<thead><tr>' + headers.map(function(h) { return '<th>' + h.trim() + '</th>'; }).join('') + '</tr></thead>';
-      var tbody = '<tbody>' + rows.map(function(row) {
-        var cells = row.replace(/^\\||\\|$/g, '').split('|');
-        return '<tr>' + cells.map(function(c) { return '<td>' + c.trim() + '</td>'; }).join('') + '</tr>';
-      }).join('') + '</tbody>';
-      return '<table>' + thead + tbody + '</table>';
-    });
-
-    // Headings
-    result = result.replace(/^(#{1,6})\\s+(.+)$/gm, function(_, hashes, content) {
-      var level = Math.min(hashes.length + 1, 6);
-      return '<h' + level + '>' + content + '</h' + level + '>';
-    });
-
-    // Horizontal rules
-    result = result.replace(/^---+$/gm, '<hr>');
-
-    // Blockquotes (> escaped to &gt;)
-    var bqLines = result.split('\\n');
-    var bqResult = [];
-    var quoteLines = [];
-    function flushQuote() {
-      if (quoteLines.length > 0) {
-        bqResult.push('<blockquote>' + quoteLines.join('<br>') + '</blockquote>');
-        quoteLines = [];
-      }
-    }
-    for (var bi = 0; bi < bqLines.length; bi++) {
-      var bqMatch = bqLines[bi].match(/^&gt;\\s?(.*)/);
-      if (bqMatch) { quoteLines.push(bqMatch[1]); }
-      else { flushQuote(); bqResult.push(bqLines[bi]); }
-    }
-    flushQuote();
-    result = bqResult.join('\\n');
-
-    // Unordered lists
-    var ulLines = result.split('\\n');
-    var ulResult = [];
-    var ulItems = [];
-    function flushUl() {
-      if (ulItems.length > 0) {
-        ulResult.push('<ul>' + ulItems.map(function(item) { return '<li>' + item + '</li>'; }).join('') + '</ul>');
-        ulItems = [];
-      }
-    }
-    for (var ui = 0; ui < ulLines.length; ui++) {
-      var ulMatch = ulLines[ui].match(/^[-*]\\s+(.*)/);
-      if (ulMatch) { ulItems.push(ulMatch[1]); }
-      else { flushUl(); ulResult.push(ulLines[ui]); }
-    }
-    flushUl();
-    result = ulResult.join('\\n');
-
-    // Ordered lists
-    var olLines = result.split('\\n');
-    var olResult = [];
-    var olItems = [];
-    function flushOl() {
-      if (olItems.length > 0) {
-        olResult.push('<ol>' + olItems.map(function(item) { return '<li>' + item + '</li>'; }).join('') + '</ol>');
-        olItems = [];
-      }
-    }
-    for (var oi = 0; oi < olLines.length; oi++) {
-      var olMatch = olLines[oi].match(/^\\d+\\.\\s+(.*)/);
-      if (olMatch) { olItems.push(olMatch[1]); }
-      else { flushOl(); olResult.push(olLines[oi]); }
-    }
-    flushOl();
-    result = olResult.join('\\n');
-
-    // Bold
-    result = result.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
-    // Italic *text*
-    result = result.replace(/(?<!\\w)\\*([^*]+?)\\*(?!\\w)/g, '<em>$1</em>');
-    // Italic _text_
-    result = result.replace(/(?<!\\w)_([^_]+?)_(?!\\w)/g, '<em>$1</em>');
-    // Strikethrough
-    result = result.replace(/~~(.+?)~~/g, '<s>$1</s>');
-
-    // Links [text](url) — only http/https
-    result = result.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, function(_, text, url) {
-      if (/^https?:\\/\\//.test(url)) {
-        return '<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>';
-      }
-      return text;
-    });
-
-    // Restore code blocks and inline codes
-    for (var ci = 0; ci < codeBlocks.length; ci++) {
-      result = result.replace('\\x00CODEBLOCK' + ci + '\\x00', codeBlocks[ci]);
-    }
-    for (var ii = 0; ii < inlineCodes.length; ii++) {
-      result = result.replace('\\x00INLINE' + ii + '\\x00', inlineCodes[ii]);
-    }
-
-    // Clean up excessive blank lines
-    result = result.replace(/\\n{3,}/g, '\\n\\n');
-
-    // Collapse blank lines around block-level elements — their CSS handles spacing,
-    // and pre-wrap would otherwise render the \\n as extra visible line breaks.
-    var blockRe = '(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)';
-    result = result.replace(new RegExp('\\\\n+(</?' + blockRe + '[>\\\\s])', 'g'), '\\n$1');
-    result = result.replace(new RegExp('(</' + blockRe + '>|<hr>)\\\\n+', 'g'), '$1\\n');
-
-    return result.trim();
-  }
-
-  // Minimal Slack mrkdwn renderer
-  function renderSlackMrkdwn(text) {
-    var links = [];
-    var t = text.replace(/<(https?:\\/\\/[^|>]+)\\|([^>]+)>/g, function(_, url, label) {
-      links.push({url: url, label: label});
-      return '%%SLINK' + (links.length - 1) + '%%';
-    });
-    t = escapeHtml(t)
-      .replace(/\\*([^*]+)\\*/g, '<strong>$1</strong>')
-      .replace(/_([^_]+)_/g, '<em>$1</em>')
-      .replace(/~([^~]+)~/g, '<del>$1</del>')
-      .replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, '<pre><code>$1</code></pre>')
-      .replace(/\`([^\`]+)\`/g, '<code>$1</code>')
-      .replace(/\\n/g, '<br>');
-    for (var i = 0; i < links.length; i++) {
-      t = t.replace('%%SLINK' + i + '%%',
-        '<a href="' + escapeHtml(links[i].url) + '" target="_blank">' + escapeHtml(links[i].label) + '</a>');
-    }
-    return t;
-  }
-
-  // Sanitize HTML — allow safe tags and attributes
-  var _tgTags = ['b', 'strong', 'i', 'em', 'u', 's', 'del', 'code', 'pre', 'a', 'br', 'span'];
-  var _webTags = _tgTags.concat(['h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'p', 'details', 'summary']);
-
-  function sanitizeHtml(html, isWeb) {
-    var allowedTags = isWeb ? _webTags : _tgTags;
-    var tmp = document.createElement('div');
-    tmp.innerHTML = html;
-
-    function walk(node) {
-      var children = Array.from(node.childNodes);
-      for (var i = 0; i < children.length; i++) {
-        var child = children[i];
-        if (child.nodeType === 1) {
-          var tag = child.tagName.toLowerCase();
-          if (allowedTags.indexOf(tag) === -1) {
-            var text = document.createTextNode(child.textContent || '');
-            node.replaceChild(text, child);
-          } else {
-            var attrs = Array.from(child.attributes);
-            for (var j = 0; j < attrs.length; j++) {
-              var attr = attrs[j];
-              if (tag === 'a' && attr.name === 'href' && /^https?:\\/\\//.test(attr.value)) continue;
-              if (tag === 'a' && (attr.name === 'target' || attr.name === 'rel')) continue;
-              if (tag === 'code' && attr.name === 'class') continue;
-              child.removeAttribute(attr.name);
-            }
-            if (tag === 'a') {
-              child.setAttribute('target', '_blank');
-              child.setAttribute('rel', 'noopener');
-            }
-            walk(child);
-          }
-        }
-      }
-    }
-    walk(tmp);
-    return tmp.innerHTML;
   }
 
   // --- Knowledge Index Links ---
