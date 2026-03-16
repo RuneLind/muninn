@@ -73,12 +73,10 @@ export async function knowledgeApiHandler(
     return c.json(data);
   } catch (err) {
     if (err instanceof KnowledgeApiError) {
-      if (err.statusCode === 503) {
-        log.warn("Knowledge API unreachable: {error}", { error: err.message });
-      }
+      log.warn("Knowledge API error on {path}: {error}", { path, error: err.message });
       return c.json({ error: err.message }, err.statusCode as 502 | 503);
     }
-    log.warn("Knowledge API unexpected error: {error}", { error: err instanceof Error ? err.message : String(err) });
+    log.warn("Knowledge API unexpected error on {path}: {error}", { path, error: err instanceof Error ? err.message : String(err) });
     return c.json({ error: "Knowledge API unreachable" }, 503);
   }
 }
