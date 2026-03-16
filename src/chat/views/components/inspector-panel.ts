@@ -193,24 +193,15 @@ export function inspectorPanelScript(): string {
     if (!container) return;
     if (!meta) { container.innerHTML = ''; return; }
 
-    var html = '';
-    var ctxTokens = meta.contextTokens || meta.inputTokens;
-    if (ctxTokens) {
-      var label, pct;
-      if (meta.contextWindow) {
-        pct = Math.min(100, Math.round((ctxTokens / meta.contextWindow) * 100));
-        label = fmtNum(ctxTokens) + ' / ' + fmtNum(meta.contextWindow);
-      } else {
-        pct = 0;
-        label = fmtNum(ctxTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
-      }
+    var usage = computeContextUsage(meta);
+    if (!usage) { container.innerHTML = ''; return; }
 
-      html += '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(label) + '</span></div>';
+    var html = '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(usage.label) + '</span></div>';
 
-      if (meta.contextWindow) {
-        var barColor = pct > 80 ? 'var(--status-error, #e74c3c)' : pct > 60 ? 'var(--status-warning, #f39c12)' : 'var(--accent, #7c6fe0)';
-        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
-      }
+    if (usage.hasBar) {
+      var colorMap = { error: 'var(--status-error, #e74c3c)', warning: 'var(--status-warning, #f39c12)', accent: 'var(--accent, #7c6fe0)' };
+      var barColor = colorMap[usage.barColor] || colorMap.accent;
+      html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + usage.percentage + '%;background:' + barColor + '"></div></div>';
     }
     container.innerHTML = html;
   }
