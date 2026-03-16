@@ -54,11 +54,6 @@ export function mcpToolResultsStyles(): string {
   `;
 }
 
-export function mcpToolResultsHtml(): string {
-  // HTML is embedded inside the tool detail panel
-  return ``;
-}
-
 export function mcpToolResultsScript(): string {
   return `
     function switchResultTab(tab) {

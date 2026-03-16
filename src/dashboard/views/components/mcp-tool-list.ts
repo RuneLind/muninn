@@ -23,11 +23,6 @@ export function mcpToolListStyles(): string {
   `;
 }
 
-export function mcpToolListHtml(): string {
-  // HTML is embedded inside the server panel's left-panel div
-  return ``;
-}
-
 export function mcpToolListScript(): string {
   return `
     // --- Render tools ---
