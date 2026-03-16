@@ -12,7 +12,9 @@ const ALL_TABLES = [
   "memories",
   "activity_log",
   "messages",
+  "chat_preferences",
   "threads",
+  "connectors",
   "user_settings",
   "users",
 ];
