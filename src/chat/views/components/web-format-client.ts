@@ -91,6 +91,11 @@ function convertOrderedLists(text: string): string {
   return result.join("\n");
 }
 
+// Pre-compiled regexes for block-element blank-line collapsing (used in formatWebHtml hot path)
+const BLOCK_RE = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
+const BLOCK_BEFORE_RE = new RegExp(`\\n+(</?${BLOCK_RE}[>\\s])`, "g");
+const BLOCK_AFTER_RE = new RegExp(`(</${BLOCK_RE}>|<hr>)\\n+`, "g");
+
 /** Convert markdown tables to HTML tables */
 function convertTables(text: string): string {
   return text.replace(
@@ -185,9 +190,8 @@ export function formatWebHtml(text: string): string {
   result = result.replace(/\n{3,}/g, "\n\n");
 
   // Collapse blank lines around block-level elements
-  const blockRe = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
-  result = result.replace(new RegExp(`\\n+(</?${blockRe}[>\\s])`, "g"), "\n$1");
-  result = result.replace(new RegExp(`(</${blockRe}>|<hr>)\\n+`, "g"), "$1\n");
+  result = result.replace(BLOCK_BEFORE_RE, "\n$1");
+  result = result.replace(BLOCK_AFTER_RE, "$1\n");
 
   return result.trim();
 }
