@@ -6,6 +6,7 @@ import { renderYouTubePage } from "../views/youtube-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots } from "../../bots/config.ts";
+import { knowledgeApiHandler } from "./knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 
@@ -132,65 +133,25 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
 
   // --- YouTube browse (proxy to knowledge API) ---
 
-  app.get("/api/youtube/categories", async (c) => {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/youtube/categories`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("YouTube categories API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+  app.get("/api/youtube/categories", (c) => {
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, "/api/youtube/categories");
   });
 
-  app.get("/api/youtube/documents", async (c) => {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/collection/${YT_COLLECTION}/documents`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("YouTube documents API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+  app.get("/api/youtube/documents", (c) => {
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${YT_COLLECTION}/documents`, 10000);
   });
 
   app.get("/api/youtube/document/*", async (c) => {
     const docId = c.req.path.replace("/api/youtube/document/", "");
     if (!docId) return c.json({ error: "Missing document ID" }, 400);
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const encodedDocId = docId.split("/").map(encodeURIComponent).join("/");
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/document/${YT_COLLECTION}/${encodedDocId}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("YouTube document fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+    const encodedDocId = docId.split("/").map(encodeURIComponent).join("/");
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/document/${YT_COLLECTION}/${encodedDocId}`);
   });
 
   app.get("/api/youtube/similar", async (c) => {
     const q = c.req.query("q");
     if (!q) return c.json({ error: "Missing query parameter" }, 400);
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const params = new URLSearchParams({ q, collection: YT_COLLECTION, limit: "7" });
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/search?${params}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("YouTube similar search failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+    const params = new URLSearchParams({ q, collection: YT_COLLECTION, limit: "7" });
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000);
   });
 }

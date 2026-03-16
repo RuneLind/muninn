@@ -9,6 +9,7 @@ import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 
@@ -60,51 +61,21 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
   app.get("/api/research/tags", async (c) => {
     const collection = c.req.query("collection");
     if (!collection) return c.json({ error: "Missing collection parameter" }, 400);
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/tags?collection=${encodeURIComponent(collection)}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("Research tags API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/tags?collection=${encodeURIComponent(collection)}`);
   });
 
   // Research browse: documents in a collection
   app.get("/api/research/documents", async (c) => {
     const collection = c.req.query("collection");
     if (!collection) return c.json({ error: "Missing collection parameter" }, 400);
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/collection/${encodeURIComponent(collection)}/documents`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("Research documents API failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${encodeURIComponent(collection)}/documents`, 10000);
   });
 
   // Research browse: single document
-  app.get("/api/research/document/:collection/*", async (c) => {
-    try {
-      const collection = c.req.param("collection");
-      const docId = c.req.path.split(`/api/research/document/${collection}/`)[1] || "";
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/document/${encodeURIComponent(collection)}/${docId}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("Research document fetch failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+  app.get("/api/research/document/:collection/*", (c) => {
+    const collection = c.req.param("collection");
+    const docId = c.req.path.split(`/api/research/document/${collection}/`)[1] || "";
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/document/${encodeURIComponent(collection)}/${docId}`);
   });
 
   // Research browse: similar search
@@ -112,19 +83,9 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const q = c.req.query("q");
     const collection = c.req.query("collection");
     if (!q) return c.json({ error: "Missing query parameter" }, 400);
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const params = new URLSearchParams({ q, limit: "6" });
-      if (collection) params.set("collection", collection);
-      const res = await fetch(`${KNOWLEDGE_API_URL}/api/search?${params}`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) return c.json({ error: "API returned " + res.status }, 502);
-      return c.json(await res.json());
-    } catch (err) {
-      log.warn("Research similar search failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      return c.json({ error: "Knowledge API unreachable" }, 503);
-    }
+    const params = new URLSearchParams({ q, limit: "6" });
+    if (collection) params.set("collection", collection);
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/search?${params}`, 10000);
   });
 
   // Research chat: CORS preflight for Chrome extension
@@ -248,31 +209,20 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     // Index Jira content in knowledge base (fire-and-forget)
     const issueKeyMatch = rawTitle.match(/^([A-Z]+-\d+)/);
     if (issueKeyMatch) {
-      const ingestJira = async () => {
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 15_000);
-          const res = await fetch(`${config.knowledgeApiUrl}/api/jira/ingest`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              issueKey: issueKeyMatch[1],
-              title: rawTitle,
-              description: body.text,
-            }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeout);
-          if (res.ok) {
-            log.info("Jira indexed: {issueKey}", { issueKey: issueKeyMatch[1] });
-          } else {
-            log.warn("Jira ingest returned {status}", { status: res.status });
-          }
-        } catch (err) {
-          log.warn("Jira ingest failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-        }
-      };
-      ingestJira();
+      fetchKnowledgeApi(config.knowledgeApiUrl, "/api/jira/ingest", {
+        timeoutMs: 15_000,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issueKey: issueKeyMatch[1],
+          title: rawTitle,
+          description: body.text,
+        }),
+      }).then(() => {
+        log.info("Jira indexed: {issueKey}", { issueKey: issueKeyMatch[1] });
+      }).catch((err) => {
+        log.warn("Jira ingest failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      });
     }
 
     return c.json({
