@@ -18,8 +18,6 @@ export function searchStatsStyles(): string {
     .stat-value { color: var(--text-primary); font-weight: 700; font-size: 24px; transition: font-size 0.2s; }
     .stat-value.text-value { font-size: 18px; }
     .stat-label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-
-    /* Error Banner */
   `;
 }
 
