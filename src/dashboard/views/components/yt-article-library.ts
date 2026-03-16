@@ -1,6 +1,6 @@
 /** YouTube page — Article library with category chips, articles grid, and doc panel integration */
 
-import { docPanelStyles, markdownContentStyles } from "./doc-panel.ts";
+import { docPanelStyles } from "./doc-panel.ts";
 
 export function ytArticleLibraryStyles(): string {
   return `
@@ -94,7 +94,6 @@ export function ytArticleLibraryStyles(): string {
     .article-row-link:hover { color: var(--accent-light); }
 
     ${docPanelStyles("ytSlideIn")}
-    ${markdownContentStyles(".doc-panel-body")}
 
     .doc-similar {
       border-top: 1px solid var(--border-primary);
