@@ -1,6 +1,5 @@
 import type { Platform } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
-import type { BotConfig } from "../bots/config.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { splitMessage } from "../utils/split-message.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
