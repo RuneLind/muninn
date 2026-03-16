@@ -1,7 +1,6 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import type { Platform } from "../types.ts";
-import type { UserIdentity } from "../types.ts";
+import type { HandleSlackMessageParams } from "./handlers/types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
@@ -13,38 +12,6 @@ import {
 import { getLog } from "../logging.ts";
 
 const log = getLog("bot", "slack");
-
-interface SlackSay {
-  (message: string): Promise<any>;
-}
-
-interface SlackSetStatus {
-  (status: string): Promise<void>;
-}
-
-interface PostToChannel {
-  (channel: string, message: string): Promise<void>;
-}
-
-interface HandleSlackMessageParams {
-  text: string;
-  userId: string;
-  username: string;
-  /** Enriched user identity from Slack profile (name, display name, title) */
-  userIdentity?: UserIdentity;
-  say: SlackSay;
-  setStatus: SlackSetStatus;
-  /** If provided, Claude can post messages to Slack channels via <slack-post> directives */
-  postToChannel?: PostToChannel;
-  /** Channel name/context for the current conversation (e.g. "#general") */
-  channelContext?: string;
-  /** Recent messages from the channel/thread for context (when responding to @mentions) */
-  recentChannelMessages?: string[];
-  /** Platform identifier for analytics (e.g. 'slack_dm', 'slack_channel', 'slack_assistant') */
-  platform?: Platform;
-  /** Thread ID for conversation isolation (resolved by caller) */
-  threadId?: string;
-}
 
 export function createSlackMessageHandler(config: Config, botConfig: BotConfig) {
   return async ({ text: rawText, userId, username, userIdentity, say, setStatus, postToChannel, channelContext, recentChannelMessages, platform, threadId }: HandleSlackMessageParams) => {
@@ -100,7 +67,7 @@ export function createSlackMessageHandler(config: Config, botConfig: BotConfig) 
  *  Matches both `/topic` and `topic` (without slash) since Slack intercepts
  *  slash commands before they reach the bot in regular DMs. */
 async function handleSlackTopicCommand(
-  text: string, userId: string, botName: string, say: SlackSay,
+  text: string, userId: string, botName: string, say: (message: string) => Promise<any>,
 ): Promise<boolean> {
   const trimmed = text.trim();
   const reply = async (msg: string) => { await say(msg); };

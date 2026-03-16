@@ -1,7 +1,6 @@
 import type { App } from "@slack/bolt";
-import type { WebClient } from "@slack/web-api";
 import type { BotConfig } from "../../bots/config.ts";
-import type { SlackMessageHandler } from "./types.ts";
+import { type SlackMessageHandler, makeThreadCallbacks } from "./types.ts";
 import { resolveSlackUser, makePostToChannel } from "../cache.ts";
 import { fetchChannelMessages, fetchThreadMessages } from "../message-fetcher.ts";
 import { getOrCreateSlackThread } from "../../db/threads.ts";
@@ -48,38 +47,18 @@ export function registerChannelMentionHandler(
     // Resolve Muninn thread for conversation isolation
     const threadId = await getOrCreateSlackThread(userId, botConfig.name, event.channel, threadTs);
 
+    const { say: threadSay, setStatus } = makeThreadCallbacks(client, event.channel, threadTs);
+
     // Show native Slack thinking indicator (same as Assistant DM experience)
-    try {
-      await client.assistant.threads.setStatus({
-        channel_id: event.channel,
-        thread_ts: threadTs,
-        status: "tenker...",
-      });
-    } catch (err) {
-      log.warn("assistant.threads.setStatus not available: {error}", { botName: bn, error: err instanceof Error ? err.message : String(err) });
-    }
+    await setStatus("tenker...");
 
     await handleMessage({
       text,
       userId,
       username: userInfo.name,
       userIdentity: userInfo,
-      say: async (msg: string) => {
-        await client.chat.postMessage({
-          channel: event.channel,
-          thread_ts: threadTs,
-          text: msg,
-        });
-      },
-      setStatus: async (status: string) => {
-        try {
-          await client.assistant.threads.setStatus({
-            channel_id: event.channel,
-            thread_ts: threadTs,
-            status,
-          });
-        } catch { /* ignore */ }
-      },
+      say: threadSay,
+      setStatus,
       postToChannel: makePostToChannel(client, botConfig.name),
       channelContext: channelName,
       recentChannelMessages,

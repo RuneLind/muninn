@@ -1,3 +1,4 @@
+import type { WebClient } from "@slack/web-api";
 import type { Platform, UserIdentity } from "../../types.ts";
 
 export interface HandleSlackMessageParams {
@@ -21,3 +22,21 @@ export interface HandleSlackMessageParams {
 }
 
 export type SlackMessageHandler = (params: HandleSlackMessageParams) => Promise<void>;
+
+/** Create say + setStatus callbacks for replying in a channel thread */
+export function makeThreadCallbacks(client: WebClient, channel: string, threadTs: string) {
+  return {
+    say: async (msg: string) => {
+      await client.chat.postMessage({ channel, thread_ts: threadTs, text: msg });
+    },
+    setStatus: async (status: string) => {
+      try {
+        await client.assistant.threads.setStatus({
+          channel_id: channel,
+          thread_ts: threadTs,
+          status,
+        });
+      } catch { /* ignore — not all threads support assistant status */ }
+    },
+  };
+}
