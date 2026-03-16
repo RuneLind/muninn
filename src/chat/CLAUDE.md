@@ -38,7 +38,7 @@
 
 ## Web Format Sync Obligation
 
-Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page (`views/page.ts`) has a client-side copy of the same formatting logic for streaming text deltas. **Both must stay in sync** — if you change markdown-to-HTML conversion in one, update the other.
+Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page has a client-side copy in `views/components/web-format-client.ts` for streaming text deltas. **Both must stay in sync** — if you change markdown-to-HTML conversion in one, update the other.
 
 ## ConversationType
 
