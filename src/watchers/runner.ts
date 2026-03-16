@@ -23,7 +23,7 @@ const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
  * These survive Haiku's translation between runs.
  * Prefixed with "h:" to distinguish from message IDs in the shared array.
  */
-function contentHash(alert: WatcherAlert): string | null {
+export function contentHash(alert: WatcherAlert): string | null {
   const text = alert.summary;
   if (!text) return null;
 
@@ -41,7 +41,7 @@ function contentHash(alert: WatcherAlert): string | null {
 }
 
 /** Extract proper nouns: ALL-CAPS words, mid-sentence capitalized words, long numbers */
-function extractProperNouns(text: string): string[] {
+export function extractProperNouns(text: string): string[] {
   const words = text.split(/[\s,;:—–\-\(\)\/]+/).filter((w) => w.length > 1);
   const tokens: string[] = [];
   let skippedFirst = false;
@@ -176,7 +176,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
   }
 }
 
-function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
+export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
   const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {

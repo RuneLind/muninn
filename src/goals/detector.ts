@@ -94,19 +94,29 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
   });
 }
 
+/** Fuzzy match: find the goal whose title best matches (substring in either direction) */
+export function fuzzyMatchGoalTitle(
+  completedTitle: string,
+  goalTitles: string[],
+): string | null {
+  const titleLower = completedTitle.toLowerCase();
+  return goalTitles.find(
+    (t) =>
+      t.toLowerCase().includes(titleLower) ||
+      titleLower.includes(t.toLowerCase()),
+  ) ?? null;
+}
+
 async function handleCompletion(
   userId: string,
   completedTitle: string,
   botName: string,
 ): Promise<void> {
   const goals = await getActiveGoals(userId, botName);
-  const titleLower = completedTitle.toLowerCase();
 
   // Fuzzy match: find the goal whose title best matches
   const match = goals.find(
-    (g) =>
-      g.title.toLowerCase().includes(titleLower) ||
-      titleLower.includes(g.title.toLowerCase()),
+    (g) => fuzzyMatchGoalTitle(completedTitle, [g.title]) !== null,
   );
 
   if (match) {
@@ -117,7 +127,7 @@ async function handleCompletion(
   }
 }
 
-function buildPrompt(
+export function buildPrompt(
   userMessage: string,
   assistantResponse: string,
   activeGoals: string,
