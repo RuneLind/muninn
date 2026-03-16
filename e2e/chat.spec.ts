@@ -65,15 +65,10 @@ test.describe("Chat page", () => {
     // Navigate with bot query parameter
     await page.goto("/chat?bot=jarvis");
 
-    // Give time for deep link handling
-    await page.waitForTimeout(500);
-
-    // The bot pill for jarvis should be active (if it exists)
+    // Wait for the bot pill to become active (deep link triggers async selectBot)
     const activePill = page.locator(".bot-pill.active");
-    const count = await activePill.count();
-    if (count > 0) {
-      await expect(activePill).toContainText("jarvis");
-    }
+    await expect(activePill).toBeVisible({ timeout: 5000 });
+    await expect(activePill).toContainText("jarvis", { ignoreCase: true });
   });
 
   test("new thread button exists", async ({ page }) => {
