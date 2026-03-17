@@ -215,11 +215,11 @@ export async function listThreads(userId: string, botName: string): Promise<Thre
       GROUP BY thread_id
     ) m ON m.tid = t.id
     WHERE t.user_id = ${userId} AND t.bot_name = ${botName}
-    ORDER BY m.last_activity DESC NULLS LAST
+    ORDER BY COALESCE(m.last_activity, t.created_at) DESC
   `;
   return rows.map((r) => ({
     ...rowToThread(r),
-    updatedAt: r.last_activity ? new Date(r.last_activity as string).getTime() : new Date(r.updated_at as string).getTime(),
+    updatedAt: new Date((r.last_activity ?? r.created_at) as string).getTime(),
   }));
 }
 
