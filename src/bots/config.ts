@@ -64,6 +64,8 @@ export interface BotPrompts {
   jiraAnalysis?: string;
   /** Prompt for the "Investigate Code" follow-up button after Jira analysis. */
   investigateCode?: string;
+  /** Prompt for the "Deep Analysis" follow-up button after code investigation — parallel agent verification. */
+  deepAnalysis?: string;
 }
 
 /**

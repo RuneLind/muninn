@@ -726,6 +726,8 @@ const CHAT_SCRIPT = `
         showResearchActions('analysis');
       } else if (researchBotReplies === 2) {
         showResearchActions('investigation');
+      } else if (researchBotReplies === 3) {
+        showResearchActions('deepAnalysis');
       }
     }
 
