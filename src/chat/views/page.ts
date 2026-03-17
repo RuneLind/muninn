@@ -525,6 +525,12 @@ const CHAT_SCRIPT = `
       if (event.conversationId !== activeConvId) return;
       var clearThread = event.threadId || null;
       if (activeThreadId && clearThread !== activeThreadId) return;
+      // If there's actual streamed text being promoted to an intermediate message,
+      // collapse the tool container so the next tool batch creates a new container
+      // below the promoted text (preserving chronological order).
+      if (streamingRawText.trim() && activeToolContainer) {
+        collapseToolActivity();
+      }
       promoteStreamingBubble();
       return;
     }
