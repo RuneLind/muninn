@@ -1,6 +1,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
+  color-scheme: light dark;
   --bg: #fafafa;
   --text: #1a1a1a;
   --text-secondary: #666;
@@ -147,6 +148,9 @@ button.secondary {
   cursor: pointer;
   white-space: nowrap;
 }
+
+button.secondary:hover { background: #047857; }
+button.secondary:disabled { background: var(--disabled); cursor: not-allowed; }
 
 .status-msg {
   padding: 8px 12px;
