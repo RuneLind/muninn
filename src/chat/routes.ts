@@ -8,7 +8,7 @@ import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
-import { getChatPreferences, setPreferredConnector } from "../db/chat-preferences.ts";
+import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDefaultUser } from "../db/chat-preferences.ts";
 import { getSimMessages, getLastResponseMeta } from "../db/messages.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -84,6 +84,48 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       log.error("Failed to save chat preferences: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to save preferences" }, 500);
     }
+  });
+
+  // Get default user for a bot (single source of truth for plugin + chat page)
+  app.get("/bot-preferences/:botName/default-user", async (c) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    try {
+      const botName = c.req.param("botName");
+      const userId = await getBotDefaultUser(botName);
+      return c.json({ userId });
+    } catch (err) {
+      log.error("Failed to fetch bot default user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ userId: null });
+    }
+  });
+
+  // Set default user for a bot
+  app.put("/bot-preferences/:botName/default-user", async (c) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    try {
+      const botName = c.req.param("botName");
+      const body = await c.req.json<{ userId: string }>();
+      if (!body.userId) {
+        return c.json({ error: "userId is required" }, 400);
+      }
+      await setBotDefaultUser(botName, body.userId);
+      return c.json({ ok: true });
+    } catch (err) {
+      log.error("Failed to save bot default user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to save default user" }, 500);
+    }
+  });
+
+  // CORS preflight for bot-preferences (Chrome extension)
+  app.options("/bot-preferences/:botName/default-user", (c) => {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, PUT",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
   });
 
   // Create a new conversation

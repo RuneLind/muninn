@@ -373,6 +373,15 @@ CREATE TRIGGER chat_preferences_updated_at
   EXECUTE FUNCTION update_chat_preferences_updated_at();
 
 -- ============================================================================
+-- Bot default user: single source of truth for plugin + chat page
+-- ============================================================================
+CREATE TABLE bot_default_user (
+  bot_name TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
 -- Traces: observability spans for request tracing
 -- ============================================================================
 CREATE TABLE traces (
