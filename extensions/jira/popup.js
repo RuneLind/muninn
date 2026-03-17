@@ -180,7 +180,8 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
 
   const dialog = document.createElement('div');
   dialog.id = 'thread-exists';
-  dialog.style.cssText = 'margin-top:8px;padding:8px 12px;background:#fef3c7;border-radius:6px;';
+  dialog.className = 'status-msg';
+  dialog.style.cssText = 'margin-top:8px;';
   const label = document.createElement('div');
   label.style.cssText = 'font-size:12px;margin-bottom:6px;';
   label.textContent = 'Tråd ';
@@ -200,8 +201,8 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   reuseBtn.addEventListener('click', () => { dialog.remove(); onReuse(); });
 
   const newBtn = document.createElement('button');
-  newBtn.className = 'primary';
-  newBtn.style.cssText = 'font-size:11px;padding:4px 10px;background:#059669;';
+  newBtn.className = 'secondary';
+  newBtn.style.cssText = 'font-size:11px;padding:4px 10px;';
   newBtn.textContent = 'Opprett ny';
   newBtn.addEventListener('click', () => { dialog.remove(); onCreateNew(); });
 
