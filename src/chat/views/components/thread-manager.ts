@@ -112,8 +112,8 @@ export function threadManagerScript(): string {
       threads = [];
     }
 
-    // DB sorts by last_activity DESC NULLS LAST — threads with
-    // messages first (most recent activity on top), empty threads at bottom.
+    // DB sorts by COALESCE(last_activity, created_at) DESC — most recent
+    // activity on top, new threads without messages sort by creation time.
 
     // Threads should always exist (created during hydration), but handle edge case
     if (threads.length === 0) {
