@@ -61,7 +61,7 @@ export function researchCardScript(): string {
         // Refresh action buttons if they're currently showing
         var existing = chatMessages.querySelector('.research-actions');
         if (existing && reportExists) {
-          var phase = researchBotReplies >= 2 ? 'investigation' : 'analysis';
+          var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
           showResearchActions(phase);
         }
       })
@@ -77,7 +77,8 @@ export function researchCardScript(): string {
     actions.className = 'research-actions';
 
     // Phase 1 (after analysis): Investigate Code + Start Building + Save Report
-    // Phase 2 (after investigation): Start Building + Save Report
+    // Phase 2 (after investigation): Deep Analysis + Start Building + Save Report
+    // Phase 3 (after deep analysis): Start Building + Save Report
     if (phase === 'analysis') {
       var investigateBtn = document.createElement('button');
       investigateBtn.innerHTML = '<span class="btn-icon">&#x1F50D;</span> Investigate Code';
@@ -89,6 +90,19 @@ export function researchCardScript(): string {
         sendMessage();
       };
       actions.appendChild(investigateBtn);
+    }
+
+    if (phase === 'investigation') {
+      var deepBtn = document.createElement('button');
+      deepBtn.innerHTML = '<span class="btn-icon">&#x1F9EA;</span> Deep Analysis';
+      deepBtn.onclick = function() {
+        actions.classList.add('used');
+        var bot = bots.find(function(b) { return b.name === selectedBot; });
+        var defaultPrompt = 'Based on the code investigation above, do a deep verification pass. For each file, function, or code path mentioned — spawn parallel read_agent tasks to verify the claims by reading the actual source code and grepping for real call sites. Specifically:\\n\\n1. For each function identified as needing changes: verify it is actually called from the relevant flow (grep for call sites)\\n2. For similar files in different directories: diff them to confirm whether they are structurally identical or different\\n3. For constants and enum values: verify actual values, not just names\\n4. For claimed dependencies between components: verify the import chain\\n\\nRun these verifications in parallel using multiple task agents. Then synthesize:\\n- Verified complexity assessment (what is confirmed vs. assumed)\\n- What remains unclear or uncertain\\n- Any corrections to the initial investigation findings';
+        chatInput.value = '<!-- prompt:deepAnalysis -->' + ((bot && bot.prompts && bot.prompts.deepAnalysis) || defaultPrompt);
+        sendMessage();
+      };
+      actions.appendChild(deepBtn);
     }
 
     var buildBtn = document.createElement('button');
@@ -139,10 +153,11 @@ export function researchCardScript(): string {
     var data = await res.json();
     var msgs = data.messages || [];
 
-    // Separate into jira content, analysis response, investigation response
+    // Separate into jira content, analysis response, investigation response, deep analysis response
     var jiraContent = '';
     var analysisResponse = '';
     var investigationResponse = '';
+    var deepAnalysisResponse = '';
     var botReplyCount = 0;
     var foundResearch = false;
     for (var i = 0; i < msgs.length; i++) {
@@ -155,6 +170,7 @@ export function researchCardScript(): string {
         botReplyCount++;
         if (botReplyCount === 1) analysisResponse = m.text;
         else if (botReplyCount === 2) investigationResponse = m.text;
+        else if (botReplyCount === 3) deepAnalysisResponse = m.text;
       }
     }
 
@@ -213,6 +229,12 @@ export function researchCardScript(): string {
       sections.push(investigationResponse);
       sections.push('');
     }
+    if (deepAnalysisResponse) {
+      sections.push('## Deep Analysis');
+      sections.push('');
+      sections.push(deepAnalysisResponse);
+      sections.push('');
+    }
     sections.push('---');
     sections.push('**Issue:** ' + issueKey + ' | **Bot:** ' + selectedBot + ' | **Model:** ' + reportConnector + ' | **Generated:** ' + new Date().toISOString());
 
@@ -230,10 +252,11 @@ export function researchCardScript(): string {
         // Update researchIssueKey if it was a fallback
         if (!researchIssueKey) researchIssueKey = issueKey;
         // Refresh action buttons to show Preview
-        var phase = researchBotReplies >= 2 ? 'investigation' : 'analysis';
+        var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
         showResearchActions(phase);
-        // Brief visual feedback on the save button
-        var btn = chatMessages.querySelector('.research-actions button:nth-child(' + (phase === 'analysis' ? '3' : '2') + ')');
+        // Brief visual feedback on the save button — Save/Workplan button position varies by phase
+        var saveBtnIdx = phase === 'analysis' ? 3 : phase === 'investigation' ? 3 : 2;
+        var btn = chatMessages.querySelector('.research-actions button:nth-child(' + saveBtnIdx + ')');
         if (btn) {
           var orig = btn.innerHTML;
           btn.innerHTML = '<span class="btn-icon">&#x2705;</span> Saved!';

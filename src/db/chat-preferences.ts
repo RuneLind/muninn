@@ -28,3 +28,23 @@ export async function setPreferredConnector(userId: string, botName: string, con
       preferred_connector_id = EXCLUDED.preferred_connector_id
   `;
 }
+
+// Bot-level default user (single source of truth for plugin + chat page)
+export async function getBotDefaultUser(botName: string): Promise<string | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT user_id FROM bot_default_user WHERE bot_name = ${botName}
+  `;
+  return (row?.user_id as string) ?? null;
+}
+
+export async function setBotDefaultUser(botName: string, userId: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    INSERT INTO bot_default_user (bot_name, user_id)
+    VALUES (${botName}, ${userId})
+    ON CONFLICT (bot_name) DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      updated_at = now()
+  `;
+}

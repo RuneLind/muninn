@@ -89,19 +89,25 @@ async function loadUsers(settings) {
   const select = $('#user-select');
   const row = $('#user-selector-row');
 
-  // Fetch users list
+  // Fetch users list and DB default in parallel (allSettled so one failure doesn't kill both)
+  let dbDefaultUserId = null;
   try {
-    const res = await fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(BOT_NAME)}`);
-    if (res.ok) {
-      const data = await res.json();
-      allUsers = (data.users || []).map(u => ({ id: u.userId || u.id, name: u.username || u.userId || u.id }));
+    const results = await Promise.allSettled([
+      fetch(`${muninnUrl}/api/users?bot=${encodeURIComponent(BOT_NAME)}`).then(r => r.ok ? r.json() : null),
+      fetch(`${muninnUrl}/chat/bot-preferences/${encodeURIComponent(BOT_NAME)}/default-user`).then(r => r.ok ? r.json() : null),
+    ]);
+    if (results[0].status === 'fulfilled' && results[0].value) {
+      allUsers = (results[0].value.users || []).map(u => ({ id: u.userId || u.id, name: u.username || u.userId || u.id }));
+    }
+    if (results[1].status === 'fulfilled' && results[1].value) {
+      dbDefaultUserId = results[1].value.userId || null;
     }
   } catch {}
 
   if (allUsers.length === 0) return;
 
-  // Pre-select: last used > settings > first in list
-  const selectedId = settings.lastUserId || settings.userId || allUsers[0].id;
+  // Pre-select: DB default (single source of truth) > options page userId > first
+  const selectedId = dbDefaultUserId || settings.userId || allUsers[0].id;
 
   // Populate dropdown (use DOM API to avoid XSS from user names)
   select.innerHTML = '';
@@ -236,11 +242,16 @@ async function handleAnalyze(forceNew) {
     const description = issueData.summary || issueData.title || '';
     const payload = { bot: BOT_NAME, title, text, description };
 
-    // Use the user from the dropdown
+    // Use the user from the dropdown and sync to DB as the default
     const userId = getSelectedUserId();
     if (userId) {
       payload.userId = userId;
-      chrome.storage.sync.set({ lastUserId: userId });
+      // Sync to DB (single source of truth — shared with chat page)
+      fetch(`${muninnUrl}/chat/bot-preferences/${encodeURIComponent(BOT_NAME)}/default-user`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      }).catch(() => {});
     }
 
     // Use the connector/model from the dropdown

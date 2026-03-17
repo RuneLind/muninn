@@ -308,14 +308,22 @@ const CHAT_SCRIPT = `
     var container = document.getElementById('userSelectorContainer');
     var selector = document.getElementById('userSelector');
 
-    // Fetch users from DB
+    // Fetch users and default user from DB in parallel (allSettled so one failure doesn't kill both)
     var merged = [];
+    var dbDefaultUserId = null;
     try {
-      var res = await fetch('/api/users?bot=' + encodeURIComponent(botName));
-      var data = await res.json();
-      (data.users || []).forEach(function(u) {
-        merged.push({ id: u.userId, name: u.username || u.userId });
-      });
+      var results = await Promise.allSettled([
+        fetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
+        fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
+      ]);
+      if (results[0].status === 'fulfilled') {
+        (results[0].value.users || []).forEach(function(u) {
+          merged.push({ id: u.userId, name: u.username || u.userId });
+        });
+      }
+      if (results[1].status === 'fulfilled') {
+        dbDefaultUserId = results[1].value.userId || null;
+      }
     } catch {}
 
     if (merged.length === 0) {
@@ -327,23 +335,35 @@ const CHAT_SCRIPT = `
 
     container.style.display = 'flex';
 
-    // Restore last selected user for this bot
-    var storedUserId = null;
-    try { storedUserId = localStorage.getItem('muninn-chat-user-' + botName); } catch {}
+    // Priority: URL deep-link user (set in localStorage by handleDeepLink) > DB default > first user
+    var urlUserId = null;
+    try { urlUserId = localStorage.getItem('muninn-chat-user-' + botName); } catch {}
+    var preferredId = urlUserId || dbDefaultUserId;
 
     selector.innerHTML = merged.map(function(u) {
       return '<option value="' + escapeAttr(u.id) + '"' +
-        (u.id === storedUserId ? ' selected' : '') +
+        (u.id === preferredId ? ' selected' : '') +
         '>' + escapeHtml(u.name) + '</option>';
     }).join('');
 
-    // Select stored or first
-    var match = storedUserId && merged.find(function(u) { return u.id === storedUserId; });
+    // Select preferred or first
+    var match = preferredId && merged.find(function(u) { return u.id === preferredId; });
     var active = match || merged[0];
     selector.value = active.id;
     selectedUserId = active.id;
     selectedUsername = active.name;
+
+    // Cache in localStorage for deep-link handoff within same page load
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
+  }
+
+  function syncDefaultUser(botName, userId) {
+    if (!botName || !userId) return;
+    fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userId }),
+    }).catch(function() {});
   }
 
 
@@ -390,6 +410,7 @@ const CHAT_SCRIPT = `
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
+    syncDefaultUser(selectedBot, userId);
     // Re-resolve conversation, threads, and connector preference for new user
     await resolveConversation();
     activeThreadId = null;
@@ -726,6 +747,8 @@ const CHAT_SCRIPT = `
         showResearchActions('analysis');
       } else if (researchBotReplies === 2) {
         showResearchActions('investigation');
+      } else if (researchBotReplies === 3) {
+        showResearchActions('deepAnalysis');
       }
     }
 
@@ -768,9 +791,14 @@ const CHAT_SCRIPT = `
     connectWs();
     loadKnowledgeUrlMaps();
 
-    // Auto-select: use stored bot if valid, otherwise first bot
-    var initialBot = selectedBot && botNames.indexOf(selectedBot) !== -1 ? selectedBot : (botNames[0] || '');
-    if (initialBot) selectBot(initialBot);
+    // Skip auto-select when deep link params are present — handleDeepLink()
+    // will call selectBot() after the WS snapshot with the correct user pre-set.
+    var hasDeepLink = new URLSearchParams(window.location.search).has('bot');
+    if (!hasDeepLink) {
+      // Auto-select: use stored bot if valid, otherwise first bot
+      var initialBot = selectedBot && botNames.indexOf(selectedBot) !== -1 ? selectedBot : (botNames[0] || '');
+      if (initialBot) selectBot(initialBot);
+    }
   }
   init();
 })();
