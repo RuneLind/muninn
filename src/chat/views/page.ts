@@ -308,19 +308,22 @@ const CHAT_SCRIPT = `
     var container = document.getElementById('userSelectorContainer');
     var selector = document.getElementById('userSelector');
 
-    // Fetch users and default user from DB in parallel
+    // Fetch users and default user from DB in parallel (allSettled so one failure doesn't kill both)
     var merged = [];
     var dbDefaultUserId = null;
     try {
-      var fetches = [
+      var results = await Promise.allSettled([
         fetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
         fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
-      ];
-      var results = await Promise.all(fetches);
-      (results[0].users || []).forEach(function(u) {
-        merged.push({ id: u.userId, name: u.username || u.userId });
-      });
-      dbDefaultUserId = results[1].userId || null;
+      ]);
+      if (results[0].status === 'fulfilled') {
+        (results[0].value.users || []).forEach(function(u) {
+          merged.push({ id: u.userId, name: u.username || u.userId });
+        });
+      }
+      if (results[1].status === 'fulfilled') {
+        dbDefaultUserId = results[1].value.userId || null;
+      }
     } catch {}
 
     if (merged.length === 0) {
@@ -350,9 +353,8 @@ const CHAT_SCRIPT = `
     selectedUserId = active.id;
     selectedUsername = active.name;
 
-    // Sync selection to both localStorage and DB
+    // Cache in localStorage for deep-link handoff within same page load
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
-    syncDefaultUser(botName, active.id);
   }
 
   function syncDefaultUser(botName, userId) {
