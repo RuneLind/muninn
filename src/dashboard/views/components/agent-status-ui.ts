@@ -93,17 +93,21 @@ export function agentStatusScript(): string {
           label = 'Calling ' + connectorWithModel(_lastConnectorInfo);
         }
         phaseEl.textContent = label;
-        detailEl.textContent = status.detail ? ' \u2014 ' + status.detail : '';
-        userEl.textContent = status.username ? '(@' + status.username + ')' : '';
+        detailEl.textContent = '';
+        userEl.textContent = '';
       }
     }
 
     function updateAgentStatusFromProgress(progress) {
+      const el = document.getElementById('agentStatus');
       if (!progress) {
-        // Request cleared — clear connector info
+        // Request cleared — clear connector info and working state
         _lastConnectorInfo = null;
+        if (el) el.classList.remove('working');
         const detailEl = document.getElementById('agentDetail');
         if (detailEl) detailEl.textContent = '';
+        const userEl = document.getElementById('agentUser');
+        if (userEl) userEl.textContent = '';
         return;
       }
       // Store connector info for use by updateAgentStatus
@@ -114,21 +118,17 @@ export function agentStatusScript(): string {
       const phaseEl = document.getElementById('agentPhase');
       const detailEl = document.getElementById('agentDetail');
       if (progress.completed) {
+        if (el) el.classList.remove('working');
         if (phaseEl) phaseEl.textContent = 'Idle';
         if (detailEl && _lastConnectorInfo) {
           detailEl.textContent = ' \u2014 ' + connectorWithModel(_lastConnectorInfo);
         }
+        const userEl = document.getElementById('agentUser');
+        if (userEl) userEl.textContent = '';
         return;
       }
       if (progress.phase === 'calling_claude' && _lastConnectorInfo) {
         if (phaseEl) phaseEl.textContent = 'Calling ' + connectorWithModel(_lastConnectorInfo);
-      }
-      if (!detailEl) return;
-      const toolCount = progress.tools.length;
-      if (toolCount > 0) {
-        const lastTool = progress.tools[progress.tools.length - 1];
-        const activeName = lastTool && !lastTool.endedAt ? lastTool.displayName : '';
-        detailEl.textContent = activeName ? ' \u2014 ' + activeName : '';
       }
     }
 `;
