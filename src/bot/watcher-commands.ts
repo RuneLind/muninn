@@ -9,7 +9,7 @@ import {
 import { upsertUserSettings, getUserSettings } from "../db/user-settings.ts";
 import type { WatcherType } from "../types.ts";
 
-const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal"];
+const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal", "x"];
 
 export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   bot.command("watchers", async (ctx) => {
@@ -43,7 +43,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     if (!args) {
       await ctx.reply(
-        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>",
+        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal, x\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>\n<code>/watch x</code> (daily X/Twitter digest)",
         { parse_mode: "HTML" },
       );
       return;
@@ -75,7 +75,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
       config: filter ? { filter } : {},
     });
 
-    const interval = normalizedType === "news" ? "60 minutes" : "5 minutes";
+    const interval = normalizedType === "x" ? "24 hours" : normalizedType === "news" ? "60 minutes" : "5 minutes";
     await ctx.reply(
       `\u{2705} Watcher created: <b>${name}</b>\nChecks every ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },

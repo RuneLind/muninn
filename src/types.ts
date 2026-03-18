@@ -110,7 +110,7 @@ export interface ScheduledTask {
   updatedAt: number;
 }
 
-export type WatcherType = "email" | "calendar" | "github" | "news" | "goal";
+export type WatcherType = "email" | "calendar" | "github" | "news" | "goal" | "x";
 
 export interface Watcher {
   id: string;

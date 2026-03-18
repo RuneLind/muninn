@@ -5,6 +5,7 @@ import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { checkEmail } from "./email.ts";
 import { checkNews } from "./news.ts";
+import { checkX } from "./x.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -170,6 +171,8 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
       return await checkEmail(watcher, cwd, botName);
     case "news":
       return await checkNews(watcher);
+    case "x":
+      return await checkX(watcher, cwd, botName);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -177,7 +180,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 }
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";
