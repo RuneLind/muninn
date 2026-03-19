@@ -84,7 +84,11 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
       config,
     });
 
-    const interval = normalizedType === "x" ? "daily at 08:30" : normalizedType === "news" ? "60 minutes" : "5 minutes";
+    const INTERVAL_LABELS: Partial<Record<WatcherType, string>> = {
+      x: `daily at ${String(config.hour ?? 8).padStart(2, "0")}:${String(config.minute ?? 0).padStart(2, "0")}`,
+      news: "60 minutes",
+    };
+    const interval = INTERVAL_LABELS[normalizedType] ?? "5 minutes";
     await ctx.reply(
       `\u{2705} Watcher created: <b>${name}</b>\nRuns ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },

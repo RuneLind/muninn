@@ -23,7 +23,7 @@ interface XTweet {
   media: { type: string; url: string }[] | null;
 }
 
-const DEFAULT_X_PROMPT = `Create a concise morning digest in markdown:
+export const DEFAULT_X_PROMPT = `Create a concise morning digest in markdown:
 - Group tweets by topic/theme (tech, news, people, etc.)
 - Highlight the most interesting or high-engagement posts
 - Skip ads, low-value retweets, and noise

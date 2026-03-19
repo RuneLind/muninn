@@ -5,7 +5,7 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "email");
 
-const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user. Important emails:
+export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user. Important emails:
 - From real people (not automated marketing/newsletters)
 - Urgent or time-sensitive
 - Action items or requests

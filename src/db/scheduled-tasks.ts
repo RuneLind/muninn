@@ -179,24 +179,25 @@ export async function updateScheduledTask(
     return row ? mapRow(row) : null;
   }
 
-  // Recompute next_run_at if schedule fields changed
+  // If schedule fields changed, fetch current row to merge and compute next_run_at in one UPDATE
   const scheduleChanged = data.scheduleHour !== undefined || data.scheduleMinute !== undefined
     || data.scheduleDays !== undefined || data.scheduleIntervalMs !== undefined;
+
+  if (scheduleChanged) {
+    const [current] = await sql`SELECT * FROM scheduled_tasks WHERE id = ${id}`;
+    if (!current) return null;
+    const merged = mapRow({ ...current, ...Object.fromEntries(cols.map((c) => [c, updateObj[c]])) });
+    const nextRunAt = computeNextRun(merged);
+    updateObj.next_run_at = nextRunAt;
+    cols.push("next_run_at");
+  }
 
   const [row] = await sql`
     UPDATE scheduled_tasks SET ${sql(updateObj, ...cols)}
     WHERE id = ${id}
     RETURNING *
   `;
-  if (!row) return null;
-
-  const task = mapRow(row);
-  if (scheduleChanged) {
-    const nextRunAt = computeNextRun(task);
-    await sql`UPDATE scheduled_tasks SET next_run_at = ${nextRunAt} WHERE id = ${id}`;
-    task.nextRunAt = nextRunAt.getTime();
-  }
-  return task;
+  return row ? mapRow(row) : null;
 }
 
 /**

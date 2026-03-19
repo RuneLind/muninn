@@ -59,6 +59,17 @@ export function extractProperNouns(text: string): string[] {
   return tokens.sort();
 }
 
+// Cached formatter for time-of-day schedule checks (reused every scheduler tick)
+const scheduleFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Oslo",
+  hour: "numeric",
+  minute: "numeric",
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour12: false,
+});
+
 /**
  * Check if a watcher with time-of-day config (hour/minute) is due now.
  * Returns false if it's too early or if it already ran today.
@@ -68,18 +79,8 @@ function isScheduledTimeDue(watcher: Watcher): boolean {
   if (config.hour == null) return true; // no time-of-day constraint
 
   const now = new Date();
-  // Use Europe/Oslo timezone for schedule checks
-  const formatter = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Oslo",
-    hour: "numeric",
-    minute: "numeric",
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour12: false,
-  });
   const parts = Object.fromEntries(
-    formatter.formatToParts(now).map((p) => [p.type, p.value]),
+    scheduleFormatter.formatToParts(now).map((p) => [p.type, p.value]),
   );
   const currentHour = Number(parts.hour);
   const currentMinute = Number(parts.minute);
@@ -94,7 +95,7 @@ function isScheduledTimeDue(watcher: Watcher): boolean {
   if (watcher.lastRunAt) {
     const lastRun = new Date(watcher.lastRunAt);
     const lastParts = Object.fromEntries(
-      formatter.formatToParts(lastRun).map((p) => [p.type, p.value]),
+      scheduleFormatter.formatToParts(lastRun).map((p) => [p.type, p.value]),
     );
     const lastStr = `${lastParts.year}-${lastParts.month}-${lastParts.day}`;
     if (lastStr === todayStr) return false;
@@ -137,14 +138,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       const alerts = await runChecker(watcher, botConfig.dir, tag);
 
       // Filter out already-notified: by message ID and by content hash
-      const known = watcher.lastNotifiedIds;
+      const known = new Set(watcher.lastNotifiedIds);
       const newAlerts = alerts.filter((a) => {
-        if (known.includes(a.id)) {
+        if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
           return false;
         }
         const hash = contentHash(a);
-        if (hash && known.includes(hash)) {
+        if (hash && known.has(hash)) {
           log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
           return false;
         }

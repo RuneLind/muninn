@@ -1,3 +1,6 @@
+import { DEFAULT_X_PROMPT } from "../../../watchers/x.ts";
+import { DEFAULT_EMAIL_PROMPT } from "../../../watchers/email.ts";
+
 /** Automation panel — combined scheduled tasks + watchers master-detail */
 export function automationPanelStyles(): string {
   return `
@@ -631,8 +634,8 @@ export function automationPanelScript(): string {
     }
 
     var WATCHER_DEFAULT_PROMPTS = {
-      x: 'Create a concise morning digest in markdown:\\n- Group tweets by topic/theme (tech, news, people, etc.)\\n- Highlight the most interesting or high-engagement posts\\n- Skip ads, low-value retweets, and noise\\n- Use bullet points, keep it scannable\\n- Include @handles for attribution\\n- Max 15 bullet points total\\n- Write in a casual, informative tone',
-      email: 'For each new unread email, evaluate if it\\'s worth notifying the user. Important emails:\\n- From real people (not automated marketing/newsletters)\\n- Urgent or time-sensitive\\n- Action items or requests\\n- Security alerts, expiring tokens, important notifications',
+      x: ${JSON.stringify(DEFAULT_X_PROMPT)},
+      email: ${JSON.stringify(DEFAULT_EMAIL_PROMPT)},
       news: '',
     };
 
