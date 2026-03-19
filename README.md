@@ -599,7 +599,7 @@ Supports cron-style (hour/minute/days) and interval-style (every N ms) schedulin
 
 Background monitors that check external services at intervals:
 - **Email** — Spawns Haiku with the bot's Gmail MCP to search and evaluate unread emails
-- **X/Twitter** — Fetches home timeline via huginn's cookie-based GraphQL fetcher (`../huginn/scripts/x/`), Haiku summarizes into a morning digest. Tweet-level dedup via `trackingIds`.
+- **X/Twitter** — Fetches home timeline via [huginn](https://github.com/RuneLind/huginn)'s cookie-based GraphQL fetcher, Haiku summarizes into a morning digest. Tweet-level dedup via `trackingIds`.
 - Quiet hours support (per-user, timezone-aware, overnight ranges like 22-08)
 - Dedup via rolling window of notified IDs + content hashes
 - Configurable prompts per watcher (custom or sensible defaults), time-of-day scheduling (hour/minute in config)
