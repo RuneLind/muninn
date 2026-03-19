@@ -32,11 +32,12 @@ export const DEFAULT_X_PROMPT = `Create a concise morning digest in markdown:
 - Max 15 bullet points total
 - Write in a casual, informative tone`;
 
+const FETCHER_TIMEOUT_MS = 60_000;
+const MAX_PAGES = 10;
+
 export async function checkX(watcher: Watcher, _cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as { pages?: number; prompt?: string };
-  const pages = config.pages ?? 3;
-
-  const FETCHER_TIMEOUT_MS = 60_000;
+  const pages = Math.min(config.pages ?? 3, MAX_PAGES);
 
   // Fetch timeline from huginn's X fetcher
   let tweets: XTweet[];

@@ -70,35 +70,35 @@ const scheduleFormatter = new Intl.DateTimeFormat("en-GB", {
   hour12: false,
 });
 
+interface TimeParts { hour: number; minute: number; dayStr: string; }
+
+function getNowParts(): TimeParts {
+  const parts = Object.fromEntries(
+    scheduleFormatter.formatToParts(new Date()).map((p) => [p.type, p.value]),
+  );
+  return { hour: Number(parts.hour), minute: Number(parts.minute), dayStr: `${parts.year}-${parts.month}-${parts.day}` };
+}
+
 /**
  * Check if a watcher with time-of-day config (hour/minute) is due now.
  * Returns false if it's too early or if it already ran today.
  */
-function isScheduledTimeDue(watcher: Watcher): boolean {
+function isScheduledTimeDue(watcher: Watcher, now: TimeParts): boolean {
   const config = watcher.config as { hour?: number; minute?: number };
   if (config.hour == null) return true; // no time-of-day constraint
 
-  const now = new Date();
-  const parts = Object.fromEntries(
-    scheduleFormatter.formatToParts(now).map((p) => [p.type, p.value]),
-  );
-  const currentHour = Number(parts.hour);
-  const currentMinute = Number(parts.minute);
-  const todayStr = `${parts.year}-${parts.month}-${parts.day}`;
-
   // Too early today?
-  if (currentHour < config.hour || (currentHour === config.hour && currentMinute < (config.minute ?? 0))) {
+  if (now.hour < config.hour || (now.hour === config.hour && now.minute < (config.minute ?? 0))) {
     return false;
   }
 
   // Already ran today?
   if (watcher.lastRunAt) {
-    const lastRun = new Date(watcher.lastRunAt);
     const lastParts = Object.fromEntries(
-      scheduleFormatter.formatToParts(lastRun).map((p) => [p.type, p.value]),
+      scheduleFormatter.formatToParts(new Date(watcher.lastRunAt)).map((p) => [p.type, p.value]),
     );
     const lastStr = `${lastParts.year}-${lastParts.month}-${lastParts.day}`;
-    if (lastStr === todayStr) return false;
+    if (lastStr === now.dayStr) return false;
   }
 
   return true;
@@ -106,7 +106,8 @@ function isScheduledTimeDue(watcher: Watcher): boolean {
 
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
   const tag = botConfig.name;
-  const dueWatchers = (await getWatchersDueNow(tag)).filter(isScheduledTimeDue);
+  const now = getNowParts();
+  const dueWatchers = (await getWatchersDueNow(tag)).filter((w) => isScheduledTimeDue(w, now));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }

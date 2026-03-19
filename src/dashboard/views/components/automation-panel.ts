@@ -315,6 +315,8 @@ export function automationPanelHtml(): string {
 
 export function automationPanelScript(): string {
   return `
+    function fmtHM(h, m) { return String(h).padStart(2,'0') + ':' + String(m || 0).padStart(2,'0'); }
+
     let atFilter = { type: 'all', status: 'all' };
     let selectedAtItem = null; // { kind, index }
     let atDetailTab = 'details';
@@ -431,7 +433,7 @@ export function automationPanelScript(): string {
 
     function renderAtWatcherRow(w, index, isSelected) {
       const intervalStr = w.config && w.config.hour != null
-        ? 'daily ' + String(w.config.hour).padStart(2,'0') + ':' + String(w.config.minute || 0).padStart(2,'0')
+        ? 'daily ' + fmtHM(w.config.hour, w.config.minute)
         : formatInterval(w.intervalMs);
       const lastRun = w.lastRunAt ? 'ran ' + timeAgo(w.lastRunAt) : 'never ran';
       return '<div class="md-row' + (isSelected ? ' selected' : '') + '" data-at-select="watcher:' + index + '" style="' + (!w.enabled ? 'opacity:0.5' : '') + '">' +
@@ -654,7 +656,7 @@ export function automationPanelScript(): string {
 
       var hasSchedule = w.config && w.config.hour != null;
       var intervalLabel = hasSchedule
-        ? 'Daily at ' + String(w.config.hour).padStart(2,'0') + ':' + String(w.config.minute || 0).padStart(2,'0')
+        ? 'Daily at ' + fmtHM(w.config.hour, w.config.minute)
         : formatInterval(w.intervalMs);
       var nextRun = w.lastRunAt
         ? new Date(w.lastRunAt + w.intervalMs).toLocaleString()
@@ -665,7 +667,7 @@ export function automationPanelScript(): string {
       var conflictWarning = '';
       if (hasSchedule && w.intervalMs < 86400000) {
         conflictWarning = '<div style="margin-top:8px;padding:8px 10px;background:color-mix(in srgb, var(--status-warning) 10%, transparent);border:1px solid color-mix(in srgb, var(--status-warning) 25%, transparent);border-radius:6px;font-size:11px;color:var(--status-warning)">' +
-          'Run-at time (' + String(w.config.hour).padStart(2,'0') + ':' + String(w.config.minute || 0).padStart(2,'0') + ') overrides the ' + formatInterval(w.intervalMs) + ' interval. This watcher runs once daily. Clear the run-at time in Edit to use the interval instead.' +
+          'Run-at time (' + fmtHM(w.config.hour, w.config.minute) + ') overrides the ' + formatInterval(w.intervalMs) + ' interval. This watcher runs once daily. Clear the run-at time in Edit to use the interval instead.' +
         '</div>';
       }
 
