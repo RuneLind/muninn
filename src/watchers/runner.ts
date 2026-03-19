@@ -5,6 +5,7 @@ import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { checkEmail } from "./email.ts";
 import { checkNews } from "./news.ts";
+import { checkX } from "./x.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -58,9 +59,55 @@ export function extractProperNouns(text: string): string[] {
   return tokens.sort();
 }
 
+// Cached formatter for time-of-day schedule checks (reused every scheduler tick)
+const scheduleFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Oslo",
+  hour: "numeric",
+  minute: "numeric",
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour12: false,
+});
+
+interface TimeParts { hour: number; minute: number; dayStr: string; }
+
+function getNowParts(): TimeParts {
+  const parts = Object.fromEntries(
+    scheduleFormatter.formatToParts(new Date()).map((p) => [p.type, p.value]),
+  );
+  return { hour: Number(parts.hour), minute: Number(parts.minute), dayStr: `${parts.year}-${parts.month}-${parts.day}` };
+}
+
+/**
+ * Check if a watcher with time-of-day config (hour/minute) is due now.
+ * Returns false if it's too early or if it already ran today.
+ */
+function isScheduledTimeDue(watcher: Watcher, now: TimeParts): boolean {
+  const config = watcher.config as { hour?: number; minute?: number };
+  if (config.hour == null) return true; // no time-of-day constraint
+
+  // Too early today?
+  if (now.hour < config.hour || (now.hour === config.hour && now.minute < (config.minute ?? 0))) {
+    return false;
+  }
+
+  // Already ran today?
+  if (watcher.lastRunAt) {
+    const lastParts = Object.fromEntries(
+      scheduleFormatter.formatToParts(new Date(watcher.lastRunAt)).map((p) => [p.type, p.value]),
+    );
+    const lastStr = `${lastParts.year}-${lastParts.month}-${lastParts.day}`;
+    if (lastStr === now.dayStr) return false;
+  }
+
+  return true;
+}
+
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
   const tag = botConfig.name;
-  const dueWatchers = await getWatchersDueNow(tag);
+  const now = getNowParts();
+  const dueWatchers = (await getWatchersDueNow(tag)).filter((w) => isScheduledTimeDue(w, now));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }
@@ -92,14 +139,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       const alerts = await runChecker(watcher, botConfig.dir, tag);
 
       // Filter out already-notified: by message ID and by content hash
-      const known = watcher.lastNotifiedIds;
+      const known = new Set(watcher.lastNotifiedIds);
       const newAlerts = alerts.filter((a) => {
-        if (known.includes(a.id)) {
+        if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
           return false;
         }
         const hash = contentHash(a);
-        if (hash && known.includes(hash)) {
+        if (hash && known.has(hash)) {
           log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
           return false;
         }
@@ -137,7 +184,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Update last_run_at and keep a rolling window of IDs + content hashes
       const newEntries = newAlerts.flatMap((a) => {
         const hash = contentHash(a);
-        return hash ? [a.id, hash] : [a.id];
+        const extras = a.trackingIds ?? [];
+        return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
       });
       const updatedIds = [
         ...watcher.lastNotifiedIds,
@@ -170,6 +218,8 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
       return await checkEmail(watcher, cwd, botName);
     case "news":
       return await checkNews(watcher);
+    case "x":
+      return await checkX(watcher, cwd, botName);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -177,7 +227,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 }
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

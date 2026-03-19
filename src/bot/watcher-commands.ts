@@ -9,7 +9,7 @@ import {
 import { upsertUserSettings, getUserSettings } from "../db/user-settings.ts";
 import type { WatcherType } from "../types.ts";
 
-const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal"];
+const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal", "x"];
 
 export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   bot.command("watchers", async (ctx) => {
@@ -43,7 +43,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     if (!args) {
       await ctx.reply(
-        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>",
+        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal, x\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>\n<code>/watch x</code> (daily X/Twitter digest)",
         { parse_mode: "HTML" },
       );
       return;
@@ -63,21 +63,34 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     }
 
     const filter = parts.slice(1).join(" ") || undefined;
+
+    const DISPLAY_NAMES: Partial<Record<WatcherType, string>> = { x: "X Timeline" };
     const name = filter
       ? `${normalizedType}: ${filter}`
-      : normalizedType;
+      : DISPLAY_NAMES[normalizedType] ?? normalizedType;
+
+    const config: Record<string, string | number | boolean | null> = filter ? { filter } : {};
+    // X watcher defaults to daily at 08:30
+    if (normalizedType === "x") {
+      config.hour = 8;
+      config.minute = 30;
+    }
 
     const id = await saveWatcher({
       userId,
       botName: botConfig.name,
       name,
       type: normalizedType,
-      config: filter ? { filter } : {},
+      config,
     });
 
-    const interval = normalizedType === "news" ? "60 minutes" : "5 minutes";
+    const INTERVAL_LABELS: Partial<Record<WatcherType, string>> = {
+      x: `daily at ${String(config.hour ?? 8).padStart(2, "0")}:${String(config.minute ?? 0).padStart(2, "0")}`,
+      news: "60 minutes",
+    };
+    const interval = INTERVAL_LABELS[normalizedType] ?? "5 minutes";
     await ctx.reply(
-      `\u{2705} Watcher created: <b>${name}</b>\nChecks every ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
+      `\u{2705} Watcher created: <b>${name}</b>\nRuns ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },
     );
   });

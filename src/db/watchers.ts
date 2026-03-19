@@ -12,6 +12,7 @@ interface SaveWatcherParams {
 
 const DEFAULT_INTERVALS: Record<string, number> = {
   news: 3600000,    // 1 hour — news changes slower
+  x: 86400000,      // 24 hours — daily digest
 };
 const DEFAULT_INTERVAL_MS = 300000; // 5 minutes
 
@@ -106,6 +107,42 @@ export async function toggleWatcher(
 ): Promise<void> {
   const sql = getDb();
   await sql`UPDATE watchers SET enabled = ${enabled} WHERE id = ${id}`;
+}
+
+export async function updateWatcher(
+  id: string,
+  data: {
+    name?: string;
+    intervalMs?: number;
+    enabled?: boolean;
+    config?: Record<string, unknown>;
+  },
+): Promise<Watcher | null> {
+  const sql = getDb();
+  const updateObj: Record<string, unknown> = {};
+  const cols: string[] = [];
+  if (data.name !== undefined) { updateObj.name = data.name; cols.push("name"); }
+  if (data.intervalMs !== undefined) {
+    updateObj.interval_ms = data.intervalMs;
+    cols.push("interval_ms");
+    // Reset last_run_at so the new interval starts from now, not from the old run time
+    updateObj.last_run_at = new Date();
+    cols.push("last_run_at");
+  }
+  if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
+  if (data.config !== undefined) { updateObj.config = JSON.stringify(data.config); cols.push("config"); }
+
+  if (cols.length === 0) {
+    const [row] = await sql`SELECT * FROM watchers WHERE id = ${id}`;
+    return row ? mapRow(row) : null;
+  }
+
+  const [row] = await sql`
+    UPDATE watchers SET ${sql(updateObj, ...cols)}
+    WHERE id = ${id}
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
 }
 
 function mapRow(r: Record<string, any>): Watcher {

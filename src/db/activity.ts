@@ -38,17 +38,41 @@ export async function getRecentActivity(limit = 50, botName?: string): Promise<A
     `;
 
   return rows
-    .map((r) => ({
-      id: r.id,
-      type: r.type as ActivityEventType,
-      timestamp: new Date(r.created_at).getTime(),
-      userId: r.user_id ?? undefined,
-      username: r.username ?? undefined,
-      botName: r.bot_name ?? undefined,
-      text: r.text,
-      durationMs: r.duration_ms ?? undefined,
-      costUsd: r.cost_usd ? Number(r.cost_usd) : undefined,
-      metadata: r.metadata ?? undefined,
-    }))
+    .map(mapActivityRow)
     .reverse(); // chronological order
+}
+
+export async function getActivityForJob(
+  jobId: string,
+  jobName: string,
+  limit = 30,
+): Promise<ActivityEvent[]> {
+  const sql = getDb();
+  // Escape ILIKE wildcards in job name to prevent unintended pattern matching
+  const escapedName = jobName.replace(/[%_]/g, "\\$&");
+  const rows = await sql`
+    SELECT id, type, user_id, bot_name, username, text, duration_ms, cost_usd, metadata, created_at
+    FROM activity_log
+    WHERE metadata->>'watcherId' = ${jobId}
+       OR metadata->>'watcherName' = ${jobName}
+       OR (type = 'system' AND text ILIKE ${"%" + escapedName + "%"})
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map(mapActivityRow).reverse();
+}
+
+function mapActivityRow(r: Record<string, unknown>): ActivityEvent {
+  return {
+    id: r.id as string,
+    type: r.type as ActivityEventType,
+    timestamp: new Date(r.created_at as string).getTime(),
+    userId: (r.user_id as string) ?? undefined,
+    username: (r.username as string) ?? undefined,
+    botName: (r.bot_name as string) ?? undefined,
+    text: r.text as string,
+    durationMs: (r.duration_ms as number) ?? undefined,
+    costUsd: r.cost_usd ? Number(r.cost_usd) : undefined,
+    metadata: (r.metadata as Record<string, unknown>) ?? undefined,
+  };
 }

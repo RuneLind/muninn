@@ -151,6 +151,55 @@ export async function updateTaskPrompt(id: string, prompt: string | null): Promi
   await sql`UPDATE scheduled_tasks SET prompt = ${prompt}, updated_at = now() WHERE id = ${id}`;
 }
 
+export async function updateScheduledTask(
+  id: string,
+  data: {
+    title?: string;
+    scheduleHour?: number;
+    scheduleMinute?: number;
+    scheduleDays?: number[] | null;
+    scheduleIntervalMs?: number | null;
+    enabled?: boolean;
+    prompt?: string | null;
+  },
+): Promise<ScheduledTask | null> {
+  const sql = getDb();
+  const updateObj: Record<string, unknown> = {};
+  const cols: string[] = [];
+  if (data.title !== undefined) { updateObj.title = data.title; cols.push("title"); }
+  if (data.scheduleHour !== undefined) { updateObj.schedule_hour = data.scheduleHour; cols.push("schedule_hour"); }
+  if (data.scheduleMinute !== undefined) { updateObj.schedule_minute = data.scheduleMinute; cols.push("schedule_minute"); }
+  if (data.scheduleDays !== undefined) { updateObj.schedule_days = data.scheduleDays; cols.push("schedule_days"); }
+  if (data.scheduleIntervalMs !== undefined) { updateObj.schedule_interval_ms = data.scheduleIntervalMs; cols.push("schedule_interval_ms"); }
+  if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
+  if (data.prompt !== undefined) { updateObj.prompt = data.prompt; cols.push("prompt"); }
+
+  if (cols.length === 0) {
+    const [row] = await sql`SELECT * FROM scheduled_tasks WHERE id = ${id}`;
+    return row ? mapRow(row) : null;
+  }
+
+  // If schedule fields changed, fetch current row to merge and compute next_run_at in one UPDATE
+  const scheduleChanged = data.scheduleHour !== undefined || data.scheduleMinute !== undefined
+    || data.scheduleDays !== undefined || data.scheduleIntervalMs !== undefined;
+
+  if (scheduleChanged) {
+    const [current] = await sql`SELECT * FROM scheduled_tasks WHERE id = ${id}`;
+    if (!current) return null;
+    const merged = mapRow({ ...current, ...Object.fromEntries(cols.map((c) => [c, updateObj[c]])) });
+    const nextRunAt = computeNextRun(merged);
+    updateObj.next_run_at = nextRunAt;
+    cols.push("next_run_at");
+  }
+
+  const [row] = await sql`
+    UPDATE scheduled_tasks SET ${sql(updateObj, ...cols)}
+    WHERE id = ${id}
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
 /**
  * Compute the next run time for a task.
  * Two modes:

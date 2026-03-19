@@ -5,18 +5,22 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "email");
 
+export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user. Important emails:
+- From real people (not automated marketing/newsletters)
+- Urgent or time-sensitive
+- Action items or requests
+- Security alerts, expiring tokens, important notifications`;
+
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
-  const config = watcher.config as { filter?: string };
+  const config = watcher.config as { filter?: string; prompt?: string };
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
+
+  const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
 
   const prompt = `You have access to Gmail MCP tools.
 Search for unread emails matching: "${query}"
 
-For each new unread email, evaluate if it's worth notifying the user. Important emails:
-- From real people (not automated marketing/newsletters)
-- Urgent or time-sensitive
-- Action items or requests
-- Security alerts, expiring tokens, important notifications
+${userPrompt}
 
 CRITICAL:
 - "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.
