@@ -311,6 +311,9 @@ export function registerDataRoutes(app: Hono): void {
       if (body.scheduleMinute !== undefined && (!Number.isFinite(body.scheduleMinute) || body.scheduleMinute < 0 || body.scheduleMinute > 59)) {
         return c.json({ error: "scheduleMinute must be 0-59" }, 400);
       }
+      if (body.scheduleIntervalMs !== undefined && body.scheduleIntervalMs !== null && (typeof body.scheduleIntervalMs !== "number" || body.scheduleIntervalMs <= 0)) {
+        return c.json({ error: "scheduleIntervalMs must be a positive number" }, 400);
+      }
       const task = await updateScheduledTask(id, body);
       if (!task) return c.json({ error: "Task not found" }, 404);
       return c.json({ task });
