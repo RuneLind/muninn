@@ -182,7 +182,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Update last_run_at and keep a rolling window of IDs + content hashes
       const newEntries = newAlerts.flatMap((a) => {
         const hash = contentHash(a);
-        return hash ? [a.id, hash] : [a.id];
+        const extras = a.trackingIds ?? [];
+        return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
       });
       const updatedIds = [
         ...watcher.lastNotifiedIds,

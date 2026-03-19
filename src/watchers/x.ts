@@ -57,10 +57,24 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
     return [];
   }
 
-  log.info("Fetched {count} tweets, summarizing with Haiku", { botName, count: tweets.length });
+  // Filter out already-seen tweets (by tweet ID in lastNotifiedIds)
+  const known = new Set(watcher.lastNotifiedIds);
+  const newTweets = tweets.filter((t) => !known.has(`tw:${t.id}`));
+
+  if (newTweets.length === 0) {
+    log.info("All {count} tweets already seen, skipping digest", { botName, count: tweets.length });
+    return [];
+  }
+
+  log.info("Fetched {total} tweets, {newCount} new, summarizing with Haiku", {
+    botName, total: tweets.length, newCount: newTweets.length,
+  });
+
+  // Track all tweet IDs (prefixed to avoid collision with other ID types)
+  const trackingIds = newTweets.map((t) => `tw:${t.id}`);
 
   // Build a compact representation for Haiku
-  const tweetSummaries = tweets.map((t) => {
+  const tweetSummaries = newTweets.map((t) => {
     let line = `@${t.handle}: ${t.text}`;
     if (t.is_retweet) line = `[RT] ${line}`;
     if (t.likes > 50) line += ` (${t.likes} likes)`;
@@ -70,7 +84,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
 
   const prompt = `You are summarizing a user's X/Twitter timeline into a morning digest.
 
-Here are ${tweets.length} tweets from the home timeline:
+Here are ${newTweets.length} tweets from the home timeline:
 
 ${tweetSummaries}
 
@@ -90,12 +104,13 @@ Create a concise morning digest in markdown:
       source: "x",
       summary: result,
       urgency: "low" as const,
+      trackingIds,
     }];
   } catch (err) {
     log.error("Haiku summarization failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
 
     // Fall back to raw tweet list (no summarization)
-    const fallback = tweets.slice(0, 10).map((t) =>
+    const fallback = newTweets.slice(0, 10).map((t) =>
       `**@${t.handle}**: ${t.text.slice(0, 200)}`,
     ).join("\n\n");
     return [{
@@ -103,6 +118,7 @@ Create a concise morning digest in markdown:
       source: "x",
       summary: fallback,
       urgency: "low" as const,
+      trackingIds,
     }];
   }
 }

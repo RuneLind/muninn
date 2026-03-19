@@ -134,6 +134,8 @@ export interface WatcherAlert {
   urgency: "low" | "medium" | "high";
   sender?: string;
   subject?: string;
+  /** Extra IDs to track in lastNotifiedIds for dedup (e.g. individual tweet IDs in a digest) */
+  trackingIds?: string[];
 }
 
 export interface UserSettings {
