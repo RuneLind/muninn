@@ -48,12 +48,14 @@ export async function getActivityForJob(
   limit = 30,
 ): Promise<ActivityEvent[]> {
   const sql = getDb();
+  // Escape ILIKE wildcards in job name to prevent unintended pattern matching
+  const escapedName = jobName.replace(/[%_]/g, "\\$&");
   const rows = await sql`
     SELECT id, type, user_id, bot_name, username, text, duration_ms, cost_usd, metadata, created_at
     FROM activity_log
     WHERE metadata->>'watcherId' = ${jobId}
        OR metadata->>'watcherName' = ${jobName}
-       OR (type = 'system' AND text ILIKE ${"%" + jobName + "%"})
+       OR (type = 'system' AND text ILIKE ${"%" + escapedName + "%"})
     ORDER BY created_at DESC
     LIMIT ${limit}
   `;

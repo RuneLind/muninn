@@ -820,15 +820,11 @@ export function automationPanelScript(): string {
 
     async function toggleAtItem(kind) {
       if (!selectedAtItem) return;
-      var item, url;
-      if (kind === 'watcher') {
-        item = (watchersData || [])[selectedAtItem.index];
-        url = '/api/watchers/' + item.id;
-      } else {
-        item = (tasksData || [])[selectedAtItem.index];
-        url = '/api/tasks/' + item.id;
-      }
+      var item = kind === 'watcher'
+        ? (watchersData || [])[selectedAtItem.index]
+        : (tasksData || [])[selectedAtItem.index];
       if (!item) return;
+      var url = '/api/' + (kind === 'watcher' ? 'watchers' : 'tasks') + '/' + item.id;
       try {
         var res = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !item.enabled }) });
         var data = await res.json();
