@@ -36,6 +36,8 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
   const config = watcher.config as { pages?: number; prompt?: string };
   const pages = config.pages ?? 3;
 
+  const FETCHER_TIMEOUT_MS = 60_000;
+
   // Fetch timeline from huginn's X fetcher
   let tweets: XTweet[];
   try {
@@ -44,11 +46,17 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
       { cwd: HUGINN_PATH, stdout: "pipe", stderr: "pipe" },
     );
 
+    const timeout = setTimeout(() => {
+      log.warn("X fetcher timed out after {ms}ms, killing", { botName, ms: FETCHER_TIMEOUT_MS });
+      proc.kill();
+    }, FETCHER_TIMEOUT_MS);
+
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
     const exitCode = await proc.exited;
+    clearTimeout(timeout);
 
     if (exitCode !== 0) {
       log.error("X fetcher failed (exit {code}): {stderr}", { botName, code: exitCode, stderr: stderr.slice(0, 500) });

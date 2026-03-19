@@ -305,10 +305,10 @@ export function registerDataRoutes(app: Hono): void {
         enabled?: boolean;
         prompt?: string | null;
       }>();
-      if (body.scheduleHour !== undefined && (body.scheduleHour < 0 || body.scheduleHour > 23)) {
+      if (body.scheduleHour !== undefined && (!Number.isFinite(body.scheduleHour) || body.scheduleHour < 0 || body.scheduleHour > 23)) {
         return c.json({ error: "scheduleHour must be 0-23" }, 400);
       }
-      if (body.scheduleMinute !== undefined && (body.scheduleMinute < 0 || body.scheduleMinute > 59)) {
+      if (body.scheduleMinute !== undefined && (!Number.isFinite(body.scheduleMinute) || body.scheduleMinute < 0 || body.scheduleMinute > 59)) {
         return c.json({ error: "scheduleMinute must be 0-59" }, 400);
       }
       const task = await updateScheduledTask(id, body);
@@ -330,6 +330,7 @@ export function registerDataRoutes(app: Hono): void {
   app.get("/api/activity/job/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid job ID" }, 400);
       const name = c.req.query("name") || id;
       const limit = parseIntParam(c.req.query("limit"), 30, 100);
       const events = await getActivityForJob(id, name, limit);
