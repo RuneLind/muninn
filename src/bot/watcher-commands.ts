@@ -63,21 +63,30 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     }
 
     const filter = parts.slice(1).join(" ") || undefined;
+
+    const DISPLAY_NAMES: Partial<Record<WatcherType, string>> = { x: "X Timeline" };
     const name = filter
       ? `${normalizedType}: ${filter}`
-      : normalizedType;
+      : DISPLAY_NAMES[normalizedType] ?? normalizedType;
+
+    const config: Record<string, string | number | boolean | null> = filter ? { filter } : {};
+    // X watcher defaults to daily at 08:30
+    if (normalizedType === "x") {
+      config.hour = 8;
+      config.minute = 30;
+    }
 
     const id = await saveWatcher({
       userId,
       botName: botConfig.name,
       name,
       type: normalizedType,
-      config: filter ? { filter } : {},
+      config,
     });
 
-    const interval = normalizedType === "x" ? "24 hours" : normalizedType === "news" ? "60 minutes" : "5 minutes";
+    const interval = normalizedType === "x" ? "daily at 08:30" : normalizedType === "news" ? "60 minutes" : "5 minutes";
     await ctx.reply(
-      `\u{2705} Watcher created: <b>${name}</b>\nChecks every ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
+      `\u{2705} Watcher created: <b>${name}</b>\nRuns ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },
     );
   });

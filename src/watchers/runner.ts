@@ -59,9 +59,53 @@ export function extractProperNouns(text: string): string[] {
   return tokens.sort();
 }
 
+/**
+ * Check if a watcher with time-of-day config (hour/minute) is due now.
+ * Returns false if it's too early or if it already ran today.
+ */
+function isScheduledTimeDue(watcher: Watcher): boolean {
+  const config = watcher.config as { hour?: number; minute?: number };
+  if (config.hour == null) return true; // no time-of-day constraint
+
+  const now = new Date();
+  // Use Europe/Oslo timezone for schedule checks
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Oslo",
+    hour: "numeric",
+    minute: "numeric",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(now).map((p) => [p.type, p.value]),
+  );
+  const currentHour = Number(parts.hour);
+  const currentMinute = Number(parts.minute);
+  const todayStr = `${parts.year}-${parts.month}-${parts.day}`;
+
+  // Too early today?
+  if (currentHour < config.hour || (currentHour === config.hour && currentMinute < (config.minute ?? 0))) {
+    return false;
+  }
+
+  // Already ran today?
+  if (watcher.lastRunAt) {
+    const lastRun = new Date(watcher.lastRunAt);
+    const lastParts = Object.fromEntries(
+      formatter.formatToParts(lastRun).map((p) => [p.type, p.value]),
+    );
+    const lastStr = `${lastParts.year}-${lastParts.month}-${lastParts.day}`;
+    if (lastStr === todayStr) return false;
+  }
+
+  return true;
+}
+
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
   const tag = botConfig.name;
-  const dueWatchers = await getWatchersDueNow(tag);
+  const dueWatchers = (await getWatchersDueNow(tag)).filter(isScheduledTimeDue);
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }
