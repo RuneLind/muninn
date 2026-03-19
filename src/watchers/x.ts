@@ -23,8 +23,17 @@ interface XTweet {
   media: { type: string; url: string }[] | null;
 }
 
+const DEFAULT_X_PROMPT = `Create a concise morning digest in markdown:
+- Group tweets by topic/theme (tech, news, people, etc.)
+- Highlight the most interesting or high-engagement posts
+- Skip ads, low-value retweets, and noise
+- Use bullet points, keep it scannable
+- Include @handles for attribution
+- Max 15 bullet points total
+- Write in a casual, informative tone`;
+
 export async function checkX(watcher: Watcher, _cwd?: string, botName?: string): Promise<WatcherAlert[]> {
-  const config = watcher.config as { pages?: number };
+  const config = watcher.config as { pages?: number; prompt?: string };
   const pages = config.pages ?? 3;
 
   // Fetch timeline from huginn's X fetcher
@@ -82,20 +91,15 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
     return line;
   }).join("\n---\n");
 
+  const userPrompt = config.prompt || DEFAULT_X_PROMPT;
+
   const prompt = `You are summarizing a user's X/Twitter timeline into a morning digest.
 
 Here are ${newTweets.length} tweets from the home timeline:
 
 ${tweetSummaries}
 
-Create a concise morning digest in markdown:
-- Group tweets by topic/theme (tech, news, people, etc.)
-- Highlight the most interesting or high-engagement posts
-- Skip ads, low-value retweets, and noise
-- Use bullet points, keep it scannable
-- Include @handles for attribution
-- Max 15 bullet points total
-- Write in a casual, informative tone`;
+${userPrompt}`;
 
   try {
     const { result } = await spawnHaiku(prompt, "watcher-x", `${botName ?? "jarvis"}-watcher`);

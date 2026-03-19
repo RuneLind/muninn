@@ -630,8 +630,21 @@ export function automationPanelScript(): string {
       if (atDetailTab === 'activity') loadJobActivity('watcher', w);
     }
 
+    var WATCHER_DEFAULT_PROMPTS = {
+      x: 'Create a concise morning digest in markdown:\\n- Group tweets by topic/theme (tech, news, people, etc.)\\n- Highlight the most interesting or high-engagement posts\\n- Skip ads, low-value retweets, and noise\\n- Use bullet points, keep it scannable\\n- Include @handles for attribution\\n- Max 15 bullet points total\\n- Write in a casual, informative tone',
+      email: 'For each new unread email, evaluate if it\\'s worth notifying the user. Important emails:\\n- From real people (not automated marketing/newsletters)\\n- Urgent or time-sensitive\\n- Action items or requests\\n- Security alerts, expiring tokens, important notifications',
+      news: '',
+    };
+
+    function getWatcherPrompt(w) {
+      return (w.config && w.config.prompt) || WATCHER_DEFAULT_PROMPTS[w.type] || '';
+    }
+
     function renderWatcherDetailsTab(w) {
-      var configEntries = Object.entries(w.config || {});
+      // Filter out prompt/hour/minute from config display (shown as dedicated fields)
+      var configEntries = Object.entries(w.config || {}).filter(function(entry) {
+        return entry[0] !== 'prompt' && entry[0] !== 'hour' && entry[0] !== 'minute';
+      });
       var configHtml = configEntries.map(function(entry) {
         return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--bg-surface)"><span style="color:var(--text-dim)">' + escapeHtml(entry[0]) + '</span><span style="color:var(--text-soft)">' + escapeHtml(String(entry[1])) + '</span></div>';
       }).join('');
@@ -653,16 +666,23 @@ export function automationPanelScript(): string {
         '</div>';
       }
 
+      var prompt = getWatcherPrompt(w);
+      var isDefault = !(w.config && w.config.prompt);
+      var promptHtml = prompt
+        ? '<div class="detail-field"><div class="detail-label">Prompt' + (isDefault ? ' <span style="opacity:0.5">(default)</span>' : '') + '</div><div class="detail-value" style="font-family:monospace;font-size:12px;background:var(--bg-panel);padding:8px;border-radius:6px;white-space:pre-wrap">' + escapeHtml(prompt) + '</div></div>'
+        : '';
+
       return '<div class="md-detail-body">' +
         '<div class="detail-field"><div class="detail-label">Type</div>' +
           '<div class="detail-value"><span class="watcher-badge ' + escapeAttr(w.type) + '">' + escapeHtml(w.type) + '</span></div></div>' +
         '<div class="detail-field"><div class="detail-label">Schedule</div><div class="detail-value">' + intervalLabel + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Next Run</div><div class="detail-value">' + nextRun + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + lastLabel + '</div></div>' +
+        promptHtml +
         '<div class="detail-field"><div class="detail-label">Tracked IDs</div><div class="detail-value">' + (w.lastNotifiedIds ? w.lastNotifiedIds.length : 0) + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Created</div><div class="detail-value">' + new Date(w.createdAt).toLocaleDateString() + '</div></div>' +
         conflictWarning +
-        (configHtml ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
+        (configHtml.length ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
       '</div>';
     }
 
@@ -685,6 +705,7 @@ export function automationPanelScript(): string {
         '</div>' +
         scheduleHint +
         (w.config && w.config.filter != null ? '<div class="at-edit-group"><label>Filter</label><input type="text" id="atEditFilter" value="' + escapeAttr(w.config.filter || '') + '"></div>' : '') +
+        '<div class="at-edit-group"><label>Prompt</label><textarea id="atEditPrompt">' + escapeHtml(getWatcherPrompt(w)) + '</textarea></div>' +
         '<div id="atEditMsg"></div>' +
         '<div class="at-edit-actions">' +
           '<button class="at-save-btn" data-at-save="watcher">Save</button>' +
@@ -738,6 +759,8 @@ export function automationPanelScript(): string {
       }
       var filterVal = document.getElementById('atEditFilter');
       if (filterVal) config.filter = filterVal.value || undefined;
+      var promptVal = document.getElementById('atEditPrompt');
+      if (promptVal) config.prompt = promptVal.value || undefined;
       body.config = config;
 
       try {
