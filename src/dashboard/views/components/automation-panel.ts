@@ -636,13 +636,22 @@ export function automationPanelScript(): string {
         return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--bg-surface)"><span style="color:var(--text-dim)">' + escapeHtml(entry[0]) + '</span><span style="color:var(--text-soft)">' + escapeHtml(String(entry[1])) + '</span></div>';
       }).join('');
 
-      var intervalLabel = w.config && w.config.hour != null
+      var hasSchedule = w.config && w.config.hour != null;
+      var intervalLabel = hasSchedule
         ? 'Daily at ' + String(w.config.hour).padStart(2,'0') + ':' + String(w.config.minute || 0).padStart(2,'0')
         : formatInterval(w.intervalMs);
       var nextRun = w.lastRunAt
         ? new Date(w.lastRunAt + w.intervalMs).toLocaleString()
         : 'Pending';
       var lastLabel = w.lastRunAt ? timeAgo(w.lastRunAt) + ' (' + new Date(w.lastRunAt).toLocaleString() + ')' : 'Never';
+
+      // Warn if interval < 24h but time-of-day is set (time-of-day wins)
+      var conflictWarning = '';
+      if (hasSchedule && w.intervalMs < 86400000) {
+        conflictWarning = '<div style="margin-top:8px;padding:8px 10px;background:color-mix(in srgb, var(--status-warning) 10%, transparent);border:1px solid color-mix(in srgb, var(--status-warning) 25%, transparent);border-radius:6px;font-size:11px;color:var(--status-warning)">' +
+          'Run-at time (' + String(w.config.hour).padStart(2,'0') + ':' + String(w.config.minute || 0).padStart(2,'0') + ') overrides the ' + formatInterval(w.intervalMs) + ' interval. This watcher runs once daily. Clear the run-at time in Edit to use the interval instead.' +
+        '</div>';
+      }
 
       return '<div class="md-detail-body">' +
         '<div class="detail-field"><div class="detail-label">Type</div>' +
@@ -652,6 +661,7 @@ export function automationPanelScript(): string {
         '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + lastLabel + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Tracked IDs</div><div class="detail-value">' + (w.lastNotifiedIds ? w.lastNotifiedIds.length : 0) + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Created</div><div class="detail-value">' + new Date(w.createdAt).toLocaleDateString() + '</div></div>' +
+        conflictWarning +
         (configHtml ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
       '</div>';
     }
@@ -659,6 +669,10 @@ export function automationPanelScript(): string {
     function renderWatcherEditTab(w) {
       var hasSchedule = w.config && w.config.hour != null;
       var intervalMin = Math.round(w.intervalMs / 60000);
+
+      var scheduleHint = hasSchedule
+        ? '<div style="font-size:10px;color:var(--status-warning);margin-top:4px">Run-at time overrides interval (runs once daily). Clear hour to use interval instead.</div>'
+        : '<div style="font-size:10px;color:var(--text-faint);margin-top:4px">Set run-at time for daily scheduling, or leave empty to use interval.</div>';
 
       return '<div class="at-edit-form">' +
         '<div class="at-edit-group"><label>Name</label><input type="text" id="atEditName" value="' + escapeAttr(w.name) + '"></div>' +
@@ -669,6 +683,7 @@ export function automationPanelScript(): string {
           '<div class="at-edit-group"><label>Run at hour (0-23, optional)</label><input type="number" id="atEditHour" value="' + (hasSchedule ? w.config.hour : '') + '" min="0" max="23" placeholder="—"></div>' +
           '<div class="at-edit-group"><label>Run at minute</label><input type="number" id="atEditMinute" value="' + (hasSchedule ? (w.config.minute || 0) : '') + '" min="0" max="59" placeholder="0"></div>' +
         '</div>' +
+        scheduleHint +
         (w.config && w.config.filter != null ? '<div class="at-edit-group"><label>Filter</label><input type="text" id="atEditFilter" value="' + escapeAttr(w.config.filter || '') + '"></div>' : '') +
         '<div id="atEditMsg"></div>' +
         '<div class="at-edit-actions">' +
