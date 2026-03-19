@@ -3,50 +3,12 @@
 Personal AI assistant platform — multi-bot system supporting Telegram, Slack, and web chat, with pluggable AI connectors, semantic memory, goal tracking, scheduled tasks, and a full-featured web dashboard.
 
 ```mermaid
-graph TB
-    subgraph Platforms
-        TG[Telegram]
-        SL[Slack]
-        WEB[Web Chat]
-        JIRA[Jira Extension]
-        YT[YouTube Extension]
-    end
-
-    subgraph "Muninn Process"
-        CORE[Core Message Processor]
-
-        subgraph Bots
-            B1[Bot 1 — Claude CLI]
-            B2[Bot 2 — Copilot SDK]
-            B3[Bot 3 — Ollama / OpenAI]
-        end
-
-        subgraph Intelligence
-            MEM[Memory Extraction]
-            GOAL[Goal Detection]
-            SCHED[Scheduler & Tasks]
-            WATCH[Watchers]
-        end
-
-        DASH[Dashboard & APIs]
-        DB[(PostgreSQL + pgvector)]
-    end
-
-    TG --> B1
-    SL --> B2
-    WEB --> CORE
-    JIRA --> DASH
-    YT --> DASH
-
-    B1 --> CORE
-    B2 --> CORE
-    B3 --> CORE
-    CORE --> DB
-    CORE --> MEM
-    CORE --> GOAL
-    CORE --> SCHED
-    WATCH --> DB
-    DASH --> DB
+graph LR
+    Platforms["Telegram · Slack · Web Chat<br/>Chrome Extensions"] --> Bots["Multi-Bot Engine<br/>(Claude CLI / Copilot SDK / Ollama)"]
+    Bots --> Intelligence["Memory · Goals<br/>Scheduler · Watchers"]
+    Bots --> DB[(PostgreSQL<br/>+ pgvector)]
+    Intelligence --> DB
+    Dashboard["Web Dashboard<br/>10+ pages"] --> DB
 ```
 
 ## Features
@@ -57,7 +19,7 @@ graph TB
 - **Semantic Memory** — Automatically extracts and recalls facts from conversations using local embeddings (Transformers.js) and hybrid search (FTS + pgvector)
 - **Goal Tracking** — Detects goals/commitments/deadlines from conversations, injects them into prompt context, and proactively sends reminders and check-ins
 - **Scheduled Tasks** — Cron-style or interval-based recurring tasks detected from conversation ("remind me every morning at 8") — supports reminders, AI-generated briefings, and custom prompts
-- **Proactive Watchers** — Background monitors (email via Gmail MCP, calendar, etc.) with quiet hours and dedup
+- **Proactive Watchers** — Background monitors (email via Gmail MCP, X/Twitter timeline digest, etc.) with quiet hours, dedup, and configurable prompts
 - **Voice** — Speech-to-text (whisper-cli) and text-to-speech (macOS say + ffmpeg) with mirror mode (voice in → voice + text out)
 - **Request Tracing** — Full request lifecycle tracing with MCP tool call tracking (which tools, how long each took), waterfall visualization in the dashboard
 - **Web Dashboard** — Hono server with 10+ pages: real-time activity feed, traces waterfall, memory search, MCP debugger, log viewer, YouTube summarizer, knowledge search, Serena code analysis, and more
@@ -349,7 +311,7 @@ Grammy-based Telegram bot with text, voice, and command support.
 |---|---|
 | `/start` | Confirms the bot is online |
 | `/watchers` | List all active watchers with status, interval, last run, and filter |
-| `/watch <type> [filter]` | Create a new watcher (types: `email`, `calendar`, `github`, `news`, `goal`) |
+| `/watch <type> [filter]` | Create a new watcher (types: `email`, `calendar`, `github`, `news`, `goal`, `x`) |
 | `/unwatch <name\|id>` | Remove a watcher by name or short ID |
 | `/quiet [start-end\|off]` | View, set, or disable quiet hours (e.g. `/quiet 22-08`) |
 | `/topic [name]` | Show current topic, or switch to a named topic |
@@ -637,8 +599,10 @@ Supports cron-style (hour/minute/days) and interval-style (every N ms) schedulin
 
 Background monitors that check external services at intervals:
 - **Email** — Spawns Haiku with the bot's Gmail MCP to search and evaluate unread emails
+- **X/Twitter** — Fetches home timeline via huginn's cookie-based GraphQL fetcher (`../huginn/scripts/x/`), Haiku summarizes into a morning digest. Tweet-level dedup via `trackingIds`.
 - Quiet hours support (per-user, timezone-aware, overnight ranges like 22-08)
-- Dedup via rolling window of notified IDs
+- Dedup via rolling window of notified IDs + content hashes
+- Configurable prompts per watcher (custom or sensible defaults), time-of-day scheduling (hour/minute in config)
 
 ### Voice
 
@@ -802,7 +766,7 @@ The app container has a health check that polls `GET /api/stats` every 30 second
 | `src/memory/` | Async memory extraction (personal + shared scope) |
 | `src/goals/` | Goal detection (async Claude Haiku) |
 | `src/scheduler/` | Unified scheduler (tasks + goal reminders + watchers), shared Haiku executor |
-| `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours |
+| `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), X/Twitter digest, quiet hours |
 | `src/db/` | Postgres CRUD — messages, memories, goals, tasks, activity, watchers, threads, traces, connectors |
 | `src/tracing/` | Request tracing with span hierarchy and MCP tool call child spans |
 | `src/dashboard/` | Hono web server — 10+ pages, REST APIs, SSE, OpenAPI spec |
