@@ -64,7 +64,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     const filter = parts.slice(1).join(" ") || undefined;
 
-    const DISPLAY_NAMES: Partial<Record<WatcherType, string>> = { x: "X Timeline" };
+    const DISPLAY_NAMES: Partial<Record<WatcherType, string>> = { x: "Timeline" };
     const name = filter
       ? `${normalizedType}: ${filter}`
       : DISPLAY_NAMES[normalizedType] ?? normalizedType;
