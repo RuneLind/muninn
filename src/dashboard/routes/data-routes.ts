@@ -13,7 +13,9 @@ import { getScheduledTasksForUser } from "../../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../../db/scheduled-tasks.ts";
 import { getRecentMemories, getMemoriesByUser, getMemoriesForUser } from "../../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../../db/stats.ts";
-import { getAllWatchers } from "../../db/watchers.ts";
+import { getAllWatchers, updateWatcher } from "../../db/watchers.ts";
+import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
+import { getActivityForJob } from "../../db/activity.ts";
 import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
 import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
@@ -268,11 +270,74 @@ export function registerDataRoutes(app: Hono): void {
     }
   });
 
+  app.put("/api/watchers/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
+      const body = await c.req.json<{
+        name?: string;
+        intervalMs?: number;
+        enabled?: boolean;
+        config?: Record<string, unknown>;
+      }>();
+      if (body.intervalMs !== undefined && (typeof body.intervalMs !== "number" || body.intervalMs <= 0)) {
+        return c.json({ error: "intervalMs must be a positive number" }, 400);
+      }
+      const watcher = await updateWatcher(id, body);
+      if (!watcher) return c.json({ error: "Watcher not found" }, 404);
+      return c.json({ watcher });
+    } catch (err) {
+      log.error("Failed to update watcher: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to update watcher" }, 500);
+    }
+  });
+
+  app.put("/api/tasks/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid task ID" }, 400);
+      const body = await c.req.json<{
+        title?: string;
+        scheduleHour?: number;
+        scheduleMinute?: number;
+        scheduleDays?: number[] | null;
+        scheduleIntervalMs?: number | null;
+        enabled?: boolean;
+        prompt?: string | null;
+      }>();
+      if (body.scheduleHour !== undefined && (body.scheduleHour < 0 || body.scheduleHour > 23)) {
+        return c.json({ error: "scheduleHour must be 0-23" }, 400);
+      }
+      if (body.scheduleMinute !== undefined && (body.scheduleMinute < 0 || body.scheduleMinute > 59)) {
+        return c.json({ error: "scheduleMinute must be 0-59" }, 400);
+      }
+      const task = await updateScheduledTask(id, body);
+      if (!task) return c.json({ error: "Task not found" }, 404);
+      return c.json({ task });
+    } catch (err) {
+      log.error("Failed to update task: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to update task" }, 500);
+    }
+  });
+
   app.get("/api/activity", (c) => {
     return c.json({
       events: activityLog.getRecent(50),
       stats: activityLog.stats,
     });
+  });
+
+  app.get("/api/activity/job/:id", async (c) => {
+    try {
+      const id = c.req.param("id");
+      const name = c.req.query("name") || id;
+      const limit = parseIntParam(c.req.query("limit"), 30, 100);
+      const events = await getActivityForJob(id, name, limit);
+      return c.json({ events });
+    } catch (err) {
+      log.error("Failed to fetch job activity: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch job activity" }, 500);
+    }
   });
 
   // --- Connector CRUD ---

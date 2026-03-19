@@ -151,6 +151,54 @@ export async function updateTaskPrompt(id: string, prompt: string | null): Promi
   await sql`UPDATE scheduled_tasks SET prompt = ${prompt}, updated_at = now() WHERE id = ${id}`;
 }
 
+export async function updateScheduledTask(
+  id: string,
+  data: {
+    title?: string;
+    scheduleHour?: number;
+    scheduleMinute?: number;
+    scheduleDays?: number[] | null;
+    scheduleIntervalMs?: number | null;
+    enabled?: boolean;
+    prompt?: string | null;
+  },
+): Promise<ScheduledTask | null> {
+  const sql = getDb();
+  const updateObj: Record<string, unknown> = {};
+  const cols: string[] = [];
+  if (data.title !== undefined) { updateObj.title = data.title; cols.push("title"); }
+  if (data.scheduleHour !== undefined) { updateObj.schedule_hour = data.scheduleHour; cols.push("schedule_hour"); }
+  if (data.scheduleMinute !== undefined) { updateObj.schedule_minute = data.scheduleMinute; cols.push("schedule_minute"); }
+  if (data.scheduleDays !== undefined) { updateObj.schedule_days = data.scheduleDays; cols.push("schedule_days"); }
+  if (data.scheduleIntervalMs !== undefined) { updateObj.schedule_interval_ms = data.scheduleIntervalMs; cols.push("schedule_interval_ms"); }
+  if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
+  if (data.prompt !== undefined) { updateObj.prompt = data.prompt; cols.push("prompt"); }
+
+  if (cols.length === 0) {
+    const [row] = await sql`SELECT * FROM scheduled_tasks WHERE id = ${id}`;
+    return row ? mapRow(row) : null;
+  }
+
+  // Recompute next_run_at if schedule fields changed
+  const scheduleChanged = data.scheduleHour !== undefined || data.scheduleMinute !== undefined
+    || data.scheduleDays !== undefined || data.scheduleIntervalMs !== undefined;
+
+  const [row] = await sql`
+    UPDATE scheduled_tasks SET ${sql(updateObj, ...cols)}
+    WHERE id = ${id}
+    RETURNING *
+  `;
+  if (!row) return null;
+
+  const task = mapRow(row);
+  if (scheduleChanged) {
+    const nextRunAt = computeNextRun(task);
+    await sql`UPDATE scheduled_tasks SET next_run_at = ${nextRunAt} WHERE id = ${id}`;
+    task.nextRunAt = nextRunAt.getTime();
+  }
+  return task;
+}
+
 /**
  * Compute the next run time for a task.
  * Two modes:

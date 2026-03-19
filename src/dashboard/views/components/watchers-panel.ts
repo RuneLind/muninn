@@ -13,6 +13,7 @@ export function watchersPanelStyles(): string {
     .watcher-badge.calendar { background: var(--tint-magenta); color: var(--status-magenta); }
     .watcher-badge.github { background: #1a2a1a; color: var(--status-success); }
     .watcher-badge.news { background: var(--tint-warning); color: var(--status-warning); }
+    .watcher-badge.x { background: #1a1a2a; color: #8899cc; }
     .watcher-badge.disabled { background: var(--tint-neutral); color: var(--text-faint); }
   `;
 }
