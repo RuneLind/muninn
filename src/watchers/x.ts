@@ -23,13 +23,14 @@ interface XTweet {
   media: { type: string; url: string }[] | null;
 }
 
-export const DEFAULT_X_PROMPT = `Create a concise morning digest in markdown:
-- Group tweets by topic/theme (tech, news, people, etc.)
+export const DEFAULT_X_PROMPT = `Create a concise digest in markdown:
+- Group by topic/theme (tech, news, people, etc.)
 - Highlight the most interesting or high-engagement posts
 - Skip ads, low-value retweets, and noise
 - Use bullet points, keep it scannable
-- Include @handles for attribution
+- For each item, link to the original tweet using the URL provided (markdown link on the @handle)
 - Max 15 bullet points total
+- Do NOT start with a heading like "# Morning Digest" — jump straight into the topics
 - Write in a casual, informative tone`;
 
 const FETCHER_TIMEOUT_MS = 60_000;
@@ -91,12 +92,13 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
   // Track all tweet IDs (prefixed to avoid collision with other ID types)
   const trackingIds = newTweets.map((t) => `tw:${t.id}`);
 
-  // Build a compact representation for Haiku
+  // Build a compact representation for Haiku — include URLs for linking
   const tweetSummaries = newTweets.map((t) => {
     let line = `@${t.handle}: ${t.text}`;
     if (t.is_retweet) line = `[RT] ${line}`;
     if (t.likes > 50) line += ` (${t.likes} likes)`;
     if (t.quoted_tweet) line += `\n  > @${t.quoted_tweet.handle}: ${t.quoted_tweet.text}`;
+    line += `\n  URL: ${t.url}`;
     return line;
   }).join("\n---\n");
 
