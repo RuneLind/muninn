@@ -36,6 +36,10 @@ graph LR
   - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated, or
   - GitHub Copilot SDK access, or
   - An OpenAI-compatible API (Ollama, LM Studio, vLLM)
+- [Huginn](https://github.com/RuneLind/huginn) (optional but recommended — companion project for knowledge search and X/Twitter):
+  - Knowledge base MCP tool — bots use huginn's MCP adapter to search indexed documents (Confluence, Jira, Notion, YouTube transcripts)
+  - X/Twitter fetcher — the X watcher shells out to huginn's `scripts/x/` to fetch the timeline via cookie-based GraphQL
+  - Dashboard search page queries huginn's knowledge API
 - [whisper-cpp](https://github.com/ggerganov/whisper.cpp) (optional, for voice: `brew install whisper-cpp`)
 - [ffmpeg](https://ffmpeg.org) (optional, for voice: `brew install ffmpeg`)
 
