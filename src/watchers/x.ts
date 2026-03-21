@@ -36,7 +36,7 @@ interface XWatcherConfig {
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
 
-const DEFAULT_API_URL = "http://localhost:8321";
+const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 const MAX_COLLECTION_DOCS = 80;
 
 interface CollectionDoc {
