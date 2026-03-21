@@ -18,26 +18,42 @@ interface XTweet {
   likes: number;
   retweets: number;
   replies: number;
+  views?: number;
+  bookmarks?: number;
+  tweet_type?: string;
   is_retweet: boolean;
   quoted_tweet: XTweet | null;
   media: { type: string; url: string }[] | null;
 }
 
-export const DEFAULT_X_PROMPT = `Create a concise digest in markdown:
-- Group by topic/theme (tech, news, people, etc.)
-- Highlight the most interesting or high-engagement posts
-- Skip ads, low-value retweets, and noise
-- Use bullet points, keep it scannable
-- For each item, link to the original tweet using the URL provided (markdown link on the @handle)
-- Max 15 bullet points total
-- Do NOT start with a heading like "# Morning Digest" — jump straight into the topics
+export const DEFAULT_X_PROMPT = `Create a digest with two sections:
+
+**Top Picks** (3-5 items) — the most interesting, impactful, or high-engagement content:
+- Give each a brief description with context on why it matters
+- Link @handles to the original tweet URL (markdown link)
+- Prioritize: articles/long-form notes, original insights, high view-to-like ratio, threads
+
+**Also Notable** (up to 10 items) — everything else worth mentioning:
+- One-line bullets only, with linked @handle
+- Skip: ads, spam, generic motivational, low-effort retweets, engagement bait, promotional
+
+Format rules:
+- Do NOT start with a heading — jump straight into "**Top Picks**"
+- Use bold for section headers
+- Keep it scannable — bullet points throughout
 - Write in a casual, informative tone`;
 
 const FETCHER_TIMEOUT_MS = 60_000;
 const MAX_PAGES = 10;
 
+interface XWatcherConfig {
+  pages?: number;
+  prompt?: string;
+  model?: string;
+}
+
 export async function checkX(watcher: Watcher, _cwd?: string, botName?: string): Promise<WatcherAlert[]> {
-  const config = watcher.config as { pages?: number; prompt?: string };
+  const config = watcher.config as XWatcherConfig;
   const pages = Math.min(config.pages ?? 3, MAX_PAGES);
 
   // Fetch timeline from huginn's X fetcher
@@ -85,18 +101,28 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
     return [];
   }
 
-  log.info("Fetched {total} tweets, {newCount} new, summarizing with Haiku", {
+  log.info("Fetched {total} tweets, {newCount} new, summarizing", {
     botName, total: tweets.length, newCount: newTweets.length,
   });
 
   // Track all tweet IDs (prefixed to avoid collision with other ID types)
   const trackingIds = newTweets.map((t) => `tw:${t.id}`);
 
-  // Build a compact representation for Haiku — include URLs for linking
+  // Build a compact representation with engagement signals for better curation
   const tweetSummaries = newTweets.map((t) => {
     let line = `@${t.handle}: ${t.text}`;
     if (t.is_retweet) line = `[RT] ${line}`;
-    if (t.likes > 50) line += ` (${t.likes} likes)`;
+
+    // Engagement signals
+    const signals: string[] = [];
+    if (t.likes > 50) signals.push(`${t.likes} likes`);
+    if (t.views && t.views > 10000) signals.push(`${Math.round(t.views / 1000)}k views`);
+    if (t.bookmarks && t.bookmarks > 10) signals.push(`${t.bookmarks} bookmarks`);
+    if (signals.length > 0) line += ` (${signals.join(", ")})`;
+
+    // Tweet type
+    if (t.tweet_type === "note") line = `[ARTICLE/NOTE] ${line}`;
+
     if (t.quoted_tweet) line += `\n  > @${t.quoted_tweet.handle}: ${t.quoted_tweet.text}`;
     line += `\n  URL: ${t.url}`;
     return line;
@@ -104,7 +130,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
 
   const userPrompt = config.prompt || DEFAULT_X_PROMPT;
 
-  const prompt = `You are summarizing a user's X/Twitter timeline into a morning digest.
+  const prompt = `You are curating a user's X/Twitter timeline into a digest.
 
 Here are ${newTweets.length} tweets from the home timeline:
 
@@ -113,7 +139,10 @@ ${tweetSummaries}
 ${userPrompt}`;
 
   try {
-    const { result } = await spawnHaiku(prompt, "watcher-x", `${botName ?? "jarvis"}-watcher`);
+    const { result } = await spawnHaiku(
+      prompt, "watcher-x", `${botName ?? "jarvis"}-watcher`,
+      undefined, botName, undefined, config.model,
+    );
     return [{
       id: `x-digest-${Date.now()}`,
       source: "x",
@@ -122,7 +151,7 @@ ${userPrompt}`;
       trackingIds,
     }];
   } catch (err) {
-    log.error("Haiku summarization failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
+    log.error("Summarization failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
 
     // Fall back to raw tweet list (no summarization)
     const fallback = newTweets.slice(0, 10).map((t) =>

@@ -12,7 +12,7 @@ export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's
 - Security alerts, expiring tokens, important notifications`;
 
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
-  const config = watcher.config as { filter?: string; prompt?: string };
+  const config = watcher.config as { filter?: string; prompt?: string; model?: string };
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
 
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
@@ -31,7 +31,7 @@ Return ONLY a JSON array (no markdown fences):
 [{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
 
-  const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName);
+  const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName, undefined, config.model);
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {

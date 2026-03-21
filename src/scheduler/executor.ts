@@ -20,6 +20,8 @@ export interface HaikuResult {
  */
 export const HAIKU_TIMEOUT_MS = 60_000;
 
+const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+
 export async function spawnHaiku(
   prompt: string,
   source: string,
@@ -27,7 +29,9 @@ export async function spawnHaiku(
   cwd?: string,
   botName?: string,
   timeoutMs = HAIKU_TIMEOUT_MS,
+  model?: string,
 ): Promise<HaikuResult> {
+  const effectiveModel = model || DEFAULT_MODEL;
   const args = [
     "claude",
     "-p",
@@ -35,7 +39,7 @@ export async function spawnHaiku(
     "--output-format",
     "json",
     "--model",
-    "claude-haiku-4-5-20251001",
+    effectiveModel,
   ];
 
   const proc = Bun.spawn(
@@ -84,8 +88,8 @@ export async function spawnHaiku(
       : 0;
     const outputTokens = parsed.usage?.output_tokens ?? 0;
     const model = parsed.modelUsage
-      ? Object.keys(parsed.modelUsage)[0] ?? "claude-haiku-4-5-20251001"
-      : "claude-haiku-4-5-20251001";
+      ? Object.keys(parsed.modelUsage)[0] ?? effectiveModel
+      : effectiveModel;
 
     // Normalize result to string — CLI 2.x may return an object
     let resultText: string;
