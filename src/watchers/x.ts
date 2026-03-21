@@ -26,6 +26,8 @@ interface XWatcherConfig {
   pages?: number;
   prompt?: string;
   model?: string;
+  /** Timeout in ms for the model call (default: 60s for Haiku, set higher for Sonnet) */
+  timeoutMs?: number;
   /** Set to collection name (e.g. "x-feed") to query huginn's indexed collection instead of spawning the fetcher */
   collection?: string;
   /** Knowledge API URL (default: http://localhost:8321) */
@@ -71,13 +73,17 @@ async function fetchFromCollection(
   }
 
   // Filter by recency — only docs from today or yesterday (date prefix in filename)
+  // Use Europe/Oslo timezone to match huginn's date convention
+  const dateFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
   const now = new Date();
-  const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-  const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+  const today = dateFmt.format(now);
+  const yesterday = dateFmt.format(new Date(now.getTime() - 86400000));
   const recentDocs = docs.filter((d) => d.id.startsWith(today) || d.id.startsWith(yesterday));
 
   // Then filter out already-seen tweets
-  const newDocs = recentDocs.filter((d) => !known.has(`tw:${extractTweetId(d.id)}`));
+  const newDocs = recentDocs
+    .filter((d) => !known.has(`tw:${extractTweetId(d.id)}`))
+    .sort((a, b) => a.id.localeCompare(b.id)); // oldest first for deterministic cap
 
   if (newDocs.length === 0) {
     log.info("No new recent tweets ({recent} recent, all seen)", { botName, recent: recentDocs.length });
@@ -89,28 +95,25 @@ async function fetchFromCollection(
   const texts: string[] = [];
   const trackingIds: string[] = [];
 
-  // Fetch in parallel batches of 10
-  for (let i = 0; i < toFetch.length; i += 10) {
-    const batch = toFetch.slice(i, i + 10);
-    const results = await Promise.all(
-      batch.map(async (doc) => {
-        try {
-          const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
-          if (!resp.ok) return null;
-          const data = await resp.json() as { text: string };
-          // Strip the bracketed document ID line that huginn prepends (e.g. "[2026-03-21_handle_id]")
-          const text = data.text.replace(/^\[.*?\]\n+/, "");
-          return { docId: doc.id, text };
-        } catch {
-          return null;
-        }
-      }),
-    );
-    for (const r of results) {
-      if (r) {
-        texts.push(r.text);
-        trackingIds.push(`tw:${extractTweetId(r.docId)}`);
+  const results = await Promise.all(
+    toFetch.map(async (doc) => {
+      try {
+        const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
+        if (!resp.ok) return null;
+        const data = await resp.json() as { text: string };
+        // Strip the bracketed document ID line that huginn prepends (e.g. "[2026-03-21_handle_id]")
+        const text = data.text.replace(/^\[.*?\]\n+/, "");
+        return { docId: doc.id, text };
+      } catch (err) {
+        log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
+        return null;
       }
+    }),
+  );
+  for (const r of results) {
+    if (r) {
+      texts.push(r.text);
+      trackingIds.push(`tw:${extractTweetId(r.docId)}`);
     }
   }
 
@@ -245,11 +248,9 @@ ${texts.join(separator)}
 ${userPrompt}`;
 
   try {
-    // Sonnet with large prompts needs more than the default 60s timeout
-    const timeoutMs = config.model?.includes("sonnet") ? 180_000 : undefined;
     const { result } = await spawnHaiku(prompt, {
       source: "watcher-x", entrypoint: `${botName ?? "jarvis"}-watcher`,
-      botName, model: config.model, timeoutMs,
+      botName, model: config.model, timeoutMs: config.timeoutMs,
     });
     return [{
       id: `x-digest-${Date.now()}`,
