@@ -92,7 +92,9 @@ async function fetchFromCollection(
           const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
           if (!resp.ok) return null;
           const data = await resp.json() as { text: string };
-          return { docId: doc.id, text: data.text };
+          // Strip the bracketed document ID line that huginn prepends (e.g. "[2026-03-21_handle_id]")
+          const text = data.text.replace(/^\[.*?\]\n+/, "");
+          return { docId: doc.id, text };
         } catch {
           return null;
         }
@@ -251,8 +253,14 @@ ${userPrompt}`;
   } catch (err) {
     log.error("Summarization failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
 
-    // Fall back to first 10 texts truncated
-    const fallback = texts.slice(0, 10).map((t) => t.slice(0, 200)).join("\n\n");
+    // Fall back to first 10 tweets — extract handle + first content line
+    const fallback = texts.slice(0, 10).map((t) => {
+      const handleMatch = t.match(/@(\w+)/);
+      const handle = handleMatch ? `**@${handleMatch[1]}**` : "";
+      // Skip heading lines, get first real content line
+      const contentLine = t.split("\n").find((l) => l && !l.startsWith("#") && !l.startsWith("---")) ?? "";
+      return `${handle}: ${contentLine.slice(0, 200)}`;
+    }).join("\n\n");
     return [{
       id: `x-digest-${Date.now()}`,
       source: "x",
