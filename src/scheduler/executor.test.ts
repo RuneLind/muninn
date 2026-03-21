@@ -20,7 +20,7 @@ describe("spawnHaiku timeout", () => {
     // Call spawnHaiku directly with a very short timeout.
     // "claude" won't be found or will hang — either way it exceeds 100ms.
     await expect(
-      spawnHaiku("test", "timeout-test", "test", undefined, "test-bot", 100),
+      spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
     ).rejects.toThrow(/timed out after 100ms|exited with code/);
   });
 

@@ -131,6 +131,22 @@ export function automationPanelStyles(): string {
       border-bottom-color: var(--accent);
     }
 
+    /* Run now button */
+    .at-run-btn {
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: var(--accent-light);
+      cursor: pointer;
+      transition: all 0.15s;
+      margin-left: auto;
+    }
+    .at-run-btn:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+    .at-run-btn:disabled { opacity: 0.5; cursor: default; }
+
     /* Toggle button in header */
     .at-toggle-btn {
       padding: 4px 10px;
@@ -140,7 +156,6 @@ export function automationPanelStyles(): string {
       border: 1px solid;
       cursor: pointer;
       transition: all 0.15s;
-      margin-left: auto;
     }
     .at-toggle-btn.enabled {
       background: color-mix(in srgb, var(--status-success) 15%, transparent);
@@ -540,6 +555,7 @@ export function automationPanelScript(): string {
             '<div style="font-size:14px;font-weight:600;color:var(--text-primary)">' + escapeHtml(label) + '</div>' +
             '<div style="font-size:11px;color:var(--text-dim)">' + escapeHtml(sublabel) + '</div>' +
           '</div>' +
+          '<button class="at-run-btn" data-at-trigger="' + kind + '" title="Run now">&#9654; Run</button>' +
           '<button class="at-toggle-btn ' + (item.enabled ? 'enabled' : 'disabled') + '" data-at-toggle="' + kind + '">' +
             (item.enabled ? 'Enabled' : 'Disabled') +
           '</button>' +
@@ -845,6 +861,41 @@ export function automationPanelScript(): string {
       } catch (err) { /* ignore */ }
     }
 
+    // --- Trigger manual run ---
+
+    async function triggerAtItem(kind, btn) {
+      if (!selectedAtItem) return;
+      var item = kind === 'watcher'
+        ? (watchersData || [])[selectedAtItem.index]
+        : (tasksData || [])[selectedAtItem.index];
+      if (!item) return;
+      var url = '/api/' + (kind === 'watcher' ? 'watchers' : 'tasks') + '/' + item.id + '/trigger';
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      try {
+        var res = await fetch(url, { method: 'POST' });
+        if (res.ok) {
+          btn.textContent = '✓ Done';
+          // Refresh activity tab if visible
+          if (atDetailTab === 'activity') loadJobActivity(kind, item);
+          // Refresh data to get updated lastRunAt
+          try {
+            var refreshRes = await fetch('/api/' + (kind === 'watcher' ? 'watchers' : 'tasks'));
+            var refreshData = await refreshRes.json();
+            if (kind === 'watcher') { watchersData = refreshData.watchers; }
+            else { tasksData = refreshData.tasks; }
+            renderAtCombinedList();
+          } catch (e) {}
+        } else {
+          var errData = await res.json().catch(function() { return {}; });
+          btn.textContent = errData.error || 'Failed';
+        }
+      } catch (err) {
+        btn.textContent = 'Error';
+      }
+      setTimeout(function() { btn.disabled = false; btn.innerHTML = '&#9654; Run'; }, 3000);
+    }
+
     function setAtFilter(key, value) {
       atFilter[key] = value;
       // Deselect current item when filters change
@@ -877,6 +928,10 @@ export function automationPanelScript(): string {
       // Tab switching
       var tabEl = e.target.closest('[data-at-tab]');
       if (tabEl) { switchAtTab(tabEl.dataset.atTab); return; }
+
+      // Trigger manual run
+      var triggerEl = e.target.closest('[data-at-trigger]');
+      if (triggerEl) { triggerAtItem(triggerEl.dataset.atTrigger, triggerEl); return; }
 
       // Toggle enabled/disabled
       var toggleEl = e.target.closest('[data-at-toggle]');

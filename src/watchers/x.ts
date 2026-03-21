@@ -139,10 +139,10 @@ ${tweetSummaries}
 ${userPrompt}`;
 
   try {
-    const { result } = await spawnHaiku(
-      prompt, "watcher-x", `${botName ?? "jarvis"}-watcher`,
-      undefined, botName, undefined, config.model,
-    );
+    const { result } = await spawnHaiku(prompt, {
+      source: "watcher-x", entrypoint: `${botName ?? "jarvis"}-watcher`,
+      botName, model: config.model,
+    });
     return [{
       id: `x-digest-${Date.now()}`,
       source: "x",

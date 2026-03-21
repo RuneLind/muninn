@@ -21,7 +21,16 @@ const tickRunning = new Map<string, boolean>();
 let lastCleanupAt = 0;
 const TICK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max per tick
 
+// Store scheduler contexts so the dashboard can trigger manual runs
+const schedulerContexts = new Map<string, { api: Api; config: Config; botConfig: BotConfig }>();
+
+export function getSchedulerContext(botName: string) {
+  return schedulerContexts.get(botName);
+}
+
 export function startScheduler(api: Api, config: Config, botConfig: BotConfig): void {
+  schedulerContexts.set(botConfig.name, { api, config, botConfig });
+
   if (!config.schedulerEnabled) {
     log.info("Scheduler disabled", { botName: botConfig.name });
     return;

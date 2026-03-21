@@ -22,15 +22,20 @@ export const HAIKU_TIMEOUT_MS = 60_000;
 
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
+export interface SpawnHaikuOptions {
+  source: string;
+  entrypoint?: string;
+  cwd?: string;
+  botName?: string;
+  timeoutMs?: number;
+  model?: string;
+}
+
 export async function spawnHaiku(
   prompt: string,
-  source: string,
-  entrypoint = "jarvis-scheduler",
-  cwd?: string,
-  botName?: string,
-  timeoutMs = HAIKU_TIMEOUT_MS,
-  model?: string,
+  opts: SpawnHaikuOptions,
 ): Promise<HaikuResult> {
+  const { source, entrypoint = "jarvis-scheduler", cwd, botName, timeoutMs = HAIKU_TIMEOUT_MS, model } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
   const args = [
     "claude",
@@ -129,7 +134,7 @@ export async function callHaiku(
   timeoutMs?: number,
 ): Promise<string> {
   try {
-    const { result } = await spawnHaiku(prompt, source, "jarvis-scheduler", cwd, botName, timeoutMs);
+    const { result } = await spawnHaiku(prompt, { source, cwd, botName, timeoutMs });
     return result.trim();
   } catch {
     return fallback;
