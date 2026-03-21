@@ -259,22 +259,9 @@ ${userPrompt}`;
       trackingIds,
     }];
   } catch (err) {
-    log.error("Summarization failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
-
-    // Fall back to first 10 tweets — extract handle + first content line
-    const fallback = texts.slice(0, 10).map((t) => {
-      const handleMatch = t.match(/@(\w+)/);
-      const handle = handleMatch ? `**@${handleMatch[1]}**` : "";
-      // Skip heading lines, get first real content line
-      const contentLine = t.split("\n").find((l) => l && !l.startsWith("#") && !l.startsWith("---")) ?? "";
-      return `${handle}: ${contentLine.slice(0, 200)}`;
-    }).join("\n\n");
-    return [{
-      id: `x-digest-${Date.now()}`,
-      source: "x",
-      summary: fallback,
-      urgency: "low" as const,
-      trackingIds,
-    }];
+    log.error("Summarization failed, skipping digest ({count} tweets lost): {error}", {
+      botName, count: texts.length, error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
   }
 }
