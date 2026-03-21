@@ -70,11 +70,17 @@ async function fetchFromCollection(
     return null;
   }
 
-  // Filter to new tweets not in lastNotifiedIds
-  const newDocs = docs.filter((d) => !known.has(`tw:${extractTweetId(d.id)}`));
+  // Filter by recency — only docs from today or yesterday (date prefix in filename)
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+  const recentDocs = docs.filter((d) => d.id.startsWith(today) || d.id.startsWith(yesterday));
+
+  // Then filter out already-seen tweets
+  const newDocs = recentDocs.filter((d) => !known.has(`tw:${extractTweetId(d.id)}`));
 
   if (newDocs.length === 0) {
-    log.info("All {count} collection documents already seen", { botName, count: docs.length });
+    log.info("No new recent tweets ({recent} recent, all seen)", { botName, recent: recentDocs.length });
     return { texts: [], trackingIds: [] };
   }
 
@@ -108,8 +114,8 @@ async function fetchFromCollection(
     }
   }
 
-  log.info("Collection: {total} docs, {newCount} new, {fetched} fetched", {
-    botName, total: docs.length, newCount: newDocs.length, fetched: texts.length,
+  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched", {
+    botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: texts.length,
   });
 
   return { texts, trackingIds };
@@ -239,9 +245,11 @@ ${texts.join(separator)}
 ${userPrompt}`;
 
   try {
+    // Sonnet with large prompts needs more than the default 60s timeout
+    const timeoutMs = config.model?.includes("sonnet") ? 180_000 : undefined;
     const { result } = await spawnHaiku(prompt, {
       source: "watcher-x", entrypoint: `${botName ?? "jarvis"}-watcher`,
-      botName, model: config.model,
+      botName, model: config.model, timeoutMs,
     });
     return [{
       id: `x-digest-${Date.now()}`,
