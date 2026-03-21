@@ -226,6 +226,49 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
   }
 }
 
+/**
+ * Trigger a single watcher run manually (from dashboard).
+ * Skips quiet hours and time-of-day checks — runs immediately.
+ */
+export async function runSingleWatcher(api: Api, botConfig: BotConfig, watcher: Watcher): Promise<{ alertsSent: number }> {
+  const tag = botConfig.name;
+  log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
+
+  const alerts = await runChecker(watcher, botConfig.dir, tag);
+
+  const known = new Set(watcher.lastNotifiedIds);
+  const newAlerts = alerts.filter((a) => {
+    if (known.has(a.id)) return false;
+    const hash = contentHash(a);
+    return !(hash && known.has(hash));
+  });
+
+  if (newAlerts.length > 0) {
+    const markdown = formatAlerts(watcher, newAlerts);
+    await api.sendMessage(watcher.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
+    const threadId = await getActiveThreadId(watcher.userId, tag);
+    await saveMessage({
+      userId: watcher.userId, botName: tag, role: "assistant", content: markdown,
+      source: `watcher:${watcher.type}`, platform: "telegram", threadId,
+    });
+    activityLog.push(
+      "system",
+      `Watcher "${watcher.name}" manually triggered — sent ${newAlerts.length} alert(s)`,
+      { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
+    );
+  }
+
+  const newEntries = newAlerts.flatMap((a) => {
+    const hash = contentHash(a);
+    const extras = a.trackingIds ?? [];
+    return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
+  });
+  const updatedIds = [...watcher.lastNotifiedIds, ...newEntries].slice(-MAX_NOTIFIED_IDS);
+  await updateWatcherLastRun(watcher.id, updatedIds);
+
+  return { alertsSent: newAlerts.length };
+}
+
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
   const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;

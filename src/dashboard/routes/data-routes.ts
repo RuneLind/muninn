@@ -16,6 +16,8 @@ import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview 
 import { getAllWatchers, updateWatcher } from "../../db/watchers.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
+import { runSingleWatcher } from "../../watchers/runner.ts";
+import { getSchedulerContext } from "../../scheduler/runner.ts";
 import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
 import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
@@ -320,6 +322,41 @@ export function registerDataRoutes(app: Hono): void {
     } catch (err) {
       log.error("Failed to update task: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to update task" }, 500);
+    }
+  });
+
+  app.post("/api/watchers/:id/trigger", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
+      const watchers = await getAllWatchers();
+      const watcher = watchers.find((w) => w.id === id);
+      if (!watcher) return c.json({ error: "Watcher not found" }, 404);
+      const ctx = getSchedulerContext(watcher.botName);
+      if (!ctx) return c.json({ error: "No scheduler context for bot " + watcher.botName }, 500);
+      const result = await runSingleWatcher(ctx.api, ctx.botConfig, watcher);
+      return c.json({ ok: true, alertsSent: result.alertsSent });
+    } catch (err) {
+      log.error("Failed to trigger watcher: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to trigger watcher" }, 500);
+    }
+  });
+
+  app.post("/api/tasks/:id/trigger", async (c) => {
+    try {
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return c.json({ error: "Invalid task ID" }, 400);
+      const tasks = await getAllScheduledTasks();
+      const task = tasks.find((t) => t.id === id);
+      if (!task) return c.json({ error: "Task not found" }, 404);
+      const ctx = getSchedulerContext(task.botName);
+      if (!ctx) return c.json({ error: "No scheduler context for bot " + task.botName }, 500);
+      const { runScheduledTasksFromList } = await import("../../scheduler/task-executor.ts");
+      await runScheduledTasksFromList(ctx.api, ctx.config, ctx.botConfig, [task]);
+      return c.json({ ok: true });
+    } catch (err) {
+      log.error("Failed to trigger task: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to trigger task" }, 500);
     }
   });
 
