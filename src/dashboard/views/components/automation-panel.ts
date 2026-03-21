@@ -874,12 +874,11 @@ export function automationPanelScript(): string {
       btn.textContent = 'Running...';
       try {
         var res = await fetch(url, { method: 'POST' });
-        var data = await res.json();
         if (res.ok) {
           btn.textContent = '✓ Done';
           // Refresh activity tab if visible
           if (atDetailTab === 'activity') loadJobActivity(kind, item);
-          // Refresh watcher data to get updated lastRunAt
+          // Refresh data to get updated lastRunAt
           try {
             var refreshRes = await fetch('/api/' + (kind === 'watcher' ? 'watchers' : 'tasks'));
             var refreshData = await refreshRes.json();
@@ -888,7 +887,8 @@ export function automationPanelScript(): string {
             renderAtCombinedList();
           } catch (e) {}
         } else {
-          btn.textContent = 'Failed';
+          var errData = await res.json().catch(function() { return {}; });
+          btn.textContent = errData.error || 'Failed';
         }
       } catch (err) {
         btn.textContent = 'Error';

@@ -96,6 +96,12 @@ export async function getWatchersForUser(userId: string, botName?: string): Prom
   return rows.map(mapRow);
 }
 
+export async function getWatcherById(id: string): Promise<Watcher | null> {
+  const sql = getDb();
+  const [row] = await sql`SELECT * FROM watchers WHERE id = ${id}`;
+  return row ? mapRow(row) : null;
+}
+
 export async function deleteWatcher(id: string): Promise<void> {
   const sql = getDb();
   await sql`DELETE FROM watchers WHERE id = ${id}`;

@@ -31,7 +31,7 @@ Return ONLY a JSON array (no markdown fences):
 [{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
 
-  const { result } = await spawnHaiku(prompt, "watcher-email", "jarvis-watcher", cwd, botName, undefined, config.model);
+  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", cwd, botName, model: config.model });
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {

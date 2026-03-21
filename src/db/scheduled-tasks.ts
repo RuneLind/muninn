@@ -122,6 +122,12 @@ export async function enableTask(id: string): Promise<void> {
   await sql`UPDATE scheduled_tasks SET enabled = true WHERE id = ${id}`;
 }
 
+export async function getScheduledTaskById(id: string): Promise<ScheduledTask | null> {
+  const sql = getDb();
+  const [row] = await sql`SELECT * FROM scheduled_tasks WHERE id = ${id}`;
+  return row ? mapRow(row) : null;
+}
+
 export async function deleteTask(id: string): Promise<void> {
   const sql = getDb();
   await sql`DELETE FROM scheduled_tasks WHERE id = ${id}`;

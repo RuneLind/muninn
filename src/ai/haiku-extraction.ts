@@ -51,13 +51,12 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
     });
   }
 
-  const haiku = await spawnHaiku(
-    opts.prompt,
-    opts.source,
-    opts.entrypoint,
-    opts.cwd,
-    opts.botName,
-  );
+  const haiku = await spawnHaiku(opts.prompt, {
+    source: opts.source,
+    entrypoint: opts.entrypoint,
+    cwd: opts.cwd,
+    botName: opts.botName,
+  });
 
   let result: T;
   try {
