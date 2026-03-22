@@ -9,7 +9,9 @@ extensions/
 ├── CLAUDE.md         ← this file
 ├── jira/             ← Jira issue → research chat
 │   └── README.md     ← per-extension docs
-└── youtube/          ← YouTube video → summarize
+├── youtube/          ← YouTube video → summarize
+│   └── README.md
+└── x-article/        ← X/Twitter article → summarize
     └── README.md
 ```
 
