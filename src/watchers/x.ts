@@ -1,5 +1,5 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { spawnHaiku } from "../scheduler/executor.ts";
+import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
 
@@ -298,7 +298,7 @@ ${texts.join(separator)}
 
 ${userPrompt}`;
 
-  const model = config.model || "claude-haiku-4-5-20251001";
+  const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? 300_000;
   log.info("Summarizing {count} tweets with {model} (timeout {timeout}s)", {
     botName, count: texts.length, model, timeout: Math.round(timeoutMs / 1000),
