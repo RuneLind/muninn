@@ -123,6 +123,7 @@ export interface Watcher {
   enabled: boolean;
   lastRunAt: number | null;
   lastNotifiedIds: string[];
+  forceNextRun: boolean;
   createdAt: number;
   updatedAt: number;
 }

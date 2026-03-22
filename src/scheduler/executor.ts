@@ -20,7 +20,7 @@ export interface HaikuResult {
  */
 export const HAIKU_TIMEOUT_MS = 60_000;
 
-const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 export interface SpawnHaikuOptions {
   source: string;

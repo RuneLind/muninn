@@ -182,6 +182,7 @@ describe("formatAlerts", () => {
     enabled: true,
     lastRunAt: null,
     lastNotifiedIds: [],
+    forceNextRun: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
