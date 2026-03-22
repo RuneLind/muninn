@@ -37,11 +37,53 @@ interface XWatcherConfig {
 // --- Collection path (queries huginn's indexed x-feed collection) ---
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-const MAX_COLLECTION_DOCS = 80;
+const MAX_COLLECTION_DOCS = 50;
 
 interface CollectionDoc {
   id: string;
   url: string;
+}
+
+/**
+ * Convert full huginn markdown document into a compact one-liner for the digest prompt.
+ * Input:  "# @handle — Author\n\nTweet text...\n\n---\n\n- **Engagement:** 1,508 likes..."
+ * Output: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: https://x.com/..."
+ */
+function compactTweetText(rawText: string, url: string): string {
+  // Strip the bracketed document ID line huginn prepends
+  const text = rawText.replace(/^\[.*?\]\n+/, "");
+  const lines = text.split("\n");
+
+  // Extract handle from heading: "# @handle — Author"
+  const heading = lines.find((l) => l.startsWith("# @")) ?? "";
+  const handleMatch = heading.match(/@(\w+)/);
+  const handle = handleMatch ? `@${handleMatch[1]}` : "unknown";
+
+  // Extract tweet body (lines between heading and "---" separator)
+  const headingIdx = lines.indexOf(heading);
+  const separatorIdx = lines.indexOf("---", headingIdx + 1);
+  const bodyLines = lines.slice(headingIdx + 1, separatorIdx > 0 ? separatorIdx : undefined)
+    .filter((l) => l.trim())
+    .map((l) => l.trim());
+  const body = bodyLines.join(" ").slice(0, 500);
+
+  // Extract engagement from footer
+  const engagementLine = lines.find((l) => l.includes("**Engagement:**")) ?? "";
+  const likesMatch = engagementLine.match(/([\d,]+)\s*likes/);
+  const viewsMatch = engagementLine.match(/([\d,]+)\s*views/);
+  const signals: string[] = [];
+  if (likesMatch) signals.push(`${likesMatch[1]} likes`);
+  if (viewsMatch) signals.push(`${viewsMatch[1]} views`);
+
+  // Extract type
+  const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
+  const isNote = typeLine.includes("note");
+
+  let result = `${handle}: ${body}`;
+  if (signals.length > 0) result += ` (${signals.join(", ")})`;
+  if (isNote) result = `[ARTICLE/NOTE] ${result}`;
+  result += `\n  URL: ${url}`;
+  return result;
 }
 
 function extractTweetId(docId: string): string {
@@ -100,9 +142,8 @@ async function fetchFromCollection(
       try {
         const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
         if (!resp.ok) return null;
-        const data = await resp.json() as { text: string };
-        // Strip the bracketed document ID line that huginn prepends (e.g. "[2026-03-21_handle_id]")
-        const text = data.text.replace(/^\[.*?\]\n+/, "");
+        const data = await resp.json() as { text: string; metadata?: { url?: string } };
+        const text = compactTweetText(data.text, data.metadata?.url || doc.url);
         return { docId: doc.id, text };
       } catch (err) {
         log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
