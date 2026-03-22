@@ -13,11 +13,10 @@ import { getScheduledTasksForUser } from "../../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../../db/scheduled-tasks.ts";
 import { getRecentMemories, getMemoriesByUser, getMemoriesForUser } from "../../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../../db/stats.ts";
-import { getAllWatchers, updateWatcher, getWatcherById } from "../../db/watchers.ts";
+import { getAllWatchers, updateWatcher, getWatcherById, forceRunWatcher } from "../../db/watchers.ts";
 import { getScheduledTaskById } from "../../db/scheduled-tasks.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
-import { runSingleWatcher } from "../../watchers/runner.ts";
 import { runScheduledTasksFromList } from "../../scheduler/task-executor.ts";
 import { getSchedulerContext } from "../../scheduler/runner.ts";
 import { getAllThreadsForBot, deleteThreadById } from "../../db/threads.ts";
@@ -333,10 +332,8 @@ export function registerDataRoutes(app: Hono): void {
       if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
       const watcher = await getWatcherById(id);
       if (!watcher) return c.json({ error: "Watcher not found" }, 404);
-      const ctx = getSchedulerContext(watcher.botName);
-      if (!ctx) return c.json({ error: "No scheduler context for bot " + watcher.botName }, 500);
-      const result = await runSingleWatcher(ctx.api, ctx.botConfig, watcher);
-      return c.json({ ok: true, alertsSent: result.alertsSent });
+      await forceRunWatcher(id);
+      return c.json({ ok: true, queued: true });
     } catch (err) {
       log.error("Failed to trigger watcher: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to trigger watcher" }, 500);

@@ -300,6 +300,7 @@ CREATE TABLE watchers (
   enabled BOOLEAN NOT NULL DEFAULT true,
   last_run_at TIMESTAMPTZ,
   last_notified_ids JSONB DEFAULT '[]',
+  force_next_run BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -40,14 +40,22 @@ export async function getWatchersDueNow(botName?: string): Promise<Watcher[]> {
     ? await sql`
       SELECT * FROM watchers
       WHERE bot_name = ${botName} AND enabled = true
-        AND (last_run_at IS NULL OR last_run_at + (interval_ms || ' milliseconds')::interval <= now())
-      ORDER BY last_run_at ASC NULLS FIRST
+        AND (
+          force_next_run = true
+          OR last_run_at IS NULL
+          OR last_run_at + (interval_ms || ' milliseconds')::interval <= now()
+        )
+      ORDER BY force_next_run DESC, last_run_at ASC NULLS FIRST
     `
     : await sql`
       SELECT * FROM watchers
       WHERE enabled = true
-        AND (last_run_at IS NULL OR last_run_at + (interval_ms || ' milliseconds')::interval <= now())
-      ORDER BY last_run_at ASC NULLS FIRST
+        AND (
+          force_next_run = true
+          OR last_run_at IS NULL
+          OR last_run_at + (interval_ms || ' milliseconds')::interval <= now()
+        )
+      ORDER BY force_next_run DESC, last_run_at ASC NULLS FIRST
     `;
   return rows.map(mapRow);
 }
@@ -60,9 +68,15 @@ export async function updateWatcherLastRun(
   await sql`
     UPDATE watchers
     SET last_run_at = now(),
-        last_notified_ids = ${sql.json(notifiedIds)}
+        last_notified_ids = ${sql.json(notifiedIds)},
+        force_next_run = false
     WHERE id = ${id}
   `;
+}
+
+export async function forceRunWatcher(id: string): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE watchers SET force_next_run = true WHERE id = ${id}`;
 }
 
 export async function getAllWatchers(botName?: string): Promise<Watcher[]> {
@@ -163,6 +177,7 @@ function mapRow(r: Record<string, any>): Watcher {
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
     lastNotifiedIds: Array.isArray(r.last_notified_ids) ? r.last_notified_ids : [],
+    forceNextRun: r.force_next_run ?? false,
     createdAt: new Date(r.created_at).getTime(),
     updatedAt: new Date(r.updated_at).getTime(),
   };

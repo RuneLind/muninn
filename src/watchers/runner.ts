@@ -107,12 +107,15 @@ function isScheduledTimeDue(watcher: Watcher, now: TimeParts): boolean {
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
   const tag = botConfig.name;
   const now = getNowParts();
-  const dueWatchers = (await getWatchersDueNow(tag)).filter((w) => isScheduledTimeDue(w, now));
+  const candidates = await getWatchersDueNow(tag);
+  // Forced watchers skip time-of-day checks; regular ones must pass
+  const dueWatchers = candidates.filter((w) => w.forceNextRun || isScheduledTimeDue(w, now));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }
 
   for (const watcher of dueWatchers) {
+    const forced = watcher.forceNextRun;
     let wt: Tracer | undefined;
     if (traceContext) {
       wt = new Tracer(`watcher:${watcher.type}`, {
@@ -124,14 +127,17 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     }
 
     try {
-      // Check quiet hours — skip notifications but still mark as run
-      const quiet = await isQuietHours(watcher.userId);
-      if (quiet) {
-        await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
-        wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
-        continue;
+      // Check quiet hours — skip notifications but still mark as run (forced runs bypass)
+      if (!forced) {
+        const quiet = await isQuietHours(watcher.userId);
+        if (quiet) {
+          await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+          wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
+          continue;
+        }
       }
 
+      if (forced) log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
       agentStatus.set("running_watcher", watcher.name);
       const requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
       setConnectorInfo(botConfig);
@@ -195,7 +201,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       await updateWatcherLastRun(watcher.id, updatedIds);
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
-      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: newAlerts.length });
+      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: newAlerts.length, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       agentStatus.clearRequest();
       agentStatus.set("idle");
@@ -226,51 +232,6 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
   }
 }
 
-/**
- * Trigger a single watcher run manually (from dashboard).
- * Skips quiet hours and time-of-day checks — runs immediately.
- */
-export async function runSingleWatcher(api: Api, botConfig: BotConfig, watcher: Watcher): Promise<{ alertsSent: number }> {
-  const tag = botConfig.name;
-  log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
-
-  const alerts = await runChecker(watcher, botConfig.dir, tag);
-
-  const known = new Set(watcher.lastNotifiedIds);
-  const newAlerts = alerts.filter((a) => {
-    if (known.has(a.id)) return false;
-    const hash = contentHash(a);
-    return !(hash && known.has(hash));
-  });
-
-  if (newAlerts.length > 0) {
-    const markdown = formatAlerts(watcher, newAlerts);
-    await api.sendMessage(watcher.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
-    const threadId = await getActiveThreadId(watcher.userId, tag);
-    await saveMessage({
-      userId: watcher.userId, botName: tag, role: "assistant", content: markdown,
-      source: `watcher:${watcher.type}`, platform: "telegram", threadId,
-    });
-    activityLog.push(
-      "system",
-      `Watcher "${watcher.name}" manually triggered — sent ${newAlerts.length} alert(s)`,
-      { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
-    );
-    log.info("Manual trigger: \"{name}\" sent {count} alert(s)", { botName: tag, name: watcher.name, count: newAlerts.length });
-  } else {
-    log.info("Manual trigger: \"{name}\" — no new alerts", { botName: tag, name: watcher.name });
-  }
-
-  const newEntries = newAlerts.flatMap((a) => {
-    const hash = contentHash(a);
-    const extras = a.trackingIds ?? [];
-    return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
-  });
-  const updatedIds = [...watcher.lastNotifiedIds, ...newEntries].slice(-MAX_NOTIFIED_IDS);
-  await updateWatcherLastRun(watcher.id, updatedIds);
-
-  return { alertsSent: newAlerts.length };
-}
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
   const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : "\u{1F514}";

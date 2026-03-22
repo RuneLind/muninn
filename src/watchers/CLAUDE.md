@@ -64,9 +64,9 @@ If the model call fails (timeout, crash), the watcher returns `[]` — no Telegr
 
 ## Runner (runner.ts)
 
-### runWatchers vs runSingleWatcher
+### Manual trigger via force_next_run
 
-Both share the same dedup → send → save → track flow. `runSingleWatcher` skips quiet hours, time-of-day checks, and tracing — runs immediately from the dashboard "▶ Run" button.
+The dashboard "Run" button sets `force_next_run = true` in the DB. The next scheduler tick picks it up through the same `runWatchers` path (with tracing). Forced watchers skip `isScheduledTimeDue` and quiet hours. The flag is cleared by `updateWatcherLastRun()`.
 
 ### Time-of-day scheduling
 

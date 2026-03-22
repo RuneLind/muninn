@@ -26,7 +26,7 @@ interface XWatcherConfig {
   pages?: number;
   prompt?: string;
   model?: string;
-  /** Timeout in ms for the model call (default: 60s for Haiku, set higher for Sonnet) */
+  /** Timeout in ms for the model call (default: 300s) */
   timeoutMs?: number;
   /** Set to collection name (e.g. "x-feed") to query huginn's indexed collection instead of spawning the fetcher */
   collection?: string;
@@ -298,10 +298,21 @@ ${texts.join(separator)}
 
 ${userPrompt}`;
 
+  const model = config.model || "claude-haiku-4-5-20251001";
+  const timeoutMs = config.timeoutMs ?? 300_000;
+  log.info("Summarizing {count} tweets with {model} (timeout {timeout}s)", {
+    botName, count: texts.length, model, timeout: Math.round(timeoutMs / 1000),
+  });
+
   try {
+    const start = Date.now();
     const { result } = await spawnHaiku(prompt, {
       source: "watcher-x", entrypoint: `${botName ?? "jarvis"}-watcher`,
-      botName, model: config.model, timeoutMs: config.timeoutMs,
+      botName, model, timeoutMs,
+    });
+    const durationMs = Date.now() - start;
+    log.info("Digest ready in {duration}s ({model}, {count} tweets)", {
+      botName, duration: (durationMs / 1000).toFixed(1), model, count: texts.length,
     });
     return [{
       id: `x-digest-${Date.now()}`,
@@ -312,7 +323,7 @@ ${userPrompt}`;
     }];
   } catch (err) {
     log.error("Summarization failed, skipping digest ({count} tweets lost): {error}", {
-      botName, count: texts.length, error: err instanceof Error ? err.message : String(err),
+      botName, count: texts.length, model, error: err instanceof Error ? err.message : String(err),
     });
     return [];
   }
