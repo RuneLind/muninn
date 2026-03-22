@@ -57,17 +57,20 @@ function compactTweetText(rawText: string, url: string): string {
   const lines = text.split("\n");
 
   // Extract handle from heading: "# @handle — Author"
-  const heading = lines.find((l) => l.startsWith("# @")) ?? "";
+  const headingIdx = lines.findIndex((l) => l.startsWith("# @"));
+  const heading = headingIdx >= 0 ? lines[headingIdx]! : "";
   const handleMatch = heading.match(/@(\w+)/);
   const handle = handleMatch ? `@${handleMatch[1]}` : "unknown";
 
-  // Extract tweet body (lines between heading and "---" separator)
-  const headingIdx = lines.indexOf(heading);
-  const separatorIdx = lines.indexOf("---", headingIdx + 1);
-  const bodyLines = lines.slice(headingIdx + 1, separatorIdx > 0 ? separatorIdx : undefined)
-    .filter((l) => l.trim())
+  // Extract tweet body (lines between heading and "---" separator, excluding metadata)
+  const startIdx = headingIdx >= 0 ? headingIdx + 1 : 0;
+  const separatorIdx = lines.indexOf("---", startIdx);
+  const bodyLines = lines.slice(startIdx, separatorIdx > 0 ? separatorIdx : undefined)
+    .filter((l) => l.trim() && !l.startsWith("- **"))
     .map((l) => l.trim());
-  const body = bodyLines.join(" ").slice(0, 500);
+  const bodyRaw = bodyLines.join(" ");
+  // Truncate at word boundary
+  const body = bodyRaw.length > 500 ? bodyRaw.slice(0, bodyRaw.lastIndexOf(" ", 500)) + "..." : bodyRaw;
 
   // Extract engagement from footer
   const engagementLine = lines.find((l) => l.includes("**Engagement:**")) ?? "";
@@ -140,24 +143,28 @@ async function fetchFromCollection(
   const texts: string[] = [];
   const trackingIds: string[] = [];
 
-  const results = await Promise.all(
-    toFetch.map(async (doc) => {
-      try {
-        const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
-        if (!resp.ok) return null;
-        const data = await resp.json() as { text: string; metadata?: { url?: string } };
-        const text = compactTweetText(data.text, data.metadata?.url || doc.url);
-        return { docId: doc.id, text };
-      } catch (err) {
-        log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
-        return null;
+  // Fetch in batches of 20 to avoid overwhelming huginn's Python server
+  for (let i = 0; i < toFetch.length; i += 20) {
+    const batch = toFetch.slice(i, i + 20);
+    const results = await Promise.all(
+      batch.map(async (doc) => {
+        try {
+          const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
+          if (!resp.ok) return null;
+          const data = await resp.json() as { text: string; metadata?: { url?: string } };
+          const text = compactTweetText(data.text, data.metadata?.url || doc.url);
+          return { docId: doc.id, text };
+        } catch (err) {
+          log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
+          return null;
+        }
+      }),
+    );
+    for (const r of results) {
+      if (r) {
+        texts.push(r.text);
+        trackingIds.push(`tw:${extractTweetId(r.docId)}`);
       }
-    }),
-  );
-  for (const r of results) {
-    if (r) {
-      texts.push(r.text);
-      trackingIds.push(`tw:${extractTweetId(r.docId)}`);
     }
   }
 
