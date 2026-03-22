@@ -256,6 +256,9 @@ export async function runSingleWatcher(api: Api, botConfig: BotConfig, watcher: 
       `Watcher "${watcher.name}" manually triggered — sent ${newAlerts.length} alert(s)`,
       { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
     );
+    log.info("Manual trigger: \"{name}\" sent {count} alert(s)", { botName: tag, name: watcher.name, count: newAlerts.length });
+  } else {
+    log.info("Manual trigger: \"{name}\" — no new alerts", { botName: tag, name: watcher.name });
   }
 
   const newEntries = newAlerts.flatMap((a) => {

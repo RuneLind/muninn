@@ -32,12 +32,14 @@ interface XWatcherConfig {
   collection?: string;
   /** Knowledge API URL (default: http://localhost:8321) */
   apiUrl?: string;
+  /** Max documents to include in digest (default: 80) */
+  maxDocs?: number;
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-const MAX_COLLECTION_DOCS = 50;
+const DEFAULT_MAX_DOCS = 80;
 
 interface CollectionDoc {
   id: string;
@@ -133,7 +135,8 @@ async function fetchFromCollection(
   }
 
   // Fetch full content for new documents (cap to avoid huge prompts)
-  const toFetch = newDocs.slice(0, MAX_COLLECTION_DOCS);
+  const maxDocs = config.maxDocs ?? DEFAULT_MAX_DOCS;
+  const toFetch = newDocs.slice(0, maxDocs);
   const texts: string[] = [];
   const trackingIds: string[] = [];
 
