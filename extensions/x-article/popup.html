@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>X Article Summarizer</h1>
+    </header>
+
+    <div id="not-article" class="message hidden">
+      <p>Navigate to an X article to summarize it.</p>
+      <p class="hint">Articles have URLs like x.com/user/article/...</p>
+    </div>
+
+    <div id="article-info" class="hidden">
+      <div class="article-title" id="article-title"></div>
+      <div class="article-author" id="article-author"></div>
+      <div id="content-status"></div>
+      <div class="controls">
+        <button id="btn-summarize" class="primary">Summarize</button>
+      </div>
+      <div id="status" class="hidden"></div>
+    </div>
+  </div>
+
+  <footer>
+    <a href="#" id="open-options">Settings</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
