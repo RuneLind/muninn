@@ -27,7 +27,7 @@ export async function executeClaudePrompt(
 
   const args = [
     "claude",
-    "-p", prompt,
+    "-p",
     "--output-format", "stream-json",
     "--verbose",
     "--include-partial-messages",
@@ -44,6 +44,9 @@ export async function executeClaudePrompt(
   if (systemPrompt) {
     args.push("--system-prompt", systemPrompt);
   }
+
+  // "--" signals end of options so prompts starting with "-" aren't parsed as flags
+  args.push("--", prompt);
 
   const env: Record<string, string | undefined> = {
     ...process.env,
