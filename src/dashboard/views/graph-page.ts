@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { escScript } from "./components/helpers.ts";
 
 export function renderGraphPage(): string {
   return `<!DOCTYPE html>
@@ -265,14 +266,37 @@ export function renderGraphPage(): string {
       return CAT_COLORS[prefix] || '#888';
     }
 
+    ${escScript()}
+
     let graphData = null;
+    let nodeMap = new Map();
     let graph = null;
     let activeCategories = new Set();
     let highlightNodes = new Set();
     let highlightLinks = new Set();
-    let hoverNode = null;
     let hoverClearTimer = null;
     let lockedNode = null;
+
+    function buildNodeMap() {
+      nodeMap.clear();
+      if (graphData) graphData.nodes.forEach(n => nodeMap.set(n.id, n));
+    }
+
+    function highlightNeighbors(node) {
+      highlightNodes.clear();
+      highlightLinks.clear();
+      highlightNodes.add(node);
+      const currentData = graph.graphData();
+      currentData.links.forEach(link => {
+        const src = typeof link.source === 'object' ? link.source : nodeMap.get(link.source);
+        const tgt = typeof link.target === 'object' ? link.target : nodeMap.get(link.target);
+        if (src === node || tgt === node) {
+          highlightLinks.add(link);
+          if (src) highlightNodes.add(src);
+          if (tgt) highlightNodes.add(tgt);
+        }
+      });
+    }
 
     const loading = document.getElementById('loading');
     const statsEl = document.getElementById('stats');
@@ -294,6 +318,7 @@ export function renderGraphPage(): string {
 
     function buildCategoryChips(nodes) {
       const cats = new Set(nodes.map(n => n.category));
+      activeCategories.clear();
       catChipsEl.innerHTML = '';
       cats.forEach(cat => {
         activeCategories.add(cat);
@@ -323,6 +348,9 @@ export function renderGraphPage(): string {
 
     function applyFilters() {
       if (!graphData || !graph) return;
+      highlightNodes.clear();
+      highlightLinks.clear();
+      lockedNode = null;
       const visibleIds = new Set(
         graphData.nodes.filter(n => activeCategories.has(n.category)).map(n => n.id)
       );
@@ -346,8 +374,7 @@ export function renderGraphPage(): string {
         .filter(e => e.source === nodeId || e.target === nodeId)
         .map(e => {
           const otherId = e.source === nodeId ? e.target : e.source;
-          const other = graphData.nodes.find(n => n.id === otherId);
-          return { node: other, similarity: e.similarity };
+          return { node: nodeMap.get(otherId), similarity: e.similarity };
         })
         .filter(d => d.node && activeCategories.has(d.node.category))
         .sort((a, b) => b.similarity - a.similarity);
@@ -377,11 +404,10 @@ export function renderGraphPage(): string {
       detailContent.innerHTML = html;
       detailPanel.classList.add('open');
 
-      // Click on connected item -> navigate to that node
       detailContent.querySelectorAll('.conn-item').forEach(el => {
         el.addEventListener('click', () => {
           const targetId = el.dataset.id;
-          const targetNode = graphData.nodes.find(n => n.id === targetId);
+          const targetNode = nodeMap.get(targetId);
           if (targetNode && graph) {
             graph.centerAt(targetNode.x, targetNode.y, 500);
             graph.zoom(3, 500);
@@ -391,14 +417,8 @@ export function renderGraphPage(): string {
       });
     }
 
-    function esc(s) {
-      if (!s) return '';
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    }
-
     function unlockGraph() {
       lockedNode = null;
-      hoverNode = null;
       highlightNodes.clear();
       highlightLinks.clear();
       clearTimeout(hoverClearTimer);
@@ -426,6 +446,7 @@ export function renderGraphPage(): string {
         return;
       }
 
+      buildNodeMap();
       buildCategoryChips(graphData.nodes);
 
       const container = document.getElementById('graph-canvas');
@@ -467,30 +488,15 @@ export function renderGraphPage(): string {
         .cooldownTime(Infinity)
         .nodeRelSize(6)
         .onNodeHover(node => {
-          // Skip hover updates when a node is locked
           if (lockedNode) {
             container.style.cursor = node ? 'pointer' : 'default';
             return;
           }
           clearTimeout(hoverClearTimer);
           if (node) {
-            hoverNode = node;
-            highlightNodes.clear();
-            highlightLinks.clear();
-            highlightNodes.add(node);
-            const currentData = graph.graphData();
-            currentData.links.forEach(link => {
-              const src = typeof link.source === 'object' ? link.source : currentData.nodes.find(n => n.id === link.source);
-              const tgt = typeof link.target === 'object' ? link.target : currentData.nodes.find(n => n.id === link.target);
-              if (src === node || tgt === node) {
-                highlightLinks.add(link);
-                if (src) highlightNodes.add(src);
-                if (tgt) highlightNodes.add(tgt);
-              }
-            });
+            highlightNeighbors(node);
           } else {
             hoverClearTimer = setTimeout(() => {
-              hoverNode = null;
               highlightNodes.clear();
               highlightLinks.clear();
             }, 40);
@@ -499,26 +505,11 @@ export function renderGraphPage(): string {
         })
         .onNodeClick(node => {
           if (lockedNode === node) {
-            // Clicking the same node unlocks
             unlockGraph();
             return;
           }
-          // Lock highlights on this node
           lockedNode = node;
-          hoverNode = node;
-          highlightNodes.clear();
-          highlightLinks.clear();
-          highlightNodes.add(node);
-          const currentData = graph.graphData();
-          currentData.links.forEach(link => {
-            const src = typeof link.source === 'object' ? link.source : currentData.nodes.find(n => n.id === link.source);
-            const tgt = typeof link.target === 'object' ? link.target : currentData.nodes.find(n => n.id === link.target);
-            if (src === node || tgt === node) {
-              highlightLinks.add(link);
-              if (src) highlightNodes.add(src);
-              if (tgt) highlightNodes.add(tgt);
-            }
-          });
+          highlightNeighbors(node);
           showDetail(node);
         })
         .onBackgroundClick(() => {
@@ -527,11 +518,9 @@ export function renderGraphPage(): string {
 
       updateStats(graphData.nodes.length, graphData.edges.length);
 
-      // Zoom to fit after warmup
       setTimeout(() => graph.zoomToFit(400, 60), 500);
     }
 
-    // Slider controls — debounced re-fetch
     let debounceTimer = null;
     function onSliderChange() {
       simVal.textContent = simSlider.value;
@@ -542,20 +531,9 @@ export function renderGraphPage(): string {
         loading.innerHTML = '<div class="spinner"></div>';
         try {
           graphData = await fetchGraph();
+          buildNodeMap();
           buildCategoryChips(graphData.nodes);
-          const visibleIds = new Set(
-            graphData.nodes.filter(n => activeCategories.has(n.category)).map(n => n.id)
-          );
-          graph.graphData({
-            nodes: graphData.nodes.filter(n => visibleIds.has(n.id)),
-            links: graphData.edges
-              .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
-              .map(e => ({ source: e.source, target: e.target, similarity: e.similarity })),
-          });
-          updateStats(
-            graphData.nodes.filter(n => visibleIds.has(n.id)).length,
-            graphData.edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target)).length,
-          );
+          applyFilters();
           loading.classList.add('hidden');
           setTimeout(() => graph.zoomToFit(400, 60), 300);
         } catch(e) {
