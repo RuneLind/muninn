@@ -272,6 +272,7 @@ export function renderGraphPage(): string {
     let highlightLinks = new Set();
     let hoverNode = null;
     let hoverClearTimer = null;
+    let lockedNode = null;
 
     const loading = document.getElementById('loading');
     const statsEl = document.getElementById('stats');
@@ -395,16 +396,19 @@ export function renderGraphPage(): string {
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
-    detailClose.onclick = () => detailPanel.classList.remove('open');
+    function unlockGraph() {
+      lockedNode = null;
+      hoverNode = null;
+      highlightNodes.clear();
+      highlightLinks.clear();
+      clearTimeout(hoverClearTimer);
+      detailPanel.classList.remove('open');
+    }
+
+    detailClose.onclick = () => unlockGraph();
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        detailPanel.classList.remove('open');
-        hoverNode = null;
-        highlightNodes.clear();
-        highlightLinks.clear();
-        clearTimeout(hoverClearTimer);
-      }
+      if (e.key === 'Escape') unlockGraph();
     });
 
     async function init() {
@@ -463,6 +467,11 @@ export function renderGraphPage(): string {
         .cooldownTime(Infinity)
         .nodeRelSize(6)
         .onNodeHover(node => {
+          // Skip hover updates when a node is locked
+          if (lockedNode) {
+            container.style.cursor = node ? 'pointer' : 'default';
+            return;
+          }
           clearTimeout(hoverClearTimer);
           if (node) {
             hoverNode = node;
@@ -480,7 +489,6 @@ export function renderGraphPage(): string {
               }
             });
           } else {
-            // Short delay to bridge micro-gaps when cursor barely leaves a node
             hoverClearTimer = setTimeout(() => {
               hoverNode = null;
               highlightNodes.clear();
@@ -490,10 +498,31 @@ export function renderGraphPage(): string {
           container.style.cursor = node ? 'pointer' : 'default';
         })
         .onNodeClick(node => {
+          if (lockedNode === node) {
+            // Clicking the same node unlocks
+            unlockGraph();
+            return;
+          }
+          // Lock highlights on this node
+          lockedNode = node;
+          hoverNode = node;
+          highlightNodes.clear();
+          highlightLinks.clear();
+          highlightNodes.add(node);
+          const currentData = graph.graphData();
+          currentData.links.forEach(link => {
+            const src = typeof link.source === 'object' ? link.source : currentData.nodes.find(n => n.id === link.source);
+            const tgt = typeof link.target === 'object' ? link.target : currentData.nodes.find(n => n.id === link.target);
+            if (src === node || tgt === node) {
+              highlightLinks.add(link);
+              if (src) highlightNodes.add(src);
+              if (tgt) highlightNodes.add(tgt);
+            }
+          });
           showDetail(node);
         })
         .onBackgroundClick(() => {
-          detailPanel.classList.remove('open');
+          unlockGraph();
         });
 
       updateStats(graphData.nodes.length, graphData.edges.length);
