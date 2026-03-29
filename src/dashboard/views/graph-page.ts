@@ -220,6 +220,10 @@ export function renderGraphPage(): string {
     <div class="graph-controls">
       <h3>Controls</h3>
       <div class="control-group">
+        <input type="text" id="search-input" placeholder="Search videos..." autocomplete="off"
+          style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border-primary);background:var(--bg-surface);color:var(--text-primary);font-size:12px;outline:none;">
+      </div>
+      <div class="control-group">
         <label>Min similarity <span id="sim-val">0.65</span></label>
         <input type="range" id="sim-slider" min="0.40" max="0.95" step="0.05" value="0.65">
       </div>
@@ -276,6 +280,7 @@ export function renderGraphPage(): string {
     let highlightLinks = new Set();
     let hoverClearTimer = null;
     let lockedNode = null;
+    let searchMatches = null; // null = no search active, Set = matched node objects
 
     function buildNodeMap() {
       nodeMap.clear();
@@ -308,6 +313,7 @@ export function renderGraphPage(): string {
     const detailPanel = document.getElementById('detail-panel');
     const detailContent = document.getElementById('detail-content');
     const detailClose = document.getElementById('detail-close');
+    const searchInput = document.getElementById('search-input');
 
     async function fetchGraph() {
       const sim = simSlider.value;
@@ -428,7 +434,13 @@ export function renderGraphPage(): string {
     detailClose.onclick = () => unlockGraph();
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') unlockGraph();
+      if (e.key === 'Escape') {
+        unlockGraph();
+        if (searchInput.value) {
+          searchInput.value = '';
+          searchMatches = null;
+        }
+      }
     });
 
     async function init() {
@@ -458,13 +470,15 @@ export function renderGraphPage(): string {
         .nodeId('id')
         .nodeLabel(n => n.title + '\\n' + n.category)
         .nodeColor(n => {
+          const matched = !searchMatches || searchMatches.has(n);
           if (highlightNodes.size > 0) {
             return highlightNodes.has(n) ? catColor(n.category) : catColor(n.category) + '20';
           }
-          return catColor(n.category);
+          return matched ? catColor(n.category) : catColor(n.category) + '15';
         })
         .nodeVal(n => {
           if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
+          if (searchMatches && searchMatches.has(n)) return 6;
           return 4;
         })
         .linkSource('source')
@@ -475,6 +489,12 @@ export function renderGraphPage(): string {
         })
         .linkColor(link => {
           if (highlightLinks.has(link)) return 'rgba(108, 99, 255, 0.6)';
+          if (searchMatches) {
+            const src = typeof link.source === 'object' ? link.source : null;
+            const tgt = typeof link.target === 'object' ? link.target : null;
+            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.08)';
+            return 'rgba(108, 99, 255, 0.02)';
+          }
           return 'rgba(108, 99, 255, 0.08)';
         })
         .linkDirectionalParticles(link => highlightLinks.has(link) ? 2 : 0)
@@ -543,6 +563,20 @@ export function renderGraphPage(): string {
     }
     simSlider.addEventListener('input', onSliderChange);
     topkSlider.addEventListener('input', onSliderChange);
+
+    searchInput.addEventListener('input', () => {
+      const q = searchInput.value.trim().toLowerCase();
+      if (!q) {
+        searchMatches = null;
+      } else {
+        const terms = q.split(/\\s+/);
+        const currentNodes = graph ? graph.graphData().nodes : [];
+        searchMatches = new Set(currentNodes.filter(n => {
+          const text = ((n.title || '') + ' ' + (n.category || '') + ' ' + (n.tags || []).join(' ') + ' ' + (n.headings || []).join(' ') + ' ' + (n.summary || '')).toLowerCase();
+          return terms.every(t => text.includes(t));
+        }));
+      }
+    });
 
     init();
   })();
