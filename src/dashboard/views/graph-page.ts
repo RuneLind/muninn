@@ -271,6 +271,7 @@ export function renderGraphPage(): string {
     let highlightNodes = new Set();
     let highlightLinks = new Set();
     let hoverNode = null;
+    let hoverClearTimer = null;
 
     const loading = document.getElementById('loading');
     const statsEl = document.getElementById('stats');
@@ -396,6 +397,16 @@ export function renderGraphPage(): string {
 
     detailClose.onclick = () => detailPanel.classList.remove('open');
 
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        detailPanel.classList.remove('open');
+        hoverNode = null;
+        highlightNodes.clear();
+        highlightLinks.clear();
+        clearTimeout(hoverClearTimer);
+      }
+    });
+
     async function init() {
       try {
         graphData = await fetchGraph();
@@ -445,15 +456,18 @@ export function renderGraphPage(): string {
         .linkDirectionalParticleWidth(2)
         .linkDirectionalParticleColor(() => '#6c63ff')
         .backgroundColor('#0a0a0f')
-        .d3AlphaDecay(0.02)
+        .d3AlphaDecay(0.03)
         .d3VelocityDecay(0.3)
         .warmupTicks(80)
-        .cooldownTicks(200)
+        .cooldownTicks(Infinity)
+        .cooldownTime(Infinity)
+        .nodeRelSize(6)
         .onNodeHover(node => {
-          hoverNode = node;
-          highlightNodes.clear();
-          highlightLinks.clear();
+          clearTimeout(hoverClearTimer);
           if (node) {
+            hoverNode = node;
+            highlightNodes.clear();
+            highlightLinks.clear();
             highlightNodes.add(node);
             const currentData = graph.graphData();
             currentData.links.forEach(link => {
@@ -465,6 +479,13 @@ export function renderGraphPage(): string {
                 if (tgt) highlightNodes.add(tgt);
               }
             });
+          } else {
+            // Short delay to bridge micro-gaps when cursor barely leaves a node
+            hoverClearTimer = setTimeout(() => {
+              hoverNode = null;
+              highlightNodes.clear();
+              highlightLinks.clear();
+            }, 40);
           }
           container.style.cursor = node ? 'pointer' : 'default';
         })
