@@ -269,11 +269,22 @@ export function renderGraphPage(): string {
       'coding':         '#c084fc',
       'parenting':      '#f59e0b',
     };
+    const generatedColors = {};
+    function hashStr(s) {
+      let h = 0;
+      for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+      return Math.abs(h);
+    }
     function catColor(cat) {
       if (CAT_COLORS[cat]) return CAT_COLORS[cat];
-      // Check prefix match (e.g., ai/something -> ai)
       const prefix = cat.split('/')[0];
-      return CAT_COLORS[prefix] || '#888';
+      if (CAT_COLORS[prefix]) return CAT_COLORS[prefix];
+      if (generatedColors[cat]) return generatedColors[cat];
+      const hue = hashStr(cat) % 360;
+      const sat = 55 + (hashStr(cat + '_s') % 25);
+      const lum = 55 + (hashStr(cat + '_l') % 15);
+      generatedColors[cat] = 'hsl(' + hue + ',' + sat + '%,' + lum + '%)';
+      return generatedColors[cat];
     }
 
     ${escScript()}
