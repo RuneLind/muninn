@@ -220,7 +220,13 @@ export function renderGraphPage(): string {
     <div class="graph-controls">
       <h3>Controls</h3>
       <div class="control-group">
-        <input type="text" id="search-input" placeholder="Search videos..." autocomplete="off"
+        <label>Collection</label>
+        <select id="collection-select" style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border-primary);background:var(--bg-surface);color:var(--text-primary);font-size:12px;outline:none;">
+          <option value="youtube-summaries">youtube-summaries</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <input type="text" id="search-input" placeholder="Search documents..." autocomplete="off"
           style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border-primary);background:var(--bg-surface);color:var(--text-primary);font-size:12px;outline:none;">
       </div>
       <div class="control-group">
@@ -314,11 +320,42 @@ export function renderGraphPage(): string {
     const detailContent = document.getElementById('detail-content');
     const detailClose = document.getElementById('detail-close');
     const searchInput = document.getElementById('search-input');
+    const collectionSelect = document.getElementById('collection-select');
+
+    async function fetchCollections() {
+      try {
+        const res = await fetch('/api/graph/collections');
+        const data = await res.json();
+        if (data.collections) {
+          collectionSelect.innerHTML = '';
+          data.collections
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c.name;
+              opt.textContent = c.name + ' (' + c.document_count + ')';
+              collectionSelect.appendChild(opt);
+            });
+          const params = new URLSearchParams(location.search);
+          const fromUrl = params.get('collection');
+          if (fromUrl && [...collectionSelect.options].some(o => o.value === fromUrl)) {
+            collectionSelect.value = fromUrl;
+          } else {
+            collectionSelect.value = 'youtube-summaries';
+          }
+        }
+      } catch(e) {}
+    }
+
+    function selectedCollection() {
+      return collectionSelect.value || 'youtube-summaries';
+    }
 
     async function fetchGraph() {
       const sim = simSlider.value;
       const topK = topkSlider.value;
-      const res = await fetch('/api/graph/similarity?collection=youtube-summaries&min_similarity=' + sim + '&top_k=' + topK);
+      const coll = selectedCollection();
+      const res = await fetch('/api/graph/similarity?collection=' + encodeURIComponent(coll) + '&min_similarity=' + sim + '&top_k=' + topK);
       return await res.json();
     }
 
@@ -371,7 +408,7 @@ export function renderGraphPage(): string {
     }
 
     function updateStats(nodes, edges) {
-      statsEl.innerHTML = '<span>' + nodes + '</span> videos &middot; <span>' + edges + '</span> connections';
+      statsEl.innerHTML = '<span>' + nodes + '</span> documents &middot; <span>' + edges + '</span> connections';
     }
 
     function getNeighborData(nodeId) {
@@ -392,12 +429,12 @@ export function renderGraphPage(): string {
       html += '<div class="meta">';
       html += '<span class="cat-badge" style="background:' + catColor(node.category) + '25;color:' + catColor(node.category) + '">' + esc(node.category) + '</span>';
       if (node.date) html += ' &middot; ' + esc(node.date);
-      html += '<br><a href="' + esc(node.url) + '" target="_blank">Watch on YouTube &rarr;</a>';
+      html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
       html += '</div>';
 
       if (neighbors.length > 0) {
         html += '<div class="connections-list">';
-        html += '<h4>Connected Videos (' + neighbors.length + ')</h4>';
+        html += '<h4>Connected (' + neighbors.length + ')</h4>';
         neighbors.forEach(d => {
           html += '<div class="conn-item" data-id="' + esc(d.node.id) + '">';
           html += '<span class="conn-dot" style="background:' + catColor(d.node.category) + '"></span>';
@@ -444,6 +481,7 @@ export function renderGraphPage(): string {
     });
 
     async function init() {
+      await fetchCollections();
       try {
         graphData = await fetchGraph();
       } catch(e) {
@@ -454,7 +492,7 @@ export function renderGraphPage(): string {
 
       if (!graphData.nodes || graphData.nodes.length === 0) {
         loading.classList.remove('hidden');
-        loading.innerHTML = '<div style="color:var(--text-muted)">No YouTube documents found</div>';
+        loading.innerHTML = '<div style="color:var(--text-muted)">No documents found in this collection</div>';
         return;
       }
 
@@ -563,6 +601,10 @@ export function renderGraphPage(): string {
     }
     simSlider.addEventListener('input', onSliderChange);
     topkSlider.addEventListener('input', onSliderChange);
+    collectionSelect.addEventListener('change', () => {
+      history.replaceState(null, '', '?collection=' + encodeURIComponent(selectedCollection()));
+      onSliderChange();
+    });
 
     searchInput.addEventListener('input', () => {
       const q = searchInput.value.trim().toLowerCase();

@@ -10,6 +10,11 @@ export function registerGraphRoutes(app: Hono, config: Config): void {
     return c.html(renderGraphPage());
   });
 
+  // Proxy to Huginn collections list
+  app.get("/api/graph/collections", async (c) => {
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, "/api/collections");
+  });
+
   // Proxy to Huginn similarity-graph endpoint
   app.get("/api/graph/similarity", async (c) => {
     const collection = c.req.query("collection") || "youtube-summaries";
