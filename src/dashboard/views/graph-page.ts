@@ -556,6 +556,105 @@ export function renderGraphPage(): string {
       }
     });
 
+    // Cluster force: pulls nodes in the same community toward their shared centroid
+    function clusterForce(strength) {
+      let nodes;
+      function force(alpha) {
+        if (colorMode !== 'community') return;
+        const centroids = {};
+        const counts = {};
+        nodes.forEach(n => {
+          const c = n.community;
+          if (c == null || c < 0) return;
+          if (!centroids[c]) { centroids[c] = {x: 0, y: 0}; counts[c] = 0; }
+          centroids[c].x += n.x || 0;
+          centroids[c].y += n.y || 0;
+          counts[c]++;
+        });
+        Object.keys(centroids).forEach(c => {
+          centroids[c].x /= counts[c];
+          centroids[c].y /= counts[c];
+        });
+        nodes.forEach(n => {
+          const c = n.community;
+          if (c == null || c < 0 || !centroids[c]) return;
+          n.vx += (centroids[c].x - n.x) * alpha * strength;
+          n.vy += (centroids[c].y - n.y) * alpha * strength;
+        });
+      }
+      force.initialize = (_nodes) => { nodes = _nodes; };
+      return force;
+    }
+
+    // Convex hull: compute hull points for a set of 2D points
+    function convexHull(points) {
+      if (points.length < 3) return points;
+      points = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const cross = (O, A, B) => (A[0]-O[0])*(B[1]-O[1]) - (A[1]-O[1])*(B[0]-O[0]);
+      const lower = [];
+      for (const p of points) { while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop(); lower.push(p); }
+      const upper = [];
+      for (const p of points.reverse()) { while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop(); upper.push(p); }
+      return lower.slice(0,-1).concat(upper.slice(0,-1));
+    }
+
+    // Draw community hulls on the canvas
+    function drawCommunityHulls(ctx, globalScale) {
+      if (colorMode !== 'community' || !communityData.length) return;
+      const currentNodes = graph ? graph.graphData().nodes : [];
+      // Group nodes by community
+      const groups = {};
+      currentNodes.forEach(n => {
+        const c = n.community;
+        if (c == null || c < 0) return;
+        if (!groups[c]) groups[c] = [];
+        groups[c].push(n);
+      });
+
+      const padding = 20 / globalScale;
+      Object.entries(groups).forEach(([commId, members]) => {
+        if (members.length < 2) return;
+        const points = members.map(n => [n.x, n.y]);
+        const hull = convexHull(points);
+        if (hull.length < 2) return;
+
+        const color = commColor(Number(commId));
+        ctx.beginPath();
+        // Draw expanded hull with rounded corners
+        for (let i = 0; i < hull.length; i++) {
+          const curr = hull[i];
+          const next = hull[(i+1) % hull.length];
+          // Offset outward from centroid
+          const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+          const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+          const dx = curr[0] - cx, dy = curr[1] - cy;
+          const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+          const ox = curr[0] + (dx/dist) * padding;
+          const oy = curr[1] + (dy/dist) * padding;
+          if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = color + '12';
+        ctx.fill();
+        ctx.strokeStyle = color + '30';
+        ctx.lineWidth = 1.5 / globalScale;
+        ctx.stroke();
+
+        // Draw community label at centroid
+        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+        const info = communityData.find(c => c.id === Number(commId));
+        if (info && globalScale > 0.3) {
+          const label = info.name || 'Cluster ' + commId;
+          const fontSize = Math.max(10, 14 / globalScale);
+          ctx.font = fontSize + 'px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = color + '90';
+          ctx.fillText(label, cx, cy - (20 / globalScale));
+        }
+      });
+    }
+
     async function init() {
       await fetchCollections();
       try {
@@ -656,7 +755,13 @@ export function renderGraphPage(): string {
         })
         .onBackgroundClick(() => {
           unlockGraph();
+        })
+        .onRenderFramePost((ctx, globalScale) => {
+          drawCommunityHulls(ctx, globalScale);
         });
+
+      // Add cluster force (active only in community mode)
+      graph.d3Force('cluster', clusterForce(0.3));
 
       updateStats(graphData.nodes.length, graphData.edges.length);
 
@@ -718,6 +823,8 @@ export function renderGraphPage(): string {
         buildChips(graphData.nodes);
         applyFilters();
       }
+      // Reheat simulation so cluster force takes effect
+      if (graph) graph.d3ReheatSimulation();
     }
     modeCatBtn.onclick = () => setColorMode('category');
     modeCommBtn.onclick = () => setColorMode('community');
