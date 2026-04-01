@@ -440,7 +440,9 @@ export function renderGraphPage(): string {
       html += '<div class="meta">';
       html += '<span class="cat-badge" style="background:' + catColor(node.category) + '25;color:' + catColor(node.category) + '">' + esc(node.category) + '</span>';
       if (node.date) html += ' &middot; ' + esc(node.date);
-      html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
+      if (node.url) html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
+      const coll = selectedCollection();
+      html += '<br><a href="/search/document/' + encodeURIComponent(coll) + '/' + encodeURIComponent(node.id) + '" target="_blank">View article &rarr;</a>';
       html += '</div>';
 
       if (neighbors.length > 0) {
