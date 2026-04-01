@@ -397,17 +397,16 @@ export function renderGraphPage(): string {
       catChipsEl.innerHTML = '';
 
       if (colorMode === 'community') {
-        // Show community chips
+        // Show community chips with names
         const comms = [...new Set(nodes.map(n => n.community ?? -1))].filter(c => c >= 0).sort((a, b) => a - b);
         comms.forEach(commId => {
           activeCategories.add(commId);
           const chip = document.createElement('span');
           chip.className = 'cat-chip active';
           const info = communityData.find(c => c.id === commId);
-          const label = info && info.top_tags && info.top_tags.length > 0
-            ? info.top_tags[0].tag + (info.top_tags[1] ? ', ' + info.top_tags[1].tag : '')
-            : 'Community ' + commId;
+          const label = info ? (info.name || 'Cluster ' + commId) : 'Cluster ' + commId;
           chip.textContent = label + ' (' + (info ? info.size : '?') + ')';
+          chip.title = info && info.representative_docs ? info.representative_docs.join(', ') : '';
           chip.style.background = commColor(commId) + '25';
           chip.style.color = commColor(commId);
           chip.style.borderColor = commColor(commId) + '50';
@@ -470,7 +469,8 @@ export function renderGraphPage(): string {
     function updateStats(nodes, edges) {
       let s = '<span>' + nodes + '</span> documents &middot; <span>' + edges + '</span> connections';
       if (communityData.length > 0) {
-        s += ' &middot; <span>' + communityData.length + '</span> communities';
+        const names = communityData.map(c => c.name || ('Cluster ' + c.id));
+        s += ' &middot; <span>' + communityData.length + '</span> communities: ' + names.join(', ');
       }
       statsEl.innerHTML = s;
     }
@@ -496,12 +496,10 @@ export function renderGraphPage(): string {
       let html = '<h3>' + esc(node.title) + '</h3>';
       html += '<div class="meta">';
       html += '<span class="cat-badge" style="background:' + catColor(node.category) + '25;color:' + catColor(node.category) + '">' + esc(node.category) + '</span>';
-      if (colorMode === 'community' && node.community != null && node.community >= 0) {
+      if (node.community != null && node.community >= 0) {
         const info = communityData.find(c => c.id === node.community);
-        const commLabel = info && info.top_tags && info.top_tags.length > 0
-          ? info.top_tags.map(t => t.tag).join(', ')
-          : 'Community ' + node.community;
-        html += ' <span class="cat-badge" style="background:' + commColor(node.community) + '25;color:' + commColor(node.community) + '">C' + node.community + ': ' + esc(commLabel) + '</span>';
+        const commName = info ? (info.name || 'Cluster ' + node.community) : 'Cluster ' + node.community;
+        html += ' <span class="cat-badge" style="background:' + commColor(node.community) + '25;color:' + commColor(node.community) + '">' + esc(commName) + '</span>';
       }
       if (node.date) html += ' &middot; ' + esc(node.date);
       if (node.url) html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
@@ -587,7 +585,10 @@ export function renderGraphPage(): string {
         .nodeId('id')
         .nodeLabel(n => {
           const label = n.title + '\\n' + n.category;
-          return colorMode === 'community' ? label + ' (community ' + (n.community ?? '?') + ')' : label;
+          if (colorMode !== 'community' || n.community == null) return label;
+          const info = communityData.find(c => c.id === n.community);
+          const commName = info ? info.name : 'Cluster ' + n.community;
+          return label + '\\n' + commName;
         })
         .nodeColor(n => {
           const c = nodeColor(n);
