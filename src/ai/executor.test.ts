@@ -57,6 +57,7 @@ describe("executeClaudePrompt", () => {
     const [args, opts] = spawnSpy.mock.calls[0]!;
     expect(args).toContain("claude");
     expect(args).toContain("-p");
+    expect(args).toContain("--");
     expect(args).toContain("test prompt");
     expect(args).toContain("--output-format");
     expect(args).toContain("stream-json");
