@@ -397,16 +397,19 @@ export function renderGraphPage(): string {
       catChipsEl.innerHTML = '';
 
       if (colorMode === 'community') {
-        // Show community chips with names
-        const comms = [...new Set(nodes.map(n => n.community ?? -1))].filter(c => c >= 0).sort((a, b) => a - b);
-        comms.forEach(commId => {
-          activeCategories.add(commId);
+        // Show community chips — only for real communities (in communityData), skip isolated nodes
+        const comms = communityData
+          .filter(c => c.size >= 2)
+          .sort((a, b) => b.size - a.size);
+        // Also activate isolated node communities so they stay visible
+        nodes.forEach(n => { if (n.community != null && n.community >= 0) activeCategories.add(n.community); });
+        comms.forEach(info => {
+          const commId = info.id;
           const chip = document.createElement('span');
           chip.className = 'cat-chip active';
-          const info = communityData.find(c => c.id === commId);
-          const label = info ? (info.name || 'Cluster ' + commId) : 'Cluster ' + commId;
-          chip.textContent = label + ' (' + (info ? info.size : '?') + ')';
-          chip.title = info && info.representative_docs ? info.representative_docs.join(', ') : '';
+          const label = info.name || 'Cluster ' + commId;
+          chip.textContent = label + ' (' + info.size + ')';
+          chip.title = info.representative_docs ? info.representative_docs.join(', ') : '';
           chip.style.background = commColor(commId) + '25';
           chip.style.color = commColor(commId);
           chip.style.borderColor = commColor(commId) + '50';
