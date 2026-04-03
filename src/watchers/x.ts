@@ -34,6 +34,8 @@ interface XWatcherConfig {
   apiUrl?: string;
   /** Max documents to include in digest (default: 80) */
   maxDocs?: number;
+  /** Max tweets to send to LLM after ranking (default: 30). Tweets are ranked by engagement_score. */
+  topN?: number;
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -46,12 +48,17 @@ interface CollectionDoc {
   url: string;
 }
 
+interface CompactedTweet {
+  text: string;
+  engagementScore: number;
+}
+
 /**
  * Convert full huginn markdown document into a compact one-liner for the digest prompt.
  * Input:  "# @handle — Author\n\nTweet text...\n\n---\n\n- **Engagement:** 1,508 likes..."
- * Output: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: https://x.com/..."
+ * Output: { text: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: ...", engagementScore: 12.34 }
  */
-function compactTweetText(rawText: string, url: string): string {
+function compactTweetText(rawText: string, url: string): CompactedTweet {
   // Strip the bracketed document ID line huginn prepends
   const text = rawText.replace(/^\[.*?\]\n+/, "");
   const lines = text.split("\n");
@@ -80,6 +87,11 @@ function compactTweetText(rawText: string, url: string): string {
   if (likesMatch) signals.push(`${likesMatch[1]} likes`);
   if (viewsMatch) signals.push(`${viewsMatch[1]} views`);
 
+  // Extract engagement score from footer
+  const scoreLine = lines.find((l) => l.includes("**Engagement Score:**")) ?? "";
+  const scoreMatch = scoreLine.match(/\*\*Engagement Score:\*\*\s*([\d.]+)/);
+  const engagementScore = scoreMatch ? parseFloat(scoreMatch[1]!) : 0;
+
   // Extract type
   const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
   const isNote = typeLine.includes("note");
@@ -88,7 +100,7 @@ function compactTweetText(rawText: string, url: string): string {
   if (signals.length > 0) result += ` (${signals.join(", ")})`;
   if (isNote) result = `[ARTICLE/NOTE] ${result}`;
   result += `\n  URL: ${url}`;
-  return result;
+  return { text: result, engagementScore };
 }
 
 function extractTweetId(docId: string): string {
@@ -144,6 +156,7 @@ async function fetchFromCollection(
   const trackingIds: string[] = [];
 
   // Fetch in batches of 20 to avoid overwhelming huginn's Python server
+  const compacted: { docId: string; text: string; engagementScore: number }[] = [];
   for (let i = 0; i < toFetch.length; i += 20) {
     const batch = toFetch.slice(i, i + 20);
     const results = await Promise.all(
@@ -152,8 +165,8 @@ async function fetchFromCollection(
           const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
           if (!resp.ok) return null;
           const data = await resp.json() as { text: string; metadata?: { url?: string } };
-          const text = compactTweetText(data.text, data.metadata?.url || doc.url);
-          return { docId: doc.id, text };
+          const { text, engagementScore } = compactTweetText(data.text, data.metadata?.url || doc.url);
+          return { docId: doc.id, text, engagementScore };
         } catch (err) {
           log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
           return null;
@@ -161,15 +174,22 @@ async function fetchFromCollection(
       }),
     );
     for (const r of results) {
-      if (r) {
-        texts.push(r.text);
-        trackingIds.push(`tw:${extractTweetId(r.docId)}`);
-      }
+      if (r) compacted.push(r);
     }
   }
 
-  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched", {
-    botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: texts.length,
+  // Rank by engagement score (highest first) and take top-N
+  compacted.sort((a, b) => b.engagementScore - a.engagementScore);
+  const topN = config.topN ?? 30;
+  const ranked = compacted.slice(0, topN);
+
+  for (const r of ranked) {
+    texts.push(r.text);
+    trackingIds.push(`tw:${extractTweetId(r.docId)}`);
+  }
+
+  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking", {
+    botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: compacted.length, ranked: ranked.length,
   });
 
   return { texts, trackingIds };
@@ -198,6 +218,7 @@ interface XTweet {
   is_retweet: boolean;
   quoted_tweet: XTweet | null;
   media: { type: string; url: string }[] | null;
+  engagement_score?: number;
 }
 
 async function fetchFromPython(
@@ -243,14 +264,19 @@ async function fetchFromPython(
     return { texts: [], trackingIds: [] };
   }
 
-  log.info("Fetcher: {total} tweets, {newCount} new", {
-    botName, total: tweets.length, newCount: newTweets.length,
+  // Sort by engagement score (already sorted by fetcher, but re-sort after dedup filtering)
+  newTweets.sort((a, b) => (b.engagement_score ?? 0) - (a.engagement_score ?? 0));
+  const topN = config.topN ?? 30;
+  const ranked = newTweets.slice(0, topN);
+
+  log.info("Fetcher: {total} tweets, {newCount} new, {ranked} after ranking (top-{topN})", {
+    botName, total: tweets.length, newCount: newTweets.length, ranked: ranked.length, topN,
   });
 
-  const trackingIds = newTweets.map((t) => `tw:${t.id}`);
+  const trackingIds = ranked.map((t) => `tw:${t.id}`);
 
-  // Build text summaries with engagement signals
-  const texts = newTweets.map((t) => {
+  // Build text summaries with engagement signals (tweets are pre-ranked by engagement_score)
+  const texts = ranked.map((t) => {
     let line = `@${t.handle}: ${t.text}`;
     if (t.is_retweet) line = `[RT] ${line}`;
 
@@ -292,7 +318,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
 
   const prompt = `You are curating a user's X/Twitter timeline into a digest.
 
-Here are ${texts.length} tweets from the home timeline:
+Here are ${texts.length} tweets from the home timeline, pre-ranked by engagement score (highest engagement first):
 
 ${texts.join(separator)}
 

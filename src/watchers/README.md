@@ -2,7 +2,7 @@
 
 ## How it works
 
-The X watcher produces a daily digest of your Twitter/X timeline and sends it via Telegram. It has two data paths, selected by the `collection` config field:
+The X watcher produces a daily digest of your Twitter/X timeline and sends it via Telegram. It reads from huginn's pre-indexed `x-feed` collection — it does NOT call the X API directly. Huginn's fetcher + indexer runs separately (on a schedule) to keep the collection fresh.
 
 ```mermaid
 flowchart TD
@@ -22,28 +22,17 @@ flowchart TD
 
     RUN[runChecker watcher.type = x]
 
-    RUN --> SWITCH{config.collection<br/>set?}
+    RUN --> LIST["GET /api/collection/x-feed/documents<br/>(huginn knowledge API)"]
+    LIST --> DATEFILTER["Filter: today + yesterday only<br/>(Europe/Oslo timezone)"]
+    DATEFILTER --> DEDUP1["Filter out known tw:ID<br/>from lastNotifiedIds"]
+    DEDUP1 --> FETCH["Fetch full docs in batches of 20<br/>GET /api/document/x-feed/{id}"]
+    FETCH --> COMPACT["compactTweetText()<br/>Full markdown → one-liner<br/>+ extract engagement_score"]
+    COMPACT --> RANK["Sort by engagement_score desc<br/>Take top-N (default 30)"]
 
-    subgraph Collection["Collection Path (new)"]
-        SWITCH -->|yes| LIST["GET /api/collection/x-feed/documents<br/>(huginn knowledge API)"]
-        LIST --> DATEFILTER["Filter: today + yesterday only<br/>(Europe/Oslo timezone)"]
-        DATEFILTER --> DEDUP1["Filter out known tw:ID<br/>from lastNotifiedIds"]
-        DEDUP1 --> FETCH["Fetch full docs in batches of 20<br/>GET /api/document/x-feed/{id}"]
-        FETCH --> COMPACT["compactTweetText()<br/>Full markdown → one-liner"]
-    end
-
-    subgraph Legacy["Legacy Path (Python fetcher)"]
-        SWITCH -->|no| SPAWN["Bun.spawn uv run x_fetcher.py<br/>--pages N"]
-        SPAWN --> PARSE[Parse JSON stdout → XTweet array]
-        PARSE --> DEDUP2["Filter out known tw:ID"]
-        DEDUP2 --> FORMAT[Format tweet summaries]
-    end
-
-    COMPACT --> PROMPT
-    FORMAT --> PROMPT
+    RANK --> PROMPT
 
     subgraph Summarize["AI Summarization"]
-        PROMPT["Build prompt with all tweets<br/>+ DEFAULT_X_PROMPT"] --> MODEL["spawnHaiku()<br/>(model from config, e.g. Sonnet)"]
+        PROMPT["Build prompt with ranked tweets<br/>+ DEFAULT_X_PROMPT"] --> MODEL["spawnHaiku()<br/>(model from config, e.g. Sonnet)"]
         MODEL -->|success| ALERT["Return WatcherAlert<br/>with trackingIds"]
         MODEL -->|failure| DROP["Return empty — skip digest<br/>tweets retry next run"]
     end
@@ -56,9 +45,9 @@ flowchart TD
     end
 ```
 
-## Collection path: how it gets tweets from huginn
+## How it gets tweets from huginn
 
-The huginn knowledge system has an `x-feed` collection that is **indexed and updated hourly** by a separate process (the huginn x fetcher + indexer). The X watcher doesn't call the X API at all — it reads from this pre-built index.
+The huginn knowledge system has an `x-feed` collection that is **indexed and updated hourly** by a separate process (huginn's x fetcher + indexer). The X watcher doesn't call the X API at all — it reads from this pre-built index.
 
 ```mermaid
 sequenceDiagram
@@ -77,9 +66,11 @@ sequenceDiagram
         H-->>W: {text: "# @handle — Author\n\nTweet...", metadata: {url}}
     end
 
-    Note over W: compactTweetText() each doc<br/>"@handle: text (likes, views)\n  URL: ..."
+    Note over W: compactTweetText() each doc<br/>Extract engagement_score from footer
 
-    W->>AI: Prompt with all compact tweets + digest instructions
+    Note over W: Sort by engagement_score desc<br/>Take top-N (default 30)
+
+    W->>AI: Prompt with pre-ranked tweets + digest instructions
     AI-->>W: Formatted digest (Top Picks + Also Notable)
 
     W->>TG: Send digest as HTML message
@@ -149,14 +140,14 @@ Set via the dashboard Edit tab on the watcher, stored in the watcher's JSONB `co
 
 | Field | Default | Description |
 |---|---|---|
-| `collection` | _(unset)_ | Collection name (e.g. `"x-feed"`). Enables collection path. Omit for legacy Python fetcher. |
+| `collection` | `"x-feed"` | Collection name. Required — the watcher reads from huginn's indexed collection. |
 | `model` | `claude-haiku-4-5` | Model for summarization. Use `"claude-sonnet-4-6"` for better quality. |
 | `timeoutMs` | `60000` | Model call timeout in ms. Set `180000`+ for Sonnet. |
-| `maxDocs` | `80` | Max documents per digest run. |
+| `maxDocs` | `80` | Max documents to fetch from collection per run. |
+| `topN` | `30` | Max tweets sent to LLM after engagement ranking. |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom digest prompt (overrides the built-in two-tier format). |
 | `hour` | _(unset)_ | Hour (0-23, Europe/Oslo) to run. Makes it a daily digest. |
 | `minute` | `0` | Minute within the hour to run. |
-| `pages` | `3` | Pages for legacy Python fetcher (ignored in collection mode). |
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Huginn knowledge API URL. |
 
 ## File map

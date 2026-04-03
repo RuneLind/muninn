@@ -19,14 +19,21 @@ Scheduler tick (every 60s)
 |---|---|---|---|
 | `email` | `email.ts` | Haiku with Gmail MCP tools | Configurable via `config.model` |
 | `news` | `news.ts` | Google News RSS (no AI) | — |
-| `x` | `x.ts` | Huginn collection or direct Python fetcher | Configurable, Sonnet recommended |
+| `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
 
 ## X/Twitter Watcher — Key Lessons
 
-### Two data paths (config.collection switches)
+### Architecture
 
-- **Collection path** (`config.collection: "x-feed"`): Queries huginn's indexed x-feed collection via knowledge API. Fast (<100ms), no X API calls. Requires huginn running with x-feed loaded.
-- **Legacy path** (no collection): Shells out to huginn's Python fetcher (`uv run x_fetcher.py`). Hits X API directly, 60s timeout.
+The X watcher reads from huginn's pre-indexed `x-feed` collection via the knowledge API. It does NOT call the X API — huginn's fetcher + indexer runs separately to keep the collection fresh. The watcher just queries the collection, ranks tweets by engagement score, and sends the top-N to an LLM for digest creation.
+
+> **Legacy note:** The codebase still contains a `fetchFromPython()` path that shells out to `x_fetcher.py` directly. This path is no longer used in production — the collection path (`config.collection: "x-feed"`) is the only active path.
+
+### Engagement ranking
+
+Tweets are ranked by `engagement_score` before being sent to the LLM. The score is computed by huginn's fetcher using X's open-sourced signal weights (retweets 20x, replies 13.5x, bookmarks 10x, likes 1x), normalized by sqrt(views), with boosts for long-form notes, quotes, and media. The score is stored in each tweet's markdown footer as `**Engagement Score:**`.
+
+The watcher extracts this score via `compactTweetText()`, sorts descending, and takes the top-N (default 30, configurable via `config.topN`). This means the LLM receives a pre-ranked, filtered set rather than all recent tweets.
 
 ### Prompt size is critical
 
@@ -50,12 +57,12 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 
 | Field | Default | Description |
 |---|---|---|
-| `collection` | — | Collection name (e.g. "x-feed"). Omit for legacy Python fetcher. |
+| `collection` | `"x-feed"` | Collection name. Required for the active collection path. |
 | `model` | Haiku | Model for summarization (e.g. "claude-sonnet-4-6") |
 | `timeoutMs` | 60000 | Model call timeout. Set 180000+ for Sonnet. |
-| `maxDocs` | 80 | Max documents per digest run |
+| `maxDocs` | 80 | Max documents to fetch from collection per run |
+| `topN` | 30 | Max tweets sent to LLM after engagement ranking |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom prompt (overrides default two-tier format) |
-| `pages` | 3 | Pages for legacy fetcher (ignored in collection mode) |
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Knowledge API URL |
 
 ### No fallback on model failure
