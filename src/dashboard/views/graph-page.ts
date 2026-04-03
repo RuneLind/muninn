@@ -100,7 +100,17 @@ export function renderGraphPage(): string {
     .cat-chip.active { opacity: 1; }
     .cat-chip.inactive { opacity: 0.35; }
 
-    /* Stats */
+    .mode-btn {
+      flex: 1;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .mode-btn.active { background: var(--accent); color: #fff; }
+    .mode-btn.inactive { background: var(--bg-surface); color: var(--text-secondary); }
+
     .graph-stats {
       position: absolute;
       bottom: 16px;
@@ -238,7 +248,11 @@ export function renderGraphPage(): string {
         <input type="range" id="topk-slider" min="1" max="15" step="1" value="5">
       </div>
       <div class="control-group">
-        <label>Categories</label>
+        <label>Color by</label>
+        <div style="display:flex;gap:4px;margin-bottom:8px;">
+          <button id="mode-category" class="mode-btn active">Category</button>
+          <button id="mode-community" class="mode-btn inactive">Community</button>
+        </div>
         <div class="category-chips" id="cat-chips"></div>
       </div>
     </div>
@@ -287,6 +301,18 @@ export function renderGraphPage(): string {
       return generatedColors[cat];
     }
 
+    // Community colors — distinct hues for up to 20 communities
+    const COMM_PALETTE = [
+      '#6c63ff', '#4ade80', '#f59e0b', '#ef4444', '#22d3ee',
+      '#c084fc', '#fb923c', '#14b8a6', '#ec4899', '#84cc16',
+      '#60a5fa', '#f43f5e', '#a3e635', '#e879f9', '#fbbf24',
+      '#2dd4bf', '#818cf8', '#fb7185', '#34d399', '#fca5a1',
+    ];
+    function commColor(commId) {
+      if (commId < 0) return '#555';
+      return COMM_PALETTE[commId % COMM_PALETTE.length];
+    }
+
     ${escScript()}
 
     let graphData = null;
@@ -298,10 +324,17 @@ export function renderGraphPage(): string {
     let hoverClearTimer = null;
     let lockedNode = null;
     let searchMatches = null; // null = no search active, Set = matched node objects
+    let colorMode = 'category';
+    let communityData = [];
+    let communityMap = new Map();
 
     function buildNodeMap() {
       nodeMap.clear();
       if (graphData) graphData.nodes.forEach(n => nodeMap.set(n.id, n));
+    }
+
+    function nodeColor(node) {
+      return colorMode === 'community' ? commColor(node.community ?? -1) : catColor(node.category);
     }
 
     function highlightNeighbors(node) {
@@ -370,32 +403,51 @@ export function renderGraphPage(): string {
       return await res.json();
     }
 
-    function buildCategoryChips(nodes) {
-      const cats = new Set(nodes.map(n => n.category));
-      activeCategories.clear();
-      catChipsEl.innerHTML = '';
-      cats.forEach(cat => {
-        activeCategories.add(cat);
-        const chip = document.createElement('span');
-        chip.className = 'cat-chip active';
-        chip.textContent = cat;
-        chip.style.background = catColor(cat) + '25';
-        chip.style.color = catColor(cat);
-        chip.style.borderColor = catColor(cat) + '50';
-        chip.dataset.cat = cat;
-        chip.onclick = () => toggleCategory(cat, chip);
-        catChipsEl.appendChild(chip);
-      });
+    function createChip(label, key, color, title) {
+      const chip = document.createElement('span');
+      chip.className = 'cat-chip active';
+      chip.textContent = label;
+      if (title) chip.title = title;
+      chip.style.background = color + '25';
+      chip.style.color = color;
+      chip.style.borderColor = color + '50';
+      chip.dataset.cat = String(key);
+      chip.onclick = () => toggleChip(key, chip);
+      return chip;
     }
 
-    function toggleCategory(cat, chip) {
-      if (activeCategories.has(cat)) {
-        activeCategories.delete(cat);
+    function buildChips(nodes) {
+      activeCategories.clear();
+      catChipsEl.innerHTML = '';
+
+      if (colorMode === 'community') {
+        const comms = communityData
+          .filter(c => c.size >= 2)
+          .sort((a, b) => b.size - a.size);
+        nodes.forEach(n => { if (n.community != null && n.community >= 0) activeCategories.add(n.community); });
+        comms.forEach(info => {
+          const label = (info.name || 'Cluster ' + info.id) + ' (' + info.size + ')';
+          const title = info.representative_docs ? info.representative_docs.join(', ') : '';
+          catChipsEl.appendChild(createChip(label, info.id, commColor(info.id), title));
+        });
+      } else {
+        const cats = new Set(nodes.map(n => n.category));
+        cats.forEach(cat => {
+          activeCategories.add(cat);
+          catChipsEl.appendChild(createChip(cat, cat, catColor(cat)));
+        });
+      }
+    }
+
+    function toggleChip(key, chip) {
+      if (activeCategories.has(key)) {
+        activeCategories.delete(key);
         chip.className = 'cat-chip inactive';
       } else {
-        activeCategories.add(cat);
+        activeCategories.add(key);
         chip.className = 'cat-chip active';
-        chip.style.borderColor = catColor(cat) + '50';
+        const c = colorMode === 'community' ? commColor(key) : catColor(key);
+        chip.style.borderColor = c + '50';
       }
       applyFilters();
     }
@@ -406,7 +458,10 @@ export function renderGraphPage(): string {
       highlightLinks.clear();
       lockedNode = null;
       const visibleIds = new Set(
-        graphData.nodes.filter(n => activeCategories.has(n.category)).map(n => n.id)
+        graphData.nodes.filter(n => {
+          const key = colorMode === 'community' ? (n.community ?? -1) : n.category;
+          return activeCategories.has(key);
+        }).map(n => n.id)
       );
       const filtered = {
         nodes: graphData.nodes.filter(n => visibleIds.has(n.id)),
@@ -419,7 +474,12 @@ export function renderGraphPage(): string {
     }
 
     function updateStats(nodes, edges) {
-      statsEl.innerHTML = '<span>' + nodes + '</span> documents &middot; <span>' + edges + '</span> connections';
+      let s = '<span>' + nodes + '</span> documents &middot; <span>' + edges + '</span> connections';
+      if (communityData.length > 0) {
+        const names = communityData.map(c => c.name || ('Cluster ' + c.id));
+        s += ' &middot; <span>' + communityData.length + '</span> communities: ' + names.join(', ');
+      }
+      statsEl.innerHTML = s;
     }
 
     function getNeighborData(nodeId) {
@@ -430,7 +490,11 @@ export function renderGraphPage(): string {
           const otherId = e.source === nodeId ? e.target : e.source;
           return { node: nodeMap.get(otherId), similarity: e.similarity };
         })
-        .filter(d => d.node && activeCategories.has(d.node.category))
+        .filter(d => {
+          if (!d.node) return false;
+          const key = colorMode === 'community' ? (d.node.community ?? -1) : d.node.category;
+          return activeCategories.has(key);
+        })
         .sort((a, b) => b.similarity - a.similarity);
     }
 
@@ -439,6 +503,11 @@ export function renderGraphPage(): string {
       let html = '<h3>' + esc(node.title) + '</h3>';
       html += '<div class="meta">';
       html += '<span class="cat-badge" style="background:' + catColor(node.category) + '25;color:' + catColor(node.category) + '">' + esc(node.category) + '</span>';
+      if (node.community != null && node.community >= 0) {
+        const info = communityMap.get(node.community);
+        const commName = info ? (info.name || 'Cluster ' + node.community) : 'Cluster ' + node.community;
+        html += ' <span class="cat-badge" style="background:' + commColor(node.community) + '25;color:' + commColor(node.community) + '">' + esc(commName) + '</span>';
+      }
       if (node.date) html += ' &middot; ' + esc(node.date);
       if (node.url) html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
       const coll = selectedCollection();
@@ -449,8 +518,9 @@ export function renderGraphPage(): string {
         html += '<div class="connections-list">';
         html += '<h4>Connected (' + neighbors.length + ')</h4>';
         neighbors.forEach(d => {
+          const dotColor = colorMode === 'community' ? commColor(d.node.community ?? -1) : catColor(d.node.category);
           html += '<div class="conn-item" data-id="' + esc(d.node.id) + '">';
-          html += '<span class="conn-dot" style="background:' + catColor(d.node.category) + '"></span>';
+          html += '<span class="conn-dot" style="background:' + dotColor + '"></span>';
           html += '<span class="conn-title">' + esc(d.node.title) + '</span>';
           html += '<span class="conn-score">' + (d.similarity * 100).toFixed(0) + '%</span>';
           html += '</div>';
@@ -493,6 +563,105 @@ export function renderGraphPage(): string {
       }
     });
 
+    // Cluster force: pulls nodes in the same community toward their shared centroid
+    function clusterForce(strength) {
+      let nodes;
+      function force(alpha) {
+        if (colorMode !== 'community') return;
+        const centroids = {};
+        const counts = {};
+        nodes.forEach(n => {
+          const c = n.community;
+          if (c == null || c < 0) return;
+          if (!centroids[c]) { centroids[c] = {x: 0, y: 0}; counts[c] = 0; }
+          centroids[c].x += n.x || 0;
+          centroids[c].y += n.y || 0;
+          counts[c]++;
+        });
+        Object.keys(centroids).forEach(c => {
+          centroids[c].x /= counts[c];
+          centroids[c].y /= counts[c];
+        });
+        nodes.forEach(n => {
+          const c = n.community;
+          if (c == null || c < 0 || !centroids[c]) return;
+          n.vx += (centroids[c].x - n.x) * alpha * strength;
+          n.vy += (centroids[c].y - n.y) * alpha * strength;
+        });
+      }
+      force.initialize = (_nodes) => { nodes = _nodes; };
+      return force;
+    }
+
+    // Convex hull: compute hull points for a set of 2D points
+    function convexHull(points) {
+      if (points.length < 3) return points;
+      points = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      const cross = (O, A, B) => (A[0]-O[0])*(B[1]-O[1]) - (A[1]-O[1])*(B[0]-O[0]);
+      const lower = [];
+      for (const p of points) { while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop(); lower.push(p); }
+      const upper = [];
+      for (const p of points.reverse()) { while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop(); upper.push(p); }
+      return lower.slice(0,-1).concat(upper.slice(0,-1));
+    }
+
+    // Draw community hulls on the canvas
+    function drawCommunityHulls(ctx, globalScale) {
+      if (colorMode !== 'community' || !communityData.length) return;
+      const currentNodes = graph ? graph.graphData().nodes : [];
+      // Group nodes by community
+      const groups = {};
+      currentNodes.forEach(n => {
+        const c = n.community;
+        if (c == null || c < 0) return;
+        if (!groups[c]) groups[c] = [];
+        groups[c].push(n);
+      });
+
+      const padding = 20 / globalScale;
+      Object.entries(groups).forEach(([commId, members]) => {
+        if (members.length < 2) return;
+        const points = members.map(n => [n.x, n.y]);
+        const hull = convexHull(points);
+        if (hull.length < 2) return;
+
+        const color = commColor(Number(commId));
+        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+
+        ctx.beginPath();
+        for (let i = 0; i < hull.length; i++) {
+          const curr = hull[i];
+          const dx = curr[0] - cx, dy = curr[1] - cy;
+          const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+          const ox = curr[0] + (dx/dist) * padding;
+          const oy = curr[1] + (dy/dist) * padding;
+          if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = color + '12';
+        ctx.fill();
+        ctx.strokeStyle = color + '30';
+        ctx.lineWidth = 1.5 / globalScale;
+        ctx.stroke();
+
+        const info = communityMap.get(Number(commId));
+        if (info && globalScale > 0.2) {
+          const label = info.name || 'Cluster ' + commId;
+          const fontSize = Math.max(12, 16 / globalScale);
+          ctx.font = 'bold ' + fontSize + 'px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const textWidth = ctx.measureText(label).width;
+          const pad = 4 / globalScale;
+          ctx.fillStyle = 'rgba(10, 10, 15, 0.7)';
+          ctx.fillRect(cx - textWidth/2 - pad, cy - (20/globalScale) - fontSize/2 - pad, textWidth + pad*2, fontSize + pad*2);
+          ctx.fillStyle = color;
+          ctx.fillText(label, cx, cy - (20 / globalScale));
+        }
+      });
+    }
+
     async function init() {
       await fetchCollections();
       try {
@@ -510,7 +679,9 @@ export function renderGraphPage(): string {
       }
 
       buildNodeMap();
-      buildCategoryChips(graphData.nodes);
+      communityData = graphData.communities || [];
+      communityMap = new Map(communityData.map(c => [c.id, c]));
+      buildChips(graphData.nodes);
 
       const container = document.getElementById('graph-canvas');
       graph = ForceGraph()(container)
@@ -519,13 +690,20 @@ export function renderGraphPage(): string {
           links: graphData.edges.map(e => ({ source: e.source, target: e.target, similarity: e.similarity })),
         })
         .nodeId('id')
-        .nodeLabel(n => n.title + '\\n' + n.category)
+        .nodeLabel(n => {
+          const label = n.title + '\\n' + n.category;
+          if (colorMode !== 'community' || n.community == null) return label;
+          const info = communityMap.get(n.community);
+          const commName = info ? info.name : 'Cluster ' + n.community;
+          return label + '\\n' + commName;
+        })
         .nodeColor(n => {
+          const c = nodeColor(n);
           const matched = !searchMatches || searchMatches.has(n);
           if (highlightNodes.size > 0) {
-            return highlightNodes.has(n) ? catColor(n.category) : catColor(n.category) + '20';
+            return highlightNodes.has(n) ? c : c + '20';
           }
-          return matched ? catColor(n.category) : catColor(n.category) + '15';
+          return matched ? c : c + '15';
         })
         .nodeVal(n => {
           if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
@@ -543,10 +721,18 @@ export function renderGraphPage(): string {
           if (searchMatches) {
             const src = typeof link.source === 'object' ? link.source : null;
             const tgt = typeof link.target === 'object' ? link.target : null;
-            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.08)';
+            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.12)';
             return 'rgba(108, 99, 255, 0.02)';
           }
-          return 'rgba(108, 99, 255, 0.08)';
+          if (colorMode === 'community') {
+            const src = typeof link.source === 'object' ? link.source : null;
+            const tgt = typeof link.target === 'object' ? link.target : null;
+            if (src && tgt && src.community != null && src.community === tgt.community) {
+              return commColor(src.community) + '20';
+            }
+            return 'rgba(100, 100, 100, 0.06)';
+          }
+          return 'rgba(108, 99, 255, 0.12)';
         })
         .linkDirectionalParticles(link => highlightLinks.has(link) ? 2 : 0)
         .linkDirectionalParticleWidth(2)
@@ -585,7 +771,13 @@ export function renderGraphPage(): string {
         })
         .onBackgroundClick(() => {
           unlockGraph();
+        })
+        .onRenderFramePost((ctx, globalScale) => {
+          drawCommunityHulls(ctx, globalScale);
         });
+
+      // Add cluster force (active only in community mode)
+      graph.d3Force('cluster', clusterForce(0.08));
 
       updateStats(graphData.nodes.length, graphData.edges.length);
 
@@ -603,7 +795,9 @@ export function renderGraphPage(): string {
         try {
           graphData = await fetchGraph();
           buildNodeMap();
-          buildCategoryChips(graphData.nodes);
+          communityData = graphData.communities || [];
+      communityMap = new Map(communityData.map(c => [c.id, c]));
+          buildChips(graphData.nodes);
           applyFilters();
           loading.classList.add('hidden');
           setTimeout(() => graph.zoomToFit(400, 60), 300);
@@ -632,6 +826,21 @@ export function renderGraphPage(): string {
         }));
       }
     });
+
+    const modeCatBtn = document.getElementById('mode-category');
+    const modeCommBtn = document.getElementById('mode-community');
+    function setColorMode(mode) {
+      colorMode = mode;
+      modeCatBtn.className = 'mode-btn ' + (mode === 'category' ? 'active' : 'inactive');
+      modeCommBtn.className = 'mode-btn ' + (mode === 'community' ? 'active' : 'inactive');
+      if (graphData) {
+        buildChips(graphData.nodes);
+        applyFilters();
+      }
+      if (graph) graph.d3ReheatSimulation();
+    }
+    modeCatBtn.onclick = () => setColorMode('category');
+    modeCommBtn.onclick = () => setColorMode('community');
 
     init();
   })();
