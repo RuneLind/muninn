@@ -647,12 +647,17 @@ export function renderGraphPage(): string {
         const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
         const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
         const info = communityData.find(c => c.id === Number(commId));
-        if (info && globalScale > 0.3) {
+        if (info && globalScale > 0.2) {
           const label = info.name || 'Cluster ' + commId;
-          const fontSize = Math.max(10, 14 / globalScale);
-          ctx.font = fontSize + 'px sans-serif';
+          const fontSize = Math.max(12, 16 / globalScale);
+          ctx.font = 'bold ' + fontSize + 'px sans-serif';
           ctx.textAlign = 'center';
-          ctx.fillStyle = color + '90';
+          ctx.textBaseline = 'middle';
+          const textWidth = ctx.measureText(label).width;
+          const pad = 4 / globalScale;
+          ctx.fillStyle = 'rgba(10, 10, 15, 0.7)';
+          ctx.fillRect(cx - textWidth/2 - pad, cy - (20/globalScale) - fontSize/2 - pad, textWidth + pad*2, fontSize + pad*2);
+          ctx.fillStyle = color;
           ctx.fillText(label, cx, cy - (20 / globalScale));
         }
       });
@@ -716,10 +721,18 @@ export function renderGraphPage(): string {
           if (searchMatches) {
             const src = typeof link.source === 'object' ? link.source : null;
             const tgt = typeof link.target === 'object' ? link.target : null;
-            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.08)';
+            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.12)';
             return 'rgba(108, 99, 255, 0.02)';
           }
-          return 'rgba(108, 99, 255, 0.08)';
+          if (colorMode === 'community') {
+            const src = typeof link.source === 'object' ? link.source : null;
+            const tgt = typeof link.target === 'object' ? link.target : null;
+            if (src && tgt && src.community != null && src.community === tgt.community) {
+              return commColor(src.community) + '20';
+            }
+            return 'rgba(100, 100, 100, 0.06)';
+          }
+          return 'rgba(108, 99, 255, 0.12)';
         })
         .linkDirectionalParticles(link => highlightLinks.has(link) ? 2 : 0)
         .linkDirectionalParticleWidth(2)
