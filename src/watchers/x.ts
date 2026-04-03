@@ -50,13 +50,14 @@ interface CollectionDoc {
 
 interface CompactedTweet {
   text: string;
-  engagementScore: number;
+  /** Combined score (engagement + relevance) if available, falls back to engagement-only */
+  rankScore: number;
 }
 
 /**
  * Convert full huginn markdown document into a compact one-liner for the digest prompt.
  * Input:  "# @handle — Author\n\nTweet text...\n\n---\n\n- **Engagement:** 1,508 likes..."
- * Output: { text: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: ...", engagementScore: 12.34 }
+ * Output: { text: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: ...", rankScore: 12.34 }
  */
 function compactTweetText(rawText: string, url: string): CompactedTweet {
   // Strip the bracketed document ID line huginn prepends
@@ -87,10 +88,15 @@ function compactTweetText(rawText: string, url: string): CompactedTweet {
   if (likesMatch) signals.push(`${likesMatch[1]} likes`);
   if (viewsMatch) signals.push(`${viewsMatch[1]} views`);
 
-  // Extract engagement score from footer
-  const scoreLine = lines.find((l) => l.includes("**Engagement Score:**")) ?? "";
-  const scoreMatch = scoreLine.match(/\*\*Engagement Score:\*\*\s*([\d.]+)/);
-  const engagementScore = scoreMatch ? parseFloat(scoreMatch[1]!) : 0;
+  // Extract scores from frontmatter — prefer combined_score (engagement + relevance),
+  // fall back to engagement_score if relevance scoring hasn't run yet
+  const combinedLine = lines.find((l) => l.includes("combined_score:")) ?? "";
+  const combinedMatch = combinedLine.match(/combined_score:\s*([\d.]+)/);
+  const engScoreLine = lines.find((l) => l.includes("engagement_score:")) ?? "";
+  const engScoreMatch = engScoreLine.match(/engagement_score:\s*([\d.]+)/);
+  const rankScore = combinedMatch
+    ? parseFloat(combinedMatch[1]!)
+    : engScoreMatch ? parseFloat(engScoreMatch[1]!) : 0;
 
   // Extract type
   const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
@@ -100,7 +106,7 @@ function compactTweetText(rawText: string, url: string): CompactedTweet {
   if (signals.length > 0) result += ` (${signals.join(", ")})`;
   if (isNote) result = `[ARTICLE/NOTE] ${result}`;
   result += `\n  URL: ${url}`;
-  return { text: result, engagementScore };
+  return { text: result, rankScore };
 }
 
 function extractTweetId(docId: string): string {
@@ -156,7 +162,7 @@ async function fetchFromCollection(
   const trackingIds: string[] = [];
 
   // Fetch in batches of 20 to avoid overwhelming huginn's Python server
-  const compacted: { docId: string; text: string; engagementScore: number }[] = [];
+  const compacted: { docId: string; text: string; rankScore: number }[] = [];
   for (let i = 0; i < toFetch.length; i += 20) {
     const batch = toFetch.slice(i, i + 20);
     const results = await Promise.all(
@@ -165,8 +171,8 @@ async function fetchFromCollection(
           const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
           if (!resp.ok) return null;
           const data = await resp.json() as { text: string; metadata?: { url?: string } };
-          const { text, engagementScore } = compactTweetText(data.text, data.metadata?.url || doc.url);
-          return { docId: doc.id, text, engagementScore };
+          const { text, rankScore } = compactTweetText(data.text, data.metadata?.url || doc.url);
+          return { docId: doc.id, text, rankScore };
         } catch (err) {
           log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
           return null;
@@ -179,7 +185,7 @@ async function fetchFromCollection(
   }
 
   // Rank by engagement score (highest first) and take top-N
-  compacted.sort((a, b) => b.engagementScore - a.engagementScore);
+  compacted.sort((a, b) => b.rankScore - a.rankScore);
   const topN = config.topN ?? 30;
   const ranked = compacted.slice(0, topN);
 

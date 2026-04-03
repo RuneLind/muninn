@@ -1,22 +1,18 @@
 import { test, expect, describe } from "bun:test";
 
-// compactTweetText and related helpers are not exported, so we test via
-// a small inline re-implementation approach: import the module and test
-// the exported checkX indirectly. But since compactTweetText is a pure
-// function, let's extract and test it directly by importing the module.
-//
-// For now, we test the logic by calling the internal function.
-// We need to export it first — or test through the public API.
-// Let's test through a focused unit test of the compact function.
-
-// Since compactTweetText is not exported, we'll duplicate the parsing logic
+// Since compactTweetText is not exported, we duplicate the parsing logic
 // here for testing. This validates the regex patterns and score extraction.
 
-function extractEngagementScore(rawText: string): number {
+function extractRankScore(rawText: string): number {
   const lines = rawText.split("\n");
-  const scoreLine = lines.find((l) => l.includes("**Engagement Score:**")) ?? "";
-  const scoreMatch = scoreLine.match(/\*\*Engagement Score:\*\*\s*([\d.]+)/);
-  return scoreMatch ? parseFloat(scoreMatch[1]!) : 0;
+  // Prefer combined_score (engagement + relevance), fall back to engagement_score
+  const combinedLine = lines.find((l) => l.includes("combined_score:")) ?? "";
+  const combinedMatch = combinedLine.match(/combined_score:\s*([\d.]+)/);
+  if (combinedMatch) return parseFloat(combinedMatch[1]!);
+
+  const engScoreLine = lines.find((l) => l.includes("engagement_score:")) ?? "";
+  const engScoreMatch = engScoreLine.match(/engagement_score:\s*([\d.]+)/);
+  return engScoreMatch ? parseFloat(engScoreMatch[1]!) : 0;
 }
 
 function extractEngagementSignals(rawText: string): { likes: string | null; views: string | null } {
@@ -30,10 +26,16 @@ function extractEngagementSignals(rawText: string): { likes: string | null; view
   };
 }
 
-// ── Engagement score extraction from markdown ───────────────────────
+// ── Score extraction from markdown frontmatter ──────────────────────
 
-describe("engagement score extraction from huginn markdown", () => {
-  const sampleMarkdown = `# @karpathy — Andrej Karpathy
+describe("rank score extraction from huginn markdown", () => {
+  const withCombinedScore = `---
+title: "@karpathy — Great thread"
+engagement_score: 42.1337
+relevance_score: 0.7823
+combined_score: 0.8912
+---
+# @karpathy — Andrej Karpathy
 
 Great thread on transformer architecture improvements.
 
@@ -45,41 +47,56 @@ Great thread on transformer architecture improvements.
 - **Type:** tweet
 - **Link:** https://x.com/karpathy/status/123456`;
 
-  test("extracts engagement score from markdown footer", () => {
-    expect(extractEngagementScore(sampleMarkdown)).toBe(42.1337);
+  const engagementOnly = `---
+title: "@someone — Some tweet"
+engagement_score: 15.5
+---
+# @someone — Name
+
+Some tweet text
+
+---
+
+- **Engagement:** 100 likes · 10 retweets · 5,000 views
+- **Engagement Score:** 15.5`;
+
+  test("prefers combined_score when available", () => {
+    expect(extractRankScore(withCombinedScore)).toBe(0.8912);
+  });
+
+  test("falls back to engagement_score when no combined_score", () => {
+    expect(extractRankScore(engagementOnly)).toBe(15.5);
+  });
+
+  test("returns 0 when no scores exist", () => {
+    const noScore = `# @someone — Name\n\nSome tweet text`;
+    expect(extractRankScore(noScore)).toBe(0);
+  });
+
+  test("returns 0 for empty text", () => {
+    expect(extractRankScore("")).toBe(0);
   });
 
   test("extracts likes from engagement line", () => {
-    const { likes } = extractEngagementSignals(sampleMarkdown);
+    const { likes } = extractEngagementSignals(withCombinedScore);
     expect(likes).toBe("1,508");
   });
 
   test("extracts views from engagement line", () => {
-    const { views } = extractEngagementSignals(sampleMarkdown);
+    const { views } = extractEngagementSignals(withCombinedScore);
     expect(views).toBe("524,000");
   });
 
-  test("returns 0 when no engagement score line exists", () => {
-    const noScore = `# @someone — Name\n\nSome tweet text\n\n---\n\n- **Engagement:** 10 likes`;
-    expect(extractEngagementScore(noScore)).toBe(0);
-  });
-
-  test("returns 0 for empty text", () => {
-    expect(extractEngagementScore("")).toBe(0);
-  });
-
   test("handles integer scores (no decimal)", () => {
-    const intScore = `- **Engagement Score:** 100`;
-    expect(extractEngagementScore(intScore)).toBe(100);
+    expect(extractRankScore("engagement_score: 100")).toBe(100);
   });
 
   test("handles very small scores", () => {
-    const smallScore = `- **Engagement Score:** 0.0012`;
-    expect(extractEngagementScore(smallScore)).toBe(0.0012);
+    expect(extractRankScore("combined_score: 0.0012")).toBe(0.0012);
   });
 });
 
-// ── XTweet sorting by engagement_score ──────────────────────────────
+// ── Tweet sorting by score ──────────────────────────────────────────
 
 interface MinimalTweet {
   id: string;
@@ -87,7 +104,7 @@ interface MinimalTweet {
   engagement_score?: number;
 }
 
-describe("tweet ranking by engagement_score", () => {
+describe("tweet ranking by engagement_score (legacy path)", () => {
   const tweets: MinimalTweet[] = [
     { id: "1", handle: "low", engagement_score: 1.5 },
     { id: "2", handle: "high", engagement_score: 42.0 },
@@ -124,7 +141,6 @@ describe("tweet ranking by engagement_score", () => {
     const sorted = [...noScores].sort(
       (a, b) => (b.engagement_score ?? 0) - (a.engagement_score ?? 0),
     );
-    // All zero — order is stable
     expect(sorted).toHaveLength(2);
   });
 });
