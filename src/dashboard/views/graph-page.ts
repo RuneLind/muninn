@@ -100,7 +100,17 @@ export function renderGraphPage(): string {
     .cat-chip.active { opacity: 1; }
     .cat-chip.inactive { opacity: 0.35; }
 
-    /* Stats */
+    .mode-btn {
+      flex: 1;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .mode-btn.active { background: var(--accent); color: #fff; }
+    .mode-btn.inactive { background: var(--bg-surface); color: var(--text-secondary); }
+
     .graph-stats {
       position: absolute;
       bottom: 16px;
@@ -240,8 +250,8 @@ export function renderGraphPage(): string {
       <div class="control-group">
         <label>Color by</label>
         <div style="display:flex;gap:4px;margin-bottom:8px;">
-          <button id="mode-category" class="mode-btn active" style="flex:1;padding:4px 8px;border-radius:6px;border:1px solid var(--border-primary);background:var(--accent);color:#fff;font-size:11px;cursor:pointer;">Category</button>
-          <button id="mode-community" class="mode-btn" style="flex:1;padding:4px 8px;border-radius:6px;border:1px solid var(--border-primary);background:var(--bg-surface);color:var(--text-secondary);font-size:11px;cursor:pointer;">Community</button>
+          <button id="mode-category" class="mode-btn active">Category</button>
+          <button id="mode-community" class="mode-btn inactive">Community</button>
         </div>
         <div class="category-chips" id="cat-chips"></div>
       </div>
@@ -314,8 +324,9 @@ export function renderGraphPage(): string {
     let hoverClearTimer = null;
     let lockedNode = null;
     let searchMatches = null; // null = no search active, Set = matched node objects
-    let colorMode = 'category'; // 'category' or 'community'
-    let communityData = []; // community summaries from API
+    let colorMode = 'category';
+    let communityData = [];
+    let communityMap = new Map();
 
     function buildNodeMap() {
       nodeMap.clear();
@@ -392,45 +403,38 @@ export function renderGraphPage(): string {
       return await res.json();
     }
 
+    function createChip(label, key, color, title) {
+      const chip = document.createElement('span');
+      chip.className = 'cat-chip active';
+      chip.textContent = label;
+      if (title) chip.title = title;
+      chip.style.background = color + '25';
+      chip.style.color = color;
+      chip.style.borderColor = color + '50';
+      chip.dataset.cat = String(key);
+      chip.onclick = () => toggleChip(key, chip);
+      return chip;
+    }
+
     function buildChips(nodes) {
       activeCategories.clear();
       catChipsEl.innerHTML = '';
 
       if (colorMode === 'community') {
-        // Show community chips — only for real communities (in communityData), skip isolated nodes
         const comms = communityData
           .filter(c => c.size >= 2)
           .sort((a, b) => b.size - a.size);
-        // Also activate isolated node communities so they stay visible
         nodes.forEach(n => { if (n.community != null && n.community >= 0) activeCategories.add(n.community); });
         comms.forEach(info => {
-          const commId = info.id;
-          const chip = document.createElement('span');
-          chip.className = 'cat-chip active';
-          const label = info.name || 'Cluster ' + commId;
-          chip.textContent = label + ' (' + info.size + ')';
-          chip.title = info.representative_docs ? info.representative_docs.join(', ') : '';
-          chip.style.background = commColor(commId) + '25';
-          chip.style.color = commColor(commId);
-          chip.style.borderColor = commColor(commId) + '50';
-          chip.dataset.cat = String(commId);
-          chip.onclick = () => toggleChip(commId, chip);
-          catChipsEl.appendChild(chip);
+          const label = (info.name || 'Cluster ' + info.id) + ' (' + info.size + ')';
+          const title = info.representative_docs ? info.representative_docs.join(', ') : '';
+          catChipsEl.appendChild(createChip(label, info.id, commColor(info.id), title));
         });
       } else {
-        // Show category chips
         const cats = new Set(nodes.map(n => n.category));
         cats.forEach(cat => {
           activeCategories.add(cat);
-          const chip = document.createElement('span');
-          chip.className = 'cat-chip active';
-          chip.textContent = cat;
-          chip.style.background = catColor(cat) + '25';
-          chip.style.color = catColor(cat);
-          chip.style.borderColor = catColor(cat) + '50';
-          chip.dataset.cat = cat;
-          chip.onclick = () => toggleChip(cat, chip);
-          catChipsEl.appendChild(chip);
+          catChipsEl.appendChild(createChip(cat, cat, catColor(cat)));
         });
       }
     }
@@ -500,7 +504,7 @@ export function renderGraphPage(): string {
       html += '<div class="meta">';
       html += '<span class="cat-badge" style="background:' + catColor(node.category) + '25;color:' + catColor(node.category) + '">' + esc(node.category) + '</span>';
       if (node.community != null && node.community >= 0) {
-        const info = communityData.find(c => c.id === node.community);
+        const info = communityMap.get(node.community);
         const commName = info ? (info.name || 'Cluster ' + node.community) : 'Cluster ' + node.community;
         html += ' <span class="cat-badge" style="background:' + commColor(node.community) + '25;color:' + commColor(node.community) + '">' + esc(commName) + '</span>';
       }
@@ -622,14 +626,12 @@ export function renderGraphPage(): string {
         if (hull.length < 2) return;
 
         const color = commColor(Number(commId));
+        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
+        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
+
         ctx.beginPath();
-        // Draw expanded hull with rounded corners
         for (let i = 0; i < hull.length; i++) {
           const curr = hull[i];
-          const next = hull[(i+1) % hull.length];
-          // Offset outward from centroid
-          const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
-          const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
           const dx = curr[0] - cx, dy = curr[1] - cy;
           const dist = Math.sqrt(dx*dx + dy*dy) || 1;
           const ox = curr[0] + (dx/dist) * padding;
@@ -643,10 +645,7 @@ export function renderGraphPage(): string {
         ctx.lineWidth = 1.5 / globalScale;
         ctx.stroke();
 
-        // Draw community label at centroid
-        const cx = members.reduce((s, n) => s + n.x, 0) / members.length;
-        const cy = members.reduce((s, n) => s + n.y, 0) / members.length;
-        const info = communityData.find(c => c.id === Number(commId));
+        const info = communityMap.get(Number(commId));
         if (info && globalScale > 0.2) {
           const label = info.name || 'Cluster ' + commId;
           const fontSize = Math.max(12, 16 / globalScale);
@@ -681,6 +680,7 @@ export function renderGraphPage(): string {
 
       buildNodeMap();
       communityData = graphData.communities || [];
+      communityMap = new Map(communityData.map(c => [c.id, c]));
       buildChips(graphData.nodes);
 
       const container = document.getElementById('graph-canvas');
@@ -693,7 +693,7 @@ export function renderGraphPage(): string {
         .nodeLabel(n => {
           const label = n.title + '\\n' + n.category;
           if (colorMode !== 'community' || n.community == null) return label;
-          const info = communityData.find(c => c.id === n.community);
+          const info = communityMap.get(n.community);
           const commName = info ? info.name : 'Cluster ' + n.community;
           return label + '\\n' + commName;
         })
@@ -796,6 +796,7 @@ export function renderGraphPage(): string {
           graphData = await fetchGraph();
           buildNodeMap();
           communityData = graphData.communities || [];
+      communityMap = new Map(communityData.map(c => [c.id, c]));
           buildChips(graphData.nodes);
           applyFilters();
           loading.classList.add('hidden');
@@ -826,20 +827,16 @@ export function renderGraphPage(): string {
       }
     });
 
-    // Mode switching: Category vs Community
     const modeCatBtn = document.getElementById('mode-category');
     const modeCommBtn = document.getElementById('mode-community');
     function setColorMode(mode) {
       colorMode = mode;
-      modeCatBtn.style.background = mode === 'category' ? 'var(--accent)' : 'var(--bg-surface)';
-      modeCatBtn.style.color = mode === 'category' ? '#fff' : 'var(--text-secondary)';
-      modeCommBtn.style.background = mode === 'community' ? 'var(--accent)' : 'var(--bg-surface)';
-      modeCommBtn.style.color = mode === 'community' ? '#fff' : 'var(--text-secondary)';
+      modeCatBtn.className = 'mode-btn ' + (mode === 'category' ? 'active' : 'inactive');
+      modeCommBtn.className = 'mode-btn ' + (mode === 'community' ? 'active' : 'inactive');
       if (graphData) {
         buildChips(graphData.nodes);
         applyFilters();
       }
-      // Reheat simulation so cluster force takes effect
       if (graph) graph.d3ReheatSimulation();
     }
     modeCatBtn.onclick = () => setColorMode('category');
