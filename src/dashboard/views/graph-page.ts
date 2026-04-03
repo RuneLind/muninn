@@ -764,7 +764,7 @@ export function renderGraphPage(): string {
         });
 
       // Add cluster force (active only in community mode)
-      graph.d3Force('cluster', clusterForce(0.3));
+      graph.d3Force('cluster', clusterForce(0.08));
 
       updateStats(graphData.nodes.length, graphData.edges.length);
 
