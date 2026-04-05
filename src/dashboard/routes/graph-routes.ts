@@ -31,4 +31,21 @@ export function registerGraphRoutes(app: Hono, config: Config): void {
       15000,
     );
   });
+
+  // Proxy to Huginn author-graph endpoint
+  app.get("/api/graph/author", async (c) => {
+    const collection = c.req.query("collection") || "x-feed";
+    const minScore = c.req.query("min_score") || "0.0";
+    const minInteractions = c.req.query("min_interactions") || "1";
+    const params = new URLSearchParams({
+      min_score: minScore,
+      min_interactions: minInteractions,
+    });
+    return knowledgeApiHandler(
+      c,
+      KNOWLEDGE_API_URL,
+      `/api/collection/${encodeURIComponent(collection)}/author-graph?${params}`,
+      30000,
+    );
+  });
 }
