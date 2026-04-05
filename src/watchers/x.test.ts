@@ -1,34 +1,9 @@
 import { test, expect, describe } from "bun:test";
+import { extractRankScore } from "./x.ts";
 
-// Since compactTweetText is not exported, we duplicate the parsing logic
-// here for testing. This validates the regex patterns and score extraction.
+// ── Score extraction from markdown (tests the real exported function) ─
 
-function extractRankScore(rawText: string): number {
-  const lines = rawText.split("\n");
-  // Prefer combined_score (engagement + relevance), fall back to engagement_score
-  const combinedLine = lines.find((l) => l.includes("combined_score:")) ?? "";
-  const combinedMatch = combinedLine.match(/combined_score:\s*([\d.]+)/);
-  if (combinedMatch) return parseFloat(combinedMatch[1]!);
-
-  const engScoreLine = lines.find((l) => l.includes("engagement_score:")) ?? "";
-  const engScoreMatch = engScoreLine.match(/engagement_score:\s*([\d.]+)/);
-  return engScoreMatch ? parseFloat(engScoreMatch[1]!) : 0;
-}
-
-function extractEngagementSignals(rawText: string): { likes: string | null; views: string | null } {
-  const lines = rawText.split("\n");
-  const engagementLine = lines.find((l) => l.includes("**Engagement:**")) ?? "";
-  const likesMatch = engagementLine.match(/([\d,]+)\s*likes/);
-  const viewsMatch = engagementLine.match(/([\d,]+)\s*views/);
-  return {
-    likes: likesMatch ? likesMatch[1]! : null,
-    views: viewsMatch ? viewsMatch[1]! : null,
-  };
-}
-
-// ── Score extraction from markdown frontmatter ──────────────────────
-
-describe("rank score extraction from huginn markdown", () => {
+describe("extractRankScore", () => {
   const withCombinedScore = `---
 title: "@karpathy — Great thread"
 engagement_score: 42.1337
@@ -37,15 +12,7 @@ combined_score: 0.8912
 ---
 # @karpathy — Andrej Karpathy
 
-Great thread on transformer architecture improvements.
-
----
-
-- **Engagement:** 1,508 likes · 234 retweets · 524,000 views · 89 bookmarks
-- **Engagement Score:** 42.1337
-- **Date:** Thu Mar 20 14:30:00 +0000 2026
-- **Type:** tweet
-- **Link:** https://x.com/karpathy/status/123456`;
+Great thread on transformer architecture improvements.`;
 
   const engagementOnly = `---
 title: "@someone — Some tweet"
@@ -53,12 +20,7 @@ engagement_score: 15.5
 ---
 # @someone — Name
 
-Some tweet text
-
----
-
-- **Engagement:** 100 likes · 10 retweets · 5,000 views
-- **Engagement Score:** 15.5`;
+Some tweet text`;
 
   test("prefers combined_score when available", () => {
     expect(extractRankScore(withCombinedScore)).toBe(0.8912);
@@ -69,22 +31,11 @@ Some tweet text
   });
 
   test("returns 0 when no scores exist", () => {
-    const noScore = `# @someone — Name\n\nSome tweet text`;
-    expect(extractRankScore(noScore)).toBe(0);
+    expect(extractRankScore("# @someone — Name\n\nSome tweet text")).toBe(0);
   });
 
   test("returns 0 for empty text", () => {
     expect(extractRankScore("")).toBe(0);
-  });
-
-  test("extracts likes from engagement line", () => {
-    const { likes } = extractEngagementSignals(withCombinedScore);
-    expect(likes).toBe("1,508");
-  });
-
-  test("extracts views from engagement line", () => {
-    const { views } = extractEngagementSignals(withCombinedScore);
-    expect(views).toBe("524,000");
   });
 
   test("handles integer scores (no decimal)", () => {

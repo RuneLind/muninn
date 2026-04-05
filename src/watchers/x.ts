@@ -42,6 +42,7 @@ interface XWatcherConfig {
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 const DEFAULT_MAX_DOCS = 80;
+const DEFAULT_TOP_N = 30;
 
 interface CollectionDoc {
   id: string;
@@ -50,8 +51,19 @@ interface CollectionDoc {
 
 interface CompactedTweet {
   text: string;
-  /** Combined score (engagement + relevance) if available, falls back to engagement-only */
   rankScore: number;
+}
+
+/**
+ * Extract rank score from markdown text. Prefers combined_score (engagement + relevance),
+ * falls back to engagement_score if relevance scoring hasn't run yet.
+ * Field names are a shared contract with huginn-jarvis/scripts/x/scoring/relevance_scorer.py.
+ */
+export function extractRankScore(text: string): number {
+  const combinedMatch = text.match(/combined_score:\s*([\d.]+)/);
+  if (combinedMatch) return parseFloat(combinedMatch[1]!);
+  const engMatch = text.match(/engagement_score:\s*([\d.]+)/);
+  return engMatch ? parseFloat(engMatch[1]!) : 0;
 }
 
 /**
@@ -88,15 +100,7 @@ function compactTweetText(rawText: string, url: string): CompactedTweet {
   if (likesMatch) signals.push(`${likesMatch[1]} likes`);
   if (viewsMatch) signals.push(`${viewsMatch[1]} views`);
 
-  // Extract scores from frontmatter — prefer combined_score (engagement + relevance),
-  // fall back to engagement_score if relevance scoring hasn't run yet
-  const combinedLine = lines.find((l) => l.includes("combined_score:")) ?? "";
-  const combinedMatch = combinedLine.match(/combined_score:\s*([\d.]+)/);
-  const engScoreLine = lines.find((l) => l.includes("engagement_score:")) ?? "";
-  const engScoreMatch = engScoreLine.match(/engagement_score:\s*([\d.]+)/);
-  const rankScore = combinedMatch
-    ? parseFloat(combinedMatch[1]!)
-    : engScoreMatch ? parseFloat(engScoreMatch[1]!) : 0;
+  const rankScore = extractRankScore(rawText);
 
   // Extract type
   const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
@@ -186,7 +190,7 @@ async function fetchFromCollection(
 
   // Rank by engagement score (highest first) and take top-N
   compacted.sort((a, b) => b.rankScore - a.rankScore);
-  const topN = config.topN ?? 30;
+  const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = compacted.slice(0, topN);
 
   for (const r of ranked) {
@@ -272,7 +276,7 @@ async function fetchFromPython(
 
   // Sort by engagement score (already sorted by fetcher, but re-sort after dedup filtering)
   newTweets.sort((a, b) => (b.engagement_score ?? 0) - (a.engagement_score ?? 0));
-  const topN = config.topN ?? 30;
+  const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = newTweets.slice(0, topN);
 
   log.info("Fetcher: {total} tweets, {newCount} new, {ranked} after ranking (top-{topN})", {
