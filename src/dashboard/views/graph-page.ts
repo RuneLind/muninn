@@ -726,6 +726,8 @@ export function renderGraphPage(): string {
         .nodeVal(n => {
           if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
           if (searchMatches && searchMatches.has(n)) return 6;
+          // Size author nodes by score (larger = higher score)
+          if (graphType === 'author' && n.score != null) return 2 + n.score * 12;
           return 4;
         })
         .linkSource('source')
