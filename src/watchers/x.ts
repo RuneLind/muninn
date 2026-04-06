@@ -162,11 +162,9 @@ async function fetchFromCollection(
   // Fetch full content for new documents (cap to avoid huge prompts)
   const maxDocs = config.maxDocs ?? DEFAULT_MAX_DOCS;
   const toFetch = newDocs.slice(0, maxDocs);
-  const texts: string[] = [];
-  const trackingIds: string[] = [];
 
   // Fetch in batches of 20 to avoid overwhelming huginn's Python server
-  const compacted: { docId: string; text: string; rankScore: number }[] = [];
+  const compacted: (CompactedTweet & { docId: string })[] = [];
   for (let i = 0; i < toFetch.length; i += 20) {
     const batch = toFetch.slice(i, i + 20);
     const results = await Promise.all(
@@ -188,15 +186,13 @@ async function fetchFromCollection(
     }
   }
 
-  // Rank by engagement score (highest first) and take top-N
+  // Rank by engagement score (highest first) and take top-N for the LLM
   compacted.sort((a, b) => b.rankScore - a.rankScore);
   const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = compacted.slice(0, topN);
-
-  for (const r of ranked) {
-    texts.push(r.text);
-    trackingIds.push(`tw:${extractTweetId(r.docId)}`);
-  }
+  const texts = ranked.map((r) => r.text);
+  // Track ALL fetched tweets so below-cutoff ones aren't re-fetched next tick
+  const trackingIds = compacted.map((r) => `tw:${extractTweetId(r.docId)}`);
 
   log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking", {
     botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: compacted.length, ranked: ranked.length,

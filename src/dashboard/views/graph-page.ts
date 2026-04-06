@@ -239,11 +239,18 @@ export function renderGraphPage(): string {
         <input type="text" id="search-input" placeholder="Search documents..." autocomplete="off"
           style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border-primary);background:var(--bg-surface);color:var(--text-primary);font-size:12px;outline:none;">
       </div>
-      <div class="control-group">
+      <div class="control-group" id="graph-type-group" style="display:none;">
+        <label>Graph type</label>
+        <div style="display:flex;gap:4px;margin-bottom:8px;">
+          <button id="type-similarity" class="mode-btn active">Documents</button>
+          <button id="type-author" class="mode-btn inactive">Authors</button>
+        </div>
+      </div>
+      <div class="control-group" id="similarity-controls">
         <label>Min similarity <span id="sim-val">0.65</span></label>
         <input type="range" id="sim-slider" min="0.40" max="0.95" step="0.05" value="0.65">
       </div>
-      <div class="control-group">
+      <div class="control-group" id="topk-controls">
         <label>Connections per node <span id="topk-val">5</span></label>
         <input type="range" id="topk-slider" min="1" max="15" step="1" value="5">
       </div>
@@ -327,6 +334,8 @@ export function renderGraphPage(): string {
     let colorMode = 'category';
     let communityData = [];
     let communityMap = new Map();
+    let graphType = 'similarity'; // 'similarity' or 'author'
+    const AUTHOR_GRAPH_COLLECTIONS = ['x-feed']; // collections with author graph support
 
     function buildNodeMap() {
       nodeMap.clear();
@@ -365,6 +374,11 @@ export function renderGraphPage(): string {
     const detailClose = document.getElementById('detail-close');
     const searchInput = document.getElementById('search-input');
     const collectionSelect = document.getElementById('collection-select');
+    const typeSimilarityBtn = document.getElementById('type-similarity');
+    const typeAuthorBtn = document.getElementById('type-author');
+    const similarityControls = document.getElementById('similarity-controls');
+    const topkControls = document.getElementById('topk-controls');
+    const graphTypeGroup = document.getElementById('graph-type-group');
 
     async function fetchCollections() {
       try {
@@ -396,9 +410,13 @@ export function renderGraphPage(): string {
     }
 
     async function fetchGraph() {
+      const coll = selectedCollection();
+      if (graphType === 'author') {
+        const res = await fetch('/api/graph/author?collection=' + encodeURIComponent(coll));
+        return await res.json();
+      }
       const sim = simSlider.value;
       const topK = topkSlider.value;
-      const coll = selectedCollection();
       const res = await fetch('/api/graph/similarity?collection=' + encodeURIComponent(coll) + '&min_similarity=' + sim + '&top_k=' + topK);
       return await res.json();
     }
@@ -664,6 +682,11 @@ export function renderGraphPage(): string {
 
     async function init() {
       await fetchCollections();
+      // Show graph type toggle if current collection supports author graph
+      const coll = selectedCollection();
+      if (AUTHOR_GRAPH_COLLECTIONS.includes(coll)) {
+        graphTypeGroup.style.display = '';
+      }
       try {
         graphData = await fetchGraph();
       } catch(e) {
@@ -708,6 +731,8 @@ export function renderGraphPage(): string {
         .nodeVal(n => {
           if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
           if (searchMatches && searchMatches.has(n)) return 6;
+          // Size author nodes by score (larger = higher score)
+          if (graphType === 'author' && n.score != null) return 2 + n.score * 12;
           return 4;
         })
         .linkSource('source')
@@ -809,7 +834,18 @@ export function renderGraphPage(): string {
     simSlider.addEventListener('input', onSliderChange);
     topkSlider.addEventListener('input', onSliderChange);
     collectionSelect.addEventListener('change', () => {
-      history.replaceState(null, '', '?collection=' + encodeURIComponent(selectedCollection()));
+      const coll = selectedCollection();
+      const hasAuthor = AUTHOR_GRAPH_COLLECTIONS.includes(coll);
+      graphTypeGroup.style.display = hasAuthor ? '' : 'none';
+      // Reset to similarity when switching away from author-capable collection
+      if (!hasAuthor && graphType === 'author') {
+        graphType = 'similarity';
+        typeSimilarityBtn.className = 'mode-btn active';
+        typeAuthorBtn.className = 'mode-btn inactive';
+      }
+      similarityControls.style.display = graphType === 'author' ? 'none' : '';
+      topkControls.style.display = graphType === 'author' ? 'none' : '';
+      history.replaceState(null, '', '?collection=' + encodeURIComponent(coll) + (graphType === 'author' ? '&type=author' : ''));
       onSliderChange();
     });
 
@@ -841,6 +877,30 @@ export function renderGraphPage(): string {
     }
     modeCatBtn.onclick = () => setColorMode('category');
     modeCommBtn.onclick = () => setColorMode('community');
+
+    // Graph type toggle (Documents vs Authors)
+    function setGraphType(type) {
+      graphType = type;
+      typeSimilarityBtn.className = 'mode-btn ' + (type === 'similarity' ? 'active' : 'inactive');
+      typeAuthorBtn.className = 'mode-btn ' + (type === 'author' ? 'active' : 'inactive');
+      // Hide similarity-specific sliders for author graph
+      similarityControls.style.display = type === 'author' ? 'none' : '';
+      topkControls.style.display = type === 'author' ? 'none' : '';
+      history.replaceState(null, '', '?collection=' + encodeURIComponent(selectedCollection()) + (type === 'author' ? '&type=author' : ''));
+      onSliderChange();
+    }
+    typeSimilarityBtn.onclick = () => setGraphType('similarity');
+    typeAuthorBtn.onclick = () => setGraphType('author');
+
+    // Check URL for graph type and collection with author support
+    const urlType = new URLSearchParams(window.location.search).get('type');
+    if (urlType === 'author') {
+      graphType = 'author';
+      typeSimilarityBtn.className = 'mode-btn inactive';
+      typeAuthorBtn.className = 'mode-btn active';
+      similarityControls.style.display = 'none';
+      topkControls.style.display = 'none';
+    }
 
     init();
   })();
