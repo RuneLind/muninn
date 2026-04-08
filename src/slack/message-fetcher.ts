@@ -23,20 +23,41 @@ export async function fetchChannelMessages(app: App, client: WebClient, channel:
   }
 }
 
-/** Fetch messages from a thread for context */
+/** Fetch messages from a thread for context.
+ *  Includes the bot's own messages (labelled as "assistant") since they're
+ *  essential thread context — e.g. a watcher digest that started the thread. */
 export async function fetchThreadMessages(app: App, client: WebClient, channel: string, threadTs: string, botName: string, limit: number = 15): Promise<string[]> {
   try {
+    // Get our own bot user ID so we can include our messages but skip other bots
+    const ownBotUserId = await getOwnBotUserId(client);
     const result = await client.conversations.replies({ channel, ts: threadTs, limit });
     const messages = result.messages ?? [];
     const lines: string[] = [];
     for (const msg of messages) {
-      if (!msg.text || msg.bot_id) continue;
-      const userInfo = msg.user ? await resolveSlackUser(app, msg.user) : null;
-      lines.push(`${userInfo?.name ?? "unknown"}: ${msg.text.slice(0, 300)}`);
+      if (!msg.text) continue;
+      if (msg.bot_id && msg.user !== ownBotUserId) continue; // skip other bots, keep ours
+      const isOwnBot = msg.user === ownBotUserId;
+      const label = isOwnBot
+        ? "assistant"
+        : (msg.user ? (await resolveSlackUser(app, msg.user))?.name ?? "unknown" : "unknown");
+      lines.push(`${label}: ${msg.text.slice(0, 300)}`);
     }
     return lines;
   } catch (err) {
     log.warn("Failed to fetch thread messages for {channel}:{threadTs}: {error}", { botName, channel, threadTs, error: err instanceof Error ? err.message : String(err) });
     return [];
+  }
+}
+
+let cachedOwnBotUserId: string | null = null;
+
+async function getOwnBotUserId(client: WebClient): Promise<string | null> {
+  if (cachedOwnBotUserId) return cachedOwnBotUserId;
+  try {
+    const result = await client.auth.test();
+    cachedOwnBotUserId = result.user_id ?? null;
+    return cachedOwnBotUserId;
+  } catch {
+    return null;
   }
 }
