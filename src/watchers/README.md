@@ -142,7 +142,7 @@ Set via the dashboard Edit tab on the watcher, stored in the watcher's JSONB `co
 |---|---|---|
 | `collection` | `"x-feed"` | Collection name. Required — the watcher reads from huginn's indexed collection. |
 | `model` | `claude-haiku-4-5` | Model for summarization. Use `"claude-sonnet-4-6"` for better quality. |
-| `timeoutMs` | `60000` | Model call timeout in ms. Set `180000`+ for Sonnet. |
+| `timeoutMs` | `300000` | Model call timeout in ms. Set `600000`+ for Sonnet with large backlogs. |
 | `maxDocs` | `80` | Max documents to fetch from collection per run. |
 | `topN` | `30` | Max tweets sent to LLM after engagement ranking. |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom digest prompt (overrides the built-in two-tier format). |

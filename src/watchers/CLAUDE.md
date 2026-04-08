@@ -59,7 +59,7 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 |---|---|---|
 | `collection` | `"x-feed"` | Collection name. Required for the active collection path. |
 | `model` | Haiku | Model for summarization (e.g. "claude-sonnet-4-6") |
-| `timeoutMs` | 60000 | Model call timeout. Set 180000+ for Sonnet. |
+| `timeoutMs` | 300000 | Model call timeout (ms). Set 600000+ for Sonnet with large backlogs. |
 | `maxDocs` | 80 | Max documents to fetch from collection per run |
 | `topN` | 30 | Max tweets sent to LLM after engagement ranking |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom prompt (overrides default two-tier format) |
