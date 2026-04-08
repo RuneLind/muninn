@@ -664,7 +664,7 @@ export function automationPanelScript(): string {
     function renderWatcherDetailsTab(w) {
       // Filter out prompt/hour/minute from config display (shown as dedicated fields)
       var configEntries = Object.entries(w.config || {}).filter(function(entry) {
-        return entry[0] !== 'prompt' && entry[0] !== 'hour' && entry[0] !== 'minute';
+        return entry[0] !== 'prompt' && entry[0] !== 'hour' && entry[0] !== 'minute' && entry[0] !== 'slackChannels' && entry[0] !== 'slackBot';
       });
       var configHtml = configEntries.map(function(entry) {
         return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--bg-surface)"><span style="color:var(--text-dim)">' + escapeHtml(entry[0]) + '</span><span style="color:var(--text-soft)">' + escapeHtml(String(entry[1])) + '</span></div>';
@@ -700,6 +700,7 @@ export function automationPanelScript(): string {
         '<div class="detail-field"><div class="detail-label">Next Run</div><div class="detail-value">' + nextRun + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + lastLabel + '</div></div>' +
         promptHtml +
+        (w.config && w.config.slackChannels && w.config.slackChannels.length ? '<div class="detail-field"><div class="detail-label">Slack Channels</div><div class="detail-value">' + escapeHtml(w.config.slackChannels.join(', ')) + (w.config.slackBot ? ' <span style="color:var(--text-faint)">via ' + escapeHtml(w.config.slackBot) + '</span>' : '') + '</div></div>' : '') +
         '<div class="detail-field"><div class="detail-label">Tracked IDs</div><div class="detail-value">' + (w.lastNotifiedIds ? w.lastNotifiedIds.length : 0) + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Created</div><div class="detail-value">' + new Date(w.createdAt).toLocaleDateString() + '</div></div>' +
         conflictWarning +
@@ -726,6 +727,10 @@ export function automationPanelScript(): string {
         '</div>' +
         scheduleHint +
         (w.config && w.config.filter != null ? '<div class="at-edit-group"><label>Filter</label><input type="text" id="atEditFilter" value="' + escapeAttr(w.config.filter || '') + '"></div>' : '') +
+        '<div class="at-edit-row">' +
+          '<div class="at-edit-group" style="flex:2"><label>Slack channels <span style="font-weight:normal;color:var(--text-faint)">(comma-separated)</span></label><input type="text" id="atEditSlackChannels" value="' + escapeAttr((w.config && w.config.slackChannels || []).join(', ')) + '" placeholder="e.g. #ai-feed, #general"></div>' +
+          '<div class="at-edit-group" style="flex:1"><label>Slack bot <span style="font-weight:normal;color:var(--text-faint)">(if different)</span></label><input type="text" id="atEditSlackBot" value="' + escapeAttr((w.config && w.config.slackBot) || '') + '" placeholder="' + escapeAttr(w.botName) + '"></div>' +
+        '</div>' +
         '<div class="at-edit-group"><label>Prompt</label><textarea id="atEditPrompt">' + escapeHtml(getWatcherPrompt(w)) + '</textarea></div>' +
         '<div id="atEditMsg"></div>' +
         '<div class="at-edit-actions">' +
@@ -780,6 +785,15 @@ export function automationPanelScript(): string {
       }
       var filterVal = document.getElementById('atEditFilter');
       if (filterVal) config.filter = filterVal.value || undefined;
+      var slackVal = document.getElementById('atEditSlackChannels');
+      if (slackVal) {
+        var channels = slackVal.value.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
+        if (channels.length > 0) { config.slackChannels = channels; } else { delete config.slackChannels; }
+      }
+      var slackBotVal = document.getElementById('atEditSlackBot');
+      if (slackBotVal) {
+        if (slackBotVal.value.trim()) { config.slackBot = slackBotVal.value.trim(); } else { delete config.slackBot; }
+      }
       var promptVal = document.getElementById('atEditPrompt');
       if (promptVal) config.prompt = promptVal.value || undefined;
       body.config = config;

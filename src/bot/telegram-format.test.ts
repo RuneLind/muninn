@@ -72,6 +72,20 @@ test("collapses excessive blank lines", () => {
   expect(formatTelegramHtml("a\n\n\n\nb")).toBe("a\n\nb");
 });
 
+test("italic does not overlap with links (prevents Telegram parse error)", () => {
+  // This pattern caused: "expected </a>, found </i>" in Telegram
+  const input = "Check *[this link](https://example.com) for details*";
+  const result = formatTelegramHtml(input);
+  // Link should be protected — italic wraps around the placeholder, not inside the <a> tag
+  expect(result).toContain('<a href="https://example.com">this link</a>');
+  expect(result).not.toMatch(/<a[^>]*>.*<i>.*<\/a>/); // no <i> starting inside <a> and closing outside
+});
+
+test("bold and italic inside link text are preserved", () => {
+  const result = formatTelegramHtml("[**bold link**](https://example.com)");
+  expect(result).toContain('<a href="https://example.com">**bold link**</a>');
+});
+
 test("handles a realistic Claude response", () => {
   const input = `## Summary: Email Conversations
 
