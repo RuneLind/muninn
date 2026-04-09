@@ -787,7 +787,8 @@ export function renderGraphPage(): string {
 
           // Draw label when zoomed in enough or when highlighted
           const fontSize = 11 / globalScale;
-          if (globalScale > 0.6 || isHighlighted) {
+          const labelThreshold = graphData.nodes.length > 200 ? 2.5 : graphData.nodes.length > 80 ? 1.5 : 0.6;
+          if (globalScale > labelThreshold || isHighlighted) {
             ctx.font = (isHighlighted ? 'bold ' : '') + fontSize + 'px sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'top';
