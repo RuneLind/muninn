@@ -10,7 +10,7 @@ import { getLog } from "../../logging.ts";
 const log = getLog("dashboard", "graph-routes");
 
 /** Collections that support wikilink edge extraction. */
-const WIKILINK_COLLECTIONS = ["wiki", "nav-wiki"];
+const WIKILINK_COLLECTIONS = ["wiki", "nav-wiki", "capra-wiki"];
 
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
 const CACHE_TTL_MS = 5 * 60 * 1000;

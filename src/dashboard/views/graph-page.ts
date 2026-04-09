@@ -345,7 +345,7 @@ export function renderGraphPage(): string {
     let graphType = 'similarity'; // 'similarity' or 'author'
     let edgeFilter = 'all'; // 'all' | 'similarity' | 'wikilink'
     const AUTHOR_GRAPH_COLLECTIONS = ['x-feed'];
-    const WIKILINK_COLLECTIONS = ['wiki', 'nav-wiki'];
+    const WIKILINK_COLLECTIONS = ['wiki', 'nav-wiki', 'capra-wiki'];
 
     function edgeType(e) { return e.type || 'similarity'; }
     function matchesEdgeFilter(e) { return edgeFilter === 'all' || edgeType(e) === edgeFilter; }
