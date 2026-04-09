@@ -81,7 +81,7 @@ test("italic does not overlap with links (prevents Telegram parse error)", () =>
   expect(result).not.toMatch(/<a[^>]*>.*<i>.*<\/a>/); // no <i> starting inside <a> and closing outside
 });
 
-test("bold and italic inside link text are preserved", () => {
+test("formatting inside link text is not processed (avoids nested tag issues)", () => {
   const result = formatTelegramHtml("[**bold link**](https://example.com)");
   expect(result).toContain('<a href="https://example.com">**bold link**</a>');
 });

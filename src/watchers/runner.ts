@@ -13,7 +13,7 @@ import { getActiveThreadId } from "../db/threads.ts";
 import { formatTelegramHtml, stripHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { getSlackApp } from "../slack/registry.ts";
-import { resolveChannelId } from "../slack/cache.ts";
+import { makePostToChannel } from "../slack/cache.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
@@ -169,12 +169,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
         // Send to Telegram (fall back to plain text if HTML is rejected)
         agentStatus.set("sending_telegram", watcher.name);
+        const html = formatTelegramHtml(markdown);
         try {
-          await api.sendMessage(watcher.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
+          await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
         } catch (sendErr) {
           if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
             log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
-            await api.sendMessage(watcher.userId, stripHtml(formatTelegramHtml(markdown)));
+            await api.sendMessage(watcher.userId, stripHtml(html));
           } else {
             throw sendErr;
           }
@@ -244,12 +245,11 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
     log.warn("Watcher wants to post to Slack but no Slack app registered for bot \"{botName}\"", { botName });
     return;
   }
+  const postToChannel = makePostToChannel(slackApp.client, botName);
   const mrkdwn = formatSlackMrkdwn(markdown);
   for (const channel of channels) {
     try {
-      const channelId = await resolveChannelId(slackApp.client, channel);
-      await slackApp.client.chat.postMessage({ channel: channelId, text: mrkdwn });
-      log.info("Watcher posted to Slack channel \"{channel}\"", { botName, channel });
+      await postToChannel(channel, mrkdwn);
     } catch (err) {
       log.error("Failed to post to Slack channel \"{channel}\": {error}", { botName, channel, error: err instanceof Error ? err.message : String(err) });
     }

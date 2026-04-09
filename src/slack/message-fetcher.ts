@@ -49,14 +49,18 @@ export async function fetchThreadMessages(app: App, client: WebClient, channel: 
   }
 }
 
-let cachedOwnBotUserId: string | null = null;
+const botUserIdCache = new Map<string, string>();
 
 async function getOwnBotUserId(client: WebClient): Promise<string | null> {
-  if (cachedOwnBotUserId) return cachedOwnBotUserId;
+  // Cache keyed by token to support multi-bot (each bot has its own WebClient/token)
+  const key = (client as any).token ?? "__default";
+  const cached = botUserIdCache.get(key);
+  if (cached) return cached;
   try {
     const result = await client.auth.test();
-    cachedOwnBotUserId = result.user_id ?? null;
-    return cachedOwnBotUserId;
+    const userId = result.user_id ?? null;
+    if (userId) botUserIdCache.set(key, userId);
+    return userId;
   } catch {
     return null;
   }
