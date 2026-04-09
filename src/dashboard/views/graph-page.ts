@@ -344,8 +344,11 @@ export function renderGraphPage(): string {
     let communityMap = new Map();
     let graphType = 'similarity'; // 'similarity' or 'author'
     let edgeFilter = 'all'; // 'all' | 'similarity' | 'wikilink'
-    const AUTHOR_GRAPH_COLLECTIONS = ['x-feed']; // collections with author graph support
-    const WIKILINK_COLLECTIONS = ['wiki']; // collections with wikilink edges
+    const AUTHOR_GRAPH_COLLECTIONS = ['x-feed'];
+    const WIKILINK_COLLECTIONS = ['wiki'];
+
+    function edgeType(e) { return edgeType(e); }
+    function matchesEdgeFilter(e) { return edgeFilter === 'all' || edgeType(e) === edgeFilter; }
 
     function buildNodeMap() {
       nodeMap.clear();
@@ -499,27 +502,21 @@ export function renderGraphPage(): string {
         nodes: graphData.nodes.filter(n => visibleIds.has(n.id)),
         links: graphData.edges
           .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
-          .filter(e => edgeFilter === 'all' || (e.type || 'similarity') === edgeFilter)
-          .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: e.type || 'similarity' })),
+          .filter(e => matchesEdgeFilter(e))
+          .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: edgeType(e) })),
       };
       graph.graphData(filtered);
       updateStats(filtered.nodes.length, filtered.links);
     }
 
-    function updateStats(nodes, linksOrCount) {
-      const isArray = Array.isArray(linksOrCount);
-      const total = isArray ? linksOrCount.length : linksOrCount;
+    function updateStats(nodes, links) {
+      const simCount = links.filter(l => l.type !== 'wikilink').length;
+      const wikiCount = links.length - simCount;
       let s = '<span>' + nodes + '</span> documents &middot; ';
-      if (isArray) {
-        const simCount = linksOrCount.filter(l => l.type !== 'wikilink').length;
-        const wikiCount = linksOrCount.filter(l => l.type === 'wikilink').length;
-        if (wikiCount > 0) {
-          s += '<span>' + simCount + '</span> similarity &middot; <span>' + wikiCount + '</span> wikilinks';
-        } else {
-          s += '<span>' + total + '</span> connections';
-        }
+      if (wikiCount > 0) {
+        s += '<span>' + simCount + '</span> similarity &middot; <span>' + wikiCount + '</span> wikilinks';
       } else {
-        s += '<span>' + total + '</span> connections';
+        s += '<span>' + links.length + '</span> connections';
       }
       if (communityData.length > 0) {
         const names = communityData.map(c => c.name || ('Cluster ' + c.id));
@@ -532,10 +529,10 @@ export function renderGraphPage(): string {
       if (!graphData) return [];
       return graphData.edges
         .filter(e => e.source === nodeId || e.target === nodeId)
-        .filter(e => edgeFilter === 'all' || (e.type || 'similarity') === edgeFilter)
+        .filter(e => matchesEdgeFilter(e))
         .map(e => {
           const otherId = e.source === nodeId ? e.target : e.source;
-          return { node: nodeMap.get(otherId), similarity: e.similarity, type: e.type || 'similarity' };
+          return { node: nodeMap.get(otherId), similarity: e.similarity, type: edgeType(e) };
         })
         .filter(d => {
           if (!d.node) return false;
@@ -569,7 +566,7 @@ export function renderGraphPage(): string {
           html += '<div class="conn-item" data-id="' + esc(d.node.id) + '">';
           html += '<span class="conn-dot" style="background:' + dotColor + '"></span>';
           html += '<span class="conn-title">' + esc(d.node.title) + '</span>';
-          html += '<span class="conn-score">' + (d.type === 'wikilink' ? '&#8599; ' : '') + (d.type === 'wikilink' ? 'link' : (d.similarity * 100).toFixed(0) + '%') + '</span>';
+          html += '<span class="conn-score">' + (d.type === 'wikilink' ? '&#8599; link' : (d.similarity * 100).toFixed(0) + '%') + '</span>';
           html += '</div>';
         });
         html += '</div>';
@@ -741,8 +738,8 @@ export function renderGraphPage(): string {
         .graphData({
           nodes: graphData.nodes.map(n => ({ ...n })),
           links: graphData.edges
-            .filter(e => edgeFilter === 'all' || (e.type || 'similarity') === edgeFilter)
-            .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: e.type || 'similarity' })),
+            .filter(e => matchesEdgeFilter(e))
+            .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: edgeType(e) })),
         })
         .nodeId('id')
         .nodeLabel(n => {
@@ -774,7 +771,6 @@ export function renderGraphPage(): string {
           const isSearched = searchMatches && searchMatches.has(node);
           const isDimmed = (highlightNodes.size > 0 && !highlightNodes.has(node)) || (searchMatches && !searchMatches.has(node));
 
-          // Draw node circle
           ctx.beginPath();
           ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
           ctx.fillStyle = isDimmed ? c + '20' : c;
@@ -785,7 +781,6 @@ export function renderGraphPage(): string {
             ctx.stroke();
           }
 
-          // Draw label when zoomed in enough or when highlighted
           const fontSize = 11 / globalScale;
           const labelThreshold = graphData.nodes.length > 200 ? 2.5 : graphData.nodes.length > 80 ? 1.5 : 0.6;
           if (globalScale > labelThreshold || isHighlighted) {
@@ -898,7 +893,7 @@ export function renderGraphPage(): string {
           graphData = await fetchGraph();
           buildNodeMap();
           communityData = graphData.communities || [];
-      communityMap = new Map(communityData.map(c => [c.id, c]));
+          communityMap = new Map(communityData.map(c => [c.id, c]));
           buildChips(graphData.nodes);
           applyFilters();
           loading.classList.add('hidden');

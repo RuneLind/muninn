@@ -12,8 +12,8 @@ const log = getLog("dashboard", "graph-routes");
 /** Collections that support wikilink edge extraction. */
 const WIKILINK_COLLECTIONS = ["wiki"];
 
-/** Regex to extract [[Page Title]] or [[Page Title|display text]] wikilinks. */
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface WikilinkEdge {
   source: string;
@@ -22,25 +22,33 @@ interface WikilinkEdge {
   type: "wikilink";
 }
 
+const wikilinkCache = new Map<
+  string,
+  { edges: WikilinkEdge[]; ts: number }
+>();
+
 /**
  * Fetch all wiki documents from Huginn and extract [[wikilink]] references
- * as directed edges. Matches link text against node titles (case-insensitive).
+ * as directed edges. Results are cached for 5 minutes since wiki content
+ * rarely changes and slider adjustments only affect similarity edges.
  */
 async function extractWikilinkEdges(
   baseUrl: string,
   collection: string,
   nodes: Array<{ id: string; title: string }>,
 ): Promise<WikilinkEdge[]> {
-  // Build title -> nodeId lookup (case-insensitive, also match by filename stem)
+  const cached = wikilinkCache.get(collection);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.edges;
+  }
+
   const titleToId = new Map<string, string>();
   for (const node of nodes) {
     titleToId.set(node.title.toLowerCase(), node.id);
-    // Also index by filename stem (e.g. "Skills System" from "concepts/Skills System.md")
     const stem = node.id.replace(/^.*\//, "").replace(/\.md$/i, "");
     if (stem) titleToId.set(stem.toLowerCase(), node.id);
   }
 
-  // Fetch document list to get IDs
   const docList = await fetchKnowledgeApi(
     baseUrl,
     `/api/collection/${encodeURIComponent(collection)}/documents`,
@@ -50,53 +58,41 @@ async function extractWikilinkEdges(
     (d: { id: string }) => d.id,
   );
 
-  // Fetch full content for each document (batched)
-  const BATCH_SIZE = 15;
+  const results = await Promise.allSettled(
+    docIds.map((docId) =>
+      fetchKnowledgeApi(
+        baseUrl,
+        `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(docId)}`,
+        { timeoutMs: 10000 },
+      ),
+    ),
+  );
+
   const edges: WikilinkEdge[] = [];
   const seen = new Set<string>();
 
-  for (let i = 0; i < docIds.length; i += BATCH_SIZE) {
-    const batch = docIds.slice(i, i + BATCH_SIZE);
-    const results = await Promise.allSettled(
-      batch.map((docId) =>
-        fetchKnowledgeApi(
-          baseUrl,
-          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(docId)}`,
-          { timeoutMs: 10000 },
-        ),
-      ),
-    );
+  for (let j = 0; j < results.length; j++) {
+    const result = results[j]!;
+    if (result.status !== "fulfilled") continue;
 
-    for (let j = 0; j < results.length; j++) {
-      const result = results[j]!;
-      if (result.status !== "fulfilled") continue;
+    const doc = (result as PromiseFulfilledResult<any>).value;
+    const sourceId = docIds[j]!;
+    const content: string = doc.content || doc.text || "";
 
-      const doc = (result as PromiseFulfilledResult<any>).value;
-      const sourceId = batch[j]!;
-      const content: string = doc.content || doc.text || "";
+    for (const match of content.matchAll(WIKILINK_RE)) {
+      const linkTitle = match[1]!.trim().toLowerCase();
+      const targetId = titleToId.get(linkTitle);
+      if (!targetId || targetId === sourceId) continue;
 
-      // Extract all wikilinks
-      let match: RegExpExecArray | null;
-      WIKILINK_RE.lastIndex = 0;
-      while ((match = WIKILINK_RE.exec(content)) !== null) {
-        const linkTitle = match[1]!.trim().toLowerCase();
-        const targetId = titleToId.get(linkTitle);
-        if (!targetId || targetId === sourceId) continue;
+      const key = `${sourceId}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-        const key = `${sourceId}->${targetId}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        edges.push({
-          source: sourceId,
-          target: targetId,
-          similarity: 1.0,
-          type: "wikilink",
-        });
-      }
+      edges.push({ source: sourceId, target: targetId, similarity: 1.0, type: "wikilink" });
     }
   }
 
+  wikilinkCache.set(collection, { edges, ts: Date.now() });
   log.info("Extracted {count} wikilink edges from {docs} documents", {
     count: edges.length,
     docs: docIds.length,
@@ -144,12 +140,10 @@ export function registerGraphRoutes(app: Hono, config: Config): void {
         { timeoutMs: 15000 },
       );
 
-      // Tag existing edges as similarity
       for (const edge of graphData.edges) {
         edge.type = "similarity";
       }
 
-      // Extract and append wikilink edges
       try {
         const wikilinkEdges = await extractWikilinkEdges(
           KNOWLEDGE_API_URL,
