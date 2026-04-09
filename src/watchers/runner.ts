@@ -10,7 +10,10 @@ import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../dashboard/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
-import { formatTelegramHtml } from "../bot/telegram-format.ts";
+import { formatTelegramHtml, stripHtml } from "../bot/telegram-format.ts";
+import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+import { getSlackApp } from "../slack/registry.ts";
+import { makePostToChannel } from "../slack/cache.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
@@ -161,10 +164,28 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       });
 
       if (newAlerts.length > 0) {
-        // Format as markdown (stored in DB), convert to Telegram HTML for send
+        // Format as markdown (stored in DB), convert to platform format for send
         const markdown = formatAlerts(watcher, newAlerts);
+
+        // Send to Telegram (fall back to plain text if HTML is rejected)
         agentStatus.set("sending_telegram", watcher.name);
-        await api.sendMessage(watcher.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
+        const html = formatTelegramHtml(markdown);
+        try {
+          await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
+        } catch (sendErr) {
+          if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
+            log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
+            await api.sendMessage(watcher.userId, stripHtml(html));
+          } else {
+            throw sendErr;
+          }
+        }
+
+        // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
+        const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };
+        if (slackConfig.slackChannels?.length) {
+          await sendToSlackChannels(slackConfig.slackBot || tag, markdown, slackConfig.slackChannels);
+        }
 
         // Persist markdown in messages so Claude can reference it in conversation.
         // Save to the user's active thread so the alert is visible in context.
@@ -214,6 +235,23 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       } catch (updateErr) {
         log.error("Failed to update watcher last_run_at after error: {error}", { botName: tag, watcherId: watcher.id, error: updateErr instanceof Error ? updateErr.message : String(updateErr) });
       }
+    }
+  }
+}
+
+async function sendToSlackChannels(botName: string, markdown: string, channels: string[]): Promise<void> {
+  const slackApp = getSlackApp(botName);
+  if (!slackApp) {
+    log.warn("Watcher wants to post to Slack but no Slack app registered for bot \"{botName}\"", { botName });
+    return;
+  }
+  const postToChannel = makePostToChannel(slackApp.client, botName);
+  const mrkdwn = formatSlackMrkdwn(markdown);
+  for (const channel of channels) {
+    try {
+      await postToChannel(channel, mrkdwn);
+    } catch (err) {
+      log.error("Failed to post to Slack channel \"{channel}\": {error}", { botName, channel, error: err instanceof Error ? err.message : String(err) });
     }
   }
 }

@@ -26,6 +26,15 @@ export function formatTelegramHtml(text: string): string {
     return `\x00INLINE${idx}\x00`;
   });
 
+  // Convert markdown links early and protect from italic/bold processing
+  // (prevents overlapping tags like <a><i>...</a></i> when formatting crosses link boundaries)
+  const links: string[] = [];
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, text, url) => {
+    const idx = links.length;
+    links.push(`<a href="${url}">${text}</a>`);
+    return `\x00LINK${idx}\x00`;
+  });
+
   // Convert markdown headings to bold lines
   result = result.replace(/^#{1,6}\s+(.+)$/gm, "<b>$1</b>");
 
@@ -44,8 +53,8 @@ export function formatTelegramHtml(text: string): string {
   // Convert ~~strikethrough~~ to <s>strikethrough</s>
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-  // Convert markdown links [text](url) to <a href="url">text</a>
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  // Restore links
+  result = result.replace(/\x00LINK(\d+)\x00/g, (_m, idx) => links[parseInt(idx)] ?? "");
 
   // Restore code blocks and inline codes
   result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)] ?? "");

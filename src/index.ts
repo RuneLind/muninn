@@ -4,6 +4,7 @@ import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
 import { createSlackApp } from "./slack/index.ts";
+import { registerSlackApp, getAllSlackApps } from "./slack/registry.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
@@ -11,7 +12,6 @@ import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
-import type { App as SlackApp } from "@slack/bolt";
 
 const config = loadConfig();
 await setupLogging(config.logDir);
@@ -31,7 +31,6 @@ if (botConfigs.length === 0) {
 
 // Module-level references for shutdown handler
 const telegramBotMap = new Map<string, Bot>();
-const slackAppList: SlackApp[] = [];
 
 // Discover Serena instances from bot configs (lazy — doesn't start them)
 serenaManager.init();
@@ -140,7 +139,7 @@ for (const botConfig of botConfigs) {
 
     createSlackApp(config, botConfig)
       .then((app) => {
-        slackAppList.push(app);
+        registerSlackApp(botConfig.name, app);
         activityLog.push("system", `${botConfig.name} Slack app connected`);
       })
       .catch((err) => {
@@ -173,7 +172,7 @@ async function shutdown() {
     bot.stop();
   }
 
-  for (const app of slackAppList) {
+  for (const app of getAllSlackApps()) {
     await app.stop().catch(() => {});
   }
 

@@ -19,7 +19,7 @@ const log = getLog("scheduler");
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
 let lastCleanupAt = 0;
-const TICK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max per tick
+const TICK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per tick
 
 // Store scheduler contexts so the dashboard can trigger manual runs
 const schedulerContexts = new Map<string, { api: Api; config: Config; botConfig: BotConfig }>();
