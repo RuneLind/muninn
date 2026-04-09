@@ -347,7 +347,7 @@ export function renderGraphPage(): string {
     const AUTHOR_GRAPH_COLLECTIONS = ['x-feed'];
     const WIKILINK_COLLECTIONS = ['wiki'];
 
-    function edgeType(e) { return edgeType(e); }
+    function edgeType(e) { return e.type || 'similarity'; }
     function matchesEdgeFilter(e) { return edgeFilter === 'all' || edgeType(e) === edgeFilter; }
 
     function buildNodeMap() {
