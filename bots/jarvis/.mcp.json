@@ -1,5 +1,20 @@
 {
   "mcpServers": {
+    "knowledge": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/rune/source/private/huginn",
+        "run",
+        "knowledge_api_mcp_adapter.py"
+      ],
+      "env": {
+        "KNOWLEDGE_API_URL": "http://localhost:8321",
+        "KNOWLEDGE_COLLECTIONS": "wiki,youtube-summaries,x-feed",
+        "KNOWLEDGE_DESCRIPTION": "wiki (synthesized knowledge pages), youtube-summaries, x-feed (X/Twitter timeline tweets)"
+      }
+    },
     "gmail": {
       "type": "stdio",
       "command": "npx",
