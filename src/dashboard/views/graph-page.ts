@@ -761,11 +761,46 @@ export function renderGraphPage(): string {
           return matched ? c : c + '15';
         })
         .nodeVal(n => {
-          if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
-          if (searchMatches && searchMatches.has(n)) return 6;
+          if (highlightNodes.size > 0 && highlightNodes.has(n)) return 3;
+          if (searchMatches && searchMatches.has(n)) return 2;
           // Size author nodes by score (larger = higher score)
-          if (graphType === 'author' && n.score != null) return 2 + n.score * 12;
-          return 4;
+          if (graphType === 'author' && n.score != null) return 1 + n.score * 6;
+          return 1;
+        })
+        .nodeCanvasObject((node, ctx, globalScale) => {
+          const r = Math.sqrt(node.val || 1) * 3;
+          const c = nodeColor(node);
+          const isHighlighted = highlightNodes.size > 0 && highlightNodes.has(node);
+          const isSearched = searchMatches && searchMatches.has(node);
+          const isDimmed = (highlightNodes.size > 0 && !highlightNodes.has(node)) || (searchMatches && !searchMatches.has(node));
+
+          // Draw node circle
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = isDimmed ? c + '20' : c;
+          ctx.fill();
+          if (isHighlighted || isSearched) {
+            ctx.strokeStyle = c;
+            ctx.lineWidth = 1.5 / globalScale;
+            ctx.stroke();
+          }
+
+          // Draw label when zoomed in enough or when highlighted
+          const fontSize = 11 / globalScale;
+          if (globalScale > 0.6 || isHighlighted) {
+            ctx.font = (isHighlighted ? 'bold ' : '') + fontSize + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = isDimmed ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.85)';
+            ctx.fillText(node.title, node.x, node.y + r + 2 / globalScale);
+          }
+        })
+        .nodePointerAreaPaint((node, color, ctx) => {
+          const r = Math.sqrt(node.val || 1) * 3 + 3;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = color;
+          ctx.fill();
         })
         .linkSource('source')
         .linkTarget('target')
@@ -809,7 +844,7 @@ export function renderGraphPage(): string {
         .warmupTicks(80)
         .cooldownTicks(Infinity)
         .cooldownTime(Infinity)
-        .nodeRelSize(6)
+        .nodeRelSize(3)
         .onNodeHover(node => {
           if (lockedNode) {
             container.style.cursor = node ? 'pointer' : 'default';
