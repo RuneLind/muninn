@@ -246,6 +246,14 @@ export function renderGraphPage(): string {
           <button id="type-author" class="mode-btn inactive">Authors</button>
         </div>
       </div>
+      <div class="control-group" id="edge-type-group" style="display:none;">
+        <label>Edge type</label>
+        <div style="display:flex;gap:4px;margin-bottom:8px;">
+          <button id="edge-all" class="mode-btn active">All</button>
+          <button id="edge-similarity" class="mode-btn inactive">Similarity</button>
+          <button id="edge-wikilink" class="mode-btn inactive">Wikilinks</button>
+        </div>
+      </div>
       <div class="control-group" id="similarity-controls">
         <label>Min similarity <span id="sim-val">0.65</span></label>
         <input type="range" id="sim-slider" min="0.40" max="0.95" step="0.05" value="0.65">
@@ -335,7 +343,12 @@ export function renderGraphPage(): string {
     let communityData = [];
     let communityMap = new Map();
     let graphType = 'similarity'; // 'similarity' or 'author'
-    const AUTHOR_GRAPH_COLLECTIONS = ['x-feed']; // collections with author graph support
+    let edgeFilter = 'all'; // 'all' | 'similarity' | 'wikilink'
+    const AUTHOR_GRAPH_COLLECTIONS = ['x-feed'];
+    const WIKILINK_COLLECTIONS = ['wiki', 'nav-wiki', 'capra-wiki'];
+
+    function edgeType(e) { return e.type || 'similarity'; }
+    function matchesEdgeFilter(e) { return edgeFilter === 'all' || edgeType(e) === edgeFilter; }
 
     function buildNodeMap() {
       nodeMap.clear();
@@ -379,6 +392,10 @@ export function renderGraphPage(): string {
     const similarityControls = document.getElementById('similarity-controls');
     const topkControls = document.getElementById('topk-controls');
     const graphTypeGroup = document.getElementById('graph-type-group');
+    const edgeTypeGroup = document.getElementById('edge-type-group');
+    const edgeAllBtn = document.getElementById('edge-all');
+    const edgeSimilarityBtn = document.getElementById('edge-similarity');
+    const edgeWikilinkBtn = document.getElementById('edge-wikilink');
 
     async function fetchCollections() {
       try {
@@ -485,14 +502,22 @@ export function renderGraphPage(): string {
         nodes: graphData.nodes.filter(n => visibleIds.has(n.id)),
         links: graphData.edges
           .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
-          .map(e => ({ source: e.source, target: e.target, similarity: e.similarity })),
+          .filter(e => matchesEdgeFilter(e))
+          .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: edgeType(e) })),
       };
       graph.graphData(filtered);
-      updateStats(filtered.nodes.length, filtered.links.length);
+      updateStats(filtered.nodes.length, filtered.links);
     }
 
-    function updateStats(nodes, edges) {
-      let s = '<span>' + nodes + '</span> documents &middot; <span>' + edges + '</span> connections';
+    function updateStats(nodes, links) {
+      const simCount = links.filter(l => l.type !== 'wikilink').length;
+      const wikiCount = links.length - simCount;
+      let s = '<span>' + nodes + '</span> documents &middot; ';
+      if (wikiCount > 0) {
+        s += '<span>' + simCount + '</span> similarity &middot; <span>' + wikiCount + '</span> wikilinks';
+      } else {
+        s += '<span>' + links.length + '</span> connections';
+      }
       if (communityData.length > 0) {
         const names = communityData.map(c => c.name || ('Cluster ' + c.id));
         s += ' &middot; <span>' + communityData.length + '</span> communities: ' + names.join(', ');
@@ -504,9 +529,10 @@ export function renderGraphPage(): string {
       if (!graphData) return [];
       return graphData.edges
         .filter(e => e.source === nodeId || e.target === nodeId)
+        .filter(e => matchesEdgeFilter(e))
         .map(e => {
           const otherId = e.source === nodeId ? e.target : e.source;
-          return { node: nodeMap.get(otherId), similarity: e.similarity };
+          return { node: nodeMap.get(otherId), similarity: e.similarity, type: edgeType(e) };
         })
         .filter(d => {
           if (!d.node) return false;
@@ -540,7 +566,7 @@ export function renderGraphPage(): string {
           html += '<div class="conn-item" data-id="' + esc(d.node.id) + '">';
           html += '<span class="conn-dot" style="background:' + dotColor + '"></span>';
           html += '<span class="conn-title">' + esc(d.node.title) + '</span>';
-          html += '<span class="conn-score">' + (d.similarity * 100).toFixed(0) + '%</span>';
+          html += '<span class="conn-score">' + (d.type === 'wikilink' ? '&#8599; link' : (d.similarity * 100).toFixed(0) + '%') + '</span>';
           html += '</div>';
         });
         html += '</div>';
@@ -687,6 +713,7 @@ export function renderGraphPage(): string {
       if (AUTHOR_GRAPH_COLLECTIONS.includes(coll)) {
         graphTypeGroup.style.display = '';
       }
+      edgeTypeGroup.style.display = WIKILINK_COLLECTIONS.includes(coll) ? '' : 'none';
       try {
         graphData = await fetchGraph();
       } catch(e) {
@@ -710,7 +737,9 @@ export function renderGraphPage(): string {
       graph = ForceGraph()(container)
         .graphData({
           nodes: graphData.nodes.map(n => ({ ...n })),
-          links: graphData.edges.map(e => ({ source: e.source, target: e.target, similarity: e.similarity })),
+          links: graphData.edges
+            .filter(e => matchesEdgeFilter(e))
+            .map(e => ({ source: e.source, target: e.target, similarity: e.similarity, type: edgeType(e) })),
         })
         .nodeId('id')
         .nodeLabel(n => {
@@ -729,25 +758,60 @@ export function renderGraphPage(): string {
           return matched ? c : c + '15';
         })
         .nodeVal(n => {
-          if (highlightNodes.size > 0 && highlightNodes.has(n)) return 8;
-          if (searchMatches && searchMatches.has(n)) return 6;
+          if (highlightNodes.size > 0 && highlightNodes.has(n)) return 3;
+          if (searchMatches && searchMatches.has(n)) return 2;
           // Size author nodes by score (larger = higher score)
-          if (graphType === 'author' && n.score != null) return 2 + n.score * 12;
-          return 4;
+          if (graphType === 'author' && n.score != null) return 1 + n.score * 6;
+          return 1;
+        })
+        .nodeCanvasObject((node, ctx, globalScale) => {
+          const r = Math.sqrt(node.val || 1) * 3;
+          const c = nodeColor(node);
+          const isHighlighted = highlightNodes.size > 0 && highlightNodes.has(node);
+          const isSearched = searchMatches && searchMatches.has(node);
+          const isDimmed = (highlightNodes.size > 0 && !highlightNodes.has(node)) || (searchMatches && !searchMatches.has(node));
+
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = isDimmed ? c + '20' : c;
+          ctx.fill();
+          if (isHighlighted || isSearched) {
+            ctx.strokeStyle = c;
+            ctx.lineWidth = 1.5 / globalScale;
+            ctx.stroke();
+          }
+
+          const fontSize = 11 / globalScale;
+          const labelThreshold = graphData.nodes.length > 200 ? 2.5 : graphData.nodes.length > 80 ? 1.5 : 0.6;
+          if (globalScale > labelThreshold || isHighlighted) {
+            ctx.font = (isHighlighted ? 'bold ' : '') + fontSize + 'px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = isDimmed ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.85)';
+            ctx.fillText(node.title, node.x, node.y + r + 2 / globalScale);
+          }
+        })
+        .nodePointerAreaPaint((node, color, ctx) => {
+          const r = Math.sqrt(node.val || 1) * 3 + 3;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = color;
+          ctx.fill();
         })
         .linkSource('source')
         .linkTarget('target')
         .linkWidth(link => {
           if (highlightLinks.has(link)) return 2;
-          return 0.5;
+          return link.type === 'wikilink' ? 1.2 : 0.5;
         })
         .linkColor(link => {
-          if (highlightLinks.has(link)) return 'rgba(108, 99, 255, 0.6)';
+          const isWiki = link.type === 'wikilink';
+          if (highlightLinks.has(link)) return isWiki ? 'rgba(245, 158, 11, 0.7)' : 'rgba(108, 99, 255, 0.6)';
           if (searchMatches) {
             const src = typeof link.source === 'object' ? link.source : null;
             const tgt = typeof link.target === 'object' ? link.target : null;
-            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return 'rgba(108, 99, 255, 0.12)';
-            return 'rgba(108, 99, 255, 0.02)';
+            if (src && tgt && (searchMatches.has(src) || searchMatches.has(tgt))) return isWiki ? 'rgba(245, 158, 11, 0.25)' : 'rgba(108, 99, 255, 0.12)';
+            return isWiki ? 'rgba(245, 158, 11, 0.05)' : 'rgba(108, 99, 255, 0.02)';
           }
           if (colorMode === 'community') {
             const src = typeof link.source === 'object' ? link.source : null;
@@ -755,20 +819,28 @@ export function renderGraphPage(): string {
             if (src && tgt && src.community != null && src.community === tgt.community) {
               return commColor(src.community) + '20';
             }
-            return 'rgba(100, 100, 100, 0.06)';
+            return isWiki ? 'rgba(245, 158, 11, 0.18)' : 'rgba(100, 100, 100, 0.06)';
           }
-          return 'rgba(108, 99, 255, 0.12)';
+          return isWiki ? 'rgba(245, 158, 11, 0.25)' : 'rgba(108, 99, 255, 0.12)';
+        })
+        .linkLineDash(link => link.type === 'wikilink' ? [4, 2] : null)
+        .linkDirectionalArrowLength(link => link.type === 'wikilink' ? 4 : 0)
+        .linkDirectionalArrowRelPos(1)
+        .linkDirectionalArrowColor(link => {
+          const isWiki = link.type === 'wikilink';
+          if (highlightLinks.has(link)) return isWiki ? 'rgba(245, 158, 11, 0.7)' : 'rgba(108, 99, 255, 0.6)';
+          return isWiki ? 'rgba(245, 158, 11, 0.25)' : 'rgba(108, 99, 255, 0.12)';
         })
         .linkDirectionalParticles(link => highlightLinks.has(link) ? 2 : 0)
         .linkDirectionalParticleWidth(2)
-        .linkDirectionalParticleColor(() => '#6c63ff')
+        .linkDirectionalParticleColor(link => link.type === 'wikilink' ? '#f59e0b' : '#6c63ff')
         .backgroundColor('#0a0a0f')
         .d3AlphaDecay(0.03)
         .d3VelocityDecay(0.3)
         .warmupTicks(80)
         .cooldownTicks(Infinity)
         .cooldownTime(Infinity)
-        .nodeRelSize(6)
+        .nodeRelSize(3)
         .onNodeHover(node => {
           if (lockedNode) {
             container.style.cursor = node ? 'pointer' : 'default';
@@ -804,7 +876,7 @@ export function renderGraphPage(): string {
       // Add cluster force (active only in community mode)
       graph.d3Force('cluster', clusterForce(0.08));
 
-      updateStats(graphData.nodes.length, graphData.edges.length);
+      updateStats(graphData.nodes.length, graphData.edges);
 
       setTimeout(() => graph.zoomToFit(400, 60), 500);
     }
@@ -821,7 +893,7 @@ export function renderGraphPage(): string {
           graphData = await fetchGraph();
           buildNodeMap();
           communityData = graphData.communities || [];
-      communityMap = new Map(communityData.map(c => [c.id, c]));
+          communityMap = new Map(communityData.map(c => [c.id, c]));
           buildChips(graphData.nodes);
           applyFilters();
           loading.classList.add('hidden');
@@ -836,12 +908,18 @@ export function renderGraphPage(): string {
     collectionSelect.addEventListener('change', () => {
       const coll = selectedCollection();
       const hasAuthor = AUTHOR_GRAPH_COLLECTIONS.includes(coll);
+      const hasWikilinks = WIKILINK_COLLECTIONS.includes(coll);
       graphTypeGroup.style.display = hasAuthor ? '' : 'none';
+      edgeTypeGroup.style.display = hasWikilinks ? '' : 'none';
       // Reset to similarity when switching away from author-capable collection
       if (!hasAuthor && graphType === 'author') {
         graphType = 'similarity';
         typeSimilarityBtn.className = 'mode-btn active';
         typeAuthorBtn.className = 'mode-btn inactive';
+      }
+      // Reset edge filter when switching away from wikilink-capable collection
+      if (!hasWikilinks && edgeFilter !== 'all') {
+        setEdgeFilter('all');
       }
       similarityControls.style.display = graphType === 'author' ? 'none' : '';
       topkControls.style.display = graphType === 'author' ? 'none' : '';
@@ -891,6 +969,18 @@ export function renderGraphPage(): string {
     }
     typeSimilarityBtn.onclick = () => setGraphType('similarity');
     typeAuthorBtn.onclick = () => setGraphType('author');
+
+    // Edge type filter toggle (wiki collections only)
+    function setEdgeFilter(filter) {
+      edgeFilter = filter;
+      edgeAllBtn.className = 'mode-btn ' + (filter === 'all' ? 'active' : 'inactive');
+      edgeSimilarityBtn.className = 'mode-btn ' + (filter === 'similarity' ? 'active' : 'inactive');
+      edgeWikilinkBtn.className = 'mode-btn ' + (filter === 'wikilink' ? 'active' : 'inactive');
+      if (graphData && graph) applyFilters();
+    }
+    edgeAllBtn.onclick = () => setEdgeFilter('all');
+    edgeSimilarityBtn.onclick = () => setEdgeFilter('similarity');
+    edgeWikilinkBtn.onclick = () => setEdgeFilter('wikilink');
 
     // Check URL for graph type and collection with author support
     const urlType = new URLSearchParams(window.location.search).get('type');
