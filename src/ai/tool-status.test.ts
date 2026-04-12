@@ -50,13 +50,27 @@ describe("getToolStatus", () => {
     expect(getToolStatus("google-calendar-list_events")).toBe("Checking calendar...");
   });
 
-  test("includes search query detail when input provided", () => {
+  test("knowledge search renders configured fields as key=value", () => {
     const input = '{"query": "authentication flow", "collection": "team-docs"}';
     expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
-      "Searching knowledge base: authentication flow",
+      "Searching knowledge base: collection=team-docs · query=authentication flow",
     );
     expect(getToolStatus("mcp__knowledge__search_knowledge", input)).toBe(
-      "Searching knowledge base: authentication flow",
+      "Searching knowledge base: collection=team-docs · query=authentication flow",
+    );
+  });
+
+  test("knowledge search renders brief=true as bare flag", () => {
+    const input = '{"query": "lovvalg", "collection": "nav-wiki", "brief": true}';
+    expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
+      "Searching knowledge base: collection=nav-wiki · brief · query=lovvalg",
+    );
+  });
+
+  test("knowledge search omits brief=false", () => {
+    const input = '{"query": "lovvalg", "collection": "nav-wiki", "brief": false}';
+    expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
+      "Searching knowledge base: collection=nav-wiki · query=lovvalg",
     );
   });
 
@@ -65,14 +79,16 @@ describe("getToolStatus", () => {
     expect(getToolStatus("gmail-search_emails", input)).toBe("Searching email: invoice from Acme Corp");
   });
 
-  test("includes document detail (title preferred over id)", () => {
-    const input = '{"id": "doc-123", "title": "Architecture overview"}';
-    expect(getToolStatus("knowledge-get_document", input)).toBe("Loading document: Architecture overview");
+  test("knowledge get_document renders collection and doc_id", () => {
+    const input = '{"collection": "team-docs", "doc_id": "MELOSYS-7912"}';
+    expect(getToolStatus("knowledge-get_document", input)).toBe(
+      "Loading document: collection=team-docs · doc_id=MELOSYS-7912",
+    );
   });
 
-  test("falls back to id when no title", () => {
-    const input = '{"id": "doc-123"}';
-    expect(getToolStatus("knowledge-get_document", input)).toBe("Loading document: doc-123");
+  test("knowledge get_document with no matching fields shows label only", () => {
+    const input = '{"irrelevant": "value"}';
+    expect(getToolStatus("knowledge-get_document", input)).toBe("Loading document...");
   });
 
   test("truncates long search queries", () => {
@@ -81,6 +97,38 @@ describe("getToolStatus", () => {
     const result = getToolStatus("knowledge-search_knowledge", input)!;
     expect(result.length).toBeLessThan(180);
     expect(result).toContain("…");
+  });
+
+  test("yggdrasil search renders repo and query from config", () => {
+    const input = '{"query": "BehandlingService", "repo": "melosys-api", "limit": 10}';
+    expect(getToolStatus("mcp__yggdrasil__search", input)).toBe(
+      "search (yggdrasil): repo=melosys-api · query=BehandlingService",
+    );
+  });
+
+  test("yggdrasil symbol_context renders qualified_name", () => {
+    const input = '{"qualified_name": "no.nav.melosys.BehandlingService", "repo": "melosys-api"}';
+    expect(getToolStatus("yggdrasil-symbol_context", input)).toBe(
+      "symbol_context (yggdrasil): qualified_name=no.nav.melosys.BehandlingService · repo=melosys-api",
+    );
+  });
+
+  test("yggdrasil impact renders numeric max_depth", () => {
+    const input = '{"qualified_name": "no.nav.melosys.Foo", "repo": "melosys-api", "max_depth": 3}';
+    expect(getToolStatus("yggdrasil-impact", input)).toBe(
+      "impact (yggdrasil): qualified_name=no.nav.melosys.Foo · repo=melosys-api · max_depth=3",
+    );
+  });
+
+  test("yggdrasil list_repos shows label only (no fields in config)", () => {
+    expect(getToolStatus("yggdrasil-list_repos", "{}")).toBe("list_repos (yggdrasil)...");
+  });
+
+  test("yggdrasil read_source renders line range", () => {
+    const input = '{"repo": "melosys-api", "path": "src/Service.kt", "start_line": 34, "end_line": 80}';
+    expect(getToolStatus("yggdrasil-read_source", input)).toBe(
+      "read_source (yggdrasil): repo=melosys-api · path=src/Service.kt · start_line=34 · end_line=80",
+    );
   });
 
   test("server-level fallback for unknown tools on known servers", () => {
