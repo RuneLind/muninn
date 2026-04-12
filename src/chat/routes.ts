@@ -405,9 +405,37 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const body = await c.req.json<{ content: string }>();
     if (!body.content) return c.json({ error: "content is required" }, 400);
 
+    // Enrich the report's YAML frontmatter with `analysis_trace_id` so the
+    // benchmark judge can later link the scored report back to the original
+    // muninn analysis trace. Pulls the most recent assistant message for
+    // this user+bot from the messages table and uses its trace_id.
+    //
+    // Best-effort: if no recent message has a trace_id, the report is saved
+    // unchanged (no frontmatter modification).
+    let enrichedContent = body.content;
+    try {
+      const recentMessages = await getSimMessages(userId, botName, "web", 20, undefined, true);
+      // getSimMessages returns oldest-first, so reverse to get newest-first
+      const newestFirst = [...recentMessages].reverse();
+      const mostRecentBotTrace = newestFirst.find((m) => m.role === "assistant" && m.traceId)?.traceId;
+      if (mostRecentBotTrace && /^---\n[\s\S]*?\n---/.test(body.content)) {
+        enrichedContent = body.content.replace(
+          /^---\n([\s\S]*?)\n---/,
+          `---\n$1\nanalysis_trace_id: ${mostRecentBotTrace}\n---`,
+        );
+        log.info("Enriched report with analysis_trace_id {traceId}", { botName, userId, traceId: mostRecentBotTrace });
+      }
+    } catch (err) {
+      log.warn("Failed to enrich report with analysis_trace_id: {error}", {
+        botName,
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const reportPath = resolve(bot.dir, "reports", userId, `${issueKey}.md`);
     await mkdir(dirname(reportPath), { recursive: true });
-    await Bun.write(reportPath, body.content);
+    await Bun.write(reportPath, enrichedContent);
     log.info("Saved research report {path}", { botName, userId, path: reportPath });
     return c.json({ ok: true, path: `reports/${userId}/${issueKey}.md` }, 201);
   });
