@@ -43,6 +43,7 @@ export function loadConfig() {
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
     tracingRetentionDays: optionalEnvInt("TRACING_RETENTION_DAYS", 7),
+    tracingCaptureToolOutputs: optionalEnv("TRACING_CAPTURE_TOOL_OUTPUTS", "true") === "true",
     promptSnapshotsRetentionDays: optionalEnvInt("PROMPT_SNAPSHOTS_RETENTION_DAYS", 3),
   } as const;
 }

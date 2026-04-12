@@ -1,4 +1,5 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
+import { truncateOutput } from "./truncate-output.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -36,6 +37,8 @@ interface PendingToolCall {
   input: unknown;
   /** Timestamp when the assistant message containing this tool_use was received */
   startTimestamp: number;
+  /** Tool result, populated when the matching user → tool_result arrives */
+  output?: string;
 }
 
 export class StreamParser {
@@ -137,7 +140,17 @@ export class StreamParser {
   }
 
   private handleUser(event: any, timestamp: number): void {
-    // User message = tool results. Resolve pending tools with this timestamp.
+    // User message = tool results.
+    const content = event.message?.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block?.type !== "tool_result") continue;
+        const useId = block.tool_use_id;
+        if (typeof useId !== "string") continue;
+        const pending = this.pendingTools.find((p) => p.id === useId);
+        if (pending) pending.output = truncateOutput(extractToolResultContent(block));
+      }
+    }
     this.resolvePendingTools(timestamp);
   }
 
@@ -153,6 +166,7 @@ export class StreamParser {
         durationMs,
         startOffsetMs,
         input: abbreviateInput(pending.input),
+        output: pending.output,
       });
       this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
     }
@@ -249,3 +263,38 @@ function abbreviateInput(input: unknown): string | undefined {
   if (json.length <= 500) return json;
   return json.slice(0, 497) + "...";
 }
+
+/**
+ * Normalize a Claude CLI `tool_result` block into a plain string for storage.
+ *
+ * The `content` field can be:
+ *   - a string (the common case)
+ *   - an array of content blocks: `[{type: "text", text: "..."}, ...]`
+ *   - null / undefined when the tool produced nothing useful
+ *
+ * Non-text blocks (images, etc.) are represented by a short placeholder since
+ * we only store textual results for benchmarking.
+ */
+function extractToolResultContent(block: { content?: unknown }): unknown {
+  const raw = block.content;
+  if (raw == null) return undefined;
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    const parts: string[] = [];
+    for (const part of raw) {
+      if (typeof part === "string") {
+        parts.push(part);
+      } else if (part && typeof part === "object") {
+        const p = part as { type?: string; text?: string };
+        if (p.type === "text" && typeof p.text === "string") {
+          parts.push(p.text);
+        } else if (p.type) {
+          parts.push(`[${p.type}]`);
+        }
+      }
+    }
+    return parts.join("\n");
+  }
+  return raw; // fall through — will be JSON-stringified by truncateOutput
+}
+

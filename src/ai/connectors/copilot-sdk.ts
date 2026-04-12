@@ -4,6 +4,8 @@ import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
+import { truncateOutput } from "../truncate-output.ts";
+import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
@@ -83,14 +85,7 @@ export async function executePrompt(
   });
 
   // Track tool calls for waterfall
-  const toolCalls: Array<{
-    id: string;
-    name: string;
-    displayName: string;
-    durationMs: number;
-    startOffsetMs: number;
-    input?: string;
-  }> = [];
+  const toolCalls: ToolCall[] = [];
   const pendingTools = new Map<string, { name: string; startMs: number; input?: string }>();
 
   // Track usage from assistant.usage events
@@ -135,6 +130,12 @@ export async function executePrompt(
         if (pending) {
           const endMs = performance.now();
           const displayName = formatToolDisplayName(pending.name);
+          // Capture the tool result for trace reproducibility. The SDK exposes
+          // `result.content` (short string) and `result.detailedContent` / `contents[]`
+          // (structured); we store the richest available form, capped to 16 KB.
+          const resultPayload = event.data.success
+            ? (event.data.result ?? undefined)
+            : { error: event.data.error ?? { message: "tool execution failed" } };
           toolCalls.push({
             id: event.data.toolCallId,
             name: pending.name,
@@ -142,6 +143,7 @@ export async function executePrompt(
             durationMs: Math.round(endMs - pending.startMs),
             startOffsetMs: Math.round(pending.startMs - wallStart),
             input: pending.input,
+            output: truncateOutput(resultPayload),
           });
           pendingTools.delete(event.data.toolCallId);
           onProgress?.({ type: "tool_end", name: pending.name, displayName });
