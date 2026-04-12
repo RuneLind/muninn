@@ -2,7 +2,9 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName, truncateOutput } from "../stream-parser.ts";
+import { formatToolDisplayName } from "../stream-parser.ts";
+import { truncateOutput } from "../truncate-output.ts";
+import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
@@ -70,15 +72,7 @@ export async function executePrompt(
   let totalApiMs = 0;
   let reportedModel = model;
   let turnCount = 0;
-  const trackedToolCalls: Array<{
-    id: string;
-    name: string;
-    displayName: string;
-    durationMs: number;
-    startOffsetMs: number;
-    input?: string;
-    output?: string;
-  }> = [];
+  const trackedToolCalls: ToolCall[] = [];
 
   // ── Agent loop: send → tool_calls? → execute → send again ──
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {

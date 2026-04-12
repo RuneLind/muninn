@@ -1,5 +1,6 @@
 import { test, expect, describe, mock } from "bun:test";
-import { StreamParser, formatToolDisplayName, truncateOutput, TOOL_OUTPUT_MAX_BYTES, type StreamProgressEvent } from "./stream-parser.ts";
+import { StreamParser, formatToolDisplayName, type StreamProgressEvent } from "./stream-parser.ts";
+import { truncateOutput, TOOL_OUTPUT_MAX_BYTES } from "./truncate-output.ts";
 
 /** Helper to build a stream-json NDJSON string from events */
 function buildStream(...events: object[]): string {
@@ -116,7 +117,6 @@ describe("StreamParser", () => {
 
     const result = parser.getResult();
     expect(result.toolCalls![0]!.output).toBe("search hit");
-    // Array-of-text-blocks is joined with \n
     expect(result.toolCalls![1]!.output).toBe("doc body\n part two");
   });
 

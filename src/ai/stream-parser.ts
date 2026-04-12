@@ -1,4 +1,5 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
+import { truncateOutput } from "./truncate-output.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -139,7 +140,7 @@ export class StreamParser {
   }
 
   private handleUser(event: any, timestamp: number): void {
-    // User message = tool results. Extract tool_result blocks matching pending tools by tool_use_id.
+    // User message = tool results.
     const content = event.message?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
@@ -150,7 +151,6 @@ export class StreamParser {
         if (pending) pending.output = truncateOutput(extractToolResultContent(block));
       }
     }
-    // Resolve pending tools with this timestamp.
     this.resolvePendingTools(timestamp);
   }
 
@@ -298,32 +298,3 @@ function extractToolResultContent(block: { content?: unknown }): unknown {
   return raw; // fall through — will be JSON-stringified by truncateOutput
 }
 
-/** Maximum bytes (UTF-8) stored for a single tool call output. */
-export const TOOL_OUTPUT_MAX_BYTES = 16 * 1024; // 16 KB
-
-/**
- * Serialize and cap a tool output for storage on a trace span.
- *
- * - Strings are stored as-is (up to the cap)
- * - Other values are JSON-stringified
- * - Over-cap payloads are replaced with `{"_truncated": true, "_originalBytes": N, "head": "…first N bytes…"}`
- *   so downstream consumers can detect truncation without guessing
- */
-export function truncateOutput(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  let text: string;
-  if (typeof value === "string") {
-    text = value;
-  } else {
-    try {
-      text = JSON.stringify(value);
-    } catch {
-      return undefined;
-    }
-  }
-  const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes <= TOOL_OUTPUT_MAX_BYTES) return text;
-  // Slice by bytes, not chars, then trim any partial UTF-8 sequence from the tail
-  const head = Buffer.from(text, "utf8").subarray(0, TOOL_OUTPUT_MAX_BYTES).toString("utf8");
-  return JSON.stringify({ _truncated: true, _originalBytes: bytes, head });
-}
