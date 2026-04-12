@@ -6,13 +6,33 @@
  *   - Copilot SDK:  <server>-<tool>            (e.g. knowledge-search_knowledge)
  *
  * All formats are normalized to "server/tool" before matching.
+ *
+ * Display text is resolved in this order:
+ *   1. `tool-display.config.json` at the repo root (user-editable overrides)
+ *   2. Hardcoded `TOOL_STATUS` entries below (built-in defaults)
+ *   3. Server-level fallback from `SERVER_STATUS`
+ *   4. Generic "tool (server)" fallback with first-field detail
  */
+
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "tool-status");
 
 interface ToolStatusEntry {
   /** Base status text (e.g. "Searching knowledge base") */
   label: string;
   /** Extract a meaningful detail from the tool input (e.g. the search query) */
   detail?: (input: string | undefined) => string | undefined;
+}
+
+/** Shape of each entry in tool-display.config.json */
+interface ToolDisplayConfigEntry {
+  /** Display label, e.g. "Searching knowledge base" */
+  label: string;
+  /** Ordered list of input JSON field names to extract and render as "key=value · ..." */
+  fields?: string[];
 }
 
 /** Extract a field value from abbreviated JSON input */
@@ -85,6 +105,119 @@ const proxyCallToolDetail = (input: string | undefined): string | undefined => {
 const proxySearchToolsDetail = (input: string | undefined): string | undefined => {
   return extractField(input, "query");
 };
+
+type ScalarValue = { value: string; type: "string" | "boolean" | "number" };
+
+/** Parse the tool input JSON into a plain object, or undefined if malformed/truncated. */
+function parseInputObject(input: string): Record<string, unknown> | undefined {
+  try {
+    const v = JSON.parse(input);
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read a scalar field from a parsed input object (structured path). */
+function lookupFromParsed(obj: Record<string, unknown>, field: string): ScalarValue | undefined {
+  const v = obj[field];
+  if (v == null) return undefined;
+  if (typeof v === "string") return { value: v, type: "string" };
+  if (typeof v === "boolean") return { value: String(v), type: "boolean" };
+  if (typeof v === "number") return { value: String(v), type: "number" };
+  return undefined;
+}
+
+/**
+ * Read a scalar field from raw JSON-ish text via regex. Used as a fallback when
+ * {@link parseInputObject} fails — tool inputs are abbreviated to 500 chars upstream,
+ * so over-long inputs arrive with a trailing `...` and cannot be parsed strictly.
+ */
+function extractRawField(input: string, field: string): ScalarValue | undefined {
+  const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const strMatch = input.match(new RegExp(`"${escaped}"\\s*:\\s*"([^"]*)"`, "i"));
+  if (strMatch?.[1] !== undefined) return { value: strMatch[1], type: "string" };
+  const boolMatch = input.match(new RegExp(`"${escaped}"\\s*:\\s*(true|false)`, "i"));
+  if (boolMatch?.[1] !== undefined) return { value: boolMatch[1], type: "boolean" };
+  const numMatch = input.match(new RegExp(`"${escaped}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`, "i"));
+  if (numMatch?.[1] !== undefined) return { value: numMatch[1], type: "number" };
+  return undefined;
+}
+
+/**
+ * Build a detail string from a list of field names using the Option A format:
+ * `key=value · flag · key=value`.
+ *
+ * - String / number fields render as `field=value` (each value truncated to 80 chars)
+ * - Boolean `true` renders as a bare flag (just `field`); boolean `false` is omitted
+ * - Missing fields are skipped
+ * - The joined result is truncated to 180 chars as a hard cap
+ *
+ * Prefers structured JSON parse for correctness (handles escaped quotes, nested
+ * objects) and falls back to regex extraction when input is truncated or malformed.
+ */
+function buildDetailFromFields(input: string | undefined, fields: string[]): string | undefined {
+  if (!input || fields.length === 0) return undefined;
+  const parsed = parseInputObject(input);
+  const parts: string[] = [];
+  for (const field of fields) {
+    const raw = parsed ? lookupFromParsed(parsed, field) : extractRawField(input, field);
+    if (!raw) continue;
+    if (raw.type === "boolean") {
+      if (raw.value === "true") parts.push(field);
+      continue;
+    }
+    parts.push(`${field}=${truncate(raw.value, 80)}`);
+  }
+  if (parts.length === 0) return undefined;
+  return truncate(parts.join(" · "), 180);
+}
+
+/**
+ * Load tool-display.config.json from the repo root. Returns {} when the file is
+ * missing (silent — config is optional) or when the file exists but is invalid
+ * (logged so the user gets feedback about config mistakes).
+ */
+function loadToolDisplayConfig(): Record<string, ToolDisplayConfigEntry> {
+  const configPath = resolve(import.meta.dir, "../../tool-display.config.json");
+  if (!existsSync(configPath)) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    log.warn("Failed to parse tool-display.config.json: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {};
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    log.warn("tool-display.config.json must be a JSON object at the top level");
+    return {};
+  }
+
+  const out: Record<string, ToolDisplayConfigEntry> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (key.startsWith("_")) continue; // underscore-prefixed keys are comments
+    if (!value || typeof value !== "object") {
+      log.warn("tool-display.config.json: entry {key} is not an object — skipping", { key });
+      continue;
+    }
+    const entry = value as { label?: unknown; fields?: unknown };
+    if (typeof entry.label !== "string") {
+      log.warn("tool-display.config.json: entry {key} is missing a string label — skipping", { key });
+      continue;
+    }
+    const fields = Array.isArray(entry.fields)
+      ? entry.fields.filter((f): f is string => typeof f === "string")
+      : undefined;
+    out[key] = { label: entry.label, fields };
+  }
+  return out;
+}
+
+const TOOL_DISPLAY_CONFIG: Record<string, ToolDisplayConfigEntry> = loadToolDisplayConfig();
 
 /** Tool entries keyed by normalized "server/tool" */
 const TOOL_STATUS: Record<string, ToolStatusEntry> = {
@@ -200,18 +333,25 @@ export function getToolStatus(toolName: string, input?: string): string | undefi
   const { server, tool } = parsed;
   const key = `${server}/${tool}`;
 
-  // 1. Exact match
+  // 1. User-editable config override (tool-display.config.json)
+  const configEntry = TOOL_DISPLAY_CONFIG[key];
+  if (configEntry) {
+    const detail = configEntry.fields ? buildDetailFromFields(input, configEntry.fields) : undefined;
+    return formatStatus(configEntry.label, detail);
+  }
+
+  // 2. Hardcoded exact match
   const entry = TOOL_STATUS[key];
   if (entry) {
     const detail = entry.detail?.(input);
     return formatStatus(entry.label, detail);
   }
 
-  // 2. Server-level fallback
+  // 3. Server-level fallback
   const serverStatus = SERVER_STATUS[server];
   if (serverStatus) return `${serverStatus}...`;
 
-  // 3. Fallback: use waterfall-style "tool (server)" format with detail
+  // 4. Fallback: use waterfall-style "tool (server)" format with detail
   const label = `${tool} (${server})`;
   const detail = genericDetail(input);
   return formatStatus(label, detail);

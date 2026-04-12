@@ -1,0 +1,38 @@
+{
+  "_comment": "Controls how tool calls are labeled in the trace waterfall and live chat UI. Keyed by normalized 'server/tool'. Fields are extracted from the tool input JSON and rendered as 'key=value · key=value'. Boolean true values render as bare flags (e.g. 'brief'); false values are omitted. See src/ai/tool-status.ts for loading logic.",
+  "knowledge/search_knowledge": {
+    "label": "Searching knowledge base",
+    "fields": ["collection", "brief", "query"]
+  },
+  "knowledge/get_document": {
+    "label": "Loading document",
+    "fields": ["collection", "doc_id"]
+  },
+  "yggdrasil/search": {
+    "label": "search (yggdrasil)",
+    "fields": ["repo", "query", "kind", "language"]
+  },
+  "yggdrasil/symbol_context": {
+    "label": "symbol_context (yggdrasil)",
+    "fields": ["qualified_name", "repo"]
+  },
+  "yggdrasil/impact": {
+    "label": "impact (yggdrasil)",
+    "fields": ["qualified_name", "repo", "max_depth"]
+  },
+  "yggdrasil/detect_changes": {
+    "label": "detect_changes (yggdrasil)",
+    "fields": ["repo", "ref"]
+  },
+  "yggdrasil/file_outline": {
+    "label": "file_outline (yggdrasil)",
+    "fields": ["repo", "path"]
+  },
+  "yggdrasil/read_source": {
+    "label": "read_source (yggdrasil)",
+    "fields": ["repo", "path", "start_line", "end_line"]
+  },
+  "yggdrasil/list_repos": {
+    "label": "list_repos (yggdrasil)"
+  }
+}
