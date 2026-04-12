@@ -155,13 +155,18 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     // Create child spans for each tool call (positioned at their actual execution time)
     if (result.toolCalls) {
+      const captureOutputs = config.tracingCaptureToolOutputs;
       for (const tool of result.toolCalls) {
-        t.addChildSpan("claude", tool.displayName, tool.durationMs, {
+        const attrs: Record<string, unknown> = {
           toolId: tool.id,
           toolName: tool.name,
           input: tool.input,
           statusText: getToolStatus(tool.name, tool.input),
-        }, tool.startOffsetMs);
+        };
+        if (captureOutputs && tool.output !== undefined) {
+          attrs.output = tool.output;
+        }
+        t.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
       }
     }
 

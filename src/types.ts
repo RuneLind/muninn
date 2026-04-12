@@ -43,6 +43,12 @@ export interface ToolCall {
   durationMs: number;
   startOffsetMs: number; // offset from Claude CLI start (for waterfall positioning)
   input?: string;      // abbreviated JSON, max 500 chars
+  /**
+   * Tool result captured from the connector. JSON-stringified, capped at 16 KB.
+   * If the original exceeded the cap, the value is `{"_truncated":true,"_originalBytes":N,"head":"..."}`.
+   * Undefined when `TRACING_CAPTURE_TOOL_OUTPUTS=false` or the connector could not surface a result.
+   */
+  output?: string;
 }
 
 export interface ClaudeResult {

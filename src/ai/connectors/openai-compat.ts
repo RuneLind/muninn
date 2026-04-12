@@ -2,7 +2,7 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName } from "../stream-parser.ts";
+import { formatToolDisplayName, truncateOutput } from "../stream-parser.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
@@ -77,6 +77,7 @@ export async function executePrompt(
     durationMs: number;
     startOffsetMs: number;
     input?: string;
+    output?: string;
   }> = [];
 
   // ── Agent loop: send → tool_calls? → execute → send again ──
@@ -216,6 +217,7 @@ export async function executePrompt(
         durationMs: toolDurationMs,
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
+        output: truncateOutput(toolResult),
       });
 
       // Add tool result to conversation

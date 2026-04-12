@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { StreamParser, formatToolDisplayName, type StreamProgressEvent } from "./stream-parser.ts";
+import { StreamParser, formatToolDisplayName, truncateOutput, TOOL_OUTPUT_MAX_BYTES, type StreamProgressEvent } from "./stream-parser.ts";
 
 /** Helper to build a stream-json NDJSON string from events */
 function buildStream(...events: object[]): string {
@@ -98,6 +98,40 @@ describe("StreamParser", () => {
     expect(tool.durationMs).toBe(2000); // 2100 - 100
     expect(tool.startOffsetMs).toBe(100); // tool started 100ms after ref
     expect(tool.input).toBe('{"query":"from:boss"}');
+    expect(tool.output).toBe("2 emails found");
+  });
+
+  test("captures tool output from user event", () => {
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_A", name: "mcp__knowledge__search_knowledge", input: { query: "foo" } },
+      { type: "tool_use", id: "toolu_B", name: "mcp__knowledge__get_document", input: { doc_id: "x" } },
+    ])), 100);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_A", content: "search hit", is_error: false },
+      { type: "tool_result", tool_use_id: "toolu_B", content: [{ type: "text", text: "doc body" }, { type: "text", text: " part two" }], is_error: false },
+    ])), 200);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+    const result = parser.getResult();
+    expect(result.toolCalls![0]!.output).toBe("search hit");
+    // Array-of-text-blocks is joined with \n
+    expect(result.toolCalls![1]!.output).toBe("doc body\n part two");
+  });
+
+  test("tool output is undefined when user event lacks matching tool_result", () => {
+    const parser = new StreamParser(0);
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "Bash", input: { command: "ls" } },
+    ])), 100);
+    // User event without content array — legacy format / missing result
+    parser.parseLine(JSON.stringify({ type: "user", message: {}, parent_tool_use_id: null }), 200);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+    const result = parser.getResult();
+    expect(result.toolCalls![0]!.output).toBeUndefined();
   });
 
   test("handles multiple tools in one turn", () => {
@@ -463,5 +497,54 @@ describe("formatToolDisplayName", () => {
     expect(formatToolDisplayName("Read")).toBe("Read");
     expect(formatToolDisplayName("Write")).toBe("Write");
     expect(formatToolDisplayName("Bash")).toBe("Bash");
+  });
+});
+
+describe("truncateOutput", () => {
+  test("returns undefined for null/undefined", () => {
+    expect(truncateOutput(null)).toBeUndefined();
+    expect(truncateOutput(undefined)).toBeUndefined();
+  });
+
+  test("passes through small strings unchanged", () => {
+    expect(truncateOutput("hello world")).toBe("hello world");
+  });
+
+  test("JSON-stringifies non-string values", () => {
+    expect(truncateOutput({ a: 1, b: "x" })).toBe('{"a":1,"b":"x"}');
+    expect(truncateOutput([1, 2, 3])).toBe("[1,2,3]");
+  });
+
+  test("passes through values at exactly the cap", () => {
+    const atCap = "a".repeat(TOOL_OUTPUT_MAX_BYTES);
+    expect(truncateOutput(atCap)).toBe(atCap);
+  });
+
+  test("wraps over-cap strings in a truncation envelope", () => {
+    const oversized = "x".repeat(TOOL_OUTPUT_MAX_BYTES + 100);
+    const out = truncateOutput(oversized)!;
+    const parsed = JSON.parse(out);
+    expect(parsed._truncated).toBe(true);
+    expect(parsed._originalBytes).toBe(TOOL_OUTPUT_MAX_BYTES + 100);
+    expect(typeof parsed.head).toBe("string");
+    // The head should be the first ~16 KB of the original (byte-wise)
+    expect(Buffer.byteLength(parsed.head, "utf8")).toBeLessThanOrEqual(TOOL_OUTPUT_MAX_BYTES);
+    expect(parsed.head.startsWith("xxx")).toBe(true);
+  });
+
+  test("wraps over-cap objects in a truncation envelope", () => {
+    // Build a JSON object whose serialization exceeds the cap
+    const fatArray = Array.from({ length: 2000 }, (_, i) => `item-${i}`);
+    const out = truncateOutput({ items: fatArray })!;
+    const parsed = JSON.parse(out);
+    expect(parsed._truncated).toBe(true);
+    expect(parsed._originalBytes).toBeGreaterThan(TOOL_OUTPUT_MAX_BYTES);
+    expect(typeof parsed.head).toBe("string");
+  });
+
+  test("handles unserializable values gracefully", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(truncateOutput(circular)).toBeUndefined();
   });
 });
