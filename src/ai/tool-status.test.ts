@@ -74,6 +74,22 @@ describe("getToolStatus", () => {
     );
   });
 
+  test("knowledge search handles escaped quotes in field values", () => {
+    // A raw regex approach would stop at the first inner quote; structured parse handles this correctly.
+    const input = JSON.stringify({ query: 'find "foo" AND bar', collection: "nav-wiki" });
+    expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
+      'Searching knowledge base: collection=nav-wiki · query=find "foo" AND bar',
+    );
+  });
+
+  test("knowledge search falls back to regex when input is truncated", () => {
+    // Simulates the upstream `abbreviateInput` trailing-dots truncation at 500 chars.
+    const input = '{"query": "foo", "collection": "nav-wiki", "big_field": "xxx...';
+    expect(getToolStatus("knowledge-search_knowledge", input)).toBe(
+      "Searching knowledge base: collection=nav-wiki · query=foo",
+    );
+  });
+
   test("includes email search detail", () => {
     const input = '{"query": "invoice from Acme Corp"}';
     expect(getToolStatus("gmail-search_emails", input)).toBe("Searching email: invoice from Acme Corp");

@@ -14,9 +14,11 @@
  *   4. Generic "tool (server)" fallback with first-field detail
  */
 
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "tool-status");
 
 interface ToolStatusEntry {
   /** Base status text (e.g. "Searching knowledge base") */
@@ -104,11 +106,34 @@ const proxySearchToolsDetail = (input: string | undefined): string | undefined =
   return extractField(input, "query");
 };
 
-/** Extract a raw field value with inferred type (string | boolean | number) from abbreviated JSON input */
-function extractRawField(
-  input: string,
-  field: string,
-): { value: string; type: "string" | "boolean" | "number" } | undefined {
+type ScalarValue = { value: string; type: "string" | "boolean" | "number" };
+
+/** Parse the tool input JSON into a plain object, or undefined if malformed/truncated. */
+function parseInputObject(input: string): Record<string, unknown> | undefined {
+  try {
+    const v = JSON.parse(input);
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read a scalar field from a parsed input object (structured path). */
+function lookupFromParsed(obj: Record<string, unknown>, field: string): ScalarValue | undefined {
+  const v = obj[field];
+  if (v == null) return undefined;
+  if (typeof v === "string") return { value: v, type: "string" };
+  if (typeof v === "boolean") return { value: String(v), type: "boolean" };
+  if (typeof v === "number") return { value: String(v), type: "number" };
+  return undefined;
+}
+
+/**
+ * Read a scalar field from raw JSON-ish text via regex. Used as a fallback when
+ * {@link parseInputObject} fails — tool inputs are abbreviated to 500 chars upstream,
+ * so over-long inputs arrive with a trailing `...` and cannot be parsed strictly.
+ */
+function extractRawField(input: string, field: string): ScalarValue | undefined {
   const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const strMatch = input.match(new RegExp(`"${escaped}"\\s*:\\s*"([^"]*)"`, "i"));
   if (strMatch?.[1] !== undefined) return { value: strMatch[1], type: "string" };
@@ -127,12 +152,16 @@ function extractRawField(
  * - Boolean `true` renders as a bare flag (just `field`); boolean `false` is omitted
  * - Missing fields are skipped
  * - The joined result is truncated to 180 chars as a hard cap
+ *
+ * Prefers structured JSON parse for correctness (handles escaped quotes, nested
+ * objects) and falls back to regex extraction when input is truncated or malformed.
  */
 function buildDetailFromFields(input: string | undefined, fields: string[]): string | undefined {
   if (!input || fields.length === 0) return undefined;
+  const parsed = parseInputObject(input);
   const parts: string[] = [];
   for (const field of fields) {
-    const raw = extractRawField(input, field);
+    const raw = parsed ? lookupFromParsed(parsed, field) : extractRawField(input, field);
     if (!raw) continue;
     if (raw.type === "boolean") {
       if (raw.value === "true") parts.push(field);
@@ -144,30 +173,48 @@ function buildDetailFromFields(input: string | undefined, fields: string[]): str
   return truncate(parts.join(" · "), 180);
 }
 
-/** Load tool-display.config.json from the repo root. Returns {} on any error. */
+/**
+ * Load tool-display.config.json from the repo root. Returns {} when the file is
+ * missing (silent — config is optional) or when the file exists but is invalid
+ * (logged so the user gets feedback about config mistakes).
+ */
 function loadToolDisplayConfig(): Record<string, ToolDisplayConfigEntry> {
+  const configPath = resolve(import.meta.dir, "../../tool-display.config.json");
+  if (!existsSync(configPath)) return {};
+
+  let parsed: unknown;
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    // tool-status.ts lives at src/ai/, so the repo root is two levels up.
-    const configPath = join(here, "..", "..", "tool-display.config.json");
-    const content = readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(content);
-    if (!parsed || typeof parsed !== "object") return {};
-    // Filter to valid entries (skip comments like "_comment" that lack a label)
-    const out: Record<string, ToolDisplayConfigEntry> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!value || typeof value !== "object") continue;
-      const entry = value as { label?: unknown; fields?: unknown };
-      if (typeof entry.label !== "string") continue;
-      const fields = Array.isArray(entry.fields)
-        ? entry.fields.filter((f): f is string => typeof f === "string")
-        : undefined;
-      out[key] = { label: entry.label, fields };
-    }
-    return out;
-  } catch {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    log.warn("Failed to parse tool-display.config.json: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return {};
   }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    log.warn("tool-display.config.json must be a JSON object at the top level");
+    return {};
+  }
+
+  const out: Record<string, ToolDisplayConfigEntry> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (key.startsWith("_")) continue; // underscore-prefixed keys are comments
+    if (!value || typeof value !== "object") {
+      log.warn("tool-display.config.json: entry {key} is not an object — skipping", { key });
+      continue;
+    }
+    const entry = value as { label?: unknown; fields?: unknown };
+    if (typeof entry.label !== "string") {
+      log.warn("tool-display.config.json: entry {key} is missing a string label — skipping", { key });
+      continue;
+    }
+    const fields = Array.isArray(entry.fields)
+      ? entry.fields.filter((f): f is string => typeof f === "string")
+      : undefined;
+    out[key] = { label: entry.label, fields };
+  }
+  return out;
 }
 
 const TOOL_DISPLAY_CONFIG: Record<string, ToolDisplayConfigEntry> = loadToolDisplayConfig();
