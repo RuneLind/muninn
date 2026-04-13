@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { extractJson } from "../ai/json-extract.ts";
+import { parseClaudeOutput } from "../ai/result-parser.ts";
 import { getLog } from "../logging.ts";
 import { Tracer } from "../tracing/index.ts";
 import type { BenchmarkManifest, JudgeResult, JudgeStats, GoldClaim } from "./types.ts";
@@ -137,11 +138,8 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
 
   const startedAt = Date.now();
   let stdoutText: string;
-  let parsed: unknown;
   try {
-    const spawned = await spawnSonnet(fullPrompt, model, timeoutMs);
-    stdoutText = spawned.stdoutText;
-    parsed = spawned.parsed;
+    stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
   } catch (err) {
     tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
     tracer.error(err instanceof Error ? err : new Error(String(err)));
@@ -149,23 +147,24 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
   }
   const wallclockMs = Date.now() - startedAt;
 
-  // Claude CLI's --output-format json wraps the result in an envelope.
-  // Token counts may live at the top level (`total_cost_usd`, `usage`) or
-  // nested in a per-message structure depending on CLI version.
-  const cliResult = parsed as {
-    result?: string;
-    usage?: { input_tokens?: number; output_tokens?: number };
-    total_input_tokens?: number;
-    total_output_tokens?: number;
-  };
-  if (typeof cliResult.result !== "string") {
-    throw new Error(
-      `Judge CLI output missing 'result' field (got: ${stdoutText.slice(0, 200)})`,
-    );
+  // Parse the Claude CLI envelope via muninn's canonical parser. This sums
+  // usage.input_tokens + cache_creation + cache_read (so cached prompt content
+  // is counted correctly) and extracts the resolved model snapshot from
+  // modelUsage keys — both of which my original bespoke parser got wrong
+  // (input tokens reported as 3, model reported as the alias).
+  let cliResult: ReturnType<typeof parseClaudeOutput>;
+  try {
+    cliResult = parseClaudeOutput(stdoutText);
+  } catch (err) {
+    tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
+    tracer.error(err instanceof Error ? err : new Error(String(err)));
+    throw err;
   }
 
-  const inputTokens = cliResult.usage?.input_tokens ?? cliResult.total_input_tokens ?? 0;
-  const outputTokens = cliResult.usage?.output_tokens ?? cliResult.total_output_tokens ?? 0;
+  const inputTokens = cliResult.inputTokens;
+  const outputTokens = cliResult.outputTokens;
+  // Prefer the resolved snapshot from the envelope over the alias we passed in
+  const resolvedModel = cliResult.model !== "unknown" ? cliResult.model : model;
 
   // The model's response is itself JSON (the judge result)
   let result: JudgeResult;
@@ -183,11 +182,12 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     outputTokens,
     wallclockMs,
     totalClaims: result.stats.totalClaims,
+    resolvedModel,
   });
 
   tracer.finish("ok", {
     issueKey: manifest.issueKey,
-    judgeModel: model,
+    judgeModel: resolvedModel,
     judgePromptVersion,
     hitRate: result.stats.hitRate,
     highlightedRate: result.stats.highlightedRate,
@@ -209,6 +209,7 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     inputTokens,
     outputTokens,
     traceId,
+    resolvedModel,
   });
 
   return {
@@ -217,23 +218,18 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     outputTokens,
     wallclockMs,
     goldContentHash,
-    judgeModel: model,
+    judgeModel: resolvedModel,
     judgePromptVersion,
     traceId,
     analysisTraceId,
   };
 }
 
-interface SpawnResult {
-  stdoutText: string;
-  parsed: unknown;
-}
-
 async function spawnSonnet(
   prompt: string,
   model: string,
   timeoutMs: number,
-): Promise<SpawnResult> {
+): Promise<string> {
   // Run from /tmp so Claude CLI doesn't auto-discover muninn's .mcp.json
   // and waste startup time loading MCP servers we don't need for judging.
   const proc = Bun.spawn(
@@ -273,9 +269,7 @@ async function spawnSonnet(
     clearTimeout(timeoutTimer!);
   }
 
-  const stdoutText = await stdoutPromise;
-  const parsed = extractJson<unknown>(stdoutText);
-  return { stdoutText, parsed };
+  return await stdoutPromise;
 }
 
 function formatHighlightedClaims(manifest: BenchmarkManifest): string {
