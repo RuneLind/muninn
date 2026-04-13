@@ -12,6 +12,7 @@ import { registerYouTubeRoutes } from "./routes/youtube-routes.ts";
 import { registerXArticleRoutes } from "./routes/x-article-routes.ts";
 import { registerSSERoutes } from "./routes/sse-routes.ts";
 import { registerGraphRoutes } from "./routes/graph-routes.ts";
+import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
@@ -32,6 +33,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerXArticleRoutes(app, config);
   registerSSERoutes(app);
   registerGraphRoutes(app, config);
+  registerBenchmarkRoutes(app);
 
   return app;
 }
