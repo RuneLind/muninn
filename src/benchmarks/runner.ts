@@ -43,14 +43,29 @@ import {
   allocateBenchmarkPort,
   type BenchmarkSerenaInstance,
 } from "./serena-benchmark.ts";
+import {
+  benchmarkYggdrasilManager,
+  allocateBenchmarkYggdrasilPort,
+  type BenchmarkYggdrasilInstance,
+} from "./yggdrasil-manager.ts";
 import { shakeoutSimilarity, classify, type ShakeoutVerdict } from "./jaccard.ts";
 
 const log = getLog("benchmarks", "runner");
 
-/** The supported MCP stacks for Phase 1. Yggdrasil stacks come back when Bug 5 is fixed. */
+/** The supported MCP stacks for Phase 1+. */
 export type McpStack =
   | "knowledge-only"
-  | "knowledge+serena";
+  | "knowledge+serena"
+  | "knowledge+yggdrasil"
+  | "knowledge+serena+yggdrasil";
+
+function stackUsesSerena(stack: McpStack): boolean {
+  return stack === "knowledge+serena" || stack === "knowledge+serena+yggdrasil";
+}
+
+function stackUsesYggdrasil(stack: McpStack): boolean {
+  return stack === "knowledge+yggdrasil" || stack === "knowledge+serena+yggdrasil";
+}
 
 /**
  * Base allow-list for the runner's scratch `.claude/settings.json`. Permissions
@@ -143,18 +158,19 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   // Step 1 — worktrees (idempotent, reused across runs)
   const worktrees = await prepareWorktrees(manifest);
 
-  // Step 2 — start Serena instances for stacks that need them
+  // Step 2 — start Serena and/or Yggdrasil instances for stacks that need them
   const stack = opts.treatment.mcpStack as McpStack;
   const serenaInstances: BenchmarkSerenaInstance[] = [];
+  let yggdrasilInstance: BenchmarkYggdrasilInstance | null = null;
   let scratchDir: string | null = null;
   let cellResult: RunCellResult;
 
+  const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
+
   try {
-    if (stack === "knowledge+serena") {
+    if (stackUsesSerena(stack)) {
       // Short names to fit under the 64-char MCP tool-name limit copilot-sdk
       // enforces. See benchmarks/known-bugs.md Bug 10.
-      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
-      // Allocate ports up front so the parallel Promise.all can't race.
       const usedPorts = new Set<number>();
       const specs = worktrees.map((wt) => {
         const port = allocateBenchmarkPort(usedPorts);
@@ -167,14 +183,33 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
       });
       const started = await Promise.all(specs.map((s) => benchmarkSerenaManager.start(s)));
       serenaInstances.push(...started);
-    } else if (stack !== "knowledge-only") {
-      throw new Error(
-        `Stack "${stack}" not supported in Phase 1 (Yggdrasil stacks deferred — see known-bugs.md Bug 5)`,
-      );
+    }
+
+    if (stackUsesYggdrasil(stack)) {
+      const yggPort = allocateBenchmarkYggdrasilPort([]);
+      // Name matches the prod bot's prompt (which references "yggdrasil
+      // search", "yggdrasil impact" etc.), so the resulting tool names
+      // mcp__yggdrasil__search / __impact / __detect_changes line up with
+      // what the bot is primed to call.
+      yggdrasilInstance = await benchmarkYggdrasilManager.start({
+        name: "yggdrasil",
+        issueKey: manifest.issueKey,
+        port: yggPort,
+        repos: worktrees.map((wt) => ({
+          repo: wt.repo,
+          worktreePath: wt.worktreePath,
+        })),
+      });
     }
 
     // Step 3 — scratch bot dir with overlayed .mcp.json
-    scratchDir = await prepareScratchBotDir(baseBot, manifest, opts.treatment, serenaInstances);
+    scratchDir = await prepareScratchBotDir(
+      baseBot,
+      manifest,
+      opts.treatment,
+      serenaInstances,
+      yggdrasilInstance,
+    );
 
     // Step 4 — load the prompt variant (if any) and build the derived bot config
     const jiraPromptOverride = await loadPromptVariant(opts.treatment.promptId);
@@ -205,6 +240,7 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
         effectiveBot,
         config,
         serenaInstances,
+        yggdrasilInstance,
         stack,
         dryRun: opts.dryRun ?? false,
         messageOverride: opts.messageOverride,
@@ -221,16 +257,27 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
       totalCostUsd: totalCost,
     };
   } finally {
+    // allSettled so one hung stop can't block the rest — each instance is
+    // independent and a leaked process is worse than a noisy teardown log.
+    const teardowns: Promise<unknown>[] = [];
     if (serenaInstances.length > 0) {
       log.info("Tearing down {n} benchmark Serena instances", {
         botName: "benchmarks",
         n: serenaInstances.length,
       });
-      // allSettled so one hung stop can't block the rest — each instance is
-      // independent and a leaked process is worse than a noisy teardown log.
-      await Promise.allSettled(
-        serenaInstances.map((inst) => benchmarkSerenaManager.stop(inst.name)),
-      );
+      for (const inst of serenaInstances) {
+        teardowns.push(benchmarkSerenaManager.stop(inst.name));
+      }
+    }
+    if (yggdrasilInstance) {
+      log.info("Tearing down benchmark Yggdrasil instance {name}", {
+        botName: "benchmarks",
+        name: yggdrasilInstance.name,
+      });
+      teardowns.push(benchmarkYggdrasilManager.stop(yggdrasilInstance.name));
+    }
+    if (teardowns.length > 0) {
+      await Promise.allSettled(teardowns);
     }
     // Scratch dirs are intentionally left on disk for debugging; they're
     // gitignored under benchmarks/scratch/.
@@ -247,6 +294,7 @@ interface RunOneCellArgs {
   effectiveBot: BotConfig;
   config: Config;
   serenaInstances: BenchmarkSerenaInstance[];
+  yggdrasilInstance: BenchmarkYggdrasilInstance | null;
   stack: McpStack;
   dryRun: boolean;
   messageOverride?: string;
@@ -285,6 +333,13 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
       port: s.port,
       projectPath: s.projectPath,
     })),
+    yggdrasilInstances: args.yggdrasilInstance
+      ? args.yggdrasilInstance.indexedRepos.map((r) => ({
+          name: r.repoName,
+          port: args.yggdrasilInstance!.port,
+          projectPath: r.worktreePath,
+        }))
+      : undefined,
   };
   const fullPromptHash = createHash("sha256").update(promptText).digest("hex").slice(0, 16);
   const candidatePath = join(runDir, "candidate.md");
@@ -586,6 +641,7 @@ async function prepareScratchBotDir(
   manifest: BenchmarkManifest,
   treatment: BenchmarkTreatment,
   serenaInstances: BenchmarkSerenaInstance[],
+  yggdrasilInstance: BenchmarkYggdrasilInstance | null,
 ): Promise<string> {
   const scratchRoot = resolve(import.meta.dir, "../../benchmarks/scratch");
   const dirName = `${manifest.issueKey}-${treatment.mcpStack}-${Date.now()}`;
@@ -605,21 +661,31 @@ async function prepareScratchBotDir(
     .then((t) => JSON.parse(t) as { mcpServers: Record<string, unknown> })
     .catch(() => ({ mcpServers: {} as Record<string, unknown> }));
 
+  const stack = treatment.mcpStack as McpStack;
   const newMcp: { mcpServers: Record<string, unknown> } = { mcpServers: {} };
   const baseKnowledge = baseMcpJson.mcpServers["knowledge"];
   if (baseKnowledge) {
     newMcp.mcpServers["knowledge"] = baseKnowledge;
   }
-  if (treatment.mcpStack === "knowledge+serena") {
+  if (stackUsesSerena(stack)) {
     for (const inst of serenaInstances) {
       newMcp.mcpServers[inst.name] = { type: "http", url: inst.mcpUrl };
     }
+  }
+  if (stackUsesYggdrasil(stack) && yggdrasilInstance) {
+    newMcp.mcpServers[yggdrasilInstance.name] = {
+      type: "http",
+      url: yggdrasilInstance.mcpUrl,
+    };
   }
   await writeFile(join(scratchDir, ".mcp.json"), JSON.stringify(newMcp, null, 2));
 
   const claudeDir = join(scratchDir, ".claude");
   await mkdir(claudeDir, { recursive: true });
-  const benchAllowPatterns = serenaInstances.map((inst) => `mcp__${inst.name}__*`);
+  const benchAllowPatterns: string[] = serenaInstances.map((inst) => `mcp__${inst.name}__*`);
+  if (yggdrasilInstance) {
+    benchAllowPatterns.push(`mcp__${yggdrasilInstance.name}__*`);
+  }
   const settingsJson = {
     permissions: {
       deny: [...BENCHMARK_SETTINGS_DENY],
