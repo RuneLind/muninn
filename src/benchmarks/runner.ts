@@ -368,7 +368,26 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   }
 
   if (!result) {
-    throw new Error("processMessage returned undefined");
+    // processMessage caught an error internally, logged via LogTape, called
+    // say() with "Something went wrong: <errorMessage>", and returned undefined.
+    // The runner's collected[] buffer is where that say() landed — surface it
+    // as the error detail so the failure mode is diagnosable from the CLI
+    // output instead of requiring a logfile grep.
+    const collectedErr = collected.join("\n\n").trim();
+    const detail = collectedErr
+      ? collectedErr.slice(0, 1500)
+      : "(no say() output captured)";
+    // Mark the benchmark_runs row as errored with the detail
+    if (benchmarkRunId) {
+      await completeBenchmarkRun(benchmarkRunId, {
+        finishedAt: new Date(),
+        status: "error",
+        error: `processMessage returned undefined. Collected: ${detail}`,
+      }).catch(() => {});
+    }
+    throw new Error(
+      `processMessage returned undefined (caught internally). Collected say() output:\n${detail}`,
+    );
   }
 
   // Persist the candidate report. Frontmatter includes the analysis trace id
