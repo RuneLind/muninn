@@ -583,11 +583,14 @@ async function prepareScratchBotDir(
   await mkdir(scratchDir, { recursive: true });
 
   // Mirror everything in the base bot dir as a symlink, except `.mcp.json`
-  // which we'll write fresh.
+  // and `.claude/` which we'll overlay ourselves. The .claude directory needs
+  // to be a real subdirectory (not a symlink) so we can write a runner-controlled
+  // settings.json without mutating the prod bot's settings.
   const { readdir } = await import("node:fs/promises");
   const entries = await readdir(base.dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name === ".mcp.json") continue;
+    if (entry.name === ".claude") continue;
     const src = join(base.dir, entry.name);
     const dst = join(scratchDir, entry.name);
     if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
@@ -618,9 +621,40 @@ async function prepareScratchBotDir(
 
   await writeFile(join(scratchDir, ".mcp.json"), JSON.stringify(newMcp, null, 2));
 
-  log.info("Scratch bot dir ready: {dir}", {
+  // Write a runner-controlled .claude/settings.json. The prod melosys bot's
+  // settings.json has an allow-list hardcoded to mcp__serena-api__*, mcp__serena-web__*
+  // etc. — it does NOT match the runner's bench-<issue>-<repo> instance names,
+  // so the CLI permission gate silently denies every benchmark Serena call
+  // (1-3ms no-op calls visible in the trace). Fix: write a fresh settings.json
+  // that allows the same knowledge MCP tools plus explicit per-instance bench-*
+  // patterns for the current cell.
+  const claudeDir = join(scratchDir, ".claude");
+  await mkdir(claudeDir, { recursive: true });
+  const benchAllowPatterns = serenaInstances.map((inst) => `mcp__${inst.name}__*`);
+  const settingsJson = {
+    permissions: {
+      deny: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+      allow: [
+        "mcp__knowledge__search_knowledge",
+        "mcp__knowledge__get_document",
+        "mcp__knowledge__get_notion_page",
+        "mcp__knowledge__list_collections",
+        "mcp__knowledge__get_graph_node",
+        "WebFetch",
+        ...benchAllowPatterns,
+      ],
+    },
+    enableAllProjectMcpServers: true,
+  };
+  await writeFile(
+    join(claudeDir, "settings.json"),
+    JSON.stringify(settingsJson, null, 2),
+  );
+
+  log.info("Scratch bot dir ready: {dir} (allow patterns: {patterns})", {
     botName: "benchmarks",
     dir: scratchDir,
+    patterns: benchAllowPatterns.join(", ") || "(none — knowledge-only)",
   });
   return scratchDir;
 }
