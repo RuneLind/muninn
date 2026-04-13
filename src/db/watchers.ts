@@ -150,7 +150,7 @@ export async function updateWatcher(
     cols.push("last_run_at");
   }
   if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
-  if (data.config !== undefined) { updateObj.config = JSON.stringify(data.config); cols.push("config"); }
+  if (data.config !== undefined) { updateObj.config = data.config; cols.push("config"); }
 
   if (cols.length === 0) {
     const [row] = await sql`SELECT * FROM watchers WHERE id = ${id}`;

@@ -9,6 +9,7 @@ import {
   getWatchersForUser,
   deleteWatcher,
   toggleWatcher,
+  updateWatcher,
 } from "./watchers.ts";
 import { getDb } from "./client.ts";
 
@@ -138,5 +139,35 @@ describe("watchers", () => {
 
     const all = await getAllWatchers("bot1");
     expect(all[0]!.enabled).toBe(true);
+  });
+
+  test("updateWatcher stores config as a proper JSONB object (regression: double-encoding)", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+
+    const nestedConfig = {
+      model: "claude-sonnet-4-6",
+      slackChannels: ["#a", "#b"],
+      nested: { k: "v", n: 1 },
+      minScore: 0.85,
+      quietMode: true,
+    };
+    const updated = await updateWatcher(id, { config: nestedConfig });
+    expect(updated?.config).toEqual(nestedConfig);
+
+    // Raw JSONB shape check — previously stored as a JSON string inside JSONB,
+    // which broke jsonb path queries like config->'slackChannels'.
+    const sql = getDb();
+    const [row] = await sql`
+      SELECT
+        jsonb_typeof(config) AS t,
+        config->'slackChannels' AS channels,
+        config->>'model' AS model,
+        config->'nested'->>'k' AS nested_k
+      FROM watchers WHERE id = ${id}
+    `;
+    expect(row!.t).toBe("object");
+    expect(row!.channels).toEqual(["#a", "#b"]);
+    expect(row!.model).toBe("claude-sonnet-4-6");
+    expect(row!.nested_k).toBe("v");
   });
 });
