@@ -22,6 +22,24 @@ Format rules:
 - Keep it scannable — bullet points throughout
 - Write in a casual, informative tone`;
 
+/**
+ * Quiet-mode prompt — used by the daytime "highlights" watcher. The model is told to
+ * either surface 1–3 genuinely exceptional tweets or respond with the literal word
+ * "SKIP" (case-insensitive) to suppress the alert entirely. Pair with config.quietMode: true.
+ */
+export const DEFAULT_X_HIGHLIGHTS_PROMPT = `You are a quality gate for daytime Twitter alerts. The user only wants to be interrupted for content that is genuinely exceptional — a breakthrough result, a must-read long-form note, a news event they'd want to know about immediately, or an insight they'd otherwise miss.
+
+If NOTHING in the list above meets that bar, respond with exactly:
+
+SKIP
+
+Otherwise, produce a short alert with 1–3 items maximum:
+- One bold line per item with linked @handle and a one-sentence reason it's worth the interruption
+- No "Also Notable" section — if it isn't exceptional, leave it out
+- No preamble, no heading — start directly with the first item
+
+Err on the side of SKIP. The user will get a full digest later today anyway.`;
+
 interface XWatcherConfig {
   pages?: number;
   prompt?: string;
@@ -36,6 +54,14 @@ interface XWatcherConfig {
   maxDocs?: number;
   /** Max tweets to send to LLM after ranking (default: 30). Tweets are ranked by engagement_score. */
   topN?: number;
+  /** How many days back to include (default: 2 — today + yesterday). Set to 7 for a weekly digest. */
+  windowDays?: number;
+  /** Filter out tweets already in lastNotifiedIds (default: true). Set false for daily/weekly digests that re-rank the full window. */
+  dedupByTweetId?: boolean;
+  /** If set, silently skip the digest when the top tweet's rank score is below this threshold. Used for daytime "quiet" alerts that only fire on exceptional content. */
+  minScore?: number;
+  /** If true, the LLM may return literal "SKIP" to silently suppress the alert. Combined with a prompt that tells the model to only surface truly exceptional content. */
+  quietMode?: boolean;
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -43,6 +69,27 @@ interface XWatcherConfig {
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 const DEFAULT_MAX_DOCS = 80;
 const DEFAULT_TOP_N = 30;
+const DEFAULT_WINDOW_DAYS = 2;
+
+/**
+ * Detect a quiet-mode SKIP response from the LLM. Accepts `SKIP` with any whitespace or
+ * surrounding punctuation so the model doesn't have to be pixel-perfect.
+ */
+export function isSkipResult(text: string): boolean {
+  const stripped = text.trim().replace(/^[`*_~"'.\s]+|[`*_~"'.\s]+$/g, "");
+  return stripped.toUpperCase() === "SKIP";
+}
+
+/** Build the set of acceptable date prefixes (YYYY-MM-DD, Europe/Oslo) for a rolling N-day window. */
+export function buildDateWindow(windowDays: number, now: Date = new Date()): Set<string> {
+  const days = Math.max(1, Math.floor(windowDays));
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
+  const set = new Set<string>();
+  for (let i = 0; i < days; i++) {
+    set.add(fmt.format(new Date(now.getTime() - i * 86400000)));
+  }
+  return set;
+}
 
 interface CollectionDoc {
   id: string;
@@ -118,11 +165,18 @@ function extractTweetId(docId: string): string {
   return match ? match[1]! : docId;
 }
 
+interface FetchResult {
+  texts: string[];
+  trackingIds: string[];
+  /** If set, the caller should return a silent alert instead of calling the LLM. */
+  silentSkip?: boolean;
+}
+
 async function fetchFromCollection(
   config: XWatcherConfig,
   known: Set<string>,
   botName?: string,
-): Promise<{ texts: string[]; trackingIds: string[] } | null> {
+): Promise<FetchResult | null> {
   const apiUrl = config.apiUrl || DEFAULT_API_URL;
   const collection = config.collection!;
 
@@ -141,17 +195,15 @@ async function fetchFromCollection(
     return null;
   }
 
-  // Filter by recency — only docs from today or yesterday (date prefix in filename)
-  // Use Europe/Oslo timezone to match huginn's date convention
-  const dateFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit" });
-  const now = new Date();
-  const today = dateFmt.format(now);
-  const yesterday = dateFmt.format(new Date(now.getTime() - 86400000));
-  const recentDocs = docs.filter((d) => d.id.startsWith(today) || d.id.startsWith(yesterday));
+  // Filter by recency — rolling window of N days (Europe/Oslo, matches huginn's date convention)
+  const windowDays = config.windowDays ?? DEFAULT_WINDOW_DAYS;
+  const dayStrings = buildDateWindow(windowDays);
+  const recentDocs = docs.filter((d) => dayStrings.has(d.id.slice(0, 10)));
 
-  // Then filter out already-seen tweets
+  // Optionally filter out already-seen tweets. Daily/weekly digests disable this to re-rank the full window.
+  const dedupByTweetId = config.dedupByTweetId ?? true;
   const newDocs = recentDocs
-    .filter((d) => !known.has(`tw:${extractTweetId(d.id)}`))
+    .filter((d) => !dedupByTweetId || !known.has(`tw:${extractTweetId(d.id)}`))
     .sort((a, b) => a.id.localeCompare(b.id)); // oldest first for deterministic cap
 
   if (newDocs.length === 0) {
@@ -188,11 +240,21 @@ async function fetchFromCollection(
 
   // Rank by engagement score (highest first) and take top-N for the LLM
   compacted.sort((a, b) => b.rankScore - a.rankScore);
+  // Track ALL fetched tweets so below-cutoff ones aren't re-fetched next tick
+  const trackingIds = compacted.map((r) => `tw:${extractTweetId(r.docId)}`);
+
+  // minScore gate: silently track but skip the LLM call if the top tweet doesn't clear the bar
+  const topScore = compacted[0]?.rankScore ?? 0;
+  if (config.minScore != null && topScore < config.minScore) {
+    log.info("Below minScore ({top} < {min}), silencing {count} tweets", {
+      botName, top: topScore.toFixed(3), min: config.minScore, count: compacted.length,
+    });
+    return { texts: [], trackingIds, silentSkip: true };
+  }
+
   const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = compacted.slice(0, topN);
   const texts = ranked.map((r) => r.text);
-  // Track ALL fetched tweets so below-cutoff ones aren't re-fetched next tick
-  const trackingIds = compacted.map((r) => `tw:${extractTweetId(r.docId)}`);
 
   log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking", {
     botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: compacted.length, ranked: ranked.length,
@@ -231,7 +293,7 @@ async function fetchFromPython(
   config: XWatcherConfig,
   known: Set<string>,
   botName?: string,
-): Promise<{ texts: string[]; trackingIds: string[] } | null> {
+): Promise<FetchResult | null> {
   const pages = Math.min(config.pages ?? 3, MAX_PAGES);
 
   let tweets: XTweet[];
@@ -303,6 +365,18 @@ async function fetchFromPython(
 
 // --- Main entry point ---
 
+/** Build a silent alert that records trackingIds for dedup without messaging the user. */
+function silentAlert(trackingIds: string[]): WatcherAlert {
+  return {
+    id: `x-silent-${Date.now()}`,
+    source: "x",
+    summary: "",
+    urgency: "low" as const,
+    trackingIds,
+    silent: true,
+  };
+}
+
 export async function checkX(watcher: Watcher, _cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as XWatcherConfig;
   const known = new Set(watcher.lastNotifiedIds);
@@ -313,6 +387,12 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
     : await fetchFromPython(config, known, botName);
 
   if (!data) return []; // fetch error
+
+  // minScore gate tripped: track IDs without notifying
+  if (data.silentSkip && data.trackingIds.length > 0) {
+    return [silentAlert(data.trackingIds)];
+  }
+
   if (data.texts.length === 0) {
     log.info("No new tweets to digest", { botName });
     return [];
@@ -346,6 +426,13 @@ ${userPrompt}`;
     log.info("Digest ready in {duration}s ({model}, {count} tweets)", {
       botName, duration: (durationMs / 1000).toFixed(1), model, count: texts.length,
     });
+
+    // Quiet-mode: the LLM may decline to surface anything by returning literal "SKIP".
+    if (config.quietMode && isSkipResult(result)) {
+      log.info("Quiet mode: LLM returned SKIP, silencing {count} tweets", { botName, count: trackingIds.length });
+      return [silentAlert(trackingIds)];
+    }
+
     return [{
       id: `x-digest-${Date.now()}`,
       source: "x",

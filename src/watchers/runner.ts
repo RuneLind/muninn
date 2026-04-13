@@ -163,9 +163,17 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         return true;
       });
 
-      if (newAlerts.length > 0) {
+      // Silent alerts (e.g. quiet-mode X digests that chose not to surface) contribute
+      // trackingIds for dedup but are not sent, saved, or logged to the user-facing feed.
+      const visibleAlerts = newAlerts.filter((a) => !a.silent);
+      const silentAlerts = newAlerts.filter((a) => a.silent);
+      if (silentAlerts.length > 0) {
+        log.info("Watcher \"{name}\" tracked {count} silent alert(s) without notification", { botName: tag, name: watcher.name, count: silentAlerts.length });
+      }
+
+      if (visibleAlerts.length > 0) {
         // Format as markdown (stored in DB), convert to platform format for send
-        const markdown = formatAlerts(watcher, newAlerts);
+        const markdown = formatAlerts(watcher, visibleAlerts);
 
         // Send to Telegram (fall back to plain text if HTML is rejected)
         agentStatus.set("sending_telegram", watcher.name);
@@ -202,10 +210,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
         activityLog.push(
           "system",
-          `Watcher "${watcher.name}" sent ${newAlerts.length} alert(s)`,
+          `Watcher "${watcher.name}" sent ${visibleAlerts.length} alert(s)`,
           { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
         );
-        log.info("Watcher \"{name}\" sent {count} alert(s) to user {userId}", { botName: tag, name: watcher.name, count: newAlerts.length, userId: watcher.userId });
+        log.info("Watcher \"{name}\" sent {count} alert(s) to user {userId}", { botName: tag, name: watcher.name, count: visibleAlerts.length, userId: watcher.userId });
       }
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
@@ -222,7 +230,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       await updateWatcherLastRun(watcher.id, updatedIds);
       agentStatus.completeRequest(requestId, {});
       agentStatus.set("idle");
-      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: newAlerts.length, ...(forced && { manualTrigger: true }) });
+      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       agentStatus.clearRequest();
       agentStatus.set("idle");

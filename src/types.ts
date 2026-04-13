@@ -143,6 +143,8 @@ export interface WatcherAlert {
   subject?: string;
   /** Extra IDs to track in lastNotifiedIds for dedup (e.g. individual tweet IDs in a digest) */
   trackingIds?: string[];
+  /** If true, the runner persists trackingIds but skips sending/saving. Used by quiet-mode digests that evaluated tweets but chose not to surface them. */
+  silent?: boolean;
 }
 
 export interface UserSettings {
