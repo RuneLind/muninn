@@ -34,6 +34,8 @@ import {
   type BenchmarkTreatment,
   type BenchmarkStackConfig,
 } from "../db/benchmark-runs.ts";
+import { ensureUser } from "../db/users.ts";
+import { createThread } from "../db/threads.ts";
 import { runJudge } from "./judge.ts";
 import { loadManifestByKey } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
@@ -152,8 +154,14 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
     // Step 3 — scratch bot dir with overlayed .mcp.json
     scratchDir = await prepareScratchBotDir(baseBot, manifest, opts.treatment, serenaInstances);
 
-    // Step 4 — derived bot config (treatment overlay on baseBot)
-    const effectiveBot = applyTreatmentOverlay(baseBot, scratchDir, opts.treatment);
+    // Step 4 — load the prompt variant (if any) and build the derived bot config
+    const jiraPromptOverride = await loadPromptVariant(opts.treatment.promptId);
+    const effectiveBot = applyTreatmentOverlay(
+      baseBot,
+      scratchDir,
+      opts.treatment,
+      jiraPromptOverride,
+    );
 
     // Step 5 — sequential n-runs loop with budget enforcement
     const runs: SingleRunResult[] = [];
@@ -240,11 +248,28 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   const messageText = args.messageOverride ?? buildDefaultMessage(manifest, dryRun);
   const promptText = `<!-- research:jira -->\n${effectiveBot.prompts?.jiraAnalysis ?? ""}\n\n---\n\n${messageText}`;
 
+  // CRITICAL: each cell gets a unique userId AND a fresh threadId so that
+  // the prompt builder pulls ZERO conversation history. Without this, prior
+  // benchmark runs' bot responses get injected as <conversation_history>
+  // into the user prompt — the bot then reads its own previous (potentially
+  // contaminated) analysis and paraphrases it, instead of doing fresh first-pass
+  // analysis. See benchmarks/known-bugs.md Bug 9.
+  //
+  // The userId encodes the issue + run timestamp + index so the messages
+  // table row is traceable back to a specific benchmark cell during debugging,
+  // but is unique per cell so no two cells ever share history. Both the user
+  // and the thread MUST be materialised in the DB before processMessage runs,
+  // otherwise the messages.thread_id FK fires when saveMessage tries to insert.
+  const cellUserId = `bench-${manifest.issueKey}-${Date.now()}-r${runIndex}`;
+  await ensureUser({ id: cellUserId, username: cellUserId, platform: "web" });
+  const cellThread = await createThread(cellUserId, effectiveBot.name, "main");
+  const cellThreadId = cellThread.id;
+
   // Pre-create the tracer so we own the analysis trace_id from the start.
   const tracer = new Tracer("benchmark_analysis", {
     botName: effectiveBot.name,
-    userId: "benchmark-runner",
-    username: "benchmark-runner",
+    userId: cellUserId,
+    username: cellUserId,
     platform: "web",
   });
   const analysisTraceId = tracer.traceId;
@@ -309,13 +334,14 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   try {
     result = await processMessage({
       text: promptText,
-      userId: "benchmark-runner",
-      username: "benchmark-runner",
+      userId: cellUserId,
+      username: cellUserId,
       platform: "web",
       botConfig: effectiveBot,
       config,
       say,
       setStatus: noop,
+      threadId: cellThreadId,
       onTextDelta: () => {},
       onIntent: () => {},
       onToolStatus: () => {},
@@ -499,17 +525,39 @@ function applyTreatmentOverlay(
   base: BotConfig,
   scratchDir: string,
   treatment: BenchmarkTreatment,
+  jiraPromptOverride: string | null,
 ): BotConfig {
+  const prompts = jiraPromptOverride
+    ? { ...base.prompts, jiraAnalysis: jiraPromptOverride }
+    : base.prompts;
   return {
     ...base,
     dir: scratchDir,
     connector: treatment.connector as ConnectorType,
     model: treatment.model,
-    // Overlay the jiraAnalysis prompt — the runner doesn't currently support
-    // prompt-variant overrides because Phase 1's first cell uses the bot's
-    // existing prompt. Phase 1 second cell will load a variant from a file.
-    prompts: base.prompts,
+    prompts,
   };
+}
+
+/**
+ * Load a jiraAnalysis prompt variant from benchmarks/prompts/<promptId>.txt.
+ *
+ * Returns null when promptId is "default" or no variant file exists — the
+ * runner then falls back to the base bot's prompts.jiraAnalysis. Throws when
+ * a non-default promptId is requested but the file is missing, so typos in
+ * treatment.promptId fail loudly instead of silently using the default.
+ */
+async function loadPromptVariant(promptId: string): Promise<string | null> {
+  if (promptId === "default") return null;
+  const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
+  const path = join(promptsDir, `${promptId}.txt`);
+  if (!existsSync(path)) {
+    throw new Error(
+      `Treatment requested promptId="${promptId}" but no variant file at ${path}. ` +
+        `Create the file or use promptId "default" to fall back to the base bot's prompt.`,
+    );
+  }
+  return readFile(path, "utf8");
 }
 
 /**
