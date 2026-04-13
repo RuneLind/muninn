@@ -10,6 +10,8 @@ import type { BenchmarkManifest, JudgeResult, JudgeStats, GoldClaim } from "./ty
 
 const log = getLog("benchmarks", "judge");
 
+const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n?/;
+
 /**
  * Parse YAML frontmatter from the top of a markdown file. Returns an object
  * keyed by frontmatter field, or an empty object if no frontmatter is present.
@@ -18,7 +20,7 @@ const log = getLog("benchmarks", "judge");
  * can link a run back to the original muninn analysis trace.
  */
 export function parseReportFrontmatter(text: string): Record<string, unknown> {
-  const match = text.match(/^---\n([\s\S]*?)\n---/);
+  const match = text.match(FRONTMATTER_REGEX);
   if (!match || !match[1]) return {};
   try {
     const parsed = parseYaml(match[1]) as unknown;
@@ -26,6 +28,10 @@ export function parseReportFrontmatter(text: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+export function stripReportFrontmatter(text: string): string {
+  return text.replace(FRONTMATTER_REGEX, "");
 }
 
 // Alias — resolves to whatever the current Sonnet 4.6 snapshot is.

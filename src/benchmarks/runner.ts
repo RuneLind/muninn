@@ -34,7 +34,7 @@ import {
   type BenchmarkStackConfig,
 } from "../db/benchmark-runs.ts";
 import { ensureCellContext } from "./cell-context.ts";
-import { runJudge } from "./judge.ts";
+import { runJudge, stripReportFrontmatter } from "./judge.ts";
 import { loadManifestByKey } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
 import { prepareWorktrees, type PreparedWorktree } from "./worktree.ts";
@@ -656,17 +656,15 @@ function defaultJudgePromptPath(): string {
   return join(promptsDir, files[0]!);
 }
 
-// ── Shake-out check (Hypothesis 2 — lexical defense for Bug 9 class leaks) ──
-
 export interface RunShakeoutOptions {
   issueKey: string;
   /**
-   * Base treatment. `mcpStack` is ignored — shake-out always compares
-   * the two stacks in `stackA`/`stackB` (defaulting to knowledge-only
-   * vs knowledge+serena).
+   * Base treatment. `mcpStack` is ignored; the shake-out always runs
+   * `stackA` and `stackB` (defaulting to knowledge-only vs knowledge+serena).
    */
   baseTreatment: BenchmarkTreatment;
   baseBotName?: string;
+  /** Total budget across both cells combined, not per-cell. */
   budgetUsd?: number;
   dryRun?: boolean;
   stackA?: McpStack;
@@ -680,34 +678,19 @@ export interface RunShakeoutResult {
   stackB: McpStack;
   similarity: number;
   verdict: ShakeoutVerdict;
-  /** True if either cell errored or candidates couldn't be compared. */
   inconclusive: boolean;
   inconclusiveReason?: string;
 }
 
 /**
- * Strip YAML frontmatter from a candidate report so the similarity check
- * compares report bodies, not the metadata block. The runner writes
- * frontmatter that contains trace IDs + mcp_stack + generated_at — all of
- * which differ between cells by design and would add noise to the Jaccard
- * score if left in.
- */
-function stripFrontmatter(text: string): string {
-  if (!text.startsWith("---\n")) return text;
-  const end = text.indexOf("\n---\n", 4);
-  if (end === -1) return text;
-  return text.slice(end + 5);
-}
-
-/**
- * Run two cells on the same issue with two different MCP stacks and compare
- * their candidate reports via 5-gram Jaccard similarity. Implementation of
- * improvement-hypotheses.md Hypothesis 2 — structural defense against the
- * Bug 9 class of cross-cell state leaks.
+ * Run two cells on the same issue with different MCP stacks and compare
+ * their candidate reports via 5-gram Jaccard similarity. High similarity
+ * between cells that should have differed is a structural signal for
+ * cross-cell state leaks that hit-rate/highlighted-rate metrics miss.
  *
- * Both cells use the same connector/model/promptId from `baseTreatment`;
- * only the `mcpStack` differs. `nRuns` is hardcoded to 1 per cell because
- * the similarity bands are calibrated against single-run pairs.
+ * Both cells share the connector/model/promptId from `baseTreatment`;
+ * only `mcpStack` differs. `nRuns` is fixed at 1 per cell because the
+ * similarity bands assume single-run pairs.
  */
 export async function runShakeout(
   opts: RunShakeoutOptions,
@@ -746,12 +729,16 @@ export async function runShakeout(
     dryRun: opts.dryRun,
   });
 
+  const budgetRemaining = opts.budgetUsd !== undefined
+    ? Math.max(0, opts.budgetUsd - cellA.totalCostUsd)
+    : undefined;
+
   const cellB = await runCell({
     issueKey: opts.issueKey,
     treatment: makeTreatment(stackB),
     baseBotName: opts.baseBotName,
     nRuns: 1,
-    budgetUsd: opts.budgetUsd,
+    budgetUsd: budgetRemaining,
     dryRun: opts.dryRun,
   });
 
@@ -777,8 +764,12 @@ export async function runShakeout(
   let textA: string;
   let textB: string;
   try {
-    textA = stripFrontmatter(await readFile(runA.candidatePath, "utf8"));
-    textB = stripFrontmatter(await readFile(runB.candidatePath, "utf8"));
+    const [rawA, rawB] = await Promise.all([
+      readFile(runA.candidatePath, "utf8"),
+      readFile(runB.candidatePath, "utf8"),
+    ]);
+    textA = stripReportFrontmatter(rawA);
+    textB = stripReportFrontmatter(rawB);
   } catch (err) {
     return {
       cellA,
