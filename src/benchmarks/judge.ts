@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { extractJson } from "../ai/json-extract.ts";
@@ -172,28 +173,20 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     const judgeResultRaw = extractJson<unknown>(cliResult.result);
     result = normaliseJudgeResult(judgeResultRaw);
   } catch (err) {
-    // On parse failure, dump the full raw stdout AND the parsed result field to
-    // /tmp so we can debug without re-spending tokens. parseClaudeOutput
-    // succeeded (we got past it), so cliResult.result is what extractJson choked on.
+    // Dump the raw CLI stdout and the parsed result field so Bug 8 can be
+    // diagnosed on the next occurrence without re-spending tokens. See
+    // benchmarks/known-bugs.md Bug 8.
     const debugDir = `/tmp/benchmark-judge-debug-${Date.now()}`;
-    try {
-      const { mkdirSync, writeFileSync } = await import("node:fs");
-      mkdirSync(debugDir, { recursive: true });
-      writeFileSync(`${debugDir}/raw-stdout.json`, stdoutText);
-      writeFileSync(`${debugDir}/parsed-result-field.txt`, cliResult.result ?? "<null>");
-      writeFileSync(`${debugDir}/error.txt`, err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
-      log.error("Judge parse failure — debug dump written to {dir}", {
-        botName: "benchmarks",
-        dir: debugDir,
-        stdoutLength: stdoutText.length,
-        resultFieldLength: cliResult.result?.length ?? 0,
-      });
-    } catch (dumpErr) {
-      log.error("Judge parse failure AND debug dump failed: {error}", {
-        botName: "benchmarks",
-        error: dumpErr instanceof Error ? dumpErr.message : String(dumpErr),
-      });
-    }
+    mkdirSync(debugDir, { recursive: true });
+    writeFileSync(`${debugDir}/raw-stdout.json`, stdoutText);
+    writeFileSync(`${debugDir}/parsed-result-field.txt`, cliResult.result ?? "<null>");
+    writeFileSync(`${debugDir}/error.txt`, err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
+    log.error("Judge parse failure — debug dump written to {dir}", {
+      botName: "benchmarks",
+      dir: debugDir,
+      stdoutLength: stdoutText.length,
+      resultFieldLength: cliResult.result?.length ?? 0,
+    });
     tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
     tracer.error(err instanceof Error ? err : new Error(String(err)));
     throw err;

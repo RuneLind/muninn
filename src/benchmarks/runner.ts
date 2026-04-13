@@ -18,7 +18,7 @@
  * for the architectural rationale.
  */
 
-import { mkdir, writeFile, readFile, symlink, rm } from "node:fs/promises";
+import { mkdir, writeFile, readFile, symlink, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createHash } from "node:crypto";
@@ -50,6 +50,22 @@ const log = getLog("benchmarks", "runner");
 export type McpStack =
   | "knowledge-only"
   | "knowledge+serena";
+
+/**
+ * Base allow-list for the runner's scratch `.claude/settings.json`. Permissions
+ * for the benchmark Serena instances are appended per cell (the names depend
+ * on the issue key). See benchmarks/known-bugs.md Bug 10 for why this file is
+ * runner-generated instead of symlinked from the prod bot.
+ */
+const BENCHMARK_SETTINGS_DENY = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"] as const;
+const BENCHMARK_SETTINGS_ALLOW_BASE = [
+  "mcp__knowledge__search_knowledge",
+  "mcp__knowledge__get_document",
+  "mcp__knowledge__get_notion_page",
+  "mcp__knowledge__list_collections",
+  "mcp__knowledge__get_graph_node",
+  "WebFetch",
+] as const;
 
 export interface RunCellOptions {
   issueKey: string;
@@ -134,29 +150,22 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
 
   try {
     if (stack === "knowledge+serena") {
-      // Name format: "b<issueNum>-<repoShort>", kept deliberately short so the
-      // generated MCP tool names fit inside the 64-char function-calling limit
-      // that Copilot/Anthropic enforce. Format examples:
-      //
-      //   mcp__b7588-api__find_referencing_symbols       → 44 chars ✓
-      //   mcp__b7588-trygdeav__find_referencing_symbols  → 45 chars ✓
-      //
-      // The old format (`bench-MELOSYS-7588-melosys-trygdeavgift-beregning`)
-      // produced 80-char tool names which copilot-sdk rejected with
-      // CAPIError: 400 Bad Request. claude-cli didn't care, but copilot-sdk
-      // (and its OpenAI-compatible function-calling envelope) does. See
-      // benchmarks/known-bugs.md Bug 10.
+      // Short names to fit under the 64-char MCP tool-name limit copilot-sdk
+      // enforces. See benchmarks/known-bugs.md Bug 10.
       const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
-      for (const wt of worktrees) {
-        const repoShort = wt.repo.replace(/^melosys-/, "").slice(0, 8);
-        const port = allocateBenchmarkPort([]);
-        const inst = await benchmarkSerenaManager.start({
-          name: `b${issueNum}-${repoShort}`,
+      // Allocate ports up front so the parallel Promise.all can't race.
+      const usedPorts = new Set<number>();
+      const specs = worktrees.map((wt) => {
+        const port = allocateBenchmarkPort(usedPorts);
+        usedPorts.add(port);
+        return {
+          name: `b${issueNum}-${wt.repo.replace(/^melosys-/, "").slice(0, 8)}`,
           projectPath: wt.worktreePath,
           port,
-        });
-        serenaInstances.push(inst);
-      }
+        };
+      });
+      const started = await Promise.all(specs.map((s) => benchmarkSerenaManager.start(s)));
+      serenaInstances.push(...started);
     } else if (stack !== "knowledge-only") {
       throw new Error(
         `Stack "${stack}" not supported in Phase 1 (Yggdrasil stacks deferred — see known-bugs.md Bug 5)`,
@@ -211,20 +220,19 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
       totalCostUsd: totalCost,
     };
   } finally {
-    // Step 6 — teardown
     if (serenaInstances.length > 0) {
       log.info("Tearing down {n} benchmark Serena instances", {
         botName: "benchmarks",
         n: serenaInstances.length,
       });
-      for (const inst of serenaInstances) {
-        await benchmarkSerenaManager.stop(inst.name);
-      }
+      // allSettled so one hung stop can't block the rest — each instance is
+      // independent and a leaked process is worse than a noisy teardown log.
+      await Promise.allSettled(
+        serenaInstances.map((inst) => benchmarkSerenaManager.stop(inst.name)),
+      );
     }
-    if (scratchDir && existsSync(scratchDir)) {
-      // Keep the scratch dir on disk for debugging — gitignored under benchmarks/.
-      // Remove only the symlinks; leave the real .mcp.json + CLAUDE.md for inspection.
-    }
+    // Scratch dirs are intentionally left on disk for debugging; they're
+    // gitignored under benchmarks/scratch/.
   }
 
   return cellResult;
@@ -260,20 +268,12 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   const messageText = args.messageOverride ?? buildDefaultMessage(manifest, dryRun);
   const promptText = `<!-- research:jira -->\n${effectiveBot.prompts?.jiraAnalysis ?? ""}\n\n---\n\n${messageText}`;
 
-  // All per-cell DB preconditions (unique userId, fresh threads row materialised,
-  // tracer created) are set up by ensureCellContext in a single call. See
-  // src/benchmarks/cell-context.ts for the full contract and benchmarks/known-bugs.md
-  // Bug 9 for why this helper exists.
-  const cellCtx = await ensureCellContext({
+  const { userId: cellUserId, threadId: cellThreadId, tracer } = await ensureCellContext({
     issueKey: manifest.issueKey,
     runIndex,
     botName: effectiveBot.name,
-    connector: treatment.connector,
   });
-  const cellUserId = cellCtx.userId;
-  const cellThreadId = cellCtx.threadId;
-  const tracer = cellCtx.tracer;
-  const analysisTraceId = cellCtx.traceId;
+  const analysisTraceId = tracer.traceId;
 
   // Pre-insert the benchmark_runs row so we have a stable id even if the
   // run errors mid-analysis. Filled in with judge results below.
@@ -382,16 +382,12 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   }
 
   if (!result) {
-    // processMessage caught an error internally, logged via LogTape, called
-    // say() with "Something went wrong: <errorMessage>", and returned undefined.
-    // The runner's collected[] buffer is where that say() landed — surface it
-    // as the error detail so the failure mode is diagnosable from the CLI
-    // output instead of requiring a logfile grep.
+    // processMessage swallows its own exceptions and surfaces them via say();
+    // the collected buffer is the only channel that carries the real error.
     const collectedErr = collected.join("\n\n").trim();
     const detail = collectedErr
       ? collectedErr.slice(0, 1500)
       : "(no say() output captured)";
-    // Mark the benchmark_runs row as errored with the detail
     if (benchmarkRunId) {
       await completeBenchmarkRun(benchmarkRunId, {
         finishedAt: new Date(),
@@ -561,11 +557,8 @@ function applyTreatmentOverlay(
 
 /**
  * Load a jiraAnalysis prompt variant from benchmarks/prompts/<promptId>.txt.
- *
- * Returns null when promptId is "default" or no variant file exists — the
- * runner then falls back to the base bot's prompts.jiraAnalysis. Throws when
- * a non-default promptId is requested but the file is missing, so typos in
- * treatment.promptId fail loudly instead of silently using the default.
+ * Returns null for the default promptId. Throws loudly on a missing variant
+ * file so typos in treatment.promptId don't silently fall back to default.
  */
 async function loadPromptVariant(promptId: string): Promise<string | null> {
   if (promptId === "default") return null;
@@ -581,15 +574,11 @@ async function loadPromptVariant(promptId: string): Promise<string | null> {
 }
 
 /**
- * Build a scratch bot directory under benchmarks/scratch/ that mirrors the
- * base bot via symlinks but with a runner-generated `.mcp.json` overlaid
- * for the requested MCP stack. Returns the absolute path.
- *
- * Why symlinks instead of full copy: the base bot dir contains CLAUDE.md
- * (the persona, often large), `.claude/settings.json` (tool permissions),
- * `reports/`, etc. We need most of these unchanged but with a different
- * `.mcp.json`. Symlinking everything except `.mcp.json` is the smallest
- * possible mutation.
+ * Build a scratch bot directory that mirrors the base bot via symlinks but
+ * overlays a runner-generated `.mcp.json` and `.claude/settings.json`. The
+ * `.claude/` dir must be a real subdirectory (not a symlink) so we can write
+ * a fresh settings.json without mutating the prod bot's file. See Bug 10 for
+ * why the prod settings.json allow-list isn't reusable here.
  */
 async function prepareScratchBotDir(
   base: BotConfig,
@@ -602,67 +591,38 @@ async function prepareScratchBotDir(
   const scratchDir = join(scratchRoot, dirName);
   await mkdir(scratchDir, { recursive: true });
 
-  // Mirror everything in the base bot dir as a symlink, except `.mcp.json`
-  // and `.claude/` which we'll overlay ourselves. The .claude directory needs
-  // to be a real subdirectory (not a symlink) so we can write a runner-controlled
-  // settings.json without mutating the prod bot's settings.
-  const { readdir } = await import("node:fs/promises");
   const entries = await readdir(base.dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.name === ".mcp.json") continue;
-    if (entry.name === ".claude") continue;
+    if (entry.name === ".mcp.json" || entry.name === ".claude") continue;
     const src = join(base.dir, entry.name);
     const dst = join(scratchDir, entry.name);
-    if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
+    await rm(dst, { recursive: true, force: true });
     await symlink(src, dst);
   }
 
-  // Build the runner-controlled .mcp.json
   const baseMcpJson = await readFile(join(base.dir, ".mcp.json"), "utf8")
     .then((t) => JSON.parse(t) as { mcpServers: Record<string, unknown> })
     .catch(() => ({ mcpServers: {} as Record<string, unknown> }));
 
   const newMcp: { mcpServers: Record<string, unknown> } = { mcpServers: {} };
-
-  // knowledge-* stacks always include the knowledge MCP from the base bot.
   const baseKnowledge = baseMcpJson.mcpServers["knowledge"];
   if (baseKnowledge) {
     newMcp.mcpServers["knowledge"] = baseKnowledge;
   }
-
-  // knowledge+serena: add direct entries pointing at benchmark Serena instances.
-  // Bypasses the live tool proxy — the analysis call sees raw serena tools
-  // for now. The proxy will come back when the benchmark version of it lands.
   if (treatment.mcpStack === "knowledge+serena") {
     for (const inst of serenaInstances) {
       newMcp.mcpServers[inst.name] = { type: "http", url: inst.mcpUrl };
     }
   }
-
   await writeFile(join(scratchDir, ".mcp.json"), JSON.stringify(newMcp, null, 2));
 
-  // Write a runner-controlled .claude/settings.json. The prod melosys bot's
-  // settings.json has an allow-list hardcoded to mcp__serena-api__*, mcp__serena-web__*
-  // etc. — it does NOT match the runner's bench-<issue>-<repo> instance names,
-  // so the CLI permission gate silently denies every benchmark Serena call
-  // (1-3ms no-op calls visible in the trace). Fix: write a fresh settings.json
-  // that allows the same knowledge MCP tools plus explicit per-instance bench-*
-  // patterns for the current cell.
   const claudeDir = join(scratchDir, ".claude");
   await mkdir(claudeDir, { recursive: true });
   const benchAllowPatterns = serenaInstances.map((inst) => `mcp__${inst.name}__*`);
   const settingsJson = {
     permissions: {
-      deny: ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
-      allow: [
-        "mcp__knowledge__search_knowledge",
-        "mcp__knowledge__get_document",
-        "mcp__knowledge__get_notion_page",
-        "mcp__knowledge__list_collections",
-        "mcp__knowledge__get_graph_node",
-        "WebFetch",
-        ...benchAllowPatterns,
-      ],
+      deny: [...BENCHMARK_SETTINGS_DENY],
+      allow: [...BENCHMARK_SETTINGS_ALLOW_BASE, ...benchAllowPatterns],
     },
     enableAllProjectMcpServers: true,
   };
