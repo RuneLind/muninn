@@ -12,10 +12,26 @@ export interface BenchmarkManifest {
   title: string;
   category: string;
   gold: GoldRef;
+  /** repos affected by this issue — runner needs the path to set up worktrees */
+  repos: RepoRef[];
   baseCommits: Record<string, string>;
-  implementationCommits: Record<string, string[]>;
+  /** branch + head per repo. Commits between base and head are recoverable
+   *  via `git log <base>..<head>` on the branch — storing them in the manifest
+   *  duplicates git's authoritative state and rots on rebase. */
+  implementationCommits: Record<string, ImplementationRef>;
   highlightedClaims: HighlightedClaim[];
   curationLog?: CurationEntry[];
+}
+
+export interface RepoRef {
+  name: string;
+  /** Absolute path to the working repo on disk */
+  path: string;
+}
+
+export interface ImplementationRef {
+  branch: string;
+  head: string;
 }
 
 export interface GoldRef {

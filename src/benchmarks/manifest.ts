@@ -1,7 +1,11 @@
 import { parse as parseYaml } from "yaml";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { BenchmarkManifest } from "./types.ts";
+import type {
+  BenchmarkManifest,
+  ImplementationRef,
+  RepoRef,
+} from "./types.ts";
 
 /**
  * Load and validate a benchmark manifest YAML file.
@@ -53,11 +57,33 @@ export async function loadManifest(path: string): Promise<BenchmarkManifest> {
     title: m.title ?? "",
     category: m.category ?? "",
     gold: { source: m.gold.source ?? "implementeringsplan", path: goldPath },
+    repos: normaliseRepos(m.repos),
     baseCommits: m.baseCommits ?? {},
-    implementationCommits: m.implementationCommits ?? {},
+    implementationCommits: normaliseImplementationCommits(m.implementationCommits),
     highlightedClaims: m.highlightedClaims ?? [],
     curationLog: m.curationLog,
   };
+}
+
+function normaliseRepos(raw: unknown): RepoRef[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
+    .map((r) => ({ name: String(r.name), path: String(r.path) }));
+}
+
+function normaliseImplementationCommits(
+  raw: unknown,
+): Record<string, ImplementationRef> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, ImplementationRef> = {};
+  for (const [repo, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") continue;
+    const v = value as Record<string, unknown>;
+    if (typeof v.branch !== "string" || typeof v.head !== "string") continue;
+    out[repo] = { branch: v.branch, head: v.head };
+  }
+  return out;
 }
 
 /**
