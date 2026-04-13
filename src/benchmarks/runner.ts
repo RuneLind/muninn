@@ -43,6 +43,7 @@ import {
   allocateBenchmarkPort,
   type BenchmarkSerenaInstance,
 } from "./serena-benchmark.ts";
+import { shakeoutSimilarity, classify, type ShakeoutVerdict } from "./jaccard.ts";
 
 const log = getLog("benchmarks", "runner");
 
@@ -653,4 +654,163 @@ function defaultJudgePromptPath(): string {
     return bv - av;
   });
   return join(promptsDir, files[0]!);
+}
+
+// ── Shake-out check (Hypothesis 2 — lexical defense for Bug 9 class leaks) ──
+
+export interface RunShakeoutOptions {
+  issueKey: string;
+  /**
+   * Base treatment. `mcpStack` is ignored — shake-out always compares
+   * the two stacks in `stackA`/`stackB` (defaulting to knowledge-only
+   * vs knowledge+serena).
+   */
+  baseTreatment: BenchmarkTreatment;
+  baseBotName?: string;
+  budgetUsd?: number;
+  dryRun?: boolean;
+  stackA?: McpStack;
+  stackB?: McpStack;
+}
+
+export interface RunShakeoutResult {
+  cellA: RunCellResult;
+  cellB: RunCellResult;
+  stackA: McpStack;
+  stackB: McpStack;
+  similarity: number;
+  verdict: ShakeoutVerdict;
+  /** True if either cell errored or candidates couldn't be compared. */
+  inconclusive: boolean;
+  inconclusiveReason?: string;
+}
+
+/**
+ * Strip YAML frontmatter from a candidate report so the similarity check
+ * compares report bodies, not the metadata block. The runner writes
+ * frontmatter that contains trace IDs + mcp_stack + generated_at — all of
+ * which differ between cells by design and would add noise to the Jaccard
+ * score if left in.
+ */
+function stripFrontmatter(text: string): string {
+  if (!text.startsWith("---\n")) return text;
+  const end = text.indexOf("\n---\n", 4);
+  if (end === -1) return text;
+  return text.slice(end + 5);
+}
+
+/**
+ * Run two cells on the same issue with two different MCP stacks and compare
+ * their candidate reports via 5-gram Jaccard similarity. Implementation of
+ * improvement-hypotheses.md Hypothesis 2 — structural defense against the
+ * Bug 9 class of cross-cell state leaks.
+ *
+ * Both cells use the same connector/model/promptId from `baseTreatment`;
+ * only the `mcpStack` differs. `nRuns` is hardcoded to 1 per cell because
+ * the similarity bands are calibrated against single-run pairs.
+ */
+export async function runShakeout(
+  opts: RunShakeoutOptions,
+): Promise<RunShakeoutResult> {
+  const stackA: McpStack = opts.stackA ?? "knowledge-only";
+  const stackB: McpStack = opts.stackB ?? "knowledge+serena";
+  if (stackA === stackB) {
+    throw new Error(
+      `Shake-out requires two different stacks; got stackA=${stackA} stackB=${stackB}. ` +
+        "Comparing a stack to itself produces similarity≈1 by construction and tells you nothing.",
+    );
+  }
+
+  log.info(
+    "Shake-out: {issue} cellA={stackA} cellB={stackB} dryRun={dry}",
+    {
+      botName: "benchmarks",
+      issue: opts.issueKey,
+      stackA,
+      stackB,
+      dry: !!opts.dryRun,
+    },
+  );
+
+  const makeTreatment = (stack: McpStack): BenchmarkTreatment => ({
+    ...opts.baseTreatment,
+    mcpStack: stack,
+  });
+
+  const cellA = await runCell({
+    issueKey: opts.issueKey,
+    treatment: makeTreatment(stackA),
+    baseBotName: opts.baseBotName,
+    nRuns: 1,
+    budgetUsd: opts.budgetUsd,
+    dryRun: opts.dryRun,
+  });
+
+  const cellB = await runCell({
+    issueKey: opts.issueKey,
+    treatment: makeTreatment(stackB),
+    baseBotName: opts.baseBotName,
+    nRuns: 1,
+    budgetUsd: opts.budgetUsd,
+    dryRun: opts.dryRun,
+  });
+
+  const runA = cellA.runs[0];
+  const runB = cellB.runs[0];
+  if (!runA || !runB || runA.status !== "done" || runB.status !== "done") {
+    return {
+      cellA,
+      cellB,
+      stackA,
+      stackB,
+      similarity: 0,
+      verdict: "unexpectedly-divergent",
+      inconclusive: true,
+      inconclusiveReason:
+        `at least one cell did not complete: cellA=${runA?.status ?? "missing"}` +
+        (runA?.error ? ` (${runA.error})` : "") +
+        ` cellB=${runB?.status ?? "missing"}` +
+        (runB?.error ? ` (${runB.error})` : ""),
+    };
+  }
+
+  let textA: string;
+  let textB: string;
+  try {
+    textA = stripFrontmatter(await readFile(runA.candidatePath, "utf8"));
+    textB = stripFrontmatter(await readFile(runB.candidatePath, "utf8"));
+  } catch (err) {
+    return {
+      cellA,
+      cellB,
+      stackA,
+      stackB,
+      similarity: 0,
+      verdict: "unexpectedly-divergent",
+      inconclusive: true,
+      inconclusiveReason: `failed to read candidate files: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const similarity = shakeoutSimilarity(textA, textB, 5);
+  const verdict = classify(similarity);
+
+  log.info(
+    "Shake-out result: similarity={sim} verdict={verdict}",
+    {
+      botName: "benchmarks",
+      sim: similarity.toFixed(4),
+      verdict,
+    },
+  );
+
+  return {
+    cellA,
+    cellB,
+    stackA,
+    stackB,
+    similarity,
+    verdict,
+    inconclusive: false,
+  };
 }
