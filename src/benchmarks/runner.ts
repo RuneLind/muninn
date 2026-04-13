@@ -134,10 +134,24 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
 
   try {
     if (stack === "knowledge+serena") {
+      // Name format: "b<issueNum>-<repoShort>", kept deliberately short so the
+      // generated MCP tool names fit inside the 64-char function-calling limit
+      // that Copilot/Anthropic enforce. Format examples:
+      //
+      //   mcp__b7588-api__find_referencing_symbols       → 44 chars ✓
+      //   mcp__b7588-trygdeav__find_referencing_symbols  → 45 chars ✓
+      //
+      // The old format (`bench-MELOSYS-7588-melosys-trygdeavgift-beregning`)
+      // produced 80-char tool names which copilot-sdk rejected with
+      // CAPIError: 400 Bad Request. claude-cli didn't care, but copilot-sdk
+      // (and its OpenAI-compatible function-calling envelope) does. See
+      // benchmarks/known-bugs.md Bug 10.
+      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
       for (const wt of worktrees) {
+        const repoShort = wt.repo.replace(/^melosys-/, "").slice(0, 8);
         const port = allocateBenchmarkPort([]);
         const inst = await benchmarkSerenaManager.start({
-          name: `bench-${manifest.issueKey}-${wt.repo}`,
+          name: `b${issueNum}-${repoShort}`,
           projectPath: wt.worktreePath,
           port,
         });
