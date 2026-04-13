@@ -163,8 +163,6 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         return true;
       });
 
-      // Silent alerts (e.g. quiet-mode X digests that chose not to surface) contribute
-      // trackingIds for dedup but are not sent, saved, or logged to the user-facing feed.
       const visibleAlerts = newAlerts.filter((a) => !a.silent);
       const silentAlerts = newAlerts.filter((a) => a.silent);
       if (silentAlerts.length > 0) {
