@@ -22,7 +22,6 @@ import { mkdir, writeFile, readFile, symlink, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createHash } from "node:crypto";
-import { Tracer } from "../tracing/index.ts";
 import { processMessage } from "../core/message-processor.ts";
 import type { ProcessMessageResult } from "../core/message-processor.ts";
 import { discoverAllBots, type BotConfig, type ConnectorType } from "../bots/config.ts";
@@ -34,8 +33,7 @@ import {
   type BenchmarkTreatment,
   type BenchmarkStackConfig,
 } from "../db/benchmark-runs.ts";
-import { ensureUser } from "../db/users.ts";
-import { createThread } from "../db/threads.ts";
+import { ensureCellContext } from "./cell-context.ts";
 import { runJudge } from "./judge.ts";
 import { loadManifestByKey } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
@@ -248,31 +246,20 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   const messageText = args.messageOverride ?? buildDefaultMessage(manifest, dryRun);
   const promptText = `<!-- research:jira -->\n${effectiveBot.prompts?.jiraAnalysis ?? ""}\n\n---\n\n${messageText}`;
 
-  // CRITICAL: each cell gets a unique userId AND a fresh threadId so that
-  // the prompt builder pulls ZERO conversation history. Without this, prior
-  // benchmark runs' bot responses get injected as <conversation_history>
-  // into the user prompt — the bot then reads its own previous (potentially
-  // contaminated) analysis and paraphrases it, instead of doing fresh first-pass
-  // analysis. See benchmarks/known-bugs.md Bug 9.
-  //
-  // The userId encodes the issue + run timestamp + index so the messages
-  // table row is traceable back to a specific benchmark cell during debugging,
-  // but is unique per cell so no two cells ever share history. Both the user
-  // and the thread MUST be materialised in the DB before processMessage runs,
-  // otherwise the messages.thread_id FK fires when saveMessage tries to insert.
-  const cellUserId = `bench-${manifest.issueKey}-${Date.now()}-r${runIndex}`;
-  await ensureUser({ id: cellUserId, username: cellUserId, platform: "web" });
-  const cellThread = await createThread(cellUserId, effectiveBot.name, "main");
-  const cellThreadId = cellThread.id;
-
-  // Pre-create the tracer so we own the analysis trace_id from the start.
-  const tracer = new Tracer("benchmark_analysis", {
+  // All per-cell DB preconditions (unique userId, fresh threads row materialised,
+  // tracer created) are set up by ensureCellContext in a single call. See
+  // src/benchmarks/cell-context.ts for the full contract and benchmarks/known-bugs.md
+  // Bug 9 for why this helper exists.
+  const cellCtx = await ensureCellContext({
+    issueKey: manifest.issueKey,
+    runIndex,
     botName: effectiveBot.name,
-    userId: cellUserId,
-    username: cellUserId,
-    platform: "web",
+    connector: treatment.connector,
   });
-  const analysisTraceId = tracer.traceId;
+  const cellUserId = cellCtx.userId;
+  const cellThreadId = cellCtx.threadId;
+  const tracer = cellCtx.tracer;
+  const analysisTraceId = cellCtx.traceId;
 
   // Pre-insert the benchmark_runs row so we have a stable id even if the
   // run errors mid-analysis. Filled in with judge results below.
