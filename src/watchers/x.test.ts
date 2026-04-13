@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { extractRankScore } from "./x.ts";
+import { extractRankScore, buildDateWindow, isSkipResult } from "./x.ts";
 
 // ── Score extraction from markdown (tests the real exported function) ─
 
@@ -93,5 +93,74 @@ describe("tweet ranking by engagement_score (legacy path)", () => {
       (a, b) => (b.engagement_score ?? 0) - (a.engagement_score ?? 0),
     );
     expect(sorted).toHaveLength(2);
+  });
+});
+
+// ── Date window for windowDays config ───────────────────────────────
+
+describe("buildDateWindow", () => {
+  // Pin "now" well inside a day in Europe/Oslo (noon UTC = 13:00 or 14:00 Oslo)
+  const anchor = new Date("2026-03-15T12:00:00Z");
+
+  test("windowDays=1 returns only today", () => {
+    const set = buildDateWindow(1, anchor);
+    expect(set.size).toBe(1);
+    expect(set.has("2026-03-15")).toBe(true);
+  });
+
+  test("windowDays=2 returns today and yesterday (preserves legacy behavior)", () => {
+    const set = buildDateWindow(2, anchor);
+    expect(set.size).toBe(2);
+    expect(set.has("2026-03-15")).toBe(true);
+    expect(set.has("2026-03-14")).toBe(true);
+  });
+
+  test("windowDays=7 returns a full rolling week", () => {
+    const set = buildDateWindow(7, anchor);
+    expect(set.size).toBe(7);
+    expect(set.has("2026-03-15")).toBe(true);
+    expect(set.has("2026-03-09")).toBe(true);
+    expect(set.has("2026-03-08")).toBe(false);
+  });
+
+  test("clamps windowDays < 1 to 1", () => {
+    const set = buildDateWindow(0, anchor);
+    expect(set.size).toBe(1);
+  });
+});
+
+// ── Quiet-mode SKIP detection ───────────────────────────────────────
+
+describe("isSkipResult", () => {
+  test("bare SKIP", () => {
+    expect(isSkipResult("SKIP")).toBe(true);
+  });
+
+  test("SKIP with surrounding whitespace", () => {
+    expect(isSkipResult("  SKIP  \n")).toBe(true);
+  });
+
+  test("lowercase skip", () => {
+    expect(isSkipResult("skip")).toBe(true);
+  });
+
+  test("SKIP wrapped in markdown bold", () => {
+    expect(isSkipResult("**SKIP**")).toBe(true);
+  });
+
+  test("SKIP with trailing period", () => {
+    expect(isSkipResult("SKIP.")).toBe(true);
+  });
+
+  test("rejects SKIP inside a sentence", () => {
+    expect(isSkipResult("I will SKIP this one")).toBe(false);
+  });
+
+  test("rejects empty string", () => {
+    expect(isSkipResult("")).toBe(false);
+  });
+
+  test("rejects a real digest", () => {
+    expect(isSkipResult("**Top Picks**\n- @karpathy: ...")).toBe(false);
   });
 });

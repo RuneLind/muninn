@@ -64,6 +64,28 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `topN` | 30 | Max tweets sent to LLM after engagement ranking |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom prompt (overrides default two-tier format) |
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Knowledge API URL |
+| `windowDays` | 2 | Rolling day window (Europe/Oslo). 1 = today only, 7 = last week. |
+| `dedupByTweetId` | `true` | Filter out tweets already in `lastNotifiedIds`. Set `false` on daily/weekly digests that re-rank the full window. |
+| `minScore` | — | Pre-LLM gate on `rankScore` (combined_score fallback engagement_score). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. |
+| `quietMode` | `false` | Allows the LLM to reply with literal `SKIP` (any case, optional surrounding markdown/punctuation) to suppress the alert. The fetched IDs are still tracked so the same tweets aren't re-evaluated next run. |
+
+### Silent alerts and the quality-gate pattern
+
+When `minScore` or `quietMode` suppresses a digest, `checkX` returns a single `WatcherAlert` with `silent: true` and populated `trackingIds`. The runner detects the flag (see runner.ts) and persists the IDs into `lastNotifiedIds` without sending, saving, or logging to `activityLog`. This keeps re-evaluation cost bounded — tweets that were considered and rejected won't be re-fetched next tick.
+
+### 3-watcher pattern (daytime alerts + daily + weekly)
+
+Instead of one X watcher doing everything, run three rows with shared `collection: "x-feed"` but distinct configs. Each has its own `lastNotifiedIds` column so they don't step on each other's dedup.
+
+| Name | Schedule | `windowDays` | `dedupByTweetId` | `minScore` | `quietMode` | Prompt |
+|---|---|---|---|---|---|---|
+| X Highlights | every 2h (08:00–22:00) | 1 | true | `0.85` (tune) | `true` | `DEFAULT_X_HIGHLIGHTS_PROMPT` — returns `SKIP` unless genuinely exceptional |
+| X Daily Digest | interval 24h + `hour: 12, minute: 0` | 1 | false | — | false | `DEFAULT_X_PROMPT` (two-tier) |
+| X Weekly Digest | interval 7d + `hour: 18, minute: 0` | 7 | false | — | false | Custom ("themes of the week" + top picks) |
+
+Day-of-week is not a first-class scheduler concept — the weekly watcher's "day" is whichever day of the week it was first run; `isScheduledTimeDue` only gates on hour/minute within a day, and the 7-day interval then determines the next fire.
+
+Existing X watchers keep their current behavior because all new fields are opt-in: `windowDays` defaults to 2 (today+yesterday), `dedupByTweetId` defaults to true, `minScore` and `quietMode` are unset.
 
 ### No fallback on model failure
 
