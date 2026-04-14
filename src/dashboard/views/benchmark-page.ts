@@ -408,6 +408,147 @@ const STYLES = `
     border-radius: 8px;
   }
 
+  /* Preview panel */
+  .preview-panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 0 0 16px;
+    display: none;
+  }
+  .preview-panel.visible { display: block; }
+  .preview-panel h2 {
+    font-size: 14px;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .preview-panel .subtitle {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 14px;
+  }
+  .preview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .preview-card {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .preview-card .card-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .preview-card .card-body {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  .preview-card .card-body .kv {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .preview-card .card-body .kv .k {
+    color: var(--text-dim);
+    min-width: 80px;
+    flex-shrink: 0;
+  }
+  .preview-section {
+    margin-top: 14px;
+  }
+  .preview-section h3 {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 6px;
+    font-weight: 700;
+  }
+  .preview-section pre {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    margin: 0;
+  }
+  .preview-section .tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .preview-section .tag {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 10px;
+    color: var(--text-soft);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .preview-section .tag.deny { color: var(--status-error); opacity: 0.75; }
+  .preview-actions {
+    margin-top: 16px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .preview-actions button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .preview-actions button.secondary {
+    background: var(--bg-deep);
+    color: var(--text-soft);
+    border: 1px solid var(--border-secondary);
+  }
+  .preview-actions .hint {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .preview-error {
+    background: var(--tint-error);
+    color: var(--status-error);
+    border: 1px solid var(--status-error);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  .preview-warnings {
+    background: var(--tint-warning);
+    color: var(--status-warning);
+    border: 1px solid var(--status-warning);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 11px;
+    margin-top: 8px;
+  }
+
   /* Binary flag annotation for low-sample highlighted */
   .binary-flag-note {
     display: inline-block;
@@ -748,9 +889,15 @@ export function renderBenchmarkListPage(
             ${treatments.map((t) => `<option value="${esc(t.path)}" data-label="${esc(t.label)}">${esc(t.label)}</option>`).join("")}
           </select>
         </div>
-        <button type="submit">Run cell (live)</button>
-        <div class="hint">Spawns run-cell.ts as a subprocess with a pre-allocated analysis trace ID and redirects to the live waterfall. Reuses whichever MCP instances the treatment needs.</div>
-      </form>`
+        <div style="display: flex; gap: 6px;">
+          <button type="button" onclick="openPreview()" style="background: var(--bg-deep); color: var(--text-soft); border: 1px solid var(--border-secondary);">Preview</button>
+          <button type="submit">Run cell (live)</button>
+        </div>
+        <div class="hint">Preview shows the resolved prompt, MCP plan, and cost estimate without spending tokens. Run cell spawns run-cell.ts with a pre-allocated trace ID and redirects to the live waterfall.</div>
+      </form>
+      <div class="preview-panel" id="previewPanel">
+        <div id="previewBody"></div>
+      </div>`
     : `<div class="run-form" style="display:block; color: var(--text-faint); font-size: 12px;">
         No issues or treatments discovered in <code>benchmarks/issues</code> and <code>benchmarks/treatments</code>.
       </div>`;
@@ -779,12 +926,18 @@ export function renderBenchmarkListPage(
 }
 
 const RUN_FORM_SCRIPT = `
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 async function startRunCell(ev) {
   ev.preventDefault();
   const issue = document.getElementById('run-issue').value;
   const treatmentEl = document.getElementById('run-treatment');
   const treatmentPath = treatmentEl.value;
-  const button = ev.target.querySelector('button');
+  const button = ev.target.querySelector('button[type="submit"]');
   button.disabled = true;
   button.textContent = 'Starting…';
   try {
@@ -805,6 +958,144 @@ async function startRunCell(ev) {
     alert('Failed to start cell: ' + err.message);
   }
   return false;
+}
+
+async function openPreview() {
+  const issue = document.getElementById('run-issue').value;
+  const treatmentPath = document.getElementById('run-treatment').value;
+  const panel = document.getElementById('previewPanel');
+  const body = document.getElementById('previewBody');
+  panel.classList.add('visible');
+  body.innerHTML = '<p style="color: var(--text-dim); font-size: 12px;">Loading preview…</p>';
+  try {
+    const url = '/api/benchmark/preview?issueKey=' + encodeURIComponent(issue) +
+                '&treatmentPath=' + encodeURIComponent(treatmentPath);
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ('HTTP ' + res.status));
+    }
+    const preview = await res.json();
+    body.innerHTML = renderPreview(preview);
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    body.innerHTML = '<div class="preview-error">Failed to build preview: ' + escHtml(err.message) + '</div>';
+  }
+}
+
+function closePreview() {
+  document.getElementById('previewPanel').classList.remove('visible');
+}
+
+async function runFromPreview(issue, treatmentPath) {
+  const btn = document.getElementById('previewRunBtn');
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  try {
+    const res = await fetch('/api/benchmark/cells', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueKey: issue, treatmentPath }),
+    });
+    if (res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ('HTTP ' + res.status));
+    }
+    const data = await res.json();
+    window.location = '/benchmark/run-live/' + data.traceId;
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Run this cell';
+    alert('Failed to start cell: ' + err.message);
+  }
+}
+
+function renderPreview(p) {
+  const cost = p.cost;
+  const costStr = '$' + cost.totalLowUsd.toFixed(2) + ' – $' + cost.totalHighUsd.toFixed(2);
+  const repos = p.issue.repos.map(r => r.name + ' @ ' + (r.baseCommit || '(no baseCommit)').slice(0, 8)).join('<br>') || '(none)';
+  const servers = p.mcp.servers.map(s =>
+    '<div class="kv"><span class="k">' + escHtml(s.role) + '</span><span>' + escHtml(s.name) + ' — ' + escHtml(s.note) + '</span></div>'
+  ).join('');
+  const worktrees = p.mcp.worktrees.length
+    ? p.mcp.worktrees.map(w => '<div class="kv"><span class="k">' + escHtml(w.repo) + '</span><span>' + escHtml(w.path) + '</span></div>').join('')
+    : '<div style="color: var(--text-faint);">No code-intel stacks in this treatment — no worktrees will be indexed.</div>';
+  const denyTags = p.mcp.disallowedTools.map(t => '<span class="tag deny">' + escHtml(t) + '</span>').join('');
+  const warningsHtml = p.warnings.length
+    ? '<div class="preview-warnings">⚠ ' + p.warnings.map(escHtml).join('<br>⚠ ') + '</div>'
+    : '';
+
+  return \`
+    <h2>Preview — \${escHtml(p.issue.issueKey)}</h2>
+    <p class="subtitle">
+      \${escHtml(p.treatment.connector)} · \${escHtml(p.treatment.model)} · \${escHtml(p.treatment.mcpStack)} · \${escHtml(p.treatment.promptId)}
+      · estimate \${costStr}
+    </p>
+
+    \${warningsHtml}
+
+    <div class="preview-grid">
+      <div class="preview-card">
+        <div class="card-label">Issue</div>
+        <div class="card-body">
+          <div class="kv"><span class="k">key</span><span>\${escHtml(p.issue.issueKey)}</span></div>
+          <div class="kv"><span class="k">title</span><span>\${escHtml(p.issue.title)}</span></div>
+          <div class="kv"><span class="k">category</span><span>\${escHtml(p.issue.category)}</span></div>
+          <div class="kv"><span class="k">gold</span><span>\${escHtml(p.issue.goldPath)}</span></div>
+          <div class="kv"><span class="k">goldLines</span><span>\${p.issue.goldLineCount}</span></div>
+          <div class="kv"><span class="k">highlighted</span><span>\${p.issue.highlightedCount}\${p.issue.highlightedCount < 3 ? ' (treated as binary flag)' : ''}</span></div>
+        </div>
+      </div>
+      <div class="preview-card">
+        <div class="card-label">Cost estimate</div>
+        <div class="card-body">
+          <div class="kv"><span class="k">analysis</span><span>$\${cost.analysisLowUsd.toFixed(2)} – $\${cost.analysisHighUsd.toFixed(2)}</span></div>
+          <div class="kv"><span class="k">judge</span><span>$\${cost.judgeUsd.toFixed(2)}</span></div>
+          <div class="kv"><span class="k">total</span><span>\${costStr}</span></div>
+          <div style="margin-top: 8px; color: var(--text-faint); font-size: 10px;">\${escHtml(cost.note)}</div>
+        </div>
+      </div>
+      <div class="preview-card">
+        <div class="card-label">Repos / baseCommits</div>
+        <div class="card-body">\${repos}</div>
+      </div>
+      <div class="preview-card">
+        <div class="card-label">MCP plan — \${escHtml(p.mcp.stack)}</div>
+        <div class="card-body">\${servers}</div>
+      </div>
+    </div>
+
+    <div class="preview-section">
+      <h3>Worktrees the code-intel stacks would index</h3>
+      <div class="preview-card"><div class="card-body">\${worktrees}</div></div>
+    </div>
+
+    <div class="preview-section">
+      <h3>Resolved user message</h3>
+      <pre>\${escHtml(p.userMessage)}</pre>
+    </div>
+
+    <div class="preview-section">
+      <h3>Resolved jiraAnalysis prompt\${p.promptVariantPath ? ' (from ' + escHtml(p.promptVariantPath) + ')' : ' (base bot default)'}</h3>
+      <pre>\${escHtml(p.jiraAnalysisPrompt)}</pre>
+    </div>
+
+    <div class="preview-section">
+      <h3>Gold excerpt (first \${p.issue.goldExcerpt.split('\\n').length} of \${p.issue.goldLineCount} lines)</h3>
+      <pre>\${escHtml(p.issue.goldExcerpt)}</pre>
+    </div>
+
+    <div class="preview-section">
+      <h3>Denied tools (Bug 11 harness fence, \${p.mcp.disallowedTools.length} entries)</h3>
+      <div class="tags">\${denyTags}</div>
+    </div>
+
+    <div class="preview-actions">
+      <button id="previewRunBtn" onclick="runFromPreview('\${escHtml(p.issue.issueKey)}', '\${escHtml(p.treatmentPath)}')">Run this cell</button>
+      <button class="secondary" onclick="closePreview()">Close</button>
+      <span class="hint">The preview is pure-reads — no tokens spent. Pressing Run this cell spawns the same subprocess as Run cell (live).</span>
+    </div>
+  \`;
 }
 `;
 

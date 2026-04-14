@@ -12,6 +12,7 @@ import {
   discoverIssues,
   discoverTreatments,
 } from "../../benchmarks/treatment-discovery.ts";
+import { buildCellPreview } from "../../benchmarks/preview.ts";
 import { getTrace } from "../../db/traces.ts";
 import {
   renderBenchmarkListPage,
@@ -121,6 +122,35 @@ export function registerBenchmarkRoutes(app: Hono): void {
     const job = liveJobSupervisor.get(traceId);
     if (!job) return c.html("Live job not found (or evicted after 10 min)", 404);
     return c.html(renderBenchmarkRunLivePage(job));
+  });
+
+  app.get("/api/benchmark/preview", async (c) => {
+    const issueKey = c.req.query("issueKey");
+    const treatmentPath = c.req.query("treatmentPath");
+    if (!issueKey || !treatmentPath) {
+      return c.json({ error: "Missing required query params: issueKey, treatmentPath" }, 400);
+    }
+    const muninnRoot = resolve(import.meta.dir, "../../..");
+    const resolvedTreatment = resolve(treatmentPath);
+    const treatmentsDir = resolve(muninnRoot, "benchmarks/treatments");
+    if (!resolvedTreatment.startsWith(treatmentsDir)) {
+      return c.json(
+        { error: "treatmentPath must resolve under benchmarks/treatments/" },
+        400,
+      );
+    }
+    const manifestPath = resolve(muninnRoot, "benchmarks/issues", `${issueKey}.yml`);
+    try {
+      const preview = await buildCellPreview({
+        manifestPath,
+        treatmentPath: resolvedTreatment,
+      });
+      return c.json(preview);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error("Failed to build preview: {error}", { error: msg });
+      return c.json({ error: msg }, 500);
+    }
   });
 
   app.post("/api/benchmark/cells", async (c) => {

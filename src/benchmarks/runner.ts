@@ -97,7 +97,7 @@ const BENCHMARK_SETTINGS_ALLOW_BASE = [
  *
  * See `benchmarks/known-bugs.md` Bug 11 for the incident this list mitigates.
  */
-const BENCHMARK_DISALLOWED_TOOLS = [
+export const BENCHMARK_DISALLOWED_TOOLS = [
   // File / shell access — could read prod-HEAD code instead of the worktree
   "Bash", "BashOutput", "KillBash", "Read", "Write", "Edit", "MultiEdit",
   "Glob", "Grep", "NotebookEdit",
@@ -759,7 +759,7 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   };
 }
 
-function buildDefaultMessage(manifest: BenchmarkManifest, dryRun: boolean): string {
+export function buildDefaultMessage(manifest: BenchmarkManifest, dryRun: boolean): string {
   if (dryRun) {
     // Tiny prompt — the dry-run is about plumbing, not real analysis.
     return `[DRY RUN] Analyser kort: ${manifest.issueKey} — ${manifest.title}. Svar i én setning.`;
@@ -802,7 +802,7 @@ function applyTreatmentOverlay(
  * Returns null for the default promptId. Throws loudly on a missing variant
  * file so typos in treatment.promptId don't silently fall back to default.
  */
-async function loadPromptVariant(promptId: string): Promise<string | null> {
+export async function loadPromptVariant(promptId: string): Promise<string | null> {
   if (promptId === "default") return null;
   const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
   const path = join(promptsDir, `${promptId}.txt`);
