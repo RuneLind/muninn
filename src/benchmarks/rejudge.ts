@@ -220,6 +220,9 @@ export async function rejudgeCandidate(
         inputTokens: judged.inputTokens,
         outputTokens: judged.outputTokens,
         judgeResult: judged.result,
+        traceId: judged.traceId,
+        judgePromptVersion: judged.judgePromptVersion,
+        judgeModel: judged.judgeModel,
       });
 
       // Estimate cost per pass from token counts — Sonnet 4.6: $3/M input + $15/M output.

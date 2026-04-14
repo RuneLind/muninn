@@ -113,6 +113,12 @@ export interface CompleteBenchmarkRunParams {
   toolCalls?: BenchmarkToolCall[] | null;
   tokens?: BenchmarkTokens | null;
   modelSnapshotId?: string | null;
+  // Re-judge passes need to overwrite fields that were set at save-time
+  // with "pending" placeholders because the real values come from runJudge.
+  // When omitted the existing row values are preserved.
+  traceId?: string | null;
+  judgePromptVersion?: string | null;
+  judgeModel?: string | null;
 }
 
 export async function saveBenchmarkRun(params: SaveBenchmarkRunParams): Promise<string> {
@@ -173,7 +179,10 @@ export async function completeBenchmarkRun(
       report_md          = ${params.reportMd ?? null},
       tool_calls         = ${params.toolCalls ? sql.json(params.toolCalls as never) : null},
       tokens             = ${params.tokens ? sql.json(params.tokens as never) : null},
-      model_snapshot_id  = ${params.modelSnapshotId ?? null}
+      model_snapshot_id  = ${params.modelSnapshotId ?? null},
+      trace_id             = COALESCE(${params.traceId ?? null}, trace_id),
+      judge_prompt_version = COALESCE(${params.judgePromptVersion ?? null}, judge_prompt_version),
+      judge_model          = COALESCE(${params.judgeModel ?? null}, judge_model)
     WHERE id = ${id}
   `;
 }
