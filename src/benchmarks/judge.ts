@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { extractJson } from "../ai/json-extract.ts";
 import { parseClaudeOutput } from "../ai/result-parser.ts";
@@ -39,6 +40,35 @@ export function stripReportFrontmatter(text: string): string {
 // pin properly for reproducibility in Phase 1+.
 export const JUDGE_MODEL_DEFAULT = "claude-sonnet-4-6";
 export const JUDGE_TIMEOUT_MS = 600_000; // 10 min — judge inputs are large and Sonnet is producing structured output
+
+/**
+ * Find the highest-versioned judge prompt in benchmarks/judge-prompts/.
+ * Shared between the score-report CLI, the re-judge helper, and any future
+ * caller that needs "the current judge prompt". Throws if the directory is
+ * empty or missing — callers should catch and fall back or surface to the UI.
+ */
+export function findHighestJudgePromptVersion(
+  dir: string = "benchmarks/judge-prompts",
+): string {
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch (err) {
+    throw new Error(
+      `Judge prompt directory unreadable (${dir}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const candidates = files
+    .filter((f) => /^v\d+\.md$/.test(f))
+    .sort((a, b) => {
+      const va = parseInt(a.match(/^v(\d+)/)?.[1] ?? "0", 10);
+      const vb = parseInt(b.match(/^v(\d+)/)?.[1] ?? "0", 10);
+      return vb - va;
+    });
+  const top = candidates[0];
+  if (!top) throw new Error(`No judge prompts (vN.md) found in ${dir}`);
+  return resolvePath(dir, top);
+}
 
 export interface RunJudgeOptions {
   manifest: BenchmarkManifest;

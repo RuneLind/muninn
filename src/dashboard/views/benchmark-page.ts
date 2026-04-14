@@ -1,7 +1,10 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { escScript } from "./components/helpers.ts";
 import type { BenchmarkRunRow } from "../../db/benchmark-runs.ts";
 import type { GoldClaim } from "../../benchmarks/types.ts";
 import type { LiveJob } from "../../benchmarks/live-job.ts";
+import { meanStddev } from "../../benchmarks/rejudge.ts";
+import type { RejudgeJobState } from "../../benchmarks/rejudge.ts";
 import type {
   DiscoveredIssue,
   DiscoveredTreatment,
@@ -791,15 +794,6 @@ function shouldSuppressHighlighted(highlightedTotal: number | null): boolean {
   return highlightedTotal === null || highlightedTotal < HIGHLIGHTED_RATE_MIN_N;
 }
 
-/** mean/stddev for a plain number array. Stddev uses n-1 (sample). */
-function meanStddev(values: number[]): { mean: number; stddev: number } | null {
-  if (values.length === 0) return null;
-  const mean = values.reduce((a, b) => a + b, 0) / values.length;
-  if (values.length === 1) return { mean, stddev: 0 };
-  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (values.length - 1);
-  return { mean, stddev: Math.sqrt(variance) };
-}
-
 function fmtTime(epochMs: number): string {
   return new Date(epochMs).toLocaleString("en-GB", {
     year: "numeric",
@@ -854,9 +848,7 @@ export function renderBenchmarkListPage(
               const highlightedCell = showHighlightedCol
                 ? `<td class="num"><span class="highlighted-rate ${hlClass}">${
                     r.highlightedTotal && r.highlightedTotal > 0
-                      ? shouldSuppressHighlighted(r.highlightedTotal)
-                        ? `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
-                        : `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
+                      ? `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
                       : "—"
                   }</span></td>`
                 : "";
@@ -926,11 +918,7 @@ export function renderBenchmarkListPage(
 }
 
 const RUN_FORM_SCRIPT = `
-function escHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
+${escScript()}
 
 async function startRunCell(ev) {
   ev.preventDefault();
@@ -979,7 +967,7 @@ async function openPreview() {
     body.innerHTML = renderPreview(preview);
     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (err) {
-    body.innerHTML = '<div class="preview-error">Failed to build preview: ' + escHtml(err.message) + '</div>';
+    body.innerHTML = '<div class="preview-error">Failed to build preview: ' + esc(err.message) + '</div>';
   }
 }
 
@@ -1015,20 +1003,20 @@ function renderPreview(p) {
   const costStr = '$' + cost.totalLowUsd.toFixed(2) + ' – $' + cost.totalHighUsd.toFixed(2);
   const repos = p.issue.repos.map(r => r.name + ' @ ' + (r.baseCommit || '(no baseCommit)').slice(0, 8)).join('<br>') || '(none)';
   const servers = p.mcp.servers.map(s =>
-    '<div class="kv"><span class="k">' + escHtml(s.role) + '</span><span>' + escHtml(s.name) + ' — ' + escHtml(s.note) + '</span></div>'
+    '<div class="kv"><span class="k">' + esc(s.role) + '</span><span>' + esc(s.name) + ' — ' + esc(s.note) + '</span></div>'
   ).join('');
   const worktrees = p.mcp.worktrees.length
-    ? p.mcp.worktrees.map(w => '<div class="kv"><span class="k">' + escHtml(w.repo) + '</span><span>' + escHtml(w.path) + '</span></div>').join('')
+    ? p.mcp.worktrees.map(w => '<div class="kv"><span class="k">' + esc(w.repo) + '</span><span>' + esc(w.path) + '</span></div>').join('')
     : '<div style="color: var(--text-faint);">No code-intel stacks in this treatment — no worktrees will be indexed.</div>';
-  const denyTags = p.mcp.disallowedTools.map(t => '<span class="tag deny">' + escHtml(t) + '</span>').join('');
+  const denyTags = p.mcp.disallowedTools.map(t => '<span class="tag deny">' + esc(t) + '</span>').join('');
   const warningsHtml = p.warnings.length
-    ? '<div class="preview-warnings">⚠ ' + p.warnings.map(escHtml).join('<br>⚠ ') + '</div>'
+    ? '<div class="preview-warnings">⚠ ' + p.warnings.map(esc).join('<br>⚠ ') + '</div>'
     : '';
 
   return \`
-    <h2>Preview — \${escHtml(p.issue.issueKey)}</h2>
+    <h2>Preview — \${esc(p.issue.issueKey)}</h2>
     <p class="subtitle">
-      \${escHtml(p.treatment.connector)} · \${escHtml(p.treatment.model)} · \${escHtml(p.treatment.mcpStack)} · \${escHtml(p.treatment.promptId)}
+      \${esc(p.treatment.connector)} · \${esc(p.treatment.model)} · \${esc(p.treatment.mcpStack)} · \${esc(p.treatment.promptId)}
       · estimate \${costStr}
     </p>
 
@@ -1038,10 +1026,10 @@ function renderPreview(p) {
       <div class="preview-card">
         <div class="card-label">Issue</div>
         <div class="card-body">
-          <div class="kv"><span class="k">key</span><span>\${escHtml(p.issue.issueKey)}</span></div>
-          <div class="kv"><span class="k">title</span><span>\${escHtml(p.issue.title)}</span></div>
-          <div class="kv"><span class="k">category</span><span>\${escHtml(p.issue.category)}</span></div>
-          <div class="kv"><span class="k">gold</span><span>\${escHtml(p.issue.goldPath)}</span></div>
+          <div class="kv"><span class="k">key</span><span>\${esc(p.issue.issueKey)}</span></div>
+          <div class="kv"><span class="k">title</span><span>\${esc(p.issue.title)}</span></div>
+          <div class="kv"><span class="k">category</span><span>\${esc(p.issue.category)}</span></div>
+          <div class="kv"><span class="k">gold</span><span>\${esc(p.issue.goldPath)}</span></div>
           <div class="kv"><span class="k">goldLines</span><span>\${p.issue.goldLineCount}</span></div>
           <div class="kv"><span class="k">highlighted</span><span>\${p.issue.highlightedCount}\${p.issue.highlightedCount < 3 ? ' (treated as binary flag)' : ''}</span></div>
         </div>
@@ -1052,7 +1040,7 @@ function renderPreview(p) {
           <div class="kv"><span class="k">analysis</span><span>$\${cost.analysisLowUsd.toFixed(2)} – $\${cost.analysisHighUsd.toFixed(2)}</span></div>
           <div class="kv"><span class="k">judge</span><span>$\${cost.judgeUsd.toFixed(2)}</span></div>
           <div class="kv"><span class="k">total</span><span>\${costStr}</span></div>
-          <div style="margin-top: 8px; color: var(--text-faint); font-size: 10px;">\${escHtml(cost.note)}</div>
+          <div style="margin-top: 8px; color: var(--text-faint); font-size: 10px;">\${esc(cost.note)}</div>
         </div>
       </div>
       <div class="preview-card">
@@ -1060,7 +1048,7 @@ function renderPreview(p) {
         <div class="card-body">\${repos}</div>
       </div>
       <div class="preview-card">
-        <div class="card-label">MCP plan — \${escHtml(p.mcp.stack)}</div>
+        <div class="card-label">MCP plan — \${esc(p.mcp.stack)}</div>
         <div class="card-body">\${servers}</div>
       </div>
     </div>
@@ -1072,17 +1060,17 @@ function renderPreview(p) {
 
     <div class="preview-section">
       <h3>Resolved user message</h3>
-      <pre>\${escHtml(p.userMessage)}</pre>
+      <pre>\${esc(p.userMessage)}</pre>
     </div>
 
     <div class="preview-section">
-      <h3>Resolved jiraAnalysis prompt\${p.promptVariantPath ? ' (from ' + escHtml(p.promptVariantPath) + ')' : ' (base bot default)'}</h3>
-      <pre>\${escHtml(p.jiraAnalysisPrompt)}</pre>
+      <h3>Resolved jiraAnalysis prompt\${p.promptVariantPath ? ' (from ' + esc(p.promptVariantPath) + ')' : ' (base bot default)'}</h3>
+      <pre>\${esc(p.jiraAnalysisPrompt)}</pre>
     </div>
 
     <div class="preview-section">
       <h3>Gold excerpt (first \${p.issue.goldExcerpt.split('\\n').length} of \${p.issue.goldLineCount} lines)</h3>
-      <pre>\${escHtml(p.issue.goldExcerpt)}</pre>
+      <pre>\${esc(p.issue.goldExcerpt)}</pre>
     </div>
 
     <div class="preview-section">
@@ -1091,7 +1079,7 @@ function renderPreview(p) {
     </div>
 
     <div class="preview-actions">
-      <button id="previewRunBtn" onclick="runFromPreview('\${escHtml(p.issue.issueKey)}', '\${escHtml(p.treatmentPath)}')">Run this cell</button>
+      <button id="previewRunBtn" onclick="runFromPreview('\${esc(p.issue.issueKey)}', '\${esc(p.treatmentPath)}')">Run this cell</button>
       <button class="secondary" onclick="closePreview()">Close</button>
       <span class="hint">The preview is pure-reads — no tokens spent. Pressing Run this cell spawns the same subprocess as Run cell (live).</span>
     </div>
@@ -1099,21 +1087,10 @@ function renderPreview(p) {
 }
 `;
 
-/** Subset of the in-memory re-judge job state the route handler passes in. */
-export interface RejudgeJobSnapshot {
-  parentRunId: string;
-  totalPasses: number;
-  completedPasses: number;
-  startedAt: number;
-  status: "running" | "done" | "error";
-  error: string | null;
-  childRunIds: string[];
-}
-
 export function renderBenchmarkDetailPage(
   run: BenchmarkRunRow,
   rejudgeChildren: BenchmarkRunRow[] = [],
-  rejudgeJob: RejudgeJobSnapshot | null = null,
+  rejudgeJob: RejudgeJobState | null = null,
 ): string {
   const claims = run.judgeResult?.goldClaims ?? [];
   const claimsHtml = claims
@@ -1246,14 +1223,14 @@ function renderRejudgeChildNotice(parentRunId: string): string {
 function renderRejudgePanel(
   run: BenchmarkRunRow,
   children: BenchmarkRunRow[],
-  job: RejudgeJobSnapshot | null,
+  job: RejudgeJobState | null,
   canRejudge: boolean,
 ): string {
   const doneChildren = children.filter((c) => c.status === "done" && c.hitRate !== null);
   const allHits: number[] = [];
   if (run.hitRate !== null && run.status === "done") allHits.push(run.hitRate);
   for (const c of doneChildren) if (c.hitRate !== null) allHits.push(c.hitRate);
-  const stats = meanStddev(allHits);
+  const stats = allHits.length > 0 ? meanStddev(allHits) : null;
 
   const rowsHtml = children
     .map((c, idx) => {
@@ -1386,6 +1363,10 @@ async function pollRejudge(runId) {
   }
 
   const tick = async () => {
+    if (document.visibilityState !== 'visible') {
+      setTimeout(tick, 4000);
+      return;
+    }
     try {
       const res = await fetch('/api/benchmark/runs/' + runId + '/rejudge-children');
       if (!res.ok) return;
@@ -1467,11 +1448,8 @@ export function renderBenchmarkRunLivePage(job: LiveJob): string {
     const TRACE_ID = ${JSON.stringify(job.traceId)};
     const STARTED_AT = ${job.startedAt};
 
-    function esc(s) {
-      return String(s ?? '')
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    }
+    ${escScript()}
+
     function fmtDur(ms) {
       if (ms == null) return '—';
       if (ms < 1000) return ms + 'ms';
@@ -1573,6 +1551,13 @@ export function renderBenchmarkRunLivePage(job: LiveJob): string {
 
     async function tick() {
       if (stopped) return;
+      // Skip the fetch if the tab isn't visible — a backgrounded tab on a
+      // 7-min cell would otherwise fire ~210 DB queries against the traces
+      // table for nothing. visibilitychange wakes us back up.
+      if (document.visibilityState !== 'visible') {
+        setTimeout(tick, 2000);
+        return;
+      }
       try {
         const res = await fetch('/api/benchmark/cells/live/' + TRACE_ID);
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1591,6 +1576,10 @@ export function renderBenchmarkRunLivePage(job: LiveJob): string {
       }
       setTimeout(tick, 2000);
     }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !stopped) tick();
+    });
 
     async function killLive(ev, traceId) {
       ev.preventDefault();

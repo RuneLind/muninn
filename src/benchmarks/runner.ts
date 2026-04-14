@@ -269,15 +269,12 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
 
   try {
     if (stackUsesSerena(stack)) {
-      // Short names to fit under the 64-char MCP tool-name limit copilot-sdk
-      // enforces. See benchmarks/known-bugs.md Bug 10.
-      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
       const usedPorts = new Set<number>();
       const specs = worktrees.map((wt) => {
         const port = allocateBenchmarkPort(usedPorts);
         usedPorts.add(port);
         return {
-          name: `b${issueNum}-${wt.repo.replace(/^melosys-/, "").slice(0, 8)}`,
+          name: buildBenchmarkSerenaInstanceName(manifest.issueKey, wt.repo),
           projectPath: wt.worktreePath,
           port,
         };
@@ -804,15 +801,44 @@ function applyTreatmentOverlay(
  */
 export async function loadPromptVariant(promptId: string): Promise<string | null> {
   if (promptId === "default") return null;
-  const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
-  const path = join(promptsDir, `${promptId}.txt`);
-  if (!existsSync(path)) {
-    throw new Error(
-      `Treatment requested promptId="${promptId}" but no variant file at ${path}. ` +
-        `Create the file or use promptId "default" to fall back to the base bot's prompt.`,
-    );
+  const path = promptVariantPath(promptId);
+  try {
+    return await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `Treatment requested promptId="${promptId}" but no variant file at ${path}. ` +
+          `Create the file or use promptId "default" to fall back to the base bot's prompt.`,
+      );
+    }
+    throw err;
   }
-  return readFile(path, "utf8");
+}
+
+/**
+ * Resolve the absolute path to a prompt variant file, anchored to the muninn
+ * repo root (not cwd). Shared by the runner and the dashboard preview so
+ * they agree on where variants live regardless of how the dashboard was
+ * launched.
+ */
+export function promptVariantPath(promptId: string): string {
+  const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
+  return join(promptsDir, `${promptId}.txt`);
+}
+
+/**
+ * Build the short Serena MCP instance name for a benchmark cell. Kept under
+ * copilot-sdk's 64-char MCP tool-name limit (see Bug 10). Exported so the
+ * preview view can show the exact name the runner will use without the
+ * two places drifting apart.
+ */
+export function buildBenchmarkSerenaInstanceName(
+  issueKey: string,
+  repoName: string,
+): string {
+  const issueNum = issueKey.replace(/^\D+/, "") || issueKey;
+  const shortRepo = repoName.replace(/^melosys-/, "").slice(0, 8);
+  return `b${issueNum}-${shortRepo}`;
 }
 
 /**

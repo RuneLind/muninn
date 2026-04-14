@@ -6,7 +6,7 @@ import {
   getBenchmarkRun,
   listRejudgeChildren,
 } from "../../db/benchmark-runs.ts";
-import { rejudgeCandidate } from "../../benchmarks/rejudge.ts";
+import { rejudgeCandidate, type RejudgeJobState } from "../../benchmarks/rejudge.ts";
 import { liveJobSupervisor, pipeSubprocessLogs } from "../../benchmarks/live-job.ts";
 import {
   discoverIssues,
@@ -22,17 +22,6 @@ import {
 
 const log = getLog("dashboard", "benchmark");
 
-/** In-flight re-judge jobs keyed by parent run id. */
-interface RejudgeJobState {
-  parentRunId: string;
-  totalPasses: number;
-  completedPasses: number;
-  startedAt: number;
-  status: "running" | "done" | "error";
-  error: string | null;
-  childRunIds: string[];
-}
-
 const activeRejudgeJobs = new Map<string, RejudgeJobState>();
 
 /**
@@ -47,6 +36,12 @@ async function spawnRunCellSubprocess(
   treatmentPath: string,
 ): Promise<void> {
   const muninnRoot = resolve(import.meta.dir, "../../..");
+  // The subprocess inherits the full process env — safe because the
+  // Bug-11 fence lives inside the runner (--strict-mcp-config +
+  // --disallowedTools applied when spawning claude-cli), not at this
+  // subprocess boundary. Filtering env here wouldn't add isolation, it
+  // would just break any legitimate parent env the runner depends on
+  // (DATABASE_URL, CLAUDE_MODEL, etc.).
   const proc = Bun.spawn(
     [
       "bun",
@@ -221,9 +216,16 @@ export function registerBenchmarkRoutes(app: Hono): void {
   app.get("/benchmark/runs/:id", async (c) => {
     try {
       const id = c.req.param("id");
-      const run = await getBenchmarkRun(id);
+      // Parent row + children load in parallel. On a child row the children
+      // query returns zero rows (partial index on parent_run_id keeps it
+      // cheap), and we discard the result — one wasted lookup on a rare
+      // path beats an extra round-trip on every detail view.
+      const [run, childrenRaw] = await Promise.all([
+        getBenchmarkRun(id),
+        listRejudgeChildren(id),
+      ]);
       if (!run) return c.html("Benchmark run not found", 404);
-      const children = run.parentRunId ? [] : await listRejudgeChildren(id);
+      const children = run.parentRunId ? [] : childrenRaw;
       const job = activeRejudgeJobs.get(id) ?? null;
       return c.html(renderBenchmarkDetailPage(run, children, job));
     } catch (err) {

@@ -14,12 +14,11 @@
  * parent_run_id set; the list-view query hides child rows by default.
  */
 
-import { writeFile, unlink, mkdir } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { loadManifestByKey } from "./manifest.ts";
-import { runJudge } from "./judge.ts";
+import { runJudge, findHighestJudgePromptVersion } from "./judge.ts";
 import {
   getBenchmarkRun,
   saveBenchmarkRun,
@@ -29,6 +28,23 @@ import {
 } from "../db/benchmark-runs.ts";
 
 const log = getLog("benchmarks", "rejudge");
+
+/**
+ * In-flight re-judge job state shared between the dashboard route handler
+ * and the detail-page view. The route maintains the live instance in its
+ * `activeRejudgeJobs` map; the view reads a snapshot of it to render the
+ * re-judge panel. Kept in a shared module so both sides reference the
+ * same type.
+ */
+export interface RejudgeJobState {
+  parentRunId: string;
+  totalPasses: number;
+  completedPasses: number;
+  startedAt: number;
+  status: "running" | "done" | "error";
+  error: string | null;
+  childRunIds: string[];
+}
 
 export interface RejudgeOptions {
   /** Number of re-judge passes to run. Each pass becomes one child row. */
@@ -74,38 +90,19 @@ const DEFAULT_BUDGET_USD = Number(process.env.BENCHMARK_BUDGET_USD ?? "10");
 const JUDGE_PASS_COST_ESTIMATE_USD = 0.2;
 
 /**
- * Find the highest-versioned judge prompt in benchmarks/judge-prompts/.
- * Duplicated from score-report.ts (which is CLI-only, not importable) to
- * avoid pulling CLI imports into the dashboard build.
- */
-function findHighestPromptVersion(dir: string = "benchmarks/judge-prompts"): string {
-  if (!existsSync(dir)) {
-    throw new Error(`Judge prompt directory does not exist: ${dir}`);
-  }
-  const candidates = readdirSync(dir)
-    .filter((f) => /^v\d+\.md$/.test(f))
-    .sort((a, b) => {
-      const va = parseInt(a.match(/^v(\d+)/)?.[1] ?? "0", 10);
-      const vb = parseInt(b.match(/^v(\d+)/)?.[1] ?? "0", 10);
-      return vb - va;
-    });
-  const top = candidates[0];
-  if (!top) throw new Error(`No judge prompts (vN.md) found in ${dir}`);
-  return resolve(dir, top);
-}
-
-/**
  * Resolve a candidate file path the judge can read for a parent run.
- * Prefers the original candidatePath on disk (cheaper, no temp file
- * needed); falls back to materialising the stored report_md column to
- * /tmp if the file has moved. Returns a cleanup callback for the temp
- * path case.
+ * Prefers the original candidatePath on disk; falls back to materialising
+ * the stored report_md column to /tmp if the file has moved. Returns a
+ * cleanup callback for the temp-path branch.
  */
 async function candidatePathForParent(
   parent: BenchmarkRunRow,
 ): Promise<{ path: string; cleanup: (() => Promise<void>) | null }> {
-  if (existsSync(parent.candidatePath)) {
+  try {
+    await readFile(parent.candidatePath);
     return { path: parent.candidatePath, cleanup: null };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   if (!parent.reportMd) {
     throw new Error(
@@ -128,7 +125,12 @@ async function candidatePathForParent(
   };
 }
 
-function computeMeanStddev(values: number[]): { mean: number; stddev: number } {
+/**
+ * Sample mean and stddev (n-1 denominator) for a plain number array.
+ * Exported so the dashboard detail page can aggregate parent + child
+ * hit rates without re-implementing the formula.
+ */
+export function meanStddev(values: number[]): { mean: number; stddev: number } {
   if (values.length === 0) return { mean: 0, stddev: 0 };
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   if (values.length === 1) return { mean, stddev: 0 };
@@ -160,7 +162,7 @@ export async function rejudgeCandidate(
 
   const judgePromptPath = opts.judgePromptPath
     ? resolve(opts.judgePromptPath)
-    : findHighestPromptVersion();
+    : findHighestJudgePromptVersion();
   const budgetUsd = opts.budgetUsd ?? DEFAULT_BUDGET_USD;
 
   const manifest = await loadManifestByKey(parent.issueKey);
@@ -284,7 +286,7 @@ export async function rejudgeCandidate(
   const doneHits = passes
     .filter((p) => p.status === "done" && p.hitRate !== null)
     .map((p) => p.hitRate as number);
-  const { mean, stddev } = computeMeanStddev(doneHits);
+  const { mean, stddev } = meanStddev(doneHits);
 
   return {
     parentRunId,
@@ -318,7 +320,7 @@ export async function summariseRun(parentRunId: string): Promise<{
   for (const c of children) {
     if (c.status === "done" && c.hitRate !== null) hits.push(c.hitRate);
   }
-  const { mean, stddev } = computeMeanStddev(hits);
+  const { mean, stddev } = meanStddev(hits);
   return {
     parent,
     children,

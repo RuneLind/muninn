@@ -19,16 +19,16 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
 import { discoverAllBots, type BotConfig } from "../bots/config.ts";
 import { loadManifest } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
 import type { BenchmarkTreatment } from "../db/benchmark-runs.ts";
 import {
   BENCHMARK_DISALLOWED_TOOLS,
+  buildBenchmarkSerenaInstanceName,
   buildDefaultMessage,
   loadPromptVariant,
+  promptVariantPath,
 } from "./runner.ts";
 
 export interface PreviewIssue {
@@ -103,33 +103,36 @@ export async function buildCellPreview(
 ): Promise<CellPreview> {
   const warnings: string[] = [];
 
-  const manifest = await loadManifest(opts.manifestPath);
-  const treatment = await loadTreatmentFile(opts.treatmentPath);
+  // Manifest, treatment, and base bot are independent — parallelise. findBot
+  // is synchronous but wrapping it in the Promise.all keeps the code symmetric.
+  const [manifest, treatment, baseBot] = await Promise.all([
+    loadManifest(opts.manifestPath),
+    loadTreatmentFile(opts.treatmentPath),
+    Promise.resolve(findBot(opts.baseBotName ?? "melosys")),
+  ]);
 
-  const baseBotName = opts.baseBotName ?? "melosys";
-  const baseBot = findBot(baseBotName);
+  // Once manifest + treatment are known, the gold excerpt and the prompt
+  // variant file can load in parallel — neither depends on the other.
+  const [promptVariant, gold] = await Promise.all([
+    loadPromptVariant(treatment.promptId).catch((err) => {
+      warnings.push(`Prompt variant failed to load: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }),
+    loadGoldExcerpt(manifest.gold.path).catch((err) => {
+      warnings.push(`Gold file read failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { excerpt: "(failed to read gold file)", lineCount: 0 };
+    }),
+  ]);
 
-  // Prompt resolution — the override wins if present.
-  const promptVariant = await loadPromptVariant(treatment.promptId).catch((err) => {
-    warnings.push(`Prompt variant failed to load: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  });
   const jiraAnalysisPrompt =
     promptVariant ??
     baseBot.prompts?.jiraAnalysis ??
     "(no jiraAnalysis prompt configured on the base bot)";
-  const promptVariantPath =
-    treatment.promptId === "default"
-      ? null
-      : resolvePromptVariantPath(treatment.promptId);
+  const variantPath =
+    treatment.promptId === "default" ? null : promptVariantPath(treatment.promptId);
 
   const userMessage = buildDefaultMessage(manifest, false);
   const fullPrompt = `<!-- research:jira -->\n${jiraAnalysisPrompt}\n\n---\n\n${userMessage}`;
-
-  const gold = await loadGoldExcerpt(manifest.gold.path).catch((err) => {
-    warnings.push(`Gold file read failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { excerpt: "(failed to read gold file)", lineCount: 0 };
-  });
 
   const mcp = buildMcpPlan(manifest, treatment);
   const cost = estimateCost(treatment);
@@ -152,7 +155,7 @@ export async function buildCellPreview(
     baseBot: { name: baseBot.name, dir: baseBot.dir },
     treatment,
     treatmentPath: opts.treatmentPath,
-    promptVariantPath,
+    promptVariantPath: variantPath,
     jiraAnalysisPrompt,
     userMessage,
     fullPrompt,
@@ -163,10 +166,15 @@ export async function buildCellPreview(
 }
 
 async function loadTreatmentFile(path: string): Promise<BenchmarkTreatment> {
-  if (!existsSync(path)) {
-    throw new Error(`Treatment file does not exist: ${path}`);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Treatment file does not exist: ${path}`);
+    }
+    throw err;
   }
-  const text = await readFile(path, "utf8");
   const raw = JSON.parse(text) as Partial<BenchmarkTreatment>;
   if (!raw.connector || !raw.model || !raw.mcpStack || !raw.promptId) {
     throw new Error(
@@ -189,19 +197,18 @@ function findBot(name: string): BotConfig {
   return bot;
 }
 
-function resolvePromptVariantPath(promptId: string): string {
-  // Mirrors runner.ts loadPromptVariant resolution. Only used for display;
-  // the actual loading goes through loadPromptVariant which throws on missing.
-  return resolvePath("benchmarks/prompts", `${promptId}.txt`);
-}
-
 async function loadGoldExcerpt(
   path: string,
 ): Promise<{ excerpt: string; lineCount: number }> {
-  if (!existsSync(path)) {
-    throw new Error(`Gold path does not exist: ${path}`);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Gold path does not exist: ${path}`);
+    }
+    throw err;
   }
-  const text = await readFile(path, "utf8");
   const lines = text.split("\n");
   const excerpt = lines.slice(0, GOLD_EXCERPT_LINES).join("\n");
   return { excerpt, lineCount: lines.length };
@@ -226,10 +233,8 @@ function buildMcpPlan(
 
   if (usesSerena) {
     for (const repo of manifest.repos ?? []) {
-      const shortName = repo.name.replace(/^melosys-/, "").slice(0, 8);
-      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
       servers.push({
-        name: `b${issueNum}-${shortName}`,
+        name: buildBenchmarkSerenaInstanceName(manifest.issueKey, repo.name),
         role: "serena",
         note: `LSP server on a short-lived port (allocated per cell from 9200+)`,
       });
