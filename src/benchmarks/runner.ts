@@ -35,6 +35,7 @@ import {
   type BenchmarkStackConfig,
 } from "../db/benchmark-runs.ts";
 import { ensureCellContext } from "./cell-context.ts";
+import { Tracer } from "../tracing/index.ts";
 import { runJudge, stripReportFrontmatter } from "./judge.ts";
 import { loadManifestByKey } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
@@ -175,6 +176,12 @@ export interface RunCellOptions {
   messageOverride?: string;
   /** Path to the judge prompt — defaults to highest vN.md in benchmarks/judge-prompts/ */
   judgePromptPath?: string;
+  /** Reuse an existing userId/threadId instead of creating a fresh cell context.
+   *  Used by runCellMultiPass so sequential passes share a conversation. */
+  preBuiltContext?: { userId: string; threadId: string };
+  /** Skip the judge step even if not a dry-run. Used by runCellMultiPass so
+   *  the judge runs once per cell on the concatenated candidate, not per pass. */
+  skipJudge?: boolean;
 }
 
 export interface RunCellResult {
@@ -321,6 +328,8 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
         dryRun: opts.dryRun ?? false,
         messageOverride: opts.messageOverride,
         judgePromptPath: opts.judgePromptPath,
+        preBuiltContext: opts.preBuiltContext,
+        skipJudge: opts.skipJudge,
       });
       runs.push(run);
       totalCost += run.costUsd;
@@ -375,6 +384,15 @@ interface RunOneCellArgs {
   dryRun: boolean;
   messageOverride?: string;
   judgePromptPath?: string;
+  /** When set, skip ensureCellContext and reuse the provided userId/threadId.
+   *  Used by runCellMultiPass so sequential passes share a conversation. A
+   *  fresh Tracer is still created per pass — the trace is the per-pass unit
+   *  the Bug 11 audit runs against, not the cell. */
+  preBuiltContext?: { userId: string; threadId: string };
+  /** When set, skip the judge step even if dryRun is false. Used by
+   *  runCellMultiPass so the judge runs once on the concatenated candidate,
+   *  not per pass. */
+  skipJudge?: boolean;
 }
 
 async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
@@ -393,11 +411,28 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   const messageText = args.messageOverride ?? buildDefaultMessage(manifest, dryRun);
   const promptText = `<!-- research:jira -->\n${effectiveBot.prompts?.jiraAnalysis ?? ""}\n\n---\n\n${messageText}`;
 
-  const { userId: cellUserId, threadId: cellThreadId, tracer } = await ensureCellContext({
-    issueKey: manifest.issueKey,
-    runIndex,
-    botName: effectiveBot.name,
-  });
+  let cellUserId: string;
+  let cellThreadId: string;
+  let tracer: Tracer;
+  if (args.preBuiltContext) {
+    cellUserId = args.preBuiltContext.userId;
+    cellThreadId = args.preBuiltContext.threadId;
+    tracer = new Tracer("benchmark_analysis", {
+      botName: effectiveBot.name,
+      userId: cellUserId,
+      username: cellUserId,
+      platform: "web",
+    });
+  } else {
+    const ctx = await ensureCellContext({
+      issueKey: manifest.issueKey,
+      runIndex,
+      botName: effectiveBot.name,
+    });
+    cellUserId = ctx.userId;
+    cellThreadId = ctx.threadId;
+    tracer = ctx.tracer;
+  }
   const analysisTraceId = tracer.traceId;
 
   // Pre-insert the benchmark_runs row so we have a stable id even if the
@@ -609,7 +644,7 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   let hitRate: number | null = null;
   let highlightedRate: number | null = null;
 
-  if (!dryRun && benchmarkRunId) {
+  if (!dryRun && !args.skipJudge && benchmarkRunId) {
     try {
       const judgePromptPath = args.judgePromptPath ?? defaultJudgePromptPath();
       const judgeResult = await runJudge({
@@ -660,7 +695,7 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
         },
       }).catch(() => {});
     }
-  } else if (dryRun && benchmarkRunId) {
+  } else if ((dryRun || args.skipJudge) && benchmarkRunId) {
     // Dry-run: mark the row done without judge data so it's not stuck "running".
     await completeBenchmarkRun(benchmarkRunId, {
       finishedAt: new Date(),
@@ -993,5 +1028,315 @@ export async function runShakeout(
     similarity,
     verdict,
     inconclusive: false,
+  };
+}
+
+/**
+ * One pass in a multi-pass cell: which prompt variant + which MCP stack to
+ * expose for that pass. All passes in the cell share the same connector,
+ * model, userId, and threadId — so the nth pass sees the 1..n-1 pass reports
+ * in its conversation history.
+ */
+export interface MultiPassSpec {
+  /** Prompt variant id (must resolve to benchmarks/prompts/<promptId>.txt) */
+  promptId: string;
+  /** MCP stack exposed to this pass */
+  mcpStack: McpStack;
+  /** Override the user message text for this pass. Defaults to
+   *  "{issueKey}: {title}" (same as runCell). Pass 2 typically wants a
+   *  short follow-up like "Fortsett analysen med kodesøk." */
+  messageOverride?: string;
+  /** Short label for logging / combined report section headings */
+  label?: string;
+}
+
+export interface RunCellMultiPassOptions {
+  issueKey: string;
+  /** Connector + model held constant across all passes */
+  connector: BenchmarkTreatment["connector"];
+  model: BenchmarkTreatment["model"];
+  passes: MultiPassSpec[];
+  baseBotName?: string;
+  /** Total budget across all passes */
+  budgetUsd?: number;
+  dryRun?: boolean;
+  judgePromptPath?: string;
+}
+
+export interface RunCellMultiPassResult {
+  issueKey: string;
+  passes: Array<{
+    spec: MultiPassSpec;
+    run: SingleRunResult;
+  }>;
+  /** Absolute path to the combined candidate that was handed to the judge */
+  combinedCandidatePath: string;
+  /** Judge result on the combined candidate */
+  hitRate: number | null;
+  highlightedRate: number | null;
+  /** Sum of analysis + judge costs across all passes. */
+  totalCostUsd: number;
+  /** benchmark_runs row id that carries the judge result (the last pass's row) */
+  judgeBenchmarkRunId: string | null;
+  judgeError?: string;
+}
+
+/**
+ * Run a multi-pass analysis cell: N sequential passes sharing userId/threadId,
+ * each pass potentially using a different MCP stack and prompt variant.
+ *
+ * Judge runs once on the concatenated candidate (pass-1 report + pass-2 report
+ * + ...), not per pass. The last pass's benchmark_runs row carries the judge
+ * verdict; earlier passes' rows are marked `done` without judge data.
+ *
+ * Each pass's trace is audited for Bug 11 leakage independently — a leak in
+ * any pass fails the cell before the judge is called.
+ */
+export async function runCellMultiPass(
+  opts: RunCellMultiPassOptions,
+): Promise<RunCellMultiPassResult> {
+  if (opts.passes.length === 0) {
+    throw new Error("runCellMultiPass requires at least one pass");
+  }
+
+  const baseBotName = opts.baseBotName ?? "melosys";
+  // Create one cell context that all passes share. We use a dummy runIndex
+  // of 0 here — the per-pass effective runIndex is encoded in the run
+  // directory names below.
+  const sharedContext = await ensureCellContext({
+    issueKey: opts.issueKey,
+    runIndex: 0,
+    botName: baseBotName,
+  });
+  // ensureCellContext's Tracer is unused (each pass makes its own). Finish
+  // it with a no-op status so the span store doesn't leak a perpetually-open
+  // "benchmark_analysis" trace.
+  try {
+    sharedContext.tracer.finish("ok", {
+      note: "multi-pass cell — per-pass tracers own the real spans",
+      issueKey: opts.issueKey,
+    });
+  } catch {
+    // ignore
+  }
+
+  log.info(
+    "Multi-pass cell: {issue} userId={userId} threadId={threadId} passes={n}",
+    {
+      botName: "benchmarks",
+      issue: opts.issueKey,
+      userId: sharedContext.userId,
+      threadId: sharedContext.threadId,
+      n: opts.passes.length,
+    },
+  );
+
+  const budget = opts.budgetUsd ?? defaultBudget();
+  const passResults: Array<{ spec: MultiPassSpec; run: SingleRunResult }> = [];
+  let cumulativeCost = 0;
+
+  for (let i = 0; i < opts.passes.length; i++) {
+    const spec = opts.passes[i]!;
+    if (cumulativeCost >= budget) {
+      log.warn("Budget cap ${budget} reached before pass {i} — aborting remaining passes", {
+        botName: "benchmarks",
+        budget,
+        i,
+      });
+      break;
+    }
+    const remainingBudget = budget - cumulativeCost;
+
+    log.info(
+      "Multi-pass: starting pass {i}/{n} — promptId={promptId} mcpStack={stack}",
+      {
+        botName: "benchmarks",
+        i: i + 1,
+        n: opts.passes.length,
+        promptId: spec.promptId,
+        stack: spec.mcpStack,
+      },
+    );
+
+    const passTreatment: BenchmarkTreatment = {
+      connector: opts.connector,
+      model: opts.model,
+      mcpStack: spec.mcpStack,
+      promptId: spec.promptId,
+    };
+
+    // Each pass spins up its own Serena/Yggdrasil instances and tears them
+    // down on exit (via runCell's finally block). That's intentional: pass 1
+    // runs knowledge-only with no yggdrasil reachable, pass 2 spins up a
+    // fresh yggdrasil instance and indexes the worktrees. The re-index cost
+    // (~30s per yggdrasil start) is paid by the pass that needs it, not by
+    // pass 1.
+    const cellResult = await runCell({
+      issueKey: opts.issueKey,
+      treatment: passTreatment,
+      baseBotName,
+      nRuns: 1,
+      budgetUsd: remainingBudget,
+      dryRun: opts.dryRun,
+      messageOverride: spec.messageOverride,
+      judgePromptPath: opts.judgePromptPath,
+      preBuiltContext: {
+        userId: sharedContext.userId,
+        threadId: sharedContext.threadId,
+      },
+      // Judge runs once at the end on the combined candidate; per-pass
+      // runs are marked `done` without judge data.
+      skipJudge: true,
+    });
+
+    const run = cellResult.runs[0];
+    if (!run) {
+      throw new Error(
+        `Multi-pass: pass ${i} returned no run result (cellResult.runs is empty)`,
+      );
+    }
+    passResults.push({ spec, run });
+    cumulativeCost += run.costUsd;
+
+    if (run.status === "error") {
+      log.error(
+        "Multi-pass: pass {i} errored — aborting remaining passes. error={error}",
+        {
+          botName: "benchmarks",
+          i: i + 1,
+          error: run.error ?? "(unknown)",
+        },
+      );
+      break;
+    }
+  }
+
+  // Build the combined candidate — one section per pass, in order. The
+  // judge sees this as a single analysis split into labeled sections.
+  const combinedCandidateDir = resolve(
+    import.meta.dir,
+    "../../benchmarks/runs",
+    opts.issueKey,
+    `${Date.now()}-multipass-${opts.connector}-${opts.model}`,
+  );
+  await mkdir(combinedCandidateDir, { recursive: true });
+  const combinedCandidatePath = join(combinedCandidateDir, "candidate.md");
+
+  const sections: string[] = [];
+  for (let i = 0; i < passResults.length; i++) {
+    const pr = passResults[i]!;
+    let body = "";
+    try {
+      const raw = await readFile(pr.run.candidatePath, "utf8");
+      body = stripReportFrontmatter(raw).trim();
+    } catch (err) {
+      log.warn("Multi-pass: could not read pass {i} candidate at {path}: {err}", {
+        botName: "benchmarks",
+        i: i + 1,
+        path: pr.run.candidatePath,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const label =
+      pr.spec.label ??
+      `Pass ${i + 1} — promptId=${pr.spec.promptId} mcpStack=${pr.spec.mcpStack}`;
+    sections.push(`## ${label}\n\n${body}`);
+  }
+
+  const lastPass = passResults[passResults.length - 1];
+  const combinedTraceId =
+    lastPass?.run.analysisTraceId ?? passResults[0]?.run.analysisTraceId ?? "multipass-none";
+  const frontmatter = [
+    "---",
+    `issue_key: ${opts.issueKey}`,
+    `analysis_trace_id: ${combinedTraceId}`,
+    `connector: ${opts.connector}`,
+    `model: ${opts.model}`,
+    `mcp_stack: multi-pass`,
+    `prompt_id: multi-pass`,
+    `multi_pass_specs: ${JSON.stringify(opts.passes.map((p) => ({ promptId: p.promptId, mcpStack: p.mcpStack })))}`,
+    `multi_pass_trace_ids: ${JSON.stringify(passResults.map((p) => p.run.analysisTraceId))}`,
+    `generated_at: ${new Date().toISOString()}`,
+    "---",
+    "",
+  ].join("\n");
+  await writeFile(combinedCandidatePath, frontmatter + sections.join("\n\n---\n\n") + "\n", "utf8");
+
+  log.info("Multi-pass: combined candidate written to {path}", {
+    botName: "benchmarks",
+    path: combinedCandidatePath,
+  });
+
+  // Bail early if any pass errored or we're in dry-run — no judge call.
+  const anyPassError = passResults.some((p) => p.run.status === "error");
+  if (opts.dryRun || anyPassError || passResults.length === 0) {
+    return {
+      issueKey: opts.issueKey,
+      passes: passResults,
+      combinedCandidatePath,
+      hitRate: null,
+      highlightedRate: null,
+      totalCostUsd: cumulativeCost,
+      judgeBenchmarkRunId: null,
+      judgeError: anyPassError ? "at least one pass errored — judge skipped" : undefined,
+    };
+  }
+
+  // Run the judge once on the combined candidate. Write its result back to
+  // the last pass's benchmark_runs row so the dashboard has a single row
+  // that shows the aggregate hit/highlighted for this multi-pass cell.
+  const manifest = await loadManifestByKey(opts.issueKey);
+  const judgePromptPath = opts.judgePromptPath ?? defaultJudgePromptPath();
+  let hitRate: number | null = null;
+  let highlightedRate: number | null = null;
+  let judgeError: string | undefined;
+
+  const judgeTargetRunId = lastPass?.run.benchmarkRunId ?? null;
+
+  try {
+    const judgeResult = await runJudge({
+      manifest,
+      candidatePath: combinedCandidatePath,
+      judgePromptPath,
+    });
+    hitRate = judgeResult.result.stats.hitRate;
+    highlightedRate = judgeResult.result.stats.highlightedRate;
+
+    if (judgeTargetRunId && lastPass) {
+      // Re-read the last pass's candidate text so we persist the actual
+      // combined candidate on the row, not the pass-only one.
+      const combinedText = await readFile(combinedCandidatePath, "utf8");
+      await completeBenchmarkRun(judgeTargetRunId, {
+        finishedAt: new Date(),
+        status: "done",
+        wallclockMs: judgeResult.wallclockMs,
+        inputTokens: judgeResult.inputTokens,
+        outputTokens: judgeResult.outputTokens,
+        judgeResult: judgeResult.result,
+        reportMd: combinedText,
+      }).catch((err) => {
+        log.warn("Multi-pass: failed to update last pass row with judge result: {err}", {
+          botName: "benchmarks",
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  } catch (err) {
+    judgeError = err instanceof Error ? err.message : String(err);
+    log.error("Multi-pass: judge failed: {err}", {
+      botName: "benchmarks",
+      err: judgeError,
+    });
+  }
+
+  return {
+    issueKey: opts.issueKey,
+    passes: passResults,
+    combinedCandidatePath,
+    hitRate,
+    highlightedRate,
+    totalCostUsd: cumulativeCost,
+    judgeBenchmarkRunId: judgeTargetRunId,
+    judgeError,
   };
 }
