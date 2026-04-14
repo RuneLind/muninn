@@ -97,7 +97,7 @@ const BENCHMARK_SETTINGS_ALLOW_BASE = [
  *
  * See `benchmarks/known-bugs.md` Bug 11 for the incident this list mitigates.
  */
-const BENCHMARK_DISALLOWED_TOOLS = [
+export const BENCHMARK_DISALLOWED_TOOLS = [
   // File / shell access — could read prod-HEAD code instead of the worktree
   "Bash", "BashOutput", "KillBash", "Read", "Write", "Edit", "MultiEdit",
   "Glob", "Grep", "NotebookEdit",
@@ -184,6 +184,14 @@ export interface RunCellOptions {
    *  runCellMultiPass so the judge runs once per cell on the concatenated
    *  candidate, not per pass. Public callers should leave this undefined. */
   skipJudge?: boolean;
+  /**
+   * Pre-allocated analysis trace ID. When set, the runner's Tracer uses this
+   * UUID instead of generating a fresh one. Used by the dashboard live-run
+   * view, which pre-allocates the trace ID before spawning the runner so the
+   * client can subscribe to spans from the moment the request lands. Only
+   * honoured for nRuns=1; for n-runs loops it's ignored past the first run.
+   */
+  preAllocatedTraceId?: string;
 }
 
 export interface RunCellResult {
@@ -229,6 +237,14 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   const baseBot = findBot(baseBotName);
   const nRuns = opts.nRuns ?? 1;
   const budget = opts.budgetUsd ?? defaultBudget();
+  // Fallback: when the caller didn't set preAllocatedTraceId but the dashboard
+  // live-run path exported BENCHMARK_TRACE_ID, honour that for nRuns=1 so the
+  // UI that spawned this process can subscribe to spans under the known UUID.
+  // Direct callers (runShakeout, runCellMultiPass) pass their own options and
+  // aren't affected by this fallback.
+  const preAllocatedTraceId =
+    opts.preAllocatedTraceId ??
+    (nRuns === 1 ? process.env.BENCHMARK_TRACE_ID : undefined);
 
   log.info(
     "Starting cell: issue={issue} treatment={treatment} nRuns={nRuns} budget=${budget}",
@@ -253,15 +269,12 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
 
   try {
     if (stackUsesSerena(stack)) {
-      // Short names to fit under the 64-char MCP tool-name limit copilot-sdk
-      // enforces. See benchmarks/known-bugs.md Bug 10.
-      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
       const usedPorts = new Set<number>();
       const specs = worktrees.map((wt) => {
         const port = allocateBenchmarkPort(usedPorts);
         usedPorts.add(port);
         return {
-          name: `b${issueNum}-${wt.repo.replace(/^melosys-/, "").slice(0, 8)}`,
+          name: buildBenchmarkSerenaInstanceName(manifest.issueKey, wt.repo),
           projectPath: wt.worktreePath,
           port,
         };
@@ -332,6 +345,10 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
         judgePromptPath: opts.judgePromptPath,
         preBuiltContext: opts.preBuiltContext,
         skipJudge: opts.skipJudge,
+        // Only honour the pre-allocated trace ID on the first run — subsequent
+        // runs in the same n-runs loop need fresh trace IDs, and the live view
+        // only supports nRuns=1 anyway.
+        preAllocatedTraceId: i === 0 ? preAllocatedTraceId : undefined,
       });
       runs.push(run);
       totalCost += run.costUsd;
@@ -395,6 +412,9 @@ interface RunOneCellArgs {
    *  runCellMultiPass so the judge runs once on the concatenated candidate,
    *  not per pass. */
   skipJudge?: boolean;
+  /** When set, the fresh Tracer uses this UUID instead of generating one.
+   *  See RunCellOptions.preAllocatedTraceId for rationale. */
+  preAllocatedTraceId?: string;
 }
 
 async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
@@ -424,12 +444,14 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
       userId: cellUserId,
       username: cellUserId,
       platform: "web",
+      traceId: args.preAllocatedTraceId,
     });
   } else {
     const ctx = await ensureCellContext({
       issueKey: manifest.issueKey,
       runIndex,
       botName: effectiveBot.name,
+      preAllocatedTraceId: args.preAllocatedTraceId,
     });
     cellUserId = ctx.userId;
     cellThreadId = ctx.threadId;
@@ -734,7 +756,7 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   };
 }
 
-function buildDefaultMessage(manifest: BenchmarkManifest, dryRun: boolean): string {
+export function buildDefaultMessage(manifest: BenchmarkManifest, dryRun: boolean): string {
   if (dryRun) {
     // Tiny prompt — the dry-run is about plumbing, not real analysis.
     return `[DRY RUN] Analyser kort: ${manifest.issueKey} — ${manifest.title}. Svar i én setning.`;
@@ -777,17 +799,46 @@ function applyTreatmentOverlay(
  * Returns null for the default promptId. Throws loudly on a missing variant
  * file so typos in treatment.promptId don't silently fall back to default.
  */
-async function loadPromptVariant(promptId: string): Promise<string | null> {
+export async function loadPromptVariant(promptId: string): Promise<string | null> {
   if (promptId === "default") return null;
-  const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
-  const path = join(promptsDir, `${promptId}.txt`);
-  if (!existsSync(path)) {
-    throw new Error(
-      `Treatment requested promptId="${promptId}" but no variant file at ${path}. ` +
-        `Create the file or use promptId "default" to fall back to the base bot's prompt.`,
-    );
+  const path = promptVariantPath(promptId);
+  try {
+    return await readFile(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `Treatment requested promptId="${promptId}" but no variant file at ${path}. ` +
+          `Create the file or use promptId "default" to fall back to the base bot's prompt.`,
+      );
+    }
+    throw err;
   }
-  return readFile(path, "utf8");
+}
+
+/**
+ * Resolve the absolute path to a prompt variant file, anchored to the muninn
+ * repo root (not cwd). Shared by the runner and the dashboard preview so
+ * they agree on where variants live regardless of how the dashboard was
+ * launched.
+ */
+export function promptVariantPath(promptId: string): string {
+  const promptsDir = resolve(import.meta.dir, "../../benchmarks/prompts");
+  return join(promptsDir, `${promptId}.txt`);
+}
+
+/**
+ * Build the short Serena MCP instance name for a benchmark cell. Kept under
+ * copilot-sdk's 64-char MCP tool-name limit (see Bug 10). Exported so the
+ * preview view can show the exact name the runner will use without the
+ * two places drifting apart.
+ */
+export function buildBenchmarkSerenaInstanceName(
+  issueKey: string,
+  repoName: string,
+): string {
+  const issueNum = issueKey.replace(/^\D+/, "") || issueKey;
+  const shortRepo = repoName.replace(/^melosys-/, "").slice(0, 8);
+  return `b${issueNum}-${shortRepo}`;
 }
 
 /**

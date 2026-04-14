@@ -16,6 +16,13 @@ export interface CellContextInput {
   issueKey: string;
   runIndex: number;
   botName: string;
+  /**
+   * When set, the newly-created Tracer reuses this UUID instead of generating
+   * a fresh one. Used by the dashboard live-run view, which pre-allocates the
+   * trace ID before spawning the runner subprocess so the live view can
+   * subscribe to spans under that ID from the moment the request lands.
+   */
+  preAllocatedTraceId?: string;
 }
 
 export interface CellIdentity {
@@ -56,6 +63,7 @@ export async function ensureCellContext(
     userId: identity.userId,
     username: identity.userId,
     platform: "web",
+    traceId: input.preAllocatedTraceId,
   });
   return { ...identity, tracer };
 }
