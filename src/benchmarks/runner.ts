@@ -27,6 +27,7 @@ import type { ProcessMessageResult } from "../core/message-processor.ts";
 import { discoverAllBots, type BotConfig, type ConnectorType } from "../bots/config.ts";
 import { loadConfig, type Config } from "../config.ts";
 import { getLog } from "../logging.ts";
+import { getDb } from "../db/client.ts";
 import {
   saveBenchmarkRun,
   completeBenchmarkRun,
@@ -81,8 +82,83 @@ const BENCHMARK_SETTINGS_ALLOW_BASE = [
   "mcp__knowledge__get_notion_page",
   "mcp__knowledge__list_collections",
   "mcp__knowledge__get_graph_node",
-  "WebFetch",
 ] as const;
+
+/**
+ * Tools the benchmark spawn must NOT have access to. Two layers of defense:
+ *
+ * 1. Passed to `claude --disallowedTools` at spawn time (hard CLI-level deny)
+ * 2. Mirrored into the scratch `.claude/settings.json` deny list (belt-and-
+ *    suspenders for any code path that bypasses --disallowedTools)
+ *
+ * The post-cell trace audit (`auditCellForLeaks`) is the canary that fires if
+ * either layer is bypassed by Claude CLI version drift or a new harness tool.
+ *
+ * See `benchmarks/known-bugs.md` Bug 11 for the incident this list mitigates.
+ */
+const BENCHMARK_DISALLOWED_TOOLS = [
+  // File / shell access — could read prod-HEAD code instead of the worktree
+  "Bash", "BashOutput", "KillBash", "Read", "Write", "Edit", "MultiEdit",
+  "Glob", "Grep", "NotebookEdit",
+  // Agent-loop tools — can spawn sub-agents with their own (unrestricted) toolset
+  "Agent", "Skill", "Task", "ToolSearch", "Monitor",
+  // Task list — leaks state into the parent runner's task tracker
+  "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
+  // Out-of-process IO that defeats reproducibility
+  "WebFetch", "WebSearch", "ScheduleWakeup", "ExitPlanMode",
+  "EnterWorktree", "ExitWorktree",
+  "CronCreate", "CronDelete", "CronList", "RemoteTrigger",
+] as const;
+
+/**
+ * Span names that, if seen as children of a benchmark cell's `claude` span,
+ * indicate Bug 11 leakage. Includes the global MCP servers known to be on
+ * developer machines (jetbrains, claude-hivemind) plus all built-in tool
+ * names from BENCHMARK_DISALLOWED_TOOLS.
+ */
+const BENCHMARK_FORBIDDEN_SPAN_NAMES: ReadonlySet<string> = new Set([
+  ...BENCHMARK_DISALLOWED_TOOLS,
+]);
+const BENCHMARK_FORBIDDEN_SPAN_PATTERNS: RegExp[] = [
+  /\(jetbrains\)$/,
+  /\(claude-hivemind\)$/,
+];
+
+function buildBenchmarkSpawnArgs(): string[] {
+  return [
+    "--strict-mcp-config",
+    "--disallowedTools",
+    BENCHMARK_DISALLOWED_TOOLS.join(" "),
+  ];
+}
+
+/** Pure helper: check a list of span names for benchmark leakage. */
+export function findLeakedSpans(spanNames: string[]): string[] {
+  const leaked: string[] = [];
+  for (const name of spanNames) {
+    if (BENCHMARK_FORBIDDEN_SPAN_NAMES.has(name)) {
+      leaked.push(name);
+      continue;
+    }
+    if (BENCHMARK_FORBIDDEN_SPAN_PATTERNS.some((re) => re.test(name))) {
+      leaked.push(name);
+    }
+  }
+  return leaked;
+}
+
+/**
+ * Query the trace store for any spans under `traceId` whose name matches
+ * the Bug 11 forbidden set. Returns the unique forbidden names found
+ * (empty when the cell is clean).
+ */
+async function auditCellForLeaks(traceId: string): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql<Array<{ name: string }>>`
+    SELECT DISTINCT name FROM traces WHERE trace_id = ${traceId}
+  `;
+  return findLeakedSpans(rows.map((r) => r.name));
+}
 
 export interface RunCellOptions {
   issueKey: string;
@@ -480,6 +556,54 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
     },
   );
 
+  // Step 5a — Bug 11 isolation audit. Query the trace for any tool spans that
+  // shouldn't have been reachable from this cell; fail loud if found, before
+  // the judge wastes tokens scoring contaminated output.
+  const leakedTools = await auditCellForLeaks(analysisTraceId);
+  if (leakedTools.length > 0) {
+    const summary = `Bug 11 leak detected — forbidden tools called from benchmark cell: ${leakedTools.join(", ")}`;
+    log.error("{summary} (trace {traceId})", {
+      botName: "benchmarks",
+      summary,
+      traceId: analysisTraceId,
+    });
+    if (benchmarkRunId) {
+      await completeBenchmarkRun(benchmarkRunId, {
+        finishedAt: new Date(),
+        status: "error",
+        error: summary,
+        reportMd: reportText,
+        toolCalls: result.toolCalls ?? null,
+        tokens: {
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          contextTokens: result.contextTokens,
+          costUsd: result.costUsd,
+          model: result.model,
+          durationMs: result.durationMs,
+        },
+        modelSnapshotId: result.model,
+      }).catch(() => {});
+    }
+    return {
+      runIndex,
+      benchmarkRunId,
+      analysisTraceId,
+      judgeTraceId: null,
+      candidatePath,
+      hitRate: null,
+      highlightedRate: null,
+      costUsd: result.costUsd,
+      durationMs: result.durationMs,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      model: result.model,
+      toolCallCount: result.toolCalls?.length ?? 0,
+      status: "error",
+      error: summary,
+    };
+  }
+
   // Step 5b — judge (skipped on dry-run)
   let judgeTraceId: string | null = null;
   let hitRate: number | null = null;
@@ -598,12 +722,16 @@ function applyTreatmentOverlay(
   const prompts = jiraPromptOverride
     ? { ...base.prompts, jiraAnalysis: jiraPromptOverride }
     : base.prompts;
+  // spawnArgs only flow through to the claude-cli executor; copilot-sdk
+  // and openai-compat ignore them. Setting unconditionally is safe — the
+  // benchmark isolation requirement is the same for every connector.
   return {
     ...base,
     dir: scratchDir,
     connector: treatment.connector as ConnectorType,
     model: treatment.model,
     prompts,
+    spawnArgs: buildBenchmarkSpawnArgs(),
   };
 }
 

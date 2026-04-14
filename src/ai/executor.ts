@@ -45,6 +45,12 @@ export async function executeClaudePrompt(
     args.push("--system-prompt", systemPrompt);
   }
 
+  // Caller-supplied extra args (e.g. benchmark runner adds --strict-mcp-config
+  // and --disallowedTools to fence the spawned bot off from harness/global MCPs).
+  if (botConfig.spawnArgs && botConfig.spawnArgs.length > 0) {
+    args.push(...botConfig.spawnArgs);
+  }
+
   // "--" signals end of options so prompts starting with "-" aren't parsed as flags
   args.push("--", prompt);
 
