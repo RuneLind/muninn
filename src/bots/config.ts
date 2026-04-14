@@ -57,6 +57,13 @@ export interface BotConfig {
   showWaterfall?: boolean;
   /** Configurable prompts for research flows */
   prompts?: BotPrompts;
+  /**
+   * Extra CLI flags appended to the `claude` spawn (between the trailing
+   * `--system-prompt` and the `--` separator). Used by the benchmark runner
+   * to inject `--strict-mcp-config` and `--disallowedTools` for cell
+   * isolation. Prod bots leave this unset.
+   */
+  spawnArgs?: string[];
 }
 
 export interface BotPrompts {
