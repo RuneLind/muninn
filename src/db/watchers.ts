@@ -172,7 +172,7 @@ function mapRow(r: Record<string, any>): Watcher {
     botName: r.bot_name ?? "jarvis",
     name: r.name,
     type: r.type as WatcherType,
-    config: typeof r.config === "string" ? JSON.parse(r.config) : r.config ?? {},
+    config: r.config ?? {},
     intervalMs: r.interval_ms,
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
