@@ -247,8 +247,16 @@ async function fetchFromCollection(
   const ranked = compacted.slice(0, topN);
   const texts = ranked.map((r) => r.text);
 
-  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking", {
-    botName, total: docs.length, recent: recentDocs.length, newCount: newDocs.length, fetched: compacted.length, ranked: ranked.length,
+  // Always emit the top score alongside counts so silent runs (minScore / quietMode)
+  // still leave a breadcrumb the user can use to calibrate the gate from log history.
+  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking, topScore={topScore}", {
+    botName,
+    total: docs.length,
+    recent: recentDocs.length,
+    newCount: newDocs.length,
+    fetched: compacted.length,
+    ranked: ranked.length,
+    topScore: compacted[0]?.rankScore.toFixed(3) ?? "n/a",
   });
 
   return { texts, trackingIds, topScore: compacted[0]?.rankScore };
