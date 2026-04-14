@@ -18,15 +18,18 @@ export interface CellContextInput {
   botName: string;
 }
 
-export interface CellContext {
+export interface CellIdentity {
   userId: string;
   threadId: string;
+}
+
+export interface CellContext extends CellIdentity {
   tracer: Tracer;
 }
 
-export async function ensureCellContext(
+export async function ensureCellIdentity(
   input: CellContextInput,
-): Promise<CellContext> {
+): Promise<CellIdentity> {
   // Unique per cell so the prompt builder can never pull a prior cell's
   // bot response out of <conversation_history>. Timestamp + runIndex makes
   // collisions impossible; the issue key makes the messages table greppable.
@@ -34,22 +37,25 @@ export async function ensureCellContext(
 
   await ensureUser({ id: userId, username: userId, platform: "web" });
   const thread = await createThread(userId, input.botName, "main");
-  const tracer = new Tracer("benchmark_analysis", {
-    botName: input.botName,
+
+  log.info("cell identity ready — userId={userId} threadId={threadId}", {
+    botName: "benchmarks",
     userId,
-    username: userId,
-    platform: "web",
+    threadId: thread.id,
   });
 
-  log.info(
-    "cell context ready — userId={userId} threadId={threadId} traceId={traceId}",
-    {
-      botName: "benchmarks",
-      userId,
-      threadId: thread.id,
-      traceId: tracer.traceId,
-    },
-  );
+  return { userId, threadId: thread.id };
+}
 
-  return { userId, threadId: thread.id, tracer };
+export async function ensureCellContext(
+  input: CellContextInput,
+): Promise<CellContext> {
+  const identity = await ensureCellIdentity(input);
+  const tracer = new Tracer("benchmark_analysis", {
+    botName: input.botName,
+    userId: identity.userId,
+    username: identity.userId,
+    platform: "web",
+  });
+  return { ...identity, tracer };
 }

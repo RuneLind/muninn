@@ -34,7 +34,7 @@ import {
   type BenchmarkTreatment,
   type BenchmarkStackConfig,
 } from "../db/benchmark-runs.ts";
-import { ensureCellContext } from "./cell-context.ts";
+import { ensureCellContext, ensureCellIdentity } from "./cell-context.ts";
 import { Tracer } from "../tracing/index.ts";
 import { runJudge, stripReportFrontmatter } from "./judge.ts";
 import { loadManifestByKey } from "./manifest.ts";
@@ -176,11 +176,13 @@ export interface RunCellOptions {
   messageOverride?: string;
   /** Path to the judge prompt — defaults to highest vN.md in benchmarks/judge-prompts/ */
   judgePromptPath?: string;
-  /** Reuse an existing userId/threadId instead of creating a fresh cell context.
-   *  Used by runCellMultiPass so sequential passes share a conversation. */
+  /** @internal — reuse an existing userId/threadId instead of creating a fresh
+   *  cell context. Used by runCellMultiPass so sequential passes share a
+   *  conversation. Public callers should leave this undefined. */
   preBuiltContext?: { userId: string; threadId: string };
-  /** Skip the judge step even if not a dry-run. Used by runCellMultiPass so
-   *  the judge runs once per cell on the concatenated candidate, not per pass. */
+  /** @internal — skip the judge step even if not a dry-run. Used by
+   *  runCellMultiPass so the judge runs once per cell on the concatenated
+   *  candidate, not per pass. Public callers should leave this undefined. */
   skipJudge?: boolean;
 }
 
@@ -1100,33 +1102,22 @@ export async function runCellMultiPass(
   }
 
   const baseBotName = opts.baseBotName ?? "melosys";
-  // Create one cell context that all passes share. We use a dummy runIndex
-  // of 0 here — the per-pass effective runIndex is encoded in the run
-  // directory names below.
-  const sharedContext = await ensureCellContext({
+  // Each pass makes its own Tracer against this shared identity, so the
+  // Bug-11 audit runs per-trace. Shared userId/threadId is what lets pass N
+  // see passes 1..N-1 in <conversation_history>.
+  const sharedIdentity = await ensureCellIdentity({
     issueKey: opts.issueKey,
     runIndex: 0,
     botName: baseBotName,
   });
-  // ensureCellContext's Tracer is unused (each pass makes its own). Finish
-  // it with a no-op status so the span store doesn't leak a perpetually-open
-  // "benchmark_analysis" trace.
-  try {
-    sharedContext.tracer.finish("ok", {
-      note: "multi-pass cell — per-pass tracers own the real spans",
-      issueKey: opts.issueKey,
-    });
-  } catch {
-    // ignore
-  }
 
   log.info(
     "Multi-pass cell: {issue} userId={userId} threadId={threadId} passes={n}",
     {
       botName: "benchmarks",
       issue: opts.issueKey,
-      userId: sharedContext.userId,
-      threadId: sharedContext.threadId,
+      userId: sharedIdentity.userId,
+      threadId: sharedIdentity.threadId,
       n: opts.passes.length,
     },
   );
@@ -1180,10 +1171,7 @@ export async function runCellMultiPass(
       dryRun: opts.dryRun,
       messageOverride: spec.messageOverride,
       judgePromptPath: opts.judgePromptPath,
-      preBuiltContext: {
-        userId: sharedContext.userId,
-        threadId: sharedContext.threadId,
-      },
+      preBuiltContext: sharedIdentity,
       // Judge runs once at the end on the combined candidate; per-pass
       // runs are marked `done` without judge data.
       skipJudge: true,
@@ -1211,8 +1199,6 @@ export async function runCellMultiPass(
     }
   }
 
-  // Build the combined candidate — one section per pass, in order. The
-  // judge sees this as a single analysis split into labeled sections.
   const combinedCandidateDir = resolve(
     import.meta.dir,
     "../../benchmarks/runs",
@@ -1260,14 +1246,14 @@ export async function runCellMultiPass(
     "---",
     "",
   ].join("\n");
-  await writeFile(combinedCandidatePath, frontmatter + sections.join("\n\n---\n\n") + "\n", "utf8");
+  const combinedText = frontmatter + sections.join("\n\n---\n\n") + "\n";
+  await writeFile(combinedCandidatePath, combinedText, "utf8");
 
   log.info("Multi-pass: combined candidate written to {path}", {
     botName: "benchmarks",
     path: combinedCandidatePath,
   });
 
-  // Bail early if any pass errored or we're in dry-run — no judge call.
   const anyPassError = passResults.some((p) => p.run.status === "error");
   if (opts.dryRun || anyPassError || passResults.length === 0) {
     return {
@@ -1282,9 +1268,6 @@ export async function runCellMultiPass(
     };
   }
 
-  // Run the judge once on the combined candidate. Write its result back to
-  // the last pass's benchmark_runs row so the dashboard has a single row
-  // that shows the aggregate hit/highlighted for this multi-pass cell.
   const manifest = await loadManifestByKey(opts.issueKey);
   const judgePromptPath = opts.judgePromptPath ?? defaultJudgePromptPath();
   let hitRate: number | null = null;
@@ -1303,9 +1286,6 @@ export async function runCellMultiPass(
     highlightedRate = judgeResult.result.stats.highlightedRate;
 
     if (judgeTargetRunId && lastPass) {
-      // Re-read the last pass's candidate text so we persist the actual
-      // combined candidate on the row, not the pass-only one.
-      const combinedText = await readFile(combinedCandidatePath, "utf8");
       await completeBenchmarkRun(judgeTargetRunId, {
         finishedAt: new Date(),
         status: "done",
@@ -1327,6 +1307,17 @@ export async function runCellMultiPass(
       botName: "benchmarks",
       err: judgeError,
     });
+    if (judgeTargetRunId) {
+      // Last pass's row was already marked status=done by its own runOneCell
+      // (skipJudge=true branch). Overwrite with status=error so the row
+      // reflects reality — we produced a candidate but couldn't score it.
+      await completeBenchmarkRun(judgeTargetRunId, {
+        finishedAt: new Date(),
+        status: "error",
+        error: `multi-pass judge failed: ${judgeError}`,
+        reportMd: combinedText,
+      }).catch(() => {});
+    }
   }
 
   return {
