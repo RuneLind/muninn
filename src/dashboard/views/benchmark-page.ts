@@ -1,6 +1,11 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import type { BenchmarkRunRow } from "../../db/benchmark-runs.ts";
 import type { GoldClaim } from "../../benchmarks/types.ts";
+import type { LiveJob } from "../../benchmarks/live-job.ts";
+import type {
+  DiscoveredIssue,
+  DiscoveredTreatment,
+} from "../../benchmarks/treatment-discovery.ts";
 
 // Server-side HTML escape — null-safe, handles &<>"'
 function esc(str: unknown): string {
@@ -412,6 +417,207 @@ const STYLES = `
     font-weight: 400;
     font-style: italic;
   }
+
+  /* Run form */
+  .run-form {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 10px;
+    align-items: end;
+  }
+  .run-form .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .run-form label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .run-form select {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-secondary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 7px 10px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+  }
+  .run-form button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .run-form button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-form .hint {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  /* Live view */
+  .live-header {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+  }
+  .live-header h1 {
+    font-size: 20px;
+    color: var(--text-primary);
+    margin: 0 0 8px;
+  }
+  .live-header .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  .live-status {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-left: 8px;
+  }
+  .live-status.pending { background: var(--tint-info); color: var(--status-info); }
+  .live-status.running { background: var(--tint-warning); color: var(--status-warning); }
+  .live-status.done { background: var(--tint-success); color: var(--status-success); }
+  .live-status.error { background: var(--tint-error); color: var(--status-error); }
+
+  .live-metrics {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin-top: 14px;
+  }
+  .live-metrics .metric {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .live-metrics .metric .label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .live-metrics .metric .value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+  }
+
+  .live-waterfall {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .live-waterfall h2 {
+    font-size: 13px;
+    color: var(--text-primary);
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .lw-bars { position: relative; }
+  .lw-row {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    align-items: center;
+    height: 24px;
+    gap: 12px;
+  }
+  .lw-label {
+    font-size: 11px;
+    color: var(--text-soft);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .lw-bar-track {
+    position: relative;
+    height: 14px;
+    background: color-mix(in srgb, white 3%, transparent);
+    border-radius: 3px;
+  }
+  .lw-bar {
+    position: absolute;
+    height: 100%;
+    border-radius: 3px;
+    min-width: 2px;
+    background: var(--accent);
+  }
+  .lw-bar.kind-tool { background: var(--status-info); }
+  .lw-bar.kind-event { background: var(--text-faint); }
+  .lw-bar.status-error { background: var(--status-error); }
+  .lw-bar.running { background: repeating-linear-gradient(45deg, var(--accent) 0 6px, color-mix(in srgb, var(--accent) 60%, transparent) 6px 12px); }
+  .lw-duration {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: rgba(255,255,255,0.9);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .lw-empty {
+    text-align: center;
+    padding: 30px 10px;
+    color: var(--text-faint);
+    font-size: 12px;
+  }
+
+  .live-logs {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }
+  .live-logs h2 {
+    font-size: 13px;
+    color: var(--text-primary);
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .live-logs pre {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    margin: 0;
+  }
+  .live-logs pre .stderr { color: var(--status-error); }
 `;
 
 function rateClass(rate: number | null): string {
@@ -463,7 +669,11 @@ function fmtTime(epochMs: number): string {
   });
 }
 
-export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
+export function renderBenchmarkListPage(
+  runs: BenchmarkRunRow[],
+  issues: DiscoveredIssue[] = [],
+  treatments: DiscoveredTreatment[] = [],
+): string {
   // Hide the highlighted column when *every* visible run has
   // highlighted_total < 3. If any run has enough highlighted claims to be
   // a real rate, keep the column on for consistency.
@@ -524,6 +734,27 @@ export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
         </tbody>
       </table>`;
 
+  const runFormHtml = issues.length > 0 && treatments.length > 0
+    ? `<form class="run-form" onsubmit="return startRunCell(event)">
+        <div class="field">
+          <label>Issue</label>
+          <select id="run-issue">
+            ${issues.map((i) => `<option value="${esc(i.issueKey)}">${esc(i.issueKey)} — ${esc(i.title.slice(0, 60))}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Treatment</label>
+          <select id="run-treatment">
+            ${treatments.map((t) => `<option value="${esc(t.path)}" data-label="${esc(t.label)}">${esc(t.label)}</option>`).join("")}
+          </select>
+        </div>
+        <button type="submit">Run cell (live)</button>
+        <div class="hint">Spawns run-cell.ts as a subprocess with a pre-allocated analysis trace ID and redirects to the live waterfall. Reuses whichever MCP instances the treatment needs.</div>
+      </form>`
+    : `<div class="run-form" style="display:block; color: var(--text-faint); font-size: 12px;">
+        No issues or treatments discovered in <code>benchmarks/issues</code> and <code>benchmarks/treatments</code>.
+      </div>`;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -539,11 +770,43 @@ export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
       <h1>Jira Analysis Benchmark</h1>
       <p>How much of each issue's reviewed analysis does muninn's first-pass capture?</p>
     </div>
+    ${runFormHtml}
     ${rowsHtml}
   </div>
+  <script>${RUN_FORM_SCRIPT}</script>
 </body>
 </html>`;
 }
+
+const RUN_FORM_SCRIPT = `
+async function startRunCell(ev) {
+  ev.preventDefault();
+  const issue = document.getElementById('run-issue').value;
+  const treatmentEl = document.getElementById('run-treatment');
+  const treatmentPath = treatmentEl.value;
+  const button = ev.target.querySelector('button');
+  button.disabled = true;
+  button.textContent = 'Starting…';
+  try {
+    const res = await fetch('/api/benchmark/cells', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ issueKey: issue, treatmentPath }),
+    });
+    if (res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ('HTTP ' + res.status));
+    }
+    const data = await res.json();
+    window.location = '/benchmark/run-live/' + data.traceId;
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'Run cell (live)';
+    alert('Failed to start cell: ' + err.message);
+  }
+  return false;
+}
+`;
 
 /** Subset of the in-memory re-judge job state the route handler passes in. */
 export interface RejudgeJobSnapshot {
@@ -864,3 +1127,193 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 `;
+
+export function renderBenchmarkRunLivePage(job: LiveJob): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muninn — Live cell — ${esc(job.issueKey)}</title>
+  <style>${STYLES}</style>
+</head>
+<body>
+  ${renderNav("benchmark")}
+  <div class="bench-container">
+    <a href="/benchmark" class="back-link">← All runs</a>
+
+    <div class="live-header">
+      <h1>
+        ${esc(job.issueKey)} · ${esc(job.treatmentLabel)}
+        <span class="live-status ${esc(job.status)}" data-live-status>${esc(job.status)}</span>
+      </h1>
+      <p class="subtitle">
+        trace ${esc(job.traceId)} ·
+        started ${fmtTime(job.startedAt)} ·
+        <a href="/benchmark/run-live/${esc(job.traceId)}/kill" onclick="return killLive(event, '${esc(job.traceId)}')" style="color: var(--status-error);">Kill</a>
+      </p>
+      <div class="live-metrics">
+        <div class="metric"><div class="label">Elapsed</div><div class="value" data-metric-elapsed>0s</div></div>
+        <div class="metric"><div class="label">Spans</div><div class="value" data-metric-spans>0</div></div>
+        <div class="metric"><div class="label">Tool calls</div><div class="value" data-metric-tools>0</div></div>
+        <div class="metric"><div class="label">Tokens (in/out)</div><div class="value" data-metric-tokens>—</div></div>
+        <div class="metric"><div class="label">Exit</div><div class="value" data-metric-exit>—</div></div>
+      </div>
+    </div>
+
+    <div class="live-waterfall">
+      <h2>Analysis trace (polling every 2s)</h2>
+      <div class="lw-bars" id="lwBars"><div class="lw-empty">Waiting for first span…</div></div>
+    </div>
+
+    <div class="live-logs">
+      <h2>Subprocess log (tail)</h2>
+      <pre id="liveLogs"><span style="color: var(--text-faint);">(no output yet)</span></pre>
+    </div>
+  </div>
+
+  <script>
+    const TRACE_ID = ${JSON.stringify(job.traceId)};
+    const STARTED_AT = ${job.startedAt};
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+    function fmtDur(ms) {
+      if (ms == null) return '—';
+      if (ms < 1000) return ms + 'ms';
+      if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+      const m = Math.floor(ms/60000);
+      const s = Math.round((ms%60000)/1000);
+      return m + 'm' + (s < 10 ? '0'+s : s) + 's';
+    }
+
+    let latestJob = null;
+    let latestSpans = [];
+    let stopped = false;
+
+    function nestingDepth(s, byId) {
+      let d = 0, cur = s;
+      while (cur.parentId && byId[cur.parentId]) { d++; cur = byId[cur.parentId]; }
+      return d;
+    }
+
+    function renderBars(spans) {
+      const el = document.getElementById('lwBars');
+      if (!spans || spans.length === 0) {
+        el.innerHTML = '<div class="lw-empty">Waiting for first span…</div>';
+        return;
+      }
+      const byId = {};
+      spans.forEach(s => { byId[s.id] = s; });
+
+      const now = Date.now();
+      const starts = spans.map(s => s.startedAt);
+      const ends = spans.map(s => s.startedAt + (s.durationMs ?? (now - s.startedAt)));
+      const minT = Math.min(...starts);
+      const maxT = Math.max(...ends);
+      const range = Math.max(maxT - minT, 1);
+
+      el.innerHTML = spans.map(s => {
+        const isRunning = s.durationMs == null;
+        const effectiveDur = s.durationMs ?? (now - s.startedAt);
+        const left = ((s.startedAt - minT) / range) * 100;
+        const width = Math.max((effectiveDur / range) * 100, 0.5);
+        const isTool = s.attributes && (s.attributes.toolName || s.attributes.toolId);
+        const kind = isTool ? 'tool' : (s.kind || 'span');
+        const statusClass = s.status === 'error' ? ' status-error' : '';
+        const runningClass = isRunning ? ' running' : '';
+        const depth = nestingDepth(s, byId);
+        const indent = '\\u00A0\\u00A0'.repeat(depth);
+        return '<div class="lw-row">' +
+          '<div class="lw-label" title="' + esc(s.name) + '">' + indent + esc(s.name) + '</div>' +
+          '<div class="lw-bar-track">' +
+            '<div class="lw-bar kind-' + kind + statusClass + runningClass +
+            '" style="left:' + left.toFixed(2) + '%;width:' + width.toFixed(2) + '%">' +
+            '<span class="lw-duration">' + fmtDur(s.durationMs) + '</span>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
+
+    function updateMetrics() {
+      const job = latestJob;
+      const spans = latestSpans;
+      document.querySelector('[data-metric-spans]').textContent = spans.length;
+      const toolCount = spans.filter(s => s.attributes && (s.attributes.toolName || s.attributes.toolId)).length;
+      document.querySelector('[data-metric-tools]').textContent = toolCount;
+
+      const now = (job && job.finishedAt) ? job.finishedAt : Date.now();
+      const elapsed = now - STARTED_AT;
+      document.querySelector('[data-metric-elapsed]').textContent = fmtDur(elapsed);
+
+      const root = spans.find(s => !s.parentId);
+      if (root && root.attributes) {
+        const inT = root.attributes.inputTokens;
+        const outT = root.attributes.outputTokens;
+        if (inT != null || outT != null) {
+          document.querySelector('[data-metric-tokens]').textContent =
+            (inT?.toLocaleString() ?? '—') + ' / ' + (outT?.toLocaleString() ?? '—');
+        }
+      }
+      if (job) {
+        document.querySelector('[data-live-status]').textContent = job.status;
+        document.querySelector('[data-live-status]').className = 'live-status ' + job.status;
+        if (job.exitCode != null) {
+          document.querySelector('[data-metric-exit]').textContent = String(job.exitCode);
+        }
+      }
+    }
+
+    function renderLogs(logTail) {
+      const el = document.getElementById('liveLogs');
+      if (!logTail || logTail.length === 0) return;
+      const html = logTail.map(l =>
+        l.stream === 'stderr'
+          ? '<span class="stderr">' + esc(l.line) + '</span>'
+          : esc(l.line)
+      ).join('\\n');
+      el.innerHTML = html;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function tick() {
+      if (stopped) return;
+      try {
+        const res = await fetch('/api/benchmark/cells/live/' + TRACE_ID);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        latestJob = data.job;
+        latestSpans = data.spans || [];
+        renderBars(latestSpans);
+        renderLogs(latestJob.logTail);
+        updateMetrics();
+        if (latestJob.status === 'done' || latestJob.status === 'error') {
+          stopped = true;
+          return;
+        }
+      } catch (err) {
+        console.warn('poll failed', err);
+      }
+      setTimeout(tick, 2000);
+    }
+
+    async function killLive(ev, traceId) {
+      ev.preventDefault();
+      if (!confirm('Kill this benchmark cell?')) return false;
+      try {
+        await fetch('/api/benchmark/cells/live/' + traceId + '/kill', { method: 'POST' });
+      } catch (e) { console.error(e); }
+      return false;
+    }
+
+    tick();
+    // Update elapsed every second even without a poll tick, so the counter looks alive.
+    setInterval(() => { if (!stopped) updateMetrics(); }, 1000);
+  </script>
+</body>
+</html>`;
+}

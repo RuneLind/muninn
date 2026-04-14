@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { resolve } from "node:path";
 import { getLog } from "../../logging.ts";
 import {
   listBenchmarkRuns,
@@ -6,9 +7,16 @@ import {
   listRejudgeChildren,
 } from "../../db/benchmark-runs.ts";
 import { rejudgeCandidate } from "../../benchmarks/rejudge.ts";
+import { liveJobSupervisor, pipeSubprocessLogs } from "../../benchmarks/live-job.ts";
+import {
+  discoverIssues,
+  discoverTreatments,
+} from "../../benchmarks/treatment-discovery.ts";
+import { getTrace } from "../../db/traces.ts";
 import {
   renderBenchmarkListPage,
   renderBenchmarkDetailPage,
+  renderBenchmarkRunLivePage,
 } from "../views/benchmark-page.ts";
 
 const log = getLog("dashboard", "benchmark");
@@ -26,17 +34,158 @@ interface RejudgeJobState {
 
 const activeRejudgeJobs = new Map<string, RejudgeJobState>();
 
+/**
+ * Spawn run-cell.ts as a detached subprocess with BENCHMARK_TRACE_ID set so
+ * the runner's Tracer reuses our pre-allocated UUID. The route handler
+ * returns immediately; stdout/stderr are streamed into the live-job supervisor
+ * for the UI to tail.
+ */
+async function spawnRunCellSubprocess(
+  traceId: string,
+  issueKey: string,
+  treatmentPath: string,
+): Promise<void> {
+  const muninnRoot = resolve(import.meta.dir, "../../..");
+  const proc = Bun.spawn(
+    [
+      "bun",
+      "run",
+      "benchmarks/scripts/run-cell.ts",
+      issueKey,
+      treatmentPath,
+      "--n-runs",
+      "1",
+    ],
+    {
+      cwd: muninnRoot,
+      env: {
+        ...process.env,
+        BENCHMARK_TRACE_ID: traceId,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    },
+  );
+
+  liveJobSupervisor.markRunning(traceId, proc);
+  log.info("Spawned live run-cell.ts pid={pid} trace={traceId}", {
+    traceId,
+    pid: proc.pid,
+    issueKey,
+    treatmentPath,
+  });
+
+  // Pipe logs in the background; don't await — let the caller return the 202
+  // immediately. proc.exited is awaited separately to record the final state.
+  void pipeSubprocessLogs(traceId, proc.stdout, "stdout");
+  void pipeSubprocessLogs(traceId, proc.stderr, "stderr");
+  void (async () => {
+    try {
+      const exitCode = await proc.exited;
+      liveJobSupervisor.markDone(traceId, exitCode);
+      log.info("Live run-cell.ts finished trace={traceId} exit={exitCode}", {
+        traceId,
+        exitCode,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      liveJobSupervisor.markError(traceId, msg);
+      log.error("Live run-cell.ts errored trace={traceId}: {error}", {
+        traceId,
+        error: msg,
+      });
+    }
+  })();
+}
+
 export function registerBenchmarkRoutes(app: Hono): void {
   app.get("/benchmark", async (c) => {
     try {
-      const runs = await listBenchmarkRuns(50);
-      return c.html(renderBenchmarkListPage(runs));
+      const [runs, issues, treatments] = await Promise.all([
+        listBenchmarkRuns(50),
+        discoverIssues().catch(() => []),
+        discoverTreatments().catch(() => []),
+      ]);
+      return c.html(renderBenchmarkListPage(runs, issues, treatments));
     } catch (err) {
       log.error("Failed to render benchmark list: {error}", {
         error: err instanceof Error ? err.message : String(err),
       });
       return c.html("Failed to load benchmark runs", 500);
     }
+  });
+
+  app.get("/benchmark/run-live/:traceId", async (c) => {
+    const traceId = c.req.param("traceId");
+    const job = liveJobSupervisor.get(traceId);
+    if (!job) return c.html("Live job not found (or evicted after 10 min)", 404);
+    return c.html(renderBenchmarkRunLivePage(job));
+  });
+
+  app.post("/api/benchmark/cells", async (c) => {
+    let body: { issueKey?: string; treatmentPath?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const { issueKey, treatmentPath } = body;
+    if (!issueKey || !treatmentPath) {
+      return c.json(
+        { error: "Missing required fields: issueKey, treatmentPath" },
+        400,
+      );
+    }
+
+    const resolvedTreatment = resolve(treatmentPath);
+    const muninnRoot = resolve(import.meta.dir, "../../..");
+    const treatmentsDir = resolve(muninnRoot, "benchmarks/treatments");
+    if (!resolvedTreatment.startsWith(treatmentsDir)) {
+      return c.json(
+        { error: "treatmentPath must resolve under benchmarks/treatments/" },
+        400,
+      );
+    }
+
+    const treatmentLabel = resolvedTreatment
+      .slice(treatmentsDir.length + 1)
+      .replace(/\.json$/, "");
+    const traceId = crypto.randomUUID();
+    liveJobSupervisor.register(traceId, issueKey, resolvedTreatment, treatmentLabel);
+
+    try {
+      await spawnRunCellSubprocess(traceId, issueKey, resolvedTreatment);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      liveJobSupervisor.markError(traceId, msg);
+      return c.json({ error: `Failed to spawn: ${msg}`, traceId }, 500);
+    }
+
+    return c.json({ ok: true, traceId }, 202);
+  });
+
+  app.get("/api/benchmark/cells/live/:traceId", async (c) => {
+    const traceId = c.req.param("traceId");
+    const job = liveJobSupervisor.get(traceId);
+    if (!job) return c.json({ error: "Not found" }, 404);
+    try {
+      const spans = await getTrace(traceId);
+      return c.json({ job, spans });
+    } catch (err) {
+      log.error("Failed to fetch live job trace {traceId}: {error}", {
+        traceId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ job, spans: [], error: "trace_fetch_failed" });
+    }
+  });
+
+  app.post("/api/benchmark/cells/live/:traceId/kill", async (c) => {
+    const traceId = c.req.param("traceId");
+    const killed = liveJobSupervisor.kill(traceId);
+    if (!killed) return c.json({ error: "Job not running" }, 404);
+    return c.json({ ok: true });
   });
 
   app.get("/benchmark/runs/:id", async (c) => {

@@ -184,6 +184,14 @@ export interface RunCellOptions {
    *  runCellMultiPass so the judge runs once per cell on the concatenated
    *  candidate, not per pass. Public callers should leave this undefined. */
   skipJudge?: boolean;
+  /**
+   * Pre-allocated analysis trace ID. When set, the runner's Tracer uses this
+   * UUID instead of generating a fresh one. Used by the dashboard live-run
+   * view, which pre-allocates the trace ID before spawning the runner so the
+   * client can subscribe to spans from the moment the request lands. Only
+   * honoured for nRuns=1; for n-runs loops it's ignored past the first run.
+   */
+  preAllocatedTraceId?: string;
 }
 
 export interface RunCellResult {
@@ -229,6 +237,14 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   const baseBot = findBot(baseBotName);
   const nRuns = opts.nRuns ?? 1;
   const budget = opts.budgetUsd ?? defaultBudget();
+  // Fallback: when the caller didn't set preAllocatedTraceId but the dashboard
+  // live-run path exported BENCHMARK_TRACE_ID, honour that for nRuns=1 so the
+  // UI that spawned this process can subscribe to spans under the known UUID.
+  // Direct callers (runShakeout, runCellMultiPass) pass their own options and
+  // aren't affected by this fallback.
+  const preAllocatedTraceId =
+    opts.preAllocatedTraceId ??
+    (nRuns === 1 ? process.env.BENCHMARK_TRACE_ID : undefined);
 
   log.info(
     "Starting cell: issue={issue} treatment={treatment} nRuns={nRuns} budget=${budget}",
@@ -332,6 +348,10 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
         judgePromptPath: opts.judgePromptPath,
         preBuiltContext: opts.preBuiltContext,
         skipJudge: opts.skipJudge,
+        // Only honour the pre-allocated trace ID on the first run — subsequent
+        // runs in the same n-runs loop need fresh trace IDs, and the live view
+        // only supports nRuns=1 anyway.
+        preAllocatedTraceId: i === 0 ? preAllocatedTraceId : undefined,
       });
       runs.push(run);
       totalCost += run.costUsd;
@@ -395,6 +415,9 @@ interface RunOneCellArgs {
    *  runCellMultiPass so the judge runs once on the concatenated candidate,
    *  not per pass. */
   skipJudge?: boolean;
+  /** When set, the fresh Tracer uses this UUID instead of generating one.
+   *  See RunCellOptions.preAllocatedTraceId for rationale. */
+  preAllocatedTraceId?: string;
 }
 
 async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
@@ -424,12 +447,14 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
       userId: cellUserId,
       username: cellUserId,
       platform: "web",
+      traceId: args.preAllocatedTraceId,
     });
   } else {
     const ctx = await ensureCellContext({
       issueKey: manifest.issueKey,
       runIndex,
       botName: effectiveBot.name,
+      preAllocatedTraceId: args.preAllocatedTraceId,
     });
     cellUserId = ctx.userId;
     cellThreadId = ctx.threadId;
