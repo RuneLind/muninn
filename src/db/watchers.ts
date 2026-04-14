@@ -150,7 +150,7 @@ export async function updateWatcher(
     cols.push("last_run_at");
   }
   if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
-  if (data.config !== undefined) { updateObj.config = JSON.stringify(data.config); cols.push("config"); }
+  if (data.config !== undefined) { updateObj.config = data.config; cols.push("config"); }
 
   if (cols.length === 0) {
     const [row] = await sql`SELECT * FROM watchers WHERE id = ${id}`;
@@ -172,7 +172,7 @@ function mapRow(r: Record<string, any>): Watcher {
     botName: r.bot_name ?? "jarvis",
     name: r.name,
     type: r.type as WatcherType,
-    config: typeof r.config === "string" ? JSON.parse(r.config) : r.config ?? {},
+    config: r.config ?? {},
     intervalMs: r.interval_ms,
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
