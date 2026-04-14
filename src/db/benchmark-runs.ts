@@ -69,6 +69,13 @@ export interface BenchmarkRunRow {
   tokens: BenchmarkTokens | null;
   modelSnapshotId: string | null;
   stackConfig: BenchmarkStackConfig | null;
+  /**
+   * Parent run this row is a re-judge of. Null for top-level analysis rows.
+   * Re-judge rows share the parent's candidate + gold; only the judge call
+   * (and its verdict) is new. The dashboard list view hides rows with a
+   * non-null parent by default — they surface on the parent's detail page.
+   */
+  parentRunId: string | null;
   createdAt: number;
 }
 
@@ -89,6 +96,8 @@ export interface SaveBenchmarkRunParams {
   fullPrompt?: string | null;
   fullPromptHash?: string | null;
   stackConfig?: BenchmarkStackConfig | null;
+  /** Set when this row is a re-judge pass of an existing parent run. */
+  parentRunId?: string | null;
 }
 
 export interface CompleteBenchmarkRunParams {
@@ -112,7 +121,7 @@ export async function saveBenchmarkRun(params: SaveBenchmarkRunParams): Promise<
     INSERT INTO benchmark_runs (
       issue_key, candidate_path, gold_path, gold_content_hash,
       judge_prompt_version, judge_model, trace_id, analysis_trace_id, started_at, status,
-      treatment, prompt_id, full_prompt, full_prompt_hash, stack_config
+      treatment, prompt_id, full_prompt, full_prompt_hash, stack_config, parent_run_id
     ) VALUES (
       ${params.issueKey},
       ${params.candidatePath},
@@ -128,7 +137,8 @@ export async function saveBenchmarkRun(params: SaveBenchmarkRunParams): Promise<
       ${params.promptId ?? null},
       ${params.fullPrompt ?? null},
       ${params.fullPromptHash ?? null},
-      ${params.stackConfig ? sql.json(params.stackConfig as never) : null}
+      ${params.stackConfig ? sql.json(params.stackConfig as never) : null},
+      ${params.parentRunId ?? null}
     )
     RETURNING id
   `;
@@ -202,6 +212,7 @@ interface RawRow {
   tokens: BenchmarkTokens | null;
   model_snapshot_id: string | null;
   stack_config: BenchmarkStackConfig | null;
+  parent_run_id: string | null;
   created_at: string | Date;
 }
 
@@ -242,17 +253,33 @@ function rowToBenchmarkRun(row: RawRow): BenchmarkRunRow {
     tokens: row.tokens,
     modelSnapshotId: row.model_snapshot_id,
     stackConfig: row.stack_config,
+    parentRunId: row.parent_run_id,
     createdAt: new Date(row.created_at).getTime(),
   };
 }
 
-export async function listBenchmarkRuns(limit: number = 50): Promise<BenchmarkRunRow[]> {
+/**
+ * List top-level benchmark runs. Re-judge passes (rows with
+ * parent_run_id IS NOT NULL) are hidden by default — they show up on
+ * the parent row's detail page instead.
+ */
+export async function listBenchmarkRuns(
+  limit: number = 50,
+  opts: { includeChildren?: boolean } = {},
+): Promise<BenchmarkRunRow[]> {
   const sql = getDb();
-  const rows = await sql<RawRow[]>`
-    SELECT * FROM benchmark_runs
-    ORDER BY started_at DESC
-    LIMIT ${limit}
-  `;
+  const rows = opts.includeChildren
+    ? await sql<RawRow[]>`
+        SELECT * FROM benchmark_runs
+        ORDER BY started_at DESC
+        LIMIT ${limit}
+      `
+    : await sql<RawRow[]>`
+        SELECT * FROM benchmark_runs
+        WHERE parent_run_id IS NULL
+        ORDER BY started_at DESC
+        LIMIT ${limit}
+      `;
   return rows.map(rowToBenchmarkRun);
 }
 
@@ -263,4 +290,18 @@ export async function getBenchmarkRun(id: string): Promise<BenchmarkRunRow | nul
   `;
   const first = rows[0];
   return first ? rowToBenchmarkRun(first) : null;
+}
+
+/**
+ * Return all re-judge children of a given parent run, oldest first so
+ * the dashboard can number them pass 1, pass 2, ….
+ */
+export async function listRejudgeChildren(parentRunId: string): Promise<BenchmarkRunRow[]> {
+  const sql = getDb();
+  const rows = await sql<RawRow[]>`
+    SELECT * FROM benchmark_runs
+    WHERE parent_run_id = ${parentRunId}
+    ORDER BY started_at ASC
+  `;
+  return rows.map(rowToBenchmarkRun);
 }

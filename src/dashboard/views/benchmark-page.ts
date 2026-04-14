@@ -287,6 +287,131 @@ const STYLES = `
     font-size: 13px;
   }
   .back-link:hover { text-decoration: underline; }
+
+  /* Re-judge panel */
+  .rejudge-panel {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-primary);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .rejudge-panel h2 {
+    font-size: 14px;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .rejudge-panel .subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 14px;
+  }
+  .rejudge-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .rejudge-form label {
+    font-size: 12px;
+    color: var(--text-soft);
+  }
+  .rejudge-form input[type="number"] {
+    width: 60px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border-secondary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    padding: 6px 10px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+  }
+  .rejudge-form button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .rejudge-form button:hover:not(:disabled) { background: var(--accent-light); }
+  .rejudge-form button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .rejudge-form .hint {
+    color: var(--text-faint);
+    font-size: 11px;
+    margin-left: auto;
+  }
+  .rejudge-status {
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text-soft);
+  }
+  .rejudge-status.running { color: var(--status-info); }
+  .rejudge-status.done { color: var(--status-success); }
+  .rejudge-status.error { color: var(--status-error); }
+
+  .rejudge-children {
+    margin-top: 16px;
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .rejudge-children th {
+    text-align: left;
+    padding: 8px 10px;
+    background: var(--bg-deep);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .rejudge-children td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-variant-numeric: tabular-nums;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+  .rejudge-children tr:hover td { background: var(--bg-surface); }
+  .rejudge-children .summary-row td {
+    background: var(--bg-deep);
+    font-weight: 700;
+    border-top: 2px solid var(--border-primary);
+    border-bottom: none;
+  }
+  .rejudge-children a {
+    color: var(--accent-light);
+    text-decoration: none;
+  }
+  .rejudge-children a:hover { text-decoration: underline; }
+
+  .rejudge-empty {
+    margin-top: 14px;
+    padding: 14px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 12px;
+    background: var(--bg-deep);
+    border-radius: 8px;
+  }
+
+  /* Binary flag annotation for low-sample highlighted */
+  .binary-flag-note {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 10px;
+    color: var(--text-faint);
+    font-weight: 400;
+    font-style: italic;
+  }
 `;
 
 function rateClass(rate: number | null): string {
@@ -308,6 +433,26 @@ function fmtRate(rate: number | null): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+/**
+ * Highlighted rate is only treated as a rate when the issue has >= 3
+ * highlighted claims. Below that it's a binary flag (0/1 or 1/1) that
+ * shouldn't drive ship/reject decisions — see workdoc-feedback-loop-overhaul.md.
+ */
+const HIGHLIGHTED_RATE_MIN_N = 3;
+
+function shouldSuppressHighlighted(highlightedTotal: number | null): boolean {
+  return highlightedTotal === null || highlightedTotal < HIGHLIGHTED_RATE_MIN_N;
+}
+
+/** mean/stddev for a plain number array. Stddev uses n-1 (sample). */
+function meanStddev(values: number[]): { mean: number; stddev: number } | null {
+  if (values.length === 0) return null;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  if (values.length === 1) return { mean, stddev: 0 };
+  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (values.length - 1);
+  return { mean, stddev: Math.sqrt(variance) };
+}
+
 function fmtTime(epochMs: number): string {
   return new Date(epochMs).toLocaleString("en-GB", {
     year: "numeric",
@@ -319,6 +464,13 @@ function fmtTime(epochMs: number): string {
 }
 
 export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
+  // Hide the highlighted column when *every* visible run has
+  // highlighted_total < 3. If any run has enough highlighted claims to be
+  // a real rate, keep the column on for consistency.
+  const showHighlightedCol = runs.some(
+    (r) => !shouldSuppressHighlighted(r.highlightedTotal),
+  );
+
   const rowsHtml = runs.length === 0
     ? `<div class="empty-state">
         <p>No benchmark runs yet.</p>
@@ -332,7 +484,7 @@ export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
           <tr>
             <th>Issue</th>
             <th>Hit rate</th>
-            <th>Highlighted</th>
+            ${showHighlightedCol ? "<th>Highlighted</th>" : ""}
             <th>Claims</th>
             <th>Tokens (out)</th>
             <th>Wallclock</th>
@@ -348,14 +500,19 @@ export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
               const claims = r.foundCount !== null
                 ? `${r.foundCount + (r.partialCount ?? 0)}/${(r.foundCount ?? 0) + (r.partialCount ?? 0) + (r.missingCount ?? 0)}`
                 : "—";
+              const highlightedCell = showHighlightedCol
+                ? `<td class="num"><span class="highlighted-rate ${hlClass}">${
+                    r.highlightedTotal && r.highlightedTotal > 0
+                      ? shouldSuppressHighlighted(r.highlightedTotal)
+                        ? `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
+                        : `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
+                      : "—"
+                  }</span></td>`
+                : "";
               return `<tr onclick="window.location='/benchmark/runs/${esc(r.id)}'">
                 <td><span class="issue-key">${esc(r.issueKey)}</span></td>
                 <td class="num"><span class="hit-rate ${hClass}">${fmtRate(r.hitRate)}</span></td>
-                <td class="num"><span class="highlighted-rate ${hlClass}">${
-                  r.highlightedTotal && r.highlightedTotal > 0
-                    ? `${r.highlightedFound ?? 0}/${r.highlightedTotal}`
-                    : "—"
-                }</span></td>
+                ${highlightedCell}
                 <td class="num">${claims}</td>
                 <td class="num">${r.outputTokens?.toLocaleString() ?? "—"}</td>
                 <td class="num">${r.wallclockMs ? `${(r.wallclockMs / 1000).toFixed(1)}s` : "—"}</td>
@@ -388,7 +545,22 @@ export function renderBenchmarkListPage(runs: BenchmarkRunRow[]): string {
 </html>`;
 }
 
-export function renderBenchmarkDetailPage(run: BenchmarkRunRow): string {
+/** Subset of the in-memory re-judge job state the route handler passes in. */
+export interface RejudgeJobSnapshot {
+  parentRunId: string;
+  totalPasses: number;
+  completedPasses: number;
+  startedAt: number;
+  status: "running" | "done" | "error";
+  error: string | null;
+  childRunIds: string[];
+}
+
+export function renderBenchmarkDetailPage(
+  run: BenchmarkRunRow,
+  rejudgeChildren: BenchmarkRunRow[] = [],
+  rejudgeJob: RejudgeJobSnapshot | null = null,
+): string {
   const claims = run.judgeResult?.goldClaims ?? [];
   const claimsHtml = claims
     .map((c: GoldClaim) => {
@@ -417,6 +589,15 @@ export function renderBenchmarkDetailPage(run: BenchmarkRunRow): string {
 
   const hClass = rateClass(run.hitRate);
   const hlClass = highlightedClass(run.highlightedTotal, run.highlightedRate);
+  const suppressHighlighted = shouldSuppressHighlighted(run.highlightedTotal);
+
+  // Re-judge panel: aggregates parent + all successful children into a
+  // mean ± stddev headline, lists each pass, and holds the Re-judge form.
+  const canRejudge = run.parentRunId === null && run.status === "done";
+  const isRejudgeChild = run.parentRunId !== null;
+  const rejudgePanelHtml = isRejudgeChild
+    ? renderRejudgeChildNotice(run.parentRunId!)
+    : renderRejudgePanel(run, rejudgeChildren, rejudgeJob, canRejudge);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -445,8 +626,13 @@ export function renderBenchmarkDetailPage(run: BenchmarkRunRow): string {
           <div class="value ${hClass}">${fmtRate(run.hitRate)}</div>
         </div>
         <div class="metric">
-          <div class="label">Highlighted rate</div>
-          <div class="value ${hlClass === "full" ? "high" : hlClass === "partial" ? "med" : "low"}">${
+          <div class="label">
+            Highlighted
+            ${suppressHighlighted && (run.highlightedTotal ?? 0) > 0
+              ? `<span class="binary-flag-note">binary flag — n=${run.highlightedTotal}</span>`
+              : ""}
+          </div>
+          <div class="value ${suppressHighlighted ? "" : hlClass === "full" ? "high" : hlClass === "partial" ? "med" : "low"}">${
             run.highlightedTotal && run.highlightedTotal > 0
               ? `${run.highlightedFound ?? 0}/${run.highlightedTotal}`
               : "—"
@@ -481,10 +667,200 @@ export function renderBenchmarkDetailPage(run: BenchmarkRunRow): string {
       </div>
     </div>
 
+    ${rejudgePanelHtml}
+
     <div class="claims-list">
       ${claimsHtml || '<div class="empty-state"><p>No per-claim data on this run.</p></div>'}
     </div>
   </div>
+  <script>${REJUDGE_SCRIPT}</script>
 </body>
 </html>`;
 }
+
+function renderRejudgeChildNotice(parentRunId: string): string {
+  return `<div class="rejudge-panel">
+    <h2>Re-judge pass</h2>
+    <p class="subtitle">
+      This row is a re-judge pass of
+      <a href="/benchmark/runs/${esc(parentRunId)}" style="color: var(--accent-light);">the parent run</a>.
+      Open the parent to see all passes and aggregate statistics.
+    </p>
+  </div>`;
+}
+
+function renderRejudgePanel(
+  run: BenchmarkRunRow,
+  children: BenchmarkRunRow[],
+  job: RejudgeJobSnapshot | null,
+  canRejudge: boolean,
+): string {
+  const doneChildren = children.filter((c) => c.status === "done" && c.hitRate !== null);
+  const allHits: number[] = [];
+  if (run.hitRate !== null && run.status === "done") allHits.push(run.hitRate);
+  for (const c of doneChildren) if (c.hitRate !== null) allHits.push(c.hitRate);
+  const stats = meanStddev(allHits);
+
+  const rowsHtml = children
+    .map((c, idx) => {
+      const pass = `pass ${idx + 1}`;
+      const hit = c.hitRate !== null ? fmtRate(c.hitRate) : "—";
+      const tokens = c.outputTokens?.toLocaleString() ?? "—";
+      const wall = c.wallclockMs ? `${(c.wallclockMs / 1000).toFixed(1)}s` : "—";
+      const when = fmtTime(c.startedAt);
+      const statusBadge = `<span class="status-badge ${esc(c.status)}">${esc(c.status)}</span>`;
+      const errorCell = c.error ? `<span title="${esc(c.error)}">error</span>` : "";
+      return `<tr>
+        <td>${pass}</td>
+        <td><a href="/benchmark/runs/${esc(c.id)}">${esc(c.judgePromptVersion)}</a></td>
+        <td>${hit}</td>
+        <td>${tokens}</td>
+        <td>${wall}</td>
+        <td>${when}</td>
+        <td>${statusBadge} ${errorCell}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const summaryRow = stats
+    ? `<tr class="summary-row">
+        <td colspan="2">mean ± stddev (n=${allHits.length}, parent + ${doneChildren.length} passes)</td>
+        <td>${(stats.mean * 100).toFixed(1)}% ± ${(stats.stddev * 100).toFixed(1)}pp</td>
+        <td colspan="4"></td>
+      </tr>`
+    : "";
+
+  const childrenTable =
+    children.length === 0
+      ? `<div class="rejudge-empty">
+           No re-judge passes yet. Run re-judge to smooth the ~6–7pp judge variance without re-spending analysis cost.
+         </div>`
+      : `<table class="rejudge-children">
+           <thead>
+             <tr>
+               <th>#</th>
+               <th>Prompt</th>
+               <th>Hit rate</th>
+               <th>Tokens (out)</th>
+               <th>Wall</th>
+               <th>Started</th>
+               <th>Status</th>
+             </tr>
+           </thead>
+           <tbody>
+             ${rowsHtml}
+             ${summaryRow}
+           </tbody>
+         </table>`;
+
+  let statusLine = "";
+  if (job?.status === "running") {
+    statusLine = `<div class="rejudge-status running" data-rejudge-status>
+      Running re-judge — pass ${job.completedPasses}/${job.totalPasses} (polling…)
+    </div>`;
+  } else if (job?.status === "done") {
+    statusLine = `<div class="rejudge-status done">
+      Re-judge complete — ${job.completedPasses} passes persisted.
+    </div>`;
+  } else if (job?.status === "error") {
+    statusLine = `<div class="rejudge-status error">
+      Re-judge failed: ${esc(job.error ?? "unknown error")}
+    </div>`;
+  }
+
+  const formDisabled = job?.status === "running" || !canRejudge;
+  const formHtml = canRejudge
+    ? `<form class="rejudge-form" onsubmit="return startRejudge(event, '${esc(run.id)}')">
+         <label for="rejudge-n">Passes:</label>
+         <input type="number" id="rejudge-n" min="1" max="10" value="3" ${formDisabled ? "disabled" : ""}>
+         <button type="submit" ${formDisabled ? "disabled" : ""}>
+           ${job?.status === "running" ? "Running…" : "Re-judge"}
+         </button>
+         <span class="hint">~$0.15 per pass · reuses the stored candidate · no new analysis</span>
+       </form>`
+    : run.status === "done"
+      ? ""
+      : `<p class="subtitle" style="margin-top: 4px;">Re-judge is only available for parent runs in <code>done</code> status.</p>`;
+
+  return `<div class="rejudge-panel">
+    <h2>Re-judge passes</h2>
+    <p class="subtitle">
+      Re-judging writes child rows against the stored candidate so you can smooth the ~6–7pp inter-run judge variance without re-spending analysis cost.
+    </p>
+    ${formHtml}
+    ${statusLine}
+    ${childrenTable}
+  </div>`;
+}
+
+const REJUDGE_SCRIPT = `
+async function startRejudge(ev, runId) {
+  ev.preventDefault();
+  const input = document.getElementById('rejudge-n');
+  const passes = parseInt(input.value, 10) || 3;
+  const button = ev.target.querySelector('button');
+  button.disabled = true;
+  button.textContent = 'Starting…';
+  try {
+    const res = await fetch('/api/benchmark/runs/' + runId + '/rejudge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passes })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ('HTTP ' + res.status));
+    }
+    pollRejudge(runId);
+  } catch (err) {
+    button.disabled = false;
+    button.textContent = 'Re-judge';
+    alert('Failed to start re-judge: ' + err.message);
+  }
+  return false;
+}
+
+async function pollRejudge(runId) {
+  let statusEl = document.querySelector('[data-rejudge-status]');
+  if (!statusEl) {
+    statusEl = document.createElement('div');
+    statusEl.className = 'rejudge-status running';
+    statusEl.setAttribute('data-rejudge-status', '');
+    const panel = document.querySelector('.rejudge-panel');
+    const form = panel && panel.querySelector('.rejudge-form');
+    if (form) form.insertAdjacentElement('afterend', statusEl);
+  }
+
+  const tick = async () => {
+    try {
+      const res = await fetch('/api/benchmark/runs/' + runId + '/rejudge-children');
+      if (!res.ok) return;
+      const data = await res.json();
+      const job = data.job;
+      if (!job) return;
+      if (job.status === 'running') {
+        statusEl.textContent = 'Running re-judge — pass ' + job.completedPasses + '/' + job.totalPasses + ' (polling…)';
+        setTimeout(tick, 4000);
+      } else if (job.status === 'done') {
+        statusEl.className = 'rejudge-status done';
+        statusEl.textContent = 'Re-judge complete — reloading…';
+        setTimeout(() => window.location.reload(), 800);
+      } else if (job.status === 'error') {
+        statusEl.className = 'rejudge-status error';
+        statusEl.textContent = 'Re-judge failed: ' + (job.error || 'unknown error');
+      }
+    } catch (err) {
+      setTimeout(tick, 4000);
+    }
+  };
+  tick();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const statusEl = document.querySelector('[data-rejudge-status]');
+  if (statusEl) {
+    const runIdMatch = window.location.pathname.match(/\\/benchmark\\/runs\\/([0-9a-f-]+)/);
+    if (runIdMatch) pollRejudge(runIdMatch[1]);
+  }
+});
+`;

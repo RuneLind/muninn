@@ -1,0 +1,326 @@
+/**
+ * Re-judge an existing benchmark run N times and persist each pass as a
+ * child row linked to the parent.
+ *
+ * Why this is useful: the v1 judge prompt has ~6-7pp inter-run variance,
+ * so a single cell's hit rate sits inside a noise band wider than most
+ * hypothesis deltas. Re-judging N times against the same candidate file
+ * (no new analysis, ~$0.15 per pass) collapses the variance without
+ * re-spending analysis cost. It also gives a cheap way to iterate the
+ * judge prompt — draft a new judge prompt version, re-judge every cell
+ * in the archive against it, compare against the v1 verdicts.
+ *
+ * The parent row is never mutated. Each pass becomes a new row with
+ * parent_run_id set; the list-view query hides child rows by default.
+ */
+
+import { writeFile, unlink, mkdir } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+import { getLog } from "../logging.ts";
+import { loadManifestByKey } from "./manifest.ts";
+import { runJudge } from "./judge.ts";
+import {
+  getBenchmarkRun,
+  saveBenchmarkRun,
+  completeBenchmarkRun,
+  listRejudgeChildren,
+  type BenchmarkRunRow,
+} from "../db/benchmark-runs.ts";
+
+const log = getLog("benchmarks", "rejudge");
+
+export interface RejudgeOptions {
+  /** Number of re-judge passes to run. Each pass becomes one child row. */
+  passes: number;
+  /**
+   * Path to the judge prompt file to use. When omitted, the highest
+   * numbered file in benchmarks/judge-prompts/ is picked — same rule the
+   * score-report CLI uses.
+   */
+  judgePromptPath?: string;
+  /**
+   * Maximum total spend across all passes in USD. Passes past the budget
+   * are skipped. Defaults to BENCHMARK_BUDGET_USD or $10.
+   */
+  budgetUsd?: number;
+}
+
+export interface RejudgePassResult {
+  runId: string;
+  passIndex: number;
+  status: "done" | "error";
+  hitRate: number | null;
+  highlightedRate: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  wallclockMs: number | null;
+  traceId: string | null;
+  error: string | null;
+}
+
+export interface RejudgeResult {
+  parentRunId: string;
+  judgePromptPath: string;
+  passes: RejudgePassResult[];
+  meanHitRate: number | null;
+  stddevHitRate: number | null;
+  totalCostUsd: number;
+}
+
+const DEFAULT_BUDGET_USD = Number(process.env.BENCHMARK_BUDGET_USD ?? "10");
+
+/** Rough cost estimator per judge pass — Sonnet pricing at ~10k output tokens. */
+const JUDGE_PASS_COST_ESTIMATE_USD = 0.2;
+
+/**
+ * Find the highest-versioned judge prompt in benchmarks/judge-prompts/.
+ * Duplicated from score-report.ts (which is CLI-only, not importable) to
+ * avoid pulling CLI imports into the dashboard build.
+ */
+function findHighestPromptVersion(dir: string = "benchmarks/judge-prompts"): string {
+  if (!existsSync(dir)) {
+    throw new Error(`Judge prompt directory does not exist: ${dir}`);
+  }
+  const candidates = readdirSync(dir)
+    .filter((f) => /^v\d+\.md$/.test(f))
+    .sort((a, b) => {
+      const va = parseInt(a.match(/^v(\d+)/)?.[1] ?? "0", 10);
+      const vb = parseInt(b.match(/^v(\d+)/)?.[1] ?? "0", 10);
+      return vb - va;
+    });
+  const top = candidates[0];
+  if (!top) throw new Error(`No judge prompts (vN.md) found in ${dir}`);
+  return resolve(dir, top);
+}
+
+/**
+ * Resolve a candidate file path the judge can read for a parent run.
+ * Prefers the original candidatePath on disk (cheaper, no temp file
+ * needed); falls back to materialising the stored report_md column to
+ * /tmp if the file has moved. Returns a cleanup callback for the temp
+ * path case.
+ */
+async function candidatePathForParent(
+  parent: BenchmarkRunRow,
+): Promise<{ path: string; cleanup: (() => Promise<void>) | null }> {
+  if (existsSync(parent.candidatePath)) {
+    return { path: parent.candidatePath, cleanup: null };
+  }
+  if (!parent.reportMd) {
+    throw new Error(
+      `Parent run ${parent.id}: candidate file missing at ${parent.candidatePath} and no report_md stored`,
+    );
+  }
+  const dir = "/tmp/muninn-rejudge";
+  await mkdir(dir, { recursive: true });
+  const path = `${dir}/${parent.id}.md`;
+  await writeFile(path, parent.reportMd);
+  return {
+    path,
+    cleanup: async () => {
+      try {
+        await unlink(path);
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+function computeMeanStddev(values: number[]): { mean: number; stddev: number } {
+  if (values.length === 0) return { mean: 0, stddev: 0 };
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  if (values.length === 1) return { mean, stddev: 0 };
+  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (values.length - 1);
+  return { mean, stddev: Math.sqrt(variance) };
+}
+
+/**
+ * Re-judge a parent run N times. Writes a new benchmark_runs row per pass
+ * with parent_run_id set. Returns aggregated hit-rate stats.
+ *
+ * Runs passes sequentially — the judge is already the bottleneck in any
+ * re-judge workflow and parallelising multiple Sonnet calls on one machine
+ * buys very little while making log output harder to read.
+ */
+export async function rejudgeCandidate(
+  parentRunId: string,
+  opts: RejudgeOptions,
+): Promise<RejudgeResult> {
+  if (opts.passes < 1) throw new Error("passes must be >= 1");
+
+  const parent = await getBenchmarkRun(parentRunId);
+  if (!parent) throw new Error(`Parent run not found: ${parentRunId}`);
+  if (parent.parentRunId) {
+    throw new Error(
+      `Cannot re-judge a re-judge pass — parent run ${parentRunId} already has parent_run_id=${parent.parentRunId}. Re-judge its grandparent instead.`,
+    );
+  }
+
+  const judgePromptPath = opts.judgePromptPath
+    ? resolve(opts.judgePromptPath)
+    : findHighestPromptVersion();
+  const budgetUsd = opts.budgetUsd ?? DEFAULT_BUDGET_USD;
+
+  const manifest = await loadManifestByKey(parent.issueKey);
+
+  const { path: candidatePathForJudge, cleanup: cleanupTemp } =
+    await candidatePathForParent(parent);
+
+  log.info("Re-judging {parentRunId} × {passes} passes against {judgePrompt}", {
+    botName: "benchmarks",
+    parentRunId,
+    passes: opts.passes,
+    judgePrompt: judgePromptPath,
+    budgetUsd,
+  });
+
+  const passes: RejudgePassResult[] = [];
+  let totalCostUsd = 0;
+
+  for (let i = 0; i < opts.passes; i++) {
+    if (totalCostUsd + JUDGE_PASS_COST_ESTIMATE_USD > budgetUsd) {
+      log.warn("Re-judge budget exceeded at pass {pass}/{total} — stopping", {
+        botName: "benchmarks",
+        pass: i + 1,
+        total: opts.passes,
+        totalCostUsd,
+        budgetUsd,
+      });
+      break;
+    }
+
+    const startedAt = new Date();
+    const runId = await saveBenchmarkRun({
+      issueKey: parent.issueKey,
+      candidatePath: parent.candidatePath,
+      goldPath: parent.goldPath,
+      goldContentHash: parent.goldContentHash,
+      judgePromptVersion: "pending",
+      judgeModel: parent.judgeModel,
+      startedAt,
+      parentRunId,
+      analysisTraceId: parent.analysisTraceId,
+      treatment: parent.treatment ?? undefined,
+      promptId: parent.promptId ?? undefined,
+    });
+
+    try {
+      const judged = await runJudge({
+        manifest,
+        candidatePath: candidatePathForJudge,
+        judgePromptPath,
+      });
+
+      await completeBenchmarkRun(runId, {
+        finishedAt: new Date(),
+        status: "done",
+        wallclockMs: judged.wallclockMs,
+        inputTokens: judged.inputTokens,
+        outputTokens: judged.outputTokens,
+        judgeResult: judged.result,
+      });
+
+      // Estimate cost per pass from token counts — Sonnet 4.6: $3/M input + $15/M output.
+      const passCost =
+        (judged.inputTokens * 3) / 1_000_000 + (judged.outputTokens * 15) / 1_000_000;
+      totalCostUsd += passCost;
+
+      passes.push({
+        runId,
+        passIndex: i,
+        status: "done",
+        hitRate: judged.result.stats.hitRate,
+        highlightedRate: judged.result.stats.highlightedRate,
+        inputTokens: judged.inputTokens,
+        outputTokens: judged.outputTokens,
+        wallclockMs: judged.wallclockMs,
+        traceId: judged.traceId,
+        error: null,
+      });
+
+      log.info("Re-judge pass {pass}/{total} done: hit={hitRate}%", {
+        botName: "benchmarks",
+        pass: i + 1,
+        total: opts.passes,
+        runId,
+        hitRate: (judged.result.stats.hitRate * 100).toFixed(1),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error("Re-judge pass {pass}/{total} failed: {error}", {
+        botName: "benchmarks",
+        pass: i + 1,
+        total: opts.passes,
+        runId,
+        error: msg,
+      });
+      await completeBenchmarkRun(runId, {
+        finishedAt: new Date(),
+        status: "error",
+        error: msg,
+      });
+      passes.push({
+        runId,
+        passIndex: i,
+        status: "error",
+        hitRate: null,
+        highlightedRate: null,
+        inputTokens: null,
+        outputTokens: null,
+        wallclockMs: null,
+        traceId: null,
+        error: msg,
+      });
+    }
+  }
+
+  if (cleanupTemp) await cleanupTemp();
+
+  const doneHits = passes
+    .filter((p) => p.status === "done" && p.hitRate !== null)
+    .map((p) => p.hitRate as number);
+  const { mean, stddev } = computeMeanStddev(doneHits);
+
+  return {
+    parentRunId,
+    judgePromptPath,
+    passes,
+    meanHitRate: doneHits.length > 0 ? mean : null,
+    stddevHitRate: doneHits.length > 0 ? stddev : null,
+    totalCostUsd,
+  };
+}
+
+/**
+ * Aggregate a parent row + its re-judge children into a single hit-rate
+ * summary (mean ± stddev). Used by the detail page to show "what does
+ * this cell actually score after averaging?".
+ */
+export async function summariseRun(parentRunId: string): Promise<{
+  parent: BenchmarkRunRow;
+  children: BenchmarkRunRow[];
+  /** All successful hit rates including the parent. */
+  allHitRates: number[];
+  meanHitRate: number | null;
+  stddevHitRate: number | null;
+}> {
+  const parent = await getBenchmarkRun(parentRunId);
+  if (!parent) throw new Error(`Run not found: ${parentRunId}`);
+  const children = await listRejudgeChildren(parentRunId);
+
+  const hits: number[] = [];
+  if (parent.status === "done" && parent.hitRate !== null) hits.push(parent.hitRate);
+  for (const c of children) {
+    if (c.status === "done" && c.hitRate !== null) hits.push(c.hitRate);
+  }
+  const { mean, stddev } = computeMeanStddev(hits);
+  return {
+    parent,
+    children,
+    allHitRates: hits,
+    meanHitRate: hits.length > 0 ? mean : null,
+    stddevHitRate: hits.length > 0 ? stddev : null,
+  };
+}
