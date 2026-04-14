@@ -1,5 +1,15 @@
 import type { ClaudeResult } from "../types.ts";
 
+interface ModelUsageEntry {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  costUSD?: number;
+}
+
+export type ModelUsage = Record<string, ModelUsageEntry>;
+
 interface ClaudeJsonOutput {
   result: string;
   total_cost_usd?: number;
@@ -15,28 +25,14 @@ interface ClaudeJsonOutput {
     cache_read_input_tokens?: number;
     output_tokens?: number;
   };
-  modelUsage?: Record<string, {
-    inputTokens?: number;
-    outputTokens?: number;
-    cacheReadInputTokens?: number;
-    cacheCreationInputTokens?: number;
-    costUSD?: number;
-  }>;
+  modelUsage?: ModelUsage;
   // Legacy top-level fields (older CLI versions)
   model?: string;
   input_tokens?: number;
   output_tokens?: number;
 }
 
-function pickPrimaryModel(
-  usage: Record<string, {
-    inputTokens?: number;
-    outputTokens?: number;
-    cacheReadInputTokens?: number;
-    cacheCreationInputTokens?: number;
-    costUSD?: number;
-  }>,
-): string | undefined {
+export function pickPrimaryModel(usage: ModelUsage): string | undefined {
   const entries = Object.entries(usage);
   const first = entries[0];
   if (!first) return undefined;
@@ -88,10 +84,9 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
     : (parsed.input_tokens ?? 0);
   const outputTokens = parsed.usage?.output_tokens ?? parsed.output_tokens ?? 0;
 
-  // Model: extract from modelUsage, fall back to top-level.
   // Claude CLI 2.1.107+ inserts a small auxiliary Haiku call as the first
-  // modelUsage key before the main inference; pick the key with the most
-  // output tokens so we report the model that actually did the work.
+  // modelUsage key before the main inference; pickPrimaryModel scores by
+  // cost so we report the model that actually did the work.
   const model = parsed.model
     ?? (parsed.modelUsage ? pickPrimaryModel(parsed.modelUsage) : undefined)
     ?? "unknown";

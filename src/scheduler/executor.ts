@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
+import { pickPrimaryModel } from "../ai/result-parser.ts";
 
 const log = getLog("scheduler", "executor");
 
@@ -93,7 +94,7 @@ export async function spawnHaiku(
       : 0;
     const outputTokens = parsed.usage?.output_tokens ?? 0;
     const model = parsed.modelUsage
-      ? Object.keys(parsed.modelUsage)[0] ?? effectiveModel
+      ? pickPrimaryModel(parsed.modelUsage) ?? effectiveModel
       : effectiveModel;
 
     // Normalize result to string — CLI 2.x may return an object
