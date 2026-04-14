@@ -12,27 +12,25 @@
  * `YGGDRASIL_PORT` it's bound to. Spawning per-worktree would just duplicate
  * a catalog that already lives in the shared Postgres.
  *
- * Tree-sitter state caveat: `src/indexer/parser.ts` in yggdrasil caches a
- * module-level parser instance, so concurrent `indexRepo` calls in the same
- * process race. The runner is sequential-by-default *and* we shell out to
- * `bun run src/cli.ts index` in a subprocess per repo so the module state
- * is fully isolated.
+ * Each `bun run src/cli.ts index` runs in its own subprocess, so yggdrasil's
+ * tree-sitter parser singleton (`src/indexer/parser.ts`) is fresh per call —
+ * we can index repos in parallel without races.
  *
  * Teardown path: `DELETE FROM ci_repos WHERE name = ANY(...)` cascades
  * through `ci_files → ci_symbols → ci_edges → ci_import_map` via
- * `ON DELETE CASCADE` — confirmed with the yggdrasil peer agent.
+ * `ON DELETE CASCADE`.
  */
 
 import type { Subprocess } from "bun";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
-import postgres from "postgres";
 import { getLog } from "../logging.ts";
+import { getDb } from "../db/client.ts";
+import { killStaleProcess, waitForReady, okResponse } from "./process-utils.ts";
 
 const log = getLog("benchmarks", "yggdrasil");
 
 const READY_TIMEOUT_MS = 60_000;
-const READY_POLL_MS = 1_000;
 const INDEX_TIMEOUT_MS = 15 * 60_000;
 
 /** Lowest port the benchmark Yggdrasil manager will allocate. */
@@ -42,17 +40,6 @@ export const BENCHMARK_YGGDRASIL_PORT_BASE = 9250;
 const YGGDRASIL_REPO_PATH =
   process.env.YGGDRASIL_REPO_PATH ??
   resolve(homedir(), "source/private/yggdrasil");
-
-/**
- * Postgres URL for the benchmark Yggdrasil. Defaults to the shared muninn
- * database so bench cells can speak to the same schema that the prod
- * yggdrasil indexer uses — the `bench-*` prefix keeps them namespaced from
- * the prod rows.
- */
-const YGGDRASIL_DATABASE_URL =
-  process.env.YGGDRASIL_DATABASE_URL ??
-  process.env.DATABASE_URL ??
-  "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
 
 export interface BenchmarkYggdrasilRepoSpec {
   /** Short label from the manifest, e.g. `"melosys-api"`. */
@@ -74,27 +61,43 @@ export interface BenchmarkYggdrasilOptions {
   port: number;
 }
 
+export interface BenchmarkYggdrasilStackEntry {
+  name: string;
+  port: number;
+  projectPath: string;
+}
+
 export interface BenchmarkYggdrasilInstance {
   name: string;
   issueKey: string;
   port: number;
   /** MCP endpoint URL — `http://127.0.0.1:<port>/mcp` */
   mcpUrl: string;
-  /** `ci_repos.name` values created by this instance — used for teardown. */
-  repoNames: string[];
-  /** Per-worktree index metadata — mirrors BenchmarkStackConfig's shape. */
-  indexedRepos: Array<{ repoName: string; worktreePath: string }>;
+  /** Per-worktree index metadata used for `BenchmarkStackConfig` and teardown. */
+  indexedRepos: ReadonlyArray<{ repoName: string; worktreePath: string }>;
   proc: Subprocess;
   startedAt: number;
+}
+
+/** Shape the runner persists in `BenchmarkStackConfig.yggdrasilInstances`. */
+export function toStackEntries(
+  instance: BenchmarkYggdrasilInstance,
+): BenchmarkYggdrasilStackEntry[] {
+  return instance.indexedRepos.map((r) => ({
+    name: r.repoName,
+    port: instance.port,
+    projectPath: r.worktreePath,
+  }));
 }
 
 class BenchmarkYggdrasilManager {
   private instances = new Map<string, BenchmarkYggdrasilInstance>();
 
   /**
-   * Start a benchmark Yggdrasil instance: index every worktree sequentially
-   * under a `bench-<issue>-<repo>` name, then spawn the MCP server. Idempotent
-   * — if an instance with the same name is already running, returns it.
+   * Start a benchmark Yggdrasil instance: index every worktree under a
+   * `bench-<issue>-<repo>` name in parallel, then spawn the MCP server.
+   * Idempotent — if an instance with the same name is already running,
+   * returns it.
    */
   async start(opts: BenchmarkYggdrasilOptions): Promise<BenchmarkYggdrasilInstance> {
     const existing = this.instances.get(opts.name);
@@ -109,39 +112,15 @@ class BenchmarkYggdrasilManager {
 
     await killStaleProcess(opts.port);
 
-    // ── Step 1: index each worktree (sequential on purpose) ──
-    const repoNames: string[] = [];
-    const indexedRepos: Array<{ repoName: string; worktreePath: string }> = [];
-    for (const spec of opts.repos) {
-      const repoName = buildBenchRepoName(opts.issueKey, spec.repo);
-      log.info("Indexing {path} as {name}", {
-        botName: "benchmarks",
-        path: spec.worktreePath,
-        name: repoName,
-      });
-      try {
-        await runYggdrasilIndexer({
-          name: repoName,
-          worktreePath: spec.worktreePath,
-        });
-      } catch (err) {
-        // Best-effort cleanup of anything we already indexed so we don't
-        // leave half an instance in the database.
-        if (repoNames.length > 0) {
-          await deleteBenchRepos(repoNames).catch(() => { /* ignore */ });
-        }
-        throw err;
-      }
-      repoNames.push(repoName);
-      indexedRepos.push({ repoName, worktreePath: spec.worktreePath });
-    }
+    // Each indexer call shells out to a fresh `bun run src/cli.ts` subprocess,
+    // so the tree-sitter parser singleton is per-child — parallel is safe.
+    const indexedRepos = await indexAllRepos(opts.issueKey, opts.repos);
 
-    // ── Step 2: spawn the MCP server ──
     log.info("Starting benchmark Yggdrasil {name} on port {port} ({n} repos)", {
       botName: "benchmarks",
       name: opts.name,
       port: opts.port,
-      n: repoNames.length,
+      n: indexedRepos.length,
     });
 
     const proc = Bun.spawn(
@@ -151,7 +130,6 @@ class BenchmarkYggdrasilManager {
         env: {
           ...process.env,
           YGGDRASIL_PORT: String(opts.port),
-          DATABASE_URL: YGGDRASIL_DATABASE_URL,
         },
         stdout: "inherit",
         stderr: "inherit",
@@ -160,10 +138,12 @@ class BenchmarkYggdrasilManager {
 
     const mcpUrl = `http://127.0.0.1:${opts.port}/mcp`;
     const healthUrl = `http://127.0.0.1:${opts.port}/health`;
-    const ready = await waitForReady(healthUrl, proc, READY_TIMEOUT_MS);
+    const ready = await waitForReady(healthUrl, proc, READY_TIMEOUT_MS, {
+      predicate: okResponse,
+    });
     if (!ready) {
       try { proc.kill(); } catch { /* ignore */ }
-      await deleteBenchRepos(repoNames).catch(() => { /* best effort */ });
+      await deleteBenchRepos(indexedRepos.map((r) => r.repoName)).catch(() => { /* best effort */ });
       const exitInfo = proc.exitCode !== null ? ` (exited ${proc.exitCode})` : "";
       throw new Error(
         `Benchmark Yggdrasil ${opts.name} did not become ready on port ${opts.port}${exitInfo}`,
@@ -175,7 +155,6 @@ class BenchmarkYggdrasilManager {
       issueKey: opts.issueKey,
       port: opts.port,
       mcpUrl,
-      repoNames,
       indexedRepos,
       proc,
       startedAt: Date.now(),
@@ -197,7 +176,7 @@ class BenchmarkYggdrasilManager {
       botName: "benchmarks",
       name: opts.name,
       url: mcpUrl,
-      n: repoNames.length,
+      n: indexedRepos.length,
     });
     return instance;
   }
@@ -210,37 +189,13 @@ class BenchmarkYggdrasilManager {
       instance.proc.kill();
     } catch { /* ignore */ }
     this.instances.delete(name);
-    await deleteBenchRepos(instance.repoNames).catch((err) => {
+    await deleteBenchRepos(instance.indexedRepos.map((r) => r.repoName)).catch((err) => {
       log.warn("Failed to clean up bench ci_repos rows for {name}: {err}", {
         botName: "benchmarks",
         name,
         err: err instanceof Error ? err.message : String(err),
       });
     });
-  }
-
-  async stopAll(): Promise<void> {
-    const names = Array.from(this.instances.keys());
-    await Promise.allSettled(names.map((n) => this.stop(n)));
-  }
-
-  /**
-   * Nuclear cleanup — kill any running instances, then delete every
-   * `bench-*` row in `ci_repos`. Safe to call at startup to sweep up
-   * orphans from crashed runs.
-   */
-  async teardownAll(): Promise<void> {
-    await this.stopAll();
-    await deleteAllBenchRepos().catch((err) => {
-      log.warn("teardownAll DELETE failed: {err}", {
-        botName: "benchmarks",
-        err: err instanceof Error ? err.message : String(err),
-      });
-    });
-  }
-
-  getInstance(name: string): BenchmarkYggdrasilInstance | undefined {
-    return this.instances.get(name);
   }
 
   listRunning(): BenchmarkYggdrasilInstance[] {
@@ -254,8 +209,7 @@ export const benchmarkYggdrasilManager = new BenchmarkYggdrasilManager();
  * Allocate a free port for a benchmark Yggdrasil instance, starting from
  * `BENCHMARK_YGGDRASIL_PORT_BASE`. Mirrors `allocateBenchmarkPort` in
  * serena-benchmark.ts — skips ports held by currently-running benchmark
- * instances but does NOT detect foreign holders (`killStaleProcess` handles
- * that on start).
+ * instances; foreign holders are handled by `killStaleProcess` on start.
  */
 export function allocateBenchmarkYggdrasilPort(usedPorts: Iterable<number>): number {
   const used = new Set(usedPorts);
@@ -269,18 +223,58 @@ export function buildBenchRepoName(issueKey: string, repo: string): string {
   return `bench-${issueKey}-${repo}`;
 }
 
+async function indexAllRepos(
+  issueKey: string,
+  specs: BenchmarkYggdrasilRepoSpec[],
+): Promise<Array<{ repoName: string; worktreePath: string }>> {
+  const planned = specs.map((spec) => ({
+    repoName: buildBenchRepoName(issueKey, spec.repo),
+    worktreePath: spec.worktreePath,
+  }));
+
+  const results = await Promise.allSettled(
+    planned.map(async (entry) => {
+      log.info("Indexing {path} as {name}", {
+        botName: "benchmarks",
+        path: entry.worktreePath,
+        name: entry.repoName,
+      });
+      await runYggdrasilIndexer(entry);
+      return entry;
+    }),
+  );
+
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length > 0) {
+    // Tear down anything that did get indexed so we don't leak rows.
+    const succeeded = results
+      .filter((r): r is PromiseFulfilledResult<{ repoName: string; worktreePath: string }> =>
+        r.status === "fulfilled")
+      .map((r) => r.value.repoName);
+    if (succeeded.length > 0) {
+      await deleteBenchRepos(succeeded).catch(() => { /* ignore */ });
+    }
+    const reasons = failures
+      .map((r) => (r as PromiseRejectedResult).reason)
+      .map((e) => (e instanceof Error ? e.message : String(e)))
+      .join("; ");
+    throw new Error(`Yggdrasil indexer failed for ${failures.length} repo(s): ${reasons}`);
+  }
+
+  return results.map(
+    (r) => (r as PromiseFulfilledResult<{ repoName: string; worktreePath: string }>).value,
+  );
+}
+
 async function runYggdrasilIndexer(args: {
-  name: string;
+  repoName: string;
   worktreePath: string;
 }): Promise<void> {
   const proc = Bun.spawn(
-    ["bun", "run", "src/cli.ts", "index", "--full", args.worktreePath, args.name],
+    ["bun", "run", "src/cli.ts", "index", "--full", args.worktreePath, args.repoName],
     {
       cwd: YGGDRASIL_REPO_PATH,
-      env: {
-        ...process.env,
-        DATABASE_URL: YGGDRASIL_DATABASE_URL,
-      },
+      env: { ...process.env },
       stdout: "inherit",
       stderr: "inherit",
     },
@@ -291,78 +285,12 @@ async function runYggdrasilIndexer(args: {
   const code = await proc.exited;
   clearTimeout(timeout);
   if (code !== 0) {
-    throw new Error(`Yggdrasil indexer exited with code ${code} for ${args.name}`);
-  }
-}
-
-async function waitForReady(
-  url: string,
-  proc: Subprocess,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) return false;
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return true;
-    } catch {
-      // connection refused — not ready yet
-    }
-    await Bun.sleep(READY_POLL_MS);
-  }
-  return false;
-}
-
-async function killStaleProcess(port: number): Promise<void> {
-  try {
-    const proc = Bun.spawn(["lsof", "-ti", `:${port}`], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const output = await new Response(proc.stdout).text();
-    await proc.exited;
-    const pids = output.trim().split("\n").filter(Boolean);
-    for (const pid of pids) {
-      const n = parseInt(pid, 10);
-      if (!Number.isNaN(n)) {
-        log.warn("Killing stale process {pid} on port {port}", {
-          botName: "benchmarks",
-          pid: n,
-          port,
-        });
-        try { process.kill(n, "SIGTERM"); } catch { /* ignore */ }
-      }
-    }
-    if (pids.length > 0) await Bun.sleep(1000);
-  } catch {
-    // lsof missing or no holder — fine
+    throw new Error(`Yggdrasil indexer exited with code ${code} for ${args.repoName}`);
   }
 }
 
 async function deleteBenchRepos(names: string[]): Promise<void> {
   if (names.length === 0) return;
-  const sql = postgres(YGGDRASIL_DATABASE_URL, {
-    max: 2,
-    idle_timeout: 5,
-    connect_timeout: 10,
-  });
-  try {
-    await sql`DELETE FROM ci_repos WHERE name = ANY(${names}::text[])`;
-  } finally {
-    await sql.end({ timeout: 5 });
-  }
-}
-
-async function deleteAllBenchRepos(): Promise<void> {
-  const sql = postgres(YGGDRASIL_DATABASE_URL, {
-    max: 2,
-    idle_timeout: 5,
-    connect_timeout: 10,
-  });
-  try {
-    await sql`DELETE FROM ci_repos WHERE name LIKE 'bench-%'`;
-  } finally {
-    await sql.end({ timeout: 5 });
-  }
+  const sql = getDb();
+  await sql`DELETE FROM ci_repos WHERE name = ANY(${names}::text[])`;
 }

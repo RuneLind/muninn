@@ -46,6 +46,7 @@ import {
 import {
   benchmarkYggdrasilManager,
   allocateBenchmarkYggdrasilPort,
+  toStackEntries as yggdrasilStackEntries,
   type BenchmarkYggdrasilInstance,
 } from "./yggdrasil-manager.ts";
 import { shakeoutSimilarity, classify, type ShakeoutVerdict } from "./jaccard.ts";
@@ -165,12 +166,11 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   let scratchDir: string | null = null;
   let cellResult: RunCellResult;
 
-  const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
-
   try {
     if (stackUsesSerena(stack)) {
       // Short names to fit under the 64-char MCP tool-name limit copilot-sdk
       // enforces. See benchmarks/known-bugs.md Bug 10.
+      const issueNum = manifest.issueKey.replace(/^\D+/, "") || manifest.issueKey;
       const usedPorts = new Set<number>();
       const specs = worktrees.map((wt) => {
         const port = allocateBenchmarkPort(usedPorts);
@@ -334,11 +334,7 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
       projectPath: s.projectPath,
     })),
     yggdrasilInstances: args.yggdrasilInstance
-      ? args.yggdrasilInstance.indexedRepos.map((r) => ({
-          name: r.repoName,
-          port: args.yggdrasilInstance!.port,
-          projectPath: r.worktreePath,
-        }))
+      ? yggdrasilStackEntries(args.yggdrasilInstance)
       : undefined,
   };
   const fullPromptHash = createHash("sha256").update(promptText).digest("hex").slice(0, 16);

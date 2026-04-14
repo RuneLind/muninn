@@ -19,11 +19,11 @@
 
 import type { Subprocess } from "bun";
 import { getLog } from "../logging.ts";
+import { killStaleProcess, waitForReady } from "./process-utils.ts";
 
 const log = getLog("benchmarks", "serena");
 
 const READY_TIMEOUT_MS = 120_000;
-const READY_POLL_MS = 1_000;
 
 /** Lowest port the benchmark manager will allocate. */
 export const BENCHMARK_SERENA_PORT_BASE = 9200;
@@ -170,46 +170,3 @@ export function allocateBenchmarkPort(usedPorts: Iterable<number>): number {
   return port;
 }
 
-async function waitForReady(
-  url: string,
-  proc: Subprocess,
-  timeoutMs: number,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) return false;
-    try {
-      // Any response (even 4xx/5xx) means the server is listening.
-      // Serena returns 405 to a GET; that's fine.
-      await fetch(url, { signal: AbortSignal.timeout(2000) });
-      return true;
-    } catch {
-      // connection refused — not ready yet
-    }
-    await Bun.sleep(READY_POLL_MS);
-  }
-  return false;
-}
-
-async function killStaleProcess(port: number): Promise<void> {
-  try {
-    const proc = Bun.spawn(["lsof", "-ti", `:${port}`], { stdout: "pipe", stderr: "ignore" });
-    const output = await new Response(proc.stdout).text();
-    await proc.exited;
-    const pids = output.trim().split("\n").filter(Boolean);
-    for (const pid of pids) {
-      const n = parseInt(pid, 10);
-      if (!Number.isNaN(n)) {
-        log.warn("Killing stale process {pid} on port {port}", {
-          botName: "benchmarks",
-          pid: n,
-          port,
-        });
-        try { process.kill(n, "SIGTERM"); } catch { /* ignore */ }
-      }
-    }
-    if (pids.length > 0) await Bun.sleep(1000);
-  } catch {
-    // lsof missing or no holder — fine
-  }
-}

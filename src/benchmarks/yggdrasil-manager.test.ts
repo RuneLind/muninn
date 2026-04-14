@@ -16,7 +16,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import postgres from "postgres";
+import { closeDb, getDb, initDb } from "../db/client.ts";
+import { loadConfig } from "../config.ts";
 import {
   allocateBenchmarkYggdrasilPort,
   BENCHMARK_YGGDRASIL_PORT_BASE,
@@ -66,13 +67,9 @@ describeIntegration("BenchmarkYggdrasilManager (integration)", () => {
   const REPO_LABEL = "fixture";
   const MANAGER_NAME = "ygg-bench-test";
   let fixtureDir: string;
-  let dbUrl: string;
 
   beforeAll(async () => {
-    dbUrl =
-      process.env.YGGDRASIL_DATABASE_URL ??
-      process.env.DATABASE_URL ??
-      "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+    initDb(loadConfig());
 
     fixtureDir = await mkdtemp(join(tmpdir(), "ygg-bench-fixture-"));
     // Minimal Java file so the indexer has something to parse. Yggdrasil's
@@ -97,13 +94,12 @@ describeIntegration("BenchmarkYggdrasilManager (integration)", () => {
   afterAll(async () => {
     // Best-effort: stop any leftover instance, purge the bench row, remove fixture.
     await benchmarkYggdrasilManager.stop(MANAGER_NAME).catch(() => { /* ignore */ });
-    const sql = postgres(dbUrl, { max: 2, idle_timeout: 5, connect_timeout: 10 });
     try {
+      const sql = getDb();
       await sql`DELETE FROM ci_repos WHERE name = ${buildBenchRepoName(ISSUE_KEY, REPO_LABEL)}`;
-    } finally {
-      await sql.end({ timeout: 5 });
-    }
+    } catch { /* ignore */ }
     await rm(fixtureDir, { recursive: true, force: true }).catch(() => { /* ignore */ });
+    await closeDb().catch(() => { /* ignore */ });
   });
 
   test("indexes a fixture, creates the bench row, and cleans it up on stop", async () => {
@@ -116,38 +112,26 @@ describeIntegration("BenchmarkYggdrasilManager (integration)", () => {
     });
 
     const expectedRepoName = buildBenchRepoName(ISSUE_KEY, REPO_LABEL);
-    expect(instance.repoNames).toEqual([expectedRepoName]);
+    expect(instance.indexedRepos.map((r) => r.repoName)).toEqual([expectedRepoName]);
     expect(instance.port).toBe(port);
     expect(instance.mcpUrl).toBe(`http://127.0.0.1:${port}/mcp`);
 
-    // Bench row should now exist in ci_repos
-    const sql = postgres(dbUrl, { max: 2, idle_timeout: 5, connect_timeout: 10 });
-    try {
-      const rowsBefore = (await sql`
+    const sql = getDb();
+    const countRows = async (): Promise<number> => {
+      const rows = await sql<Array<{ name: string }>>`
         SELECT name FROM ci_repos WHERE name = ${expectedRepoName}
-      `) as Array<{ name: string }>;
-      expect(rowsBefore.length).toBe(1);
-    } finally {
-      await sql.end({ timeout: 5 });
-    }
+      `;
+      return rows.length;
+    };
 
-    // Health endpoint should respond while the instance is up
+    expect(await countRows()).toBe(1);
+
     const health = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: AbortSignal.timeout(5000),
     });
     expect(health.ok).toBe(true);
 
-    // Stop — kills proc and DELETEs the bench row
     await benchmarkYggdrasilManager.stop(MANAGER_NAME);
-
-    const sqlAfter = postgres(dbUrl, { max: 2, idle_timeout: 5, connect_timeout: 10 });
-    try {
-      const rowsAfter = (await sqlAfter`
-        SELECT name FROM ci_repos WHERE name = ${expectedRepoName}
-      `) as Array<{ name: string }>;
-      expect(rowsAfter.length).toBe(0);
-    } finally {
-      await sqlAfter.end({ timeout: 5 });
-    }
+    expect(await countRows()).toBe(0);
   }, 180_000);
 });
