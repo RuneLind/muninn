@@ -124,6 +124,101 @@ describe("parseClaudeOutput", () => {
     expect(result.model).toBe("claude-sonnet-4-5-20250929");
   });
 
+  test("picks Sonnet over auxiliary Haiku call using costUSD", () => {
+    // Real envelope shape: Claude CLI inserts an auxiliary Haiku call as
+    // the first modelUsage key. For short responses the aux call can
+    // even have more output tokens than the primary call, so cost is
+    // the only reliable discriminator.
+    const input = JSON.stringify({
+      result: "test",
+      duration_ms: 100,
+      duration_api_ms: 50,
+      is_error: false,
+      num_turns: 1,
+      session_id: "test",
+      modelUsage: {
+        "claude-haiku-4-5-20251001": {
+          inputTokens: 350,
+          outputTokens: 11,
+          costUSD: 0.000405,
+        },
+        "claude-sonnet-4-6": {
+          inputTokens: 3,
+          outputTokens: 8,
+          cacheCreationInputTokens: 20406,
+          costUSD: 0.07665,
+        },
+      },
+    });
+
+    const result = parseClaudeOutput(input);
+    expect(result.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("picks Sonnet over Haiku via total tokens when cost is absent", () => {
+    // Older CLI envelopes may not include costUSD — fall back to total
+    // tokens (including cache).
+    const input = JSON.stringify({
+      result: "test",
+      duration_ms: 100,
+      duration_api_ms: 50,
+      is_error: false,
+      num_turns: 1,
+      session_id: "test",
+      modelUsage: {
+        "claude-haiku-4-5-20251001": { inputTokens: 350, outputTokens: 11 },
+        "claude-sonnet-4-6": {
+          inputTokens: 3,
+          outputTokens: 17700,
+          cacheCreationInputTokens: 7306,
+          cacheReadInputTokens: 13302,
+        },
+      },
+    });
+
+    const result = parseClaudeOutput(input);
+    expect(result.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("returns genuine Haiku-only call correctly", () => {
+    const input = JSON.stringify({
+      result: "test",
+      duration_ms: 100,
+      duration_api_ms: 50,
+      is_error: false,
+      num_turns: 1,
+      session_id: "test",
+      modelUsage: {
+        "claude-haiku-4-5-20251001": {
+          inputTokens: 100,
+          outputTokens: 50,
+          costUSD: 0.0002,
+        },
+      },
+    });
+
+    const result = parseClaudeOutput(input);
+    expect(result.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  test("tie-breaker prefers non-haiku key when all fields are absent", () => {
+    const input = JSON.stringify({
+      result: "test",
+      duration_ms: 100,
+      duration_api_ms: 50,
+      is_error: false,
+      num_turns: 1,
+      session_id: "test",
+      modelUsage: {
+        "claude-haiku-4-5-20251001": {},
+        "claude-sonnet-4-6": {},
+      },
+    });
+
+    const result = parseClaudeOutput(input);
+    expect(result.model).toBe("claude-sonnet-4-6");
+  });
+
   test("prefers top-level model field", () => {
     const input = JSON.stringify({
       result: "test",
