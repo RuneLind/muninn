@@ -39,7 +39,7 @@ export function stripReportFrontmatter(text: string): string {
 // Phase 0.3 captures the actual snapshot from the response so we can
 // pin properly for reproducibility in Phase 1+.
 export const JUDGE_MODEL_DEFAULT = "claude-sonnet-4-6";
-export const JUDGE_TIMEOUT_MS = 600_000; // 10 min — judge inputs are large and Sonnet is producing structured output
+export const JUDGE_TIMEOUT_MS = 900_000; // 15 min — dense H7-style candidates pushed the 600s ceiling during the scoped re-baseline
 
 /**
  * Find the highest-versioned judge prompt in benchmarks/judge-prompts/.
