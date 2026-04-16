@@ -45,6 +45,11 @@ export async function executeClaudePrompt(
     args.push("--system-prompt", systemPrompt);
   }
 
+  // Exclude specific tools (e.g. native tools during jira analysis to force MCP usage)
+  if (botConfig.excludedTools && botConfig.excludedTools.length > 0) {
+    args.push("--disallowedTools", botConfig.excludedTools.join(","));
+  }
+
   // Caller-supplied extra args (e.g. benchmark runner adds --strict-mcp-config
   // and --disallowedTools to fence the spawned bot off from harness/global MCPs).
   if (botConfig.spawnArgs && botConfig.spawnArgs.length > 0) {

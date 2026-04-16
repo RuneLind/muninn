@@ -6,6 +6,12 @@ import type { Connector } from "../db/connectors.ts";
 
 import { chatState, type ChatMessage } from "./state.ts";
 
+/** Native copilot-sdk tools blocked during jira analysis to force MCP (yggdrasil) usage. */
+const JIRA_ANALYSIS_EXCLUDED_TOOLS = [
+  "bash", "grep", "view", "glob",
+  "Explore Agent", "General Purpose Agent",
+];
+
 /**
  * Bridges the chat state to the core message processor.
  *
@@ -39,6 +45,15 @@ export async function processChatMessage(
     };
   } else if (connectorOverride) {
     effectiveBotConfig = { ...botConfig, connector: connectorOverride as BotConfig["connector"] };
+  }
+
+  // For jira analysis flows, block native tools to force MCP tool usage
+  // (prevents 43-min bash/grep fallback when yggdrasil is available)
+  if (text.includes("<!-- research:jira -->") && !effectiveBotConfig.excludedTools) {
+    effectiveBotConfig = {
+      ...effectiveBotConfig,
+      excludedTools: JIRA_ANALYSIS_EXCLUDED_TOOLS,
+    };
   }
 
   // Messages sent from the chat page are stored as "web" platform, even when
