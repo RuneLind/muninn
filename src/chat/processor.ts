@@ -41,6 +41,18 @@ export async function processChatMessage(
     effectiveBotConfig = { ...botConfig, connector: connectorOverride as BotConfig["connector"] };
   }
 
+  // For jira analysis flows, block native tools to force MCP tool usage
+  // (prevents 43-min bash/grep fallback when yggdrasil is available)
+  if (text.includes("<!-- research:jira -->") && !effectiveBotConfig.excludedTools) {
+    effectiveBotConfig = {
+      ...effectiveBotConfig,
+      excludedTools: [
+        "bash", "grep", "view", "glob",
+        "Explore Agent", "General Purpose Agent",
+      ],
+    };
+  }
+
   // Messages sent from the chat page are stored as "web" platform, even when
   // continuing a conversation that originated on Telegram or Slack.
   const platform: Platform = "web";

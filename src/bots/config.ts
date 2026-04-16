@@ -64,6 +64,13 @@ export interface BotConfig {
    * isolation. Prod bots leave this unset.
    */
   spawnArgs?: string[];
+  /**
+   * Tool names to exclude from the AI session. Set dynamically per-request
+   * (e.g. for jira-analysis flows to block native tools and force MCP usage).
+   * For copilot-sdk: passed as `excludedTools` to `createSession`.
+   * For claude-cli: converted to `--disallowedTools` spawn args.
+   */
+  excludedTools?: string[];
 }
 
 export interface BotPrompts {

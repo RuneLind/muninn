@@ -10,6 +10,7 @@ import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
+import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
 
 const log = getLog("dashboard");
 
@@ -126,6 +127,17 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       return c.json({ error: "No bots configured" }, 500);
     }
     const botConfig = (body.bot && allBots.find((b) => b.name === body.bot)) || allBots[0]!;
+
+    // Health-check critical MCP servers before starting analysis
+    const healthErrors = await checkMcpServerHealth(botConfig, ["yggdrasil"]);
+    if (healthErrors.length > 0) {
+      const names = healthErrors.map((e) => e.name).join(", ");
+      log.warn("Research blocked — MCP servers not reachable: {names}", { botName: botConfig.name, names });
+      return c.json({
+        error: `Kan ikke starte analyse — følgende MCP-servere er ikke tilgjengelige: ${names}. Start dem fra dashboardet (Serena-siden) før du kjører en analyse.`,
+        unreachableServers: healthErrors,
+      }, 503);
+    }
 
     // Resolve userId — require explicit userId when multiple users exist
     const chatConfig = await loadChatConfig(botConfig.name);
