@@ -6,6 +6,12 @@ import type { Connector } from "../db/connectors.ts";
 
 import { chatState, type ChatMessage } from "./state.ts";
 
+/** Native copilot-sdk tools blocked during jira analysis to force MCP (yggdrasil) usage. */
+const JIRA_ANALYSIS_EXCLUDED_TOOLS = [
+  "bash", "grep", "view", "glob",
+  "Explore Agent", "General Purpose Agent",
+];
+
 /**
  * Bridges the chat state to the core message processor.
  *
@@ -46,10 +52,7 @@ export async function processChatMessage(
   if (text.includes("<!-- research:jira -->") && !effectiveBotConfig.excludedTools) {
     effectiveBotConfig = {
       ...effectiveBotConfig,
-      excludedTools: [
-        "bash", "grep", "view", "glob",
-        "Explore Agent", "General Purpose Agent",
-      ],
+      excludedTools: JIRA_ANALYSIS_EXCLUDED_TOOLS,
     };
   }
 

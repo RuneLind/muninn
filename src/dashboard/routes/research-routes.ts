@@ -10,6 +10,7 @@ import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
+import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
 import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
 
 const log = getLog("dashboard");
@@ -129,7 +130,8 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const botConfig = (body.bot && allBots.find((b) => b.name === body.bot)) || allBots[0]!;
 
     // Health-check critical MCP servers before starting analysis
-    const healthErrors = await checkMcpServerHealth(botConfig, ["yggdrasil"]);
+    const mcpServers = parseMcpConfig(botConfig.dir);
+    const healthErrors = await checkMcpServerHealth(mcpServers, ["yggdrasil"], botConfig.name);
     if (healthErrors.length > 0) {
       const names = healthErrors.map((e) => e.name).join(", ");
       log.warn("Research blocked — MCP servers not reachable: {names}", { botName: botConfig.name, names });

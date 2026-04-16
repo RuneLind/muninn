@@ -6,7 +6,8 @@ import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import type { ToolCall } from "../../types.ts";
-import { parseMcpConfig, type CopilotMcpServer } from "./copilot-mcp.ts";
+import { parseMcpConfig } from "./copilot-mcp.ts";
+import { probeHttpServers } from "./mcp-health.ts";
 import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
@@ -71,9 +72,13 @@ export async function executePrompt(
   // Pre-flight: check HTTP MCP servers are reachable (the SDK silently drops
   // failed connections without warning, which causes invisible degradation)
   if (hasMcp) {
-    const unreachable = await checkHttpMcpServers(mcpServers, botConfig.name);
-    for (const name of unreachable) {
-      log.warn("MCP server \"{name}\" is not reachable — copilot-sdk will proceed without it", { botName: botConfig.name, name });
+    const httpEntries = Object.entries(mcpServers)
+      .filter(([, cfg]) => cfg.type === "http" || cfg.type === "sse")
+      .map(([name, cfg]) => ({ name, url: (cfg as { url: string }).url }));
+
+    const failures = await probeHttpServers(httpEntries);
+    for (const { name, error } of failures) {
+      log.warn("MCP server \"{name}\" is not reachable — copilot-sdk will proceed without it", { botName: botConfig.name, name, error });
       onProgress?.({ type: "intent", text: `⚠️ MCP-server "${name}" er ikke tilgjengelig` });
     }
   }
@@ -302,37 +307,6 @@ ${projectPaths}
 - Read files to verify specific details`,
     mcpServers: {}, // No MCP tools — use built-in tools only (Bash, Grep, Read, Glob)
   }];
-}
-
-/**
- * Check which HTTP/SSE MCP servers are actually reachable.
- * Returns the names of unreachable servers.
- */
-async function checkHttpMcpServers(
-  servers: Record<string, CopilotMcpServer>,
-  botName: string,
-): Promise<string[]> {
-  const httpEntries = Object.entries(servers).filter(
-    ([, cfg]) => cfg.type === "http" || cfg.type === "sse",
-  ) as [string, { url: string }][];
-
-  if (httpEntries.length === 0) return [];
-
-  const results = await Promise.all(
-    httpEntries.map(async ([name, cfg]) => {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        await fetch(cfg.url, { method: "GET", signal: controller.signal });
-        clearTimeout(timeout);
-        return null; // reachable
-      } catch {
-        return name;
-      }
-    }),
-  );
-
-  return results.filter((n): n is string => n !== null);
 }
 
 function extractIntentText(args: unknown): string | undefined {
