@@ -14,6 +14,12 @@ import { discoverSerenaConfigs } from "../../serena/config.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
+/** Human-readable names for MCP servers shown in chat intent bubbles. */
+const MCP_DISPLAY_NAMES: Record<string, string> = {
+  code: "Serena",
+  yggdrasil: "Yggdrasil",
+};
+
 // Shared client — started once, stopped on process exit
 let client: CopilotClient | null = null;
 let clientStarting: Promise<void> | null = null;
@@ -79,7 +85,8 @@ export async function executePrompt(
     const failures = await probeHttpServers(httpEntries);
     for (const { name, error } of failures) {
       log.warn("MCP server \"{name}\" is not reachable — copilot-sdk will proceed without it", { botName: botConfig.name, name, error });
-      onProgress?.({ type: "intent", text: `⚠️ MCP-server "${name}" er ikke tilgjengelig` });
+      const displayName = MCP_DISPLAY_NAMES[name] ?? name;
+      onProgress?.({ type: "intent", text: `⚠️ MCP-server "${displayName}" er ikke tilgjengelig` });
     }
   }
 
