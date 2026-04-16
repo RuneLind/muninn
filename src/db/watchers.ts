@@ -145,9 +145,15 @@ export async function updateWatcher(
   if (data.intervalMs !== undefined) {
     updateObj.interval_ms = data.intervalMs;
     cols.push("interval_ms");
-    // Reset last_run_at so the new interval starts from now, not from the old run time
-    updateObj.last_run_at = new Date();
-    cols.push("last_run_at");
+    // Only reset last_run_at if the interval value is actually changing, so an unrelated
+    // or no-op config edit doesn't silently shift the next fire time. (A previous version
+    // reset unconditionally, which caused a daily hour-gated watcher to skip its fire day
+    // when the setup script updated intervalMs to the same 24h value.)
+    const [current] = await sql`SELECT interval_ms FROM watchers WHERE id = ${id}`;
+    if (current && current.interval_ms !== data.intervalMs) {
+      updateObj.last_run_at = new Date();
+      cols.push("last_run_at");
+    }
   }
   if (data.enabled !== undefined) { updateObj.enabled = data.enabled; cols.push("enabled"); }
   if (data.config !== undefined) { updateObj.config = data.config; cols.push("config"); }

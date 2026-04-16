@@ -141,6 +141,34 @@ describe("watchers", () => {
     expect(all[0]!.enabled).toBe(true);
   });
 
+  test("updateWatcher does not touch last_run_at when interval is unchanged", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1", intervalMs: 300000 }));
+    const sql = getDb();
+    const pinned = new Date(Date.now() - 60 * 60 * 1000); // 1h ago
+    await sql`UPDATE watchers SET last_run_at = ${pinned} WHERE id = ${id}`;
+
+    // Editing an unrelated field must not shift the next fire time
+    await updateWatcher(id, { name: "renamed" });
+    let [row] = await sql`SELECT last_run_at FROM watchers WHERE id = ${id}`;
+    expect(new Date(row!.last_run_at).getTime()).toBe(pinned.getTime());
+
+    // Passing the SAME intervalMs also must not shift it (no-op "update")
+    await updateWatcher(id, { intervalMs: 300000 });
+    [row] = await sql`SELECT last_run_at FROM watchers WHERE id = ${id}`;
+    expect(new Date(row!.last_run_at).getTime()).toBe(pinned.getTime());
+  });
+
+  test("updateWatcher resets last_run_at when interval actually changes", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1", intervalMs: 300000 }));
+    const sql = getDb();
+    const pinned = new Date(Date.now() - 60 * 60 * 1000);
+    await sql`UPDATE watchers SET last_run_at = ${pinned} WHERE id = ${id}`;
+
+    await updateWatcher(id, { intervalMs: 600000 });
+    const [row] = await sql`SELECT last_run_at FROM watchers WHERE id = ${id}`;
+    expect(new Date(row!.last_run_at).getTime()).toBeGreaterThan(pinned.getTime());
+  });
+
   test("updateWatcher stores config as a proper JSONB object (regression: double-encoding)", async () => {
     const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
 
