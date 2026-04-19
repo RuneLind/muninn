@@ -80,6 +80,16 @@ const STYLES = `
     font-weight: 600;
     color: var(--accent-light);
   }
+  .runs-table .model-cell {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-soft);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: help;
+  }
 
   .hit-rate {
     font-weight: 700;
@@ -828,6 +838,7 @@ export function renderBenchmarkListPage(
         <thead>
           <tr>
             <th>Issue</th>
+            <th>Model</th>
             <th>Hit rate</th>
             ${showHighlightedCol ? "<th>Highlighted</th>" : ""}
             <th>Claims</th>
@@ -852,8 +863,19 @@ export function renderBenchmarkListPage(
                       : "—"
                   }</span></td>`
                 : "";
+              const modelLabel = r.treatment?.model ?? r.modelSnapshotId ?? "—";
+              const treatmentTooltip = r.treatment
+                ? [
+                    `connector: ${r.treatment.connector}`,
+                    `model: ${r.treatment.model}`,
+                    `mcpStack: ${r.treatment.mcpStack}`,
+                    `promptId: ${r.treatment.promptId}`,
+                    ...(r.treatment.baseUrl ? [`baseUrl: ${r.treatment.baseUrl}`] : []),
+                  ].join("\n")
+                : "no treatment recorded";
               return `<tr onclick="window.location='/benchmark/runs/${esc(r.id)}'">
                 <td><span class="issue-key">${esc(r.issueKey)}</span></td>
+                <td class="model-cell" title="${esc(treatmentTooltip)}">${esc(modelLabel)}</td>
                 <td class="num"><span class="hit-rate ${hClass}">${fmtRate(r.hitRate)}</span></td>
                 ${highlightedCell}
                 <td class="num">${claims}</td>

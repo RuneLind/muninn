@@ -789,6 +789,7 @@ function applyTreatmentOverlay(
     dir: scratchDir,
     connector: treatment.connector as ConnectorType,
     model: treatment.model,
+    baseUrl: treatment.baseUrl ?? base.baseUrl,
     prompts,
     spawnArgs: buildBenchmarkSpawnArgs(),
   };

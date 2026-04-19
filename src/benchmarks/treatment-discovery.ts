@@ -84,6 +84,7 @@ export async function discoverTreatments(
           model: raw.model,
           mcpStack: raw.mcpStack,
           promptId: raw.promptId,
+          ...(raw.baseUrl ? { baseUrl: raw.baseUrl } : {}),
         },
       });
     } catch (err) {
