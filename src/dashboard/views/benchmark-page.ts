@@ -1146,7 +1146,11 @@ export function renderBenchmarkDetailPage(
 
   // Re-judge panel: aggregates parent + all successful children into a
   // mean ± stddev headline, lists each pass, and holds the Re-judge form.
-  const canRejudge = run.parentRunId === null && run.status === "done";
+  // Allow re-judging on error rows too — the candidate.md file is written
+  // before the judge runs, so a judge-side failure (Bug 8 parse error, judge
+  // timeout, etc.) still leaves a valid candidate to score against.
+  const canRejudge =
+    run.parentRunId === null && (run.status === "done" || run.status === "error");
   const isRejudgeChild = run.parentRunId !== null;
   const rejudgePanelHtml = isRejudgeChild
     ? renderRejudgeChildNotice(run.parentRunId!)
@@ -1331,9 +1335,9 @@ function renderRejudgePanel(
          </button>
          <span class="hint">~$0.15 per pass · reuses the stored candidate · no new analysis</span>
        </form>`
-    : run.status === "done"
-      ? ""
-      : `<p class="subtitle" style="margin-top: 4px;">Re-judge is only available for parent runs in <code>done</code> status.</p>`;
+    : run.status === "running"
+      ? `<p class="subtitle" style="margin-top: 4px;">Re-judge will be available once this run finishes.</p>`
+      : `<p class="subtitle" style="margin-top: 4px;">Re-judge is only available for parent runs.</p>`;
 
   return `<div class="rejudge-panel">
     <h2>Re-judge passes</h2>
