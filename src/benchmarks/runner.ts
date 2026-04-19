@@ -604,6 +604,52 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   ].join("\n");
   await writeFile(candidatePath, frontmatter + reportText, "utf8");
 
+  // Guard against empty candidates — happens when an agent loop terminates
+  // without producing a final text block (e.g. Opus claude-cli hitting a
+  // turn cap or context exhaustion mid-tool-loop). Scoring a blank report
+  // returns a misleading 0% hit rate that pollutes matrix aggregates.
+  if (!reportText.trim()) {
+    const summary = `Empty candidate report — ${result.numTurns} turns, ${result.outputTokens} output tokens, but no final text block produced. Likely agent loop terminated without finalising (see stream-parser.ts handleAssistant / handleResult).`;
+    log.error("{summary} (trace {traceId})", {
+      botName: "benchmarks",
+      summary,
+      traceId: analysisTraceId,
+    });
+    if (benchmarkRunId) {
+      await completeBenchmarkRun(benchmarkRunId, {
+        finishedAt: new Date(),
+        status: "error",
+        error: summary,
+        reportMd: reportText,
+        toolCalls: result.toolCalls ?? null,
+        tokens: {
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          costUsd: result.costUsd,
+          model: result.model,
+          durationMs: result.durationMs,
+        },
+      }).catch(() => {});
+    }
+    return {
+      runIndex,
+      benchmarkRunId,
+      analysisTraceId,
+      judgeTraceId: null,
+      candidatePath,
+      hitRate: null,
+      highlightedRate: null,
+      costUsd: result.costUsd,
+      durationMs: result.durationMs,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      model: result.model,
+      toolCallCount: result.toolCalls?.length ?? 0,
+      status: "error",
+      error: summary,
+    };
+  }
+
   log.info(
     "Analysis complete — run {i}, {tokens} tokens out, ${cost} (cumulative ${cumulative})",
     {
