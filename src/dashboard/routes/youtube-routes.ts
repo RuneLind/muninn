@@ -6,11 +6,34 @@ import { renderYouTubePage } from "../views/youtube-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots } from "../../bots/config.ts";
-import { knowledgeApiHandler } from "./knowledge-api-client.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 
 const YT_COLLECTION = "youtube-summaries";
+
+interface YtDocumentMeta { id: string; url?: string }
+
+async function findExistingByVideoId(
+  baseUrl: string,
+  videoId: string,
+): Promise<YtDocumentMeta | null> {
+  try {
+    const data = await fetchKnowledgeApi(
+      baseUrl,
+      `/api/collection/${YT_COLLECTION}/documents`,
+      { timeoutMs: 10000 },
+    );
+    const docs = (data?.documents ?? []) as YtDocumentMeta[];
+    const needle = `v=${videoId}`;
+    return docs.find((d) => typeof d.url === "string" && d.url.includes(needle)) ?? null;
+  } catch (err) {
+    log.warn("YouTube duplicate check failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 export function registerYouTubeRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
@@ -39,6 +62,20 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
 
     if (!video_id || !url) {
       return c.json({ error: "Missing required fields: url, video_id" }, 400);
+    }
+
+    const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, video_id);
+    if (existing) {
+      log.info("YouTube duplicate detected for {videoId}: {docId}", {
+        videoId: video_id,
+        docId: existing.id,
+      });
+      return c.json({
+        duplicate: true,
+        document_id: existing.id,
+        existing_url: existing.url,
+        dashboard_url: `/youtube?doc=${encodeURIComponent(existing.id)}&duplicate=1`,
+      });
     }
 
     const jobId = createJob(video_id, title || url, url);

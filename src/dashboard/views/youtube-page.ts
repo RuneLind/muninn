@@ -26,6 +26,19 @@ export function renderYouTubePage(): string {
     ${ytJobCardStyles()}
     ${ytRecentJobsStyles()}
     ${ytArticleLibraryStyles()}
+
+    .duplicate-banner {
+      display: none;
+      max-width: 960px;
+      margin: 16px auto 0;
+      padding: 12px 16px;
+      background: var(--accent-dim, #2a2f3a);
+      border-left: 3px solid var(--accent, #6c8aff);
+      color: var(--text, #e6e6e6);
+      border-radius: 4px;
+      font-size: 14px;
+    }
+    .duplicate-banner.visible { display: block; }
   </style>
 </head>
 <body>
@@ -34,6 +47,10 @@ export function renderYouTubePage(): string {
   <div class="error-banner" id="knowledgeBanner">
     Knowledge API is not available. Summarization requires an external knowledge/vector search server.
     Set <code>KNOWLEDGE_API_URL</code> in your <code>.env</code> file to connect.
+  </div>
+
+  <div class="duplicate-banner" id="duplicateBanner">
+    This video has already been summarized — showing the existing summary.
   </div>
 
   <div class="page-content">
@@ -60,6 +77,11 @@ export function renderYouTubePage(): string {
     ${ytArticleLibraryScript()}
     ${ytSubmitFormScript()}
 
+    function showDuplicateBanner() {
+      var el = document.getElementById('duplicateBanner');
+      if (el) el.classList.add('visible');
+    }
+
     // --- Init ---
     async function init() {
       // Check knowledge API availability
@@ -73,8 +95,18 @@ export function renderYouTubePage(): string {
       loadRecentJobs();
       loadLibrary();
 
-      // Check for ?job= param
       var params = new URLSearchParams(window.location.search);
+
+      // ?doc= deep link — open existing summary panel (used by duplicate-detection redirect)
+      var deepLinkDoc = params.get('doc');
+      if (deepLinkDoc) {
+        if (params.get('duplicate') === '1') {
+          showDuplicateBanner();
+        }
+        try { openYouTubeDoc(deepLinkDoc, ''); } catch (e) {}
+      }
+
+      // Check for ?job= param
       var jobId = params.get('job');
       if (!jobId) return;
 

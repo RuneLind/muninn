@@ -59,7 +59,7 @@ async function handleSummarize() {
     }
 
     // Submit to Muninn — opens dashboard in new tab
-    await new Promise((resolve, reject) => {
+    const result = await new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({
         type: 'SUMMARIZE',
         title: videoInfo.title,
@@ -73,6 +73,13 @@ async function handleSummarize() {
         resolve(response);
       });
     });
+
+    if (result?.duplicate) {
+      status.className = '';
+      status.textContent = 'Already summarized — opening existing summary.';
+      setTimeout(() => window.close(), 1200);
+      return;
+    }
 
     // Close popup — dashboard tab is now open
     window.close();
