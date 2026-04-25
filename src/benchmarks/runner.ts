@@ -390,6 +390,69 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   return cellResult;
 }
 
+/**
+ * Mark a benchmark cell as failed and return the error-shaped SingleRunResult.
+ * Shared by the empty-candidate guard and the Bug 11 leak audit so they can't
+ * drift on the token-fields they record (contextTokens/modelSnapshotId).
+ */
+async function failCellWithError(args: {
+  benchmarkRunId: string | null;
+  summary: string;
+  result: ProcessMessageResult;
+  reportText: string;
+  runIndex: number;
+  analysisTraceId: string;
+  candidatePath: string;
+}): Promise<SingleRunResult> {
+  const { benchmarkRunId, summary, result, reportText, runIndex, analysisTraceId, candidatePath } = args;
+  log.error("{summary} (trace {traceId})", {
+    botName: "benchmarks",
+    summary,
+    traceId: analysisTraceId,
+  });
+  if (benchmarkRunId) {
+    await completeBenchmarkRun(benchmarkRunId, {
+      finishedAt: new Date(),
+      status: "error",
+      error: summary,
+      reportMd: reportText,
+      toolCalls: result.toolCalls ?? null,
+      tokens: {
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        contextTokens: result.contextTokens,
+        costUsd: result.costUsd,
+        model: result.model,
+        durationMs: result.durationMs,
+      },
+      modelSnapshotId: result.model,
+    }).catch((err) => {
+      log.error("Failed to mark benchmark_run {id} as error: {error}", {
+        botName: "benchmarks",
+        id: benchmarkRunId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+  return {
+    runIndex,
+    benchmarkRunId,
+    analysisTraceId,
+    judgeTraceId: null,
+    candidatePath,
+    hitRate: null,
+    highlightedRate: null,
+    costUsd: result.costUsd,
+    durationMs: result.durationMs,
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    model: result.model,
+    toolCallCount: result.toolCalls?.length ?? 0,
+    status: "error",
+    error: summary,
+  };
+}
+
 interface RunOneCellArgs {
   runIndex: number;
   manifest: BenchmarkManifest;
@@ -587,9 +650,26 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
     );
   }
 
-  // Persist the candidate report. Frontmatter includes the analysis trace id
-  // so the score-report CLI / dashboard can link to it.
   const reportText = collected.join("\n\n") || result.responseText;
+
+  // Empty candidate means the agent loop terminated without a final text
+  // block (e.g. claude-cli hitting a turn cap mid-tool-loop). Skip the file
+  // write and the judge — scoring a blank report yields a misleading 0% that
+  // pollutes matrix aggregates.
+  if (!reportText.trim()) {
+    return failCellWithError({
+      benchmarkRunId,
+      summary: `Empty candidate report — ${result.numTurns} turns, ${result.outputTokens} output tokens, but no final text block produced. Likely agent loop terminated without finalising (see stream-parser.ts handleAssistant / handleResult).`,
+      result,
+      reportText,
+      runIndex,
+      analysisTraceId,
+      candidatePath,
+    });
+  }
+
+  // Frontmatter includes the analysis trace id so the score-report CLI /
+  // dashboard can link to it.
   const frontmatter = [
     "---",
     `issue_key: ${manifest.issueKey}`,
@@ -603,52 +683,6 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
     "",
   ].join("\n");
   await writeFile(candidatePath, frontmatter + reportText, "utf8");
-
-  // Guard against empty candidates — happens when an agent loop terminates
-  // without producing a final text block (e.g. Opus claude-cli hitting a
-  // turn cap or context exhaustion mid-tool-loop). Scoring a blank report
-  // returns a misleading 0% hit rate that pollutes matrix aggregates.
-  if (!reportText.trim()) {
-    const summary = `Empty candidate report — ${result.numTurns} turns, ${result.outputTokens} output tokens, but no final text block produced. Likely agent loop terminated without finalising (see stream-parser.ts handleAssistant / handleResult).`;
-    log.error("{summary} (trace {traceId})", {
-      botName: "benchmarks",
-      summary,
-      traceId: analysisTraceId,
-    });
-    if (benchmarkRunId) {
-      await completeBenchmarkRun(benchmarkRunId, {
-        finishedAt: new Date(),
-        status: "error",
-        error: summary,
-        reportMd: reportText,
-        toolCalls: result.toolCalls ?? null,
-        tokens: {
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          costUsd: result.costUsd,
-          model: result.model,
-          durationMs: result.durationMs,
-        },
-      }).catch(() => {});
-    }
-    return {
-      runIndex,
-      benchmarkRunId,
-      analysisTraceId,
-      judgeTraceId: null,
-      candidatePath,
-      hitRate: null,
-      highlightedRate: null,
-      costUsd: result.costUsd,
-      durationMs: result.durationMs,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      model: result.model,
-      toolCallCount: result.toolCalls?.length ?? 0,
-      status: "error",
-      error: summary,
-    };
-  }
 
   log.info(
     "Analysis complete — run {i}, {tokens} tokens out, ${cost} (cumulative ${cumulative})",
@@ -666,47 +700,15 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   // the judge wastes tokens scoring contaminated output.
   const leakedTools = await auditCellForLeaks(analysisTraceId);
   if (leakedTools.length > 0) {
-    const summary = `Bug 11 leak detected — forbidden tools called from benchmark cell: ${leakedTools.join(", ")}`;
-    log.error("{summary} (trace {traceId})", {
-      botName: "benchmarks",
-      summary,
-      traceId: analysisTraceId,
-    });
-    if (benchmarkRunId) {
-      await completeBenchmarkRun(benchmarkRunId, {
-        finishedAt: new Date(),
-        status: "error",
-        error: summary,
-        reportMd: reportText,
-        toolCalls: result.toolCalls ?? null,
-        tokens: {
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          contextTokens: result.contextTokens,
-          costUsd: result.costUsd,
-          model: result.model,
-          durationMs: result.durationMs,
-        },
-        modelSnapshotId: result.model,
-      }).catch(() => {});
-    }
-    return {
-      runIndex,
+    return failCellWithError({
       benchmarkRunId,
+      summary: `Bug 11 leak detected — forbidden tools called from benchmark cell: ${leakedTools.join(", ")}`,
+      result,
+      reportText,
+      runIndex,
       analysisTraceId,
-      judgeTraceId: null,
       candidatePath,
-      hitRate: null,
-      highlightedRate: null,
-      costUsd: result.costUsd,
-      durationMs: result.durationMs,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      model: result.model,
-      toolCallCount: result.toolCalls?.length ?? 0,
-      status: "error",
-      error: summary,
-    };
+    });
   }
 
   // Step 5b — judge (skipped on dry-run)

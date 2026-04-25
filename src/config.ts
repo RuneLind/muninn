@@ -15,7 +15,7 @@ function optionalEnv(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
 }
 
-function optionalEnvInt(name: string, defaultValue: number): number {
+export function optionalEnvInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
   if (!raw) return defaultValue;
   const parsed = parseInt(raw, 10);

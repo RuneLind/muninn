@@ -9,19 +9,13 @@ import { callTool } from "../../dashboard/mcp-client.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
 import { loadToolsForBot, type OpenAITool } from "./openai-compat-tools.ts";
+import { optionalEnvInt } from "../../config.ts";
 
 const log = getLog("ai", "openai-compat");
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
 const DEFAULT_MAX_TOOL_TURNS = 50;
-
-function resolveMaxToolTurns(): number {
-  const raw = process.env.OPENAI_COMPAT_MAX_TOOL_TURNS;
-  if (!raw) return DEFAULT_MAX_TOOL_TURNS;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_TOOL_TURNS;
-}
 
 type ChatMessage =
   | { role: "system"; content: string }
@@ -80,7 +74,7 @@ export async function executePrompt(
   let reportedModel = model;
   let turnCount = 0;
   const trackedToolCalls: ToolCall[] = [];
-  const maxToolTurns = resolveMaxToolTurns();
+  const maxToolTurns = optionalEnvInt("OPENAI_COMPAT_MAX_TOOL_TURNS", DEFAULT_MAX_TOOL_TURNS);
 
   // ── Agent loop: send → tool_calls? → execute → send again ──
   for (let turn = 0; turn < maxToolTurns; turn++) {

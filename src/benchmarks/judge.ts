@@ -175,57 +175,76 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
 
   const startedAt = Date.now();
 
-  // One-shot CLI call + envelope parse + JSON extract. Returns the parsed
-  // envelope alongside the attempt's stdout so the caller can dump it on a
-  // final failure. Throws if any stage fails.
-  const runOneJudgeAttempt = async (): Promise<{
+  type AttemptOk = {
+    ok: true;
     stdoutText: string;
     cliResult: ReturnType<typeof parseClaudeOutput>;
     result: JudgeResult;
-  }> => {
-    const stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
-    const cliResult = parseClaudeOutput(stdoutText);
-    const judgeResultRaw = extractJson<unknown>(cliResult.result);
-    const result = normaliseJudgeResult(judgeResultRaw);
-    return { stdoutText, cliResult, result };
+  };
+  type AttemptFail = {
+    ok: false;
+    error: Error;
+    stdoutText?: string;
+    cliResult?: ReturnType<typeof parseClaudeOutput>;
   };
 
-  // Retry policy: one extra attempt on any failure after the first (including
-  // Bug 8 — Claude CLI truncating the envelope `result` field to just the tail
-  // of a long JSON response). The model at temp=0 still varies across
-  // prompt-cache states, so a retry often produces a parseable response. Cost
-  // of one wasted judge call is much lower than an unscorable matrix cell.
-  let stdoutText: string;
-  let cliResult: ReturnType<typeof parseClaudeOutput>;
-  let result: JudgeResult;
-  let firstError: Error | null = null;
-  try {
-    ({ stdoutText, cliResult, result } = await runOneJudgeAttempt());
-  } catch (err) {
-    firstError = err instanceof Error ? err : new Error(String(err));
+  const runOneJudgeAttempt = async (): Promise<AttemptOk | AttemptFail> => {
+    let stdoutText: string;
+    try {
+      stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    let cliResult: ReturnType<typeof parseClaudeOutput>;
+    try {
+      cliResult = parseClaudeOutput(stdoutText);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)), stdoutText };
+    }
+    try {
+      const judgeResultRaw = extractJson<unknown>(cliResult.result);
+      const result = normaliseJudgeResult(judgeResultRaw);
+      return { ok: true, stdoutText, cliResult, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)), stdoutText, cliResult };
+    }
+  };
+
+  // Bug 8 — Claude CLI truncates the envelope `result` field to just the tail
+  // of long JSON responses. Sonnet at temp=0 still varies across prompt-cache
+  // states, so a retry usually produces a parseable response. Skip the retry
+  // on spawn-side timeouts: a stuck CLI doubles wall time for no benefit.
+  const attempt = await (async (): Promise<AttemptOk> => {
+    const first = await runOneJudgeAttempt();
+    if (first.ok) return first;
+    if (first.error.message.startsWith("Judge timed out")) {
+      tracer.end("claude-cli-call", { status: "error", error: first.error.message });
+      tracer.error(first.error);
+      throw first.error;
+    }
     log.warn("Judge attempt 1 failed, retrying once: {error}", {
       botName: "benchmarks",
-      error: firstError.message,
+      error: first.error.message,
     });
-    try {
-      ({ stdoutText, cliResult, result } = await runOneJudgeAttempt());
-      log.info("Judge attempt 2 succeeded after attempt 1 failed", { botName: "benchmarks" });
-    } catch (err2) {
-      const secondError = err2 instanceof Error ? err2 : new Error(String(err2));
-      // Dump the raw CLI stdout from the SECOND attempt so Bug 8 diagnostics
-      // capture the most recent envelope. See benchmarks/known-bugs.md Bug 8.
-      const debugDir = `/tmp/benchmark-judge-debug-${Date.now()}`;
-      mkdirSync(debugDir, { recursive: true });
-      writeFileSync(`${debugDir}/error.txt`, `attempt 1: ${firstError.message}\n\nattempt 2: ${secondError.message}\n${secondError.stack ?? ""}`);
-      log.error("Judge failed on both attempts — debug dump written to {dir}", {
-        botName: "benchmarks",
-        dir: debugDir,
-      });
-      tracer.end("claude-cli-call", { status: "error", error: secondError.message });
-      tracer.error(secondError);
-      throw secondError;
-    }
-  }
+    const second = await runOneJudgeAttempt();
+    if (second.ok) return second;
+    const debugDir = `/tmp/benchmark-judge-debug-${Date.now()}`;
+    mkdirSync(debugDir, { recursive: true });
+    if (second.stdoutText) writeFileSync(`${debugDir}/raw-stdout.json`, second.stdoutText);
+    if (second.cliResult) writeFileSync(`${debugDir}/parsed-result-field.txt`, second.cliResult.result ?? "<null>");
+    writeFileSync(
+      `${debugDir}/error.txt`,
+      `attempt 1: ${first.error.message}\n\nattempt 2: ${second.error.message}\n${second.error.stack ?? ""}`,
+    );
+    log.error("Judge failed on both attempts — debug dump written to {dir}", {
+      botName: "benchmarks",
+      dir: debugDir,
+    });
+    tracer.end("claude-cli-call", { status: "error", error: second.error.message });
+    tracer.error(second.error);
+    throw second.error;
+  })();
+  const { cliResult, result } = attempt;
   const wallclockMs = Date.now() - startedAt;
 
   const inputTokens = cliResult.inputTokens;
