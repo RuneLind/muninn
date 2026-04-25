@@ -174,59 +174,83 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
   });
 
   const startedAt = Date.now();
-  let stdoutText: string;
-  try {
-    stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
-  } catch (err) {
-    tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
-    tracer.error(err instanceof Error ? err : new Error(String(err)));
-    throw err;
-  }
-  const wallclockMs = Date.now() - startedAt;
 
-  // Parse the Claude CLI envelope via muninn's canonical parser. This sums
-  // usage.input_tokens + cache_creation + cache_read (so cached prompt content
-  // is counted correctly) and extracts the resolved model snapshot from
-  // modelUsage keys — both of which my original bespoke parser got wrong
-  // (input tokens reported as 3, model reported as the alias).
-  let cliResult: ReturnType<typeof parseClaudeOutput>;
-  try {
-    cliResult = parseClaudeOutput(stdoutText);
-  } catch (err) {
-    tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
-    tracer.error(err instanceof Error ? err : new Error(String(err)));
-    throw err;
-  }
+  type AttemptOk = {
+    ok: true;
+    stdoutText: string;
+    cliResult: ReturnType<typeof parseClaudeOutput>;
+    result: JudgeResult;
+  };
+  type AttemptFail = {
+    ok: false;
+    error: Error;
+    stdoutText?: string;
+    cliResult?: ReturnType<typeof parseClaudeOutput>;
+  };
+
+  const runOneJudgeAttempt = async (): Promise<AttemptOk | AttemptFail> => {
+    let stdoutText: string;
+    try {
+      stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    let cliResult: ReturnType<typeof parseClaudeOutput>;
+    try {
+      cliResult = parseClaudeOutput(stdoutText);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)), stdoutText };
+    }
+    try {
+      const judgeResultRaw = extractJson<unknown>(cliResult.result);
+      const result = normaliseJudgeResult(judgeResultRaw);
+      return { ok: true, stdoutText, cliResult, result };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err : new Error(String(err)), stdoutText, cliResult };
+    }
+  };
+
+  // Bug 8 — Claude CLI truncates the envelope `result` field to just the tail
+  // of long JSON responses. Sonnet at temp=0 still varies across prompt-cache
+  // states, so a retry usually produces a parseable response. Skip the retry
+  // on spawn-side timeouts: a stuck CLI doubles wall time for no benefit.
+  const attempt = await (async (): Promise<AttemptOk> => {
+    const first = await runOneJudgeAttempt();
+    if (first.ok) return first;
+    if (first.error.message.startsWith("Judge timed out")) {
+      tracer.end("claude-cli-call", { status: "error", error: first.error.message });
+      tracer.error(first.error);
+      throw first.error;
+    }
+    log.warn("Judge attempt 1 failed, retrying once: {error}", {
+      botName: "benchmarks",
+      error: first.error.message,
+    });
+    const second = await runOneJudgeAttempt();
+    if (second.ok) return second;
+    const debugDir = `/tmp/benchmark-judge-debug-${Date.now()}`;
+    mkdirSync(debugDir, { recursive: true });
+    if (second.stdoutText) writeFileSync(`${debugDir}/raw-stdout.json`, second.stdoutText);
+    if (second.cliResult) writeFileSync(`${debugDir}/parsed-result-field.txt`, second.cliResult.result ?? "<null>");
+    writeFileSync(
+      `${debugDir}/error.txt`,
+      `attempt 1: ${first.error.message}\n\nattempt 2: ${second.error.message}\n${second.error.stack ?? ""}`,
+    );
+    log.error("Judge failed on both attempts — debug dump written to {dir}", {
+      botName: "benchmarks",
+      dir: debugDir,
+    });
+    tracer.end("claude-cli-call", { status: "error", error: second.error.message });
+    tracer.error(second.error);
+    throw second.error;
+  })();
+  const { cliResult, result } = attempt;
+  const wallclockMs = Date.now() - startedAt;
 
   const inputTokens = cliResult.inputTokens;
   const outputTokens = cliResult.outputTokens;
   // Prefer the resolved snapshot from the envelope over the alias we passed in
   const resolvedModel = cliResult.model !== "unknown" ? cliResult.model : model;
-
-  // The model's response is itself JSON (the judge result)
-  let result: JudgeResult;
-  try {
-    const judgeResultRaw = extractJson<unknown>(cliResult.result);
-    result = normaliseJudgeResult(judgeResultRaw);
-  } catch (err) {
-    // Dump the raw CLI stdout and the parsed result field so Bug 8 can be
-    // diagnosed on the next occurrence without re-spending tokens. See
-    // benchmarks/known-bugs.md Bug 8.
-    const debugDir = `/tmp/benchmark-judge-debug-${Date.now()}`;
-    mkdirSync(debugDir, { recursive: true });
-    writeFileSync(`${debugDir}/raw-stdout.json`, stdoutText);
-    writeFileSync(`${debugDir}/parsed-result-field.txt`, cliResult.result ?? "<null>");
-    writeFileSync(`${debugDir}/error.txt`, err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
-    log.error("Judge parse failure — debug dump written to {dir}", {
-      botName: "benchmarks",
-      dir: debugDir,
-      stdoutLength: stdoutText.length,
-      resultFieldLength: cliResult.result?.length ?? 0,
-    });
-    tracer.end("claude-cli-call", { status: "error", error: err instanceof Error ? err.message : String(err) });
-    tracer.error(err instanceof Error ? err : new Error(String(err)));
-    throw err;
-  }
 
   tracer.end("claude-cli-call", {
     inputTokens,

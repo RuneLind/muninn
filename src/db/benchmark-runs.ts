@@ -7,6 +7,7 @@ export interface BenchmarkTreatment {
   model: string;
   mcpStack: string;
   promptId: string;
+  baseUrl?: string;
 }
 
 /** Per-cell stack configuration — which Serena/Yggdrasil instances were running. */

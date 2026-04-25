@@ -80,6 +80,16 @@ const STYLES = `
     font-weight: 600;
     color: var(--accent-light);
   }
+  .runs-table .model-cell {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-soft);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: help;
+  }
 
   .hit-rate {
     font-weight: 700;
@@ -828,6 +838,7 @@ export function renderBenchmarkListPage(
         <thead>
           <tr>
             <th>Issue</th>
+            <th>Model</th>
             <th>Hit rate</th>
             ${showHighlightedCol ? "<th>Highlighted</th>" : ""}
             <th>Claims</th>
@@ -852,8 +863,19 @@ export function renderBenchmarkListPage(
                       : "—"
                   }</span></td>`
                 : "";
+              const modelLabel = r.treatment?.model ?? r.modelSnapshotId ?? "—";
+              const treatmentTooltip = r.treatment
+                ? [
+                    `connector: ${r.treatment.connector}`,
+                    `model: ${r.treatment.model}`,
+                    `mcpStack: ${r.treatment.mcpStack}`,
+                    `promptId: ${r.treatment.promptId}`,
+                    ...(r.treatment.baseUrl ? [`baseUrl: ${r.treatment.baseUrl}`] : []),
+                  ].join("\n")
+                : "no treatment recorded";
               return `<tr onclick="window.location='/benchmark/runs/${esc(r.id)}'">
                 <td><span class="issue-key">${esc(r.issueKey)}</span></td>
+                <td class="model-cell" title="${esc(treatmentTooltip)}">${esc(modelLabel)}</td>
                 <td class="num"><span class="hit-rate ${hClass}">${fmtRate(r.hitRate)}</span></td>
                 ${highlightedCell}
                 <td class="num">${claims}</td>
@@ -1124,7 +1146,10 @@ export function renderBenchmarkDetailPage(
 
   // Re-judge panel: aggregates parent + all successful children into a
   // mean ± stddev headline, lists each pass, and holds the Re-judge form.
-  const canRejudge = run.parentRunId === null && run.status === "done";
+  // Error rows are eligible too — candidate.md is persisted before the judge
+  // runs, so a judge-side failure still leaves a valid candidate to score.
+  const canRejudge =
+    run.parentRunId === null && (run.status === "done" || run.status === "error");
   const isRejudgeChild = run.parentRunId !== null;
   const rejudgePanelHtml = isRejudgeChild
     ? renderRejudgeChildNotice(run.parentRunId!)
@@ -1309,9 +1334,9 @@ function renderRejudgePanel(
          </button>
          <span class="hint">~$0.15 per pass · reuses the stored candidate · no new analysis</span>
        </form>`
-    : run.status === "done"
-      ? ""
-      : `<p class="subtitle" style="margin-top: 4px;">Re-judge is only available for parent runs in <code>done</code> status.</p>`;
+    : run.status === "running"
+      ? `<p class="subtitle" style="margin-top: 4px;">Re-judge will be available once this run finishes.</p>`
+      : `<p class="subtitle" style="margin-top: 4px;">Re-judge is only available for parent runs.</p>`;
 
   return `<div class="rejudge-panel">
     <h2>Re-judge passes</h2>
