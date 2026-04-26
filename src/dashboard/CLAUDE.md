@@ -23,9 +23,11 @@ Routes are split by domain in `routes/`:
 | `search-routes.ts` | Knowledge base document search and management |
 | `research-routes.ts` | Jira research: trigger analysis, post to chat |
 | `memsearch-routes.ts` | Memory semantic search (hybrid FTS + vector) |
+| `graph-routes.ts` | Knowledge graph page + wikilink edge extraction across knowledge collections |
 | `logs-routes.ts` | Log file viewer (JSONL files from LogTape) |
 | `tools-routes.ts` | MCP tool debug: connect, list, call, disconnect |
 | `youtube-routes.ts` | YouTube transcript fetch and summarization |
+| `x-article-routes.ts` | X/Twitter article summarization (Chrome extension backend) |
 | `route-utils.ts` | Shared helpers: UUID validation, pagination parsing |
 
 ## View System

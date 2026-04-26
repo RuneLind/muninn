@@ -162,6 +162,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 |---|---|---|
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
+| Core | `src/core/` | Central message pipeline — `message-processor.ts` (shared by Telegram/Slack/web), metadata extraction, progress callbacks |
 | AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK + OpenAI-compat connectors, prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
@@ -171,7 +172,12 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, threads, user settings |
 | Tracing | `src/tracing/` | Request tracing with span hierarchy, tool call child spans |
 | Dashboard | `src/dashboard/` | Hono server with SSE activity feed, traces waterfall + REST APIs |
+| Chat | `src/chat/` | Web chat state, WebSocket, processor, server-rendered UI |
+| Web format | `src/web/web-format.ts` | Markdown → HTML for web chat (server side; client mirror in `src/chat/views/components/web-format-client.ts`) |
+| Serena | `src/serena/` | Serena MCP instance manager + multi-instance tool proxy (port 9120) |
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
+| YouTube | `src/youtube/` | Transcript fetch + summarization (backs `youtube-routes.ts` + Chrome extension) |
+| X article | `src/x-article/` | X/Twitter article summarization (backs `x-article-routes.ts` + Chrome extension) |
 | Extensions | `extensions/` | Chrome extensions (Jira research, YouTube summarizer) — each subfolder is a standalone extension |
 
 ### Bot Folder Structure
@@ -331,7 +337,7 @@ When implementing Slack bot features, be aware of the different message contexts
 
 ### Testing
 
-Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into two groups to avoid `mock.module()` leakage between files:
+Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into three sub-scripts (unit / db / handlers) to avoid `mock.module()` leakage between files:
 
 ```bash
 bun run test              # All tests
