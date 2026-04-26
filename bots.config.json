@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "bots": {
+    "jarvis": {
+      "inline": true
+    },
+    "capra": {
+      "repo": "~/source/private/muninn-config",
+      "subpath": "bots/capra"
+    },
+    "melosys": {
+      "repo": "~/source/private/muninn-config",
+      "subpath": "bots/melosys"
+    }
+  }
+}

@@ -264,11 +264,28 @@ PostgreSQL + pgvector via Docker (single container).
 
 ### Config Sync
 
-Bot folders (except jarvis) and `.env` are gitignored and tracked in a separate private repo (`~/source/private/muninn-config`). After changing any bot config, persona, or MCP settings, sync with:
+Bot folders (except `jarvis`) are gitignored. The manifest at `bots.config.json` (repo root) maps each bot to its source-of-truth repo — either a local path (e.g. `~/source/private/muninn-config`) or a git URL (e.g. `git@github.com:capraconsulting/huginn-capra.git`). Git-URL repos are sparse-cloned into `~/.muninn/bot-repos/<name>/`.
+
+`.env` is **per-developer** — each dev maintains their own with the tokens for the bots they actually run. It is not synced by this tool.
 
 ```bash
-bun run config:sync -- --commit
+bun run config:sync                # push local bots/<name>/ → each repo
+bun run config:sync -- --pull      # fetch latest from git remotes first
+bun run config:sync -- --commit    # commit + push in every touched repo
 ```
+
+Entries in the manifest whose `repo` path doesn't exist (or whose git clone fails) are skipped with a warning, so a contributor only needs access to the repos for the bots they care about.
+
+Manifest entry shapes:
+```json
+{
+  "jarvis":  { "inline": true },
+  "capra":   { "repo": "git@github.com:capraconsulting/huginn-capra.git", "subpath": "bot" },
+  "melosys": { "repo": "~/source/private/muninn-config", "subpath": "bots/melosys" }
+}
+```
+
+Path conventions inside synced `.mcp.json`: paths are resolved relative to `cwd: bots/<name>/`. To reference a sibling project (e.g. `~/source/private/huginn` when muninn is at `~/source/private/muninn`), use `../../../huginn`. Paths in `env` blocks are read literally — for HOME-relative paths use shell expansion in a `bash -c` command instead.
 
 ## Serena Code Analysis (MCP Proxy)
 
