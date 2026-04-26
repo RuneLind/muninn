@@ -14,6 +14,17 @@ const YT_COLLECTION = "youtube-summaries";
 
 interface YtDocumentMeta { id: string; url?: string }
 
+function extractYouTubeVideoId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "youtu.be") return u.pathname.slice(1) || null;
+    if (u.hostname.endsWith("youtube.com")) return u.searchParams.get("v");
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function findExistingByVideoId(
   baseUrl: string,
   videoId: string,
@@ -25,8 +36,7 @@ async function findExistingByVideoId(
       { timeoutMs: 10000 },
     );
     const docs = (data?.documents ?? []) as YtDocumentMeta[];
-    const needle = `v=${videoId}`;
-    return docs.find((d) => typeof d.url === "string" && d.url.includes(needle)) ?? null;
+    return docs.find((d) => d.url != null && extractYouTubeVideoId(d.url) === videoId) ?? null;
   } catch (err) {
     log.warn("YouTube duplicate check failed: {error}", {
       error: err instanceof Error ? err.message : String(err),

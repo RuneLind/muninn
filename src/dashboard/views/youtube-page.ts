@@ -97,16 +97,12 @@ export function renderYouTubePage(): string {
 
       var params = new URLSearchParams(window.location.search);
 
-      // ?doc= deep link — open existing summary panel (used by duplicate-detection redirect)
       var deepLinkDoc = params.get('doc');
       if (deepLinkDoc) {
-        if (params.get('duplicate') === '1') {
-          showDuplicateBanner();
-        }
-        try { openYouTubeDoc(deepLinkDoc, ''); } catch (e) {}
+        if (params.get('duplicate') === '1') showDuplicateBanner();
+        openYouTubeDoc(deepLinkDoc, '');
       }
 
-      // Check for ?job= param
       var jobId = params.get('job');
       if (!jobId) return;
 
