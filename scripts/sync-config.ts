@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // Sync gitignored bot folders to/from per-bot config repos.
 // Manifest:  bots.config.json (at repo root)
-// Usage:     bun run config:sync [--commit] [--pull]
+// Usage:     bun run config:sync    [--commit] [--pull]
+//            bun run config:restore
 //
 // Each entry in bots.config.json describes where a bot's source-of-truth lives:
 //   { "repo": "<local path | git URL>", "subpath": "<dir-in-repo>", "branch": "<main>" }
@@ -9,10 +10,11 @@
 //
 // Local-path repos (e.g. ~/source/private/muninn-config) are used as-is.
 // Git URLs are cloned (sparse, by subpath) into ~/.muninn/bot-repos/<name>/.
-// Direction is push (local → repo) by default; --pull fetches latest from
-// remote first (only meaningful for git URLs).
 //
-// --commit: stage, commit and push (if remote exists) in every touched repo.
+// Default direction: push (local bots/<name>/ → repo subpath).
+//   --pull     fetch latest from git remotes first (push direction unchanged)
+//   --commit   stage, commit and push (if remote exists) in every touched repo
+//   --restore  reverse direction: repo subpath → local bots/<name>/ (implies git pull)
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -23,7 +25,8 @@ const BOT_CACHE = join(homedir(), ".muninn", "bot-repos");
 
 const args = new Set(process.argv.slice(2));
 const COMMIT = args.has("--commit");
-const PULL = args.has("--pull");
+const RESTORE = args.has("--restore");
+const PULL = args.has("--pull") || RESTORE; // restore always wants the latest source
 
 interface BotEntry {
   repo?: string;
@@ -110,19 +113,33 @@ async function syncBot(name: string, e: BotEntry): Promise<string | null> {
     console.log(`  · ${name} (inline)`);
     return null;
   }
-  const localDir = join(MUNINN_DIR, "bots", name);
-  if (!existsSync(localDir)) {
-    console.warn(`  ⚠ ${name}: bots/${name}/ not present locally — skipping`);
-    return null;
-  }
-  // Safety: refuse to sync an empty/uninitialised local dir to avoid wiping the source-of-truth.
-  if (!existsSync(join(localDir, "CLAUDE.md"))) {
-    console.warn(`  ⚠ ${name}: bots/${name}/CLAUDE.md not present — refusing to sync (run 'bun run config:restore' first)`);
-    return null;
-  }
   const sot = await ensureSourceOfTruth(name, e);
   if (!sot) return null;
-  await Bun.$`rsync -a --delete --exclude=reports/ --exclude=.DS_Store ${localDir}/ ${sot.path}/`.quiet();
+  const localDir = join(MUNINN_DIR, "bots", name);
+  const RSYNC_FLAGS = ["-a", "--delete", "--exclude=reports/", "--exclude=.DS_Store"];
+
+  if (RESTORE) {
+    // repo subpath → local
+    if (!existsSync(join(sot.path, "CLAUDE.md"))) {
+      console.warn(`  ⚠ ${name}: ${sot.path}/CLAUDE.md not present — source-of-truth not populated, skipping`);
+      return null;
+    }
+    mkdirSync(localDir, { recursive: true });
+    await Bun.$`rsync ${RSYNC_FLAGS} ${sot.path}/ ${localDir}/`.quiet();
+    console.log(`  ↻ ${sot.path} → bots/${name}/`);
+    return null; // restore doesn't dirty the repo
+  }
+
+  // push: local → repo subpath
+  if (!existsSync(localDir)) {
+    console.warn(`  ⚠ ${name}: bots/${name}/ not present locally — skipping (run with --restore to populate)`);
+    return null;
+  }
+  if (!existsSync(join(localDir, "CLAUDE.md"))) {
+    console.warn(`  ⚠ ${name}: bots/${name}/CLAUDE.md not present — refusing to push (run --restore first)`);
+    return null;
+  }
+  await Bun.$`rsync ${RSYNC_FLAGS} ${localDir}/ ${sot.path}/`.quiet();
   console.log(`  ✓ bots/${name}/ → ${sot.path}`);
   return sot.repoRoot;
 }
@@ -144,7 +161,7 @@ async function commitRepo(repoRoot: string): Promise<void> {
 }
 
 async function main() {
-  console.log(`Syncing from ${MUNINN_DIR}`);
+  console.log(RESTORE ? `Restoring into ${MUNINN_DIR}` : `Syncing from ${MUNINN_DIR}`);
   const manifest = loadManifest();
 
   const touched = new Set<string>();
@@ -152,6 +169,8 @@ async function main() {
     const repoRoot = await syncBot(name, entry);
     if (repoRoot) touched.add(repoRoot);
   }
+
+  if (RESTORE) return; // nothing to commit on restore
 
   if (COMMIT) {
     console.log("\nCommitting…");

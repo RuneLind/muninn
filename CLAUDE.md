@@ -272,15 +272,16 @@ Bot folders (except `jarvis`) are gitignored. The manifest at `bots.config.json`
 bun run config:sync                # push local bots/<name>/ → each repo
 bun run config:sync -- --pull      # fetch latest from git remotes first
 bun run config:sync -- --commit    # commit + push in every touched repo
+bun run config:restore             # reverse: pull each repo subpath → bots/<name>/
 ```
 
-Entries in the manifest whose `repo` path doesn't exist (or whose git clone fails) are skipped with a warning, so a contributor only needs access to the repos for the bots they care about.
+Entries in the manifest whose `repo` path doesn't exist (or whose git clone fails) are skipped with a warning, so a contributor only needs access to the repos for the bots they care about. `--restore` skips entries whose source-of-truth doesn't have a `CLAUDE.md` yet (i.e. has never been populated).
 
 Manifest entry shapes:
 ```json
 {
   "jarvis":  { "inline": true },
-  "capra":   { "repo": "git@github.com:capraconsulting/huginn-capra.git", "subpath": "bot" },
+  "capra":   { "repo": "https://github.com/capraconsulting/huginn-capra.git", "subpath": "bot" },
   "melosys": { "repo": "~/source/private/muninn-config", "subpath": "bots/melosys" }
 }
 ```

@@ -5,8 +5,9 @@
       "inline": true
     },
     "capra": {
-      "repo": "~/source/private/muninn-config",
-      "subpath": "bots/capra"
+      "repo": "https://github.com/capraconsulting/huginn-capra.git",
+      "subpath": "bot",
+      "branch": "main"
     },
     "melosys": {
       "repo": "~/source/private/muninn-config",
