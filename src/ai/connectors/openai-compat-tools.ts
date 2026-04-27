@@ -40,7 +40,7 @@ export async function loadToolsForBot(
 
   for (const [serverName, serverConfig] of serverEntries) {
     try {
-      const { tools } = await connectToServer(botConfig.name, serverName, serverConfig);
+      const { tools } = await connectToServer(botConfig.name, serverName, serverConfig, botConfig.dir);
       for (const tool of tools) {
         openaiTools.push(mcpToolToOpenAI(tool));
         toolServerMap.set(tool.name, serverName);

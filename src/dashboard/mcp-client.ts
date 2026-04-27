@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 
 const log = getLog("dashboard", "mcp");
@@ -71,6 +71,7 @@ export async function connectToServer(
   botName: string,
   serverName: string,
   serverConfig: McpServerConfig,
+  botDir?: string,
 ): Promise<{ tools: ToolInfo[]; serverInfo?: { name: string; version: string } }> {
   const key = connectionKey(botName, serverName);
 
@@ -94,11 +95,18 @@ export async function connectToServer(
     transport = new StreamableHTTPClientTransport(new URL(serverConfig.url));
   } else {
     if (!serverConfig.command) throw new Error(`MCP server ${serverName} has no command`);
+    // Convention: relative paths in args/cwd are relative to the bot dir (matches claude-cli executor).
+    // Without this, MCP Debug would spawn from the muninn process cwd and break configs that use ../-paths.
+    const cwd = serverConfig.cwd
+      ? isAbsolute(serverConfig.cwd) || !botDir
+        ? serverConfig.cwd
+        : resolve(botDir, serverConfig.cwd)
+      : botDir;
     transport = new StdioClientTransport({
       command: serverConfig.command,
       args: serverConfig.args,
       env: { ...process.env, ...serverConfig.env } as Record<string, string>,
-      cwd: serverConfig.cwd,
+      cwd,
       stderr: "pipe",
     });
   }
