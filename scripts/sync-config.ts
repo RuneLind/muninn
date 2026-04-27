@@ -26,7 +26,10 @@ const BOT_CACHE = join(homedir(), ".muninn", "bot-repos");
 const args = new Set(process.argv.slice(2));
 const COMMIT = args.has("--commit");
 const RESTORE = args.has("--restore");
-const PULL = args.has("--pull") || RESTORE; // restore always wants the latest source
+// --restore implies --pull: pulling local from a stale clone defeats the purpose.
+const PULL = args.has("--pull") || RESTORE;
+
+const RSYNC_FLAGS = ["-a", "--delete", "--exclude=reports/", "--exclude=.DS_Store"];
 
 interface BotEntry {
   repo?: string;
@@ -116,7 +119,6 @@ async function syncBot(name: string, e: BotEntry): Promise<string | null> {
   const sot = await ensureSourceOfTruth(name, e);
   if (!sot) return null;
   const localDir = join(MUNINN_DIR, "bots", name);
-  const RSYNC_FLAGS = ["-a", "--delete", "--exclude=reports/", "--exclude=.DS_Store"];
 
   if (RESTORE) {
     // repo subpath → local
