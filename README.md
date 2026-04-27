@@ -578,6 +578,47 @@ The bot's `.mcp.json` points to the proxy (not individual instances):
 
 > See [`docs/examples/jira-assistant/`](docs/examples/jira-assistant/) for a complete team bot example with Serena code search and Copilot SDK connector.
 
+## Sharing bot configs across machines / contributors
+
+Bot folders (everything except the bundled `bots/jarvis/`) are gitignored, but they're often the most valuable part of a deployment — personas, MCP wiring, tool permissions. Muninn syncs them to/from external "source-of-truth" repos via a manifest at `bots.config.json` (repo root). Each entry maps a bot name to either a local path (e.g. a personal config repo) or a git URL (typically a private team repo).
+
+```json
+{
+  "schemaVersion": 1,
+  "bots": {
+    "jarvis":  { "inline": true },
+    "capra":   { "repo": "https://github.com/capraconsulting/huginn-capra.git", "subpath": "bot" },
+    "melosys": { "repo": "~/source/private/muninn-config", "subpath": "bots/melosys" }
+  }
+}
+```
+
+`inline: true` means the bot is checked into muninn directly (the case for `jarvis`). Git-URL repos are sparse-cloned into `~/.muninn/bot-repos/<name>/`. Manifest entries you can't reach (path missing, clone fails) are skipped with a warning, so each contributor only needs access to the repos for the bots they actually run.
+
+```bash
+bun run config:sync                # push local bots/<name>/ → each repo
+bun run config:sync -- --pull      # fetch latest from git remotes first
+bun run config:sync -- --commit    # commit + push in every touched repo
+bun run config:restore             # reverse: pull each repo subpath → bots/<name>/
+```
+
+`.env` is **per-developer** — each contributor maintains their own with the tokens for the bots they actually run. It is not synced by this tool.
+
+**Onboarding a new contributor for a single bot** (e.g. someone joining a Capra-only team):
+
+```bash
+git clone https://github.com/RuneLind/muninn.git
+cd muninn && bun install
+bun run config:restore             # pulls bots/capra/ from huginn-capra (the only repo they have access to)
+cp .env.example .env               # add their own SLACK_BOT_TOKEN_CAPRA etc.
+bun run db:up && bun run db:migrate
+bun run dev
+```
+
+They never touch a personal config repo and never see other teams' bots.
+
+**Path conventions inside synced `.mcp.json`:** paths resolve relative to `cwd: bots/<name>/`. To reference a sibling project (e.g. `~/source/private/huginn` when muninn lives at `~/source/private/muninn`), use `../../../huginn`. Values inside `env` blocks are read literally — for HOME-relative paths use shell expansion in a `bash -c` command instead.
+
 ## How It Works
 
 ### Memory
