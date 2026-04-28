@@ -43,6 +43,7 @@ describe("parseMcpConfig", () => {
           type: "local",
           command: "npx",
           args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+          cwd: dir,
           env: { TOKEN_PATH: "/tmp/token.json" },
           tools: ["*"],
         },
@@ -50,6 +51,7 @@ describe("parseMcpConfig", () => {
           type: "local",
           command: "node",
           args: [],
+          cwd: dir,
           env: undefined,
           tools: ["*"],
         },
@@ -143,6 +145,26 @@ describe("parseMcpConfig", () => {
       const result = parseMcpConfig(dir);
       expect(result.gmail!.type).toBe("local");
       expect(result.serena!.type).toBe("http");
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("resolves relative cwd against bot dir", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: {
+        rel: { command: "uv", args: ["run", "x.py"], cwd: "../sibling" },
+        abs: { command: "uv", args: ["run", "y.py"], cwd: "/opt/foo" },
+      },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+    try {
+      const result = parseMcpConfig(dir);
+      const rel = result.rel as { cwd: string };
+      const abs = result.abs as { cwd: string };
+      expect(rel.cwd).toBe(join(dir, "..", "sibling"));
+      expect(abs.cwd).toBe("/opt/foo");
     } finally {
       rmSync(dir, { recursive: true });
     }
