@@ -283,20 +283,32 @@ DB:
 
 ```mermaid
 graph LR
-    P1[Phase 1<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2<br/>Inbound + threading<br/>peer thread UI]
+    P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2<br/>Inbound + threading<br/>peer thread UI]
     P2 --> P3[Phase 3<br/>Auto-respond<br/>+ guardrails]
     P3 --> P4[Phase 4<br/>Cross-namespace<br/>melosys ↔ nav]
     P4 --> P5[Phase 5<br/>yggdrasil + others]
 ```
 
-**Phase 1 (1–2 days).** WS client, single namespace (`private`), `ask_peer`
-+ `send_to_peer` + `list_peers` tools. No inbound handling beyond
-resolving pending `ask_peer`. Manual test: melosys bot asks huginn a
-question during Jira analysis.
+**Phase 1 — done (2026-04-28).** Commits: `f4ab41e` (initial module),
+`b2fc1c3` (timeout + registration fixes). Branch `hivemind-phase-1`.
+Verified end-to-end: melosys bot asks huginn a question during Jira
+analysis, gets a reply within the same turn, FIFO resolver matches by
+`from_id`. Two bugs surfaced and fixed during manual testing:
+
+- **`ask_peer` returned `fetch failed` after ~10s** — Bun.serve's default
+  idle timeout was tearing down the bot's MCP HTTP request before peers
+  replied. Fixed by setting `idleTimeout: 255` on the hivemind MCP
+  server and clamping `wait_seconds` to 240s for headroom.
+- **WS would open but never receive `registered`** — observed during
+  `bun --watch` hot reloads. The WS upgrade succeeded, register was
+  sent, but no reply came back; the client sat with `peerId === null`
+  and `isConnected === false`. Fixed by adding a 5s registration
+  timeout that force-closes the WS so exponential-backoff reconnect
+  takes over.
 
 **Phase 2 (1 day).** Inbound router + peer threads in chat UI. No
 auto-respond yet — peer messages just appear in the thread, you reply
-manually.
+manually. See "Phase 2 acceptance criteria" below for concrete scope.
 
 **Phase 3 (1 day).** `autoRespondPeers` allowlist + loop guards + traces
 integration. Now huginn can autonomously fix things on melosys's request.
@@ -307,6 +319,50 @@ works.
 
 **Phase 5 (when ready).** Onboard yggdrasil. Mostly a config change unless
 yggdrasil has its own quirks.
+
+## Phase 2 acceptance criteria
+
+Carrying forward from Phase 1:
+
+- `HivemindBotClient.onIncomingMessage` callback exists in `client.ts`
+  but is unwired. Phase 2 routes it to a chat thread.
+- The melosys bot is already a registered peer — no changes needed to
+  `manager.ts` boot for Phase 2.
+- Constraints from Phase 1 testing: `ask_peer` wait is bounded to 240s
+  by the MCP HTTP idle timeout. Don't try to make `ask_peer` itself
+  longer; instead, async replies (Phase 2) handle long-running cases.
+
+Required for Phase 2 to be "done":
+
+1. **DB migration** `db/migrations/NNN_hivemind_peer_messages.sql`:
+   add `from_peer_id TEXT NULL` to `messages`. Update `saveMessage` and
+   `getMessages` to round-trip the field.
+2. **Thread routing** in `src/hivemind/router.ts` (new module):
+   - On inbound peer message, find or create a `peer:<peer-id>` thread
+     for the receiving bot (no FK to a real user — bot-owned thread).
+   - Append the message with `sender: "peer"` and `from_peer_id` set.
+   - Broadcast a chat event so any open chat-page WebSocket gets it.
+3. **Chat state** `src/chat/state.ts`: add `"peer"` to the `ChatMessage`
+   sender union; teach hydration to load peer-thread messages.
+4. **UI** `src/chat/views/components/thread-manager.ts`: render peer
+   threads with a distinct icon (suggest a small antenna/bot glyph) and
+   a `[from peer-id]` prefix on messages. No "Pause auto-respond"
+   toggle yet — that's Phase 3.
+5. **Manual outbound from chat**: a button or text-prefix convention
+   (e.g. `>peer-id message...`) so the user can reply to a peer from
+   the chat UI without going through the bot's tool calls. This makes
+   peer threads useful even when the bot's connector isn't running.
+6. **Tests**: extend `client.test.ts` with a stubbed broker delivering
+   an unsolicited message and verify the router persists it. New
+   `router.test.ts` covers thread create/find logic with an in-memory
+   DB.
+
+Out of scope for Phase 2 (deferred to Phase 3+):
+
+- Autorespond / autonomous bot replies to peer messages
+- Loop guards / token budget
+- Trace span emission for peer messages
+- Multi-namespace registration (Phase 4)
 
 ## Risks & open questions
 
