@@ -62,8 +62,6 @@ export class HivemindManager {
         summary: cfg.summary ?? defaultSummary(bot),
         brokerPort: brokerPort(),
       });
-      // Route unsolicited inbound peer messages into the bot's chat threads.
-      // Errors are swallowed so a routing failure doesn't break the WS pump.
       client.onIncomingMessage = (msg) => {
         this.router.route(bot.name, msg).catch((err) => {
           log.error("Router failed for inbound peer message: {error}", {

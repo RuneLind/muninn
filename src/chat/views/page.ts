@@ -691,7 +691,6 @@ const CHAT_SCRIPT = `
   }
 
   function peerLabelForMessage(msg) {
-    // Prefer the thread name (peer:<cwd-basename>) — stable across peer reconnects.
     if (msg.threadId) {
       for (var i = 0; i < threads.length; i++) {
         if (threads[i].id === msg.threadId && threads[i].name && threads[i].name.indexOf('peer:') === 0) {
@@ -699,7 +698,6 @@ const CHAT_SCRIPT = `
         }
       }
     }
-    // Fall back to a short prefix of the broker peer ID.
     if (msg.fromPeerId) return msg.fromPeerId.slice(0, 8);
     return 'peer';
   }

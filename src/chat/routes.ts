@@ -3,7 +3,7 @@ import { resolve, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { chatState, type ConversationType } from "./state.ts";
+import { chatState, roleToSender, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
@@ -291,7 +291,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({
       messages: msgs.map((m) => ({
         id: m.id,
-        sender: m.role === "user" ? "user" : m.role === "peer" ? "peer" : "bot",
+        sender: roleToSender(m.role),
         text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
         timestamp: m.createdAt,
         threadId: m.threadId,
@@ -327,20 +327,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: `Bot "${conversation.botName}" not found` }, 404);
     }
 
-    // Hivemind text-prefix outbound: in a `peer:<name>` thread, a message that
-    // starts with `>` is sent directly to the peer instead of running through
-    // the bot's connector. The recipient is the most recent peer that spoke in
-    // this thread (no broker correlation IDs, so the simplest mapping is "most
-    // recent inbound peer in the thread").
     if (body.threadId && body.text.startsWith(">")) {
       const peerThread = await getThreadById(body.threadId);
       if (peerThread?.name.startsWith("peer:")) {
-        const result = await handlePeerOutbound({
-          conversationId: id,
-          conversation,
-          thread: peerThread,
-          rawText: body.text,
-        });
+        const result = await handlePeerOutbound(id, peerThread, conversation.username, body.text);
         return c.json(result.body, result.status);
       }
     }
@@ -502,35 +492,19 @@ function conversationTypeToPlatform(type: ConversationType): string {
   }
 }
 
-/**
- * Handle a `>...` text-prefix message sent inside a `peer:<name>` thread.
- * Strips the prefix, sends via the bot's HivemindBotClient, and persists the
- * outbound message under the same thread so the chat log shows the full
- * back-and-forth.
- */
-async function handlePeerOutbound(params: {
-  conversationId: string;
-  conversation: { botName: string; userId: string; username: string };
-  thread: { id: string; name: string; userId: string; botName: string };
-  rawText: string;
-}): Promise<{ status: 202 | 400 | 503; body: { status?: string; error?: string } }> {
-  const { conversationId, conversation, thread, rawText } = params;
-
-  // Strip the leading `>` and an optional space-delimited token. Keeping the
-  // token tolerant lets the user type either `>hi` or `>huginn hi` — both are
-  // routed to the thread's most-recent peer because we have no broker-side
-  // name registry to validate the token against.
+async function handlePeerOutbound(
+  conversationId: string,
+  thread: { id: string; userId: string; botName: string },
+  username: string,
+  rawText: string,
+): Promise<{ status: 202 | 400 | 503; body: { status?: string; error?: string } }> {
+  // Token after `>` is advisory; recipient is always the thread's most-recent peer.
   const stripped = rawText.replace(/^>\s*\S*\s*/, "").trim();
   if (!stripped) {
     return { status: 400, body: { error: "Empty message after stripping `>` prefix" } };
   }
 
-  const targetPeerId = await getMostRecentPeerIdForThread(thread.id);
-  if (!targetPeerId) {
-    return { status: 400, body: { error: "No prior peer message in this thread to reply to" } };
-  }
-
-  const client = hivemindManager.getClient(conversation.botName);
+  const client = hivemindManager.getClient(thread.botName);
   if (!client) {
     return { status: 503, body: { error: "Hivemind is not enabled for this bot" } };
   }
@@ -538,17 +512,20 @@ async function handlePeerOutbound(params: {
     return { status: 503, body: { error: "Hivemind broker is not connected" } };
   }
 
+  const targetPeerId = await getMostRecentPeerIdForThread(thread.id);
+  if (!targetPeerId) {
+    return { status: 400, body: { error: "No prior peer message in this thread to reply to" } };
+  }
+
   const sent = client.sendMessage(targetPeerId, stripped);
   if (!sent) {
     return { status: 503, body: { error: "Failed to send to peer (WebSocket write failed)" } };
   }
 
-  // Persist + broadcast as a regular user message under the peer thread so
-  // the conversation reads chronologically.
   const messageId = await saveMessage({
     userId: thread.userId,
     botName: thread.botName,
-    username: conversation.username,
+    username,
     role: "user",
     content: stripped,
     platform: "web",

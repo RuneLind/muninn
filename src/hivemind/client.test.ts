@@ -199,8 +199,6 @@ test("inbound message with no pending ask invokes onIncomingMessage", async () =
 });
 
 test("unsolicited inbound message exposes fromCwd, fromSummary, sentAt for the router", async () => {
-  // Phase 2 router needs from_cwd to derive a stable peer thread name. This
-  // guards against accidentally dropping any of those fields in client.ts.
   received.length = 0;
   const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
   const onIncoming = mock(

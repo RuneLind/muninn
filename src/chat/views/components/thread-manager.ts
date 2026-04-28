@@ -146,7 +146,6 @@ export function threadManagerScript(): string {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
-      // Satellite antenna for peer threads, # for main, bullet otherwise.
       var icon = isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;');
       var displayName = isPeer ? t.name.slice('peer:'.length) : t.name;
       var meta = '';

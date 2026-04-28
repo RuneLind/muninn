@@ -210,12 +210,7 @@ export interface AlertMessage {
   timestamp: number;
 }
 
-/**
- * Look up the most-recent broker peer ID seen in a peer thread. Used by the
- * chat UI's text-prefix outbound path: when the user sends a `>...` message
- * in a `peer:<name>` thread, we route it back to whichever peer last spoke
- * in that thread.
- */
+/** Most-recent broker peer-id in a thread — recipient for `>` text-prefix replies. */
 export async function getMostRecentPeerIdForThread(threadId: string): Promise<string | null> {
   const sql = getDb();
   const [row] = await sql`
