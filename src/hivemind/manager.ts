@@ -6,13 +6,11 @@ import { HivemindMcpServer } from "./mcp-server.ts";
 
 const log = getLog("hivemind", "manager");
 
-/**
- * Singleton that owns one HivemindBotClient per enabled bot plus the shared
- * HTTP MCP server. Started from `src/index.ts` after DB init.
- *
- * Phase 1: each bot uses the FIRST namespace from its config. Multi-namespace
- * (one client per namespace per bot) lands in Phase 4.
- */
+function defaultSummary(bot: BotConfig): string {
+  const firstLine = bot.persona.split("\n")[0]?.trim().slice(0, 80) ?? "";
+  return firstLine ? `${bot.name} (Muninn) — ${firstLine}` : `${bot.name} (Muninn)`;
+}
+
 export class HivemindManager {
   private clients = new Map<string, HivemindBotClient>();
   private mcpServer = new HivemindMcpServer();
@@ -46,11 +44,7 @@ export class HivemindManager {
     for (const bot of enabledBots) {
       const cfg = bot.hivemind!;
       // Phase 1: take the first namespace only. Phase 4 will iterate all of them.
-      const namespace = cfg.namespaces[0];
-      if (!namespace) {
-        log.warn("Bot {botName} has hivemind.enabled but no namespaces — skipping", { botName: bot.name });
-        continue;
-      }
+      const namespace = cfg.namespaces[0]!;
       if (cfg.namespaces.length > 1) {
         log.info(
           "Bot {botName} configured for {count} namespaces — Phase 1 only joins the first ({first}). Multi-namespace lands in Phase 4.",
@@ -62,17 +56,21 @@ export class HivemindManager {
         botName: bot.name,
         namespace,
         cwd: bot.dir,
-        summary: cfg.summary ?? `${bot.name} (Muninn) — ${bot.persona.split("\n")[0]?.slice(0, 80) ?? ""}`,
+        summary: cfg.summary ?? defaultSummary(bot),
         brokerPort: brokerPort(),
       });
       client.start();
-
       this.clients.set(bot.name, client);
-      this.mcpServer.registerBot(bot.name, client);
+
+      // exposeToTools=false leaves the peer connected (so messages still flow)
+      // but skips MCP registration — the bot's Claude won't see the tools.
+      if (cfg.exposeToTools !== false) {
+        this.mcpServer.registerBot(bot.name, client);
+      }
 
       log.info(
-        "Bot {botName} hivemind active (namespace={ns}, MCP url={url}/mcp/{botName})",
-        { botName: bot.name, ns: namespace, url: this.mcpServer.url },
+        "Bot {botName} hivemind active (namespace={ns}, MCP {mcp})",
+        { botName: bot.name, ns: namespace, mcp: cfg.exposeToTools !== false ? `${this.mcpServer.url}/mcp/${bot.name}` : "disabled (exposeToTools=false)" },
       );
     }
   }
@@ -97,11 +95,8 @@ export class HivemindManager {
     return this.mcpServer.url;
   }
 
-  /** Shut down all clients and the MCP server. */
   async stop(): Promise<void> {
-    for (const c of this.clients.values()) {
-      await c.stop();
-    }
+    await Promise.all(Array.from(this.clients.values(), (c) => c.stop()));
     this.clients.clear();
     await this.mcpServer.stop();
     this.started = false;

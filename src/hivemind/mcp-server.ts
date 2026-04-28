@@ -14,20 +14,6 @@ interface Session {
   server: McpServer;
 }
 
-/**
- * HTTP MCP server exposing hivemind tools (ask_peer, send_to_peer, list_peers)
- * to bots. One instance serves all bots on the same port; per-bot scoping is
- * done via the URL path (/mcp/<botName>).
- *
- * Each bot's `.mcp.json` should contain:
- * ```json
- * {
- *   "mcpServers": {
- *     "hivemind": { "type": "http", "url": "http://127.0.0.1:9180/mcp/<botName>" }
- *   }
- * }
- * ```
- */
 export class HivemindMcpServer {
   private httpServer: ReturnType<typeof Bun.serve> | null = null;
   private sessions = new Map<string, Session>();
@@ -123,7 +109,7 @@ export class HivemindMcpServer {
   }
 
   private async handleNewSession(req: Request, client: HivemindBotClient): Promise<Response> {
-    let server: McpServer;
+    const server = createMcpServerForBot(client);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
@@ -137,7 +123,6 @@ export class HivemindMcpServer {
     transport.onclose = () => {
       if (transport.sessionId) this.sessions.delete(transport.sessionId);
     };
-    server = createMcpServerForBot(client);
     await server.connect(transport);
     return transport.handleRequest(req);
   }
@@ -206,8 +191,15 @@ function createMcpServerForBot(client: HivemindBotClient): McpServer {
     async ({ to, message, wait_seconds }) => {
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;
       const reply = await client.askPeer(to, message, timeout);
-      const prefix = reply.timedOut ? "[timed out] " : "";
-      return textResult(`${prefix}${reply.text}`);
+      switch (reply.status) {
+        case "ok":
+          return textResult(reply.text);
+        case "timeout":
+          return textResult(`[timed out] ${reply.text}`);
+        case "not_connected":
+        case "send_failed":
+          return textResult(reply.text, true);
+      }
     },
   );
 

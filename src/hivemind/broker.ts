@@ -1,30 +1,23 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
+import { optionalEnvInt } from "../config.ts";
 
 const log = getLog("hivemind", "broker");
 
 const DEFAULT_BROKER_PORT = 7899;
 const DEFAULT_BROKER_SCRIPT = resolve(homedir(), "source/private/claude-hivemind/src/broker.ts");
 const HEALTH_TIMEOUT_MS = 1500;
-const STARTUP_POLL_INTERVAL_MS = 200;
+const STARTUP_POLL_INTERVAL_MS = 100;
 const STARTUP_MAX_WAIT_MS = 6_000;
 
-/** Resolve broker script path with env override. */
 function brokerScript(): string {
   return process.env.HIVEMIND_BROKER_SCRIPT ?? DEFAULT_BROKER_SCRIPT;
 }
 
-/** Resolve broker port with env override. */
 export function brokerPort(): number {
-  const env = process.env.HIVEMIND_BROKER_PORT;
-  if (env) {
-    const n = parseInt(env, 10);
-    if (!Number.isNaN(n)) return n;
-  }
-  return DEFAULT_BROKER_PORT;
+  return optionalEnvInt("HIVEMIND_BROKER_PORT", DEFAULT_BROKER_PORT);
 }
 
 /** Check if the broker's HTTP /health endpoint responds. */
@@ -64,11 +57,7 @@ export async function ensureBrokerRunning(): Promise<boolean> {
 
   log.info("Spawning broker daemon: bun {script}", { script });
   try {
-    const proc = spawn("bun", [script], {
-      stdio: "ignore",
-      detached: true,
-      env: { ...process.env },
-    });
+    const proc = Bun.spawn(["bun", script], { stdio: ["ignore", "ignore", "ignore"] });
     proc.unref();
   } catch (e) {
     log.warn("Failed to spawn broker: {error}", { error: e instanceof Error ? e.message : String(e) });
@@ -77,11 +66,11 @@ export async function ensureBrokerRunning(): Promise<boolean> {
 
   const deadline = Date.now() + STARTUP_MAX_WAIT_MS;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
     if (await isBrokerAlive(port)) {
       log.info("Broker started on :{port}", { port });
       return true;
     }
+    await new Promise((r) => setTimeout(r, STARTUP_POLL_INTERVAL_MS));
   }
   log.warn("Broker failed to come online within {ms}ms", { ms: STARTUP_MAX_WAIT_MS });
   return false;

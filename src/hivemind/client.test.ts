@@ -163,7 +163,7 @@ test("askPeer resolves with first matching inbound message", async () => {
   stub.sendFrom("peer-A", "yes I'm here");
 
   const reply = await askPromise;
-  expect(reply.timedOut).toBe(false);
+  expect(reply.status).toBe("ok");
   expect(reply.text).toBe("yes I'm here");
 
   await c.stop();
@@ -176,7 +176,7 @@ test("askPeer times out and reports timeout", async () => {
   await waitFor(() => c.isConnected ? true : null);
 
   const reply = await c.askPeer("peer-B", "ping", 1);
-  expect(reply.timedOut).toBe(true);
+  expect(reply.status).toBe("timeout");
   expect(reply.text).toContain("no reply from peer within 1s");
 
   await c.stop();
