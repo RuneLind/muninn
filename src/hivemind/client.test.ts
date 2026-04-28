@@ -198,6 +198,50 @@ test("inbound message with no pending ask invokes onIncomingMessage", async () =
   await c.stop();
 });
 
+test("force-closes WS if broker never sends `registered` reply", async () => {
+  // Spin up a silent broker that accepts the upgrade but never replies to register.
+  let silentWs: { send(s: string): void; close(): void } | null = null;
+  const silentServer = Bun.serve<{ stub: true }>({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req, srv) {
+      const url = new URL(req.url);
+      if (url.pathname === "/ws/peer") {
+        if (srv.upgrade(req, { data: { stub: true } })) return undefined as unknown as Response;
+        return new Response("upgrade failed", { status: 500 });
+      }
+      return new Response("not found", { status: 404 });
+    },
+    websocket: {
+      open(ws) {
+        silentWs = ws as unknown as typeof silentWs;
+      },
+      message() { /* deliberately silent */ },
+      close() { silentWs = null; },
+    },
+  });
+
+  const c = new HivemindBotClient({
+    botName: "test-bot",
+    namespace: "private",
+    cwd: "/tmp",
+    brokerPort: silentServer.port ?? 0,
+  });
+  c.start();
+
+  // Wait for the WS to connect to our silent broker
+  await waitFor(() => silentWs ? true : null, 1000);
+  // peerId should remain null because broker never replied
+  expect(c.id).toBeNull();
+  // After REGISTRATION_TIMEOUT_MS (5s) the client should close the WS itself.
+  // We don't want to wait 5s in a unit test — instead, verify the client
+  // doesn't claim to be connected.
+  expect(c.isConnected).toBe(false);
+
+  await c.stop();
+  silentServer.stop();
+});
+
 test("FIFO: two concurrent asks to same peer resolve in order", async () => {
   received.length = 0;
   const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });

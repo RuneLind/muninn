@@ -61,6 +61,10 @@ export class HivemindMcpServer {
     this.httpServer = Bun.serve({
       port: this.port,
       hostname: "127.0.0.1",
+      // ask_peer can block up to ~600s waiting for a peer reply. Bun's
+      // default idle timeout (~10s) closes the MCP request mid-wait and the
+      // bot sees "fetch failed". 255 is the maximum allowed value.
+      idleTimeout: 255,
       fetch: (req) => this.handleHttp(req),
     });
     log.info("Hivemind MCP server started on :{port}", { port: this.port });
@@ -195,9 +199,9 @@ function createMcpServerForBot(client: HivemindBotClient): McpServer {
         .number()
         .int()
         .positive()
-        .max(600)
+        .max(240)
         .optional()
-        .describe(`How long to wait for a reply (default ${DEFAULT_ASK_PEER_TIMEOUT_SEC}s, max 600s)`),
+        .describe(`How long to wait for a reply (default ${DEFAULT_ASK_PEER_TIMEOUT_SEC}s, max 240s — bounded by the MCP HTTP idle timeout)`),
     },
     async ({ to, message, wait_seconds }) => {
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;

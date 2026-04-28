@@ -13,6 +13,13 @@ const DEFAULT_BROKER_PORT = 7899;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const LIST_PEERS_TIMEOUT_MS = 5_000;
+/**
+ * Max time to wait for the broker's `registered` reply after WS open.
+ * If we don't hear back, force a reconnect — the WS is effectively dead.
+ * Observed in practice when Bun's --watch hot-reload races with the broker's
+ * cleanup of the previous WS.
+ */
+const REGISTRATION_TIMEOUT_MS = 5_000;
 
 /** A pending ask_peer call waiting for a reply from a specific peer. */
 interface PendingAsk {
@@ -45,6 +52,7 @@ export class HivemindBotClient {
   private brokerPort: number;
   private reconnectAttempts = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private registrationTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
 
   /** FIFO queue of pending ask_peer calls per fromId. First message resolves first ask. */
@@ -90,6 +98,10 @@ export class HivemindBotClient {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this.registrationTimer) {
+      clearTimeout(this.registrationTimer);
+      this.registrationTimer = null;
     }
     if (this.ws) {
       this.ws.close();
@@ -212,6 +224,17 @@ export class HivemindBotClient {
         agent_type: "claude-code",
       };
       ws.send(JSON.stringify(reg));
+      // Defensive: if the broker never replies with `registered`, the WS is
+      // effectively dead — force-close so the reconnect logic kicks in.
+      this.registrationTimer = setTimeout(() => {
+        if (this.peerId === null && this.ws === ws) {
+          log.warn(
+            "Bot {botName}: no `registered` reply within {ms}ms — closing WS to force reconnect",
+            { botName: this.botName, ms: REGISTRATION_TIMEOUT_MS },
+          );
+          ws.close();
+        }
+      }, REGISTRATION_TIMEOUT_MS);
     });
 
     ws.addEventListener("message", (ev) => {
@@ -230,6 +253,10 @@ export class HivemindBotClient {
       if (this.heartbeatTimer) {
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = null;
+      }
+      if (this.registrationTimer) {
+        clearTimeout(this.registrationTimer);
+        this.registrationTimer = null;
       }
       this.scheduleReconnect();
     });
@@ -252,6 +279,10 @@ export class HivemindBotClient {
       case "registered":
         this.peerId = msg.id;
         log.info("Bot {botName}: registered as peer {peerId} in namespace {ns}", { botName: this.botName, peerId: msg.id, ns: msg.namespace });
+        if (this.registrationTimer) {
+          clearTimeout(this.registrationTimer);
+          this.registrationTimer = null;
+        }
         // Push initial summary now that we have a peer ID
         this.send({ type: "set_summary", summary: this.summary });
         // Heartbeat keeps the broker from marking us dead
