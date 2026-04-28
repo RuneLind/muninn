@@ -283,7 +283,7 @@ DB:
 
 ```mermaid
 graph LR
-    P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2<br/>Inbound + threading<br/>peer thread UI]
+    P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2 ✓<br/>Inbound + threading<br/>peer thread UI]
     P2 --> P3[Phase 3<br/>Auto-respond<br/>+ guardrails]
     P3 --> P4[Phase 4<br/>Cross-namespace<br/>melosys ↔ nav]
     P4 --> P5[Phase 5<br/>yggdrasil + others]
@@ -306,9 +306,27 @@ analysis, gets a reply within the same turn, FIFO resolver matches by
   timeout that force-closes the WS so exponential-backoff reconnect
   takes over.
 
-**Phase 2 (1 day).** Inbound router + peer threads in chat UI. No
-auto-respond yet — peer messages just appear in the thread, you reply
-manually. See "Phase 2 acceptance criteria" below for concrete scope.
+**Phase 2 — done (2026-04-28).** Squash-merged as `bf118eb` via PR #74.
+Branch `hivemind-phase-2` (now deleted on remote). Inbound router lands
+unsolicited peer messages in `peer:<cwd-basename>` threads under the
+bot's default user; chat UI surfaces them with a 📡 icon and `[from
+<peer>]` prefix; the `>...` text-prefix in a peer thread routes a
+reply via `HivemindBotClient.sendMessage` to the most-recent peer.
+Verified end-to-end live: melosys received an unsolicited message
+from a sibling agent, the human replied via the chat UI, and the
+broker delivered the reply back to the originating peer.
+
+Implementation notes worth keeping for Phase 3:
+- The thread upsert was reworked into a private `upsertInactiveThread`
+  helper shared with `getOrCreateSlackThread`; it does SELECT-first
+  to avoid a no-op `UPDATE updated_at` + WAL write on every inbound
+  message.
+- `HivemindRouter.route` parallelizes the DB write and the chat
+  `findOrCreateBotConversation` lookup via `Promise.all` — Phase 3's
+  autorespond path will sit in the same hot loop, keep it parallel.
+- A shared `roleToSender(role)` helper now maps `'peer'` → `'peer'`
+  in both hydration and the REST API; reuse it in any new
+  message-shaped DB consumer.
 
 **Phase 3 (1 day).** `autoRespondPeers` allowlist + loop guards + traces
 integration. Now huginn can autonomously fix things on melosys's request.
