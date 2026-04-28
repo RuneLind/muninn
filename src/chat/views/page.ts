@@ -59,6 +59,7 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
+        <button class="auto-respond-pill" id="autoRespondPill" hidden></button>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -428,6 +429,8 @@ const CHAT_SCRIPT = `
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
+    var arPill = document.getElementById('autoRespondPill');
+    if (arPill) { arPill.hidden = true; arPill.classList.remove('paused'); }
     connectorDropdown.value = selectedConnectorId;
     setChatStatusText('');
     // Reset streaming state so stale text doesn't leak into next thread

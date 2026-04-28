@@ -128,6 +128,19 @@ export class ChatState {
     this.publish({ type: "message", conversationId, message });
   }
 
+  /** Append a bot-authored message to a conversation. Wraps `addMessage` to keep
+   *  the ChatMessage shape co-located so callers (chat processor, hivemind autorespond)
+   *  don't drift if the shape changes. */
+  appendBotMessage(conversationId: string, text: string, threadId?: string | null): void {
+    this.addMessage(conversationId, {
+      id: crypto.randomUUID(),
+      timestamp: Date.now(),
+      sender: "bot",
+      text,
+      threadId: threadId ?? null,
+    });
+  }
+
   setStatus(conversationId: string, status: string): void {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) return;

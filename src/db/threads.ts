@@ -12,6 +12,9 @@ export interface Thread {
   description?: string;
   connectorId?: string;
   isActive: boolean;
+  autoRespondPaused: boolean;
+  /** Free-form text shown in the chat pause pill; null when not paused. */
+  pauseReason?: string;
   createdAt: number;
   updatedAt: number;
   messageCount?: number;
@@ -30,6 +33,8 @@ function rowToThread(r: Record<string, unknown>): Thread {
     description: (r.description as string) ?? undefined,
     connectorId: (r.connector_id as string) ?? undefined,
     isActive: r.is_active as boolean,
+    autoRespondPaused: (r.auto_respond_paused as boolean) ?? false,
+    pauseReason: (r.pause_reason as string) ?? undefined,
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
     messageCount: r.message_count != null ? Number(r.message_count) : undefined,
@@ -95,6 +100,27 @@ export async function getThreadById(threadId: string): Promise<Thread | null> {
 export async function updateThreadConnector(threadId: string, connectorId: string | null): Promise<boolean> {
   const sql = getDb();
   const result = await sql`UPDATE threads SET connector_id = ${connectorId} WHERE id = ${threadId}`;
+  return result.count > 0;
+}
+
+/**
+ * Set the hivemind autorespond pause flag on a thread. When `paused=false`,
+ * pause_reason is cleared. When `paused=true`, the optional reason is stored
+ * (e.g. "20-turn/hour cap") so the chat header pill can render the cause.
+ */
+export async function setThreadAutoRespondPaused(
+  threadId: string,
+  paused: boolean,
+  reason?: string | null,
+): Promise<boolean> {
+  const sql = getDb();
+  const nextReason = paused ? (reason ?? null) : null;
+  const result = await sql`
+    UPDATE threads
+    SET auto_respond_paused = ${paused},
+        pause_reason = ${nextReason}
+    WHERE id = ${threadId}
+  `;
   return result.count > 0;
 }
 

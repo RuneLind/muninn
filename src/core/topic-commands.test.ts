@@ -134,8 +134,8 @@ describe("core/topic-commands", () => {
   describe("formatThreadList", () => {
     test("formats active and inactive threads", () => {
       const threads = [
-        { id: "1", userId: "u1", botName: "bot1", name: "work", isActive: true, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 5 },
-        { id: "2", userId: "u1", botName: "bot1", name: "play", isActive: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+        { id: "1", userId: "u1", botName: "bot1", name: "work", isActive: true, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 5 },
+        { id: "2", userId: "u1", botName: "bot1", name: "play", isActive: false, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
       ];
       const result = formatThreadList(threads);
       expect(result).toContain("▶️ *work*");

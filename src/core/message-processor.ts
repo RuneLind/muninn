@@ -52,6 +52,10 @@ export interface ProcessMessageParams {
   /** External tracer — if provided, processMessage uses it instead of creating a new one.
    *  The caller is responsible for calling tracer.finish() after processMessage returns. */
   tracer?: Tracer;
+  /** When true, skip the inbound `saveMessage(role='user')` write. Caller must
+   *  guarantee the triggering message is already persisted (under any role) so
+   *  that prompt-builder's history dedup still finds it. */
+  skipUserSave?: boolean;
 }
 
 export interface ProcessMessageResult {
@@ -98,10 +102,12 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const requestId = agentStatus.startRequest(botConfig.name, "receiving", username);
   log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
-  // Save user message to DB
-  t.start("db_save_user");
-  await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform, threadId });
-  t.end("db_save_user");
+  // Save user message to DB (skipped for autorespond — caller has already saved as role='peer')
+  if (!params.skipUserSave) {
+    t.start("db_save_user");
+    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform, threadId });
+    t.end("db_save_user");
+  }
 
   // Build context-aware prompt
   agentStatus.set("building_prompt", username);

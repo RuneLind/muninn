@@ -109,9 +109,11 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     systemParts.push(formatAlerts(recentAlerts));
   }
 
-  // User prompt: conversation history + current message
-  // Drop the last message if it's the current user message (already saved to DB before buildPrompt)
-  const history = recentMessages.at(-1)?.role === "user" && recentMessages.at(-1)?.text === currentMessage
+  // The last message is dropped when it matches `currentMessage` because the
+  // caller persisted it before calling buildPrompt — we'd otherwise repeat it
+  // verbatim under the `<conversation_history>` block.
+  const last = recentMessages.at(-1);
+  const history = last && last.role !== "assistant" && last.text === currentMessage
     ? recentMessages.slice(0, -1)
     : recentMessages;
 

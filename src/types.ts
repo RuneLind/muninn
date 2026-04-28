@@ -67,7 +67,7 @@ export interface ClaudeResult {
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "peer";
   text: string;
   timestamp: number;
   userId?: string;

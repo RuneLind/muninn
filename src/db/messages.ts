@@ -79,7 +79,7 @@ export async function getRecentMessages(
   return rows
     .map((r) => ({
       id: r.id,
-      role: r.role as "user" | "assistant",
+      role: r.role as "user" | "assistant" | "peer",
       text: r.content,
       timestamp: new Date(r.created_at).getTime(),
       userId: r.user_id,
@@ -220,6 +220,24 @@ export async function getMostRecentPeerIdForThread(threadId: string): Promise<st
     LIMIT 1
   `;
   return (row?.from_peer_id as string) ?? null;
+}
+
+/** Count messages with a given role in a thread within the last N hours.
+ *  Used by the hivemind loop guard for rolling-hour autorespond turn caps. */
+export async function countMessagesByRoleInWindow(
+  threadId: string,
+  role: "user" | "assistant" | "peer",
+  hours: number,
+): Promise<number> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT COUNT(*)::int AS count
+    FROM messages
+    WHERE thread_id = ${threadId}
+      AND role = ${role}
+      AND created_at > now() - make_interval(hours => ${hours})
+  `;
+  return Number(row?.count ?? 0);
 }
 
 export async function getRecentAlerts(

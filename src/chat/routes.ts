@@ -6,7 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import { chatState, roleToSender, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
-import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
+import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector, setThreadAutoRespondPaused } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDefaultUser } from "../db/chat-preferences.ts";
 import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage } from "../db/messages.ts";
@@ -247,6 +247,25 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ ok: true });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  // Toggle hivemind autorespond pause for a peer thread
+  app.patch("/threads/:id/auto-respond", async (c) => {
+    const id = c.req.param("id");
+    if (!isValidUuid(id)) return c.json({ error: "Invalid thread ID" }, 400);
+    const body = await c.req.json<{ paused: boolean; reason?: string }>();
+    if (typeof body.paused !== "boolean") {
+      return c.json({ error: "paused (boolean) is required" }, 400);
+    }
+    try {
+      const updated = await setThreadAutoRespondPaused(id, body.paused, body.paused ? body.reason ?? "manual" : null);
+      if (!updated) return c.json({ error: "Thread not found" }, 404);
+      const thread = await getThreadById(id);
+      return c.json({ ok: true, thread });
+    } catch (err) {
+      log.error("Failed to toggle auto-respond: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to update thread" }, 500);
     }
   });
 

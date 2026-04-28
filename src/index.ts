@@ -79,7 +79,7 @@ try {
 }
 
 // Start hivemind manager (peers, MCP server). Best-effort — never blocks boot.
-hivemindManager.start(allBotConfigs).catch((err) => {
+hivemindManager.start(allBotConfigs, config).catch((err) => {
   log.warn("Hivemind manager failed to start: {error}", { error: err instanceof Error ? err.message : String(err) });
 });
 
