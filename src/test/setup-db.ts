@@ -17,6 +17,7 @@ const ALL_TABLES = [
   "connectors",
   "user_settings",
   "users",
+  "bot_default_user",
 ];
 
 let dbInitialized = false;

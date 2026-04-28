@@ -239,6 +239,26 @@ export async function getOrCreateSlackThread(
   return row!.id;
 }
 
+/**
+ * Get or create a hivemind peer thread. Always inactive — peer threads aren't
+ * the user's "current" topic; they're a parallel side-channel that surfaces in
+ * the sidebar. Name format: `peer:<cwd-basename>` (stable across peer
+ * reconnects; the broker's `from_id` rotates per session).
+ */
+export async function getOrCreatePeerThread(
+  userId: string, botName: string, peerName: string,
+): Promise<Thread> {
+  const name = `peer:${peerName}`;
+  const sql = getDb();
+  const [row] = await sql`
+    INSERT INTO threads (user_id, bot_name, name, is_active)
+    VALUES (${userId}, ${botName}, ${name}, false)
+    ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
+    RETURNING *
+  `;
+  return rowToThread(row!);
+}
+
 /** Get all threads for a bot (or all bots), with message counts and username from latest message. */
 export async function getAllThreadsForBot(botName?: string): Promise<(Thread & { username?: string })[]> {
   const sql = getDb();

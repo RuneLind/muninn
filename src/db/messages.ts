@@ -5,7 +5,7 @@ export interface SaveMessageParams {
   userId: string;
   botName: string;
   username?: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "peer";
   content: string;
   costUsd?: number;
   durationMs?: number;
@@ -19,13 +19,15 @@ export interface SaveMessageParams {
   threadId?: string;
   /** Trace ID linking to the request's trace spans (tool call history) */
   traceId?: string;
+  /** Hivemind broker peer ID — only set for role='peer' inbound messages. */
+  fromPeerId?: string;
 }
 
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id, trace_id)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null}, ${msg.traceId ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id, trace_id, from_peer_id)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null}, ${msg.traceId ?? null}, ${msg.fromPeerId ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -165,7 +167,7 @@ export async function getSimMessages(
   limit = 50,
   threadId?: string,
   allPlatforms?: boolean,
-): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null; traceId: string | null }[]> {
+): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null; traceId: string | null; fromPeerId: string | null }[]> {
   const sql = getDb();
 
   const platformFilter = allPlatforms ? sql`` : sql`AND platform = ${platform}`;
@@ -179,7 +181,7 @@ export async function getSimMessages(
     : sql``;
 
   const rows = await sql`
-    SELECT id, role, content, created_at, thread_id, trace_id
+    SELECT id, role, content, created_at, thread_id, trace_id, from_peer_id
     FROM messages
     WHERE user_id = ${userId}
       AND bot_name = ${botName}
@@ -196,6 +198,7 @@ export async function getSimMessages(
       createdAt: new Date(r.created_at).getTime(),
       threadId: (r.thread_id as string) ?? null,
       traceId: (r.trace_id as string) ?? null,
+      fromPeerId: (r.from_peer_id as string) ?? null,
     }))
     .reverse();
 }
@@ -205,6 +208,23 @@ export interface AlertMessage {
   source: string;
   content: string;
   timestamp: number;
+}
+
+/**
+ * Look up the most-recent broker peer ID seen in a peer thread. Used by the
+ * chat UI's text-prefix outbound path: when the user sends a `>...` message
+ * in a `peer:<name>` thread, we route it back to whichever peer last spoke
+ * in that thread.
+ */
+export async function getMostRecentPeerIdForThread(threadId: string): Promise<string | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT from_peer_id FROM messages
+    WHERE thread_id = ${threadId} AND from_peer_id IS NOT NULL
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  return (row?.from_peer_id as string) ?? null;
 }
 
 export async function getRecentAlerts(

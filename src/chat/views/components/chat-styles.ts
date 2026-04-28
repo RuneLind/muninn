@@ -364,6 +364,35 @@ export function chatStyles(): string {
       border-bottom-left-radius: 2px;
       border: 1px solid var(--border-primary);
     }
+    .msg-peer {
+      align-self: flex-start;
+      background: color-mix(in srgb, var(--accent) 12%, var(--chat-assistant-bg));
+      color: var(--chat-assistant-text);
+      border-bottom-left-radius: 2px;
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-primary));
+    }
+    .msg-peer .msg-peer-from {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent-light, var(--accent));
+      letter-spacing: 0.3px;
+      margin-bottom: 4px;
+    }
+    .thread-item-icon.peer { color: var(--accent-light, var(--accent)); }
+    .thread-item-tag {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--accent) 22%, transparent);
+      color: var(--accent-light, var(--accent));
+      vertical-align: middle;
+    }
     .msg-bot a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .msg-bot a:hover { text-decoration-color: var(--accent-light); }
     .msg-bot.telegram { font-family: inherit; }

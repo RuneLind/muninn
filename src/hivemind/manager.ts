@@ -1,8 +1,10 @@
 import { getLog } from "../logging.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { chatState } from "../chat/state.ts";
 import { ensureBrokerRunning, brokerPort } from "./broker.ts";
 import { HivemindBotClient } from "./client.ts";
 import { HivemindMcpServer } from "./mcp-server.ts";
+import { HivemindRouter } from "./router.ts";
 
 const log = getLog("hivemind", "manager");
 
@@ -14,6 +16,7 @@ function defaultSummary(bot: BotConfig): string {
 export class HivemindManager {
   private clients = new Map<string, HivemindBotClient>();
   private mcpServer = new HivemindMcpServer();
+  private router = new HivemindRouter(chatState);
   private started = false;
 
   /**
@@ -59,6 +62,17 @@ export class HivemindManager {
         summary: cfg.summary ?? defaultSummary(bot),
         brokerPort: brokerPort(),
       });
+      // Route unsolicited inbound peer messages into the bot's chat threads.
+      // Errors are swallowed so a routing failure doesn't break the WS pump.
+      client.onIncomingMessage = (msg) => {
+        this.router.route(bot.name, msg).catch((err) => {
+          log.error("Router failed for inbound peer message: {error}", {
+            botName: bot.name,
+            fromId: msg.fromId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      };
       client.start();
       this.clients.set(bot.name, client);
 

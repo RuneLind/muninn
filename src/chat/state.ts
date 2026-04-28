@@ -17,9 +17,11 @@ export interface ChatConversation {
 export interface ChatMessage {
   id: string;
   timestamp: number;
-  sender: "user" | "bot";
+  sender: "user" | "bot" | "peer";
   text: string;
   threadId?: string | null;
+  /** Hivemind peer ID — only set for `sender: "peer"` messages. */
+  fromPeerId?: string | null;
 }
 
 export type ChatEvent =
@@ -35,7 +37,7 @@ export type ChatEvent =
 type EventSubscriber = (event: ChatEvent) => void;
 
 /** Deterministic conversation ID from a composite key (e.g. "userId:botName:platform"). */
-async function deterministicId(key: string): Promise<string> {
+export async function deterministicId(key: string): Promise<string> {
   const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
   return Array.from(new Uint8Array(hashBuffer))
     .slice(0, 16)
@@ -206,13 +208,21 @@ export class ChatState {
         botName: row.botName,
         userId: row.userId,
         username: row.username ?? "chat-user",
-        messages: msgs.map((m) => ({
-          id: m.id,
-          timestamp: m.createdAt,
-          sender: m.role === "user" ? "user" as const : "bot" as const,
-          text: isWebPlatform && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
-          threadId: m.threadId,
-        })),
+        messages: msgs.map((m) => {
+          const sender: ChatMessage["sender"] = m.role === "user"
+            ? "user"
+            : m.role === "peer"
+              ? "peer"
+              : "bot";
+          return {
+            id: m.id,
+            timestamp: m.createdAt,
+            sender,
+            text: isWebPlatform && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
+            threadId: m.threadId,
+            fromPeerId: m.fromPeerId,
+          };
+        }),
       };
 
       this.conversations.set(id, conversation);
@@ -238,6 +248,37 @@ export class ChatState {
       username,
       channelName,
     });
+  }
+
+  /**
+   * Find or create the bot-owner's web conversation, using the same deterministic
+   * ID that hydrateFromDb uses. Used by the hivemind router to surface peer
+   * threads in the existing chat sidebar without inventing a new ConversationType.
+   */
+  async findOrCreateBotConversation(params: {
+    botName: string;
+    userId: string;
+    username?: string;
+  }): Promise<ChatConversation> {
+    const id = await deterministicId(`${params.userId}:${params.botName}:web`);
+    const existing = this.conversations.get(id);
+    if (existing) return existing;
+
+    while (this.conversations.size >= MAX_CONVERSATIONS) {
+      const oldest = this.conversations.keys().next().value;
+      if (oldest) this.conversations.delete(oldest);
+    }
+    const conversation: ChatConversation = {
+      id,
+      type: "web",
+      botName: params.botName,
+      userId: params.userId,
+      username: params.username ?? "chat-user",
+      messages: [],
+    };
+    this.conversations.set(id, conversation);
+    this.publish({ type: "conversation_created", conversation });
+    return conversation;
   }
 }
 

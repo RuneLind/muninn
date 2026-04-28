@@ -112,7 +112,7 @@ CREATE TABLE messages (
   user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   username TEXT,
-  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'peer')),
   content TEXT NOT NULL,
   cost_usd DOUBLE PRECISION,
   duration_ms INTEGER,
@@ -124,6 +124,7 @@ CREATE TABLE messages (
   platform TEXT DEFAULT 'telegram',
   thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
   trace_id UUID,
+  from_peer_id TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

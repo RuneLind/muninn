@@ -144,7 +144,11 @@ export function threadManagerScript(): string {
 
     threadList.innerHTML = threads.map(function(t) {
       var isActive = t.id && t.id === activeThreadId;
-      var icon = t.name === 'main' ? '#' : '&bull;';
+      var isPeer = t.name && t.name.indexOf('peer:') === 0;
+      var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
+      // Satellite antenna for peer threads, # for main, bullet otherwise.
+      var icon = isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;');
+      var displayName = isPeer ? t.name.slice('peer:'.length) : t.name;
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
@@ -152,10 +156,10 @@ export function threadManagerScript(): string {
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
 
-      return '<div class="thread-item' + (isActive ? ' active' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
-        + '<div class="thread-item-icon">' + icon + '</div>'
+      return '<div class="thread-item' + (isActive ? ' active' : '') + (isPeer ? ' peer' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
+        + '<div class="' + iconClass + '">' + icon + '</div>'
         + '<div class="thread-item-content">'
-          + '<div class="thread-item-name">' + escapeHtml(t.name) + '</div>'
+          + '<div class="thread-item-name">' + escapeHtml(displayName) + (isPeer ? ' <span class="thread-item-tag">peer</span>' : '') + '</div>'
           + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
           + (t.connectorName ? '<div class="thread-item-model">' + escapeHtml(t.connectorName) + '</div>' : '')
           + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
