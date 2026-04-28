@@ -3,13 +3,14 @@ import { resolve, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
-import { chatState, type ConversationType } from "./state.ts";
+import { chatState, roleToSender, type ConversationType } from "./state.ts";
 import { processChatMessage } from "./processor.ts";
 import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDefaultUser } from "../db/chat-preferences.ts";
-import { getSimMessages, getLastResponseMeta } from "../db/messages.ts";
+import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage } from "../db/messages.ts";
+import { hivemindManager } from "../hivemind/manager.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -290,11 +291,12 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({
       messages: msgs.map((m) => ({
         id: m.id,
-        sender: m.role === "user" ? "user" : "bot",
+        sender: roleToSender(m.role),
         text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
         timestamp: m.createdAt,
         threadId: m.threadId,
         traceId: m.traceId,
+        fromPeerId: m.fromPeerId,
       })),
     });
   });
@@ -323,6 +325,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const bot = botConfigs.find((b) => b.name === conversation.botName);
     if (!bot) {
       return c.json({ error: `Bot "${conversation.botName}" not found` }, 404);
+    }
+
+    if (body.threadId && body.text.startsWith(">")) {
+      const peerThread = await getThreadById(body.threadId);
+      if (peerThread?.name.startsWith("peer:")) {
+        const result = await handlePeerOutbound(id, peerThread, conversation.username, body.text);
+        return c.json(result.body, result.status);
+      }
     }
 
     const connectorOverride = body.connector === "copilot-sdk" || body.connector === "claude-cli"
@@ -480,4 +490,54 @@ function conversationTypeToPlatform(type: ConversationType): string {
     case "web": return "web";
     default: return type; // slack_dm, slack_channel, slack_assistant match directly
   }
+}
+
+async function handlePeerOutbound(
+  conversationId: string,
+  thread: { id: string; userId: string; botName: string },
+  username: string,
+  rawText: string,
+): Promise<{ status: 202 | 400 | 503; body: { status?: string; error?: string } }> {
+  // Token after `>` is advisory; recipient is always the thread's most-recent peer.
+  const stripped = rawText.replace(/^>\s*\S*\s*/, "").trim();
+  if (!stripped) {
+    return { status: 400, body: { error: "Empty message after stripping `>` prefix" } };
+  }
+
+  const client = hivemindManager.getClient(thread.botName);
+  if (!client) {
+    return { status: 503, body: { error: "Hivemind is not enabled for this bot" } };
+  }
+  if (!client.isConnected) {
+    return { status: 503, body: { error: "Hivemind broker is not connected" } };
+  }
+
+  const targetPeerId = await getMostRecentPeerIdForThread(thread.id);
+  if (!targetPeerId) {
+    return { status: 400, body: { error: "No prior peer message in this thread to reply to" } };
+  }
+
+  const sent = client.sendMessage(targetPeerId, stripped);
+  if (!sent) {
+    return { status: 503, body: { error: "Failed to send to peer (WebSocket write failed)" } };
+  }
+
+  const messageId = await saveMessage({
+    userId: thread.userId,
+    botName: thread.botName,
+    username,
+    role: "user",
+    content: stripped,
+    platform: "web",
+    threadId: thread.id,
+  });
+  chatState.addMessage(conversationId, {
+    id: messageId,
+    timestamp: Date.now(),
+    sender: "user",
+    text: stripped,
+    threadId: thread.id,
+  });
+
+  return { status: 202, body: { status: "sent" } };
 }

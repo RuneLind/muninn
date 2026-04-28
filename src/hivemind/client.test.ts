@@ -198,6 +198,30 @@ test("inbound message with no pending ask invokes onIncomingMessage", async () =
   await c.stop();
 });
 
+test("unsolicited inbound message exposes fromCwd, fromSummary, sentAt for the router", async () => {
+  received.length = 0;
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  const onIncoming = mock(
+    (m: { fromId: string; fromSummary: string; fromCwd: string; text: string; sentAt: string }) => { void m; },
+  );
+  c.onIncomingMessage = onIncoming;
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  stub.sendFrom("peer-huginn", "index rebuilt", "huginn — search-index assistant");
+
+  await waitFor(() => onIncoming.mock.calls.length > 0 ? true : null);
+  const payload = onIncoming.mock.calls[0]?.[0]!;
+  expect(payload.fromId).toBe("peer-huginn");
+  expect(payload.fromCwd).toBe("/tmp");
+  expect(payload.fromSummary).toBe("huginn — search-index assistant");
+  expect(payload.text).toBe("index rebuilt");
+  expect(typeof payload.sentAt).toBe("string");
+  expect(Number.isFinite(new Date(payload.sentAt).getTime())).toBe(true);
+
+  await c.stop();
+});
+
 test("force-closes WS if broker never sends `registered` reply", async () => {
   // Spin up a silent broker that accepts the upgrade but never replies to register.
   let silentWs: { send(s: string): void; close(): void } | null = null;

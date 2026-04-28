@@ -223,20 +223,45 @@ export async function listThreads(userId: string, botName: string): Promise<Thre
   }));
 }
 
-/** Get or create a thread for a Slack channel thread. Returns the thread id.
- *  Thread name format: `slack:{channel}:{threadTs}` — always inactive (no topic switching). */
-export async function getOrCreateSlackThread(
-  userId: string, botName: string, channel: string, threadTs: string,
-): Promise<string> {
-  const name = `slack:${channel}:${threadTs}`;
+/**
+ * Upsert an always-inactive system thread (Slack channel threads, hivemind
+ * peer threads). SELECT-first to avoid a no-op UPDATE+WAL write on the common
+ * case where the thread already exists; falls back to a race-safe INSERT for
+ * first-time creation.
+ */
+async function upsertInactiveThread(userId: string, botName: string, name: string): Promise<Thread> {
   const sql = getDb();
+  const [existing] = await sql`
+    SELECT * FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${name}
+  `;
+  if (existing) return rowToThread(existing);
   const [row] = await sql`
     INSERT INTO threads (user_id, bot_name, name, is_active)
     VALUES (${userId}, ${botName}, ${name}, false)
     ON CONFLICT (user_id, bot_name, name) DO UPDATE SET updated_at = now()
-    RETURNING id
+    RETURNING *
   `;
-  return row!.id;
+  return rowToThread(row!);
+}
+
+/** Thread name format: `slack:{channel}:{threadTs}` — always inactive. */
+export async function getOrCreateSlackThread(
+  userId: string, botName: string, channel: string, threadTs: string,
+): Promise<string> {
+  const thread = await upsertInactiveThread(userId, botName, `slack:${channel}:${threadTs}`);
+  return thread.id;
+}
+
+/**
+ * Hivemind peer thread. Name uses cwd basename rather than the broker's
+ * `from_id` UUID so the same conversation lands in the same thread across
+ * peer reconnects.
+ */
+export async function getOrCreatePeerThread(
+  userId: string, botName: string, peerName: string,
+): Promise<Thread> {
+  return upsertInactiveThread(userId, botName, `peer:${peerName}`);
 }
 
 /** Get all threads for a bot (or all bots), with message counts and username from latest message. */

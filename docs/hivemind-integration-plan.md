@@ -332,30 +332,63 @@ Carrying forward from Phase 1:
   by the MCP HTTP idle timeout. Don't try to make `ask_peer` itself
   longer; instead, async replies (Phase 2) handle long-running cases.
 
-Required for Phase 2 to be "done":
+### Confirmed Phase 2 decisions (2026-04-28)
 
-1. **DB migration** `db/migrations/NNN_hivemind_peer_messages.sql`:
-   add `from_peer_id TEXT NULL` to `messages`. Update `saveMessage` and
-   `getMessages` to round-trip the field.
+These were resolved in the kickoff conversation before implementation
+started. Locked in:
+
+- **Branch base.** Branch `hivemind-phase-2` off `main` (Phase 1 PR #73
+  was squash-merged as `c303455`; the `hivemind-phase-1` branch is
+  redundant).
+- **`user_id` for peer threads.** Reuse the **bot's default user** (the
+  synthetic owner introduced in migration 027). `threads.user_id` is
+  `NOT NULL`, and a peer thread has no real user — using the bot's
+  default user lets peer threads appear next to the owner's other
+  threads in the sidebar without schema changes.
+- **Thread name.** `peer:<cwd-basename>`, derived from the inbound
+  message's `from_cwd`. The broker's `from_id` is a per-session UUID
+  that rotates on peer reconnect; the cwd basename (e.g. `huginn`,
+  `yggdrasil`) is stable across sessions and human-readable, so the
+  same long-running conversation lands in the same thread on
+  reconnect.
+- **Manual outbound from chat.** Text-prefix convention `>peer-id
+  message…` in the chat send path. No new button or modal — keeps the
+  UI surface untouched for Phase 2.
+- **Inbound → chat WebSocket routing.** Reuse the bot-default-user's
+  existing `web` conversation and emit a `message` event with the peer
+  thread's `threadId`. No new `ConversationType` — the existing
+  thread-sidebar UI surfaces peer threads automatically once their
+  rows exist in `threads`.
+
+### Required for Phase 2 to be "done"
+
+1. **DB migration** `db/migrations/035_hivemind_peer_messages.sql`:
+   add `from_peer_id TEXT NULL` to `messages`. Update `saveMessage`
+   and the relevant `getMessages` paths to round-trip the field.
 2. **Thread routing** in `src/hivemind/router.ts` (new module):
-   - On inbound peer message, find or create a `peer:<peer-id>` thread
-     for the receiving bot (no FK to a real user — bot-owned thread).
-   - Append the message with `sender: "peer"` and `from_peer_id` set.
-   - Broadcast a chat event so any open chat-page WebSocket gets it.
-3. **Chat state** `src/chat/state.ts`: add `"peer"` to the `ChatMessage`
-   sender union; teach hydration to load peer-thread messages.
+   - On inbound peer message, find or create a
+     `peer:<cwd-basename>` thread owned by the bot's default user.
+   - Append the message with `sender: "peer"` (stored as a new role
+     value or via a sender mapping — see implementation note below)
+     and `from_peer_id` set to the broker's `from_id`.
+   - Broadcast a chat event so any open chat-page WebSocket sees it
+     in real time.
+3. **Chat state** `src/chat/state.ts`: add `"peer"` to the
+   `ChatMessage` sender union; teach hydration to load peer-thread
+   messages with the right sender value.
 4. **UI** `src/chat/views/components/thread-manager.ts`: render peer
-   threads with a distinct icon (suggest a small antenna/bot glyph) and
-   a `[from peer-id]` prefix on messages. No "Pause auto-respond"
-   toggle yet — that's Phase 3.
-5. **Manual outbound from chat**: a button or text-prefix convention
-   (e.g. `>peer-id message...`) so the user can reply to a peer from
-   the chat UI without going through the bot's tool calls. This makes
-   peer threads useful even when the bot's connector isn't running.
-6. **Tests**: extend `client.test.ts` with a stubbed broker delivering
-   an unsolicited message and verify the router persists it. New
-   `router.test.ts` covers thread create/find logic with an in-memory
-   DB.
+   threads with a distinct icon (small antenna/bot glyph) and a
+   `[from peer-id]` prefix on inbound messages. No "Pause
+   auto-respond" toggle yet — that's Phase 3.
+5. **Manual outbound from chat**: detect the `>peer-id message…`
+   prefix in the chat send handler and route through the bot's
+   `HivemindBotClient.sendMessage()` instead of the connector. The
+   thread → peer-id mapping uses the most-recent `from_peer_id` for
+   that thread.
+6. **Tests**: extend `client.test.ts` with a stubbed broker
+   delivering an unsolicited message and verify the router persists
+   it. New `router.test.ts` covers thread create/find logic with the
+   real test DB (mirrors the rest of the project's DB-test pattern).
 
 Out of scope for Phase 2 (deferred to Phase 3+):
 

@@ -17,9 +17,17 @@ export interface ChatConversation {
 export interface ChatMessage {
   id: string;
   timestamp: number;
-  sender: "user" | "bot";
+  sender: "user" | "bot" | "peer";
   text: string;
   threadId?: string | null;
+  /** Hivemind peer ID — only set for `sender: "peer"` messages. */
+  fromPeerId?: string | null;
+}
+
+export function roleToSender(role: string): ChatMessage["sender"] {
+  if (role === "user") return "user";
+  if (role === "peer") return "peer";
+  return "bot";
 }
 
 export type ChatEvent =
@@ -209,9 +217,10 @@ export class ChatState {
         messages: msgs.map((m) => ({
           id: m.id,
           timestamp: m.createdAt,
-          sender: m.role === "user" ? "user" as const : "bot" as const,
+          sender: roleToSender(m.role),
           text: isWebPlatform && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
           threadId: m.threadId,
+          fromPeerId: m.fromPeerId,
         })),
       };
 
@@ -238,6 +247,33 @@ export class ChatState {
       username,
       channelName,
     });
+  }
+
+  /** Same deterministic ID as hydrateFromDb so the conversation merges with hydrated state. */
+  async findOrCreateBotConversation(params: {
+    botName: string;
+    userId: string;
+    username?: string;
+  }): Promise<ChatConversation> {
+    const id = await deterministicId(`${params.userId}:${params.botName}:web`);
+    const existing = this.conversations.get(id);
+    if (existing) return existing;
+
+    while (this.conversations.size >= MAX_CONVERSATIONS) {
+      const oldest = this.conversations.keys().next().value;
+      if (oldest) this.conversations.delete(oldest);
+    }
+    const conversation: ChatConversation = {
+      id,
+      type: "web",
+      botName: params.botName,
+      userId: params.userId,
+      username: params.username ?? "chat-user",
+      messages: [],
+    };
+    this.conversations.set(id, conversation);
+    this.publish({ type: "conversation_created", conversation });
+    return conversation;
   }
 }
 

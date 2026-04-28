@@ -690,6 +690,18 @@ const CHAT_SCRIPT = `
     }
   }
 
+  function peerLabelForMessage(msg) {
+    if (msg.threadId) {
+      for (var i = 0; i < threads.length; i++) {
+        if (threads[i].id === msg.threadId && threads[i].name && threads[i].name.indexOf('peer:') === 0) {
+          return threads[i].name.slice('peer:'.length);
+        }
+      }
+    }
+    if (msg.fromPeerId) return msg.fromPeerId.slice(0, 8);
+    return 'peer';
+  }
+
   function appendMessage(msg, convType) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
@@ -719,6 +731,17 @@ const CHAT_SCRIPT = `
     } else if (msg.sender === 'bot') {
       div.className = 'msg msg-bot' + platformClass;
       div.innerHTML = renderSlackMrkdwn(msg.text);
+    } else if (msg.sender === 'peer') {
+      div.className = 'msg msg-peer';
+      var peerLabel = peerLabelForMessage(msg);
+      var fromEl = document.createElement('span');
+      fromEl.className = 'msg-peer-from';
+      fromEl.textContent = '[from ' + peerLabel + ']';
+      div.appendChild(fromEl);
+      var bodyEl = document.createElement('span');
+      bodyEl.className = 'msg-peer-body';
+      bodyEl.textContent = msg.text;
+      div.appendChild(bodyEl);
     } else if (msg.sender === 'user' && msg.text.indexOf('<!-- prompt:') === 0) {
       div.className = 'msg msg-user msg-prompt';
       div.textContent = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
