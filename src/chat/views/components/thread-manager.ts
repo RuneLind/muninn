@@ -145,8 +145,9 @@ export function threadManagerScript(): string {
     threadList.innerHTML = threads.map(function(t) {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
+      var isPaused = isPeer && t.autoRespondPaused === true;
       var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
-      var icon = isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;');
+      var icon = isPaused ? '⏸' : (isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;'));
       var displayName = isPeer ? t.name.slice('peer:'.length) : t.name;
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
@@ -155,7 +156,12 @@ export function threadManagerScript(): string {
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
         : '';
 
-      return '<div class="thread-item' + (isActive ? ' active' : '') + (isPeer ? ' peer' : '') + '" data-id="' + escapeAttr(t.id || '') + '">'
+      var classes = 'thread-item'
+        + (isActive ? ' active' : '')
+        + (isPeer ? ' peer' : '')
+        + (isPaused ? ' paused' : '');
+
+      return '<div class="' + classes + '" data-id="' + escapeAttr(t.id || '') + '">'
         + '<div class="' + iconClass + '">' + icon + '</div>'
         + '<div class="thread-item-content">'
           + '<div class="thread-item-name">' + escapeHtml(displayName) + (isPeer ? ' <span class="thread-item-tag">peer</span>' : '') + '</div>'
@@ -208,13 +214,20 @@ export function threadManagerScript(): string {
     // Update header
     var threadName = 'main';
     var threadDesc = '';
+    var activeThread = null;
     for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId) { threadName = threads[i].name; threadDesc = threads[i].description || ''; break; }
+      if (threads[i].id === threadId) {
+        threadName = threads[i].name;
+        threadDesc = threads[i].description || '';
+        activeThread = threads[i];
+        break;
+      }
     }
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
     document.getElementById('chatDescription').textContent = threadDesc;
     syncConnectorDropdown();
+    renderAutoRespondPill(activeThread);
 
     // Highlight in sidebar
     renderThreadList();
@@ -229,5 +242,54 @@ export function threadManagerScript(): string {
     // Update inspector
     updateInspector();
   }
+
+  // ── Auto-respond pill (peer threads only) ───────────────────────────────
+
+  var autoRespondPill = document.getElementById('autoRespondPill');
+
+  function renderAutoRespondPill(thread) {
+    if (!thread || !thread.name || thread.name.indexOf('peer:') !== 0) {
+      autoRespondPill.hidden = true;
+      autoRespondPill.classList.remove('paused');
+      return;
+    }
+    var paused = thread.autoRespondPaused === true;
+    autoRespondPill.hidden = false;
+    autoRespondPill.classList.toggle('paused', paused);
+    if (paused) {
+      var reason = thread.pauseReason ? ' \\u00b7 ' + thread.pauseReason : '';
+      autoRespondPill.textContent = 'Auto-respond: PAUSED' + reason;
+      autoRespondPill.title = 'Click to resume autorespond for this peer thread';
+    } else {
+      autoRespondPill.textContent = 'Auto-respond: ON';
+      autoRespondPill.title = 'Click to pause autorespond for this peer thread';
+    }
+  }
+
+  autoRespondPill.onclick = function() {
+    if (!activeThreadId) return;
+    var current = null;
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === activeThreadId) { current = threads[i]; break; }
+    }
+    if (!current) return;
+    var nextPaused = current.autoRespondPaused !== true;
+    autoRespondPill.disabled = true;
+    fetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/auto-respond', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: nextPaused }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.error) { alert('Failed to update: ' + data.error); return; }
+      if (data.thread) {
+        for (var i = 0; i < threads.length; i++) {
+          if (threads[i].id === data.thread.id) { threads[i] = data.thread; break; }
+        }
+        renderAutoRespondPill(data.thread);
+        renderThreadList();
+      }
+    }).catch(function() { alert('Failed to update auto-respond'); })
+      .finally(function() { autoRespondPill.disabled = false; });
+  };
   `;
 }

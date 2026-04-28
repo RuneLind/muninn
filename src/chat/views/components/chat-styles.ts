@@ -243,6 +243,20 @@ export function chatStyles(): string {
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
+    .auto-respond-pill {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-surface);
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .auto-respond-pill:hover { color: var(--text-primary); border-color: var(--accent, #58a6ff); }
+    .auto-respond-pill.paused { color: #f0883e; border-color: #f0883e; }
+    .auto-respond-pill[disabled] { opacity: 0.5; cursor: progress; }
     .chat-messages {
       flex: 1;
       overflow-y: auto;
@@ -380,6 +394,9 @@ export function chatStyles(): string {
       margin-bottom: 4px;
     }
     .thread-item-icon.peer { color: var(--accent-light, var(--accent)); }
+    .thread-item.paused .thread-item-name,
+    .thread-item.paused .thread-item-desc { color: var(--text-muted); }
+    .thread-item.paused .thread-item-icon { color: #f0883e; }
     .thread-item-tag {
       display: inline-block;
       margin-left: 6px;

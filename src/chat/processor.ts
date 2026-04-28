@@ -81,18 +81,10 @@ export async function processChatMessage(
   };
   chatState.addMessage(conversationId, userMessage);
 
-  // Create say callback — adds bot message to conversation state
-  // Note: does NOT clear status here — status is cleared after processMessage completes
-  // to avoid flickering during multi-chunk Telegram responses
+  // Status is cleared after processMessage completes (not in say) to avoid
+  // flickering during multi-chunk Telegram responses.
   const say = async (message: string): Promise<void> => {
-    const botMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      timestamp: Date.now(),
-      sender: "bot",
-      text: message,
-      threadId: threadId ?? null,
-    };
-    chatState.addMessage(conversationId, botMessage);
+    chatState.appendBotMessage(conversationId, message, threadId);
   };
 
   // Create setStatus callback — updates conversation status

@@ -78,6 +78,8 @@ CREATE TABLE threads (
   description TEXT,
   connector_id UUID REFERENCES connectors(id),
   is_active BOOLEAN NOT NULL DEFAULT false,
+  auto_respond_paused BOOLEAN NOT NULL DEFAULT false,
+  pause_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

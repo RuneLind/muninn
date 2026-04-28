@@ -21,8 +21,10 @@ export interface HivemindBotConfig {
   namespaces: Namespace[];
   /** Initial set_summary value. Visible to peers via list_peers. */
   summary?: string;
-  /** Allowlist of peer names that may trigger autonomous bot replies. Phase 3+ feature. */
+  /** Allowlist of peer names (matching `peerNameFor()` output) that may trigger autonomous bot replies. */
   autoRespondPeers?: string[];
+  /** Hourly cap on autorespond turns per peer thread. Hitting it auto-pauses until manual unmute. Default 20. */
+  maxAutoTurnsPerHour?: number;
   /** Default ask_peer wait timeout in seconds (default 120). */
   askPeerDefaultTimeoutSec?: number;
   /** Whether to expose the hivemind tools to the bot's Claude (default true if enabled). */
@@ -30,6 +32,7 @@ export interface HivemindBotConfig {
 }
 
 export const DEFAULT_ASK_PEER_TIMEOUT_SEC = 120;
+export const DEFAULT_MAX_AUTO_TURNS_PER_HOUR = 20;
 
 /** Validate and normalize a hivemind block from a bot's config.json. */
 export function parseHivemindConfig(raw: unknown): HivemindBotConfig | null {
@@ -50,6 +53,10 @@ export function parseHivemindConfig(raw: unknown): HivemindBotConfig | null {
     autoRespondPeers: Array.isArray(r.autoRespondPeers)
       ? r.autoRespondPeers.filter((p): p is string => typeof p === "string")
       : undefined,
+    maxAutoTurnsPerHour:
+      typeof r.maxAutoTurnsPerHour === "number" && r.maxAutoTurnsPerHour > 0
+        ? Math.floor(r.maxAutoTurnsPerHour)
+        : undefined,
     askPeerDefaultTimeoutSec:
       typeof r.askPeerDefaultTimeoutSec === "number" && r.askPeerDefaultTimeoutSec > 0
         ? r.askPeerDefaultTimeoutSec
