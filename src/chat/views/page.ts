@@ -695,9 +695,10 @@ const CHAT_SCRIPT = `
 
   function peerLabelForMessage(msg) {
     if (msg.threadId) {
+      var pBot = bots.find(function(b) { return b.name === selectedBot; });
       for (var i = 0; i < threads.length; i++) {
         if (threads[i].id === msg.threadId && threads[i].name && threads[i].name.indexOf('peer:') === 0) {
-          return threads[i].name.slice('peer:'.length);
+          return peerDisplayName(threads[i].name, pBot);
         }
       }
     }

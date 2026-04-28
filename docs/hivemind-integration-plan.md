@@ -285,7 +285,7 @@ DB:
 graph LR
     P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2 ✓<br/>Inbound + threading<br/>peer thread UI]
     P2 --> P3[Phase 3 ✓<br/>Auto-respond<br/>+ guardrails]
-    P3 --> P4[Phase 4<br/>Cross-namespace<br/>melosys ↔ nav]
+    P3 --> P4[Phase 4 ✓<br/>Cross-namespace<br/>melosys ↔ nav]
     P4 --> P5[Phase 5<br/>yggdrasil + others]
 ```
 
@@ -384,9 +384,58 @@ Implementation notes worth keeping for Phase 4:
   helper for bot-authored messages — reuse it in any new outbound
   pathway rather than inlining `addMessage` with a literal `ChatMessage`.
 
-**Phase 4 (½ day).** Add second namespace registration to melosys config
-(`["private", "nav"]`). Verify cross-namespace `list_peers` and routing
-works.
+**Phase 4 — done (2026-04-28).** Implemented in PR #76 on branch
+`hivemind-phase-4` (commits `b885bb9` Phase 4 + `0a44868` simplify pass).
+Each bot opens one `HivemindBotClient` per joined namespace; peer threads
+are now `peer:<namespace>/<basename>`; `BotClientRegistry` in the MCP shim
+holds clients per namespace and a `peer_id → namespace` cache populated
+from every `list_peers` response. Migration 037 backfills pre-Phase-4
+rows.
+
+E2E verified live: melosys configured for `["private", "nav"]`, both
+registrations succeed (`melosys` in private, `melosys-2` in nav, same
+PID), inbound from each namespace lands in its own thread
+(`peer:private/muninn` and `peer:nav/muninn` coexist for the same cwd
+basename), autorespond round-trips back through the same WS the inbound
+came in on.
+
+Decisions made before coding:
+
+- **Thread-name format becomes `peer:<namespace>/<cwd-basename>`.** The
+  cwd-basename only is no longer unique — two peers with the same
+  basename in different namespaces would collide on the same row. The
+  namespace prefix disambiguates and is also the key used by the
+  manager to pick the right WS for outbound traffic.
+- **Existing rows are backfilled.** Migration 037 renames any
+  `peer:<name>` thread to `peer:private/<name>` (Phase 1+2+3 traffic
+  was all on the `private` namespace, so the rename is lossless). Avoids
+  leaving the DB in a mixed-format state.
+- **`peer_id → namespace` cache lives on the MCP server.** The broker
+  assigns peer IDs per-WebSocket, so the shim has to know which client
+  owns a given peer ID before calling `ask_peer`/`send_to_peer`. The
+  cache is populated from every `list_peers` response any client
+  returns — bots typically `list_peers` first, so the cache is warm by
+  the time `ask_peer` fires. Cache miss falls back to the bot's first
+  client + a warn log; the bot can recover by calling `list_peers`
+  again. **Tool signatures stay identical** — no persona churn.
+- **`list_peers` takes optional `namespace?`.** Default = list across
+  all of the bot's joined namespaces (results merged, each peer
+  carries its `namespace` field already). Explicit `namespace` filters
+  to one. `scope: "machine"` still works against any one client.
+- **Sidebar display: strip `<ns>/` when the bot has only one
+  namespace configured.** Keeps the dominant single-namespace UX
+  unchanged; full `<ns>/<basename>` only shows when a bot is actually
+  multi-namespace.
+
+Surfaced during Phase 4 E2E (and fixed coordinately):
+
+- **Broker `deleteByPid` was unconditional.** With Muninn registering N
+  namespaces from one PID, the second register wiped the first. Reported
+  to the `claude-hivemind` peer; broker fix landed as `0a5faed` on
+  origin/main (pid+namespace scoped dedup, no schema change). Muninn
+  needs that fix to register both namespaces concurrently — pre-fix only
+  the most recent registration is reachable, but the muninn code path is
+  correct either way.
 
 **Phase 5 (when ready).** Onboard yggdrasil. Mostly a config change unless
 yggdrasil has its own quirks.

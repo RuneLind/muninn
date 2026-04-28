@@ -9,7 +9,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import type { HivemindBotClient } from "./client.ts";
-import { HivemindRouter, peerNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
+import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 
 setupTestDb();
 
@@ -23,6 +23,7 @@ function makeMsg(overrides: Partial<InboundPeerMessage> = {}): InboundPeerMessag
     fromCwd: "/Users/test/source/private/huginn",
     text: "index rebuilt, +12% recall",
     sentAt: new Date("2026-04-28T10:00:00Z").toISOString(),
+    namespace: "private",
     ...overrides,
   };
 }
@@ -42,6 +43,26 @@ describe("peerNameFor", () => {
   });
 });
 
+describe("peer thread name (namespace-aware)", () => {
+  test("peerThreadNameFor builds peer:<ns>/<basename>", () => {
+    expect(peerThreadNameFor({
+      namespace: "nav", fromCwd: "/Users/x/source/huginn", fromSummary: "h", fromId: "id",
+    })).toBe("peer:nav/huginn");
+  });
+
+  test("parsePeerThreadName splits namespace and peer name", () => {
+    expect(parsePeerThreadName("peer:nav/huginn")).toEqual({ namespace: "nav", peerName: "huginn" });
+    expect(parsePeerThreadName("peer:private/yggdrasil")).toEqual({ namespace: "private", peerName: "yggdrasil" });
+  });
+
+  test("parsePeerThreadName returns null for legacy/unmigrated rows or non-peer names", () => {
+    expect(parsePeerThreadName("peer:huginn")).toBeNull();
+    expect(parsePeerThreadName("main")).toBeNull();
+    expect(parsePeerThreadName("peer:nav/")).toBeNull();
+    expect(parsePeerThreadName("peer:/huginn")).toBeNull();
+  });
+});
+
 describe("HivemindRouter.route", () => {
   test("creates peer:<cwd-basename> thread and persists message under bot owner", async () => {
     await setBotDefaultUser(BOT, OWNER);
@@ -52,7 +73,7 @@ describe("HivemindRouter.route", () => {
     expect(messageId).toBeTruthy();
 
     const threads = await listThreads(OWNER, BOT);
-    const peerThread = threads.find((t) => t.name === "peer:huginn");
+    const peerThread = threads.find((t) => t.name === "peer:private/huginn");
     expect(peerThread).toBeDefined();
     expect(peerThread!.isActive).toBe(false);
 
@@ -106,7 +127,7 @@ describe("HivemindRouter.route", () => {
     await router.route(BOT, makeMsg({ text: "second", fromId: "peer-uuid-bbb" }));
 
     const threads = await listThreads(OWNER, BOT);
-    const peerThreads = threads.filter((t) => t.name === "peer:huginn");
+    const peerThreads = threads.filter((t) => t.name === "peer:private/huginn");
     expect(peerThreads).toHaveLength(1);
 
     const sql = getDb();
@@ -114,6 +135,30 @@ describe("HivemindRouter.route", () => {
     expect(rows.map((r) => r.content)).toEqual(["first", "second"]);
     // Even when from_peer_id changes (peer reconnected), the thread is reused.
     expect(rows.map((r) => r.from_peer_id)).toEqual(["peer-uuid-aaa", "peer-uuid-bbb"]);
+  });
+
+  test("same cwd basename in two namespaces creates two distinct threads", async () => {
+    await setBotDefaultUser(BOT, OWNER);
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+
+    await router.route(BOT, makeMsg({ namespace: "private", text: "from-private" }));
+    await router.route(BOT, makeMsg({
+      namespace: "nav", text: "from-nav", fromId: "peer-uuid-nav-1",
+    }));
+
+    const threads = await listThreads(OWNER, BOT);
+    const privateThread = threads.find((t) => t.name === "peer:private/huginn");
+    const navThread = threads.find((t) => t.name === "peer:nav/huginn");
+    expect(privateThread).toBeDefined();
+    expect(navThread).toBeDefined();
+    expect(privateThread!.id).not.toBe(navThread!.id);
+
+    const sql = getDb();
+    const privateRows = await sql`SELECT content FROM messages WHERE thread_id = ${privateThread!.id}`;
+    const navRows = await sql`SELECT content FROM messages WHERE thread_id = ${navThread!.id}`;
+    expect(privateRows.map((r) => r.content)).toEqual(["from-private"]);
+    expect(navRows.map((r) => r.content)).toEqual(["from-nav"]);
   });
 
   test("returns null and does not persist when the bot has no default user", async () => {
@@ -165,10 +210,14 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     botConfig: BotConfig | undefined;
     sent: { calls: { to: string; text: string }[]; result: boolean };
     process: StubProcessMessage;
+    clientLookups?: { calls: { botName: string; namespace: string }[] };
   }): AutorespondDeps {
     return {
       getBotConfig: () => opts.botConfig,
-      getClient: () => makeStubClient(opts.sent),
+      getClient: (botName, namespace) => {
+        opts.clientLookups?.calls.push({ botName, namespace });
+        return makeStubClient(opts.sent);
+      },
       config: {} as Config,
       processMessage: opts.process,
     };
@@ -181,6 +230,7 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
       fromCwd: "/Users/test/source/private/huginn",
       text: "please re-index",
       sentAt: new Date().toISOString(),
+      namespace: "private",
       ...overrides,
     };
   }
@@ -193,13 +243,13 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
 
   beforeEach(async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "huginn");
+    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "private/huginn");
     await setThreadAutoRespondPaused(thread.id, false);
   });
 
   test("calls processMessage and relays bot reply when peer is on autoRespondPeers", async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    await clearAssistantMessagesForThread("huginn");
+    await clearAssistantMessagesForThread("private/huginn");
     const chat = new ChatState();
     const sent = { calls: [] as { to: string; text: string }[], result: true };
     let processCalls = 0;
@@ -232,7 +282,7 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
 
   test("does not autorespond when peer is not on the allowlist", async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    await clearAssistantMessagesForThread("yggdrasil");
+    await clearAssistantMessagesForThread("private/yggdrasil");
     const chat = new ChatState();
     const sent = { calls: [] as { to: string; text: string }[], result: true };
     let processCalls = 0;
@@ -288,9 +338,9 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
 
   test("auto-pauses the thread when hourly turn cap is hit and skips processMessage", async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    await clearAssistantMessagesForThread("huginn");
+    await clearAssistantMessagesForThread("private/huginn");
     // Pre-seed the thread with 3 assistant turns to trip the cap of 3 on first attempt.
-    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "huginn");
+    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "private/huginn");
     for (let i = 0; i < 3; i++) {
       await saveMessage({
         userId: AR_OWNER, botName: AR_BOT, role: "assistant", content: `prior ${i}`,
@@ -317,15 +367,15 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     expect(processCalls).toBe(0);
     expect(sent.calls).toHaveLength(0);
     const threads = await listThreads(AR_OWNER, AR_BOT);
-    const peerThread = threads.find((t) => t.name === "peer:huginn");
+    const peerThread = threads.find((t) => t.name === "peer:private/huginn");
     expect(peerThread?.autoRespondPaused).toBe(true);
     expect(peerThread?.pauseReason).toBe("3-turn/hour cap");
   });
 
   test("does not autorespond when thread is already paused", async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    await clearAssistantMessagesForThread("huginn");
-    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "huginn");
+    await clearAssistantMessagesForThread("private/huginn");
+    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "private/huginn");
     await setThreadAutoRespondPaused(thread.id, true, "manual");
     const chat = new ChatState();
     const sent = { calls: [] as { to: string; text: string }[], result: true };
@@ -348,9 +398,45 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     expect(sent.calls).toHaveLength(0);
   });
 
+  test("autorespond outbound looks up the client for the inbound namespace", async () => {
+    await setBotDefaultUser(AR_BOT, AR_OWNER);
+    // Ensure both candidate threads start unpaused.
+    const navThread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "nav/huginn");
+    await setThreadAutoRespondPaused(navThread.id, false);
+    const sql = getDb();
+    await sql`DELETE FROM messages WHERE thread_id = ${navThread.id} AND role = 'assistant'`;
+
+    const chat = new ChatState();
+    const sent = { calls: [] as { to: string; text: string }[], result: true };
+    const clientLookups = { calls: [] as { botName: string; namespace: string }[] };
+    const stubProcess: StubProcessMessage = async (params) => {
+      await saveMessage({
+        userId: params.userId, botName: params.botConfig.name, role: "assistant",
+        content: "ack", platform: "web", threadId: params.threadId,
+      });
+      return {
+        responseText: "ack",
+        traceId: "trace-x", durationMs: 1, inputTokens: 1, outputTokens: 1,
+        costUsd: 0, model: "stub", numTurns: 1,
+      };
+    };
+    const router = new HivemindRouter(chat, makeDeps({
+      botConfig: makeBotConfig({ namespaces: ["private", "nav"], autoRespondPeers: ["huginn"] }),
+      sent, process: stubProcess, clientLookups,
+    }));
+
+    await router.route(AR_BOT, makeMsg({ namespace: "nav", fromId: "nav-peer-id" }));
+    await router.pendingAutorespond;
+
+    expect(clientLookups.calls).toHaveLength(1);
+    expect(clientLookups.calls[0]!.namespace).toBe("nav");
+    expect(sent.calls).toHaveLength(1);
+    expect(sent.calls[0]!.to).toBe("nav-peer-id");
+  });
+
   test("setThreadAutoRespondPaused round-trips paused + reason", async () => {
     await setBotDefaultUser(AR_BOT, AR_OWNER);
-    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "huginn");
+    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "private/huginn");
 
     expect(await setThreadAutoRespondPaused(thread.id, true, "manual")).toBe(true);
     let threads = await listThreads(AR_OWNER, AR_BOT);

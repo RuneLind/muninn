@@ -202,7 +202,7 @@ test("unsolicited inbound message exposes fromCwd, fromSummary, sentAt for the r
   received.length = 0;
   const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
   const onIncoming = mock(
-    (m: { fromId: string; fromSummary: string; fromCwd: string; text: string; sentAt: string }) => { void m; },
+    (m: { fromId: string; fromSummary: string; fromCwd: string; text: string; sentAt: string; namespace: string }) => { void m; },
   );
   c.onIncomingMessage = onIncoming;
   c.start();
@@ -216,6 +216,7 @@ test("unsolicited inbound message exposes fromCwd, fromSummary, sentAt for the r
   expect(payload.fromCwd).toBe("/tmp");
   expect(payload.fromSummary).toBe("huginn — search-index assistant");
   expect(payload.text).toBe("index rebuilt");
+  expect(payload.namespace).toBe("private");
   expect(typeof payload.sentAt).toBe("string");
   expect(Number.isFinite(new Date(payload.sentAt).getTime())).toBe(true);
 

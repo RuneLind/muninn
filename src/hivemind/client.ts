@@ -52,8 +52,21 @@ export class HivemindBotClient {
   private pendingAsks = new Map<PeerId, PendingAsk[]>();
   private pendingListPeers: { resolve: (peers: Peer[]) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
 
-  /** Phase 2 will route this to a peer:<id> chat thread. */
-  onIncomingMessage: ((msg: { fromId: PeerId; fromSummary: string; fromCwd: string; text: string; sentAt: string }) => void) | null = null;
+  /**
+   * Inbound peer message that didn't match a pending ask_peer call. The
+   * `namespace` is filled in from the client's own registration so the router
+   * can scope the thread name and pick the right outbound WS.
+   */
+  onIncomingMessage:
+    | ((msg: {
+        fromId: PeerId;
+        fromSummary: string;
+        fromCwd: string;
+        text: string;
+        sentAt: string;
+        namespace: Namespace;
+      }) => void)
+    | null = null;
 
   constructor(opts: {
     botName: string;
@@ -333,6 +346,7 @@ export class HivemindBotClient {
       fromCwd: msg.from_cwd,
       text: msg.text,
       sentAt: msg.sent_at,
+      namespace: this.namespace,
     });
   }
 

@@ -96,6 +96,21 @@ export function threadManagerScript(): string {
   threadModal.onclick = function(e) { if (e.target === threadModal) closeThreadModal(); };
   threadModalName.addEventListener('keydown', function(e) { if (e.key === 'Enter') submitThreadModal(); });
 
+  // ── Peer thread label helper ────────────────────────────────────────────
+
+  // Strip the \`peer:\` prefix and, when the active bot has at most one
+  // configured hivemind namespace, the leading \`<ns>/\` segment too.
+  // Returns the raw name unchanged when it isn't a peer thread.
+  function peerDisplayName(threadName, bot) {
+    if (!threadName || threadName.indexOf('peer:') !== 0) return threadName;
+    var label = threadName.slice('peer:'.length);
+    if (bot && bot.hivemindNamespaceCount <= 1) {
+      var slashIdx = label.indexOf('/');
+      if (slashIdx >= 0) label = label.slice(slashIdx + 1);
+    }
+    return label;
+  }
+
   // ── Thread list ─────────────────────────────────────────────────────────
 
   async function loadThreads(autoSelectThreadId) {
@@ -142,13 +157,15 @@ export function threadManagerScript(): string {
       return;
     }
 
+    var currentBot = bots.find(function(b) { return b.name === selectedBot; });
+
     threadList.innerHTML = threads.map(function(t) {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var isPaused = isPeer && t.autoRespondPaused === true;
       var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
       var icon = isPaused ? '⏸' : (isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;'));
-      var displayName = isPeer ? t.name.slice('peer:'.length) : t.name;
+      var displayName = isPeer ? peerDisplayName(t.name, currentBot) : t.name;
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
@@ -223,8 +240,13 @@ export function threadManagerScript(): string {
         break;
       }
     }
+    var headerThreadName = threadName;
+    if (headerThreadName && headerThreadName.indexOf('peer:') === 0) {
+      var hdrBot = bots.find(function(b) { return b.name === selectedBot; });
+      headerThreadName = 'peer:' + peerDisplayName(headerThreadName, hdrBot);
+    }
     chatHeader.querySelector('.chat-title').textContent =
-      (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
+      (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + headerThreadName;
     document.getElementById('chatDescription').textContent = threadDesc;
     syncConnectorDropdown();
     renderAutoRespondPill(activeThread);

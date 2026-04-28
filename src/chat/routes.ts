@@ -11,6 +11,7 @@ import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDefaultUser } from "../db/chat-preferences.ts";
 import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage } from "../db/messages.ts";
 import { hivemindManager } from "../hivemind/manager.ts";
+import { parsePeerThreadName } from "../hivemind/router.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -48,6 +49,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       showWaterfall: b.showWaterfall !== false,
       contextWindow: b.contextWindow ?? null,
       prompts: b.prompts,
+      hivemindNamespaceCount: b.hivemind?.enabled ? b.hivemind.namespaces.length : 0,
     }));
     let connectors: Awaited<ReturnType<typeof listConnectors>> = [];
     try { connectors = await listConnectors(); } catch (err) {
@@ -513,7 +515,7 @@ function conversationTypeToPlatform(type: ConversationType): string {
 
 async function handlePeerOutbound(
   conversationId: string,
-  thread: { id: string; userId: string; botName: string },
+  thread: { id: string; userId: string; botName: string; name: string },
   username: string,
   rawText: string,
 ): Promise<{ status: 202 | 400 | 503; body: { status?: string; error?: string } }> {
@@ -523,9 +525,15 @@ async function handlePeerOutbound(
     return { status: 400, body: { error: "Empty message after stripping `>` prefix" } };
   }
 
-  const client = hivemindManager.getClient(thread.botName);
+  // Outbound goes through the same WS the inbound came in on; namespace is
+  // encoded in the thread name. `getAnyClient` is the fallback for legacy
+  // unmigrated `peer:<name>` rows (pre-Phase-4 format).
+  const parsed = parsePeerThreadName(thread.name);
+  const client = parsed
+    ? hivemindManager.getClient(thread.botName, parsed.namespace)
+    : hivemindManager.getAnyClient(thread.botName);
   if (!client) {
-    return { status: 503, body: { error: "Hivemind is not enabled for this bot" } };
+    return { status: 503, body: { error: "Hivemind is not enabled for this bot in that namespace" } };
   }
   if (!client.isConnected) {
     return { status: 503, body: { error: "Hivemind broker is not connected" } };

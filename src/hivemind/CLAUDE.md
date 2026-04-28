@@ -1,6 +1,6 @@
 # Hivemind Module — Architecture & Rules
 
-Phases 1, 2, and 3 of the integration plan in `docs/hivemind-integration-plan.md`.
+Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan.md`.
 
 ## File Overview
 
@@ -9,18 +9,38 @@ Phases 1, 2, and 3 of the integration plan in `docs/hivemind-integration-plan.md
 | `types.ts` | Subset of the claude-hivemind broker protocol (mirrored from `~/source/private/claude-hivemind/src/shared/types.ts`) |
 | `config.ts` | Per-bot `hivemind` config block parser. Returns `null` unless `enabled: true` and at least one valid namespace is set. Knows `autoRespondPeers` + `maxAutoTurnsPerHour` (default 20). |
 | `broker.ts` | `ensureBrokerRunning()` — health-checks `localhost:7899`, spawns `bun ~/source/private/claude-hivemind/src/broker.ts` if missing. Override path with `HIVEMIND_BROKER_SCRIPT`. |
-| `client.ts` | `HivemindBotClient` — one WebSocket peer connection per bot. Handles register, set_summary, list_peers, send_message, heartbeat, reconnect with exponential backoff. |
-| `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). Exposes `list_peers`, `ask_peer`, `send_to_peer`. |
-| `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages into `peer:<cwd-basename>` threads under the bot's default user. Phase 3: kicks off an autonomous bot turn for peers on the `autoRespondPeers` allowlist, gated by the loop guard, and relays the bot's reply back via `client.sendMessage`. |
+| `client.ts` | `HivemindBotClient` — one WebSocket peer connection per (bot, namespace). Handles register, set_summary, list_peers, send_message, heartbeat, reconnect with exponential backoff. Inbound messages carry the client's `namespace`. |
+| `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). `BotClientRegistry` holds one `HivemindBotClient` per joined namespace and a `peer_id → namespace` cache populated from every `list_peers` response. Exposes `list_peers` (cross-namespace), `ask_peer`, `send_to_peer` — tool signatures unchanged from Phase 3 except for an optional `namespace?` filter on `list_peers`. |
+| `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages into `peer:<namespace>/<cwd-basename>` threads under the bot's default user. Autorespond looks up `getClient(botName, namespace)` so the outbound relay goes through the same WS the inbound came in on. `parsePeerThreadName` and `peerThreadNameFor` helpers expose the format. |
 | `loop-guard.ts` | `checkAutoRespond()` — hourly turn cap + already-paused check. Returns `{ allowed, reason?, capHit? }`; the router writes `auto_respond_paused=true` on cap hit. |
-| `manager.ts` | `HivemindManager` singleton — boots one client per bot with `hivemind.enabled: true`, registers each with the MCP server, and wires `client.onIncomingMessage` into the router. Started from `src/index.ts` (passes the global `Config` through so the router can run a full bot turn). |
+| `manager.ts` | `HivemindManager` singleton — boots one `HivemindBotClient` per `(bot, namespace)` pair. `getClient(botName, namespace)` returns the namespace-specific client (or null); `getAnyClient(botName)` is the explicit fallback for paths that don't know the namespace (only used by chat `>` outbound for legacy unmigrated peer threads). Started from `src/index.ts`. |
 
 ## Phase 1 scope
 
-- Single namespace per bot — takes the **first** entry of `hivemind.namespaces`. Multi-namespace is Phase 4.
+- Single namespace per bot — takes the **first** entry of `hivemind.namespaces`. Multi-namespace lands in Phase 4.
 - Tools: `ask_peer` (blocking with timeout), `send_to_peer` (fire-and-forget), `list_peers`.
 - Pending-ask resolution by FIFO queue per `from_id`. The first inbound message from peer X resolves the oldest pending `ask_peer(X, ...)`.
 - No autonomous responses, no loop guards — those land in Phase 3 alongside autorespond.
+
+## Phase 4 scope
+
+- **Multi-namespace per bot.** Manager iterates `hivemind.namespaces` and opens one
+  `HivemindBotClient` per `(bot, namespace)` pair.
+- **Namespace plumbed end-to-end.** `client.onIncomingMessage` carries the
+  client's `namespace`; the router uses it to (a) compute the thread name
+  `peer:<namespace>/<cwd-basename>` and (b) pick the right outbound client for
+  autorespond replies.
+- **`peer_id → namespace` cache.** Lives on `BotClientRegistry` in
+  `mcp-server.ts`; populated from every `list_peers` response. `ask_peer` /
+  `send_to_peer` look the cache up and pick the matching client; cache miss
+  falls back to the first registered client + warn.
+- **`list_peers(namespace?)`.** Default lists peers across all of the bot's
+  joined namespaces; explicit `namespace` filters to one.
+- **Manual outbound from chat.** `>...` text-prefix in a `peer:<ns>/<name>`
+  thread parses the namespace via `parsePeerThreadName` and calls
+  `getClient(botName, ns)` so the reply goes through the inbound WS.
+- **Migration 037.** Backfills existing `peer:<name>` thread rows to
+  `peer:private/<name>` (Phase 1+2+3 traffic was all on `private`).
 
 ## Phase 2 scope (this revision)
 
@@ -76,12 +96,14 @@ Phases 1, 2, and 3 of the integration plan in `docs/hivemind-integration-plan.md
 
 ## Bot setup
 
-1. Add `hivemind` block to `bots/<name>/config.json`:
+1. Add `hivemind` block to `bots/<name>/config.json`. Use a single namespace
+   for project-local peers, or multiple to bridge into another namespace
+   (e.g. `nav`):
    ```json
    {
      "hivemind": {
        "enabled": true,
-       "namespaces": ["private"],
+       "namespaces": ["private", "nav"],
        "summary": "Melosys — analyzes Jira, asks peers for help"
      }
    }
@@ -107,3 +129,6 @@ Phases 1, 2, and 3 of the integration plan in `docs/hivemind-integration-plan.md
 7. **Autorespond is fire-and-forget.** `HivemindRouter.route` returns once the inbound message is persisted; the bot turn runs in the background. Tests can await `router.pendingAutorespond` to settle the in-flight promise. Don't await it from production callers — it's a test-only seam.
 8. **`processMessage` injection in tests.** `AutorespondDeps.processMessage` is an optional override so router tests can stub the AI pipeline. Production wires `defaultProcessMessage`. If you change `ProcessMessageParams`, check both call sites.
 9. **Cap hit auto-pauses.** Once `maxAutoTurnsPerHour` trips, `auto_respond_paused` stays true until the user manually unpauses via the chat-header pill. The cap reset is implicit (older assistant turns roll out of the hour), so a paused thread won't auto-resume.
+10. **Peer thread name encodes namespace.** Thread names are `peer:<namespace>/<cwd-basename>` post-Phase-4. Don't grep for literal `peer:huginn` — use `parsePeerThreadName` to split. Migration 037 backfilled all pre-Phase-4 rows to `peer:private/<name>`.
+11. **`peer_id → namespace` cache is warmed by `list_peers`.** `ask_peer`/`send_to_peer` rely on the bot calling `list_peers` first. Cache miss falls back to the first registered client + a warn — recoverable but not free, so keep `list_peers` in the persona's prescribed flow.
+12. **Sidebar UI hides the `<ns>/` prefix when the bot has only one configured namespace.** That decision is driven by `bots[].hivemindNamespaceCount` in the `/chat/bots` response — don't change the field name without updating `thread-manager.ts`/`page.ts`.
