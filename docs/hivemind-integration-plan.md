@@ -284,7 +284,7 @@ DB:
 ```mermaid
 graph LR
     P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2 ✓<br/>Inbound + threading<br/>peer thread UI]
-    P2 --> P3[Phase 3<br/>Auto-respond<br/>+ guardrails]
+    P2 --> P3[Phase 3 ✓<br/>Auto-respond<br/>+ guardrails]
     P3 --> P4[Phase 4<br/>Cross-namespace<br/>melosys ↔ nav]
     P4 --> P5[Phase 5<br/>yggdrasil + others]
 ```
@@ -328,8 +328,61 @@ Implementation notes worth keeping for Phase 3:
   in both hydration and the REST API; reuse it in any new
   message-shaped DB consumer.
 
-**Phase 3 (1 day).** `autoRespondPeers` allowlist + loop guards + traces
-integration. Now huginn can autonomously fix things on melosys's request.
+**Phase 3 — done (2026-04-28).** Implemented in PR #75 on branch
+`hivemind-phase-3` (commit `e854c10`, pending squash-merge). Inbound
+peer messages from peers on `autoRespondPeers` trigger an autonomous
+bot turn through the regular prompt-builder + connector pipeline; the
+bot's reply is relayed back to the originating peer via
+`HivemindBotClient.sendMessage`. Each turn runs under a `Tracer`
+rooted at `hivemind_autorespond` with `peer_inbound` / `peer_outbound`
+events so the waterfall view shows the full agent-to-agent chain.
+
+A rolling-hour assistant-turn cap (default 20, configurable via
+`maxAutoTurnsPerHour`) auto-pauses a peer thread when hit. Migration
+036 adds `auto_respond_paused` + `pause_reason` to `threads`.
+`PATCH /chat/threads/:id/auto-respond` toggles the flag (manual
+unpause clears the reason). Chat header gets an Auto-respond pill on
+peer threads; sidebar paused peer threads render with a ⏸ glyph and
+muted styling.
+
+Verified end-to-end live on the melosys-2 ↔ muninn peer link: 3
+autoresponds round-tripped (`pong` / `pong2` / `pong3`), turn 4 was
+blocked + auto-paused with `pause_reason = '3-turn/hour cap'`, the
+PATCH endpoint round-tripped the toggle and cleared `pause_reason` on
+unpause, trace waterfall showed the full `peer_inbound → claude →
+peer_outbound` chain.
+
+Decisions made during Phase 3:
+
+- **Token budget dropped.** The plan originally listed a per-thread
+  token budget (`tokenBudget` mechanic) alongside the hourly turn cap.
+  We dropped it: hourly cap × per-turn `contextWindow` already bounds
+  cost, and adding a second guard before we have data showing the
+  first is insufficient violates the "don't add features beyond what
+  the task requires" rule. Add later if real traffic needs it.
+- **Auto-pause is sticky.** Cap-hit pauses persist until manual
+  unpause via the chat-header pill — older assistant turns roll out
+  of the rolling hour but the flag stays set, so an explicit human
+  ack is required before resuming.
+
+Implementation notes worth keeping for Phase 4:
+
+- `manager.ts:50` currently takes `cfg.namespaces[0]!` only. Phase 4
+  needs to iterate all namespaces and open one `HivemindBotClient` per
+  namespace. The router's `getClient(botName)` lookup returns one
+  client per bot; multi-namespace will need a `getClient(botName, ns)`
+  variant so outbound relays go through the same namespace the inbound
+  arrived on.
+- `peerNameFor` is `from_cwd` basename. Two peers with the same cwd
+  basename in different namespaces would collide on `peer:<name>`
+  thread name. Phase 4 should consider namespace-prefixed thread
+  names (`peer:<ns>/<name>`) — design before coding.
+- The `processMessage` injection seam (`AutorespondDeps.processMessage`)
+  is a clean test boundary; reuse it if Phase 4 needs cross-namespace
+  routing tests with stubbed connectors.
+- `chatState.appendBotMessage(convId, text, threadId)` is the shared
+  helper for bot-authored messages — reuse it in any new outbound
+  pathway rather than inlining `addMessage` with a literal `ChatMessage`.
 
 **Phase 4 (½ day).** Add second namespace registration to melosys config
 (`["private", "nav"]`). Verify cross-namespace `list_peers` and routing
