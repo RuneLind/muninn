@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "bots": {
+    "jarvis": {
+      "inline": true
+    },
+    "capra": {
+      "repo": "https://github.com/capraconsulting/huginn-capra.git",
+      "subpath": "bot",
+      "branch": "main"
+    },
+    "melosys": {
+      "repo": "~/source/private/muninn-config",
+      "subpath": "bots/melosys"
+    }
+  }
+}

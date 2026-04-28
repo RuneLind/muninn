@@ -55,7 +55,7 @@ export function registerToolsRoutes(app: Hono): void {
         return c.json({ error: "Server not found in config" }, 404);
       }
 
-      const result = await connectToServer(botName, serverName, mcpConfig.mcpServers[serverName]);
+      const result = await connectToServer(botName, serverName, mcpConfig.mcpServers[serverName], bot.dir);
       return c.json(result);
     } catch (err) {
       log.error("MCP connect failed: {error}", { error: err instanceof Error ? err.message : String(err) });
