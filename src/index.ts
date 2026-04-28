@@ -10,6 +10,7 @@ import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
+import { hivemindManager } from "./hivemind/manager.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
@@ -76,6 +77,11 @@ try {
 } catch (err) {
   log.warn("Failed to hydrate chat conversations: {error}", { error: err instanceof Error ? err.message : String(err) });
 }
+
+// Start hivemind manager (peers, MCP server). Best-effort — never blocks boot.
+hivemindManager.start(allBotConfigs).catch((err) => {
+  log.warn("Hivemind manager failed to start: {error}", { error: err instanceof Error ? err.message : String(err) });
+});
 
 // Build the combined Hono app
 const dashboard = createDashboardRoutes(config);
@@ -177,6 +183,7 @@ async function shutdown() {
   }
 
   server.stop();
+  await hivemindManager.stop();
   await serenaManager.stopAll();
   await disconnectAllMcp();
   await closeDb();

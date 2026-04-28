@@ -9,7 +9,9 @@ export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's
 - From real people (not automated marketing/newsletters)
 - Urgent or time-sensitive
 - Action items or requests
-- Security alerts, expiring tokens, important notifications`;
+- Security alerts, expiring tokens, important notifications
+- NOT worth notifying LinkedIn — Connection suggestion`;
+
 
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string; prompt?: string; model?: string };
