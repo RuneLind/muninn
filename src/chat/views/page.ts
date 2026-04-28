@@ -695,15 +695,10 @@ const CHAT_SCRIPT = `
 
   function peerLabelForMessage(msg) {
     if (msg.threadId) {
+      var pBot = bots.find(function(b) { return b.name === selectedBot; });
       for (var i = 0; i < threads.length; i++) {
         if (threads[i].id === msg.threadId && threads[i].name && threads[i].name.indexOf('peer:') === 0) {
-          var label = threads[i].name.slice('peer:'.length);
-          var pBot = bots.find(function(b) { return b.name === selectedBot; });
-          if (pBot && pBot.hivemindNamespaceCount <= 1) {
-            var s = label.indexOf('/');
-            if (s >= 0) label = label.slice(s + 1);
-          }
-          return label;
+          return peerDisplayName(threads[i].name, pBot);
         }
       }
     }

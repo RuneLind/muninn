@@ -525,12 +525,13 @@ async function handlePeerOutbound(
     return { status: 400, body: { error: "Empty message after stripping `>` prefix" } };
   }
 
-  // Thread name is `peer:<namespace>/<basename>` post-Phase-4. Parse the
-  // namespace so the outbound goes through the same WS the inbound came in on.
+  // Outbound goes through the same WS the inbound came in on; namespace is
+  // encoded in the thread name. `getAnyClient` is the fallback for legacy
+  // unmigrated `peer:<name>` rows (pre-Phase-4 format).
   const parsed = parsePeerThreadName(thread.name);
   const client = parsed
     ? hivemindManager.getClient(thread.botName, parsed.namespace)
-    : hivemindManager.getClient(thread.botName);
+    : hivemindManager.getAnyClient(thread.botName);
   if (!client) {
     return { status: 503, body: { error: "Hivemind is not enabled for this bot in that namespace" } };
   }

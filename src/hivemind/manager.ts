@@ -15,11 +15,6 @@ function defaultSummary(bot: BotConfig): string {
   return firstLine ? `${bot.name} (Muninn) — ${firstLine}` : `${bot.name} (Muninn)`;
 }
 
-/** Map key for a (bot, namespace) pair. */
-export function clientKey(botName: string, namespace: Namespace): string {
-  return `${botName}\x00${namespace}`;
-}
-
 export class HivemindManager {
   /** Keyed by `clientKey(botName, namespace)` — one entry per joined namespace per bot. */
   private clients = new Map<string, HivemindBotClient>();
@@ -83,7 +78,7 @@ export class HivemindManager {
           });
         };
         client.start();
-        this.clients.set(clientKey(bot.name, namespace), client);
+        this.clients.set(`${bot.name}\x00${namespace}`, client);
 
         // exposeToTools=false leaves the peer connected (so messages still flow)
         // but skips MCP registration — the bot's Claude won't see the tools.
@@ -105,24 +100,21 @@ export class HivemindManager {
     }
   }
 
-  /**
-   * Get a client by (bot, namespace). When `namespace` is omitted, returns the
-   * first client registered for the bot — used as a best-effort fallback by
-   * paths that can't yet identify the namespace (e.g. cache-miss in MCP shim).
-   */
-  getClient(botName: string, namespace?: Namespace): HivemindBotClient | null {
-    if (namespace !== undefined) {
-      return this.clients.get(clientKey(botName, namespace)) ?? null;
-    }
+  /** Get a client by (bot, namespace). Returns null if the bot isn't
+   *  registered in that namespace. */
+  getClient(botName: string, namespace: Namespace): HivemindBotClient | null {
+    return this.clients.get(`${botName}\x00${namespace}`) ?? null;
+  }
+
+  /** Best-effort lookup when the namespace is unknown — returns the first
+   *  registered client for the bot, in `cfg.namespaces` order. The only
+   *  intended caller is the chat `>` outbound path's fallback for legacy
+   *  unmigrated peer threads (`peer:<name>` rather than `peer:<ns>/<name>`). */
+  getAnyClient(botName: string): HivemindBotClient | null {
     for (const c of this.clients.values()) {
       if (c.botName === botName) return c;
     }
     return null;
-  }
-
-  /** All clients for a single bot, across every joined namespace. */
-  getClientsForBot(botName: string): HivemindBotClient[] {
-    return Array.from(this.clients.values()).filter((c) => c.botName === botName);
   }
 
   /** All currently active clients. */

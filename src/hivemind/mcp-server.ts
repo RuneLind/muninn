@@ -37,28 +37,34 @@ export class BotClientRegistry {
   /**
    * List peers across all namespaces (or just one when filtered). Each
    * client's response is cached so subsequent `ask_peer` calls can find
-   * the right WS for a given peer ID.
+   * the right WS for a given peer ID. Cache is rebuilt every call so
+   * dead peer IDs from prior sessions don't accumulate.
    */
   async listPeers(scope: "namespace" | "machine", filter?: Namespace): Promise<Peer[]> {
-    const targets = filter ? [this.clients.get(filter)].filter(Boolean) as HivemindBotClient[] : Array.from(this.clients.values());
+    const single = filter ? this.clients.get(filter) : null;
+    const targets = filter ? (single ? [single] : []) : Array.from(this.clients.values());
     if (targets.length === 0) return [];
+
+    const results = await Promise.allSettled(targets.map((c) => c.listPeers(scope)));
+    if (!filter) this.peerNamespace.clear();
 
     const merged: Peer[] = [];
     const seen = new Set<string>();
-    for (const c of targets) {
-      try {
-        const peers = await c.listPeers(scope);
-        for (const p of peers) {
-          this.peerNamespace.set(p.id, c.namespace);
-          if (seen.has(p.id)) continue;
-          seen.add(p.id);
-          merged.push(p);
-        }
-      } catch (e) {
+    for (let i = 0; i < targets.length; i++) {
+      const c = targets[i]!;
+      const r = results[i]!;
+      if (r.status === "rejected") {
         log.warn("listPeers failed in namespace {ns}: {error}", {
           botName: c.botName, ns: c.namespace,
-          error: e instanceof Error ? e.message : String(e),
+          error: r.reason instanceof Error ? r.reason.message : String(r.reason),
         });
+        continue;
+      }
+      for (const p of r.value) {
+        this.peerNamespace.set(p.id, c.namespace);
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        merged.push(p);
       }
     }
     return merged;
