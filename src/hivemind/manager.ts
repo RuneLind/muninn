@@ -6,6 +6,7 @@ import { ensureBrokerRunning, brokerPort } from "./broker.ts";
 import { HivemindBotClient } from "./client.ts";
 import { HivemindMcpServer } from "./mcp-server.ts";
 import { HivemindRouter } from "./router.ts";
+import type { Namespace } from "./types.ts";
 
 const log = getLog("hivemind", "manager");
 
@@ -14,7 +15,13 @@ function defaultSummary(bot: BotConfig): string {
   return firstLine ? `${bot.name} (Muninn) — ${firstLine}` : `${bot.name} (Muninn)`;
 }
 
+/** Map key for a (bot, namespace) pair. */
+export function clientKey(botName: string, namespace: Namespace): string {
+  return `${botName}\x00${namespace}`;
+}
+
 export class HivemindManager {
+  /** Keyed by `clientKey(botName, namespace)` — one entry per joined namespace per bot. */
   private clients = new Map<string, HivemindBotClient>();
   private mcpServer = new HivemindMcpServer();
   private botConfigs = new Map<string, BotConfig>();
@@ -31,7 +38,7 @@ export class HivemindManager {
     if (this.started) return;
     this.router = new HivemindRouter(chatState, {
       getBotConfig: (name) => this.botConfigs.get(name),
-      getClient: (name) => this.clients.get(name) ?? null,
+      getClient: (name, ns) => this.getClient(name, ns),
       config,
     });
 
@@ -56,50 +63,66 @@ export class HivemindManager {
     for (const bot of enabledBots) {
       this.botConfigs.set(bot.name, bot);
       const cfg = bot.hivemind!;
-      // Phase 1: take the first namespace only. Phase 4 will iterate all of them.
-      const namespace = cfg.namespaces[0]!;
-      if (cfg.namespaces.length > 1) {
-        log.info(
-          "Bot {botName} configured for {count} namespaces — Phase 1 only joins the first ({first}). Multi-namespace lands in Phase 4.",
-          { botName: bot.name, count: cfg.namespaces.length, first: namespace },
-        );
-      }
 
-      const client = new HivemindBotClient({
-        botName: bot.name,
-        namespace,
-        cwd: bot.dir,
-        summary: cfg.summary ?? defaultSummary(bot),
-        brokerPort: brokerPort(),
-      });
-      client.onIncomingMessage = (msg) => {
-        this.router.route(bot.name, msg).catch((err) => {
-          log.error("Router failed for inbound peer message: {error}", {
-            botName: bot.name,
-            fromId: msg.fromId,
-            error: err instanceof Error ? err.message : String(err),
-          });
+      for (const namespace of cfg.namespaces) {
+        const client = new HivemindBotClient({
+          botName: bot.name,
+          namespace,
+          cwd: bot.dir,
+          summary: cfg.summary ?? defaultSummary(bot),
+          brokerPort: brokerPort(),
         });
-      };
-      client.start();
-      this.clients.set(bot.name, client);
+        client.onIncomingMessage = (msg) => {
+          this.router.route(bot.name, msg).catch((err) => {
+            log.error("Router failed for inbound peer message: {error}", {
+              botName: bot.name,
+              fromId: msg.fromId,
+              namespace: msg.namespace,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        };
+        client.start();
+        this.clients.set(clientKey(bot.name, namespace), client);
 
-      // exposeToTools=false leaves the peer connected (so messages still flow)
-      // but skips MCP registration — the bot's Claude won't see the tools.
-      if (cfg.exposeToTools !== false) {
-        this.mcpServer.registerBot(bot.name, client);
+        // exposeToTools=false leaves the peer connected (so messages still flow)
+        // but skips MCP registration — the bot's Claude won't see the tools.
+        if (cfg.exposeToTools !== false) {
+          this.mcpServer.registerBotClient(bot.name, namespace, client);
+        }
       }
 
       log.info(
-        "Bot {botName} hivemind active (namespace={ns}, MCP {mcp})",
-        { botName: bot.name, ns: namespace, mcp: cfg.exposeToTools !== false ? `${this.mcpServer.url}/mcp/${bot.name}` : "disabled (exposeToTools=false)" },
+        "Bot {botName} hivemind active (namespaces={namespaces}, MCP {mcp})",
+        {
+          botName: bot.name,
+          namespaces: cfg.namespaces.join(","),
+          mcp: cfg.exposeToTools !== false
+            ? `${this.mcpServer.url}/mcp/${bot.name}`
+            : "disabled (exposeToTools=false)",
+        },
       );
     }
   }
 
-  /** Get a client by bot name — used by chat UI / dashboard panels later. */
-  getClient(botName: string): HivemindBotClient | null {
-    return this.clients.get(botName) ?? null;
+  /**
+   * Get a client by (bot, namespace). When `namespace` is omitted, returns the
+   * first client registered for the bot — used as a best-effort fallback by
+   * paths that can't yet identify the namespace (e.g. cache-miss in MCP shim).
+   */
+  getClient(botName: string, namespace?: Namespace): HivemindBotClient | null {
+    if (namespace !== undefined) {
+      return this.clients.get(clientKey(botName, namespace)) ?? null;
+    }
+    for (const c of this.clients.values()) {
+      if (c.botName === botName) return c;
+    }
+    return null;
+  }
+
+  /** All clients for a single bot, across every joined namespace. */
+  getClientsForBot(botName: string): HivemindBotClient[] {
+    return Array.from(this.clients.values()).filter((c) => c.botName === botName);
   }
 
   /** All currently active clients. */

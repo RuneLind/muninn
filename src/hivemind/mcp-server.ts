@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { getLog } from "../logging.ts";
 import type { HivemindBotClient } from "./client.ts";
+import type { Namespace, Peer } from "./types.ts";
 import { DEFAULT_ASK_PEER_TIMEOUT_SEC } from "./config.ts";
 
 const log = getLog("hivemind", "mcp-server");
@@ -14,11 +15,83 @@ interface Session {
   server: McpServer;
 }
 
+/**
+ * Tracks all `HivemindBotClient` instances for one bot (one per joined
+ * namespace). Maintains a `peer_id → namespace` cache populated by every
+ * `list_peers` response so the shim can route `ask_peer`/`send_to_peer`
+ * through the correct WS without persona changes.
+ */
+export class BotClientRegistry {
+  private clients = new Map<Namespace, HivemindBotClient>();
+  /** peer_id → namespace owning that peer. Updated on every list_peers response. */
+  private peerNamespace = new Map<string, Namespace>();
+
+  add(namespace: Namespace, client: HivemindBotClient): void {
+    this.clients.set(namespace, client);
+  }
+
+  get namespaces(): Namespace[] {
+    return Array.from(this.clients.keys());
+  }
+
+  /**
+   * List peers across all namespaces (or just one when filtered). Each
+   * client's response is cached so subsequent `ask_peer` calls can find
+   * the right WS for a given peer ID.
+   */
+  async listPeers(scope: "namespace" | "machine", filter?: Namespace): Promise<Peer[]> {
+    const targets = filter ? [this.clients.get(filter)].filter(Boolean) as HivemindBotClient[] : Array.from(this.clients.values());
+    if (targets.length === 0) return [];
+
+    const merged: Peer[] = [];
+    const seen = new Set<string>();
+    for (const c of targets) {
+      try {
+        const peers = await c.listPeers(scope);
+        for (const p of peers) {
+          this.peerNamespace.set(p.id, c.namespace);
+          if (seen.has(p.id)) continue;
+          seen.add(p.id);
+          merged.push(p);
+        }
+      } catch (e) {
+        log.warn("listPeers failed in namespace {ns}: {error}", {
+          botName: c.botName, ns: c.namespace,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    return merged;
+  }
+
+  /**
+   * Pick the client that owns this peer ID. Cache hit when the bot called
+   * `list_peers` first (the dominant flow). On miss falls back to the first
+   * client and logs a warn — bot can recover by calling list_peers again.
+   */
+  pickClientFor(peerId: string): HivemindBotClient | null {
+    const ns = this.peerNamespace.get(peerId);
+    if (ns) {
+      const c = this.clients.get(ns);
+      if (c) return c;
+    }
+    const fallback = this.clients.values().next().value ?? null;
+    if (fallback) {
+      log.warn(
+        "No cached namespace for peer {peerId} — falling back to {ns}. " +
+          "Bot should call list_peers before ask_peer/send_to_peer.",
+        { botName: fallback.botName, peerId, ns: fallback.namespace },
+      );
+    }
+    return fallback;
+  }
+}
+
 export class HivemindMcpServer {
   private httpServer: ReturnType<typeof Bun.serve> | null = null;
   private sessions = new Map<string, Session>();
-  /** Map of bot name → client. Used to route tool calls to the right peer. */
-  private clients = new Map<string, HivemindBotClient>();
+  /** Map of bot name → registry of (namespace, client) pairs. */
+  private bots = new Map<string, BotClientRegistry>();
   private port: number;
 
   constructor(port = HIVEMIND_MCP_PORT) {
@@ -33,13 +106,20 @@ export class HivemindMcpServer {
     return `http://127.0.0.1:${this.port}`;
   }
 
-  registerBot(botName: string, client: HivemindBotClient): void {
-    this.clients.set(botName, client);
-    log.info("Registered bot {botName} at /mcp/{botName}", { botName });
+  /** Register one client (one namespace) for a bot. May be called multiple
+   *  times per bot — once per joined namespace. */
+  registerBotClient(botName: string, namespace: Namespace, client: HivemindBotClient): void {
+    let reg = this.bots.get(botName);
+    if (!reg) {
+      reg = new BotClientRegistry();
+      this.bots.set(botName, reg);
+    }
+    reg.add(namespace, client);
+    log.info("Registered bot {botName} namespace {ns} at /mcp/{botName}", { botName, ns: namespace });
   }
 
   unregisterBot(botName: string): void {
-    this.clients.delete(botName);
+    this.bots.delete(botName);
   }
 
   start(): void {
@@ -79,7 +159,7 @@ export class HivemindMcpServer {
     if (url.pathname === "/health") {
       return Response.json({
         status: "ok",
-        bots: Array.from(this.clients.keys()),
+        bots: Array.from(this.bots.keys()),
         sessions: this.sessions.size,
       });
     }
@@ -90,8 +170,8 @@ export class HivemindMcpServer {
       return new Response("Not found", { status: 404 });
     }
     const botName = decodeURIComponent(match[1]!);
-    const client = this.clients.get(botName);
-    if (!client) {
+    const registry = this.bots.get(botName);
+    if (!registry) {
       return new Response(`Unknown bot: ${botName}`, { status: 404 });
     }
 
@@ -103,18 +183,18 @@ export class HivemindMcpServer {
     }
 
     if (req.method === "POST") {
-      return this.handleNewSession(req, client);
+      return this.handleNewSession(req, botName, registry);
     }
     return new Response("Bad request — missing session ID", { status: 400 });
   }
 
-  private async handleNewSession(req: Request, client: HivemindBotClient): Promise<Response> {
-    const server = createMcpServerForBot(client);
+  private async handleNewSession(req: Request, botName: string, registry: BotClientRegistry): Promise<Response> {
+    const server = createMcpServerForBot(botName, registry);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
         this.sessions.set(id, { transport, server });
-        log.info("New MCP session {id} for bot {bot}", { id: id.slice(0, 8), bot: client.botName });
+        log.info("New MCP session {id} for bot {bot}", { id: id.slice(0, 8), bot: botName });
       },
       onsessionclosed: (id) => {
         this.sessions.delete(id);
@@ -128,28 +208,36 @@ export class HivemindMcpServer {
   }
 }
 
-/** Build an MCP server scoped to a single bot's HivemindBotClient. */
-function createMcpServerForBot(client: HivemindBotClient): McpServer {
+/** Build an MCP server scoped to a single bot's set of HivemindBotClients. */
+function createMcpServerForBot(botName: string, registry: BotClientRegistry): McpServer {
   const server = new McpServer(
-    { name: `muninn-hivemind-${client.botName}`, version: "1.0.0" },
+    { name: `muninn-hivemind-${botName}`, version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
+
+  const namespacesHint = registry.namespaces.join(", ");
 
   server.tool(
     "list_peers",
     "List other AI coding agents reachable via claude-hivemind. Use this first to find the peer ID before calling ask_peer or send_to_peer. " +
-      'Default scope "namespace" returns peers in your project group; "machine" returns all peers on this computer.',
+      'Default scope "namespace" returns peers in all namespaces this bot has joined; "machine" returns all peers on this computer. ' +
+      `Pass an optional namespace to filter to one (joined namespaces: ${namespacesHint}).`,
     {
       scope: z
         .enum(["namespace", "machine"])
         .optional()
         .describe('"namespace" (default) or "machine"'),
+      namespace: z
+        .string()
+        .optional()
+        .describe(`Filter to one of the bot's joined namespaces (${namespacesHint}). Default: list across all of them.`),
     },
-    async ({ scope }) => {
+    async ({ scope, namespace }) => {
       try {
-        const peers = await client.listPeers(scope ?? "namespace");
+        const peers = await registry.listPeers(scope ?? "namespace", namespace);
         if (peers.length === 0) {
-          return textResult(`No peers found (scope: ${scope ?? "namespace"}, namespace: ${client.namespace}).`);
+          const where = namespace ? `namespace=${namespace}` : `joined namespaces=${namespacesHint}`;
+          return textResult(`No peers found (scope: ${scope ?? "namespace"}, ${where}).`);
         }
         const lines = peers.map((p) => {
           const parts = [
@@ -189,6 +277,10 @@ function createMcpServerForBot(client: HivemindBotClient): McpServer {
         .describe(`How long to wait for a reply (default ${DEFAULT_ASK_PEER_TIMEOUT_SEC}s, max 240s — bounded by the MCP HTTP idle timeout)`),
     },
     async ({ to, message, wait_seconds }) => {
+      const client = registry.pickClientFor(to);
+      if (!client) {
+        return textResult("No hivemind client registered for this bot", true);
+      }
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;
       const reply = await client.askPeer(to, message, timeout);
       switch (reply.status) {
@@ -213,6 +305,10 @@ function createMcpServerForBot(client: HivemindBotClient): McpServer {
       message: z.string().describe("The message to send"),
     },
     async ({ to, message }) => {
+      const client = registry.pickClientFor(to);
+      if (!client) {
+        return textResult("No hivemind client registered for this bot", true);
+      }
       const ok = client.sendMessage(to, message);
       if (!ok) return textResult("Failed to send — not connected to broker", true);
       return textResult(`Message sent to peer ${to}.`);

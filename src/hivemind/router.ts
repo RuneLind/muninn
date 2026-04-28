@@ -13,6 +13,7 @@ import { Tracer } from "../tracing/index.ts";
 import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
 import type { HivemindBotClient } from "./client.ts";
+import type { Namespace } from "./types.ts";
 
 const log = getLog("hivemind", "router");
 
@@ -22,6 +23,9 @@ export interface InboundPeerMessage {
   fromCwd: string;
   text: string;
   sentAt: string;
+  /** Namespace the inbound WebSocket is registered in. Outbound autorespond
+   *  goes back through the same namespace's client. */
+  namespace: Namespace;
 }
 
 /**
@@ -47,11 +51,28 @@ export function peerNameFor(msg: { fromCwd: string; fromSummary: string; fromId:
  */
 export interface AutorespondDeps {
   getBotConfig: (botName: string) => BotConfig | undefined;
-  getClient: (botName: string) => HivemindBotClient | null;
+  /** Get the client for a specific (bot, namespace) — outbound autorespond
+   *  must go through the same WS the inbound arrived on. */
+  getClient: (botName: string, namespace: Namespace) => HivemindBotClient | null;
   config: Config;
   /** Defaults to the real `processMessage` from `core/message-processor.ts`.
    *  Tests inject a stub to avoid spinning up a real AI connector. */
   processMessage?: typeof ProcessMessageFn;
+}
+
+/** Build a peer thread name from the inbound namespace + cwd basename. */
+export function peerThreadNameFor(msg: { namespace: Namespace; fromCwd: string; fromSummary: string; fromId: string }): string {
+  return `peer:${msg.namespace}/${peerNameFor(msg)}`;
+}
+
+/** Parse `peer:<namespace>/<basename>` into its parts. Returns null if the
+ *  thread name doesn't match the namespaced format (e.g. legacy unmigrated row). */
+export function parsePeerThreadName(name: string): { namespace: Namespace; peerName: string } | null {
+  if (!name.startsWith("peer:")) return null;
+  const rest = name.slice("peer:".length);
+  const slashIdx = rest.indexOf("/");
+  if (slashIdx <= 0 || slashIdx === rest.length - 1) return null;
+  return { namespace: rest.slice(0, slashIdx), peerName: rest.slice(slashIdx + 1) };
 }
 
 export class HivemindRouter {
@@ -79,7 +100,8 @@ export class HivemindRouter {
     }
 
     const peerName = peerNameFor(msg);
-    const thread = await getOrCreatePeerThread(userId, botName, peerName);
+    const threadName = `${msg.namespace}/${peerName}`;
+    const thread = await getOrCreatePeerThread(userId, botName, threadName);
 
     const platform: Platform = "web";
     const [messageId, conv] = await Promise.all([
@@ -196,7 +218,7 @@ export class HivemindRouter {
 
       let outboundSent = false;
       if (result) {
-        const client = deps.getClient(args.botName);
+        const client = deps.getClient(args.botName, args.msg.namespace);
         outboundSent = client?.sendMessage(args.msg.fromId, result.responseText) ?? false;
       }
       tracer.event("peer_outbound", {

@@ -142,13 +142,23 @@ export function threadManagerScript(): string {
       return;
     }
 
+    var currentBot = bots.find(function(b) { return b.name === selectedBot; });
+    var hideNamespacePrefix = currentBot && currentBot.hivemindNamespaceCount <= 1;
+
     threadList.innerHTML = threads.map(function(t) {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var isPaused = isPeer && t.autoRespondPaused === true;
       var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
       var icon = isPaused ? '⏸' : (isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;'));
-      var displayName = isPeer ? t.name.slice('peer:'.length) : t.name;
+      var displayName = t.name;
+      if (isPeer) {
+        displayName = t.name.slice('peer:'.length);
+        if (hideNamespacePrefix) {
+          var slashIdx = displayName.indexOf('/');
+          if (slashIdx >= 0) displayName = displayName.slice(slashIdx + 1);
+        }
+      }
       var meta = '';
       if (t.messageCount > 0) meta += t.messageCount + ' msgs';
 
@@ -223,8 +233,18 @@ export function threadManagerScript(): string {
         break;
       }
     }
+    var headerThreadName = threadName;
+    if (headerThreadName && headerThreadName.indexOf('peer:') === 0) {
+      var hdrBot = bots.find(function(b) { return b.name === selectedBot; });
+      headerThreadName = headerThreadName.slice('peer:'.length);
+      if (hdrBot && hdrBot.hivemindNamespaceCount <= 1) {
+        var s = headerThreadName.indexOf('/');
+        if (s >= 0) headerThreadName = headerThreadName.slice(s + 1);
+      }
+      headerThreadName = 'peer:' + headerThreadName;
+    }
     chatHeader.querySelector('.chat-title').textContent =
-      (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + threadName;
+      (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + headerThreadName;
     document.getElementById('chatDescription').textContent = threadDesc;
     syncConnectorDropdown();
     renderAutoRespondPill(activeThread);
