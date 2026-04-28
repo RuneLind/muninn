@@ -285,7 +285,7 @@ DB:
 graph LR
     P1[Phase 1 ✓<br/>Outbound only<br/>melosys → huginn] --> P2[Phase 2 ✓<br/>Inbound + threading<br/>peer thread UI]
     P2 --> P3[Phase 3 ✓<br/>Auto-respond<br/>+ guardrails]
-    P3 --> P4[Phase 4<br/>Cross-namespace<br/>melosys ↔ nav]
+    P3 --> P4[Phase 4 ✓<br/>Cross-namespace<br/>melosys ↔ nav]
     P4 --> P5[Phase 5<br/>yggdrasil + others]
 ```
 
@@ -384,9 +384,20 @@ Implementation notes worth keeping for Phase 4:
   helper for bot-authored messages — reuse it in any new outbound
   pathway rather than inlining `addMessage` with a literal `ChatMessage`.
 
-**Phase 4 — in progress (2026-04-28).** Branch `hivemind-phase-4`. Add
-second namespace registration to melosys config (`["private", "nav"]`).
-Verify cross-namespace `list_peers` and routing works.
+**Phase 4 — done (2026-04-28).** Implemented in PR #76 on branch
+`hivemind-phase-4` (commits `b885bb9` Phase 4 + `0a44868` simplify pass).
+Each bot opens one `HivemindBotClient` per joined namespace; peer threads
+are now `peer:<namespace>/<basename>`; `BotClientRegistry` in the MCP shim
+holds clients per namespace and a `peer_id → namespace` cache populated
+from every `list_peers` response. Migration 037 backfills pre-Phase-4
+rows.
+
+E2E verified live: melosys configured for `["private", "nav"]`, both
+registrations succeed (`melosys` in private, `melosys-2` in nav, same
+PID), inbound from each namespace lands in its own thread
+(`peer:private/muninn` and `peer:nav/muninn` coexist for the same cwd
+basename), autorespond round-trips back through the same WS the inbound
+came in on.
 
 Decisions made before coding:
 
@@ -415,6 +426,16 @@ Decisions made before coding:
   namespace configured.** Keeps the dominant single-namespace UX
   unchanged; full `<ns>/<basename>` only shows when a bot is actually
   multi-namespace.
+
+Surfaced during Phase 4 E2E (and fixed coordinately):
+
+- **Broker `deleteByPid` was unconditional.** With Muninn registering N
+  namespaces from one PID, the second register wiped the first. Reported
+  to the `claude-hivemind` peer; broker fix landed as `0a5faed` on
+  origin/main (pid+namespace scoped dedup, no schema change). Muninn
+  needs that fix to register both namespaces concurrently — pre-fix only
+  the most recent registration is reachable, but the muninn code path is
+  correct either way.
 
 **Phase 5 (when ready).** Onboard yggdrasil. Mostly a config change unless
 yggdrasil has its own quirks.

@@ -13,7 +13,7 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 | `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). `BotClientRegistry` holds one `HivemindBotClient` per joined namespace and a `peer_id → namespace` cache populated from every `list_peers` response. Exposes `list_peers` (cross-namespace), `ask_peer`, `send_to_peer` — tool signatures unchanged from Phase 3 except for an optional `namespace?` filter on `list_peers`. |
 | `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages into `peer:<namespace>/<cwd-basename>` threads under the bot's default user. Autorespond looks up `getClient(botName, namespace)` so the outbound relay goes through the same WS the inbound came in on. `parsePeerThreadName` and `peerThreadNameFor` helpers expose the format. |
 | `loop-guard.ts` | `checkAutoRespond()` — hourly turn cap + already-paused check. Returns `{ allowed, reason?, capHit? }`; the router writes `auto_respond_paused=true` on cap hit. |
-| `manager.ts` | `HivemindManager` singleton — boots one `HivemindBotClient` per `(bot, namespace)` pair, keyed by `clientKey(botName, namespace)`. `getClient(botName, namespace?)` returns the namespace-specific client or falls back to the bot's first client when namespace is unknown. Started from `src/index.ts`. |
+| `manager.ts` | `HivemindManager` singleton — boots one `HivemindBotClient` per `(bot, namespace)` pair. `getClient(botName, namespace)` returns the namespace-specific client (or null); `getAnyClient(botName)` is the explicit fallback for paths that don't know the namespace (only used by chat `>` outbound for legacy unmigrated peer threads). Started from `src/index.ts`. |
 
 ## Phase 1 scope
 
@@ -25,8 +25,7 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 ## Phase 4 scope
 
 - **Multi-namespace per bot.** Manager iterates `hivemind.namespaces` and opens one
-  `HivemindBotClient` per `(bot, namespace)` pair. `clientKey(botName, namespace)`
-  is the Map key.
+  `HivemindBotClient` per `(bot, namespace)` pair.
 - **Namespace plumbed end-to-end.** `client.onIncomingMessage` carries the
   client's `namespace`; the router uses it to (a) compute the thread name
   `peer:<namespace>/<cwd-basename>` and (b) pick the right outbound client for
