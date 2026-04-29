@@ -669,6 +669,70 @@ export function chatStyles(): string {
     .ins-tool-name { color: var(--text-muted); }
     .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
 
+    .ins-mcp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .ins-mcp-refresh {
+      background: var(--bg-inset);
+      border: 1px solid var(--border-primary);
+      color: var(--text-secondary);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 13px;
+      cursor: pointer;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .ins-mcp-refresh:hover:not(:disabled) {
+      color: var(--text-primary);
+      background: var(--bg-surface);
+      border-color: var(--accent, #7c6fe0);
+    }
+    .ins-mcp-refresh:disabled { opacity: 0.5; cursor: default; }
+    .ins-mcp-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      font-size: 11px;
+      color: var(--text-soft);
+      border-radius: 4px;
+    }
+    .ins-mcp-row.critical {
+      background: rgba(231, 76, 60, 0.08);
+      color: var(--status-error, #e74c3c);
+    }
+    .ins-mcp-name { flex: 1; }
+    .ins-mcp-detail { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+    .ins-mcp-row.critical .ins-mcp-detail { color: var(--status-error, #e74c3c); }
+    .ins-mcp-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--text-disabled);
+    }
+    .ins-mcp-dot.ok { background: var(--status-ok, #27ae60); }
+    .ins-mcp-dot.down { background: var(--status-warning, #f39c12); }
+    .ins-mcp-dot.down-critical { background: var(--status-error, #e74c3c); }
+    .ins-mcp-dot.unknown { background: var(--text-disabled); }
+    .ins-mcp-spinner {
+      width: 10px;
+      height: 10px;
+      border: 1.5px solid var(--text-faint);
+      border-top-color: transparent;
+      border-radius: 50%;
+      display: inline-block;
+      animation: ins-mcp-spin 0.8s linear infinite;
+    }
+    @keyframes ins-mcp-spin { to { transform: rotate(360deg); } }
+
     .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
     /* Streaming bubble */

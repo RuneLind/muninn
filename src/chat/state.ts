@@ -1,5 +1,6 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
+import type { McpServerStatus } from "../ai/mcp-status.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -38,7 +39,8 @@ export type ChatEvent =
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] };
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] }
+  | { type: "mcp_status"; botName: string; servers: McpServerStatus[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -166,6 +168,11 @@ export class ChatState {
   /** Broadcast a tool status update (appended as separate lines in the UI) */
   publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
     this.publish({ type: "tool_status", conversationId, text, threadId });
+  }
+
+  /** Broadcast MCP server status for a bot (every open chat tab updates) */
+  publishMcpStatus(botName: string, servers: McpServerStatus[]): void {
+    this.publish({ type: "mcp_status", botName, servers });
   }
 
   /** Broadcast response metadata (tokens, timing) after a response completes */

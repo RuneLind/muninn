@@ -245,6 +245,95 @@ export function inspectorPanelScript(): string {
       .catch(function() {});
   }
 
+  function renderMcpStatus(servers, isLoading) {
+    if (!inspectorMcpStatus) return;
+    if (!servers || servers.length === 0) {
+      inspectorMcpStatus.innerHTML = '';
+      return;
+    }
+    var rows = servers.map(function(s) {
+      var dotClass = 'ins-mcp-dot ' + (
+        s.status === 'ok' ? 'ok' :
+        s.status === 'down' ? (s.critical ? 'down-critical' : 'down') :
+        'unknown'
+      );
+      var detail = s.status === 'ok'
+        ? (s.toolCount != null ? s.toolCount + ' tools' : 'ok')
+        : (s.errorMessage ? truncateMcpError(s.errorMessage) : 'down');
+      var rowClass = 'ins-mcp-row' + (s.status === 'down' && s.critical ? ' critical' : '');
+      var titleAttr = s.errorMessage ? ' title="' + escapeHtml(s.errorMessage) + '"' : '';
+      return '<div class="' + rowClass + '"' + titleAttr + '>'
+        + '<span class="' + dotClass + '"></span>'
+        + '<span class="ins-mcp-name">' + escapeHtml(s.displayName) + '</span>'
+        + '<span class="ins-mcp-detail">' + escapeHtml(detail) + '</span>'
+        + '</div>';
+    }).join('');
+    var refreshIcon = isLoading
+      ? '<span class="ins-mcp-spinner"></span>'
+      : '<span aria-hidden="true">&#x21BB;</span>';
+    var refreshLabel = isLoading ? 'Probing...' : 'Refresh';
+    inspectorMcpStatus.innerHTML =
+      '<div class="ins-section">'
+      + '<div class="ins-section-title ins-mcp-header">'
+      + '<span>MCP servers</span>'
+      + '<button type="button" class="ins-mcp-refresh" id="insMcpRefresh" '
+      + (isLoading ? 'disabled' : '') + ' aria-label="Refresh MCP status">'
+      + refreshIcon + '<span>' + refreshLabel + '</span></button>'
+      + '</div>'
+      + rows
+      + '</div>';
+    var btn = document.getElementById('insMcpRefresh');
+    if (btn) btn.onclick = refreshMcpStatus;
+  }
+
+  function truncateMcpError(msg) {
+    var s = String(msg).split('\\n')[0];
+    if (s.length > 40) s = s.slice(0, 37) + '...';
+    return s;
+  }
+
+  function loadMcpStatus() {
+    if (!selectedBot) return;
+    var cached = mcpStatusByBot[selectedBot];
+    if (cached) {
+      renderMcpStatus(cached, false);
+      return;
+    }
+    renderMcpStatus([{
+      name: '__loading', displayName: 'Probing...', status: 'unknown', critical: false,
+    }], true);
+    fetch('/chat/mcp-status/' + encodeURIComponent(selectedBot))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var servers = data.servers || [];
+        mcpStatusByBot[selectedBot] = servers;
+        renderMcpStatus(servers, false);
+      })
+      .catch(function() {
+        renderMcpStatus([], false);
+      });
+  }
+
+  function refreshMcpStatus() {
+    if (!selectedBot || mcpStatusRefreshing) return;
+    mcpStatusRefreshing = true;
+    var existing = mcpStatusByBot[selectedBot] || [];
+    renderMcpStatus(existing, true);
+    fetch('/chat/mcp-status/' + encodeURIComponent(selectedBot) + '/refresh', {
+      method: 'POST',
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var servers = data.servers || [];
+        mcpStatusByBot[selectedBot] = servers;
+        renderMcpStatus(servers, false);
+      })
+      .catch(function() {
+        renderMcpStatus(existing, false);
+      })
+      .finally(function() { mcpStatusRefreshing = false; });
+  }
+
   function loadInspectorContext(userId, botName) {
     var bp = encodeURIComponent(botName);
     var up = encodeURIComponent(userId);
@@ -364,6 +453,7 @@ export function inspectorPanelScript(): string {
     // Always reload per-thread stats (tool usage + context usage)
     loadToolUsageStats();
     loadContextUsage();
+    loadMcpStatus();
   }
   `;
 }

@@ -5,6 +5,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeResult } from "../types.ts";
 import { StreamParser, type StreamProgressCallback } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
+import { preflightMcpForRequest } from "./mcp-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "executor");
@@ -39,6 +40,8 @@ export async function executeClaudePrompt(
   const mcpConfigPath = join(botConfig.dir, ".mcp.json");
   if (existsSync(mcpConfigPath)) {
     args.push("--mcp-config", mcpConfigPath);
+    // Pre-flight: warn if a *critical* MCP server is down (cached probe).
+    await preflightMcpForRequest(botConfig, onProgress);
   }
 
   if (systemPrompt) {
