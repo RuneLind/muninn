@@ -459,7 +459,11 @@ function extractTextSummary(
  * looks like a doc count (followed by "doc..." or "document..." or "items").
  */
 export function parseCollectionsMarkdown(text: string): McpCollectionInfo[] | undefined {
-  const lines = text.split("\n");
+  // Some MCP servers serialize the response on a single line, e.g.
+  // "**Loaded collections:** - **nav-wiki**: ... - **x-feed**: ...".
+  // Insert a newline before each bullet so the line-by-line scan works.
+  const normalized = text.replace(/\s+(?=(?:[-*+•]|\d+[.)])\s+\*\*)/g, "\n");
+  const lines = normalized.split("\n");
   const out: McpCollectionInfo[] = [];
   // Match a leading bullet: "-", "*", "+", "•", or numbered "1."
   const bullet = /^\s*(?:[-*+•]|\d+[.)])\s+(.*)$/;

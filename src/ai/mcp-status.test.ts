@@ -349,6 +349,28 @@ describe("mcp-status", () => {
       expect(parseCollectionsMarkdown("Knowledge API server is not running")).toBeUndefined();
     });
 
+    test("handles inline bullets on a single line (no newlines)", () => {
+      // Some MCP servers serialize the entire response on one line.
+      // Regression test for the live failure where the muninn panel showed
+      // "Could not parse collections from response" even though MCP debug
+      // showed the same data parsing fine when newline-separated.
+      const text = "**Loaded collections:** - **nav-wiki**: 65 documents, 710 embeddings (updated: 2026-04-28T06:24:16+00:00) - **melosys-confluence-v3**: 270 documents, 2447 embeddings - **jira-issues**: 2189 documents, 8965 embeddings";
+      expect(parseCollectionsMarkdown(text)).toEqual([
+        { name: "nav-wiki", documentCount: 65 },
+        { name: "melosys-confluence-v3", documentCount: 270 },
+        { name: "jira-issues", documentCount: 2189 },
+      ]);
+    });
+
+    test("handles mixed inline and newline bullets", () => {
+      const text = "Header - **a**: 1 doc\n- **b**: 2 documents - **c**: 3 docs";
+      expect(parseCollectionsMarkdown(text)).toEqual([
+        { name: "a", documentCount: 1 },
+        { name: "b", documentCount: 2 },
+        { name: "c", documentCount: 3 },
+      ]);
+    });
+
     test("end-to-end: parseCollectionsResult falls back to markdown when JSON fails", () => {
       const huginnText = "- **wiki**: 12 documents, 99 embeddings\n- **x-feed**: 7 documents, 7 embeddings";
       const result = { content: [{ type: "text", text: huginnText }] };
