@@ -89,12 +89,29 @@ mock.module("../db/prompt-snapshots.ts", () => ({
   savePromptSnapshot: mock(() => Promise.resolve()),
 }));
 
+// Captures the most recent addChildSpan call args so tests can assert on them.
+const capturedChildSpans: Array<{
+  parentLabel: string;
+  name: string;
+  durationMs: number;
+  attributes?: Record<string, unknown>;
+  startOffsetMs?: number;
+}> = [];
+
 mock.module("../tracing/index.ts", () => ({
   Tracer: class MockTracer {
     traceId = "mock-trace-id";
     start() { return "mock-span-id"; }
     end() { return 0; }
-    addChildSpan() {}
+    addChildSpan(
+      parentLabel: string,
+      name: string,
+      durationMs: number,
+      attributes?: Record<string, unknown>,
+      startOffsetMs?: number,
+    ) {
+      capturedChildSpans.push({ parentLabel, name, durationMs, attributes, startOffsetMs });
+    }
     event() {}
     finish() {}
     error() {}
@@ -133,6 +150,7 @@ describe("processMessage", () => {
     mockExtractMemory.mockClear();
     mockExtractGoal.mockClear();
     mockExtractSchedule.mockClear();
+    capturedChildSpans.length = 0;
   });
 
   test("processes message and calls say with formatted response", async () => {
@@ -393,6 +411,78 @@ describe("processMessage", () => {
     expect(mockExtractMemory).toHaveBeenCalledTimes(1);
     expect(mockExtractGoal).toHaveBeenCalledTimes(1);
     expect(mockExtractSchedule).toHaveBeenCalledTimes(1);
+  });
+
+  test("extracts Huginn search trace from tool output and stores under attributes.searchTrace", async () => {
+    const trace = { query: { raw: "hello" }, schemaVersion: 1, totalMs: 71 };
+    const rawOutput =
+      "Found 3 documents:\n- Doc A\n- Doc B\n- Doc C\n\n" +
+      "```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+
+    mockExecuteClaudePrompt.mockResolvedValueOnce({
+      result: "Here you go.",
+      costUsd: 0.01, durationMs: 1000, durationApiMs: 800,
+      numTurns: 2, model: "sonnet", inputTokens: 100, outputTokens: 50,
+      wallClockMs: 1200, startupMs: 200,
+      toolCalls: [{
+        id: "toolu_01",
+        name: "mcp__knowledge__search_knowledge",
+        displayName: "search_knowledge (knowledge)",
+        durationMs: 80,
+        startOffsetMs: 50,
+        input: '{"query":"hello"}',
+        output: rawOutput,
+      }],
+    } as any);
+
+    await processMessage({
+      text: "search for hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config: { ...config, tracingCaptureToolOutputs: true } as any,
+      say: sayMock,
+    });
+
+    const toolSpan = capturedChildSpans.find((s) => s.parentLabel === "claude");
+    expect(toolSpan).toBeDefined();
+    expect(toolSpan!.attributes!.searchTrace).toEqual(trace);
+    expect(toolSpan!.attributes!.output).toBe("Found 3 documents:\n- Doc A\n- Doc B\n- Doc C");
+    expect(toolSpan!.attributes!.output).not.toContain("huginn-trace");
+  });
+
+  test("leaves non-Huginn tool outputs untouched", async () => {
+    mockExecuteClaudePrompt.mockResolvedValueOnce({
+      result: "Done.",
+      costUsd: 0.01, durationMs: 1000, durationApiMs: 800,
+      numTurns: 2, model: "sonnet", inputTokens: 100, outputTokens: 50,
+      wallClockMs: 1200, startupMs: 200,
+      toolCalls: [{
+        id: "toolu_02",
+        name: "mcp__gmail__search_emails",
+        displayName: "search_emails (gmail)",
+        durationMs: 50,
+        startOffsetMs: 10,
+        input: '{"query":"x"}',
+        output: "regular tool output, no trace fence",
+      }],
+    } as any);
+
+    await processMessage({
+      text: "check email",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config: { ...config, tracingCaptureToolOutputs: true } as any,
+      say: sayMock,
+    });
+
+    const toolSpan = capturedChildSpans.find((s) => s.parentLabel === "claude");
+    expect(toolSpan).toBeDefined();
+    expect(toolSpan!.attributes!.searchTrace).toBeUndefined();
+    expect(toolSpan!.attributes!.output).toBe("regular tool output, no trace fence");
   });
 
   test("saves platform to message DB entries", async () => {

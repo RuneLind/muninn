@@ -49,6 +49,13 @@ export interface ToolCall {
    * Undefined when `TRACING_CAPTURE_TOOL_OUTPUTS=false` or the connector could not surface a result.
    */
   output?: string;
+  /**
+   * Parsed Huginn search trace (when the tool call returned one). The connector
+   * is expected to peel this off the raw tool output so it doesn't pollute the
+   * `output` snapshot or the LLM context. Surfaces in the inspector under
+   * `attributes.searchTrace`. See src/ai/huginn-trace.ts.
+   */
+  searchTrace?: unknown;
 }
 
 export interface ClaudeResult {

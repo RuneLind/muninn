@@ -44,7 +44,7 @@ describe("parseMcpConfig", () => {
           command: "npx",
           args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
           cwd: dir,
-          env: { TOKEN_PATH: "/tmp/token.json" },
+          env: { HUGINN_TRACE_DEFAULT: "1", TOKEN_PATH: "/tmp/token.json" },
           tools: ["*"],
         },
         calendar: {
@@ -52,7 +52,7 @@ describe("parseMcpConfig", () => {
           command: "node",
           args: [],
           cwd: dir,
-          env: undefined,
+          env: { HUGINN_TRACE_DEFAULT: "1" },
           tools: ["*"],
         },
       });

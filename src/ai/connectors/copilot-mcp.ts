@@ -70,12 +70,15 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           continue;
         }
         const cwd = resolveBotCwd(entry.cwd, botDir);
+        // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
+        // servers ignore unknown env vars, so it's safe to set unconditionally.
+        // The bot's own .mcp.json env wins via spread order.
         result[name] = {
           type: "local",
           command: entry.command,
           args: entry.args ?? [],
           cwd,
-          env: entry.env,
+          env: { HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
           tools: ["*"],
         };
       }
