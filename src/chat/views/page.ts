@@ -79,8 +79,9 @@ export function renderChatPage(): string {
       <div id="inspectorContent">
         <div class="empty-state">Select a thread</div>
       </div>
-      <div id="inspectorContext"></div>
+      <div id="inspectorMcpStatus"></div>
       <div id="inspectorToolUsage"></div>
+      <div id="inspectorContext"></div>
     </div>
   </div>
 
@@ -244,6 +245,10 @@ const CHAT_SCRIPT = `
   var inspectorToolUsage = document.getElementById('inspectorToolUsage');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
+  var inspectorMcpStatus = document.getElementById('inspectorMcpStatus');
+  var mcpStatusByBot = {};
+  var mcpStatusRefreshing = false;
+  var mcpExpandState = {}; // key: "<bot>::<server>" → boolean (user toggle); absent = use default
 
   // ── Inspector panel functions (from inspector-panel.ts) ──
   ${inspectorPanelScript()}
@@ -559,6 +564,13 @@ const CHAT_SCRIPT = `
       var rmThread = event.threadId || null;
       if (activeThreadId && rmThread !== activeThreadId) return;
       showResponseMeta(event);
+      return;
+    }
+
+    if (event.type === 'mcp_status') {
+      // Cache by bot name; only render if it matches the selected bot
+      mcpStatusByBot[event.botName] = event.servers;
+      if (event.botName === selectedBot) renderMcpStatus(event.servers, false);
       return;
     }
 

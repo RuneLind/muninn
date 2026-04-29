@@ -2,6 +2,7 @@ import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
+import type { McpStatusConfig } from "../ai/mcp-status.ts";
 
 const log = getLog("bots");
 
@@ -74,6 +75,8 @@ export interface BotConfig {
   excludedTools?: string[];
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */
   hivemind?: HivemindBotConfig;
+  /** MCP status probing config — controls cache TTL and which servers are critical */
+  mcpStatus?: McpStatusConfig;
 }
 
 export interface BotPrompts {
@@ -161,7 +164,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -204,6 +207,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       prompts: botSettings.prompts as BotPrompts | undefined,
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
+      mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
     });
 
     const configParts: string[] = [];

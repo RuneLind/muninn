@@ -6,6 +6,7 @@ import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
+import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
 import { loadToolsForBot, type OpenAITool } from "./openai-compat-tools.ts";
@@ -55,6 +56,9 @@ export async function executePrompt(
   const maxTokens = botConfig.thinkingMaxTokens && botConfig.thinkingMaxTokens > 0
     ? botConfig.thinkingMaxTokens
     : 8192;
+
+  // Pre-flight: warn if a *critical* MCP server is down (cached probe).
+  await preflightMcpForRequest(botConfig, onProgress);
 
   // Load MCP tools for this bot (cached after first call)
   const { openaiTools, toolServerMap } = await loadToolsForBot(botConfig);

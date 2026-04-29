@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
+import { resolveBotCwd } from "../mcp-config-utils.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("ai", "copilot-mcp");
@@ -68,14 +69,7 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           log.warn("MCP server {name} has no command — skipping", { name });
           continue;
         }
-        // Convention: relative paths in cwd are relative to the bot dir (matches mcp-client.ts and the
-        // claude-cli executor). Without this, copilot-sdk spawns from the muninn process cwd and breaks
-        // configs that use ../-paths in args (e.g. melosys' --directory ../../../huginn).
-        const cwd = entry.cwd
-          ? isAbsolute(entry.cwd)
-            ? entry.cwd
-            : resolve(botDir, entry.cwd)
-          : botDir;
+        const cwd = resolveBotCwd(entry.cwd, botDir);
         result[name] = {
           type: "local",
           command: entry.command,

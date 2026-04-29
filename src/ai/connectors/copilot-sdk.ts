@@ -7,18 +7,12 @@ import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
-import { probeHttpServers } from "./mcp-health.ts";
+import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
 
 const log = getLog("ai", "copilot-sdk");
-
-/** Human-readable names for MCP servers shown in chat intent bubbles. */
-const MCP_DISPLAY_NAMES: Record<string, string> = {
-  code: "Serena",
-  yggdrasil: "Yggdrasil",
-};
 
 // Shared client — started once, stopped on process exit
 let client: CopilotClient | null = null;
@@ -75,19 +69,11 @@ export async function executePrompt(
   const mcpServers = parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
 
-  // Pre-flight: check HTTP MCP servers are reachable (the SDK silently drops
-  // failed connections without warning, which causes invisible degradation)
+  // Pre-flight: warn if a *critical* MCP server is down. Non-critical failures
+  // are visible in the inspector panel only — they no longer pollute the chat
+  // stream. See src/ai/mcp-status.ts.
   if (hasMcp) {
-    const httpEntries = Object.entries(mcpServers)
-      .filter(([, cfg]) => cfg.type === "http" || cfg.type === "sse")
-      .map(([name, cfg]) => ({ name, url: (cfg as { url: string }).url }));
-
-    const failures = await probeHttpServers(httpEntries);
-    for (const { name, error } of failures) {
-      log.warn("MCP server \"{name}\" is not reachable — copilot-sdk will proceed without it", { botName: botConfig.name, name, error });
-      const displayName = MCP_DISPLAY_NAMES[name] ?? name;
-      onProgress?.({ type: "intent", text: `⚠️ MCP-server "${displayName}" er ikke tilgjengelig` });
-    }
+    await preflightMcpForRequest(botConfig, onProgress);
   }
 
   // Build custom subagents (e.g. verify-code for grep/diff verification)

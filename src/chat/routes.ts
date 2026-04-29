@@ -13,6 +13,7 @@ import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, save
 import { hivemindManager } from "../hivemind/manager.ts";
 import { parsePeerThreadName } from "../hivemind/router.ts";
 import { getToolUsageStats } from "../db/traces.ts";
+import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
@@ -26,6 +27,12 @@ const log = getLog("chat");
  */
 export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono {
   const app = new Hono();
+
+  // Bridge MCP status changes from the ai/ layer into the chat WebSocket.
+  // Wired here (not in ai/mcp-status.ts) to keep ai/ free of chat-state imports.
+  onMcpStatusChange((botName, servers) => {
+    chatState.publishMcpStatus(botName, servers);
+  });
 
   // Serve the chat UI page
   app.get("/", (c) => {
@@ -416,6 +423,36 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     } catch (err) {
       log.warn("Failed to load tool usage: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ tools: [] });
+    }
+  });
+
+  // MCP server status for a bot (uses cache if fresh, probes otherwise)
+  app.get("/mcp-status/:botName", async (c) => {
+    const botName = c.req.param("botName");
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+    try {
+      const cached = getCachedMcpStatus(botName);
+      const servers = cached ?? (await getMcpStatus(bot));
+      return c.json({ servers, cached: cached !== null });
+    } catch (err) {
+      log.warn("Failed to load MCP status for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
+      return c.json({ servers: [], cached: false });
+    }
+  });
+
+  // Force re-probe MCP status — invalidates cache and probes
+  app.post("/mcp-status/:botName/refresh", async (c) => {
+    const botName = c.req.param("botName");
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+    invalidateMcpStatus(botName);
+    try {
+      const servers = await getMcpStatus(bot, { force: true });
+      return c.json({ servers });
+    } catch (err) {
+      log.warn("Failed to refresh MCP status for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
+      return c.json({ servers: [] }, 500);
     }
   });
 
