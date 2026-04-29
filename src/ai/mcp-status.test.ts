@@ -8,6 +8,7 @@ import {
   invalidateMcpStatus,
   findCriticalDown,
   preflightMcpForRequest,
+  parseCollectionsResult,
   _resetMcpStatusCache,
   type McpServerStatus,
 } from "./mcp-status.ts";
@@ -201,6 +202,108 @@ describe("mcp-status", () => {
       } finally {
         rmSync(dir, { recursive: true });
       }
+    });
+  });
+
+  describe("parseCollectionsResult", () => {
+    test("returns undefined for non-MCP shapes", () => {
+      expect(parseCollectionsResult(undefined)).toBeUndefined();
+      expect(parseCollectionsResult(null)).toBeUndefined();
+      expect(parseCollectionsResult({})).toBeUndefined();
+      expect(parseCollectionsResult({ content: [] })).toBeUndefined();
+    });
+
+    test("parses huginn-style { name, document_count } array", () => {
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify([
+              { name: "wiki", document_count: 1234 },
+              { name: "x-feed", document_count: 9871 },
+            ]),
+          },
+        ],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 1234 },
+        { name: "x-feed", documentCount: 9871 },
+      ]);
+    });
+
+    test("parses { collections: [...] } wrapper", () => {
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ collections: [{ name: "wiki", count: 5 }] }),
+          },
+        ],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 5 },
+      ]);
+    });
+
+    test("parses bare string array as names without counts", () => {
+      const result = {
+        content: [{ type: "text", text: JSON.stringify(["a", "b", "c"]) }],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "a" },
+        { name: "b" },
+        { name: "c" },
+      ]);
+    });
+
+    test("accepts `collection` key as name fallback", () => {
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify([{ collection: "yggdrasil-wiki", size: 42 }]),
+          },
+        ],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "yggdrasil-wiki", documentCount: 42 },
+      ]);
+    });
+
+    test("uses structuredContent when present", () => {
+      const result = {
+        structuredContent: [{ name: "wiki", document_count: 100 }],
+        content: [{ type: "text", text: "ignored" }],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 100 },
+      ]);
+    });
+
+    test("returns undefined when text is not JSON", () => {
+      const result = {
+        content: [{ type: "text", text: "not json at all" }],
+      };
+      expect(parseCollectionsResult(result)).toBeUndefined();
+    });
+
+    test("skips items without a usable name", () => {
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify([
+              { foo: "bar" },
+              { name: "ok" },
+              { collection: "alt" },
+            ]),
+          },
+        ],
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "ok" },
+        { name: "alt" },
+      ]);
     });
   });
 

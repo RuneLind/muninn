@@ -14,6 +14,16 @@ const PROBE_TIMEOUT_MS = 5_000;
 
 export type McpStatus = "ok" | "down" | "unknown";
 
+export interface McpToolInfo {
+  name: string;
+  description?: string;
+}
+
+export interface McpCollectionInfo {
+  name: string;
+  documentCount?: number;
+}
+
 export interface McpServerStatus {
   /** Server name as it appears in `.mcp.json` */
   name: string;
@@ -21,6 +31,13 @@ export interface McpServerStatus {
   displayName: string;
   status: McpStatus;
   toolCount?: number;
+  /** Tool list — populated on a successful probe. Names + optional descriptions. */
+  tools?: McpToolInfo[];
+  /**
+   * Collection list — populated when the server exposes a `list_collections`
+   * tool and the call succeeds. Each entry has a name and optional doc count.
+   */
+  collections?: McpCollectionInfo[];
   errorMessage?: string;
   /** Epoch ms — when the probe last completed (or 0 if never probed) */
   lastCheckedMs: number;
@@ -114,11 +131,16 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
+interface ProbeOk {
+  tools: McpToolInfo[];
+  collections?: McpCollectionInfo[];
+}
+
 async function probeOne(
   name: string,
   entry: RawMcpEntry,
   botDir: string,
-): Promise<{ toolCount: number } | { error: string }> {
+): Promise<ProbeOk | { error: string }> {
   const isRemote = entry.type === "http" || entry.type === "sse";
   let transport: Transport | null = null;
   let client: Client | null = null;
@@ -149,12 +171,40 @@ async function probeOne(
     );
 
     await withTimeout(client.connect(transport), PROBE_TIMEOUT_MS, `connect ${name}`);
-    const { tools } = await withTimeout(
+    const { tools: rawTools } = await withTimeout(
       client.listTools(),
       PROBE_TIMEOUT_MS,
       `listTools ${name}`,
     );
-    return { toolCount: tools.length };
+    const tools: McpToolInfo[] = rawTools.map((t) => ({
+      name: t.name,
+      description: t.description,
+    }));
+
+    // If the server exposes list_collections, call it to enrich the row.
+    // Failures here degrade silently — the server is still considered "ok"
+    // because listTools succeeded.
+    let collections: McpCollectionInfo[] | undefined;
+    const listCollectionsTool = tools.find(
+      (t) => t.name === "list_collections" || t.name.endsWith("__list_collections"),
+    );
+    if (listCollectionsTool) {
+      try {
+        const result = await withTimeout(
+          client.callTool({ name: listCollectionsTool.name, arguments: {} }),
+          PROBE_TIMEOUT_MS,
+          `list_collections ${name}`,
+        );
+        collections = parseCollectionsResult(result);
+      } catch (e) {
+        log.warn("list_collections failed for {server}: {error}", {
+          server: name,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+
+    return { tools, collections };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -166,6 +216,74 @@ async function probeOne(
       }
     }
   }
+}
+
+/**
+ * Parse the `list_collections` MCP tool response into a normalized list.
+ * MCP tool results have shape `{ content: [{ type, text }, ...] }`.
+ * We accept several shapes since each server formats its payload differently:
+ *   - `[{ name, document_count }]`
+ *   - `[{ name, count }]`
+ *   - `[{ name, size }]`
+ *   - `[{ collection, ... }]`
+ *   - `["wiki", "x-feed"]` (just names)
+ *   - `{ collections: [...] }`
+ */
+export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | undefined {
+  // MCP returns content as array of TextContent. Look for first text part with parseable JSON.
+  const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+  let payload: unknown = r?.structuredContent;
+  if (payload === undefined && Array.isArray(r?.content)) {
+    for (const part of r.content) {
+      if (part?.type === "text" && typeof part.text === "string") {
+        try {
+          payload = JSON.parse(part.text);
+          break;
+        } catch {
+          // Not JSON — try the next content part.
+        }
+      }
+    }
+  }
+  if (payload === undefined) return undefined;
+
+  // Unwrap `{ collections: [...] }`
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.collections)) payload = obj.collections;
+    else if (Array.isArray(obj.results)) payload = obj.results;
+  }
+
+  if (!Array.isArray(payload)) return undefined;
+
+  const out: McpCollectionInfo[] = [];
+  for (const item of payload) {
+    if (typeof item === "string") {
+      out.push({ name: item });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const name = typeof o.name === "string"
+      ? o.name
+      : typeof o.collection === "string"
+        ? o.collection
+        : typeof o.id === "string"
+          ? o.id
+          : undefined;
+    if (!name) continue;
+    const count = typeof o.document_count === "number"
+      ? o.document_count
+      : typeof o.count === "number"
+        ? o.count
+        : typeof o.size === "number"
+          ? o.size
+          : typeof o.documents === "number"
+            ? o.documents
+            : undefined;
+    out.push({ name, ...(count !== undefined ? { documentCount: count } : {}) });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 async function runProbe(bot: BotConfig): Promise<McpServerStatus[]> {
@@ -197,7 +315,11 @@ async function runProbe(bot: BotConfig): Promise<McpServerStatus[]> {
         critical: cfg.critical.includes(name),
         ...("error" in result
           ? { errorMessage: result.error }
-          : { toolCount: result.toolCount }),
+          : {
+              toolCount: result.tools.length,
+              tools: result.tools,
+              ...(result.collections ? { collections: result.collections } : {}),
+            }),
       };
       if (status.status === "down") {
         log.warn("MCP {name} probe failed for {bot}: {error}", {

@@ -696,21 +696,80 @@ export function chatStyles(): string {
     }
     .ins-mcp-refresh:disabled { opacity: 0.5; cursor: default; }
     .ins-mcp-row {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 3px 6px;
       font-size: 11px;
       color: var(--text-soft);
       border-radius: 4px;
+      margin-bottom: 1px;
     }
     .ins-mcp-row.critical {
       background: rgba(231, 76, 60, 0.08);
       color: var(--status-error, #e74c3c);
     }
+    .ins-mcp-row-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px;
+      border-radius: 4px;
+    }
+    .ins-mcp-row-header.expandable {
+      cursor: pointer;
+      user-select: none;
+    }
+    .ins-mcp-row-header.expandable:hover {
+      background: var(--bg-inset);
+    }
+    .ins-mcp-caret {
+      width: 10px;
+      display: inline-block;
+      color: var(--text-faint);
+      font-size: 9px;
+      transition: transform 0.1s ease;
+      flex-shrink: 0;
+    }
+    .ins-mcp-caret.open { transform: rotate(90deg); }
+    .ins-mcp-caret-spacer { width: 10px; display: inline-block; flex-shrink: 0; }
     .ins-mcp-name { flex: 1; }
     .ins-mcp-detail { color: var(--text-faint); font-variant-numeric: tabular-nums; }
     .ins-mcp-row.critical .ins-mcp-detail { color: var(--status-error, #e74c3c); }
+    .ins-mcp-detail-block {
+      padding: 4px 6px 8px 28px;
+      font-size: 11px;
+    }
+    .ins-mcp-subtitle {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-faint);
+      margin: 6px 0 3px;
+    }
+    .ins-mcp-subtitle:first-child { margin-top: 0; }
+    .ins-mcp-subitem {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1px 0;
+      color: var(--text-soft);
+    }
+    .ins-mcp-subname { flex: 1; }
+    .ins-mcp-subcount {
+      color: var(--text-faint);
+      font-variant-numeric: tabular-nums;
+      margin-left: 8px;
+    }
+    .ins-mcp-tool-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+    }
+    .ins-mcp-tool-chip {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--bg-inset);
+      color: var(--text-muted);
+      border: 1px solid var(--border-subtle);
+    }
     .ins-mcp-dot {
       width: 8px;
       height: 8px;

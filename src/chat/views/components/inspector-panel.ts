@@ -245,13 +245,38 @@ export function inspectorPanelScript(): string {
       .catch(function() {});
   }
 
+  function isExpandable(s) {
+    return s && s.status === 'ok' && (
+      (s.collections && s.collections.length > 0) ||
+      (s.tools && s.tools.length > 0)
+    );
+  }
+
+  function defaultExpanded(s) {
+    // Auto-expand any server that exposes collections (knowledge-capable).
+    return !!(s && s.collections && s.collections.length > 0);
+  }
+
+  function isRowExpanded(s) {
+    if (!isExpandable(s)) return false;
+    var key = selectedBot + '::' + s.name;
+    if (mcpExpandState[key] != null) return mcpExpandState[key];
+    return defaultExpanded(s);
+  }
+
+  function fmtCount(n) {
+    if (typeof n !== 'number') return '';
+    if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k docs';
+    return n + ' docs';
+  }
+
   function renderMcpStatus(servers, isLoading) {
     if (!inspectorMcpStatus) return;
     if (!servers || servers.length === 0) {
       inspectorMcpStatus.innerHTML = '';
       return;
     }
-    var rows = servers.map(function(s) {
+    var rows = servers.map(function(s, i) {
       var dotClass = 'ins-mcp-dot ' + (
         s.status === 'ok' ? 'ok' :
         s.status === 'down' ? (s.critical ? 'down-critical' : 'down') :
@@ -262,11 +287,51 @@ export function inspectorPanelScript(): string {
         : (s.errorMessage ? truncateMcpError(s.errorMessage) : 'down');
       var rowClass = 'ins-mcp-row' + (s.status === 'down' && s.critical ? ' critical' : '');
       var titleAttr = s.errorMessage ? ' title="' + escapeHtml(s.errorMessage) + '"' : '';
-      return '<div class="' + rowClass + '"' + titleAttr + '>'
+      var expandable = isExpandable(s);
+      var expanded = isRowExpanded(s);
+      var caret = expandable
+        ? '<span class="ins-mcp-caret' + (expanded ? ' open' : '') + '" aria-hidden="true">&#x25B8;</span>'
+        : '<span class="ins-mcp-caret-spacer" aria-hidden="true"></span>';
+      var headerAttrs = expandable
+        ? ' role="button" tabindex="0" data-mcp-toggle="' + i + '"'
+        : '';
+      var headerCls = 'ins-mcp-row-header' + (expandable ? ' expandable' : '');
+
+      var html = '<div class="' + rowClass + '"' + titleAttr + '>'
+        + '<div class="' + headerCls + '"' + headerAttrs + '>'
+        + caret
         + '<span class="' + dotClass + '"></span>'
         + '<span class="ins-mcp-name">' + escapeHtml(s.displayName) + '</span>'
         + '<span class="ins-mcp-detail">' + escapeHtml(detail) + '</span>'
         + '</div>';
+
+      if (expandable && expanded) {
+        html += '<div class="ins-mcp-detail-block">';
+        if (s.collections && s.collections.length > 0) {
+          html += '<div class="ins-mcp-subtitle">Collections (' + s.collections.length + ')</div>';
+          html += s.collections.map(function(c) {
+            var cnt = c.documentCount != null ? fmtCount(c.documentCount) : '';
+            return '<div class="ins-mcp-subitem">'
+              + '<span class="ins-mcp-subname">' + escapeHtml(c.name) + '</span>'
+              + (cnt ? '<span class="ins-mcp-subcount">' + escapeHtml(cnt) + '</span>' : '')
+              + '</div>';
+          }).join('');
+        }
+        if (s.tools && s.tools.length > 0) {
+          html += '<div class="ins-mcp-subtitle">Tools (' + s.tools.length + ')</div>';
+          html += '<div class="ins-mcp-tool-chips">'
+            + s.tools.map(function(t) {
+                var titleA = t.description ? ' title="' + escapeHtml(t.description) + '"' : '';
+                return '<span class="ins-mcp-tool-chip"' + titleA + '>'
+                  + escapeHtml(t.name) + '</span>';
+              }).join('')
+            + '</div>';
+        }
+        html += '</div>';
+      }
+
+      html += '</div>';
+      return html;
     }).join('');
     var refreshIcon = isLoading
       ? '<span class="ins-mcp-spinner"></span>'
@@ -284,6 +349,26 @@ export function inspectorPanelScript(): string {
       + '</div>';
     var btn = document.getElementById('insMcpRefresh');
     if (btn) btn.onclick = refreshMcpStatus;
+
+    // Wire up row toggles (delegated)
+    var toggles = inspectorMcpStatus.querySelectorAll('[data-mcp-toggle]');
+    for (var t = 0; t < toggles.length; t++) {
+      (function(el) {
+        var idx = parseInt(el.getAttribute('data-mcp-toggle'), 10);
+        var fn = function(e) {
+          if (e && e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+          if (e) e.preventDefault();
+          var srv = (mcpStatusByBot[selectedBot] || [])[idx];
+          if (!srv) return;
+          var key = selectedBot + '::' + srv.name;
+          var current = isRowExpanded(srv);
+          mcpExpandState[key] = !current;
+          renderMcpStatus(mcpStatusByBot[selectedBot] || [], false);
+        };
+        el.addEventListener('click', fn);
+        el.addEventListener('keydown', fn);
+      })(toggles[t]);
+    }
   }
 
   function truncateMcpError(msg) {

@@ -248,6 +248,7 @@ const CHAT_SCRIPT = `
   var inspectorMcpStatus = document.getElementById('inspectorMcpStatus');
   var mcpStatusByBot = {};
   var mcpStatusRefreshing = false;
+  var mcpExpandState = {}; // key: "<bot>::<server>" → boolean (user toggle); absent = use default
 
   // ── Inspector panel functions (from inspector-panel.ts) ──
   ${inspectorPanelScript()}
