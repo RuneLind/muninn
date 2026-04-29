@@ -9,6 +9,7 @@ import {
   findCriticalDown,
   preflightMcpForRequest,
   parseCollectionsResult,
+  parseCollectionsMarkdown,
   _resetMcpStatusCache,
   type McpServerStatus,
 } from "./mcp-status.ts";
@@ -303,6 +304,57 @@ describe("mcp-status", () => {
       expect(parseCollectionsResult(result)).toEqual([
         { name: "ok" },
         { name: "alt" },
+      ]);
+    });
+  });
+
+  describe("parseCollectionsMarkdown (huginn-style fallback)", () => {
+    test("parses huginn list_collections output", () => {
+      const text = [
+        "**Loaded collections:**",
+        "",
+        "- **wiki**: 1234 documents, 5678 embeddings (updated: 2026-01-01)",
+        "- **x-feed**: 987 documents, 1500 embeddings (updated: unknown)",
+        "- **youtube-summaries**: 412 documents, 412 embeddings (updated: 2026-04-01)",
+      ].join("\n");
+      expect(parseCollectionsMarkdown(text)).toEqual([
+        { name: "wiki", documentCount: 1234 },
+        { name: "x-feed", documentCount: 987 },
+        { name: "youtube-summaries", documentCount: 412 },
+      ]);
+    });
+
+    test("handles bullet lists without bold", () => {
+      const text = [
+        "Loaded collections:",
+        "- wiki: 1234 documents",
+        "- x-feed: 987 docs",
+      ].join("\n");
+      expect(parseCollectionsMarkdown(text)).toEqual([
+        { name: "wiki", documentCount: 1234 },
+        { name: "x-feed", documentCount: 987 },
+      ]);
+    });
+
+    test("handles names without doc counts", () => {
+      const text = "- wiki\n- x-feed\n- ygg-data";
+      expect(parseCollectionsMarkdown(text)).toEqual([
+        { name: "wiki" },
+        { name: "x-feed" },
+        { name: "ygg-data" },
+      ]);
+    });
+
+    test("returns undefined when no bullets are found", () => {
+      expect(parseCollectionsMarkdown("Knowledge API server is not running")).toBeUndefined();
+    });
+
+    test("end-to-end: parseCollectionsResult falls back to markdown when JSON fails", () => {
+      const huginnText = "- **wiki**: 12 documents, 99 embeddings\n- **x-feed**: 7 documents, 7 embeddings";
+      const result = { content: [{ type: "text", text: huginnText }] };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 12 },
+        { name: "x-feed", documentCount: 7 },
       ]);
     });
   });

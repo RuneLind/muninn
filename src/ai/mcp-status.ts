@@ -230,12 +230,17 @@ async function probeOne(
  *   - `{ collections: [...] }`
  */
 export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | undefined {
-  // MCP returns content as array of TextContent. Look for first text part with parseable JSON.
+  // MCP returns content as array of TextContent. We try, in order:
+  //   1. structuredContent (if the server set it)
+  //   2. Each text part as JSON
+  //   3. Each text part as markdown bullet list (huginn-style)
   const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
   let payload: unknown = r?.structuredContent;
+  const textParts: string[] = [];
   if (payload === undefined && Array.isArray(r?.content)) {
     for (const part of r.content) {
       if (part?.type === "text" && typeof part.text === "string") {
+        textParts.push(part.text);
         try {
           payload = JSON.parse(part.text);
           break;
@@ -244,6 +249,13 @@ export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | u
         }
       }
     }
+  }
+  // Markdown fallback for human-readable text responses (e.g. huginn's
+  // `- **wiki**: 1234 documents, ...`).
+  if (payload === undefined && textParts.length > 0) {
+    const md = parseCollectionsMarkdown(textParts.join("\n"));
+    if (md && md.length > 0) return md;
+    return undefined;
   }
   if (payload === undefined) return undefined;
 
@@ -393,6 +405,49 @@ export function invalidateMcpStatus(botName: string): void {
 export function _resetMcpStatusCache(): void {
   cache.clear();
   inFlight.clear();
+}
+
+/**
+ * Markdown fallback parser for `list_collections`. Recognizes patterns like:
+ *
+ *   - **wiki**: 1234 documents, 5678 embeddings (updated: ...)
+ *   - **x-feed** (987 docs)
+ *   - wiki: 1234 documents
+ *   - wiki
+ *
+ * Extracts the bolded or first-token name and the first integer that
+ * looks like a doc count (followed by "doc..." or "document..." or "items").
+ */
+export function parseCollectionsMarkdown(text: string): McpCollectionInfo[] | undefined {
+  const lines = text.split("\n");
+  const out: McpCollectionInfo[] = [];
+  // Match a leading bullet: "-", "*", "+", "•", or numbered "1."
+  const bullet = /^\s*(?:[-*+•]|\d+[.)])\s+(.*)$/;
+  for (const line of lines) {
+    const m = bullet.exec(line);
+    if (!m) continue;
+    const rest = m[1] ?? "";
+    // Prefer **bold** as the name; otherwise take the first word/identifier
+    // before a delimiter (`:`, `(`, `—`, `-`, etc.).
+    const boldMatch = /^\*\*([^*]+)\*\*/.exec(rest);
+    let name: string | undefined;
+    if (boldMatch) {
+      name = boldMatch[1]?.trim();
+    } else {
+      const tokenMatch = /^[`"']?([\w.\-/]+)[`"']?/.exec(rest);
+      name = tokenMatch?.[1]?.trim();
+    }
+    if (!name) continue;
+    const countMatch = /(\d[\d ,_]*)\s*(?:doc|document|item|entry|entries|rows?)/i.exec(rest);
+    const documentCount = countMatch?.[1]
+      ? parseInt(countMatch[1].replace(/[ ,_]/g, ""), 10)
+      : undefined;
+    out.push({
+      name,
+      ...(Number.isFinite(documentCount) ? { documentCount: documentCount as number } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Find critical-down servers in a status list. */
