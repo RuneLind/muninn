@@ -143,6 +143,19 @@ describe("extractMcpResultText", () => {
     expect(extractMcpResultText(null)).toBeNull();
     expect(extractMcpResultText(123)).toBeNull();
   });
+
+  test("extract+parse pipeline yields readable text for non-Huginn copilot-sdk results", () => {
+    // Repros the "Output too large" trace shape: SDK envelope wraps a plain
+    // string tool result, no trace fence. Storing the structured payload would
+    // double-encode to {"content":"Output too large..."} — the pipeline should
+    // produce just "Output too large..." instead.
+    const sdkResult = { content: "Output too large to read at once (159.3 KB). Saved to: /tmp/abc" };
+    const text = extractMcpResultText(sdkResult);
+    expect(text).toBe("Output too large to read at once (159.3 KB). Saved to: /tmp/abc");
+    const { text: cleaned, trace } = parseHuginnTrace(text!);
+    expect(trace).toBeNull();
+    expect(cleaned).toBe("Output too large to read at once (159.3 KB). Saved to: /tmp/abc");
+  });
 });
 
 describe("parseHuginnTrace — defensive", () => {

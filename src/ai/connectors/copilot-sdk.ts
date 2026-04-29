@@ -147,20 +147,20 @@ export async function executePrompt(
             ? (event.data.result ?? undefined)
             : { error: event.data.error ?? { message: "tool execution failed" } };
 
-          // If this is a Huginn search, peel off the trace fence so it surfaces
-          // separately in the inspector instead of bloating the output snapshot
-          // (and keeps the LLM context cleaner on follow-up turns).
+          // Prefer the inner text payload over the SDK's structured envelope so
+          // the inspector shows readable content instead of a double-encoded
+          // {"content":"..."} blob. For Huginn searches this also peels off the
+          // trailing trace fence and surfaces it separately as searchTrace.
+          // Falls through to the structured form (e.g. error envelopes) when
+          // no text content is extractable.
           let outputForStorage: string | undefined;
           let searchTrace: unknown | undefined;
           const text = extractMcpResultText(resultPayload);
-          if (text) {
+          if (text !== null) {
             const parsed = parseHuginnTrace(text);
-            if (parsed.trace !== null) {
-              searchTrace = parsed.trace;
-              outputForStorage = truncateOutput(parsed.text);
-            }
-          }
-          if (outputForStorage === undefined) {
+            searchTrace = parsed.trace ?? undefined;
+            outputForStorage = truncateOutput(parsed.text);
+          } else {
             outputForStorage = truncateOutput(resultPayload);
           }
 
