@@ -165,9 +165,30 @@ describe("parseHuginnTrace — defensive", () => {
     expect(trace).toBeNull();
   });
 
-  test("handles non-string input gracefully", () => {
-    const { text, trace } = parseHuginnTrace(undefined as unknown as string);
-    expect(text).toBeUndefined();
-    expect(trace).toBeNull();
+  test("matches a fence at the very end of a >4 KB output", () => {
+    const trace = { schemaVersion: 1, totalMs: 5 };
+    const filler = "x".repeat(8000);
+    const input = filler + "\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+    const { text, trace: extracted } = parseHuginnTrace(input);
+    expect(extracted).toEqual(trace);
+    expect(text).toBe(filler);
+  });
+
+  test("extracts a trace whose JSON body itself exceeds 4 KB", () => {
+    // Real melosys queries produce ~14 KB trace bodies (one candidate object
+    // per chunk in fetch-K, often 33+ candidates with full stage scoring).
+    const candidates = Array.from({ length: 50 }, (_, i) => ({
+      chunkId: i,
+      stages: { faiss: { rank: i, score: -(i + 1) / 10 }, bm25: { rank: i, score: -(i + 1) / 5 } },
+      kept: true,
+    }));
+    const trace = { collections: [{ name: "wiki", candidates }], schemaVersion: 1 };
+    const traceJson = JSON.stringify(trace);
+    expect(traceJson.length).toBeGreaterThan(4096);
+    const input = "Result.\n\n```huginn-trace\n" + traceJson + "\n```";
+
+    const { text, trace: extracted } = parseHuginnTrace(input);
+    expect(extracted).toEqual(trace);
+    expect(text).toBe("Result.");
   });
 });
