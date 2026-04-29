@@ -189,17 +189,16 @@ describe("mcp-status", () => {
   });
 
   describe("invalidateMcpStatus", () => {
-    test("forces next getMcpStatus to re-probe", async () => {
+    test("clears the cache so next getMcpStatus re-probes", async () => {
       const dir = makeBotDir({
         mcpServers: { dead: { type: "http", url: "http://127.0.0.1:1/mcp" } },
       });
       try {
         const bot = makeBot(dir, { name: "invalidate-bot" });
-        const first = await getMcpStatus(bot);
-        await new Promise((r) => setTimeout(r, 5));
+        await getMcpStatus(bot);
+        expect(getCachedMcpStatus("invalidate-bot")).not.toBeNull();
         invalidateMcpStatus("invalidate-bot");
-        const second = await getMcpStatus(bot);
-        expect(second[0]!.lastCheckedMs).toBeGreaterThan(first[0]!.lastCheckedMs);
+        expect(getCachedMcpStatus("invalidate-bot")).toBeNull();
       } finally {
         rmSync(dir, { recursive: true });
       }
@@ -456,6 +455,21 @@ describe("mcp-status", () => {
         const result = await preflightMcpForRequest(bot, (e) => events.push(e));
         expect(result).toEqual([]);
         expect(events).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+
+    test("does not probe when bot declares no critical servers", async () => {
+      // Per-request preflight is a hot path. With no critical servers there
+      // is nothing to warn about, so we should skip the probe entirely.
+      const dir = makeBotDir({
+        mcpServers: { dead: { type: "http", url: "http://127.0.0.1:1/mcp" } },
+      });
+      try {
+        const bot = makeBot(dir, { name: "no-probe-bot" });
+        await preflightMcpForRequest(bot);
+        expect(getCachedMcpStatus("no-probe-bot")).toBeNull();
       } finally {
         rmSync(dir, { recursive: true });
       }

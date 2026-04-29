@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { BotConfig } from "../bots/config.ts";
+import { resolveBotCwd } from "./mcp-config-utils.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "mcp-status");
@@ -162,16 +163,11 @@ async function probeOne(
       transport = new StreamableHTTPClientTransport(new URL(entry.url));
     } else {
       if (!entry.command) return { error: "missing command" };
-      const cwd = entry.cwd
-        ? isAbsolute(entry.cwd)
-          ? entry.cwd
-          : resolve(botDir, entry.cwd)
-        : botDir;
       transport = new StdioClientTransport({
         command: entry.command,
         args: entry.args,
         env: { ...process.env, ...entry.env } as Record<string, string>,
-        cwd,
+        cwd: resolveBotCwd(entry.cwd, botDir),
         stderr: "pipe",
       });
     }
@@ -192,7 +188,6 @@ async function probeOne(
       description: t.description,
     }));
 
-    // If the server exposes list_collections, call it to enrich the row.
     // Failures keep the row "ok" (listTools succeeded) but record a
     // collectionsError so the panel can flag it — a server that can't
     // enumerate its collections is usually broken for retrieval.
@@ -245,49 +240,17 @@ async function probeOne(
 
 /**
  * Parse the `list_collections` MCP tool response into a normalized list.
- * MCP tool results have shape `{ content: [{ type, text }, ...] }`.
- * We accept several shapes since each server formats its payload differently:
- *   - `[{ name, document_count }]`
- *   - `[{ name, count }]`
- *   - `[{ name, size }]`
- *   - `[{ collection, ... }]`
- *   - `["wiki", "x-feed"]` (just names)
- *   - `{ collections: [...] }`
+ * MCPs vary widely — some return a JSON array, some wrap it in
+ * `{ collections: [...] }`, some return markdown bullets, some serialize
+ * everything onto one line, and some put the response in
+ * `structuredContent.result` as a string. We try each shape in turn.
  */
 export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | undefined {
-  // MCP returns content as array of TextContent. Servers can also set
-  // structuredContent — but the shape varies wildly. We try, in order:
-  //   1. structuredContent if it is array-shaped or a recognized wrapper
-  //      ({ collections: [...] } / { results: [...] }). If structuredContent
-  //      is a `{ result: "<text>" }` wrapper (some servers stuff the human
-  //      response there), we treat its `result` as a text payload too.
-  //   2. Each `content` text part as JSON.
-  //   3. Each `content` text part as markdown bullet list (huginn-style).
   const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
 
-  // Step 1: structuredContent
-  const sc = r?.structuredContent;
-  if (Array.isArray(sc)) {
-    const parsed = parseCollectionsArray(sc);
-    if (parsed) return parsed;
-  } else if (sc && typeof sc === "object") {
-    const obj = sc as Record<string, unknown>;
-    if (Array.isArray(obj.collections)) {
-      const parsed = parseCollectionsArray(obj.collections);
-      if (parsed) return parsed;
-    }
-    if (Array.isArray(obj.results)) {
-      const parsed = parseCollectionsArray(obj.results);
-      if (parsed) return parsed;
-    }
-    // Some servers stuff the markdown text into structuredContent.result.
-    if (typeof obj.result === "string") {
-      const parsed = tryParseText(obj.result);
-      if (parsed) return parsed;
-    }
-  }
+  const fromStructured = tryParseStructured(r?.structuredContent);
+  if (fromStructured) return fromStructured;
 
-  // Step 2 + 3: walk text content parts, trying JSON then markdown.
   const textParts: string[] = [];
   if (Array.isArray(r?.content)) {
     for (const part of r.content) {
@@ -300,23 +263,32 @@ export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | u
     const parsed = tryParseText(text);
     if (parsed) return parsed;
   }
-  // Last resort: join all text and try markdown across the combined text.
   if (textParts.length > 0) {
-    const md = parseCollectionsMarkdown(textParts.join("\n"));
-    if (md && md.length > 0) return md;
+    return parseCollectionsMarkdown(textParts.join("\n"));
   }
   return undefined;
 }
 
-/** Try a single text payload as JSON, then markdown. */
+function tryParseStructured(sc: unknown): McpCollectionInfo[] | undefined {
+  if (Array.isArray(sc)) return parseCollectionsArray(sc);
+  if (!sc || typeof sc !== "object") return undefined;
+  const fromKeys = tryUnwrapCollections(sc);
+  if (fromKeys) return fromKeys;
+  // Some servers stuff the markdown text into structuredContent.result.
+  const resultStr = (sc as Record<string, unknown>).result;
+  if (typeof resultStr === "string") return tryParseText(resultStr);
+  return undefined;
+}
+
 function tryParseText(text: string): McpCollectionInfo[] | undefined {
   try {
     const json = JSON.parse(text);
-    if (Array.isArray(json)) return parseCollectionsArray(json);
-    if (json && typeof json === "object") {
-      const obj = json as Record<string, unknown>;
-      if (Array.isArray(obj.collections)) return parseCollectionsArray(obj.collections);
-      if (Array.isArray(obj.results)) return parseCollectionsArray(obj.results);
+    if (Array.isArray(json)) {
+      const parsed = parseCollectionsArray(json);
+      if (parsed) return parsed;
+    } else {
+      const fromKeys = tryUnwrapCollections(json);
+      if (fromKeys) return fromKeys;
     }
   } catch {
     // Not JSON — fall through to markdown.
@@ -324,7 +296,15 @@ function tryParseText(text: string): McpCollectionInfo[] | undefined {
   return parseCollectionsMarkdown(text);
 }
 
-/** Map a JSON array of items into McpCollectionInfo entries. */
+/** Look for a recognized array key (`collections` or `results`) on an object. */
+function tryUnwrapCollections(json: unknown): McpCollectionInfo[] | undefined {
+  if (!json || typeof json !== "object") return undefined;
+  const obj = json as Record<string, unknown>;
+  if (Array.isArray(obj.collections)) return parseCollectionsArray(obj.collections);
+  if (Array.isArray(obj.results)) return parseCollectionsArray(obj.results);
+  return undefined;
+}
+
 function parseCollectionsArray(arr: unknown[]): McpCollectionInfo[] | undefined {
   const out: McpCollectionInfo[] = [];
   for (const item of arr) {
@@ -481,39 +461,24 @@ function extractTextSummary(
 }
 
 /**
- * Markdown fallback parser for `list_collections`. Recognizes patterns like:
- *
- *   - **wiki**: 1234 documents, 5678 embeddings (updated: ...)
- *   - **x-feed** (987 docs)
- *   - wiki: 1234 documents
- *   - wiki
- *
- * Extracts the bolded or first-token name and the first integer that
- * looks like a doc count (followed by "doc..." or "document..." or "items").
+ * Markdown fallback for `list_collections`. Recognizes bullet lists like
+ * `- **wiki**: 1234 documents`, with fallbacks for plain-name and inline
+ * (single-line) variants. Some MCPs serialize the whole response on one line
+ * (`**Loaded collections:** - **wiki**: ... - **x-feed**: ...`), so we
+ * normalize by inserting newlines before bullet markers before scanning.
  */
 export function parseCollectionsMarkdown(text: string): McpCollectionInfo[] | undefined {
-  // Some MCP servers serialize the response on a single line, e.g.
-  // "**Loaded collections:** - **nav-wiki**: ... - **x-feed**: ...".
-  // Insert a newline before each bullet so the line-by-line scan works.
   const normalized = text.replace(/\s+(?=(?:[-*+•]|\d+[.)])\s+\*\*)/g, "\n");
-  const lines = normalized.split("\n");
   const out: McpCollectionInfo[] = [];
-  // Match a leading bullet: "-", "*", "+", "•", or numbered "1."
   const bullet = /^\s*(?:[-*+•]|\d+[.)])\s+(.*)$/;
-  for (const line of lines) {
+  for (const line of normalized.split("\n")) {
     const m = bullet.exec(line);
     if (!m) continue;
     const rest = m[1] ?? "";
-    // Prefer **bold** as the name; otherwise take the first word/identifier
-    // before a delimiter (`:`, `(`, `—`, `-`, etc.).
     const boldMatch = /^\*\*([^*]+)\*\*/.exec(rest);
-    let name: string | undefined;
-    if (boldMatch) {
-      name = boldMatch[1]?.trim();
-    } else {
-      const tokenMatch = /^[`"']?([\w.\-/]+)[`"']?/.exec(rest);
-      name = tokenMatch?.[1]?.trim();
-    }
+    const name = boldMatch
+      ? boldMatch[1]?.trim()
+      : /^[`"']?([\w.\-/]+)[`"']?/.exec(rest)?.[1]?.trim();
     if (!name) continue;
     const countMatch = /(\d[\d ,_]*)\s*(?:doc|document|item|entry|entries|rows?)/i.exec(rest);
     const documentCount = countMatch?.[1]
@@ -547,7 +512,8 @@ export async function preflightMcpForRequest(
 ): Promise<McpServerStatus[]> {
   try {
     const cfg = getStatusConfig(bot);
-    // If probeOnSend is true, force a fresh probe; otherwise use cache (probes if missing/expired).
+    // No critical servers declared → nothing to warn about, skip the probe.
+    if (cfg.critical.length === 0) return [];
     const servers = await getMcpStatus(bot, { force: cfg.probeOnSend });
     const criticalDown = findCriticalDown(servers);
     for (const s of criticalDown) {
