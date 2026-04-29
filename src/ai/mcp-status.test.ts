@@ -271,13 +271,39 @@ describe("mcp-status", () => {
       ]);
     });
 
-    test("uses structuredContent when present", () => {
+    test("uses structuredContent when it is array-shaped", () => {
       const result = {
         structuredContent: [{ name: "wiki", document_count: 100 }],
         content: [{ type: "text", text: "ignored" }],
       };
       expect(parseCollectionsResult(result)).toEqual([
         { name: "wiki", documentCount: 100 },
+      ]);
+    });
+
+    test("falls through to text content when structuredContent is not array-shaped", () => {
+      // Regression test: huginn returns structuredContent: { result: "<markdown>" }
+      // which is NOT an array. The parser must fall through to `content`.
+      const md = "**Loaded collections:**\n\n- **wiki**: 65 documents, 710 embeddings";
+      const result = {
+        content: [{ type: "text", text: md }],
+        structuredContent: { result: md },
+        isError: false,
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 65 },
+      ]);
+    });
+
+    test("parses markdown stuffed into structuredContent.result", () => {
+      const md = "- **wiki**: 12 documents\n- **x-feed**: 7 documents";
+      const result = {
+        content: [],
+        structuredContent: { result: md },
+      };
+      expect(parseCollectionsResult(result)).toEqual([
+        { name: "wiki", documentCount: 12 },
+        { name: "x-feed", documentCount: 7 },
       ]);
     });
 

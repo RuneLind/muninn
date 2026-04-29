@@ -255,46 +255,79 @@ async function probeOne(
  *   - `{ collections: [...] }`
  */
 export function parseCollectionsResult(result: unknown): McpCollectionInfo[] | undefined {
-  // MCP returns content as array of TextContent. We try, in order:
-  //   1. structuredContent (if the server set it)
-  //   2. Each text part as JSON
-  //   3. Each text part as markdown bullet list (huginn-style)
+  // MCP returns content as array of TextContent. Servers can also set
+  // structuredContent — but the shape varies wildly. We try, in order:
+  //   1. structuredContent if it is array-shaped or a recognized wrapper
+  //      ({ collections: [...] } / { results: [...] }). If structuredContent
+  //      is a `{ result: "<text>" }` wrapper (some servers stuff the human
+  //      response there), we treat its `result` as a text payload too.
+  //   2. Each `content` text part as JSON.
+  //   3. Each `content` text part as markdown bullet list (huginn-style).
   const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
-  let payload: unknown = r?.structuredContent;
+
+  // Step 1: structuredContent
+  const sc = r?.structuredContent;
+  if (Array.isArray(sc)) {
+    const parsed = parseCollectionsArray(sc);
+    if (parsed) return parsed;
+  } else if (sc && typeof sc === "object") {
+    const obj = sc as Record<string, unknown>;
+    if (Array.isArray(obj.collections)) {
+      const parsed = parseCollectionsArray(obj.collections);
+      if (parsed) return parsed;
+    }
+    if (Array.isArray(obj.results)) {
+      const parsed = parseCollectionsArray(obj.results);
+      if (parsed) return parsed;
+    }
+    // Some servers stuff the markdown text into structuredContent.result.
+    if (typeof obj.result === "string") {
+      const parsed = tryParseText(obj.result);
+      if (parsed) return parsed;
+    }
+  }
+
+  // Step 2 + 3: walk text content parts, trying JSON then markdown.
   const textParts: string[] = [];
-  if (payload === undefined && Array.isArray(r?.content)) {
+  if (Array.isArray(r?.content)) {
     for (const part of r.content) {
       if (part?.type === "text" && typeof part.text === "string") {
         textParts.push(part.text);
-        try {
-          payload = JSON.parse(part.text);
-          break;
-        } catch {
-          // Not JSON — try the next content part.
-        }
       }
     }
   }
-  // Markdown fallback for human-readable text responses (e.g. huginn's
-  // `- **wiki**: 1234 documents, ...`).
-  if (payload === undefined && textParts.length > 0) {
+  for (const text of textParts) {
+    const parsed = tryParseText(text);
+    if (parsed) return parsed;
+  }
+  // Last resort: join all text and try markdown across the combined text.
+  if (textParts.length > 0) {
     const md = parseCollectionsMarkdown(textParts.join("\n"));
     if (md && md.length > 0) return md;
-    return undefined;
   }
-  if (payload === undefined) return undefined;
+  return undefined;
+}
 
-  // Unwrap `{ collections: [...] }`
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const obj = payload as Record<string, unknown>;
-    if (Array.isArray(obj.collections)) payload = obj.collections;
-    else if (Array.isArray(obj.results)) payload = obj.results;
+/** Try a single text payload as JSON, then markdown. */
+function tryParseText(text: string): McpCollectionInfo[] | undefined {
+  try {
+    const json = JSON.parse(text);
+    if (Array.isArray(json)) return parseCollectionsArray(json);
+    if (json && typeof json === "object") {
+      const obj = json as Record<string, unknown>;
+      if (Array.isArray(obj.collections)) return parseCollectionsArray(obj.collections);
+      if (Array.isArray(obj.results)) return parseCollectionsArray(obj.results);
+    }
+  } catch {
+    // Not JSON — fall through to markdown.
   }
+  return parseCollectionsMarkdown(text);
+}
 
-  if (!Array.isArray(payload)) return undefined;
-
+/** Map a JSON array of items into McpCollectionInfo entries. */
+function parseCollectionsArray(arr: unknown[]): McpCollectionInfo[] | undefined {
   const out: McpCollectionInfo[] = [];
-  for (const item of payload) {
+  for (const item of arr) {
     if (typeof item === "string") {
       out.push({ name: item });
       continue;
