@@ -11,6 +11,9 @@ const log = getLog("ai", "mcp-status");
 
 const DEFAULT_TTL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 5_000;
+/** list_collections is called after the MCP is already warm, but it does its
+ *  own HTTP roundtrip to the backing knowledge API — give it some headroom. */
+const CALL_TIMEOUT_MS = 15_000;
 
 export type McpStatus = "ok" | "down" | "unknown";
 
@@ -38,6 +41,13 @@ export interface McpServerStatus {
    * tool and the call succeeds. Each entry has a name and optional doc count.
    */
   collections?: McpCollectionInfo[];
+  /**
+   * Set when a server exposes `list_collections` but the call failed or
+   * returned an unparseable response. Distinguishes "no collections support"
+   * from "collections support exists but is broken" — the latter usually
+   * means the underlying API is down, which is a real outage.
+   */
+  collectionsError?: string;
   errorMessage?: string;
   /** Epoch ms — when the probe last completed (or 0 if never probed) */
   lastCheckedMs: number;
@@ -134,6 +144,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 interface ProbeOk {
   tools: McpToolInfo[];
   collections?: McpCollectionInfo[];
+  collectionsError?: string;
 }
 
 async function probeOne(
@@ -182,9 +193,11 @@ async function probeOne(
     }));
 
     // If the server exposes list_collections, call it to enrich the row.
-    // Failures here degrade silently — the server is still considered "ok"
-    // because listTools succeeded.
+    // Failures keep the row "ok" (listTools succeeded) but record a
+    // collectionsError so the panel can flag it — a server that can't
+    // enumerate its collections is usually broken for retrieval.
     let collections: McpCollectionInfo[] | undefined;
+    let collectionsError: string | undefined;
     const listCollectionsTool = tools.find(
       (t) => t.name === "list_collections" || t.name.endsWith("__list_collections"),
     );
@@ -192,19 +205,31 @@ async function probeOne(
       try {
         const result = await withTimeout(
           client.callTool({ name: listCollectionsTool.name, arguments: {} }),
-          PROBE_TIMEOUT_MS,
+          CALL_TIMEOUT_MS,
           `list_collections ${name}`,
         );
-        collections = parseCollectionsResult(result);
+        const r = result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
+        if (r?.isError) {
+          collectionsError = extractTextSummary(r.content) || "Tool reported an error";
+        } else {
+          collections = parseCollectionsResult(result);
+          if (!collections || collections.length === 0) {
+            const summary = extractTextSummary(r?.content);
+            collectionsError = summary
+              ? `Could not parse collections from response: ${summary}`
+              : "Empty response from list_collections";
+          }
+        }
       } catch (e) {
+        collectionsError = e instanceof Error ? e.message : String(e);
         log.warn("list_collections failed for {server}: {error}", {
           server: name,
-          error: e instanceof Error ? e.message : String(e),
+          error: collectionsError,
         });
       }
     }
 
-    return { tools, collections };
+    return { tools, collections, collectionsError };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -331,6 +356,7 @@ async function runProbe(bot: BotConfig): Promise<McpServerStatus[]> {
               toolCount: result.tools.length,
               tools: result.tools,
               ...(result.collections ? { collections: result.collections } : {}),
+              ...(result.collectionsError ? { collectionsError: result.collectionsError } : {}),
             }),
       };
       if (status.status === "down") {
@@ -405,6 +431,20 @@ export function invalidateMcpStatus(botName: string): void {
 export function _resetMcpStatusCache(): void {
   cache.clear();
   inFlight.clear();
+}
+
+/** Pull a short text summary from MCP `content` for diagnostics. */
+function extractTextSummary(
+  content: Array<{ type?: string; text?: string }> | undefined,
+): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  for (const part of content) {
+    if (part?.type === "text" && typeof part.text === "string" && part.text.length > 0) {
+      const s = part.text.replace(/\s+/g, " ").trim();
+      return s.length > 120 ? s.slice(0, 117) + "..." : s;
+    }
+  }
+  return undefined;
 }
 
 /**

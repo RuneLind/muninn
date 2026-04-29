@@ -757,6 +757,14 @@ export function chatStyles(): string {
       font-variant-numeric: tabular-nums;
       margin-left: 8px;
     }
+    .ins-mcp-collerr {
+      padding: 4px 6px;
+      font-size: 11px;
+      color: var(--status-warning, #f39c12);
+      background: rgba(243, 156, 18, 0.08);
+      border-radius: 4px;
+      margin-bottom: 6px;
+    }
     .ins-mcp-tool-chips {
       display: flex;
       flex-wrap: wrap;

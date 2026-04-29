@@ -248,13 +248,15 @@ export function inspectorPanelScript(): string {
   function isExpandable(s) {
     return s && s.status === 'ok' && (
       (s.collections && s.collections.length > 0) ||
-      (s.tools && s.tools.length > 0)
+      (s.tools && s.tools.length > 0) ||
+      s.collectionsError
     );
   }
 
   function defaultExpanded(s) {
-    // Auto-expand any server that exposes collections (knowledge-capable).
-    return !!(s && s.collections && s.collections.length > 0);
+    // Auto-expand servers that have collections OR a collections-error so the
+    // user immediately sees the inventory or the problem.
+    return !!(s && ((s.collections && s.collections.length > 0) || s.collectionsError));
   }
 
   function isRowExpanded(s) {
@@ -316,6 +318,11 @@ export function inspectorPanelScript(): string {
               + (cnt ? '<span class="ins-mcp-subcount">' + escapeHtml(cnt) + '</span>' : '')
               + '</div>';
           }).join('');
+        } else if (s.collectionsError) {
+          html += '<div class="ins-mcp-subtitle">Collections</div>'
+            + '<div class="ins-mcp-collerr" title="' + escapeHtml(s.collectionsError) + '">'
+            + '⚠️ ' + escapeHtml(truncateMcpError(s.collectionsError))
+            + '</div>';
         }
         if (s.tools && s.tools.length > 0) {
           html += '<div class="ins-mcp-subtitle">Tools (' + s.tools.length + ')</div>';
@@ -373,7 +380,7 @@ export function inspectorPanelScript(): string {
 
   function truncateMcpError(msg) {
     var s = String(msg).split('\\n')[0];
-    if (s.length > 40) s = s.slice(0, 37) + '...';
+    if (s.length > 80) s = s.slice(0, 77) + '...';
     return s;
   }
 
