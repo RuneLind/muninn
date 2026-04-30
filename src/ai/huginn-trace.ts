@@ -19,7 +19,13 @@ const log = getLog("ai", "huginn-trace");
  *
  *   2. In-process (multi_collection_search_mcp_adapter.py) — JSON tool result
  *      with a top-level `trace` key alongside `results`.
+ *
+ * Spread {@link HUGINN_TRACE_ENV} into MCP server spawn envs to opt them in.
+ * Non-Huginn servers ignore the unknown var, so it's safe to set unconditionally.
  */
+
+/** Env var that opts a Huginn MCP adapter into emitting trace blobs. */
+export const HUGINN_TRACE_ENV = { HUGINN_TRACE_DEFAULT: "1" } as const;
 
 export interface HuginnTraceExtraction {
   /** Tool output with the trace block stripped. Same type as input. */
@@ -28,7 +34,8 @@ export interface HuginnTraceExtraction {
   trace: unknown | null;
 }
 
-const FENCE_PATTERN = /\n*```huginn-trace\n([\s\S]+?)\n```\s*$/;
+const FENCE_OPEN = "```huginn-trace\n";
+const FENCE_CLOSE = "\n```";
 
 /**
  * Extract a Huginn search trace from a tool output string.
@@ -39,28 +46,34 @@ const FENCE_PATTERN = /\n*```huginn-trace\n([\s\S]+?)\n```\s*$/;
  *   `trace: null` so the caller can pass it through unchanged.
  */
 export function parseHuginnTrace(output: string): HuginnTraceExtraction {
-  if (typeof output !== "string" || output.length === 0) {
-    return { text: output, trace: null };
-  }
+  if (output.length === 0) return { text: output, trace: null };
 
-  // Text-mode: trailing fenced block
-  const match = output.match(FENCE_PATTERN);
-  if (match && match[1] !== undefined) {
-    try {
-      const trace = JSON.parse(match[1]);
-      const text = output.slice(0, match.index).replace(/\s+$/, "");
-      return { text, trace };
-    } catch (e) {
-      log.warn("Failed to parse huginn-trace fence body: {error}", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-      return { text: output, trace: null };
+  // Anchor on the closing fence at end-of-string (allowing trailing whitespace),
+  // then walk back to the opener. This handles arbitrarily large trace bodies —
+  // a real-world melosys query produces ~14 KB of trace JSON, more than fits in
+  // a fixed-size tail window.
+  const trimmedEnd = output.replace(/\s+$/, "");
+  if (trimmedEnd.endsWith("```")) {
+    const closeIdx = trimmedEnd.lastIndexOf(FENCE_CLOSE);
+    if (closeIdx !== -1 && closeIdx === trimmedEnd.length - FENCE_CLOSE.length) {
+      const openIdx = trimmedEnd.lastIndexOf(FENCE_OPEN, closeIdx);
+      if (openIdx !== -1) {
+        const body = trimmedEnd.slice(openIdx + FENCE_OPEN.length, closeIdx);
+        try {
+          const trace = JSON.parse(body);
+          const text = output.slice(0, openIdx).replace(/\s+$/, "");
+          return { text, trace };
+        } catch (e) {
+          log.warn("Failed to parse huginn-trace fence body: {error}", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+          return { text: output, trace: null };
+        }
+      }
     }
   }
 
-  // JSON-mode: top-level `trace` key
-  const trimmed = output.trimStart();
-  if (trimmed.startsWith("{")) {
+  if (output.trimStart().startsWith("{")) {
     try {
       const parsed = JSON.parse(output);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "trace" in parsed) {
@@ -68,8 +81,7 @@ export function parseHuginnTrace(output: string): HuginnTraceExtraction {
         return { text: JSON.stringify(rest), trace };
       }
     } catch {
-      // Not JSON — fall through. Plenty of tool outputs start with `{` but
-      // are e.g. truncated JSON or text containing braces, so this is normal.
+      // Genuine non-JSON text starting with `{` is common — fall through.
     }
   }
 
@@ -85,6 +97,8 @@ export function parseHuginnTrace(output: string): HuginnTraceExtraction {
  *   - `{ content: [{ type: "text", text: "..." }, ...] }` (MCP standard)
  *   - `{ content: "{\"result\":\"...\"}" }`        (Huginn HTTP wrapper, double-encoded)
  *   - `{ result: "..." }` / `{ text: "..." }`      (other adapters)
+ *   - `{ content: "<placeholder>", contents: [{type:"text", text:"<full>"}], detailedContent: "<truncated>" }`
+ *     (copilot-sdk oversized-tool divert — see {@link OVERSIZED_PLACEHOLDER_RE})
  *
  * Returns the longest text fragment found (which is where Huginn's trace fence
  * lives), or null if nothing text-like is present.
@@ -109,23 +123,44 @@ export function extractMcpResultText(result: unknown): string | null {
   if (typeof result !== "object") return null;
   const r = result as Record<string, unknown>;
 
+  // copilot-sdk oversized-tool envelope: when the SDK diverts a >~32 KB tool
+  // result to a tempfile, it sets `content` to a short placeholder string and
+  // stashes the *full* payload under `contents[]` (MCP-standard
+  // `[{type:"text", text:...}]`). `detailedContent` is also present but is
+  // itself truncated to ~10 KB, so we never read from it.
+  if (
+    typeof r.content === "string" &&
+    OVERSIZED_PLACEHOLDER_RE.test(r.content) &&
+    Array.isArray(r.contents)
+  ) {
+    const fromContents = extractTextBlocks(r.contents);
+    if (fromContents !== null) return extractMcpResultText(fromContents);
+  }
+
   if (typeof r.content === "string") {
     return extractMcpResultText(r.content);
   }
   if (Array.isArray(r.content)) {
-    const parts: string[] = [];
-    for (const block of r.content) {
-      if (typeof block === "string") parts.push(block);
-      else if (block && typeof block === "object") {
-        const b = block as { type?: string; text?: string };
-        if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
-      }
-    }
-    if (parts.length > 0) return parts.join("\n");
+    const text = extractTextBlocks(r.content);
+    if (text !== null) return text;
   }
   if (typeof r.text === "string") return r.text;
   if (typeof r.result === "string") return extractMcpResultText(r.result);
   if (typeof r.detailedContent === "string") return r.detailedContent;
 
   return null;
+}
+
+const OVERSIZED_PLACEHOLDER_RE = /^Output too large to read at once \(/;
+
+function extractTextBlocks(blocks: unknown[]): string | null {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (typeof block === "string") parts.push(block);
+    else if (block && typeof block === "object") {
+      const b = block as { type?: string; text?: string };
+      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
 }

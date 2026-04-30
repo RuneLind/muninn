@@ -926,7 +926,16 @@ async function prepareScratchBotDir(
   const newMcp: { mcpServers: Record<string, unknown> } = { mcpServers: {} };
   const baseKnowledge = baseMcpJson.mcpServers["knowledge"];
   if (baseKnowledge) {
-    newMcp.mcpServers["knowledge"] = baseKnowledge;
+    // Pin stdio entries' cwd to the *original* bot dir. Without this, relative
+    // paths in args (e.g. `--directory ../../../huginn`) resolve against the
+    // deeper scratch dir and silently miss the target — leaving the bot with
+    // no knowledge tools while the rest of the cell runs as if it had them.
+    const entry = baseKnowledge as { type?: string; cwd?: string };
+    if (entry.type !== "http" && entry.type !== "sse" && entry.cwd === undefined) {
+      newMcp.mcpServers["knowledge"] = { ...entry, cwd: base.dir };
+    } else {
+      newMcp.mcpServers["knowledge"] = baseKnowledge;
+    }
   }
   if (stackUsesSerena(stack)) {
     for (const inst of serenaInstances) {
