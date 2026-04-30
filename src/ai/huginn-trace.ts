@@ -97,6 +97,8 @@ export function parseHuginnTrace(output: string): HuginnTraceExtraction {
  *   - `{ content: [{ type: "text", text: "..." }, ...] }` (MCP standard)
  *   - `{ content: "{\"result\":\"...\"}" }`        (Huginn HTTP wrapper, double-encoded)
  *   - `{ result: "..." }` / `{ text: "..." }`      (other adapters)
+ *   - `{ content: "<placeholder>", contents: [{type:"text", text:"<full>"}], detailedContent: "<truncated>" }`
+ *     (copilot-sdk oversized-tool divert — see {@link OVERSIZED_PLACEHOLDER_RE})
  *
  * Returns the longest text fragment found (which is where Huginn's trace fence
  * lives), or null if nothing text-like is present.
@@ -121,23 +123,44 @@ export function extractMcpResultText(result: unknown): string | null {
   if (typeof result !== "object") return null;
   const r = result as Record<string, unknown>;
 
+  // copilot-sdk oversized-tool envelope: when the SDK diverts a >~32 KB tool
+  // result to a tempfile, it sets `content` to a short placeholder string and
+  // stashes the *full* payload under `contents[]` (MCP-standard
+  // `[{type:"text", text:...}]`). `detailedContent` is also present but is
+  // itself truncated to ~10 KB, so we never read from it.
+  if (
+    typeof r.content === "string" &&
+    OVERSIZED_PLACEHOLDER_RE.test(r.content) &&
+    Array.isArray(r.contents)
+  ) {
+    const fromContents = extractTextBlocks(r.contents);
+    if (fromContents !== null) return extractMcpResultText(fromContents);
+  }
+
   if (typeof r.content === "string") {
     return extractMcpResultText(r.content);
   }
   if (Array.isArray(r.content)) {
-    const parts: string[] = [];
-    for (const block of r.content) {
-      if (typeof block === "string") parts.push(block);
-      else if (block && typeof block === "object") {
-        const b = block as { type?: string; text?: string };
-        if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
-      }
-    }
-    if (parts.length > 0) return parts.join("\n");
+    const text = extractTextBlocks(r.content);
+    if (text !== null) return text;
   }
   if (typeof r.text === "string") return r.text;
   if (typeof r.result === "string") return extractMcpResultText(r.result);
   if (typeof r.detailedContent === "string") return r.detailedContent;
 
   return null;
+}
+
+const OVERSIZED_PLACEHOLDER_RE = /^Output too large to read at once \(/;
+
+function extractTextBlocks(blocks: unknown[]): string | null {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (typeof block === "string") parts.push(block);
+    else if (block && typeof block === "object") {
+      const b = block as { type?: string; text?: string };
+      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
 }

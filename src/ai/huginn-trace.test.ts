@@ -144,11 +144,40 @@ describe("extractMcpResultText", () => {
     expect(extractMcpResultText(123)).toBeNull();
   });
 
-  test("extract+parse pipeline yields readable text for non-Huginn copilot-sdk results", () => {
-    // Repros the "Output too large" trace shape: SDK envelope wraps a plain
-    // string tool result, no trace fence. Storing the structured payload would
-    // double-encode to {"content":"Output too large..."} — the pipeline should
-    // produce just "Output too large..." instead.
+  test("prefers contents[] when content is the SDK oversized-tool placeholder", () => {
+    // Captured 2026-04-30 from a live melosys + jira-issues knowledge_search.
+    // copilot-sdk's `tool.execution_complete` event for an oversized result
+    // carries three keys:
+    //   content         → short placeholder string (~857 B)
+    //   detailedContent → TRUNCATED JSON envelope (~10 KB) — never use
+    //   contents        → MCP-standard `[{type:"text", text:"<full>"}]` (~37 KB)
+    //
+    // The Huginn trace fence lives only in the full payload, so we must read
+    // `contents[0].text` rather than the placeholder.
+    const trace = { schemaVersion: 1, totalMs: 71 };
+    const innerText = "Some long result\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+    const fullPayload = JSON.stringify({ result: innerText });
+    const sdkResult = {
+      content:
+        "Output too large to read at once (37.1 KB). Saved to: /var/folders/.../tmp.txt\n" +
+        "Consider using tools like grep (for searching), head/tail (for first/last lines)…",
+      detailedContent: '{"result":"Some long result',
+      contents: [{ type: "text", text: fullPayload }],
+    };
+
+    const text = extractMcpResultText(sdkResult);
+    expect(text).toBe(innerText);
+
+    const { trace: extracted, text: cleaned } = parseHuginnTrace(text!);
+    expect(extracted).toEqual(trace);
+    expect(cleaned).toBe("Some long result");
+  });
+
+  test("falls back to the placeholder string when contents[] is missing", () => {
+    // Defensive: if a future SDK or non-Huginn adapter emits the placeholder
+    // without an accompanying contents[], we still return the placeholder
+    // string instead of null. Same downstream behavior as a normal text
+    // envelope — the trace gets the placeholder, no searchTrace is parsed.
     const sdkResult = { content: "Output too large to read at once (159.3 KB). Saved to: /tmp/abc" };
     const text = extractMcpResultText(sdkResult);
     expect(text).toBe("Output too large to read at once (159.3 KB). Saved to: /tmp/abc");

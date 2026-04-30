@@ -115,15 +115,55 @@ recoverable for forensic / one-shot analysis.
 ## Open questions to answer first (in order)
 
 1. **What does `event.data.result` actually contain when the SDK
-   diverts a tool result?** Add a one-shot debug log line in
-   `copilot-sdk.ts` capturing `Object.keys(resultPayload)` and per-key
-   sizes when the placeholder pattern is detected. Run one search through
-   the live bot. Look in `logs/`.
+   diverts a tool result?** **ANSWERED** (2026-04-30, on
+   `fix/sdk-output-too-large`). One-shot debug log on
+   `tool.execution_complete` against melosys + jira-issues collection
+   reproduced an oversized event with the following shape:
+
+   ```
+   keys = content, detailedContent, contents
+   ```
+
+   Per-key sizes captured on a 37.1 KB Huginn jira-issues result
+   (placeholder reported `(37.1 KB)`):
+
+   | Key | Type | Size | Holds |
+   |---|---|---|---|
+   | `content` | string | 857 B | The placeholder string `"Output too large to read at once (37.1 KB). Saved to: /var/folders/.../1777527599059-copilot-tool-output-hscrsh.txt\nConsider using tools like grep ..."` |
+   | `detailedContent` | string | **10,300 B** | A *truncated* JSON envelope `{"result":"1. **MELOSYS-7570_..."}` — clipped well before the end. **NOT a usable substitute for the full payload.** |
+   | `contents` | array(1), JSON-stringified 37,866 B | 37.0 KB | The full payload as the MCP-standard `[{type:"text", text:"..."}]` shape. Inner shape was not directly captured (a follow-up search came back under-threshold so the extended logger never fired), but the size matches both the placeholder's claim and the on-disk tempfile (37,978 B), so this is where the full content lives. |
+
+   The matching tempfile `/var/folders/.../1777527599059-copilot-tool-output-hscrsh.txt`
+   contains the same payload as `{"result":"<full Huginn HTTP wrapper output>"}` —
+   the tempfile and `contents[]` carry the same bytes, just one inside the
+   JSON envelope and one outside.
+
+   So: **the full payload is sitting right there in the same event** as the
+   placeholder, on the `contents[]` field. We don't need to read the
+   tempfile in normal operation — the SDK already gave it to us, we just
+   pick the wrong field.
 
 2. **Is there a `detailedContent` / `contents[]` / similar field with the
-   full payload?** If yes — change `extractMcpResultText` to prefer
-   the longest text-bearing field rather than first-match. Smallest
-   possible fix. Add a regression test that emits the SDK's actual shape.
+   full payload?** **ANSWERED — yes, `contents[]`.** `detailedContent`
+   exists too but is itself truncated (~10 KB), so don't rely on it. Fix:
+   teach `extractMcpResultText` (in `src/ai/huginn-trace.ts`) to look at
+   `contents` *before* `content` when the value of `content` matches the
+   placeholder — or simply: prefer the longest text fragment across
+   `contents[]` (joined), `content`, `text`, `result`, `detailedContent`.
+   Add a regression test in `huginn-trace.test.ts` mirroring the
+   real envelope shape:
+
+   ```ts
+   {
+     content: "Output too large to read at once (37.1 KB). Saved to: ...",
+     detailedContent: "{\"result\":\"1. **MELOSYS-...\"}", // truncated
+     contents: [{ type: "text", text: "<full payload incl. huginn-trace fence>" }],
+   }
+   ```
+
+   The existing test that uses `{ content: "Output too large..." }` only
+   should be updated, not removed — it now represents an unrealistic
+   shape (no SDK that emits the placeholder also omits `contents[]`).
 
 3. **If no — is there an SDK option to raise or disable the threshold?**
    Check `@github/copilot-sdk` config for tool-result-size knobs. Some
@@ -157,6 +197,10 @@ recoverable for forensic / one-shot analysis.
    nice-to-fix.
 
 ## Quick recovery path for already-completed runs
+
+> **Decision (2026-04-30, on `fix/sdk-output-too-large`):** we are NOT going
+> to recover historical traces. Sketch retained below for posterity in case
+> a future need arises, but it is out of scope for this fix.
 
 For salvaging the `cbb60098` benchmark run's trace data without re-running:
 
