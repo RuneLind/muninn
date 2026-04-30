@@ -5,6 +5,7 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
+import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -145,6 +146,24 @@ export async function executePrompt(
           const resultPayload = event.data.success
             ? (event.data.result ?? undefined)
             : { error: event.data.error ?? { message: "tool execution failed" } };
+
+          // Prefer the inner text payload over the SDK's structured envelope so
+          // the inspector shows readable content instead of a double-encoded
+          // {"content":"..."} blob. For Huginn searches this also peels off the
+          // trailing trace fence and surfaces it separately as searchTrace.
+          // Falls through to the structured form (e.g. error envelopes) when
+          // no text content is extractable.
+          let outputForStorage: string | undefined;
+          let searchTrace: unknown | undefined;
+          const text = extractMcpResultText(resultPayload);
+          if (text !== null) {
+            const parsed = parseHuginnTrace(text);
+            searchTrace = parsed.trace ?? undefined;
+            outputForStorage = truncateOutput(parsed.text);
+          } else {
+            outputForStorage = truncateOutput(resultPayload);
+          }
+
           toolCalls.push({
             id: event.data.toolCallId,
             name: pending.name,
@@ -152,7 +171,8 @@ export async function executePrompt(
             durationMs: Math.round(endMs - pending.startMs),
             startOffsetMs: Math.round(pending.startMs - wallStart),
             input: pending.input,
-            output: truncateOutput(resultPayload),
+            output: outputForStorage,
+            searchTrace,
           });
           pendingTools.delete(event.data.toolCallId);
           onProgress?.({ type: "tool_end", name: pending.name, displayName });

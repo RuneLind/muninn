@@ -10,6 +10,7 @@ import { Tracer } from "../tracing/index.ts";
 import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
+import { parseHuginnTrace } from "../ai/huginn-trace.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
 
@@ -169,8 +170,24 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           input: tool.input,
           statusText: getToolStatus(tool.name, tool.input),
         };
-        if (captureOutputs && tool.output !== undefined) {
-          attrs.output = tool.output;
+        // Huginn search adapters embed a per-search trace blob in their output
+        // when HUGINN_TRACE_DEFAULT=1 is set. Connectors that can intercept the
+        // structured tool result (copilot-sdk) extract the trace themselves and
+        // pass it through `tool.searchTrace`. For connectors that surface the
+        // result as a plain text blob (claude-cli stream parser), fall back to
+        // running the parser on the string here. Parser is a no-op otherwise.
+        let toolOutput = tool.output;
+        if (tool.searchTrace !== undefined) {
+          attrs.searchTrace = tool.searchTrace;
+        } else if (typeof toolOutput === "string") {
+          const { text, trace } = parseHuginnTrace(toolOutput);
+          if (trace !== null) {
+            attrs.searchTrace = trace;
+            toolOutput = text;
+          }
+        }
+        if (captureOutputs && toolOutput !== undefined) {
+          attrs.output = toolOutput;
         }
         t.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
       }

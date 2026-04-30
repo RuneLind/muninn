@@ -4,6 +4,7 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
+import { parseHuginnTrace } from "../huginn-trace.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -210,6 +211,12 @@ export async function executePrompt(
       const toolDurationMs = Math.round(performance.now() - toolStart);
       onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
+      // Strip Huginn search-trace blob (if present) before showing the model
+      // the tool result. The trace is captured separately in the trace span
+      // for inspector use; keeping it out of the LLM context avoids polluting
+      // its turns with debug data. No-op for non-Huginn outputs.
+      const cleaned = parseHuginnTrace(toolResult).text;
+
       trackedToolCalls.push({
         id: tc.id,
         name: tc.name,
@@ -217,14 +224,14 @@ export async function executePrompt(
         durationMs: toolDurationMs,
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
-        output: truncateOutput(toolResult),
+        output: truncateOutput(cleaned),
       });
 
       // Add tool result to conversation
       messages.push({
         role: "tool",
         tool_call_id: tc.id,
-        content: toolResult,
+        content: cleaned,
       });
 
       log.info("Tool {tool} completed in {ms}ms", {

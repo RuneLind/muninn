@@ -65,6 +65,10 @@ export async function executeClaudePrompt(
   const env: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CODE_ENTRYPOINT: `${botConfig.name}-bot`,
+    // Huginn MCP adapters embed a search trace in their tool result when this
+    // is set. The CLI inherits this env and propagates it to spawned MCP
+    // servers; non-Huginn servers ignore it.
+    HUGINN_TRACE_DEFAULT: "1",
   };
   if (botConfig.thinkingMaxTokens !== undefined) {
     env.MAX_THINKING_TOKENS = String(botConfig.thinkingMaxTokens);

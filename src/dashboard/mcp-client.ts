@@ -101,7 +101,13 @@ export async function connectToServer(
     transport = new StdioClientTransport({
       command: serverConfig.command,
       args: serverConfig.args,
-      env: { ...process.env, ...serverConfig.env } as Record<string, string>,
+      env: {
+        ...process.env,
+        // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
+        // servers ignore unknown env vars, so it's safe to set unconditionally.
+        HUGINN_TRACE_DEFAULT: "1",
+        ...serverConfig.env,
+      } as Record<string, string>,
       cwd,
       stderr: "pipe",
     });
