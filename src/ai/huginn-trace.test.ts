@@ -1,5 +1,8 @@
 import { test, expect, describe } from "bun:test";
-import { parseHuginnTrace, extractMcpResultText } from "./huginn-trace.ts";
+import { parseHuginnTrace, extractMcpResultText, recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 describe("parseHuginnTrace — text-mode", () => {
   test("extracts trailing ```huginn-trace fence", () => {
@@ -219,5 +222,100 @@ describe("parseHuginnTrace — defensive", () => {
     const { text, trace: extracted } = parseHuginnTrace(input);
     expect(extracted).toEqual(trace);
     expect(text).toBe("Result.");
+  });
+});
+
+describe("recoverOversizedClaudeCliToolResult", () => {
+  function makePlaceholder(filePath: string, chars = 198_415): string {
+    return `Error: result (${chars.toLocaleString("en-US")} characters) exceeds maximum allowed tokens. Output has been saved to ${filePath}.\nFormat: JSON with schema: {result: string}`;
+  }
+
+  test("returns null when input is not the divert placeholder", () => {
+    expect(recoverOversizedClaudeCliToolResult("hello world")).toBeNull();
+    expect(recoverOversizedClaudeCliToolResult("Error: something else")).toBeNull();
+  });
+
+  test("recovers trace and rewrites file fence-free by default", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const trace = { query: { raw: "hello" }, schemaVersion: 1 };
+    const body = "## Search results\n\nlots of content here";
+    const original = body + "\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+    writeFileSync(filePath, JSON.stringify({ result: original }), "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(makePlaceholder(filePath));
+      expect(recovered).not.toBeNull();
+      expect(recovered!.filePath).toBe(filePath);
+      expect(recovered!.trace).toEqual(trace);
+      expect(recovered!.rewritten).toBe(true);
+      // File now holds the cleaned text — no fence
+      const after = JSON.parse(readFileSync(filePath, "utf8")) as { result: string };
+      expect(after.result).toBe(body);
+      expect(after.result).not.toContain("huginn-trace");
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("does not rewrite when stripTraceFromFile is false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const trace = { schemaVersion: 1 };
+    const original = "body\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+    const fileContent = JSON.stringify({ result: original });
+    writeFileSync(filePath, fileContent, "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(
+        makePlaceholder(filePath),
+        { stripTraceFromFile: false },
+      );
+      expect(recovered!.trace).toEqual(trace);
+      expect(recovered!.rewritten).toBe(false);
+      // File untouched
+      expect(readFileSync(filePath, "utf8")).toBe(fileContent);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("returns trace=null when file has no fence (and does not rewrite)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const fileContent = JSON.stringify({ result: "no fence in here" });
+    writeFileSync(filePath, fileContent, "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(makePlaceholder(filePath));
+      expect(recovered!.trace).toBeNull();
+      expect(recovered!.rewritten).toBe(false);
+      expect(readFileSync(filePath, "utf8")).toBe(fileContent);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("degrades gracefully when file is missing", () => {
+    const recovered = recoverOversizedClaudeCliToolResult(
+      makePlaceholder("/nonexistent/path/to/result.txt"),
+    );
+    expect(recovered).not.toBeNull();
+    expect(recovered!.trace).toBeNull();
+    expect(recovered!.rewritten).toBe(false);
+  });
+
+  test("degrades gracefully when file is not the expected JSON shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    writeFileSync(filePath, "not json at all", "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(makePlaceholder(filePath));
+      expect(recovered!.trace).toBeNull();
+      expect(recovered!.rewritten).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
   });
 });

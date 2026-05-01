@@ -1,6 +1,6 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
-import { parseHuginnTrace } from "./huginn-trace.ts";
+import { parseHuginnTrace, recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -177,9 +177,24 @@ export class StreamParser {
         // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
         const raw = extractToolResultContent(block);
         if (typeof raw === "string") {
-          const parsed = parseHuginnTrace(raw);
-          pending.output = truncateOutput(parsed.text);
-          if (parsed.trace !== null) pending.searchTrace = parsed.trace;
+          // Two recovery paths can populate searchTrace:
+          //   1. Claude CLI diverted the result to a file because it
+          //      exceeded MAX_MCP_OUTPUT_TOKENS — read the file, peel the
+          //      trace, and rewrite the file fence-free so the next model
+          //      Read doesn't pull 14 KB of debug JSON back into context.
+          //      The placeholder text stays as the stored output so the
+          //      inspector shows the diversion happened.
+          //   2. The result fits inline — peel the fence directly so the
+          //      closing ``` doesn't fall past truncateOutput's 16 KB cap.
+          const recovery = recoverOversizedClaudeCliToolResult(raw);
+          if (recovery !== null) {
+            pending.output = truncateOutput(raw);
+            if (recovery.trace !== null) pending.searchTrace = recovery.trace;
+          } else {
+            const parsed = parseHuginnTrace(raw);
+            pending.output = truncateOutput(parsed.text);
+            if (parsed.trace !== null) pending.searchTrace = parsed.trace;
+          }
         } else {
           pending.output = truncateOutput(raw);
         }
