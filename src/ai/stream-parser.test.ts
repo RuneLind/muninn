@@ -486,6 +486,53 @@ describe("StreamParser text_delta from stream_event", () => {
   });
 });
 
+describe("StreamParser huginn-trace extraction", () => {
+  test("peels trace fence off tool_result before truncation", () => {
+    const t0 = 0;
+    const parser = new StreamParser(t0);
+
+    // Build a result whose body alone is over the 16 KB cap, with the
+    // huginn-trace fence appended after — the closing ``` would otherwise
+    // get cut by truncateOutput and parseHuginnTrace would find nothing.
+    const body = "x".repeat(20 * 1024);
+    const trace = { query: { raw: "hello" }, schemaVersion: 1 };
+    const raw = `${body}\n\n\`\`\`huginn-trace\n${JSON.stringify(trace)}\n\`\`\``;
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "mcp__knowledge__search_knowledge", input: { q: "hi" } },
+    ])), t0 + 100);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: raw, is_error: false },
+    ])), t0 + 200);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), t0 + 300);
+
+    const result = parser.getResult();
+    const tool = result.toolCalls![0]!;
+    expect(tool.searchTrace).toEqual(trace);
+    // Output is the cleaned body (truncated for storage), no fence present
+    expect(typeof tool.output).toBe("string");
+    expect(tool.output!).not.toContain("huginn-trace");
+  });
+
+  test("leaves non-huginn outputs unchanged", () => {
+    const t0 = 0;
+    const parser = new StreamParser(t0);
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "Read", input: {} },
+    ])), t0 + 100);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "hello world", is_error: false },
+    ])), t0 + 200);
+    parser.parseLine(JSON.stringify(makeResult()), t0 + 300);
+
+    const tool = parser.getResult().toolCalls![0]!;
+    expect(tool.output).toBe("hello world");
+    expect(tool.searchTrace).toBeUndefined();
+  });
+});
+
 describe("StreamParser contextTokens (per-turn input tokens)", () => {
   test("tracks last assistant turn's input tokens as contextTokens", () => {
     const parser = new StreamParser();

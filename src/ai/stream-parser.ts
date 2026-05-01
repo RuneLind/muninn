@@ -1,5 +1,6 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
+import { parseHuginnTrace } from "./huginn-trace.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -39,6 +40,8 @@ interface PendingToolCall {
   startTimestamp: number;
   /** Tool result, populated when the matching user → tool_result arrives */
   output?: string;
+  /** Parsed Huginn search trace, peeled off the raw output before truncation. */
+  searchTrace?: unknown;
 }
 
 export class StreamParser {
@@ -167,7 +170,19 @@ export class StreamParser {
         const useId = block.tool_use_id;
         if (typeof useId !== "string") continue;
         const pending = this.pendingTools.find((p) => p.id === useId);
-        if (pending) pending.output = truncateOutput(extractToolResultContent(block));
+        if (!pending) continue;
+        // Peel the Huginn search-trace fence (if present) from the raw text
+        // BEFORE truncateOutput runs — the closing ``` would otherwise fall
+        // past the 16 KB cap and the trace would never make it onto the
+        // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
+        const raw = extractToolResultContent(block);
+        if (typeof raw === "string") {
+          const parsed = parseHuginnTrace(raw);
+          pending.output = truncateOutput(parsed.text);
+          if (parsed.trace !== null) pending.searchTrace = parsed.trace;
+        } else {
+          pending.output = truncateOutput(raw);
+        }
       }
     }
     this.resolvePendingTools(timestamp);
@@ -186,6 +201,7 @@ export class StreamParser {
         startOffsetMs,
         input: abbreviateInput(pending.input),
         output: pending.output,
+        searchTrace: pending.searchTrace,
       });
       this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
     }

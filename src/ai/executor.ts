@@ -65,16 +65,13 @@ export async function executeClaudePrompt(
   const env: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CODE_ENTRYPOINT: `${botConfig.name}-bot`,
-    // HUGINN_TRACE_DEFAULT is intentionally NOT set here. Claude CLI manages
-    // its own agent loop, so Muninn never gets a chance to strip the trailing
-    // ```huginn-trace``` fence before the model sees it. With the fence on,
-    // every search result is ~36 KB instead of ~22 KB; on melosys queries
-    // this both pushes the model into Claude CLI's MAX_MCP_OUTPUT_TOKENS
-    // divert-to-file path and inflates per-turn context across multi-search
-    // sessions. searchTrace observability is also lost on this path because
-    // the fence sits past truncateOutput's 16 KB cap and gets cut off in
-    // storage. Re-enable only when Huginn's trace can be intercepted before
-    // the model sees it (Phase 2 / out-of-band trace channel).
+    // Huginn MCP adapters embed a search trace in their tool result when this
+    // is set. The CLI inherits this env and propagates it to spawned MCP
+    // servers; non-Huginn servers ignore it. The stream parser peels the
+    // ```huginn-trace``` fence off before truncateOutput runs so searchTrace
+    // lands on attributes.searchTrace even for ~36 KB results where the fence
+    // would otherwise fall past the 16 KB storage cap.
+    HUGINN_TRACE_DEFAULT: "1",
   };
   if (botConfig.thinkingMaxTokens !== undefined) {
     env.MAX_THINKING_TOKENS = String(botConfig.thinkingMaxTokens);
