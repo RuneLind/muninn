@@ -34,7 +34,7 @@ export function tracesWaterfallStyles(): string {
     }
     .waterfall-row {
       display: grid;
-      grid-template-columns: 200px 1fr;
+      grid-template-columns: 240px 1fr;
       align-items: center;
       height: 28px;
       gap: 12px;
@@ -45,6 +45,39 @@ export function tracesWaterfallStyles(): string {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    /* Chip-rendered labels for tool spans with discoverable collections.
+       Verb + first-collection + (+N) — color stable per collection name (HSL hash). */
+    .wf-chip {
+      display: inline-block;
+      padding: 0 6px;
+      margin-right: 4px;
+      border-radius: 3px;
+      font-size: 10px;
+      line-height: 16px;
+      vertical-align: middle;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .wf-verb { font-weight: 600; }
+    .wf-verb-search { background: color-mix(in srgb, var(--status-tool) 18%, transparent); color: var(--status-tool); border: 1px solid color-mix(in srgb, var(--status-tool) 40%, transparent); }
+    .wf-verb-get    { background: color-mix(in srgb, var(--status-info) 18%, transparent); color: var(--status-info); border: 1px solid color-mix(in srgb, var(--status-info) 40%, transparent); }
+    .wf-verb-list   { background: color-mix(in srgb, var(--status-cyan) 18%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 40%, transparent); }
+    .wf-verb-other  { background: color-mix(in srgb, white 6%, transparent); color: var(--text-soft); border: 1px solid color-mix(in srgb, white 12%, transparent); }
+    .wf-coll-more {
+      background: color-mix(in srgb, white 5%, transparent);
+      color: var(--text-dim);
+      border: 1px solid color-mix(in srgb, white 10%, transparent);
+    }
+    .wf-trace-dot {
+      color: var(--status-success);
+      font-size: 10px;
+      line-height: 16px;
+      vertical-align: middle;
+      margin-right: 4px;
     }
     .waterfall-bar-container {
       position: relative;
@@ -247,12 +280,21 @@ export function tracesWaterfallScript(): string {
         const statusClass = s.status === 'error' ? ' status-error' : '';
         const depth = nestingDepth(s);
         const indent = '\\u00A0\\u00A0'.repeat(depth);
-        const label = indent + s.name;
+        // Tool spans with a discoverable collection render as chips (verb + collection
+        // + +N more) with a green dot when extended search trace is available.
+        // Other spans (and tool spans without a collection) keep the plain text label.
+        const chip = isToolSpan(s) && typeof deriveSpanLabelHtml === 'function'
+          ? deriveSpanLabelHtml(s)
+          : null;
+        const labelInner = chip
+          ? esc(indent) + chip.html
+          : esc(indent + s.name);
+        const labelTooltip = chip ? chip.tooltip : s.name;
         const barKind = isToolSpan(s) ? 'tool' : s.kind;
         const inputLabel = isToolSpan(s) ? toolInputLabel(s.attributes && s.attributes.input) : '';
         const inputHtml = inputLabel ? '<span class="waterfall-input" title="' + esc(inputLabel) + '">' + esc(inputLabel) + '</span>' : '';
         return '<div class="waterfall-row">' +
-          '<div class="waterfall-label" title="' + esc(s.name) + '">' + esc(label) + '</div>' +
+          '<div class="waterfall-label" title="' + esc(labelTooltip) + '">' + labelInner + '</div>' +
           '<div class="waterfall-bar-container">' +
             '<div class="waterfall-bar kind-' + barKind + statusClass + '" ' +
               'style="left:' + left + '%;width:' + width + '%"' +
