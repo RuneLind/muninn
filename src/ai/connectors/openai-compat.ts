@@ -4,7 +4,7 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { parseHuginnTrace } from "../huginn-trace.ts";
+import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -189,24 +189,21 @@ export async function executePrompt(
       }
       onProgress?.({ type: "tool_start", name: tc.name, displayName, input: inputPreview });
 
-      let toolResult: string;
+      let rawResult: unknown;
       try {
         const serverName = toolServerMap.get(tc.name);
         if (!serverName) {
-          toolResult = JSON.stringify({ error: `Unknown tool: ${tc.name}` });
+          rawResult = { error: `Unknown tool: ${tc.name}` };
           log.warn("Model called unknown tool {tool}", {
             botName: botConfig.name,
             tool: tc.name,
           });
         } else {
           const args = JSON.parse(tc.arguments);
-          const result = await callTool(botConfig.name, serverName, tc.name, args);
-          toolResult = typeof result === "string" ? result : JSON.stringify(result);
+          rawResult = await callTool(botConfig.name, serverName, tc.name, args);
         }
       } catch (e) {
-        toolResult = JSON.stringify({
-          error: e instanceof Error ? e.message : String(e),
-        });
+        rawResult = { error: e instanceof Error ? e.message : String(e) };
         log.warn("Tool call {tool} failed: {error}", {
           botName: botConfig.name,
           tool: tc.name,
@@ -217,12 +214,20 @@ export async function executePrompt(
       const toolDurationMs = Math.round(performance.now() - toolStart);
       onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
-      // Strip Huginn search-trace blob (if present) before showing the model
-      // the tool result. The trace is captured separately on the tool span
-      // (attributes.searchTrace) for inspector use; keeping it out of the LLM
-      // context avoids polluting its turns with debug data. No-op for
-      // non-Huginn outputs.
-      const parsed = parseHuginnTrace(toolResult);
+      // Peel the MCP envelope so the model only sees the inner text payload —
+      // shipping the full {"content":[{"type":"text","text":"..."}]} blob to a
+      // small-context model (e.g. local qwen3 35B) wastes thousands of tokens
+      // and would otherwise hide the Huginn trace fence inside the JSON, where
+      // parseHuginnTrace can't anchor on the closing ``` and won't strip it.
+      // Errors and plain-string outputs fall through to JSON.stringify so the
+      // model still gets a structured signal it can reason about.
+      const innerText = extractMcpResultText(rawResult);
+      const parsed = innerText !== null
+        ? parseHuginnTrace(innerText)
+        : {
+            text: typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult),
+            trace: null as unknown,
+          };
       const cleaned = parsed.text;
 
       trackedToolCalls.push({
