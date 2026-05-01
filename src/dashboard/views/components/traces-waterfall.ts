@@ -88,8 +88,10 @@ export function tracesWaterfallStyles(): string {
       max-width: 300px;
     }
 
-    /* Span Details */
+    /* Span Details — inline panel below the waterfall on narrow viewports.
+       Promoted to a fixed right-side drawer at ≥1200px (see media query below). */
     .span-details {
+      position: relative;
       margin-top: 16px;
       background: var(--bg-page);
       border: 1px solid var(--border-primary);
@@ -99,7 +101,7 @@ export function tracesWaterfallStyles(): string {
       display: none;
     }
     .span-details.visible { display: block; }
-    .span-details h4 { color: var(--accent-light); margin-bottom: 8px; font-size: 13px; }
+    .span-details h4 { color: var(--accent-light); margin-bottom: 8px; font-size: 13px; padding-right: 32px; }
     .span-details pre {
       background: var(--bg-panel);
       padding: 10px;
@@ -108,6 +110,44 @@ export function tracesWaterfallStyles(): string {
       color: var(--text-tertiary);
       font-size: 11px;
       line-height: 1.5;
+    }
+    .span-details-close {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 20px;
+      line-height: 1;
+      padding: 4px 8px;
+      border-radius: 4px;
+      display: none;
+    }
+    .span-details-close:hover { color: var(--text-primary); background: color-mix(in srgb, white 5%, transparent); }
+
+    @media (min-width: 1200px) {
+      .span-details {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: clamp(560px, 55vw, 920px);
+        margin: 0;
+        z-index: 50;
+        border-radius: 0;
+        border: none;
+        border-left: 1px solid var(--border-primary);
+        padding: 20px 20px 24px;
+        overflow-y: auto;
+        background: var(--bg-page);
+        box-shadow: -8px 0 24px rgba(0,0,0,0.35);
+      }
+      .span-details-close { display: block; }
+      /* Title can be long inside a narrow drawer column; let it shrink hard
+         and rely on the cell's title attribute for the full string. */
+      .span-details .stt-cands td.stt-title { max-width: 220px; }
     }
 
     /* View Prompt button in waterfall header */
@@ -138,6 +178,7 @@ export function tracesWaterfallHtml(): string {
       </div>
       <div class="waterfall" id="waterfall"></div>
       <div class="span-details" id="spanDetails">
+        <button class="span-details-close" onclick="closeSpanDetails()" title="Close (Esc)" aria-label="Close span detail">&times;</button>
         <h4 id="spanDetailsTitle"></h4>
         <div id="spanDetailsJson"></div>
       </div>
@@ -251,7 +292,29 @@ export function tracesWaterfallScript(): string {
 
     function closeWaterfall() {
       document.getElementById('waterfallContainer').classList.remove('visible');
+      document.getElementById('spanDetails').classList.remove('visible');
       document.querySelectorAll('.trace-table tr').forEach(r => r.classList.remove('expanded'));
     }
+
+    function closeSpanDetails() {
+      document.getElementById('spanDetails').classList.remove('visible');
+    }
+
+    // Esc closes the drawer first if open, then the waterfall. Doesn't preventDefault
+    // unless something was actually closed, so other shortcuts are unaffected.
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      const det = document.getElementById('spanDetails');
+      if (det && det.classList.contains('visible')) {
+        e.preventDefault();
+        closeSpanDetails();
+        return;
+      }
+      const wf = document.getElementById('waterfallContainer');
+      if (wf && wf.classList.contains('visible')) {
+        e.preventDefault();
+        closeWaterfall();
+      }
+    });
   `;
 }

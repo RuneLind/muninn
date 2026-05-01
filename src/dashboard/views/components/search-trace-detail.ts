@@ -118,12 +118,16 @@ export function searchTraceDetailStyles(): string {
     .stt-conf-noise{ position: absolute; top: 8px; bottom: 8px; width: 2px; background: var(--text-dim); }
     .stt-conf-label { position: absolute; bottom: -16px; font-size: 10px; color: var(--text-dim); transform: translateX(-50%); }
 
-    /* Candidates table */
-    .stt-cands {
+    /* Candidates table — wrapper allows horizontal scroll when the panel is
+       too narrow for all 9 columns (rank stages + Δboost + status). */
+    .stt-cands-wrap {
       width: 100%;
+      overflow-x: auto;
+      margin-top: 6px;
+    }
+    .stt-cands {
       border-collapse: collapse;
       font-size: 11px;
-      margin-top: 6px;
     }
     .stt-cands th, .stt-cands td {
       text-align: left;
@@ -358,7 +362,7 @@ export function searchTraceDetailScript(): string {
           filterBtn('dropped', 'dropped only') +
           filterBtn('all', 'all') +
         '</div>' +
-        '<table class="stt-cands">' + header + '<tbody>' + rows + '</tbody></table>' +
+        '<div class="stt-cands-wrap"><table class="stt-cands">' + header + '<tbody>' + rows + '</tbody></table></div>' +
       '</div>';
     }
 
