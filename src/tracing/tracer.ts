@@ -110,15 +110,17 @@ export class Tracer {
 
   /** Create a completed child span under a named parent span (for pre-computed durations like tool calls).
    *  If startOffsetMs is provided, the span's start time is offset from the parent span's start.
-   *  Status defaults to 'ok' in the DB schema. */
+   *  Status defaults to 'ok' in the DB schema.
+   *  Returns the new span id (or a fresh uuid if tracing is disabled, so callers can chain regardless). */
   addChildSpan(
     parentLabel: string,
     name: string,
     durationMs: number,
     attributes?: Record<string, unknown>,
     startOffsetMs?: number,
-  ): void {
-    if (!this.enabled) return;
+  ): string {
+    const id = crypto.randomUUID();
+    if (!this.enabled) return id;
 
     const parentSpan = this.spans.get(parentLabel);
     const parentId = parentSpan?.id ?? this.rootSpanId;
@@ -132,7 +134,7 @@ export class Tracer {
     }
 
     saveSpan({
-      id: crypto.randomUUID(),
+      id,
       traceId: this.traceId,
       parentId,
       name,
@@ -143,6 +145,42 @@ export class Tracer {
       durationMs: Math.round(durationMs),
       attributes,
     }).catch(logError);
+
+    return id;
+  }
+
+  /** Create a completed child span under an arbitrary parent span id.
+   *  Use when the parent isn't a label-tracked span — e.g. when nesting stage spans
+   *  under a tool span that was itself produced by addChildSpan.
+   *  startOffsetMs is anchored to parentStartedAt if provided, else "now − duration". */
+  addSubSpan(
+    parentSpanId: string,
+    name: string,
+    durationMs: number,
+    attributes?: Record<string, unknown>,
+    opts?: { startOffsetMs?: number; parentStartedAt?: Date },
+  ): string {
+    const id = crypto.randomUUID();
+    if (!this.enabled) return id;
+
+    const offset = opts?.startOffsetMs ?? 0;
+    const anchor = opts?.parentStartedAt ?? new Date(Date.now() - Math.round(durationMs));
+    const startedAt = new Date(anchor.getTime() + offset);
+
+    saveSpan({
+      id,
+      traceId: this.traceId,
+      parentId: parentSpanId,
+      name,
+      kind: "span",
+      botName: this.opts.botName,
+      userId: this.opts.userId,
+      startedAt,
+      durationMs: Math.round(durationMs),
+      attributes,
+    }).catch(logError);
+
+    return id;
   }
 
   /** Point-in-time event (no duration) */
@@ -196,6 +234,12 @@ export class Tracer {
   /** Context for passing to background tasks (memory/goal/schedule extractors) */
   get context(): TraceContext {
     return { traceId: this.traceId, parentId: this.rootSpanId };
+  }
+
+  /** Start time of a label-tracked span, or undefined if not started.
+   *  Useful when synthesizing sub-spans that need to anchor against a known parent. */
+  spanStartedAt(label: string): Date | undefined {
+    return this.spans.get(label)?.startedAt;
   }
 }
 

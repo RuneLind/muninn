@@ -139,7 +139,7 @@ export function tracesWaterfallHtml(): string {
       <div class="waterfall" id="waterfall"></div>
       <div class="span-details" id="spanDetails">
         <h4 id="spanDetailsTitle"></h4>
-        <pre id="spanDetailsJson"></pre>
+        <div id="spanDetailsJson"></div>
       </div>
     </div>`;
 }
@@ -236,8 +236,17 @@ export function tracesWaterfallScript(): string {
       document.getElementById('spanDetailsTitle').textContent =
         span.name + ' (' + span.kind + ', ' + span.status + ')';
       const attrs = span.attributes || {};
-      document.getElementById('spanDetailsJson').textContent =
-        JSON.stringify(attrs, null, 2);
+      const host = document.getElementById('spanDetailsJson');
+      // If the span carries a v1 Huginn search trace, render the structured panel.
+      // Fall back to raw JSON for everything else (other span kinds, future schema
+      // versions, or if the renderer module isn't loaded).
+      if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
+          attrs.searchTrace.schemaVersion === 1) {
+        if (window.__sttState) window.__sttState.showRaw = false;
+        host.innerHTML = renderSearchTrace(attrs.searchTrace);
+      } else {
+        host.innerHTML = '<pre>' + esc(JSON.stringify(attrs, null, 2)) + '</pre>';
+      }
     });
 
     function closeWaterfall() {

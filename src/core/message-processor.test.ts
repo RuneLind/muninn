@@ -91,6 +91,7 @@ mock.module("../db/prompt-snapshots.ts", () => ({
 
 // Captures the most recent addChildSpan call args so tests can assert on them.
 const capturedChildSpans: Array<{
+  spanId: string;
   parentLabel: string;
   name: string;
   durationMs: number;
@@ -98,10 +99,26 @@ const capturedChildSpans: Array<{
   startOffsetMs?: number;
 }> = [];
 
+const capturedSubSpans: Array<{
+  spanId: string;
+  parentSpanId: string;
+  name: string;
+  durationMs: number;
+  attributes?: Record<string, unknown>;
+  opts?: { startOffsetMs?: number; parentStartedAt?: Date };
+}> = [];
+
+let _mockSpanCounter = 0;
+const _mockSpanStarts: Record<string, Date> = {};
+
 mock.module("../tracing/index.ts", () => ({
   Tracer: class MockTracer {
     traceId = "mock-trace-id";
-    start() { return "mock-span-id"; }
+    start(label: string) {
+      const id = "mock-span-" + ++_mockSpanCounter;
+      _mockSpanStarts[label] = new Date(2026, 0, 1, 0, 0, 0);
+      return id;
+    }
     end() { return 0; }
     addChildSpan(
       parentLabel: string,
@@ -110,8 +127,22 @@ mock.module("../tracing/index.ts", () => ({
       attributes?: Record<string, unknown>,
       startOffsetMs?: number,
     ) {
-      capturedChildSpans.push({ parentLabel, name, durationMs, attributes, startOffsetMs });
+      const spanId = "mock-child-" + ++_mockSpanCounter;
+      capturedChildSpans.push({ spanId, parentLabel, name, durationMs, attributes, startOffsetMs });
+      return spanId;
     }
+    addSubSpan(
+      parentSpanId: string,
+      name: string,
+      durationMs: number,
+      attributes?: Record<string, unknown>,
+      opts?: { startOffsetMs?: number; parentStartedAt?: Date },
+    ) {
+      const spanId = "mock-sub-" + ++_mockSpanCounter;
+      capturedSubSpans.push({ spanId, parentSpanId, name, durationMs, attributes, opts });
+      return spanId;
+    }
+    spanStartedAt(label: string) { return _mockSpanStarts[label]; }
     event() {}
     finish() {}
     error() {}
@@ -151,6 +182,9 @@ describe("processMessage", () => {
     mockExtractGoal.mockClear();
     mockExtractSchedule.mockClear();
     capturedChildSpans.length = 0;
+    capturedSubSpans.length = 0;
+    _mockSpanCounter = 0;
+    for (const k of Object.keys(_mockSpanStarts)) delete _mockSpanStarts[k];
   });
 
   test("processes message and calls say with formatted response", async () => {
@@ -450,6 +484,109 @@ describe("processMessage", () => {
     expect(toolSpan!.attributes!.searchTrace).toEqual(trace);
     expect(toolSpan!.attributes!.output).toBe("Found 3 documents:\n- Doc A\n- Doc B\n- Doc C");
     expect(toolSpan!.attributes!.output).not.toContain("huginn-trace");
+  });
+
+  test("synthesizes per-stage child spans under the search tool span", async () => {
+    const trace = {
+      schemaVersion: 1,
+      query: { raw: "hello" },
+      collections: [
+        {
+          name: "jira-issues",
+          indexer: "hybrid",
+          fetchK: 10,
+          candidates: [{ kept: true }, { kept: false }],
+          confidence: { lowConfidence: false, bestScore: -2 },
+          timingsMs: { indexFetch: 80, chunkLoad: 20, rerank: 1400, titleBoost: 0, assembly: 1, total: 1501 },
+        },
+      ],
+      totalMs: 1501,
+    };
+    const rawOutput =
+      "result body\n\n```huginn-trace\n" + JSON.stringify(trace) + "\n```";
+
+    mockExecuteClaudePrompt.mockResolvedValueOnce({
+      result: "ok",
+      costUsd: 0.01, durationMs: 1500, durationApiMs: 1400,
+      numTurns: 2, model: "sonnet", inputTokens: 100, outputTokens: 50,
+      wallClockMs: 1600, startupMs: 100,
+      toolCalls: [{
+        id: "toolu_03",
+        name: "mcp__knowledge__search_knowledge",
+        displayName: "search_knowledge (knowledge)",
+        durationMs: 1501,
+        startOffsetMs: 50,
+        input: '{"query":"hello"}',
+        output: rawOutput,
+      }],
+    } as any);
+
+    await processMessage({
+      text: "search",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config: { ...config, tracingCaptureToolOutputs: true } as any,
+      say: sayMock,
+    });
+
+    const toolSpan = capturedChildSpans.find((s) => s.parentLabel === "claude");
+    expect(toolSpan).toBeDefined();
+
+    // Three non-zero stages: indexFetch, chunkLoad, rerank, assembly (4)
+    const subSpans = capturedSubSpans.filter((s) => s.parentSpanId === toolSpan!.spanId);
+    expect(subSpans.map((s) => s.name)).toEqual([
+      "index.fetch",
+      "chunk.load",
+      "rerank.ce",
+      "assemble",
+    ]);
+
+    // First sub-span has startOffsetMs=0 and walks forward
+    expect(subSpans[0]!.opts?.startOffsetMs).toBe(0);
+    expect(subSpans[1]!.opts?.startOffsetMs).toBe(80);
+    expect(subSpans[2]!.opts?.startOffsetMs).toBe(100);
+
+    // Collection-level summary attached
+    expect(subSpans[2]!.attributes).toMatchObject({
+      collection: "jira-issues",
+      indexer: "hybrid",
+      candidateCount: 2,
+      droppedCount: 1,
+      synthesized: true,
+      stage: "rerank",
+    });
+  });
+
+  test("does not synthesize stage spans for non-Huginn tool calls", async () => {
+    mockExecuteClaudePrompt.mockResolvedValueOnce({
+      result: "ok",
+      costUsd: 0.01, durationMs: 100, durationApiMs: 80,
+      numTurns: 1, model: "sonnet", inputTokens: 10, outputTokens: 5,
+      wallClockMs: 110, startupMs: 10,
+      toolCalls: [{
+        id: "toolu_04",
+        name: "mcp__gmail__search",
+        displayName: "search (gmail)",
+        durationMs: 50,
+        startOffsetMs: 5,
+        input: '{}',
+        output: "no trace here",
+      }],
+    } as any);
+
+    await processMessage({
+      text: "x",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config: { ...config, tracingCaptureToolOutputs: true } as any,
+      say: sayMock,
+    });
+
+    expect(capturedSubSpans).toHaveLength(0);
   });
 
   test("leaves non-Huginn tool outputs untouched", async () => {
