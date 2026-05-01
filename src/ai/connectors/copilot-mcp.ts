@@ -70,15 +70,22 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           continue;
         }
         const cwd = resolveBotCwd(entry.cwd, botDir);
-        // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
-        // servers ignore unknown env vars, so it's safe to set unconditionally.
-        // The bot's own .mcp.json env wins via spread order.
+        // HUGINN_TRACE_DEFAULT is intentionally NOT set here. The Copilot SDK
+        // owns the agent loop, so Muninn observes tool.execution_complete
+        // events post-fact and cannot strip the trailing ```huginn-trace```
+        // fence before the SDK forwards the result to the model. With the
+        // fence on, every search adds ~14 KB of debug JSON to the model's
+        // context; multi-turn conversations with several searches blow up
+        // even Sonnet's window. searchTrace was also never end-to-end on
+        // this path because the fence usually falls past truncateOutput's
+        // 16 KB cap. Re-enable once Huginn ships an out-of-band trace
+        // channel (Phase 2).
         result[name] = {
           type: "local",
           command: entry.command,
           args: entry.args ?? [],
           cwd,
-          env: { HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
+          env: { ...(entry.env ?? {}) },
           tools: ["*"],
         };
       }
