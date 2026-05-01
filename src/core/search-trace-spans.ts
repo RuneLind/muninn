@@ -11,10 +11,13 @@ import type { Tracer } from "../tracing/index.ts";
  * Schema documented in huginn/docs/search-tracing-plan.md (schemaVersion 1).
  */
 
-const STAGE_KEYS = ["indexFetch", "chunkLoad", "rerank", "titleBoost", "assembly"] as const;
-type StageKey = (typeof STAGE_KEYS)[number];
+/** Source of truth for the v1 searchTrace stage list. The dashboard panel
+ *  reuses both arrays via {@link STAGE_KEYS} / {@link STAGE_NAMES} so a rename
+ *  here automatically flows to the table, strip, and CSS selectors. */
+export const STAGE_KEYS = ["indexFetch", "chunkLoad", "rerank", "titleBoost", "assembly"] as const;
+export type StageKey = (typeof STAGE_KEYS)[number];
 
-const STAGE_NAMES: Record<StageKey, string> = {
+export const STAGE_NAMES: Record<StageKey, string> = {
   indexFetch: "index.fetch",
   chunkLoad: "chunk.load",
   rerank: "rerank.ce",

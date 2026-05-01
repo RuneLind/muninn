@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractToolInputLabel, deriveSpanLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority } from "./helpers.ts";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority } from "./helpers.ts";
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {
@@ -58,78 +58,6 @@ describe("extractToolInputLabel", () => {
 
   test("respects priority order: file_path before arbitrary key", () => {
     expect(extractToolInputLabel({ custom: "custom val", file_path: "/src/index.ts" })).toBe("/src/index.ts");
-  });
-});
-
-describe("deriveSpanLabel", () => {
-  test("returns empty string for missing span", () => {
-    expect(deriveSpanLabel({} as never)).toBe("");
-    expect(deriveSpanLabel(null as unknown as never)).toBe("");
-  });
-
-  test("returns raw name when there are no attributes", () => {
-    expect(deriveSpanLabel({ name: "claude" })).toBe("claude");
-  });
-
-  test("appends collection from input.collection (object), collapsing tool name to verb", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-search_knowledge",
-      attributes: { input: { collection: "jira-issues", query: "x" } },
-    })).toBe("search · jira-issues");
-  });
-
-  test("parses input as JSON string", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-get_document",
-      attributes: { input: '{"collection":"jira-issues","document_id":"X"}' },
-    })).toBe("get · jira-issues");
-  });
-
-  test("prefers searchTrace.collections over input.collection", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-search_knowledge",
-      attributes: {
-        input: { collection: "ignored" },
-        searchTrace: {
-          collections: [{ name: "melosys-confluence-v3" }, { name: "jira-issues" }],
-        },
-      },
-    })).toBe("search · melosys-confluence-v3 + jira-issues");
-  });
-
-  test("falls back to raw name when no collection is discoverable", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-search_knowledge",
-      attributes: { input: { query: "x" } },
-    })).toBe("knowledge-search_knowledge");
-  });
-
-  test("ignores invalid JSON input gracefully", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-get_document",
-      attributes: { input: "not json {" },
-    })).toBe("knowledge-get_document");
-  });
-
-  test("strips huginn- prefix as well as knowledge-", () => {
-    expect(deriveSpanLabel({
-      name: "huginn-search",
-      attributes: { input: { collection: "kb" } },
-    })).toBe("search · kb");
-  });
-
-  test("collapses multi-segment tool names to first verb", () => {
-    expect(deriveSpanLabel({
-      name: "knowledge-get_graph_node",
-      attributes: { input: { collection: "kb" } },
-    })).toBe("get · kb");
-  });
-
-  test("leaves single-token tool names intact", () => {
-    expect(deriveSpanLabel({
-      name: "custom",
-      attributes: { input: { collection: "kb" } },
-    })).toBe("custom · kb");
   });
 });
 

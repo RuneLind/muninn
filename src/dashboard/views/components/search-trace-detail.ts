@@ -1,3 +1,5 @@
+import { STAGE_KEYS, STAGE_NAMES } from "../../../core/search-trace-spans.ts";
+
 /**
  * Structured renderer for a Huginn searchTrace blob (schemaVersion 1).
  *
@@ -166,11 +168,8 @@ export function searchTraceDetailStyles(): string {
 
 export function searchTraceDetailScript(): string {
   return `
-    const STT_STAGES = ['indexFetch','chunkLoad','rerank','titleBoost','assembly'];
-    const STT_STAGE_LABELS = {
-      indexFetch: 'index.fetch', chunkLoad: 'chunk.load', rerank: 'rerank.ce',
-      titleBoost: 'boost.title', assembly: 'assemble',
-    };
+    const STT_STAGES = ${JSON.stringify(STAGE_KEYS)};
+    const STT_STAGE_LABELS = ${JSON.stringify(STAGE_NAMES)};
 
     /** State for an open searchTrace panel — sort + filter for the candidates table. */
     window.__sttState = window.__sttState || {

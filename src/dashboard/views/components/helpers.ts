@@ -45,49 +45,6 @@ interface SpanLike {
   };
 }
 
-/**
- * Build a more informative waterfall row label for a tool span by appending
- * the collection(s) it touched. Falls back to the raw span name when no
- * collection is discoverable, so the row never reads worse than today.
- *
- * Sources, in priority order:
- *   1. `attributes.searchTrace.collections[].name` — the actual collections
- *      Huginn searched (handles multi-collection calls).
- *   2. `attributes.input.collection` — the requested collection (covers
- *      single-collection tools like get_document where there's no trace).
- */
-export function deriveSpanLabel(span: SpanLike): string {
-  if (!span || !span.name) return "";
-  const attrs = span.attributes ?? {};
-
-  let collections: string | null = null;
-  const trace = attrs.searchTrace as { collections?: Array<{ name?: unknown }> } | undefined;
-  if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
-    const names = trace.collections
-      .map((c) => (c && typeof c.name === "string" ? c.name : null))
-      .filter((n): n is string => !!n);
-    if (names.length > 0) collections = names.join(" + ");
-  }
-  if (!collections) {
-    const raw = attrs.input;
-    let input: Record<string, unknown> | null = null;
-    if (raw && typeof raw === "object") input = raw as Record<string, unknown>;
-    else if (typeof raw === "string") {
-      try { input = JSON.parse(raw); } catch { /* not JSON */ }
-    }
-    if (input && typeof input.collection === "string" && input.collection.length > 0) {
-      collections = input.collection;
-    }
-  }
-
-  if (!collections) return span.name;
-  // Strip the MCP-server prefix and collapse the operation suffix to its verb so
-  // long collection names have room to breathe in the 200-260px label column
-  // (e.g. "knowledge-search_knowledge" → "search", "knowledge-get_document" → "get").
-  const shortName = span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] ?? span.name;
-  return shortName + " · " + collections;
-}
-
 /** Render the tool span label as a verb chip + per-collection chips with a
  *  stable color-by-hash, plus a "trace available" dot when the span carries a
  *  Huginn searchTrace. Returns null when no collection is discoverable, so the
@@ -209,39 +166,9 @@ function escHtml(s: string): string {
 }
 function escAttr(s: string): string { return escHtml(s); }
 
-/** Inline JS twin of {@link deriveSpanLabel} for the dashboard waterfall. */
+/** Inline JS twin of {@link deriveSpanLabelHtml} for the dashboard waterfall. */
 export function deriveSpanLabelScript(): string {
   return `
-    function deriveSpanLabel(span) {
-      if (!span || !span.name) return '';
-      var attrs = span.attributes || {};
-      var collections = null;
-      var trace = attrs.searchTrace;
-      if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
-        var names = [];
-        for (var i = 0; i < trace.collections.length; i++) {
-          var c = trace.collections[i];
-          if (c && typeof c.name === 'string' && c.name.length > 0) names.push(c.name);
-        }
-        if (names.length > 0) collections = names.join(' + ');
-      }
-      if (!collections) {
-        var input = null;
-        var raw = attrs.input;
-        if (raw && typeof raw === 'object') input = raw;
-        else if (typeof raw === 'string') { try { input = JSON.parse(raw); } catch (e) {} }
-        if (input && typeof input.collection === 'string' && input.collection.length > 0) {
-          collections = input.collection;
-        }
-      }
-      if (!collections) return span.name;
-      var shortName = span.name.replace(/^(knowledge|huginn)[-_]/, '').split(/[_-]/)[0] || span.name;
-      return shortName + ' \\u00B7 ' + collections;
-    }
-
-    /** Render the tool-span label as chips (verb + collection + +N) with a
-     *  trace-available dot. Returns { html, tooltip } or null when no
-     *  collection can be discovered. */
     function deriveSpanLabelHtml(span) {
       if (!span || !span.name) return null;
       var attrs = span.attributes || {};
