@@ -31,6 +31,228 @@ export function extractToolInputLabel(input: unknown): string {
   return '';
 }
 
+/** Strip the redundant MCP-server prefix from a tool span's display name when
+ *  we're going to append a more specific identifier (e.g. a collection name). */
+const TOOL_NAME_PREFIX_RE = /^(knowledge|huginn)[-_]/;
+
+interface SpanLike {
+  name?: string;
+  attributes?: {
+    toolName?: unknown;
+    toolId?: unknown;
+    input?: unknown;
+    searchTrace?: { collections?: Array<{ name?: unknown }> } | unknown;
+  };
+}
+
+/** Render the tool span label as a verb chip + per-collection chips with a
+ *  stable color-by-hash, plus a "trace available" dot when the span carries a
+ *  Huginn searchTrace. Returns null when no collection is discoverable, so the
+ *  caller falls back to the plain text path. Exposed for testing. */
+export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: string } | null {
+  if (!span || !span.name) return null;
+  const attrs = span.attributes ?? {};
+  let collections = collectionsFor(attrs);
+  if (!collections || collections.length === 0) return null;
+  collections = sortCollectionsByPriority(collections);
+
+  const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
+  const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
+  const hasTrace = !!(attrs.searchTrace && (attrs.searchTrace as { schemaVersion?: unknown }).schemaVersion === 1);
+
+  const traceDot = hasTrace
+    ? '<span class="wf-trace-dot" title="search trace available — click for details">●</span>'
+    : '';
+  const verbChip = verb
+    ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
+    : '';
+  const first = collections[0]!;
+  const firstAbbr = abbreviateCollection(first);
+  const firstTitle = firstAbbr === first ? first : `${first} (${firstAbbr})`;
+  const firstChip = `<span class="wf-chip wf-coll" style="${collStyle(first)}" title="${escAttr(firstTitle)}">${escHtml(firstAbbr)}</span>`;
+  const moreChip = collections.length > 1
+    ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
+    : '';
+
+  return {
+    html: traceDot + verbChip + firstChip + moreChip,
+    tooltip: span.name + "\ncollections: " + collections.join(", "),
+  };
+}
+
+function collectionsFor(attrs: NonNullable<SpanLike["attributes"]>): string[] | null {
+  const trace = attrs.searchTrace as { collections?: Array<{ name?: unknown }> } | undefined;
+  if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
+    const names = trace.collections
+      .map((c) => (c && typeof c.name === "string" ? c.name : null))
+      .filter((n): n is string => !!n);
+    if (names.length > 0) return names;
+  }
+  const raw = attrs.input;
+  let input: Record<string, unknown> | null = null;
+  if (raw && typeof raw === "object") input = raw as Record<string, unknown>;
+  else if (typeof raw === "string") {
+    try { input = JSON.parse(raw); } catch { /* ignore */ }
+  }
+  if (input && typeof input.collection === "string" && input.collection.length > 0) {
+    return [input.collection];
+  }
+  return null;
+}
+
+/**
+ * Reorder collections so the highest-priority one becomes the primary chip
+ * (shown verbatim) instead of getting rolled into "+N". Priority is matched
+ * as a case-insensitive substring; ties keep original order. Wiki content is
+ * usually the most authoritative source for "how does X work" questions, so
+ * it ranks first by default.
+ */
+const COLLECTION_PRIORITY: readonly string[] = ["wiki"];
+
+export function sortCollectionsByPriority(collections: string[]): string[] {
+  const buckets: string[][] = COLLECTION_PRIORITY.map(() => []);
+  const rest: string[] = [];
+  for (const name of collections) {
+    const lower = name.toLowerCase();
+    let placed = false;
+    for (let i = 0; i < COLLECTION_PRIORITY.length; i++) {
+      if (lower.includes(COLLECTION_PRIORITY[i]!)) {
+        buckets[i]!.push(name);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) rest.push(name);
+  }
+  return buckets.flat().concat(rest);
+}
+
+/**
+ * Abbreviate a collection name for chip display when it's longer than the
+ * threshold: take the first letter of each dash-separated segment and append
+ * any trailing version-like token verbatim. The full name lives in the chip's
+ * `title` attribute for hover.
+ *
+ *   "melosys-confluence-v3"   → "mc-v3"
+ *   "jira-issues"             → "jira-issues"  (≤12 chars, kept)
+ *   "very-long-collection"    → "vlc"
+ */
+export function abbreviateCollection(name: string): string {
+  if (!name) return "";
+  if (name.length <= 12) return name;
+  const parts = name.split("-");
+  if (parts.length <= 1) return name;
+  const trailing: string[] = [];
+  while (parts.length > 1 && /^v?\d+$/.test(parts[parts.length - 1]!)) {
+    trailing.unshift(parts.pop()!);
+  }
+  const initials = parts.map((p) => p[0] || "").join("");
+  return trailing.length > 0 ? initials + "-" + trailing.join("-") : initials;
+}
+
+function collHue(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return Math.abs(h) % 360;
+}
+
+function collStyle(name: string): string {
+  const h = collHue(name);
+  return `background:hsl(${h} 32% 18%);color:hsl(${h} 60% 75%);border:1px solid hsl(${h} 35% 32%)`;
+}
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escAttr(s: string): string { return escHtml(s); }
+
+/** Inline JS twin of {@link deriveSpanLabelHtml} for the dashboard waterfall. */
+export function deriveSpanLabelScript(): string {
+  return `
+    function deriveSpanLabelHtml(span) {
+      if (!span || !span.name) return null;
+      var attrs = span.attributes || {};
+      var collections = null;
+      var trace = attrs.searchTrace;
+      if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
+        var names = [];
+        for (var i = 0; i < trace.collections.length; i++) {
+          var c = trace.collections[i];
+          if (c && typeof c.name === 'string' && c.name.length > 0) names.push(c.name);
+        }
+        if (names.length > 0) collections = names;
+      }
+      if (!collections) {
+        var input = null;
+        var raw = attrs.input;
+        if (raw && typeof raw === 'object') input = raw;
+        else if (typeof raw === 'string') { try { input = JSON.parse(raw); } catch (e) {} }
+        if (input && typeof input.collection === 'string' && input.collection.length > 0) {
+          collections = [input.collection];
+        }
+      }
+      if (!collections || collections.length === 0) return null;
+      // Sort by priority — wiki collections lead so they become the primary chip.
+      var COLLECTION_PRIORITY = ['wiki'];
+      var sorted = [];
+      var rest = [];
+      var buckets = COLLECTION_PRIORITY.map(function () { return []; });
+      for (var i = 0; i < collections.length; i++) {
+        var name = collections[i];
+        var lower = name.toLowerCase();
+        var placed = false;
+        for (var j = 0; j < COLLECTION_PRIORITY.length; j++) {
+          if (lower.indexOf(COLLECTION_PRIORITY[j]) !== -1) { buckets[j].push(name); placed = true; break; }
+        }
+        if (!placed) rest.push(name);
+      }
+      for (var k = 0; k < buckets.length; k++) sorted = sorted.concat(buckets[k]);
+      collections = sorted.concat(rest);
+
+      var verb = (span.name.replace(/^(knowledge|huginn)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
+      var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
+      var hasTrace = !!(trace && trace.schemaVersion === 1);
+
+      function collHue(name) {
+        var h = 0;
+        for (var i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+        return Math.abs(h) % 360;
+      }
+      function collStyle(name) {
+        var h = collHue(name);
+        return 'background:hsl(' + h + ' 32% 18%);color:hsl(' + h + ' 60% 75%);border:1px solid hsl(' + h + ' 35% 32%)';
+      }
+      function abbreviateCollection(name) {
+        if (!name) return '';
+        if (name.length <= 12) return name;
+        var parts = name.split('-');
+        if (parts.length <= 1) return name;
+        var trailing = [];
+        while (parts.length > 1 && /^v?\\d+$/.test(parts[parts.length - 1])) {
+          trailing.unshift(parts.pop());
+        }
+        var initials = parts.map(function (p) { return p[0] || ''; }).join('');
+        return trailing.length > 0 ? initials + '-' + trailing.join('-') : initials;
+      }
+
+      var traceDot = hasTrace ? '<span class="wf-trace-dot" title="search trace available — click for details">\\u25CF</span>' : '';
+      var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
+      var first = collections[0];
+      var firstAbbr = abbreviateCollection(first);
+      var firstTitle = firstAbbr === first ? first : first + ' (' + firstAbbr + ')';
+      var firstChip = '<span class="wf-chip wf-coll" style="' + collStyle(first) + '" title="' + esc(firstTitle) + '">' + esc(firstAbbr) + '</span>';
+      var moreChip = collections.length > 1
+        ? '<span class="wf-chip wf-coll-more" title="' + esc(collections.slice(1).join(', ')) + '">+' + (collections.length - 1) + '</span>'
+        : '';
+
+      return {
+        html: traceDot + verbChip + firstChip + moreChip,
+        tooltip: span.name + '\\ncollections: ' + collections.join(', '),
+      };
+    }
+  `;
+}
+
 /** Inline JS: extract a short readable summary from tool input JSON */
 export function toolInputLabelScript(): string {
   return `

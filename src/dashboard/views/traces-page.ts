@@ -1,11 +1,12 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { escScript, toolInputLabelScript } from "./components/helpers.ts";
+import { escScript, toolInputLabelScript, deriveSpanLabelScript } from "./components/helpers.ts";
 import { tracesStatsStyles, tracesStatsHtml, tracesStatsScript } from "./components/traces-stats.ts";
 import { tracesFiltersStyles, tracesFiltersHtml, tracesPaginationHtml, tracesFiltersScript } from "./components/traces-filters.ts";
 import { tracesListStyles, tracesListHtml, tracesListScript } from "./components/traces-list.ts";
 import { tracesWaterfallStyles, tracesWaterfallHtml, tracesWaterfallScript } from "./components/traces-waterfall.ts";
 import { tracesPromptModalStyles, tracesPromptModalHtml, tracesPromptModalScript } from "./components/traces-prompt-modal.ts";
+import { searchTraceDetailStyles, searchTraceDetailScript } from "./components/search-trace-detail.ts";
 
 export function renderTracesPage(): string {
   return `<!DOCTYPE html>
@@ -22,6 +23,7 @@ export function renderTracesPage(): string {
     ${tracesListStyles()}
     ${tracesWaterfallStyles()}
     ${tracesPromptModalStyles()}
+    ${searchTraceDetailStyles()}
   </style>
 </head>
 <body>
@@ -41,9 +43,11 @@ export function renderTracesPage(): string {
   <script>
     ${escScript()}
     ${toolInputLabelScript()}
+    ${deriveSpanLabelScript()}
     ${tracesListScript()}
     ${tracesStatsScript()}
     ${tracesFiltersScript()}
+    ${searchTraceDetailScript()}
     ${tracesWaterfallScript()}
     ${tracesPromptModalScript()}
 

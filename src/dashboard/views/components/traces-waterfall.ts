@@ -34,7 +34,7 @@ export function tracesWaterfallStyles(): string {
     }
     .waterfall-row {
       display: grid;
-      grid-template-columns: 200px 1fr;
+      grid-template-columns: 240px 1fr;
       align-items: center;
       height: 28px;
       gap: 12px;
@@ -45,6 +45,39 @@ export function tracesWaterfallStyles(): string {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+    /* Chip-rendered labels for tool spans with discoverable collections.
+       Verb + first-collection + (+N) — color stable per collection name (HSL hash). */
+    .wf-chip {
+      display: inline-block;
+      padding: 0 6px;
+      margin-right: 4px;
+      border-radius: 3px;
+      font-size: 10px;
+      line-height: 16px;
+      vertical-align: middle;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      max-width: 120px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .wf-verb { font-weight: 600; }
+    .wf-verb-search { background: color-mix(in srgb, var(--status-tool) 18%, transparent); color: var(--status-tool); border: 1px solid color-mix(in srgb, var(--status-tool) 40%, transparent); }
+    .wf-verb-get    { background: color-mix(in srgb, var(--status-info) 18%, transparent); color: var(--status-info); border: 1px solid color-mix(in srgb, var(--status-info) 40%, transparent); }
+    .wf-verb-list   { background: color-mix(in srgb, var(--status-cyan) 18%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 40%, transparent); }
+    .wf-verb-other  { background: color-mix(in srgb, white 6%, transparent); color: var(--text-soft); border: 1px solid color-mix(in srgb, white 12%, transparent); }
+    .wf-coll-more {
+      background: color-mix(in srgb, white 5%, transparent);
+      color: var(--text-dim);
+      border: 1px solid color-mix(in srgb, white 10%, transparent);
+    }
+    .wf-trace-dot {
+      color: var(--status-success);
+      font-size: 10px;
+      line-height: 16px;
+      vertical-align: middle;
+      margin-right: 4px;
     }
     .waterfall-bar-container {
       position: relative;
@@ -88,8 +121,10 @@ export function tracesWaterfallStyles(): string {
       max-width: 300px;
     }
 
-    /* Span Details */
+    /* Span Details — inline panel below the waterfall on narrow viewports.
+       Promoted to a fixed right-side drawer at ≥1200px (see media query below). */
     .span-details {
+      position: relative;
       margin-top: 16px;
       background: var(--bg-page);
       border: 1px solid var(--border-primary);
@@ -99,7 +134,7 @@ export function tracesWaterfallStyles(): string {
       display: none;
     }
     .span-details.visible { display: block; }
-    .span-details h4 { color: var(--accent-light); margin-bottom: 8px; font-size: 13px; }
+    .span-details h4 { color: var(--accent-light); margin-bottom: 8px; font-size: 13px; padding-right: 32px; }
     .span-details pre {
       background: var(--bg-panel);
       padding: 10px;
@@ -108,6 +143,44 @@ export function tracesWaterfallStyles(): string {
       color: var(--text-tertiary);
       font-size: 11px;
       line-height: 1.5;
+    }
+    .span-details-close {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 20px;
+      line-height: 1;
+      padding: 4px 8px;
+      border-radius: 4px;
+      display: none;
+    }
+    .span-details-close:hover { color: var(--text-primary); background: color-mix(in srgb, white 5%, transparent); }
+
+    @media (min-width: 1200px) {
+      .span-details {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: clamp(560px, 55vw, 920px);
+        margin: 0;
+        z-index: 50;
+        border-radius: 0;
+        border: none;
+        border-left: 1px solid var(--border-primary);
+        padding: 20px 20px 24px;
+        overflow-y: auto;
+        background: var(--bg-page);
+        box-shadow: -8px 0 24px rgba(0,0,0,0.35);
+      }
+      .span-details-close { display: block; }
+      /* Title can be long inside a narrow drawer column; let it shrink hard
+         and rely on the cell's title attribute for the full string. */
+      .span-details .stt-cands td.stt-title { max-width: 220px; }
     }
 
     /* View Prompt button in waterfall header */
@@ -138,8 +211,9 @@ export function tracesWaterfallHtml(): string {
       </div>
       <div class="waterfall" id="waterfall"></div>
       <div class="span-details" id="spanDetails">
+        <button class="span-details-close" onclick="closeSpanDetails()" title="Close (Esc)" aria-label="Close span detail">&times;</button>
         <h4 id="spanDetailsTitle"></h4>
-        <pre id="spanDetailsJson"></pre>
+        <div id="spanDetailsJson"></div>
       </div>
     </div>`;
 }
@@ -206,12 +280,21 @@ export function tracesWaterfallScript(): string {
         const statusClass = s.status === 'error' ? ' status-error' : '';
         const depth = nestingDepth(s);
         const indent = '\\u00A0\\u00A0'.repeat(depth);
-        const label = indent + s.name;
+        // Tool spans with a discoverable collection render as chips (verb + collection
+        // + +N more) with a green dot when extended search trace is available.
+        // Other spans (and tool spans without a collection) keep the plain text label.
+        const chip = isToolSpan(s) && typeof deriveSpanLabelHtml === 'function'
+          ? deriveSpanLabelHtml(s)
+          : null;
+        const labelInner = chip
+          ? esc(indent) + chip.html
+          : esc(indent + s.name);
+        const labelTooltip = chip ? chip.tooltip : s.name;
         const barKind = isToolSpan(s) ? 'tool' : s.kind;
         const inputLabel = isToolSpan(s) ? toolInputLabel(s.attributes && s.attributes.input) : '';
         const inputHtml = inputLabel ? '<span class="waterfall-input" title="' + esc(inputLabel) + '">' + esc(inputLabel) + '</span>' : '';
         return '<div class="waterfall-row">' +
-          '<div class="waterfall-label" title="' + esc(s.name) + '">' + esc(label) + '</div>' +
+          '<div class="waterfall-label" title="' + esc(labelTooltip) + '">' + labelInner + '</div>' +
           '<div class="waterfall-bar-container">' +
             '<div class="waterfall-bar kind-' + barKind + statusClass + '" ' +
               'style="left:' + left + '%;width:' + width + '%"' +
@@ -236,13 +319,44 @@ export function tracesWaterfallScript(): string {
       document.getElementById('spanDetailsTitle').textContent =
         span.name + ' (' + span.kind + ', ' + span.status + ')';
       const attrs = span.attributes || {};
-      document.getElementById('spanDetailsJson').textContent =
-        JSON.stringify(attrs, null, 2);
+      const host = document.getElementById('spanDetailsJson');
+      // If the span carries a v1 Huginn search trace, render the structured panel.
+      // Fall back to raw JSON for everything else (other span kinds, future schema
+      // versions, or if the renderer module isn't loaded).
+      if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
+          attrs.searchTrace.schemaVersion === 1) {
+        if (window.__sttState) window.__sttState.showRaw = false;
+        host.innerHTML = renderSearchTrace(attrs.searchTrace);
+      } else {
+        host.innerHTML = '<pre>' + esc(JSON.stringify(attrs, null, 2)) + '</pre>';
+      }
     });
 
     function closeWaterfall() {
       document.getElementById('waterfallContainer').classList.remove('visible');
+      document.getElementById('spanDetails').classList.remove('visible');
       document.querySelectorAll('.trace-table tr').forEach(r => r.classList.remove('expanded'));
     }
+
+    function closeSpanDetails() {
+      document.getElementById('spanDetails').classList.remove('visible');
+    }
+
+    // Esc closes the drawer first if open, then the waterfall. Doesn't preventDefault
+    // unless something was actually closed, so other shortcuts are unaffected.
+    document.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      const det = document.getElementById('spanDetails');
+      if (det && det.classList.contains('visible')) {
+        e.preventDefault();
+        closeSpanDetails();
+        return;
+      }
+      const wf = document.getElementById('waterfallContainer');
+      if (wf && wf.classList.contains('visible')) {
+        e.preventDefault();
+        closeWaterfall();
+      }
+    });
   `;
 }

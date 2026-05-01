@@ -222,6 +222,50 @@ describe("Tracer", () => {
       const childStart = child.startedAt as Date;
       expect(childStart.getTime()).toBe(parentStart.getTime() + 5000);
     });
+
+    test("addChildSpan returns the new span id matching the saved span", () => {
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      saveSpanCalls.length = 0;
+
+      const id = tracer.addChildSpan("claude", "tool:Read", 50);
+
+      expect(typeof id).toBe("string");
+      expect(id.length).toBeGreaterThan(0);
+      expect(saveSpanCalls[0]!.id).toBe(id);
+    });
+
+    test("addSubSpan nests under an arbitrary parent span id", () => {
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      const toolSpanId = tracer.addChildSpan("claude", "tool:knowledge-search", 500);
+      saveSpanCalls.length = 0;
+
+      const stageId = tracer.addSubSpan(toolSpanId, "rerank.ce", 200, { collection: "x" });
+
+      expect(saveSpanCalls).toHaveLength(1);
+      const stage = saveSpanCalls[0]!;
+      expect(stage.id).toBe(stageId);
+      expect(stage.parentId).toBe(toolSpanId);
+      expect(stage.name).toBe("rerank.ce");
+      expect(stage.durationMs).toBe(200);
+      expect(stage.attributes).toEqual({ collection: "x" });
+    });
+
+    test("addSubSpan honors parentStartedAt and startOffsetMs", () => {
+      const tracer = new Tracer("request");
+      const parentStart = new Date("2026-01-01T00:00:00Z");
+      saveSpanCalls.length = 0;
+
+      tracer.addSubSpan("parent-uuid", "stage", 30, undefined, {
+        parentStartedAt: parentStart,
+        startOffsetMs: 100,
+      });
+
+      const stage = saveSpanCalls[0]!;
+      const start = stage.startedAt as Date;
+      expect(start.getTime()).toBe(parentStart.getTime() + 100);
+    });
   });
 
   describe("events", () => {

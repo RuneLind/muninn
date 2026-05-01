@@ -11,6 +11,7 @@ import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/a
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { parseHuginnTrace } from "../ai/huginn-trace.ts";
+import { emitSearchTraceSpans } from "./search-trace-spans.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
 
@@ -189,7 +190,23 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
         if (captureOutputs && toolOutput !== undefined) {
           attrs.output = toolOutput;
         }
-        t.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
+        const toolSpanId = t.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
+
+        // If the tool call carries a v1 Huginn search trace, synthesize per-stage
+        // child spans so the waterfall shows where the time went without the
+        // operator having to expand the trace JSON.
+        if (attrs.searchTrace !== undefined) {
+          const claudeStart = t.spanStartedAt("claude");
+          if (claudeStart) {
+            const toolStart = new Date(claudeStart.getTime() + (tool.startOffsetMs ?? 0));
+            emitSearchTraceSpans({
+              tracer: t,
+              toolSpanId,
+              toolStartedAt: toolStart,
+              searchTrace: attrs.searchTrace,
+            });
+          }
+        }
       }
     }
 
