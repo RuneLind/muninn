@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { StreamParser, formatToolDisplayName, type StreamProgressEvent } from "./stream-parser.ts";
+import { StreamParser, formatToolDisplayName, isReportIntentTool, extractIntentText, type StreamProgressEvent } from "./stream-parser.ts";
 import { truncateOutput, TOOL_OUTPUT_MAX_BYTES } from "./truncate-output.ts";
 
 /** Helper to build a stream-json NDJSON string from events */
@@ -483,6 +483,153 @@ describe("StreamParser text_delta from stream_event", () => {
       type: "stream_event",
       event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
     }));
+  });
+});
+
+describe("StreamParser contextTokens (per-turn input tokens)", () => {
+  test("tracks last assistant turn's input tokens as contextTokens", () => {
+    const parser = new StreamParser();
+    parser.parseLine(JSON.stringify(systemEvent));
+    // Turn 1: smaller input
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        content: [{ type: "tool_use", id: "toolu_01", name: "Read", input: {} }],
+        usage: { input_tokens: 1000, output_tokens: 50 },
+      },
+      parent_tool_use_id: null,
+    }));
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "ok", is_error: false },
+    ])));
+    // Turn 2: larger input (cumulative growth)
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "Done." }],
+        usage: { input_tokens: 2500, cache_read_input_tokens: 500, output_tokens: 80 },
+      },
+      parent_tool_use_id: null,
+    }));
+    parser.parseLine(JSON.stringify(makeResult({
+      num_turns: 2,
+      usage: { input_tokens: 3500, output_tokens: 130 },
+    })));
+
+    const result = parser.getResult();
+    // contextTokens = last turn's input + cache_read = 2500 + 500
+    expect(result.contextTokens).toBe(3000);
+    // cumulative inputTokens unchanged (from result event)
+    expect(result.inputTokens).toBe(3500);
+  });
+
+  test("contextTokens undefined when no per-turn usage seen", () => {
+    const parser = new StreamParser();
+    parser.parseAll(buildStream(
+      systemEvent,
+      makeAssistant([{ type: "text", text: "Hi" }]),  // no usage on assistant
+      makeResult(),
+    ));
+    expect(parser.getResult().contextTokens).toBeUndefined();
+  });
+});
+
+describe("StreamParser report_intent → intent event", () => {
+  test("emits intent event for bare report_intent tool", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "report_intent", input: { intent: "Looking up your calendar" } },
+    ])), 100);
+
+    const intents = events.filter((e) => e.type === "intent");
+    expect(intents).toHaveLength(1);
+    expect((intents[0] as { type: "intent"; text: string }).text).toBe("Looking up your calendar");
+    // Tool span still emits — intent doesn't replace it
+    expect(events.filter((e) => e.type === "tool_start")).toHaveLength(1);
+  });
+
+  test("emits intent event for mcp-wrapped report_intent tool", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "mcp__intent__report_intent", input: { description: "Drafting reply" } },
+    ])), 100);
+
+    const intents = events.filter((e) => e.type === "intent");
+    expect(intents).toHaveLength(1);
+    expect((intents[0] as { type: "intent"; text: string }).text).toBe("Drafting reply");
+  });
+
+  test("does not emit intent for non-report_intent tools", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "Read", input: { file_path: "/x" } },
+    ])), 100);
+
+    expect(events.filter((e) => e.type === "intent")).toHaveLength(0);
+  });
+
+  test("does not emit intent when input lacks recognizable text field", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(0, (e) => events.push(e));
+
+    parser.parseLine(JSON.stringify(systemEvent), 0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "report_intent", input: { unrelated: 42 } },
+    ])), 100);
+
+    expect(events.filter((e) => e.type === "intent")).toHaveLength(0);
+    // tool_start still emitted
+    expect(events.filter((e) => e.type === "tool_start")).toHaveLength(1);
+  });
+});
+
+describe("isReportIntentTool", () => {
+  test("matches all known formats", () => {
+    expect(isReportIntentTool("report_intent")).toBe(true);
+    expect(isReportIntentTool("mcp__intent__report_intent")).toBe(true);
+    expect(isReportIntentTool("intent__report_intent")).toBe(true);
+    expect(isReportIntentTool("intent-report_intent")).toBe(true);
+  });
+
+  test("rejects unrelated tools", () => {
+    expect(isReportIntentTool("Read")).toBe(false);
+    expect(isReportIntentTool("mcp__gmail__search_emails")).toBe(false);
+    expect(isReportIntentTool("report_intent_v2")).toBe(false);
+  });
+});
+
+describe("extractIntentText", () => {
+  test("reads intent / description / text fields from object", () => {
+    expect(extractIntentText({ intent: "looking up X" })).toBe("looking up X");
+    expect(extractIntentText({ description: "drafting reply" })).toBe("drafting reply");
+    expect(extractIntentText({ text: "thinking" })).toBe("thinking");
+  });
+
+  test("parses JSON string arguments (openai-compat path)", () => {
+    expect(extractIntentText('{"intent":"checking calendar"}')).toBe("checking calendar");
+  });
+
+  test("returns undefined for missing or non-string field", () => {
+    expect(extractIntentText({ unrelated: 42 })).toBeUndefined();
+    expect(extractIntentText(null)).toBeUndefined();
+    expect(extractIntentText(undefined)).toBeUndefined();
+    expect(extractIntentText("not json")).toBeUndefined();
+  });
+
+  test("prefers intent over description over text", () => {
+    expect(extractIntentText({ intent: "A", description: "B", text: "C" })).toBe("A");
+    expect(extractIntentText({ description: "B", text: "C" })).toBe("B");
   });
 });
 

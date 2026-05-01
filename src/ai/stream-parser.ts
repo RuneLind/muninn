@@ -50,6 +50,9 @@ export class StreamParser {
   private model = "unknown";
   private inputTokens = 0;
   private outputTokens = 0;
+  /** Last assistant turn's input tokens — actual context window consumption.
+   *  Result event reports cumulative across all turns; this tracks per-turn. */
+  private lastTurnInputTokens = 0;
   private toolCalls: ToolCall[] = [];
   private pendingTools: PendingToolCall[] = [];
   private hasResult = false;
@@ -112,6 +115,16 @@ export class StreamParser {
       this.model = event.message.model;
     }
 
+    // Per-turn usage — track the most recent assistant turn so we can report
+    // actual context-window consumption (vs the cumulative result.usage).
+    const usage = event.message?.usage;
+    if (usage) {
+      this.lastTurnInputTokens =
+        (usage.input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0);
+    }
+
     // Resolve any pending tool calls — the assistant responding means tools finished
     this.resolvePendingTools(timestamp);
 
@@ -129,6 +142,12 @@ export class StreamParser {
           input: block.input,
           startTimestamp: timestamp,
         });
+        // Surface report_intent calls as inline intent bubbles in chat, in
+        // addition to keeping them as a regular tool span in the waterfall.
+        if (isReportIntentTool(block.name)) {
+          const intentText = extractIntentText(block.input);
+          if (intentText) this.onProgress?.({ type: "intent", text: intentText });
+        }
         this.onProgress?.({ type: "tool_start", name: block.name, displayName, input: abbreviateInput(block.input) });
       }
     }
@@ -226,6 +245,7 @@ export class StreamParser {
       model: this.model,
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
+      contextTokens: this.lastTurnInputTokens || undefined,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,
     };
   }
@@ -254,6 +274,44 @@ export function formatToolDisplayName(name: string): string {
   const server = withoutPrefix.slice(0, lastDoubleUnderscore);
   const tool = withoutPrefix.slice(lastDoubleUnderscore + 2);
   return `${tool} (${server})`;
+}
+
+/**
+ * True when a tool name represents the conventional "report_intent" tool —
+ * either bare (Copilot SDK) or wrapped through MCP (`mcp__<server>__report_intent`,
+ * `<server>-report_intent`). Used by all three connectors to surface the
+ * model's plan as an inline intent bubble in chat.
+ */
+export function isReportIntentTool(name: string): boolean {
+  if (name === "report_intent") return true;
+  // mcp__<server>__report_intent
+  if (name.startsWith("mcp__") && name.endsWith("__report_intent")) return true;
+  // <server>__report_intent  (no mcp__ prefix)
+  if (name.endsWith("__report_intent")) return true;
+  // <server>-report_intent  (Copilot SDK / dash-style)
+  if (name.endsWith("-report_intent")) return true;
+  return false;
+}
+
+/**
+ * Extract the human-readable intent text from a `report_intent` tool call's
+ * arguments. Accepts a parsed object (Claude CLI / Copilot SDK) or a JSON
+ * string (OpenAI-compat). Returns undefined if no recognizable text field is
+ * found, in which case callers should not emit an intent event.
+ */
+export function extractIntentText(args: unknown): string | undefined {
+  let obj: unknown = args;
+  if (typeof obj === "string") {
+    try {
+      obj = JSON.parse(obj);
+    } catch {
+      return undefined;
+    }
+  }
+  if (obj == null || typeof obj !== "object") return undefined;
+  const rec = obj as Record<string, unknown>;
+  const text = rec.intent ?? rec.description ?? rec.text;
+  return typeof text === "string" ? text : undefined;
 }
 
 /** Abbreviate tool input to max 500 chars */

@@ -2,7 +2,7 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName } from "../stream-parser.ts";
+import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { parseHuginnTrace } from "../huginn-trace.ts";
 import type { ToolCall } from "../../types.ts";
@@ -181,6 +181,12 @@ export async function executePrompt(
         ? tc.arguments.slice(0, 500) + "…"
         : tc.arguments;
 
+      // Surface report_intent calls as inline intent bubbles in chat, in
+      // addition to keeping them as a regular tool span in the waterfall.
+      if (isReportIntentTool(tc.name)) {
+        const intentText = extractIntentText(tc.arguments);
+        if (intentText) onProgress?.({ type: "intent", text: intentText });
+      }
       onProgress?.({ type: "tool_start", name: tc.name, displayName, input: inputPreview });
 
       let toolResult: string;
@@ -212,10 +218,12 @@ export async function executePrompt(
       onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
       // Strip Huginn search-trace blob (if present) before showing the model
-      // the tool result. The trace is captured separately in the trace span
-      // for inspector use; keeping it out of the LLM context avoids polluting
-      // its turns with debug data. No-op for non-Huginn outputs.
-      const cleaned = parseHuginnTrace(toolResult).text;
+      // the tool result. The trace is captured separately on the tool span
+      // (attributes.searchTrace) for inspector use; keeping it out of the LLM
+      // context avoids polluting its turns with debug data. No-op for
+      // non-Huginn outputs.
+      const parsed = parseHuginnTrace(toolResult);
+      const cleaned = parsed.text;
 
       trackedToolCalls.push({
         id: tc.id,
@@ -225,6 +233,7 @@ export async function executePrompt(
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
         output: truncateOutput(cleaned),
+        searchTrace: parsed.trace ?? undefined,
       });
 
       // Add tool result to conversation

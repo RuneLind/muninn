@@ -319,8 +319,17 @@ export function parseToolName(name: string): { server: string; tool: string } | 
  * Returns undefined for tools that should not show status (e.g. report_intent).
  */
 export function getToolStatus(toolName: string, input?: string): string | undefined {
-  // Skip report_intent — it generates its own intent events
-  if (toolName === "report_intent") return undefined;
+  // Skip report_intent — it generates its own intent events.
+  // Match across all connector formats (bare, mcp__server__report_intent,
+  // server-report_intent) so claude-cli/openai-compat exposed tools are also
+  // suppressed.
+  if (
+    toolName === "report_intent" ||
+    toolName.endsWith("__report_intent") ||
+    toolName.endsWith("-report_intent")
+  ) {
+    return undefined;
+  }
 
   const parsed = parseToolName(toolName);
   if (!parsed) {
