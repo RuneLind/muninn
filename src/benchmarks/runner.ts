@@ -926,13 +926,29 @@ async function prepareScratchBotDir(
   const newMcp: { mcpServers: Record<string, unknown> } = { mcpServers: {} };
   const baseKnowledge = baseMcpJson.mcpServers["knowledge"];
   if (baseKnowledge) {
-    // Pin stdio entries' cwd to the *original* bot dir. Without this, relative
-    // paths in args (e.g. `--directory ../../../huginn`) resolve against the
-    // deeper scratch dir and silently miss the target — leaving the bot with
-    // no knowledge tools while the rest of the cell runs as if it had them.
-    const entry = baseKnowledge as { type?: string; cwd?: string };
-    if (entry.type !== "http" && entry.type !== "sse" && entry.cwd === undefined) {
-      newMcp.mcpServers["knowledge"] = { ...entry, cwd: base.dir };
+    // Claude CLI ignores the `cwd` field on stdio MCP entries and spawns the
+    // subprocess from its own cwd — which is the scratch dir for benchmark
+    // cells. Relative paths in `args` (e.g. `uv --directory ../../../huginn`)
+    // therefore resolve to the wrong place and the server silently fails to
+    // start. Pre-resolve them against the original bot dir so the spawn works
+    // regardless of which connector reads the config. Copilot SDK does honour
+    // `cwd`, so we keep that field too — absolute args make it a no-op there.
+    const entry = baseKnowledge as {
+      type?: string;
+      cwd?: string;
+      args?: unknown[];
+    };
+    if (entry.type !== "http" && entry.type !== "sse") {
+      const resolvedArgs = (entry.args ?? []).map((arg) =>
+        typeof arg === "string" && (arg.startsWith("./") || arg.startsWith("../"))
+          ? resolve(base.dir, arg)
+          : arg,
+      );
+      newMcp.mcpServers["knowledge"] = {
+        ...entry,
+        args: resolvedArgs,
+        cwd: entry.cwd ?? base.dir,
+      };
     } else {
       newMcp.mcpServers["knowledge"] = baseKnowledge;
     }
