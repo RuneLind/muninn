@@ -205,7 +205,16 @@ export function searchTraceDetailScript(): string {
     };
 
     function renderSearchTrace(trace) {
-      window.__sttState.trace = trace;
+      // New trace identity → reset sort/filter/qFilter so leftover state from
+      // the previous span (which may have been a different shape) doesn't
+      // silently flip ordering or hide rows.
+      if (window.__sttState.trace !== trace) {
+        window.__sttState.sortKey = 'final';
+        window.__sttState.sortDir = 'asc';
+        window.__sttState.filter = 'kept-top';
+        window.__sttState.qFilter = '';
+        window.__sttState.trace = trace;
+      }
       if (window.__sttState.showRaw) {
         return '<pre class="stt-raw">' + esc(JSON.stringify(trace, null, 2)) + '</pre>' +
                '<div class="stt-toolbar"><button class="stt-active" onclick="sttToggleRaw()">Show structured</button></div>';
@@ -221,7 +230,9 @@ export function searchTraceDetailScript(): string {
     }
 
     function sttIsYggdrasilTrace(trace) {
-      return !!(trace && trace.tool === 'search' && !Array.isArray(trace.collections));
+      return !!(trace && typeof trace.tool === 'string' &&
+                !Array.isArray(trace.collections) &&
+                Array.isArray(trace.candidates));
     }
 
     function sttToggleRaw() {
@@ -281,18 +292,26 @@ export function searchTraceDetailScript(): string {
       return collections.map((c, i) => sttRenderCollection(c, i)).join('');
     }
 
+    function sttBuildTimingsStrip(timings, keys, labels) {
+      let sum = 0;
+      for (const k of keys) if (timings[k] > 0) sum += timings[k];
+      const total = sum || timings.total || 0;
+      let segs = '';
+      let legend = '';
+      for (const k of keys) {
+        const ms = timings[k];
+        if (!(ms > 0)) continue;
+        const pct = total > 0 ? (ms / total) * 100 : 0;
+        segs += '<div class="stt-strip-seg stt-stage-' + k + '" style="width:' + pct + '%" title="' + labels[k] + ' — ' + ms + 'ms">' +
+          (pct > 8 ? labels[k] + ' ' + ms + 'ms' : '') + '</div>';
+        legend += '<span class="stt-leg-' + k + '">' + labels[k] + ' ' + ms + 'ms</span>';
+      }
+      return { segs, legend, total };
+    }
+
     function sttRenderCollection(c, idx) {
       const timings = c.timingsMs || {};
-      const total = STT_STAGES.reduce((s, k) => s + (timings[k] > 0 ? timings[k] : 0), 0) || timings.total || 0;
-      const stripSegs = STT_STAGES.filter(k => timings[k] > 0).map(k => {
-        const pct = total > 0 ? (timings[k] / total) * 100 : 0;
-        return '<div class="stt-strip-seg stt-stage-' + k + '" style="width:' + pct + '%" title="' + STT_STAGE_LABELS[k] + ' — ' + timings[k] + 'ms">' +
-          (pct > 8 ? STT_STAGE_LABELS[k] + ' ' + timings[k] + 'ms' : '') +
-        '</div>';
-      }).join('');
-      const legend = STT_STAGES.filter(k => timings[k] > 0).map(k =>
-        '<span class="stt-leg-' + k + '">' + STT_STAGE_LABELS[k] + ' ' + timings[k] + 'ms</span>'
-      ).join('');
+      const strip = sttBuildTimingsStrip(timings, STT_STAGES, STT_STAGE_LABELS);
 
       const conf = c.confidence || {};
       const confBlock = sttRenderConfidence(conf);
@@ -303,10 +322,10 @@ export function searchTraceDetailScript(): string {
           (c.indexer ? 'indexer=' + esc(c.indexer) : '') +
           (c.fetchK != null ? ' · fetchK=' + c.fetchK : '') +
           ' · candidates=' + (c.candidates || []).length +
-          ' · ' + (timings.total != null ? timings.total + 'ms' : total + 'ms') +
+          ' · ' + (timings.total != null ? timings.total + 'ms' : strip.total + 'ms') +
         '</span></h5>' +
-        '<div class="stt-strip">' + stripSegs + '</div>' +
-        (legend ? '<div class="stt-strip-legend">' + legend + '</div>' : '') +
+        '<div class="stt-strip">' + strip.segs + '</div>' +
+        (strip.legend ? '<div class="stt-strip-legend">' + strip.legend + '</div>' : '') +
         confBlock +
         candTable +
       '</div>';
@@ -444,6 +463,7 @@ export function searchTraceDetailScript(): string {
 
     const STT_YGG_STAGES = ['fts','semantic','name','rrf','final'];
     const STT_YGG_TIMING_KEYS = ['embedding','fts','semantic','name','rrf'];
+    const STT_YGG_SORT_KEYS = STT_YGG_STAGES.concat(['qualifiedName','kind']);
     const STT_YGG_LABELS = {
       embedding: 'embed', fts: 'FTS', semantic: 'semantic',
       name: 'name', rrf: 'RRF', final: 'final',
@@ -479,93 +499,69 @@ export function searchTraceDetailScript(): string {
     }
 
     function sttRenderYggTimings(timings) {
-      var sum = 0;
-      for (var i = 0; i < STT_YGG_TIMING_KEYS.length; i++) {
-        var k = STT_YGG_TIMING_KEYS[i];
-        if (timings[k] > 0) sum += timings[k];
-      }
-      var total = sum || timings.total || 0;
-      var stripSegs = '';
-      var legend = '';
-      for (var j = 0; j < STT_YGG_TIMING_KEYS.length; j++) {
-        var key = STT_YGG_TIMING_KEYS[j];
-        var ms = timings[key];
-        if (!(ms > 0)) continue;
-        var pct = total > 0 ? (ms / total) * 100 : 0;
-        stripSegs += '<div class="stt-strip-seg stt-stage-' + key + '" style="width:' + pct + '%" title="' +
-          STT_YGG_LABELS[key] + ' — ' + ms + 'ms">' +
-          (pct > 8 ? STT_YGG_LABELS[key] + ' ' + ms + 'ms' : '') +
-        '</div>';
-        legend += '<span class="stt-leg-' + key + '">' + STT_YGG_LABELS[key] + ' ' + ms + 'ms</span>';
-      }
-      var totalLabel = timings.total != null ? timings.total : total;
+      const strip = sttBuildTimingsStrip(timings, STT_YGG_TIMING_KEYS, STT_YGG_LABELS);
+      if (!strip.segs) return '';
+      const totalLabel = timings.total != null ? timings.total : strip.total;
       return '<div class="stt-section">' +
         '<h5>Timings <span style="color:var(--text-faint);font-weight:normal;text-transform:none;letter-spacing:0">total=' + totalLabel + 'ms</span></h5>' +
-        '<div class="stt-strip">' + stripSegs + '</div>' +
-        (legend ? '<div class="stt-strip-legend">' + legend + '</div>' : '') +
+        '<div class="stt-strip">' + strip.segs + '</div>' +
+        (strip.legend ? '<div class="stt-strip-legend">' + strip.legend + '</div>' : '') +
       '</div>';
     }
 
     function sttRenderYggCandidates(cands) {
       if (!cands.length) return '';
-      var s = window.__sttState;
-      var qf = ((s.qFilter || '') + '').trim().toLowerCase();
-      var filtered = cands.slice();
+      const s = window.__sttState;
+      const qf = ((s.qFilter || '') + '').trim().toLowerCase();
+      let filtered = cands;
       if (qf) {
-        filtered = filtered.filter(function (c) {
-          return (c.qualifiedName || '').toLowerCase().indexOf(qf) !== -1;
-        });
+        filtered = cands.filter(c => (c.qualifiedName || '').toLowerCase().indexOf(qf) !== -1);
       }
-      var visible = s.filter === 'all'
-        ? filtered
-        : filtered.filter(function (c) { return c.stages && c.stages.final; }).slice(0, 20);
+      const visible = s.filter === 'all'
+        ? filtered.slice()
+        : filtered.filter(c => c.stages && c.stages.final).slice(0, 20);
 
-      var sortKey = STT_YGG_STAGES.indexOf(s.sortKey) !== -1 || s.sortKey === 'qualifiedName' || s.sortKey === 'kind'
-        ? s.sortKey : 'final';
-      var mul = s.sortDir === 'asc' ? 1 : -1;
-      function valFor(c) {
+      const sortKey = STT_YGG_SORT_KEYS.indexOf(s.sortKey) !== -1 ? s.sortKey : 'final';
+      const mul = s.sortDir === 'asc' ? 1 : -1;
+      const valFor = (c) => {
         if (sortKey === 'qualifiedName') return (c.qualifiedName || '').toLowerCase();
         if (sortKey === 'kind') return c.kind || '';
-        var stage = c.stages && c.stages[sortKey];
+        const stage = c.stages && c.stages[sortKey];
         return stage && typeof stage.rank === 'number' ? stage.rank : Infinity;
-      }
-      visible.sort(function (a, b) {
-        var va = valFor(a), vb = valFor(b);
+      };
+      visible.sort((a, b) => {
+        const va = valFor(a), vb = valFor(b);
         if (va < vb) return -1 * mul;
         if (va > vb) return 1 * mul;
         return 0;
       });
 
-      var cols = [
-        { key: null,             label: '#'              },
-        { key: null,             label: 'symbol'         },
-        { key: 'qualifiedName',  label: 'qualifiedName'  },
-        { key: 'kind',           label: 'kind'           },
-        { key: 'fts',            label: 'FTS'            },
-        { key: 'semantic',       label: 'semantic'       },
-        { key: 'name',           label: 'name'           },
-        { key: 'rrf',            label: 'RRF'            },
-        { key: 'final',          label: 'final'          },
+      const cols = [
+        { key: null,            label: '#'             },
+        { key: null,            label: 'symbol'        },
+        { key: 'qualifiedName', label: 'qualifiedName' },
+        { key: 'kind',          label: 'kind'          },
+        { key: 'fts',           label: 'FTS'           },
+        { key: 'semantic',      label: 'semantic'      },
+        { key: 'name',          label: 'name'          },
+        { key: 'rrf',           label: 'RRF'           },
+        { key: 'final',         label: 'final'         },
       ];
-      var header = '<thead><tr>';
-      for (var ci = 0; ci < cols.length; ci++) {
-        var col = cols[ci];
-        if (!col.key) { header += '<th>' + esc(col.label) + '</th>'; continue; }
-        var arrow = s.sortKey === col.key ? (s.sortDir === 'asc' ? ' \\u25B2' : ' \\u25BC') : '';
-        header += '<th onclick="sttSetSort(\\'' + col.key + '\\')">' + esc(col.label) + arrow + '</th>';
-      }
-      header += '</tr></thead>';
+      const header = '<thead><tr>' + cols.map(col => {
+        if (!col.key) return '<th>' + esc(col.label) + '</th>';
+        const arrow = s.sortKey === col.key ? (s.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        return '<th onclick="sttSetSort(\\'' + col.key + '\\')">' + esc(col.label) + arrow + '</th>';
+      }).join('') + '</tr></thead>';
 
-      var rows = '';
-      for (var ri = 0; ri < visible.length; ri++) {
-        var c = visible[ri];
-        var stages = c.stages || {};
-        var sym = c.symbolId ? c.symbolId.slice(0, 8) : '';
-        var qn = c.qualifiedName || '';
-        rows += '<tr>' +
-          '<td class="stt-num">' + (ri + 1) + '</td>' +
-          '<td class="stt-sym" title="' + esc(c.symbolId || '') + '">' + esc(sym) + '</td>' +
-          '<td class="stt-title" title="' + esc(qn) + '">' + esc(qn) + '</td>' +
+      const rows = visible.map((c, i) => {
+        const stages = c.stages || {};
+        const symEsc = esc(c.symbolId || '');
+        const qnEsc = esc(c.qualifiedName || '');
+        const sym = c.symbolId ? c.symbolId.slice(0, 8) : '';
+        return '<tr>' +
+          '<td class="stt-num">' + (i + 1) + '</td>' +
+          '<td class="stt-sym" title="' + symEsc + '">' + esc(sym) + '</td>' +
+          '<td class="stt-title" title="' + qnEsc + '">' + qnEsc + '</td>' +
           '<td>' + (c.kind ? '<span class="stt-chip">' + esc(c.kind) + '</span>' : '') + '</td>' +
           '<td class="stt-num">' + sttFmtRank(stages.fts) + '</td>' +
           '<td class="stt-num">' + sttFmtRank(stages.semantic) + '</td>' +
@@ -573,31 +569,37 @@ export function searchTraceDetailScript(): string {
           '<td class="stt-num">' + sttFmtRank(stages.rrf) + '</td>' +
           '<td class="stt-num">' + sttFmtRank(stages.final) + '</td>' +
         '</tr>';
-      }
+      }).join('');
 
-      function btn(key, label) {
-        return '<button class="' + (s.filter === key ? 'stt-active' : '') +
-          '" onclick="sttSetFilter(\\'' + key + '\\')">' + label + '</button>';
-      }
+      const btn = (key, label) =>
+        '<button class="' + (s.filter === key ? 'stt-active' : '') +
+        '" onclick="sttSetFilter(\\'' + key + '\\')">' + label + '</button>';
       return '<div style="margin-top:12px">' +
         '<div class="stt-toolbar">' +
           '<span>Candidates (' + visible.length + '/' + cands.length + ')</span>' +
           btn('kept-top', 'top 20 final') +
           btn('all', 'all') +
-          '<input class="stt-qf" type="text" placeholder="filter qualifiedName\\u2026" value="' + esc(s.qFilter || '') + '" oninput="sttSetQFilter(this.value)">' +
+          '<input class="stt-qf" type="text" placeholder="filter qualifiedName…" value="' + esc(s.qFilter || '') + '" oninput="sttSetQFilter(this.value)">' +
         '</div>' +
         '<div class="stt-cands-wrap"><table class="stt-cands">' + header + '<tbody>' + rows + '</tbody></table></div>' +
       '</div>';
     }
 
     function sttSetQFilter(v) {
+      // Capture caret position before sttRerender swaps innerHTML — otherwise
+      // the cursor jumps to the end on every keystroke and editing mid-string
+      // becomes impossible.
+      const prev = document.querySelector('.stt-qf');
+      const start = prev ? prev.selectionStart : null;
+      const end = prev ? prev.selectionEnd : null;
       window.__sttState.qFilter = v;
       sttRerender();
-      var input = document.querySelector('.stt-qf');
-      if (input) {
-        input.focus();
-        var len = input.value.length;
-        try { input.setSelectionRange(len, len); } catch (e) {}
+      const next = document.querySelector('.stt-qf');
+      if (next) {
+        next.focus();
+        if (start != null && end != null) {
+          try { next.setSelectionRange(start, end); } catch (e) {}
+        }
       }
     }
   `;

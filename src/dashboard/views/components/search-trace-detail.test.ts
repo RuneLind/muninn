@@ -228,8 +228,10 @@ describe("renderSearchTrace — yggdrasil shape", () => {
   });
 
   test("candidates table renders one row per candidate without 'undefined' for missing stages", () => {
+    const trace = yggFixture();
+    sb.renderSearchTrace(trace); // seed state for this trace identity
     sb.getState().filter = 'all'; // include candidates without a final stage
-    const html = sb.renderSearchTrace(yggFixture());
+    const html = sb.renderSearchTrace(trace);
     expect(html).toContain("BehandlingService");
     expect(html).toContain("A011Mapper.mapFraSed");
     expect(html).not.toContain("undefined");
@@ -275,9 +277,11 @@ describe("renderSearchTrace — yggdrasil shape", () => {
   });
 
   test("substring filter on qualifiedName narrows the candidate list", () => {
+    const trace = yggFixture();
+    sb.renderSearchTrace(trace); // seed state for this trace identity
     sb.getState().qFilter = 'A011';
     sb.getState().filter = 'all';
-    const html = sb.renderSearchTrace(yggFixture());
+    const html = sb.renderSearchTrace(trace);
     expect(html).toContain("A011Mapper.mapFraSed");
     expect(html).not.toContain(">no.nav.melosys.service.behandling.BehandlingService<");
     expect(html).toContain("Candidates (1/3)");
@@ -291,5 +295,22 @@ describe("renderSearchTrace — yggdrasil shape", () => {
     });
     expect(html).not.toContain("tool: search");
     expect(html).toContain("Collection");
+  });
+
+  test("clicking a new trace resets sort/filter state from the previous trace", () => {
+    const trace1 = yggFixture();
+    sb.renderSearchTrace(trace1);
+    sb.getState().sortKey = 'fts';
+    sb.getState().sortDir = 'desc';
+    sb.getState().qFilter = 'A011';
+    // Same trace identity — state should persist across re-renders.
+    sb.renderSearchTrace(trace1);
+    expect(sb.getState().sortKey).toBe('fts');
+    expect(sb.getState().qFilter).toBe('A011');
+    // Different trace identity (next click) — state should reset.
+    sb.renderSearchTrace(yggFixture());
+    expect(sb.getState().sortKey).toBe('final');
+    expect(sb.getState().sortDir).toBe('asc');
+    expect(sb.getState().qFilter).toBe('');
   });
 });
