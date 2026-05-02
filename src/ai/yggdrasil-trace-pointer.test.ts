@@ -1,8 +1,5 @@
-import { test, expect, mock, afterEach } from "bun:test";
-import {
-  parseYggdrasilTracePointer,
-  fetchYggdrasilTrace,
-} from "./yggdrasil-trace-pointer.ts";
+import { test, expect } from "bun:test";
+import { parseYggdrasilTracePointer } from "./yggdrasil-trace-pointer.ts";
 
 // ── parseYggdrasilTracePointer ───────────────────────────────
 
@@ -88,6 +85,35 @@ test("empty allow-list rejects every URL pointer", () => {
   expect(text).toBe("results");
 });
 
+test("wrapped envelope with disallowed origin is also rejected", () => {
+  const inner =
+    "results\n\nyggdrasil-trace-url: https://evil.example/api/trace/cafef00ddeadbeef\n";
+  const wrapped = JSON.stringify({ result: inner });
+  const { text, fetchUrl } = parseYggdrasilTracePointer(wrapped, [
+    "http://127.0.0.1:9130",
+  ]);
+  expect(fetchUrl).toBeNull();
+  // Pointer line is stripped from the inner text even though origin was rejected.
+  expect(text).toBe("results");
+  expect(text).not.toContain("yggdrasil-trace-url");
+});
+
+test("default allow-list reads YGGDRASIL_MCP_URL from config", () => {
+  const prev = process.env.YGGDRASIL_MCP_URL;
+  process.env.YGGDRASIL_MCP_URL = "http://config-host.local:7777";
+  try {
+    const input =
+      "results\n\nyggdrasil-trace-url: http://config-host.local:7777/api/trace/aaaabbbbccccdddd";
+    const { fetchUrl } = parseYggdrasilTracePointer(input);
+    expect(fetchUrl).toBe(
+      "http://config-host.local:7777/api/trace/aaaabbbbccccdddd",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.YGGDRASIL_MCP_URL;
+    else process.env.YGGDRASIL_MCP_URL = prev;
+  }
+});
+
 // ── regex shape ──────────────────────────────────────────────
 
 test("non-/api/trace/ path does not match", () => {
@@ -130,7 +156,6 @@ test("extra path segments after id do not match", () => {
 });
 
 test("does not match huginn-trace-url marker", () => {
-  // Disjoint producers: yggdrasil parser must not accidentally pick up huginn's.
   const input =
     "results\n\nhuginn-trace-url: http://127.0.0.1:9130/api/trace/cafef00ddeadbeef";
   const { fetchUrl, text } = parseYggdrasilTracePointer(input, [
@@ -138,50 +163,4 @@ test("does not match huginn-trace-url marker", () => {
   ]);
   expect(fetchUrl).toBeNull();
   expect(text).toBe(input);
-});
-
-// ── fetchYggdrasilTrace ──────────────────────────────────────
-
-const realFetch = globalThis.fetch;
-
-afterEach(() => {
-  globalThis.fetch = realFetch;
-});
-
-test("fetches and returns parsed trace on 200", async () => {
-  globalThis.fetch = mock(async () =>
-    new Response(JSON.stringify({ schemaVersion: 1, tool: "search" }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-  ) as unknown as typeof fetch;
-  const trace = await fetchYggdrasilTrace("http://x:1/api/trace/abc");
-  expect(trace).toEqual({ schemaVersion: 1, tool: "search" });
-});
-
-test("returns null on 404 (expired / unknown)", async () => {
-  globalThis.fetch = mock(async () =>
-    new Response("not found", { status: 404 }),
-  ) as unknown as typeof fetch;
-  expect(await fetchYggdrasilTrace("http://x:1/api/trace/abc")).toBeNull();
-});
-
-test("returns null on network error", async () => {
-  globalThis.fetch = mock(async () => {
-    throw new Error("ECONNREFUSED");
-  }) as unknown as typeof fetch;
-  expect(await fetchYggdrasilTrace("http://x:1/api/trace/abc")).toBeNull();
-});
-
-test("returns null on timeout", async () => {
-  globalThis.fetch = mock(
-    (_url: string, init: RequestInit | undefined) =>
-      new Promise<Response>((_, reject) => {
-        init?.signal?.addEventListener("abort", () =>
-          reject(new DOMException("aborted", "AbortError")),
-        );
-      }),
-  ) as unknown as typeof fetch;
-  const trace = await fetchYggdrasilTrace("http://x:1/api/trace/abc", 50);
-  expect(trace).toBeNull();
 });

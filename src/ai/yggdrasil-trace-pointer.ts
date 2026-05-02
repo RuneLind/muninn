@@ -1,6 +1,11 @@
 import { loadConfig } from "../config.ts";
 import { getLog } from "../logging.ts";
 import { extractMcpResultText } from "./huginn-trace.ts";
+import {
+  isUrlOriginAllowed,
+  safeOrigin,
+  type PointerExtraction,
+} from "./huginn-trace-pointer.ts";
 
 const log = getLog("ai", "yggdrasil-trace-pointer");
 
@@ -14,40 +19,16 @@ const log = getLog("ai", "yggdrasil-trace-pointer");
  *
  *     yggdrasil-trace-url: http://127.0.0.1:9130/api/trace/a3f8b21c4e9d0a55
  *
- * 16-hex id, 5-min TTL on the producer side, non-consumptive get.
+ * The `/api/trace/<16-hex>` shape is locked into the regex so a malformed
+ * URL embedded in a search hit can never reach the trace fetcher.
  */
 
 const POINTER_RE =
   /\n+yggdrasil-trace-url: (https?:\/\/\S+?\/api\/trace\/[0-9a-f]{16})\s*$/;
 
-export interface PointerExtraction {
-  /** Tool output with the pointer line stripped. Same string when no pointer. */
-  text: string;
-  /** Resolved fetch URL, or null if no pointer was present / origin disallowed. */
-  fetchUrl: string | null;
-}
-
-function safeOrigin(url: string): string | null {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Origins muninn is willing to issue trace fetches against. Defaults to the
- * `YGGDRASIL_MCP_URL` origin so a planted `yggdrasil-trace-url:` line in a
- * search hit can't redirect muninn at an arbitrary host.
- */
 function getDefaultAllowedOrigins(): string[] {
   const origin = safeOrigin(loadConfig().yggdrasilMcpUrl);
   return origin === null ? [] : [origin];
-}
-
-function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
-  const origin = safeOrigin(url);
-  return origin !== null && allowedOrigins.includes(origin);
 }
 
 export function parseYggdrasilTracePointer(
@@ -86,29 +67,4 @@ function matchPointer(
     { url, allowed: allowedOrigins.join(",") },
   );
   return { text, fetchUrl: null };
-}
-
-/**
- * Fetch a yggdrasil trace by URL. Returns the parsed JSON body on 2xx, null
- * otherwise. Never throws — pointer traces are observability and must never
- * break the request.
- */
-export async function fetchYggdrasilTrace(
-  url: string,
-  timeoutMs = 2000,
-): Promise<unknown | null> {
-  try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp.ok) {
-      log.warn("Trace fetch returned {status} for {url}", { status: resp.status, url });
-      return null;
-    }
-    return await resp.json();
-  } catch (e) {
-    log.warn("Trace fetch failed for {url}: {error}", {
-      url,
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return null;
-  }
 }

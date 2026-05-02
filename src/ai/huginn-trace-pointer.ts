@@ -51,7 +51,7 @@ export interface PointerExtraction {
   fetchUrl: string | null;
 }
 
-function safeOrigin(url: string): string | null {
+export function safeOrigin(url: string): string | null {
   try {
     return new URL(url).origin;
   } catch {
@@ -70,7 +70,7 @@ function getDefaultAllowedOrigins(): string[] {
   return origin === null ? [] : [origin];
 }
 
-function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
+export function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
   const origin = safeOrigin(url);
   return origin !== null && allowedOrigins.includes(origin);
 }
@@ -130,9 +130,7 @@ export function peelHuginnTraceChannel(
   if (ptr.fetchUrl !== null) {
     return { text: ptr.text, pointer: ptr.fetchUrl };
   }
-  // Yggdrasil emits its own pointer line with a different prefix; same shape,
-  // disjoint from huginn's. Per producer = per allow-list, so we don't share
-  // the `allowedOrigins` argument across producers.
+  // Disjoint allow-list per producer — yggdrasil reads its own env.
   const ygg = parseYggdrasilTracePointer(text);
   if (ygg.fetchUrl !== null) {
     return { text: ygg.text, pointer: ygg.fetchUrl };
