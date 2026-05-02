@@ -33,15 +33,43 @@ const log = getLog("ai", "huginn-trace-pointer");
  * observability.
  */
 
-/** Match either a bare id or a full URL pointer line. */
+/**
+ * Match either a bare id or a full URL pointer line. The URL form is locked to
+ * the `/api/trace/<16hex>` path shape so a malformed or attacker-shaped URL in
+ * a search-hit body never reaches {@link fetchHuginnTrace} (belt-and-suspenders
+ * with the host allow-list below).
+ */
 const POINTER_RE =
-  /\n+(?:huginn-trace-id: ([0-9a-f]{16})|huginn-trace-url: (https?:\/\/[^\s]+))\s*$/;
+  /\n+(?:huginn-trace-id: ([0-9a-f]{16})|huginn-trace-url: (https?:\/\/\S+?\/api\/trace\/[0-9a-f]{16}))\s*$/;
 
 export interface PointerExtraction {
   /** Tool output with the pointer line stripped. Same string when no pointer. */
   text: string;
   /** Resolved fetch URL, or null if no pointer was present / parse failed. */
   fetchUrl: string | null;
+}
+
+/**
+ * Origins Muninn is willing to issue trace fetches against. Defaults to the
+ * `KNOWLEDGE_API_URL` origin (the same env Huginn-side uses) so a planted
+ * `huginn-trace-url:` line in a search hit can't trick Muninn into hitting
+ * an arbitrary host. Read at call time so tests can override the env.
+ */
+function getDefaultAllowedOrigins(): string[] {
+  const raw = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+  try {
+    return [new URL(raw).origin];
+  } catch {
+    return [];
+  }
+}
+
+function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
+  try {
+    return allowedOrigins.includes(new URL(url).origin);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -58,15 +86,16 @@ export interface PointerExtraction {
 export function parseHuginnTracePointer(
   output: string,
   defaultBaseUrl?: string,
+  allowedOrigins: string[] = getDefaultAllowedOrigins(),
 ): PointerExtraction {
   if (output.length === 0) return { text: output, fetchUrl: null };
 
-  const direct = matchPointer(output, defaultBaseUrl);
+  const direct = matchPointer(output, defaultBaseUrl, allowedOrigins);
   if (direct !== null) return direct;
 
   const inner = extractMcpResultText(output);
   if (inner !== null && inner !== output) {
-    const wrapped = matchPointer(inner, defaultBaseUrl);
+    const wrapped = matchPointer(inner, defaultBaseUrl, allowedOrigins);
     if (wrapped !== null) return wrapped;
   }
 
@@ -90,8 +119,11 @@ export interface HuginnTraceChannel {
  *
  * Returns `text` unchanged when neither channel matched.
  */
-export function peelHuginnTraceChannel(text: string): HuginnTraceChannel {
-  const ptr = parseHuginnTracePointer(text);
+export function peelHuginnTraceChannel(
+  text: string,
+  allowedOrigins?: string[],
+): HuginnTraceChannel {
+  const ptr = parseHuginnTracePointer(text, undefined, allowedOrigins);
   if (ptr.fetchUrl !== null) {
     return { text: ptr.text, pointer: ptr.fetchUrl };
   }
@@ -103,24 +135,36 @@ export function peelHuginnTraceChannel(text: string): HuginnTraceChannel {
 }
 
 /** Try the pointer regex against `output`. Returns split + URL on hit, null on miss. */
-function matchPointer(output: string, defaultBaseUrl?: string): PointerExtraction | null {
+function matchPointer(
+  output: string,
+  defaultBaseUrl: string | undefined,
+  allowedOrigins: string[],
+): PointerExtraction | null {
   const match = output.match(POINTER_RE);
   if (!match) return null;
 
   const id = match[1];
   const url = match[2];
+  const text = output.slice(0, match.index!).replace(/\s+$/, "");
+
   let fetchUrl: string | null = null;
   if (url) {
-    fetchUrl = url;
+    if (isUrlOriginAllowed(url, allowedOrigins)) {
+      fetchUrl = url;
+    } else {
+      log.warn(
+        "Pointer URL {url} origin not in allow-list {allowed}; trace will not be fetched",
+        { url, allowed: allowedOrigins.join(",") },
+      );
+    }
   } else if (id) {
     if (!defaultBaseUrl) {
       log.warn("Pointer id {id} found but no defaultBaseUrl; trace will not be fetched", { id });
-      return { text: output.slice(0, match.index!).replace(/\s+$/, ""), fetchUrl: null };
+    } else {
+      fetchUrl = `${defaultBaseUrl.replace(/\/+$/, "")}/api/trace/${id}`;
     }
-    fetchUrl = `${defaultBaseUrl.replace(/\/+$/, "")}/api/trace/${id}`;
   }
 
-  const text = output.slice(0, match.index!).replace(/\s+$/, "");
   return { text, fetchUrl };
 }
 

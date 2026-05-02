@@ -94,6 +94,82 @@ test("ignores envelope-shaped strings that don't actually parse as JSON", () => 
   expect(fetchUrl).toBeNull();
 });
 
+// ── host allow-list (security: don't fetch arbitrary URLs from search hits) ──
+
+test("URL pointer with allowed origin is fetched", () => {
+  const input = "results\n\nhuginn-trace-url: http://huginn.local:8321/api/trace/cafef00ddeadbeef";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, undefined, [
+    "http://huginn.local:8321",
+  ]);
+  expect(fetchUrl).toBe("http://huginn.local:8321/api/trace/cafef00ddeadbeef");
+  expect(text).toBe("results");
+});
+
+test("URL pointer with disallowed origin is dropped (line stripped, no fetch)", () => {
+  const input = "results\n\nhuginn-trace-url: https://evil.example/api/trace/cafef00ddeadbeef";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, undefined, [
+    "http://localhost:8321",
+  ]);
+  expect(fetchUrl).toBeNull();
+  // Pointer line is still stripped — model must never see it even on misconfig.
+  expect(text).toBe("results");
+  expect(text).not.toContain("huginn-trace-url");
+});
+
+test("multi-host allow-list permits any matching origin", () => {
+  const allowed = ["http://h1:1", "http://h2:2", "http://h3:3"];
+
+  const hit = parseHuginnTracePointer(
+    "results\n\nhuginn-trace-url: http://h2:2/api/trace/cafef00ddeadbeef",
+    undefined,
+    allowed,
+  );
+  expect(hit.fetchUrl).toBe("http://h2:2/api/trace/cafef00ddeadbeef");
+
+  const miss = parseHuginnTracePointer(
+    "results\n\nhuginn-trace-url: http://h4:4/api/trace/cafef00ddeadbeef",
+    undefined,
+    allowed,
+  );
+  expect(miss.fetchUrl).toBeNull();
+  expect(miss.text).toBe("results");
+});
+
+test("empty allow-list rejects every URL pointer", () => {
+  const input = "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, undefined, []);
+  expect(fetchUrl).toBeNull();
+  expect(text).toBe("results");
+});
+
+// ── regex shape (URL must look like /api/trace/<16hex>) ──
+
+test("URL pointing to non-/api/trace/ path does not match", () => {
+  const input = "results\n\nhuginn-trace-url: http://localhost:8321/cafef00ddeadbeef";
+  const { fetchUrl, text } = parseHuginnTracePointer(input);
+  expect(fetchUrl).toBeNull();
+  // Regex didn't match → original text returned unchanged.
+  expect(text).toBe(input);
+});
+
+test("URL with non-16-hex id at end does not match", () => {
+  const tooShort = "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/deadbeef";
+  expect(parseHuginnTracePointer(tooShort).fetchUrl).toBeNull();
+
+  const nonHex = "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/g3f8b21c4e9d0a55";
+  expect(parseHuginnTracePointer(nonHex).fetchUrl).toBeNull();
+
+  const tooLong = "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef00";
+  expect(parseHuginnTracePointer(tooLong).fetchUrl).toBeNull();
+});
+
+test("URL with extra path segments after the id does not match", () => {
+  const input =
+    "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef/extra";
+  const { fetchUrl } = parseHuginnTracePointer(input);
+  expect(fetchUrl).toBeNull();
+});
+
 // ── fetchHuginnTrace ─────────────────────────────────────────
 
 const realFetch = globalThis.fetch;
@@ -116,6 +192,13 @@ test("fetches and returns parsed trace on 200", async () => {
 test("returns null on 404 (expired / unknown)", async () => {
   globalThis.fetch = mock(async () =>
     new Response("not found", { status: 404 }),
+  ) as unknown as typeof fetch;
+  expect(await fetchHuginnTrace("http://x:1/api/trace/abc")).toBeNull();
+});
+
+test("returns null on 5xx (server error)", async () => {
+  globalThis.fetch = mock(async () =>
+    new Response("internal error", { status: 500 }),
   ) as unknown as typeof fetch;
   expect(await fetchHuginnTrace("http://x:1/api/trace/abc")).toBeNull();
 });
