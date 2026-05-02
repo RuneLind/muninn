@@ -92,31 +92,38 @@ What this buys us:
 
 | Layer | Result |
 |---|---|
-| **MCP spec** (`spec.types.d.ts:Result`) | `_meta?: { [key: string]: unknown }` is on the base `Result` type that `CallToolResult` extends. Spec-level support confirmed. |
-| **TS SDK client** (`@modelcontextprotocol/sdk` in muninn) | `client.callTool()` returns top-level `_meta?: { progressToken?, "io.modelcontextprotocol/related-task"?, [x:string]: unknown }`. Custom `_meta` keys are preserved verbatim. ✅ |
-| **Python SDK server** (`mcp.types.CallToolResult` extends `Result`) | `meta: dict[str, Any] \| None = Field(alias="_meta")`. Setting it serializes to JSON `_meta` over the wire. ✅ |
-| **FastMCP tool returns** (`func_metadata.py`) | `if isinstance(result, CallToolResult): … return result` — FastMCP passes `CallToolResult` through unchanged, including `_meta`. ✅ |
-| **Muninn's openai-compat path** (`mcp-client.ts:148`) | Returns the raw SDK result; just read `(result as any)._meta?.["huginn.trace"]`. ✅ |
-| **Claude CLI NDJSON** | **Not yet probed.** Need to write a tiny test MCP server that sets `_meta`, run `claude -p --output-format stream-json --verbose`, and grep the NDJSON `tool_result` block for `_meta`. This is the load-bearing unknown. |
-| **Copilot SDK** | **Not yet probed.** Need to inspect `event.data.result` shape on a `tool.execution_complete` event when the upstream tool sets `_meta`. |
+| **MCP spec** (`spec.types.d.ts:Result`) | `_meta?: { [key: string]: unknown }` is on the base `Result` type that `CallToolResult` extends. ✅ |
+| **TS SDK client** (`@modelcontextprotocol/sdk`) | `client.callTool()` preserves top-level `_meta`. ✅ |
+| **Python SDK server** (`mcp.types.CallToolResult` extends `Result`) | `meta: dict[str, Any] \| None = Field(alias="_meta")` — serializes to wire `_meta`. ✅ |
+| **FastMCP tool returns** | `if isinstance(result, CallToolResult): return result` — passes `_meta` through. ✅ |
+| **Muninn's openai-compat path** (`mcp-client.ts:148`) | Raw SDK result returned; reading `_meta` is trivial. ✅ |
+| **Claude CLI NDJSON** | **`_meta` is fully stripped.** Probe `scripts/probe-claude-cli-meta.ts` set `_meta` on a `CallToolResult`; the marker `META_PROBE_MARKER_42` appeared **nowhere** in NDJSON output (3 runs, with and without `--include-partial-messages`). ❌ |
+| **Claude CLI structuredContent** | Surfaced — but **as model-facing tool result content**, not as a side-channel. Marker reached the model and `event.tool_use_result.structuredContent` carries the same payload that's also serialized into `message.content[].content`. ⚠️ Not usable for trace data the model shouldn't see. |
+| **Copilot SDK** | Not probed yet, but irrelevant — that connector already extracts trace from `result.contents[]` (the existing `extractMcpResultText` path), so even if `_meta` worked, the existing path is sufficient. |
 
-### The load-bearing unknown
+### Verdict — Phase 2 as designed is dead
 
-If `claude-cli` strips `_meta` before exposing the `tool_result` to NDJSON consumers, this approach won't work for that connector and we'd need either:
-- A tiny pointer in text (`huginn-trace-id: <uuid>`) plus a Huginn-side store Muninn fetches from, or
-- Continue to ship the fence in text *only* for claude-cli, with the existing parse + recover paths.
+Claude CLI's NDJSON deliberately exposes only what the model is meant to see. `_meta` exists in the MCP wire format but is filtered out before reaching the orchestrator. There is no out-of-band channel through claude-cli — anything we want to surface to Muninn-the-trace-collector must travel through the same text channel the LLM reads.
 
-Same for `copilot-sdk` — but that connector already gives us `result.contents[]` access in `tool.execution_complete`, so even if `_meta` doesn't surface, we have a degraded path.
+This kills "out-of-band via `_meta`" as a clean architectural win. It does **not** kill the goal, but the realistic options change shape:
+
+| Option | What | Pros | Cons |
+|---|---|---|---|
+| **A. Keep current architecture** | Three strip paths (fence/divert-rewrite/openai-strip) stay as-is. Document the "why" so future readers don't mistake the complexity for accident. | Verified working in prod; tested; bug surface is bounded. | Future readers will be tempted to "clean it up" without realizing claude-cli forces the design. |
+| **B. Trace-id pointer + Huginn store** | Huginn writes a single short line (`huginn-trace-id: <uuid>`) to the tool result text and stores the trace JSON behind a `GET /api/trace/<id>` endpoint. Muninn strips the line and fetches the trace via HTTP. | One unified strip path (regex one line, not 14 KB JSON). If strip ever fails, only ~50 bytes of pollution reach the model — harmless. Same pattern across all 3 connectors. | Requires Huginn-side trace store (in-memory + TTL is fine) + HTTP endpoint. Adds a localhost round-trip per search. |
+| **C. Two-channel split** | `_meta` for openai-compat, keep fence for claude-cli, copilot-sdk uses existing `contents[]` path. | Simplifies 1/3 connectors. | Increases connector divergence; the win doesn't justify the change. |
+
+**Recommendation: Option A.** The current architecture works (verified), is tested, and has bounded complexity. The "210k twice" panic that triggered this analysis turned out to be model confabulation, not a real bug. The Phase 2 motivation was complexity-removal, not bugfix; with `_meta` ruled out, the cleanup payoff shrinks below the cost of changing it.
+
+If Option B ever becomes worth doing — likely trigger: a *third* trace-like side-channel needs to be added — the trace-id pattern is the right shape and is documented here so we don't have to rediscover it.
 
 ## 6. Open questions / TODO
 
 - [x] **Verify divert-recovery actually works in production** — **Confirmed working** for the relevant case. For jarvis (the only Muninn-spawned claude-cli bot today), 0/7 of the saved tool-result files contain the trace fence. The 5/12 fence-bearing files in `bots-melosys` come from interactive `claude` sessions Rune ran from the bot directory, **not** from Muninn — melosys is configured `connector: copilot-sdk`, so Muninn's stream-parser was never in that loop. Probe of `recoverOversizedClaudeCliToolResult` against an actual fence-bearing file successfully extracted the trace, so the regex and recovery logic are sound. Capra has no diverted files at all (small results).
-- [ ] **Probe `_meta` end-to-end for each connector**:
-  - `claude-cli`: write a tiny MCP test server that sets `_meta`; run it under `claude -p --output-format stream-json`; grep the NDJSON for `_meta`.
-  - `copilot-sdk`: same setup; inspect `event.data.result` shape on `tool.execution_complete`.
-  - `openai-compat`: trivial — `mcp-client.ts` returns the raw `CallToolResult`, just read `result._meta`.
-- [ ] **Decide fallback for connectors that drop `_meta`** — likely a `huginn-trace-id` pointer + a Huginn-side trace store endpoint Muninn can fetch. Worth a Phase 3.
+- [x] **Probe `_meta` end-to-end for claude-cli** — done. `scripts/probe-meta-mcp-server.py` + `scripts/probe-claude-cli-meta.ts`. Result: `_meta` is stripped, `structuredContent` reaches the model. No side-channel through claude-cli.
+- [x] **Decide fallback** — Option A (keep current architecture). See verdict above. Option B (trace-id pointer + Huginn store) is documented as the path forward *if* a third trace-like side-channel ever appears.
 - [ ] **Squash `75c4198` into `68ad460`** before pushing the branch (carry-over from prior handover).
+- [ ] **Update `wiki/muninn/tracing.md`** — the "Future work" section currently lists "out-of-band trace channel via MCP `_meta`" as a Phase 2 item; update to reflect that this was probed and ruled out, with a pointer to this working doc for the rationale.
 
 ## 7. Useful queries
 
