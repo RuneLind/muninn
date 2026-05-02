@@ -2,9 +2,10 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName } from "../stream-parser.ts";
+import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { parseHuginnTrace } from "../huginn-trace.ts";
+import { extractMcpResultText } from "../huginn-trace.ts";
+import { peelHuginnTraceChannel } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -181,26 +182,29 @@ export async function executePrompt(
         ? tc.arguments.slice(0, 500) + "…"
         : tc.arguments;
 
+      // Surface report_intent calls as inline intent bubbles in chat, in
+      // addition to keeping them as a regular tool span in the waterfall.
+      if (isReportIntentTool(tc.name)) {
+        const intentText = extractIntentText(tc.arguments);
+        if (intentText) onProgress?.({ type: "intent", text: intentText });
+      }
       onProgress?.({ type: "tool_start", name: tc.name, displayName, input: inputPreview });
 
-      let toolResult: string;
+      let rawResult: unknown;
       try {
         const serverName = toolServerMap.get(tc.name);
         if (!serverName) {
-          toolResult = JSON.stringify({ error: `Unknown tool: ${tc.name}` });
+          rawResult = { error: `Unknown tool: ${tc.name}` };
           log.warn("Model called unknown tool {tool}", {
             botName: botConfig.name,
             tool: tc.name,
           });
         } else {
           const args = JSON.parse(tc.arguments);
-          const result = await callTool(botConfig.name, serverName, tc.name, args);
-          toolResult = typeof result === "string" ? result : JSON.stringify(result);
+          rawResult = await callTool(botConfig.name, serverName, tc.name, args);
         }
       } catch (e) {
-        toolResult = JSON.stringify({
-          error: e instanceof Error ? e.message : String(e),
-        });
+        rawResult = { error: e instanceof Error ? e.message : String(e) };
         log.warn("Tool call {tool} failed: {error}", {
           botName: botConfig.name,
           tool: tc.name,
@@ -211,11 +215,23 @@ export async function executePrompt(
       const toolDurationMs = Math.round(performance.now() - toolStart);
       onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
-      // Strip Huginn search-trace blob (if present) before showing the model
-      // the tool result. The trace is captured separately in the trace span
-      // for inspector use; keeping it out of the LLM context avoids polluting
-      // its turns with debug data. No-op for non-Huginn outputs.
-      const cleaned = parseHuginnTrace(toolResult).text;
+      // Peel the MCP envelope so the model only sees the inner text payload —
+      // shipping the full {"content":[{"type":"text","text":"..."}]} blob to a
+      // small-context model (e.g. local qwen3 35B) wastes thousands of tokens.
+      // Errors and plain-string outputs fall through to JSON.stringify so the
+      // model still gets a structured signal it can reason about.
+      const innerText = extractMcpResultText(rawResult);
+      let cleaned: string;
+      let searchTrace: unknown | undefined;
+      let searchTracePointer: string | undefined;
+      if (innerText !== null) {
+        const channel = peelHuginnTraceChannel(innerText);
+        cleaned = channel.text;
+        searchTrace = channel.trace;
+        searchTracePointer = channel.pointer;
+      } else {
+        cleaned = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
+      }
 
       trackedToolCalls.push({
         id: tc.id,
@@ -225,6 +241,8 @@ export async function executePrompt(
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
         output: truncateOutput(cleaned),
+        searchTrace,
+        searchTracePointer,
       });
 
       // Add tool result to conversation

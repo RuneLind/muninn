@@ -73,6 +73,10 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
         // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
         // servers ignore unknown env vars, so it's safe to set unconditionally.
         // The bot's own .mcp.json env wins via spread order.
+        // Works end-to-end for copilot-sdk because the SDK's oversized-tool
+        // divert keeps the full payload on contents[] where extractMcpResultText
+        // can read it — searchTrace lands on attributes.searchTrace and the
+        // model only sees the SDK's "Output too large" placeholder.
         result[name] = {
           type: "local",
           command: entry.command,

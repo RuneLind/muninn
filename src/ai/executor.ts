@@ -67,7 +67,10 @@ export async function executeClaudePrompt(
     CLAUDE_CODE_ENTRYPOINT: `${botConfig.name}-bot`,
     // Huginn MCP adapters embed a search trace in their tool result when this
     // is set. The CLI inherits this env and propagates it to spawned MCP
-    // servers; non-Huginn servers ignore it.
+    // servers; non-Huginn servers ignore it. The stream parser peels the
+    // ```huginn-trace``` fence off before truncateOutput runs so searchTrace
+    // lands on attributes.searchTrace even for ~36 KB results where the fence
+    // would otherwise fall past the 16 KB storage cap.
     HUGINN_TRACE_DEFAULT: "1",
   };
   if (botConfig.thinkingMaxTokens !== undefined) {

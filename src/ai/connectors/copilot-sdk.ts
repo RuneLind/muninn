@@ -3,9 +3,10 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName } from "../stream-parser.ts";
+import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
+import { extractMcpResultText } from "../huginn-trace.ts";
+import { peelHuginnTraceChannel } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -123,7 +124,7 @@ export async function executePrompt(
       case "tool.execution_start": {
         const name = event.data.toolName;
         // Emit intent event from report_intent tool (in addition to waterfall entry)
-        if (name === "report_intent") {
+        if (isReportIntentTool(name)) {
           const intentText = extractIntentText(event.data.arguments);
           if (intentText) onProgress?.({ type: "intent", text: intentText });
         }
@@ -149,17 +150,17 @@ export async function executePrompt(
 
           // Prefer the inner text payload over the SDK's structured envelope so
           // the inspector shows readable content instead of a double-encoded
-          // {"content":"..."} blob. For Huginn searches this also peels off the
-          // trailing trace fence and surfaces it separately as searchTrace.
-          // Falls through to the structured form (e.g. error envelopes) when
-          // no text content is extractable.
+          // {"content":"..."} blob. Falls through to the structured form
+          // (e.g. error envelopes) when no text content is extractable.
           let outputForStorage: string | undefined;
           let searchTrace: unknown | undefined;
+          let searchTracePointer: string | undefined;
           const text = extractMcpResultText(resultPayload);
           if (text !== null) {
-            const parsed = parseHuginnTrace(text);
-            searchTrace = parsed.trace ?? undefined;
-            outputForStorage = truncateOutput(parsed.text);
+            const channel = peelHuginnTraceChannel(text);
+            outputForStorage = truncateOutput(channel.text);
+            searchTrace = channel.trace;
+            searchTracePointer = channel.pointer;
           } else {
             outputForStorage = truncateOutput(resultPayload);
           }
@@ -173,6 +174,7 @@ export async function executePrompt(
             input: pending.input,
             output: outputForStorage,
             searchTrace,
+            searchTracePointer,
           });
           pendingTools.delete(event.data.toolCallId);
           onProgress?.({ type: "tool_end", name: pending.name, displayName });
@@ -320,14 +322,6 @@ ${projectPaths}
 - Read files to verify specific details`,
     mcpServers: {}, // No MCP tools — use built-in tools only (Bash, Grep, Read, Glob)
   }];
-}
-
-function extractIntentText(args: unknown): string | undefined {
-  if (args == null || typeof args !== "object") return undefined;
-  const obj = args as Record<string, unknown>;
-  // report_intent typically has an "intent" or "description" field
-  const text = obj.intent ?? obj.description ?? obj.text;
-  return typeof text === "string" ? text : undefined;
 }
 
 function abbreviateInput(args: unknown): string | undefined {

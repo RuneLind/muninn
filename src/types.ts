@@ -56,6 +56,14 @@ export interface ToolCall {
    * `attributes.searchTrace`. See src/ai/huginn-trace.ts.
    */
   searchTrace?: unknown;
+  /**
+   * Phase 2 trace channel: a fetch URL the connector parsed from a
+   * `huginn-trace-id`/`huginn-trace-url` pointer line in the tool result.
+   * Set when the tool ran but `searchTrace` is not yet resolved — message-processor
+   * fetches the actual trace JSON from this URL after the tool loop and merges
+   * it into the span. See src/ai/huginn-trace-pointer.ts.
+   */
+  searchTracePointer?: string;
 }
 
 export interface ClaudeResult {

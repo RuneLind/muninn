@@ -17,6 +17,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
+import { isReportIntentTool } from "./stream-parser.ts";
 
 const log = getLog("ai", "tool-status");
 
@@ -319,8 +320,8 @@ export function parseToolName(name: string): { server: string; tool: string } | 
  * Returns undefined for tools that should not show status (e.g. report_intent).
  */
 export function getToolStatus(toolName: string, input?: string): string | undefined {
-  // Skip report_intent — it generates its own intent events
-  if (toolName === "report_intent") return undefined;
+  // Skip report_intent — it generates its own intent events.
+  if (isReportIntentTool(toolName)) return undefined;
 
   const parsed = parseToolName(toolName);
   if (!parsed) {
