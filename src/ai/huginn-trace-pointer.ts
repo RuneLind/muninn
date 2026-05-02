@@ -1,3 +1,4 @@
+import { loadConfig } from "../config.ts";
 import { getLog } from "../logging.ts";
 import { extractMcpResultText, parseHuginnTrace } from "./huginn-trace.ts";
 
@@ -49,6 +50,14 @@ export interface PointerExtraction {
   fetchUrl: string | null;
 }
 
+function safeOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Origins Muninn is willing to issue trace fetches against. Defaults to the
  * `KNOWLEDGE_API_URL` origin (the same env Huginn-side uses) so a planted
@@ -56,20 +65,13 @@ export interface PointerExtraction {
  * an arbitrary host. Read at call time so tests can override the env.
  */
 function getDefaultAllowedOrigins(): string[] {
-  const raw = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-  try {
-    return [new URL(raw).origin];
-  } catch {
-    return [];
-  }
+  const origin = safeOrigin(loadConfig().knowledgeApiUrl);
+  return origin === null ? [] : [origin];
 }
 
 function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
-  try {
-    return allowedOrigins.includes(new URL(url).origin);
-  } catch {
-    return false;
-  }
+  const origin = safeOrigin(url);
+  return origin !== null && allowedOrigins.includes(origin);
 }
 
 /**

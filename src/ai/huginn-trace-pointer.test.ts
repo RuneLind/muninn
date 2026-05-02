@@ -148,7 +148,6 @@ test("URL pointing to non-/api/trace/ path does not match", () => {
   const input = "results\n\nhuginn-trace-url: http://localhost:8321/cafef00ddeadbeef";
   const { fetchUrl, text } = parseHuginnTracePointer(input);
   expect(fetchUrl).toBeNull();
-  // Regex didn't match → original text returned unchanged.
   expect(text).toBe(input);
 });
 
