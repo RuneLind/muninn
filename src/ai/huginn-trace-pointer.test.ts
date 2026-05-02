@@ -72,6 +72,28 @@ test("returns text without pointer when id present but no base URL", () => {
   expect(fetchUrl).toBeNull();
 });
 
+test("unwraps {\"result\":\"<inner>\"} envelope and finds inner pointer", () => {
+  // Recent Claude CLI versions hand the orchestrator a JSON-wrapped form for
+  // some MCP tool results. The pointer lives inside the result string,
+  // not at the end of the wrapper. Without unwrapping, the regex anchors on
+  // `"}` and misses.
+  const inner =
+    "## Result A\nfoo\n\n## Result B\nbar\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef\n";
+  const wrapped = JSON.stringify({ result: inner });
+  const { text, fetchUrl } = parseHuginnTracePointer(wrapped);
+  expect(fetchUrl).toBe("http://localhost:8321/api/trace/cafef00ddeadbeef");
+  // Inner text returned (envelope discarded — model sees just the results).
+  expect(text).toBe("## Result A\nfoo\n\n## Result B\nbar");
+  expect(text).not.toContain("huginn-trace-url");
+  expect(text).not.toContain("\"result\"");
+});
+
+test("ignores envelope-shaped strings that don't actually parse as JSON", () => {
+  const fake = "{not valid json with huginn-trace-url: http://x.y/api/trace/cafef00ddeadbeef}";
+  const { fetchUrl } = parseHuginnTracePointer(fake);
+  expect(fetchUrl).toBeNull();
+});
+
 // ── fetchHuginnTrace ─────────────────────────────────────────
 
 const realFetch = globalThis.fetch;

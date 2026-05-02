@@ -51,6 +51,10 @@ export interface PointerExtraction {
  * Anchors at end-of-string (with trailing whitespace tolerance) so a literal
  * "huginn-trace-id:" inside a search hit's text body never produces a false
  * positive.
+ *
+ * Also unwraps the `{"result":"<inner>"}` envelope that recent Claude CLI
+ * versions wrap MCP tool results in. When unwrapping succeeds the inner text
+ * is returned (no envelope) so the model sees just the search results.
  */
 export function parseHuginnTracePointer(
   output: string,
@@ -58,8 +62,34 @@ export function parseHuginnTracePointer(
 ): PointerExtraction {
   if (output.length === 0) return { text: output, fetchUrl: null };
 
+  // Direct case — pointer at the end of a plain text result.
+  const direct = matchPointer(output, defaultBaseUrl);
+  if (direct !== null) return direct;
+
+  // Wrapped case — Claude CLI inlines large MCP results as
+  // `{"result":"<inner>"}` strings. The pointer lives inside `<inner>`,
+  // not at the end of the wrapper. Unwrap once and retry; on success
+  // return the inner text (envelope discarded — model gets clean text).
+  const trimmed = output.trimStart();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(output) as { result?: unknown };
+      if (parsed && typeof parsed.result === "string") {
+        const innerMatch = matchPointer(parsed.result, defaultBaseUrl);
+        if (innerMatch !== null) return innerMatch;
+      }
+    } catch {
+      // Not a clean JSON wrapper — fall through, no pointer.
+    }
+  }
+
+  return { text: output, fetchUrl: null };
+}
+
+/** Try the pointer regex against `output`. Returns split + URL on hit, null on miss. */
+function matchPointer(output: string, defaultBaseUrl?: string): PointerExtraction | null {
   const match = output.match(POINTER_RE);
-  if (!match) return { text: output, fetchUrl: null };
+  if (!match) return null;
 
   const id = match[1];
   const url = match[2];
