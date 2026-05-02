@@ -1,6 +1,7 @@
 import { loadConfig } from "../config.ts";
 import { getLog } from "../logging.ts";
 import { extractMcpResultText, parseHuginnTrace } from "./huginn-trace.ts";
+import { parseYggdrasilTracePointer } from "./yggdrasil-trace-pointer.ts";
 
 const log = getLog("ai", "huginn-trace-pointer");
 
@@ -50,7 +51,7 @@ export interface PointerExtraction {
   fetchUrl: string | null;
 }
 
-function safeOrigin(url: string): string | null {
+export function safeOrigin(url: string): string | null {
   try {
     return new URL(url).origin;
   } catch {
@@ -69,7 +70,7 @@ function getDefaultAllowedOrigins(): string[] {
   return origin === null ? [] : [origin];
 }
 
-function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
+export function isUrlOriginAllowed(url: string, allowedOrigins: string[]): boolean {
   const origin = safeOrigin(url);
   return origin !== null && allowedOrigins.includes(origin);
 }
@@ -128,6 +129,11 @@ export function peelHuginnTraceChannel(
   const ptr = parseHuginnTracePointer(text, undefined, allowedOrigins);
   if (ptr.fetchUrl !== null) {
     return { text: ptr.text, pointer: ptr.fetchUrl };
+  }
+  // Disjoint allow-list per producer — yggdrasil reads its own env.
+  const ygg = parseYggdrasilTracePointer(text);
+  if (ygg.fetchUrl !== null) {
+    return { text: ygg.text, pointer: ygg.fetchUrl };
   }
   const parsed = parseHuginnTrace(text);
   return {
