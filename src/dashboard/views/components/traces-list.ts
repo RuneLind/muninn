@@ -111,20 +111,28 @@ export function tracesListScript(): string {
       } catch (e) { console.error('Failed to load traces', e); }
     }
 
+    function connectorLabel(type) {
+      // Mirrors getConnectorLabel() in src/dashboard/agent-status.ts so the
+      // traces list reads the same as the live status header / progress overlay.
+      if (type === 'copilot-sdk') return 'Copilot SDK';
+      if (type === 'openai-compat') return 'OpenAI';
+      return 'Claude Code';
+    }
     function fmtBackend(attrs) {
       const connector = attrs?.connector;
-      const model = attrs?.model || attrs?.requestedModel;
+      const model = attrs?.model ?? attrs?.requestedModel;
       if (!connector && !model) return '<span style="color:var(--text-disabled)">-</span>';
       const parts = [];
-      if (connector) parts.push('<span class="backend-connector">' + esc(connector) + '</span>');
-      if (model) parts.push('<span class="backend-model">' + esc(model) + '</span>');
-      return '<span class="backend-cell">' + parts.join(' · ') + '</span>';
+      if (connector) parts.push('<span class="backend-connector">' + esc(connectorLabel(connector)) + '</span>');
+      if (model) parts.push('<span class="backend-model">(' + esc(model) + ')</span>');
+      return '<span class="backend-cell">' + parts.join(' ') + '</span>';
     }
 
     function renderTraceList(traces) {
       const tbody = document.getElementById('traceList');
       if (traces.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="empty">No traces found</td></tr>';
+        const colspan = document.querySelectorAll('.trace-table thead th').length;
+        tbody.innerHTML = '<tr><td colspan="' + colspan + '" class="empty">No traces found</td></tr>';
         return;
       }
       tbody.innerHTML = traces.map(t => {

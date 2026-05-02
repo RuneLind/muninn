@@ -256,7 +256,6 @@ function mapRow(r: Record<string, any>): SpanRow {
     }, {});
   }
 
-  // Merge token/tool/connector data from child span join (if available and not already in attributes)
   if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
   if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
   if (r.tool_count != null && !attrs.toolCount) attrs = { ...attrs, toolCount: Number(r.tool_count) };
