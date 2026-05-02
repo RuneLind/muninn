@@ -94,7 +94,7 @@ export function searchTraceDetailStyles(): string {
     .stt-strip-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; flex-wrap: wrap; }
     .stt-strip-legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 
-    /* Stage colors */
+    /* Stage colors — huginn */
     .stt-stage-indexFetch { background: #4f46e5; }
     .stt-stage-chunkLoad  { background: #0ea5e9; }
     .stt-stage-rerank     { background: #f59e0b; }
@@ -106,6 +106,19 @@ export function searchTraceDetailStyles(): string {
     .stt-leg-rerank::before     { background: #f59e0b; }
     .stt-leg-titleBoost::before { background: #ef4444; }
     .stt-leg-assembly::before   { background: #10b981; }
+
+    /* Stage colors — yggdrasil */
+    .stt-stage-embedding { background: #6366f1; }
+    .stt-stage-fts       { background: #0ea5e9; }
+    .stt-stage-semantic  { background: #8b5cf6; }
+    .stt-stage-name      { background: #f59e0b; }
+    .stt-stage-rrf       { background: #10b981; }
+
+    .stt-leg-embedding::before { background: #6366f1; }
+    .stt-leg-fts::before       { background: #0ea5e9; }
+    .stt-leg-semantic::before  { background: #8b5cf6; }
+    .stt-leg-name::before      { background: #f59e0b; }
+    .stt-leg-rrf::before       { background: #10b981; }
 
     /* Confidence axis */
     .stt-conf {
@@ -145,10 +158,25 @@ export function searchTraceDetailStyles(): string {
     .stt-cands th:hover { color: var(--text-soft); }
     .stt-cands td.stt-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
     .stt-cands td.stt-title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stt-cands td.stt-sym {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--text-faint);
+      font-size: 10px;
+    }
     .stt-cands tr.stt-disagree td { background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
     .stt-cands tr.stt-dropped td { color: var(--text-dim); }
     .stt-status-kept { color: var(--status-success); }
     .stt-status-dropped { color: var(--status-error); }
+    .stt-qf {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
+      color: var(--text-soft);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      min-width: 200px;
+    }
+    .stt-qf:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
     .stt-toolbar { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
     .stt-toolbar button {
@@ -182,11 +210,18 @@ export function searchTraceDetailScript(): string {
         return '<pre class="stt-raw">' + esc(JSON.stringify(trace, null, 2)) + '</pre>' +
                '<div class="stt-toolbar"><button class="stt-active" onclick="sttToggleRaw()">Show structured</button></div>';
       }
+      if (sttIsYggdrasilTrace(trace)) {
+        return sttRenderYggdrasilPanel(trace);
+      }
       return '<div class="stt-panel">' +
         sttRenderQuery(trace.query || {}) +
         sttRenderCollections(trace.collections || []) +
         '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
       '</div>';
+    }
+
+    function sttIsYggdrasilTrace(trace) {
+      return !!(trace && trace.tool === 'search' && !Array.isArray(trace.collections));
     }
 
     function sttToggleRaw() {
@@ -367,7 +402,15 @@ export function searchTraceDetailScript(): string {
 
     function sttFmtRank(stage) {
       if (!stage || stage.rank == null) return '—';
-      return stage.rank + (typeof stage.score === 'number' ? ' (' + stage.score.toFixed(2) + ')' : '');
+      // yggdrasil emits name.score as a string ("1.0") in some cases —
+      // coerce before formatting so the cell doesn't render "undefined".
+      var n = null;
+      if (typeof stage.score === 'number' && isFinite(stage.score)) n = stage.score;
+      else if (typeof stage.score === 'string') {
+        var parsed = parseFloat(stage.score);
+        if (isFinite(parsed)) n = parsed;
+      }
+      return stage.rank + (n != null ? ' (' + n.toFixed(2) + ')' : '');
     }
 
     function sttFilterCandidates(cands, mode) {
@@ -395,6 +438,167 @@ export function searchTraceDetailScript(): string {
         if (va > vb) return 1 * mul;
         return 0;
       });
+    }
+
+    /* --- Yggdrasil branch (code-intelligence search) ---------------------- */
+
+    const STT_YGG_STAGES = ['fts','semantic','name','rrf','final'];
+    const STT_YGG_TIMING_KEYS = ['embedding','fts','semantic','name','rrf'];
+    const STT_YGG_LABELS = {
+      embedding: 'embed', fts: 'FTS', semantic: 'semantic',
+      name: 'name', rrf: 'RRF', final: 'final',
+    };
+
+    function sttRenderYggdrasilPanel(trace) {
+      return '<div class="stt-panel">' +
+        sttRenderYggHeader(trace.query || {}) +
+        sttRenderYggTimings(trace.timingsMs || {}) +
+        sttRenderYggCandidates(trace.candidates || []) +
+        '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
+      '</div>';
+    }
+
+    function sttRenderYggHeader(q) {
+      var filterChips = '';
+      if (q.filters && typeof q.filters === 'object') {
+        var keys = Object.keys(q.filters);
+        for (var i = 0; i < keys.length; i++) {
+          var v = q.filters[keys[i]];
+          if (v == null) continue;
+          filterChips += '<span class="stt-chip"><span class="stt-chip-type">' +
+            esc(keys[i]) + '</span>' + esc(String(v)) + '</span>';
+        }
+      }
+      return '<div class="stt-section">' +
+        '<h5>Query <span class="stt-badge">tool: search</span></h5>' +
+        '<div class="stt-query">' +
+          '<div><span class="stt-label">raw:</span>' + esc(q.raw || '') + '</div>' +
+          (filterChips ? '<div class="stt-row" style="margin-top:8px">' + filterChips + '</div>' : '') +
+        '</div>' +
+      '</div>';
+    }
+
+    function sttRenderYggTimings(timings) {
+      var sum = 0;
+      for (var i = 0; i < STT_YGG_TIMING_KEYS.length; i++) {
+        var k = STT_YGG_TIMING_KEYS[i];
+        if (timings[k] > 0) sum += timings[k];
+      }
+      var total = sum || timings.total || 0;
+      var stripSegs = '';
+      var legend = '';
+      for (var j = 0; j < STT_YGG_TIMING_KEYS.length; j++) {
+        var key = STT_YGG_TIMING_KEYS[j];
+        var ms = timings[key];
+        if (!(ms > 0)) continue;
+        var pct = total > 0 ? (ms / total) * 100 : 0;
+        stripSegs += '<div class="stt-strip-seg stt-stage-' + key + '" style="width:' + pct + '%" title="' +
+          STT_YGG_LABELS[key] + ' — ' + ms + 'ms">' +
+          (pct > 8 ? STT_YGG_LABELS[key] + ' ' + ms + 'ms' : '') +
+        '</div>';
+        legend += '<span class="stt-leg-' + key + '">' + STT_YGG_LABELS[key] + ' ' + ms + 'ms</span>';
+      }
+      var totalLabel = timings.total != null ? timings.total : total;
+      return '<div class="stt-section">' +
+        '<h5>Timings <span style="color:var(--text-faint);font-weight:normal;text-transform:none;letter-spacing:0">total=' + totalLabel + 'ms</span></h5>' +
+        '<div class="stt-strip">' + stripSegs + '</div>' +
+        (legend ? '<div class="stt-strip-legend">' + legend + '</div>' : '') +
+      '</div>';
+    }
+
+    function sttRenderYggCandidates(cands) {
+      if (!cands.length) return '';
+      var s = window.__sttState;
+      var qf = ((s.qFilter || '') + '').trim().toLowerCase();
+      var filtered = cands.slice();
+      if (qf) {
+        filtered = filtered.filter(function (c) {
+          return (c.qualifiedName || '').toLowerCase().indexOf(qf) !== -1;
+        });
+      }
+      var visible = s.filter === 'all'
+        ? filtered
+        : filtered.filter(function (c) { return c.stages && c.stages.final; }).slice(0, 20);
+
+      var sortKey = STT_YGG_STAGES.indexOf(s.sortKey) !== -1 || s.sortKey === 'qualifiedName' || s.sortKey === 'kind'
+        ? s.sortKey : 'final';
+      var mul = s.sortDir === 'asc' ? 1 : -1;
+      function valFor(c) {
+        if (sortKey === 'qualifiedName') return (c.qualifiedName || '').toLowerCase();
+        if (sortKey === 'kind') return c.kind || '';
+        var stage = c.stages && c.stages[sortKey];
+        return stage && typeof stage.rank === 'number' ? stage.rank : Infinity;
+      }
+      visible.sort(function (a, b) {
+        var va = valFor(a), vb = valFor(b);
+        if (va < vb) return -1 * mul;
+        if (va > vb) return 1 * mul;
+        return 0;
+      });
+
+      var cols = [
+        { key: null,             label: '#'              },
+        { key: null,             label: 'symbol'         },
+        { key: 'qualifiedName',  label: 'qualifiedName'  },
+        { key: 'kind',           label: 'kind'           },
+        { key: 'fts',            label: 'FTS'            },
+        { key: 'semantic',       label: 'semantic'       },
+        { key: 'name',           label: 'name'           },
+        { key: 'rrf',            label: 'RRF'            },
+        { key: 'final',          label: 'final'          },
+      ];
+      var header = '<thead><tr>';
+      for (var ci = 0; ci < cols.length; ci++) {
+        var col = cols[ci];
+        if (!col.key) { header += '<th>' + esc(col.label) + '</th>'; continue; }
+        var arrow = s.sortKey === col.key ? (s.sortDir === 'asc' ? ' \\u25B2' : ' \\u25BC') : '';
+        header += '<th onclick="sttSetSort(\\'' + col.key + '\\')">' + esc(col.label) + arrow + '</th>';
+      }
+      header += '</tr></thead>';
+
+      var rows = '';
+      for (var ri = 0; ri < visible.length; ri++) {
+        var c = visible[ri];
+        var stages = c.stages || {};
+        var sym = c.symbolId ? c.symbolId.slice(0, 8) : '';
+        var qn = c.qualifiedName || '';
+        rows += '<tr>' +
+          '<td class="stt-num">' + (ri + 1) + '</td>' +
+          '<td class="stt-sym" title="' + esc(c.symbolId || '') + '">' + esc(sym) + '</td>' +
+          '<td class="stt-title" title="' + esc(qn) + '">' + esc(qn) + '</td>' +
+          '<td>' + (c.kind ? '<span class="stt-chip">' + esc(c.kind) + '</span>' : '') + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.fts) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.semantic) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.name) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.rrf) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.final) + '</td>' +
+        '</tr>';
+      }
+
+      function btn(key, label) {
+        return '<button class="' + (s.filter === key ? 'stt-active' : '') +
+          '" onclick="sttSetFilter(\\'' + key + '\\')">' + label + '</button>';
+      }
+      return '<div style="margin-top:12px">' +
+        '<div class="stt-toolbar">' +
+          '<span>Candidates (' + visible.length + '/' + cands.length + ')</span>' +
+          btn('kept-top', 'top 20 final') +
+          btn('all', 'all') +
+          '<input class="stt-qf" type="text" placeholder="filter qualifiedName\\u2026" value="' + esc(s.qFilter || '') + '" oninput="sttSetQFilter(this.value)">' +
+        '</div>' +
+        '<div class="stt-cands-wrap"><table class="stt-cands">' + header + '<tbody>' + rows + '</tbody></table></div>' +
+      '</div>';
+    }
+
+    function sttSetQFilter(v) {
+      window.__sttState.qFilter = v;
+      sttRerender();
+      var input = document.querySelector('.stt-qf');
+      if (input) {
+        input.focus();
+        var len = input.value.length;
+        try { input.setSelectionRange(len, len); } catch (e) {}
+      }
     }
   `;
 }

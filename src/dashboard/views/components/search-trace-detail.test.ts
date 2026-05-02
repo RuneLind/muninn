@@ -158,3 +158,138 @@ describe("renderSearchTrace", () => {
     expect(html).toContain("Show structured");
   });
 });
+
+describe("renderSearchTrace — yggdrasil shape", () => {
+  let sb: ReturnType<typeof loadSandbox>;
+  beforeEach(() => { sb = loadSandbox(); sb.reset(); });
+
+  // Modeled on a real yggdrasil-search trace pulled from the muninn DB —
+  // candidates have varying stage subsets, and `name.score` is a string ("1.0").
+  type YggCand = { symbolId: string; qualifiedName: string; kind: string; stages: Record<string, { rank: number; score?: number | string }> };
+  const yggFixture = (): { schemaVersion: number; tool: string; query: Record<string, unknown>; timingsMs: Record<string, number>; candidates: YggCand[] } => ({
+    schemaVersion: 1,
+    tool: "search",
+    query: { raw: "BehandlingService", filters: { repo: "melosys-api" } },
+    timingsMs: { embedding: 5, fts: 14, semantic: 15, name: 62, rrf: 0, total: 69 },
+    candidates: [
+      {
+        symbolId: "332c9a10-dee7-4d25-8ad5-89cf0c4839ca",
+        qualifiedName: "no.nav.melosys.service.behandling.BehandlingService",
+        kind: "class",
+        stages: {
+          fts:      { rank: 9,  score: 0.082 },
+          semantic: { rank: 17, score: 0.907 },
+          name:     { rank: 1,  score: "1.0" },
+          rrf:      { rank: 1,  score: 0.052 },
+          final:    { rank: 1,  score: 0.078 },
+        },
+      },
+      {
+        symbolId: "b2fb5812-c725-45e7-9c3f-1e54535cefde",
+        qualifiedName: "no.nav.melosys.service.behandling.BehandlingService.BehandlingService",
+        kind: "constructor",
+        stages: {
+          fts:   { rank: 2, score: 0.087 },
+          name:  { rank: 2, score: "1.0" },
+          rrf:   { rank: 2, score: 0.040 },
+          final: { rank: 2, score: 0.044 },
+        },
+      },
+      {
+        symbolId: "add4c190-0960-4b06-9d73-8418f48a9142",
+        qualifiedName: "no.nav.melosys.service.A011Mapper.mapFraSed",
+        kind: "function",
+        stages: {
+          semantic: { rank: 1, score: 0.905 },
+          rrf:      { rank: 3, score: 0.016 },
+          // No `final` — this candidate didn't survive to the final ranking.
+        },
+      },
+    ],
+  });
+
+  test("renders the query header with raw and filter chips", () => {
+    const html = sb.renderSearchTrace(yggFixture());
+    expect(html).toContain("BehandlingService");
+    expect(html).toContain("repo");
+    expect(html).toContain("melosys-api");
+    expect(html).toContain("tool: search");
+  });
+
+  test("renders the timings strip with one segment per non-zero stage", () => {
+    const html = sb.renderSearchTrace(yggFixture());
+    expect(html).toContain("stt-stage-embedding");
+    expect(html).toContain("stt-stage-fts");
+    expect(html).toContain("stt-stage-semantic");
+    expect(html).toContain("stt-stage-name");
+    expect(html).toContain("total=69ms");
+    // rrf is 0ms — strip omits the segment
+    expect(html).not.toContain("stt-stage-rrf");
+  });
+
+  test("candidates table renders one row per candidate without 'undefined' for missing stages", () => {
+    sb.getState().filter = 'all'; // include candidates without a final stage
+    const html = sb.renderSearchTrace(yggFixture());
+    expect(html).toContain("BehandlingService");
+    expect(html).toContain("A011Mapper.mapFraSed");
+    expect(html).not.toContain("undefined");
+    // Candidate 3 has no fts / name / final — those cells must show the em-dash placeholder.
+    expect(html).toContain("—");
+  });
+
+  test("string-typed name.score (e.g. '1.0') is coerced and rendered as a number", () => {
+    const html = sb.renderSearchTrace(yggFixture());
+    // sttFmtRank coerces with parseFloat then .toFixed(2) — should produce "1.00"
+    expect(html).toContain("1 (1.00)");
+    expect(html).not.toContain("undefined");
+  });
+
+  test("default filter (kept-top) hides candidates without a final stage", () => {
+    const html = sb.renderSearchTrace(yggFixture());
+    expect(html).toContain("BehandlingService");
+    expect(html).not.toContain("A011Mapper.mapFraSed");
+    expect(html).toContain("Candidates (2/3)");
+  });
+
+  test("sort by final.rank ASC puts the surviving candidates at the top", () => {
+    const trace = yggFixture();
+    trace.candidates = [
+      {
+        symbolId: "ccccccc1",
+        qualifiedName: "z.last",
+        kind: "class",
+        stages: { final: { rank: 5, score: 0.01 } },
+      },
+      {
+        symbolId: "ccccccc2",
+        qualifiedName: "a.first",
+        kind: "class",
+        stages: { final: { rank: 1, score: 0.08 } },
+      },
+    ];
+    const html = sb.renderSearchTrace(trace);
+    // first row should be the rank-1 candidate (a.first), not z.last
+    const firstRowMatch = html.match(/<tbody>\s*<tr>[\s\S]*?<td class="stt-title"[^>]*>([^<]+)<\/td>/);
+    expect(firstRowMatch).not.toBeNull();
+    expect(firstRowMatch![1]).toBe("a.first");
+  });
+
+  test("substring filter on qualifiedName narrows the candidate list", () => {
+    sb.getState().qFilter = 'A011';
+    sb.getState().filter = 'all';
+    const html = sb.renderSearchTrace(yggFixture());
+    expect(html).toContain("A011Mapper.mapFraSed");
+    expect(html).not.toContain(">no.nav.melosys.service.behandling.BehandlingService<");
+    expect(html).toContain("Candidates (1/3)");
+  });
+
+  test("yggdrasil discriminator does not fire for a huginn-shaped trace", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: { raw: "x" },
+      collections: [{ name: "wiki", candidates: [] }],
+    });
+    expect(html).not.toContain("tool: search");
+    expect(html).toContain("Collection");
+  });
+});

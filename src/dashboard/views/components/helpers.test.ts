@@ -146,6 +146,18 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.html).toContain(">jira-issues<");
     expect(out!.html).toContain('title="jira-issues"');
   });
+
+  test("yggdrasil-shaped trace synthesizes a 'yggdrasil' chip and 'search' verb", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-search",
+      attributes: { searchTrace: { schemaVersion: 1, tool: "search" } },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-trace-dot");
+    expect(out!.html).toContain("wf-verb-search");
+    expect(out!.html).toContain(">search<");
+    expect(out!.html).toContain(">yggdrasil<");
+  });
 });
 
 describe("sortCollectionsByPriority", () => {
