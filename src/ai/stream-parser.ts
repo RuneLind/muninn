@@ -1,6 +1,7 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
 import { parseHuginnTrace, recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
+import { parseHuginnTracePointer } from "./huginn-trace-pointer.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -42,6 +43,8 @@ interface PendingToolCall {
   output?: string;
   /** Parsed Huginn search trace, peeled off the raw output before truncation. */
   searchTrace?: unknown;
+  /** Phase 2 trace channel: pointer URL to fetch trace from after the loop. */
+  searchTracePointer?: string;
 }
 
 export class StreamParser {
@@ -177,23 +180,33 @@ export class StreamParser {
         // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
         const raw = extractToolResultContent(block);
         if (typeof raw === "string") {
-          // Two recovery paths can populate searchTrace:
-          //   1. Claude CLI diverted the result to a file because it
-          //      exceeded MAX_MCP_OUTPUT_TOKENS — read the file, peel the
-          //      trace, and rewrite the file fence-free so the next model
-          //      Read doesn't pull 14 KB of debug JSON back into context.
-          //      The placeholder text stays as the stored output so the
-          //      inspector shows the diversion happened.
-          //   2. The result fits inline — peel the fence directly so the
-          //      closing ``` doesn't fall past truncateOutput's 16 KB cap.
-          const recovery = recoverOversizedClaudeCliToolResult(raw);
-          if (recovery !== null) {
-            pending.output = truncateOutput(raw);
-            if (recovery.trace !== null) pending.searchTrace = recovery.trace;
+          // Three trace-channel paths, tried in order:
+          //   1. Phase 2 pointer line (HUGINN_TRACE_POINTER=1 on Huginn). The
+          //      tool result ends with `huginn-trace-id:` or `huginn-trace-url:`
+          //      and the actual trace is fetched out-of-band from Huginn's
+          //      /api/trace/<id> endpoint by message-processor after the loop.
+          //      This avoids the 188 KB fence that pushes results past Claude
+          //      CLI's MAX_MCP_OUTPUT_TOKENS divert threshold.
+          //   2. Inline fence (HUGINN_TRACE_DEFAULT=1, fence-mode). Strip the
+          //      trace fence directly — the closing ``` would otherwise fall
+          //      past truncateOutput's 16 KB cap and land in the visible output.
+          //   3. Diverted to file (CLI divert path with fence-mode). Read the
+          //      saved file, peel the trace, rewrite fence-free so the model's
+          //      next Read doesn't pull the trace back into context.
+          const pointer = parseHuginnTracePointer(raw);
+          if (pointer.fetchUrl !== null) {
+            pending.output = truncateOutput(pointer.text);
+            pending.searchTracePointer = pointer.fetchUrl;
           } else {
-            const parsed = parseHuginnTrace(raw);
-            pending.output = truncateOutput(parsed.text);
-            if (parsed.trace !== null) pending.searchTrace = parsed.trace;
+            const recovery = recoverOversizedClaudeCliToolResult(raw);
+            if (recovery !== null) {
+              pending.output = truncateOutput(raw);
+              if (recovery.trace !== null) pending.searchTrace = recovery.trace;
+            } else {
+              const parsed = parseHuginnTrace(raw);
+              pending.output = truncateOutput(parsed.text);
+              if (parsed.trace !== null) pending.searchTrace = parsed.trace;
+            }
           }
         } else {
           pending.output = truncateOutput(raw);
@@ -217,6 +230,7 @@ export class StreamParser {
         input: abbreviateInput(pending.input),
         output: pending.output,
         searchTrace: pending.searchTrace,
+        searchTracePointer: pending.searchTracePointer,
       });
       this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
     }

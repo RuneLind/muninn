@@ -5,6 +5,7 @@ import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
+import { parseHuginnTracePointer } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -221,14 +222,27 @@ export async function executePrompt(
       // parseHuginnTrace can't anchor on the closing ``` and won't strip it.
       // Errors and plain-string outputs fall through to JSON.stringify so the
       // model still gets a structured signal it can reason about.
+      //
+      // Pointer-mode (Phase 2) is tried first; falls back to inline-fence
+      // for unflipped Huginn instances. Either way the model never sees
+      // either fence text or pointer line.
       const innerText = extractMcpResultText(rawResult);
-      const parsed = innerText !== null
-        ? parseHuginnTrace(innerText)
-        : {
-            text: typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult),
-            trace: null as unknown,
-          };
-      const cleaned = parsed.text;
+      let cleaned: string;
+      let searchTrace: unknown | undefined;
+      let searchTracePointer: string | undefined;
+      if (innerText !== null) {
+        const pointer = parseHuginnTracePointer(innerText);
+        if (pointer.fetchUrl !== null) {
+          cleaned = pointer.text;
+          searchTracePointer = pointer.fetchUrl;
+        } else {
+          const parsed = parseHuginnTrace(innerText);
+          cleaned = parsed.text;
+          searchTrace = parsed.trace ?? undefined;
+        }
+      } else {
+        cleaned = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
+      }
 
       trackedToolCalls.push({
         id: tc.id,
@@ -238,7 +252,8 @@ export async function executePrompt(
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
         output: truncateOutput(cleaned),
-        searchTrace: parsed.trace ?? undefined,
+        searchTrace,
+        searchTracePointer,
       });
 
       // Add tool result to conversation

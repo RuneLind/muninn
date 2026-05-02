@@ -6,6 +6,7 @@ import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
+import { parseHuginnTracePointer } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -153,13 +154,25 @@ export async function executePrompt(
           // trailing trace fence and surfaces it separately as searchTrace.
           // Falls through to the structured form (e.g. error envelopes) when
           // no text content is extractable.
+          //
+          // Pointer-mode (Phase 2) is tried first: when Huginn runs with
+          // HUGINN_TRACE_POINTER=1, the trace lives behind a /api/trace/<id>
+          // endpoint and only a tiny pointer line rides in the tool result.
+          // Falls back to the inline-fence path for unflipped Huginn instances.
           let outputForStorage: string | undefined;
           let searchTrace: unknown | undefined;
+          let searchTracePointer: string | undefined;
           const text = extractMcpResultText(resultPayload);
           if (text !== null) {
-            const parsed = parseHuginnTrace(text);
-            searchTrace = parsed.trace ?? undefined;
-            outputForStorage = truncateOutput(parsed.text);
+            const pointer = parseHuginnTracePointer(text);
+            if (pointer.fetchUrl !== null) {
+              searchTracePointer = pointer.fetchUrl;
+              outputForStorage = truncateOutput(pointer.text);
+            } else {
+              const parsed = parseHuginnTrace(text);
+              searchTrace = parsed.trace ?? undefined;
+              outputForStorage = truncateOutput(parsed.text);
+            }
           } else {
             outputForStorage = truncateOutput(resultPayload);
           }
@@ -173,6 +186,7 @@ export async function executePrompt(
             input: pending.input,
             output: outputForStorage,
             searchTrace,
+            searchTracePointer,
           });
           pendingTools.delete(event.data.toolCallId);
           onProgress?.({ type: "tool_end", name: pending.name, displayName });

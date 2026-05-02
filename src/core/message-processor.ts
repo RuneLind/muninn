@@ -11,6 +11,7 @@ import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/a
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { parseHuginnTrace } from "../ai/huginn-trace.ts";
+import { fetchHuginnTrace } from "../ai/huginn-trace-pointer.ts";
 import { emitSearchTraceSpans } from "./search-trace-spans.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
@@ -161,6 +162,28 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCount,
     });
 
+    // Resolve any Phase-2 trace pointers in parallel before opening tool spans.
+    // Pointer-mode tools come back from the connector with a `searchTracePointer`
+    // (fetch URL) but no `searchTrace` — we hit Huginn's /api/trace/<id> here
+    // and merge the result back onto the tool. Fail-soft: a null fetch leaves
+    // the span without `searchTrace`, never breaks the user-visible response.
+    if (result.toolCalls) {
+      const pointerTools = result.toolCalls.filter(
+        (tc) => tc.searchTracePointer && tc.searchTrace === undefined,
+      );
+      if (pointerTools.length > 0) {
+        const fetched = await Promise.allSettled(
+          pointerTools.map((tc) => fetchHuginnTrace(tc.searchTracePointer!)),
+        );
+        for (let i = 0; i < pointerTools.length; i++) {
+          const r = fetched[i]!;
+          if (r.status === "fulfilled" && r.value !== null) {
+            pointerTools[i]!.searchTrace = r.value;
+          }
+        }
+      }
+    }
+
     // Create child spans for each tool call (positioned at their actual execution time)
     if (result.toolCalls) {
       const captureOutputs = config.tracingCaptureToolOutputs;
@@ -177,6 +200,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
         // pass it through `tool.searchTrace`. For connectors that surface the
         // result as a plain text blob (claude-cli stream parser), fall back to
         // running the parser on the string here. Parser is a no-op otherwise.
+        // Phase-2 pointer-mode tools were already resolved above; their
+        // `searchTrace` is populated when the fetch succeeded.
         let toolOutput = tool.output;
         if (tool.searchTrace !== undefined) {
           attrs.searchTrace = tool.searchTrace;

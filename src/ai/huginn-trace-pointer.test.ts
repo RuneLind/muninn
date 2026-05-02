@@ -1,0 +1,120 @@
+import { test, expect, mock, beforeEach, afterEach } from "bun:test";
+import {
+  parseHuginnTracePointer,
+  fetchHuginnTrace,
+} from "./huginn-trace-pointer.ts";
+
+// ── parseHuginnTracePointer ──────────────────────────────────
+
+test("returns input unchanged when no pointer present", () => {
+  const text = "## Result 1\nfoo\n\n## Result 2\nbar";
+  const { text: out, fetchUrl } = parseHuginnTracePointer(text, "http://x:1");
+  expect(out).toBe(text);
+  expect(fetchUrl).toBeNull();
+});
+
+test("returns input unchanged on empty string", () => {
+  const { text, fetchUrl } = parseHuginnTracePointer("");
+  expect(text).toBe("");
+  expect(fetchUrl).toBeNull();
+});
+
+test("parses bare id pointer with default base URL", () => {
+  const input = "search results here\n\nhuginn-trace-id: a3f8b21c4e9d0a55";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, "http://localhost:8321");
+  expect(text).toBe("search results here");
+  expect(fetchUrl).toBe("http://localhost:8321/api/trace/a3f8b21c4e9d0a55");
+});
+
+test("parses bare id pointer with trailing newline", () => {
+  const input = "results\n\nhuginn-trace-id: 0123456789abcdef\n";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, "http://h:1");
+  expect(text).toBe("results");
+  expect(fetchUrl).toBe("http://h:1/api/trace/0123456789abcdef");
+});
+
+test("parses url pointer (preferred form — no base URL needed)", () => {
+  const input = "results\n\nhuginn-trace-url: http://localhost:8321/api/trace/deadbeef00112233";
+  const { text, fetchUrl } = parseHuginnTracePointer(input);
+  expect(text).toBe("results");
+  expect(fetchUrl).toBe("http://localhost:8321/api/trace/deadbeef00112233");
+});
+
+test("strips trailing whitespace before pointer", () => {
+  const input = "results\n   \n\n\nhuginn-trace-id: a3f8b21c4e9d0a55\n";
+  const { text } = parseHuginnTracePointer(input, "http://h:1");
+  expect(text).toBe("results");
+});
+
+test("ignores literal 'huginn-trace-id:' inside text body", () => {
+  // A search hit might quote the wire format. Anchor must be end-of-string.
+  const input =
+    "## Doc about tracing\nThe pointer line looks like: `huginn-trace-id: abc123`\n\n## Other result";
+  const { text, fetchUrl } = parseHuginnTracePointer(input, "http://h:1");
+  expect(text).toBe(input);
+  expect(fetchUrl).toBeNull();
+});
+
+test("rejects malformed id (wrong length / non-hex)", () => {
+  const tooShort = "results\n\nhuginn-trace-id: deadbeef";
+  expect(parseHuginnTracePointer(tooShort, "http://h:1").fetchUrl).toBeNull();
+
+  const nonHex = "results\n\nhuginn-trace-id: g3f8b21c4e9d0a55";
+  expect(parseHuginnTracePointer(nonHex, "http://h:1").fetchUrl).toBeNull();
+});
+
+test("returns text without pointer when id present but no base URL", () => {
+  const input = "results\n\nhuginn-trace-id: a3f8b21c4e9d0a55";
+  const { text, fetchUrl } = parseHuginnTracePointer(input);
+  // Pointer line is still stripped (so the model wouldn't see it even on
+  // misconfig), but we have nowhere to fetch from.
+  expect(text).toBe("results");
+  expect(fetchUrl).toBeNull();
+});
+
+// ── fetchHuginnTrace ─────────────────────────────────────────
+
+const realFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+test("fetches and returns parsed trace on 200", async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ schemaVersion: 1, totalMs: 71 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  ) as unknown as typeof fetch;
+  const trace = await fetchHuginnTrace("http://x:1/api/trace/abc");
+  expect(trace).toEqual({ schemaVersion: 1, totalMs: 71 });
+});
+
+test("returns null on 404 (expired / unknown)", async () => {
+  globalThis.fetch = mock(async () =>
+    new Response("not found", { status: 404 }),
+  ) as unknown as typeof fetch;
+  expect(await fetchHuginnTrace("http://x:1/api/trace/abc")).toBeNull();
+});
+
+test("returns null on network error", async () => {
+  globalThis.fetch = mock(async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  expect(await fetchHuginnTrace("http://x:1/api/trace/abc")).toBeNull();
+});
+
+test("returns null on timeout", async () => {
+  globalThis.fetch = mock(
+    (_url: string, init: RequestInit | undefined) =>
+      new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("aborted", "AbortError")),
+        );
+        // never resolves otherwise
+      }),
+  ) as unknown as typeof fetch;
+  const trace = await fetchHuginnTrace("http://x:1/api/trace/abc", 50);
+  expect(trace).toBeNull();
+});
