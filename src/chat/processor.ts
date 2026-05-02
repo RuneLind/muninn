@@ -26,6 +26,7 @@ export async function processChatMessage(
   threadId?: string,
   connectorOverride?: "copilot-sdk" | "claude-cli",
   threadConnector?: Connector,
+  skipExtractions?: boolean,
 ): Promise<void> {
   const conversation = chatState.getConversation(conversationId);
   if (!conversation) {
@@ -150,6 +151,7 @@ export async function processChatMessage(
       onTextDelta,
       onIntent,
       onToolStatus,
+      skipExtractions,
     });
 
     // Publish response metadata to web clients (token usage, timing)

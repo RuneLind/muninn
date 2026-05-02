@@ -345,7 +345,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: "Conversation not found" }, 404);
     }
 
-    const body = await c.req.json<{ text: string; threadId?: string; connector?: string }>();
+    const body = await c.req.json<{ text: string; threadId?: string; connector?: string; skipExtractions?: boolean }>();
     if (!body.text) {
       return c.json({ error: "text is required" }, 400);
     }
@@ -381,7 +381,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
 
     // Process asynchronously — response comes via WebSocket
-    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined).catch((err) => {
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, body.skipExtractions).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       chatState.addMessage(id, {

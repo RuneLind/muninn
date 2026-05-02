@@ -447,6 +447,23 @@ describe("processMessage", () => {
     expect(mockExtractSchedule).toHaveBeenCalledTimes(1);
   });
 
+  test("skips extraction pipelines when skipExtractions is true", async () => {
+    await processMessage({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "web",
+      botConfig,
+      config,
+      say: sayMock,
+      skipExtractions: true,
+    });
+
+    expect(mockExtractMemory).not.toHaveBeenCalled();
+    expect(mockExtractGoal).not.toHaveBeenCalled();
+    expect(mockExtractSchedule).not.toHaveBeenCalled();
+  });
+
   test("extracts Huginn search trace from tool output and stores under attributes.searchTrace", async () => {
     const trace = { query: { raw: "hello" }, schemaVersion: 1, totalMs: 71 };
     const rawOutput =

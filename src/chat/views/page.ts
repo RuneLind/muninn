@@ -59,7 +59,11 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
-        <button class="auto-respond-pill" id="autoRespondPill" hidden></button>
+        <label class="chat-header-pill skip-extractions-toggle" title="When on, this thread will not run memory_extraction, goal_detection, or schedule_detection — useful for testing without polluting personal memory.">
+          <input type="checkbox" id="skipExtractionsCheckbox">
+          <span>Skip extractions</span>
+        </label>
+        <button class="chat-header-pill auto-respond-pill" id="autoRespondPill" hidden></button>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">
@@ -242,6 +246,15 @@ const CHAT_SCRIPT = `
   var chatSend = document.getElementById('chatSend');
   var chatHeader = document.getElementById('chatHeader');
   var chatStatus = document.getElementById('chatStatus');
+  var skipExtractionsCheckbox = document.getElementById('skipExtractionsCheckbox');
+  try {
+    skipExtractionsCheckbox.checked = localStorage.getItem('muninn-skip-extractions') === '1';
+  } catch {}
+  skipExtractionsCheckbox.addEventListener('change', function() {
+    try {
+      localStorage.setItem('muninn-skip-extractions', skipExtractionsCheckbox.checked ? '1' : '0');
+    } catch {}
+  });
   var inspectorToolUsage = document.getElementById('inspectorToolUsage');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
@@ -646,6 +659,9 @@ const CHAT_SCRIPT = `
     if (pendingConnector) {
       payload.connector = pendingConnector;
       pendingConnector = null;
+    }
+    if (skipExtractionsCheckbox.checked) {
+      payload.skipExtractions = true;
     }
     await fetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
