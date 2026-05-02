@@ -261,6 +261,23 @@ export function tracesWaterfallScript(): string {
       } catch (e) { console.error('Failed to load waterfall', e); }
     }
 
+    // The AI span is recorded internally as "claude" regardless of which
+    // connector handled the call. Render the label as "{connector}, {model}"
+    // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
+    // actually ran. Defined at the top level so both renderWaterfall and the
+    // click handler below can see them.
+    function isAiSpan(s) {
+      if (!s || s.name !== 'claude') return false;
+      const a = s.attributes || {};
+      return !!(a.connector || a.model || a.requestedModel);
+    }
+    function aiSpanLabel(s) {
+      const a = s.attributes || {};
+      const conn = a.connector || 'claude-cli';
+      const model = a.model || a.requestedModel || '';
+      return model ? conn + ', ' + model : conn;
+    }
+
     function renderWaterfall(spans) {
       waterfallSpans = spans;
       const el = document.getElementById('waterfall');
@@ -282,22 +299,6 @@ export function tracesWaterfallScript(): string {
 
       function isToolSpan(s) {
         return s.attributes && (s.attributes.toolName || s.attributes.toolId);
-      }
-
-      // The AI span is recorded internally as "claude" regardless of which
-      // connector handled the call. Render the label as "{connector}, {model}"
-      // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
-      // actually ran.
-      function isAiSpan(s) {
-        if (s.name !== 'claude') return false;
-        const a = s.attributes || {};
-        return !!(a.connector || a.model || a.requestedModel);
-      }
-      function aiSpanLabel(s) {
-        const a = s.attributes || {};
-        const conn = a.connector || 'claude-cli';
-        const model = a.model || a.requestedModel || '';
-        return model ? conn + ', ' + model : conn;
       }
 
       const minTime = Math.min(...spans.map(s => s.startedAt));
