@@ -59,11 +59,11 @@ export function renderChatPage(): string {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
-        <label class="skip-extractions-toggle" id="skipExtractionsToggle" title="When on, this thread will not run memory_extraction, goal_detection, or schedule_detection — useful for testing without polluting personal memory.">
+        <label class="chat-header-pill skip-extractions-toggle" title="When on, this thread will not run memory_extraction, goal_detection, or schedule_detection — useful for testing without polluting personal memory.">
           <input type="checkbox" id="skipExtractionsCheckbox">
           <span>Skip extractions</span>
         </label>
-        <button class="auto-respond-pill" id="autoRespondPill" hidden></button>
+        <button class="chat-header-pill auto-respond-pill" id="autoRespondPill" hidden></button>
         <span class="chat-status" id="chatStatus"></span>
       </div>
       <div class="chat-body">

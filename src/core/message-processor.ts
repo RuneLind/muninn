@@ -267,10 +267,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     });
     t.end("db_save_response");
 
-    // Extract memories, goals, and schedules async (fire-and-forget)
-    // Skip for research/analysis flows (e.g. Jira task analysis) — these are
-    // machine-generated prompts, not personal conversations worth extracting from.
-    // Also skip when the caller explicitly opts out (e.g. web chat testing toggle).
+    // Skip extractions for research/analysis flows (Jira task analysis etc.) —
+    // those are machine-generated prompts, not personal conversations.
     const isResearch = text.includes("<!-- research:");
     if (!isResearch && !params.skipExtractions) {
       runExtractionPipelines(

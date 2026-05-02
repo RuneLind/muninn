@@ -381,7 +381,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
 
     // Process asynchronously — response comes via WebSocket
-    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, body.skipExtractions === true).catch((err) => {
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, body.skipExtractions).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       chatState.addMessage(id, {
