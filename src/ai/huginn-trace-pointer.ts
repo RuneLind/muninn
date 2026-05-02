@@ -1,4 +1,5 @@
 import { getLog } from "../logging.ts";
+import { extractMcpResultText, parseHuginnTrace } from "./huginn-trace.ts";
 
 const log = getLog("ai", "huginn-trace-pointer");
 
@@ -50,11 +51,9 @@ export interface PointerExtraction {
  *
  * Anchors at end-of-string (with trailing whitespace tolerance) so a literal
  * "huginn-trace-id:" inside a search hit's text body never produces a false
- * positive.
- *
- * Also unwraps the `{"result":"<inner>"}` envelope that recent Claude CLI
- * versions wrap MCP tool results in. When unwrapping succeeds the inner text
- * is returned (no envelope) so the model sees just the search results.
+ * positive. Recent Claude CLI versions wrap MCP tool results in a
+ * `{"result":"<inner>"}` envelope; we delegate that unwrap to
+ * {@link extractMcpResultText} so the regex always sees the inner text.
  */
 export function parseHuginnTracePointer(
   output: string,
@@ -62,28 +61,45 @@ export function parseHuginnTracePointer(
 ): PointerExtraction {
   if (output.length === 0) return { text: output, fetchUrl: null };
 
-  // Direct case — pointer at the end of a plain text result.
   const direct = matchPointer(output, defaultBaseUrl);
   if (direct !== null) return direct;
 
-  // Wrapped case — Claude CLI inlines large MCP results as
-  // `{"result":"<inner>"}` strings. The pointer lives inside `<inner>`,
-  // not at the end of the wrapper. Unwrap once and retry; on success
-  // return the inner text (envelope discarded — model gets clean text).
-  const trimmed = output.trimStart();
-  if (trimmed.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(output) as { result?: unknown };
-      if (parsed && typeof parsed.result === "string") {
-        const innerMatch = matchPointer(parsed.result, defaultBaseUrl);
-        if (innerMatch !== null) return innerMatch;
-      }
-    } catch {
-      // Not a clean JSON wrapper — fall through, no pointer.
-    }
+  const inner = extractMcpResultText(output);
+  if (inner !== null && inner !== output) {
+    const wrapped = matchPointer(inner, defaultBaseUrl);
+    if (wrapped !== null) return wrapped;
   }
 
   return { text: output, fetchUrl: null };
+}
+
+export interface HuginnTraceChannel {
+  /** Tool output with the trace marker stripped, ready to store / forward. */
+  text: string;
+  /** Inline-fence trace, if Huginn ran in `HUGINN_TRACE_DEFAULT` (legacy) mode. */
+  trace?: unknown;
+  /** Phase 2 fetch URL, if Huginn ran in `HUGINN_TRACE_POINTER` mode. */
+  pointer?: string;
+}
+
+/**
+ * Single entry point for connectors: try the pointer channel first, then fall
+ * back to the inline-fence channel. Both modes coexist during rollout, and
+ * the precedence rule is the same in every connector — wrap it once instead
+ * of repeating the if/else in each call site.
+ *
+ * Returns `text` unchanged when neither channel matched.
+ */
+export function peelHuginnTraceChannel(text: string): HuginnTraceChannel {
+  const ptr = parseHuginnTracePointer(text);
+  if (ptr.fetchUrl !== null) {
+    return { text: ptr.text, pointer: ptr.fetchUrl };
+  }
+  const parsed = parseHuginnTrace(text);
+  return {
+    text: parsed.text,
+    trace: parsed.trace ?? undefined,
+  };
 }
 
 /** Try the pointer regex against `output`. Returns split + URL on hit, null on miss. */
@@ -121,10 +137,8 @@ export async function fetchHuginnTrace(
   url: string,
   timeoutMs = 2000,
 ): Promise<unknown | null> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const resp = await fetch(url, { signal: ctrl.signal });
+    const resp = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!resp.ok) {
       log.warn("Trace fetch returned {status} for {url}", { status: resp.status, url });
       return null;
@@ -136,7 +150,5 @@ export async function fetchHuginnTrace(
       error: e instanceof Error ? e.message : String(e),
     });
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }

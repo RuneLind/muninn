@@ -5,8 +5,8 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
-import { parseHuginnTracePointer } from "../huginn-trace-pointer.ts";
+import { extractMcpResultText } from "../huginn-trace.ts";
+import { peelHuginnTraceChannel } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -150,29 +150,17 @@ export async function executePrompt(
 
           // Prefer the inner text payload over the SDK's structured envelope so
           // the inspector shows readable content instead of a double-encoded
-          // {"content":"..."} blob. For Huginn searches this also peels off the
-          // trailing trace fence and surfaces it separately as searchTrace.
-          // Falls through to the structured form (e.g. error envelopes) when
-          // no text content is extractable.
-          //
-          // Pointer-mode (Phase 2) is tried first: when Huginn runs with
-          // HUGINN_TRACE_POINTER=1, the trace lives behind a /api/trace/<id>
-          // endpoint and only a tiny pointer line rides in the tool result.
-          // Falls back to the inline-fence path for unflipped Huginn instances.
+          // {"content":"..."} blob. Falls through to the structured form
+          // (e.g. error envelopes) when no text content is extractable.
           let outputForStorage: string | undefined;
           let searchTrace: unknown | undefined;
           let searchTracePointer: string | undefined;
           const text = extractMcpResultText(resultPayload);
           if (text !== null) {
-            const pointer = parseHuginnTracePointer(text);
-            if (pointer.fetchUrl !== null) {
-              searchTracePointer = pointer.fetchUrl;
-              outputForStorage = truncateOutput(pointer.text);
-            } else {
-              const parsed = parseHuginnTrace(text);
-              searchTrace = parsed.trace ?? undefined;
-              outputForStorage = truncateOutput(parsed.text);
-            }
+            const channel = peelHuginnTraceChannel(text);
+            outputForStorage = truncateOutput(channel.text);
+            searchTrace = channel.trace;
+            searchTracePointer = channel.pointer;
           } else {
             outputForStorage = truncateOutput(resultPayload);
           }

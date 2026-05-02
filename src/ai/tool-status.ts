@@ -17,6 +17,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
+import { isReportIntentTool } from "./stream-parser.ts";
 
 const log = getLog("ai", "tool-status");
 
@@ -320,16 +321,7 @@ export function parseToolName(name: string): { server: string; tool: string } | 
  */
 export function getToolStatus(toolName: string, input?: string): string | undefined {
   // Skip report_intent — it generates its own intent events.
-  // Match across all connector formats (bare, mcp__server__report_intent,
-  // server-report_intent) so claude-cli/openai-compat exposed tools are also
-  // suppressed.
-  if (
-    toolName === "report_intent" ||
-    toolName.endsWith("__report_intent") ||
-    toolName.endsWith("-report_intent")
-  ) {
-    return undefined;
-  }
+  if (isReportIntentTool(toolName)) return undefined;
 
   const parsed = parseToolName(toolName);
   if (!parsed) {

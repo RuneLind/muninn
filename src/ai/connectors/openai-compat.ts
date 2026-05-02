@@ -4,8 +4,8 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { parseHuginnTrace, extractMcpResultText } from "../huginn-trace.ts";
-import { parseHuginnTracePointer } from "../huginn-trace-pointer.ts";
+import { extractMcpResultText } from "../huginn-trace.ts";
+import { peelHuginnTraceChannel } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -217,29 +217,18 @@ export async function executePrompt(
 
       // Peel the MCP envelope so the model only sees the inner text payload —
       // shipping the full {"content":[{"type":"text","text":"..."}]} blob to a
-      // small-context model (e.g. local qwen3 35B) wastes thousands of tokens
-      // and would otherwise hide the Huginn trace fence inside the JSON, where
-      // parseHuginnTrace can't anchor on the closing ``` and won't strip it.
+      // small-context model (e.g. local qwen3 35B) wastes thousands of tokens.
       // Errors and plain-string outputs fall through to JSON.stringify so the
       // model still gets a structured signal it can reason about.
-      //
-      // Pointer-mode (Phase 2) is tried first; falls back to inline-fence
-      // for unflipped Huginn instances. Either way the model never sees
-      // either fence text or pointer line.
       const innerText = extractMcpResultText(rawResult);
       let cleaned: string;
       let searchTrace: unknown | undefined;
       let searchTracePointer: string | undefined;
       if (innerText !== null) {
-        const pointer = parseHuginnTracePointer(innerText);
-        if (pointer.fetchUrl !== null) {
-          cleaned = pointer.text;
-          searchTracePointer = pointer.fetchUrl;
-        } else {
-          const parsed = parseHuginnTrace(innerText);
-          cleaned = parsed.text;
-          searchTrace = parsed.trace ?? undefined;
-        }
+        const channel = peelHuginnTraceChannel(innerText);
+        cleaned = channel.text;
+        searchTrace = channel.trace;
+        searchTracePointer = channel.pointer;
       } else {
         cleaned = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
       }
