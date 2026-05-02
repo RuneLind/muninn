@@ -59,6 +59,10 @@ export interface ProcessMessageParams {
    *  guarantee the triggering message is already persisted (under any role) so
    *  that prompt-builder's history dedup still finds it. */
   skipUserSave?: boolean;
+  /** When true, skip async memory/goal/schedule extraction pipelines. Used by
+   *  the web chat "Skip extractions" testing toggle to avoid polluting personal
+   *  memory/goals/schedules during dev iteration. */
+  skipExtractions?: boolean;
 }
 
 export interface ProcessMessageResult {
@@ -266,8 +270,9 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // Extract memories, goals, and schedules async (fire-and-forget)
     // Skip for research/analysis flows (e.g. Jira task analysis) — these are
     // machine-generated prompts, not personal conversations worth extracting from.
+    // Also skip when the caller explicitly opts out (e.g. web chat testing toggle).
     const isResearch = text.includes("<!-- research:");
-    if (!isResearch) {
+    if (!isResearch && !params.skipExtractions) {
       runExtractionPipelines(
         {
           userId, botName: botConfig.name, botDir: botConfig.dir,

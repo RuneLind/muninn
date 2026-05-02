@@ -242,6 +242,22 @@ export function chatStyles(): string {
     .sidebar-connector select:focus { outline: none; border-color: var(--accent); }
     .chat-status { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; max-width: 50%; }
     .chat-status:empty { display: none; }
+    .skip-extractions-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+      flex-shrink: 0;
+      padding: 4px 8px;
+      border: 1px solid var(--border-primary);
+      border-radius: 4px;
+      background: var(--bg-surface);
+    }
+    .skip-extractions-toggle:hover { color: var(--text-primary); }
+    .skip-extractions-toggle input { margin: 0; cursor: pointer; }
     .chat-status .status-detail { color: var(--accent-light, #a8b4ff); }
     .auto-respond-pill {
       font-size: 11px;
