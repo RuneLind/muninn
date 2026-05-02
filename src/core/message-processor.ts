@@ -140,11 +140,12 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     agentStatus.set("calling_claude", username);
     agentStatus.updatePhase("calling_claude");
     setConnectorInfo(botConfig, config.claudeModel);
-    const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
+    const connectorType = botConfig.connector ?? "claude-cli";
+    const connectorLabel = getConnectorLabel(connectorType);
     const effectiveModel = botConfig.model ?? config.claudeModel;
     const effectiveTimeout = botConfig.timeoutMs ?? config.claudeTimeoutMs;
     log.info("Calling {connector} (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
-    t.start("claude");
+    t.start("claude", { connector: connectorType, requestedModel: effectiveModel });
     const progressCallback = buildProgressCallback(
       { onTextDelta, onIntent, onToolStatus, setStatus },
       username,
