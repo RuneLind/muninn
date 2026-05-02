@@ -1,6 +1,7 @@
 import { loadConfig } from "../config.ts";
 import { getLog } from "../logging.ts";
 import { extractMcpResultText, parseHuginnTrace } from "./huginn-trace.ts";
+import { parseYggdrasilTracePointer } from "./yggdrasil-trace-pointer.ts";
 
 const log = getLog("ai", "huginn-trace-pointer");
 
@@ -128,6 +129,13 @@ export function peelHuginnTraceChannel(
   const ptr = parseHuginnTracePointer(text, undefined, allowedOrigins);
   if (ptr.fetchUrl !== null) {
     return { text: ptr.text, pointer: ptr.fetchUrl };
+  }
+  // Yggdrasil emits its own pointer line with a different prefix; same shape,
+  // disjoint from huginn's. Per producer = per allow-list, so we don't share
+  // the `allowedOrigins` argument across producers.
+  const ygg = parseYggdrasilTracePointer(text);
+  if (ygg.fetchUrl !== null) {
+    return { text: ygg.text, pointer: ygg.fetchUrl };
   }
   const parsed = parseHuginnTrace(text);
   return {

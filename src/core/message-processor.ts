@@ -165,9 +165,11 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     // Resolve any Phase-2 trace pointers in parallel before opening tool spans.
     // Pointer-mode tools come back from the connector with a `searchTracePointer`
-    // (fetch URL) but no `searchTrace` — we hit Huginn's /api/trace/<id> here
-    // and merge the result back onto the tool. Fail-soft: a null fetch leaves
-    // the span without `searchTrace`, never breaks the user-visible response.
+    // (fetch URL) but no `searchTrace` — we hit the producer's /api/trace/<id>
+    // (huginn or yggdrasil; the fetch is producer-agnostic, the URL is the
+    // discriminator) and merge the result back onto the tool. Fail-soft: a null
+    // fetch leaves the span without `searchTrace`, never breaks the user-visible
+    // response.
     if (result.toolCalls) {
       const pointerTools = result.toolCalls.filter(
         (tc) => tc.searchTracePointer && tc.searchTrace === undefined,
