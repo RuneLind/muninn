@@ -270,6 +270,22 @@ export function tracesWaterfallScript(): string {
         return s.attributes && (s.attributes.toolName || s.attributes.toolId);
       }
 
+      // The AI span is recorded internally as "claude" regardless of which
+      // connector handled the call. Render the label as "{connector}, {model}"
+      // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
+      // actually ran.
+      function isAiSpan(s) {
+        if (s.name !== 'claude') return false;
+        const a = s.attributes || {};
+        return !!(a.connector || a.model || a.requestedModel);
+      }
+      function aiSpanLabel(s) {
+        const a = s.attributes || {};
+        const conn = a.connector || 'claude-cli';
+        const model = a.model || a.requestedModel || '';
+        return model ? conn + ', ' + model : conn;
+      }
+
       const minTime = Math.min(...spans.map(s => s.startedAt));
       const maxTime = Math.max(...spans.map(s => s.startedAt + (s.durationMs || 0)));
       const totalRange = Math.max(maxTime - minTime, 1);
@@ -286,10 +302,12 @@ export function tracesWaterfallScript(): string {
         const chip = isToolSpan(s) && typeof deriveSpanLabelHtml === 'function'
           ? deriveSpanLabelHtml(s)
           : null;
+        const aiLabel = !chip && isAiSpan(s) ? aiSpanLabel(s) : null;
+        const fallbackName = aiLabel || s.name;
         const labelInner = chip
           ? esc(indent) + chip.html
-          : esc(indent + s.name);
-        const labelTooltip = chip ? chip.tooltip : s.name;
+          : esc(indent + fallbackName);
+        const labelTooltip = chip ? chip.tooltip : fallbackName;
         const barKind = isToolSpan(s) ? 'tool' : s.kind;
         const inputLabel = isToolSpan(s) ? toolInputLabel(s.attributes && s.attributes.input) : '';
         const inputHtml = inputLabel ? '<span class="waterfall-input" title="' + esc(inputLabel) + '">' + esc(inputLabel) + '</span>' : '';
@@ -316,8 +334,9 @@ export function tracesWaterfallScript(): string {
       if (!span) return;
       const details = document.getElementById('spanDetails');
       details.classList.add('visible');
+      const titleName = isAiSpan(span) ? aiSpanLabel(span) : span.name;
       document.getElementById('spanDetailsTitle').textContent =
-        span.name + ' (' + span.kind + ', ' + span.status + ')';
+        titleName + ' (' + span.kind + ', ' + span.status + ')';
       const attrs = span.attributes || {};
       const host = document.getElementById('spanDetailsJson');
       // If the span carries a v1 Huginn search trace, render the structured panel.
