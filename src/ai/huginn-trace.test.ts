@@ -318,4 +318,48 @@ describe("recoverOversizedClaudeCliToolResult", () => {
       rmSync(dir, { recursive: true });
     }
   });
+
+  test("recovers Phase 2 pointer URL from diverted file and strips it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const body = "## Search results\n\nrelevant content here";
+    const url = "http://localhost:8321/api/trace/86251f3c5c58db3a";
+    const original = body + "\n\nhuginn-trace-url: " + url + "\n";
+    writeFileSync(filePath, JSON.stringify({ result: original }), "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(makePlaceholder(filePath));
+      expect(recovered).not.toBeNull();
+      expect(recovered!.trace).toBeNull();
+      expect(recovered!.tracePointer).toBe(url);
+      expect(recovered!.rewritten).toBe(true);
+      // File now holds cleaned text — no pointer
+      const after = JSON.parse(readFileSync(filePath, "utf8")) as { result: string };
+      expect(after.result).toBe(body);
+      expect(after.result).not.toContain("huginn-trace-url");
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("pointer recovery does not rewrite when stripTraceFromFile is false", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const url = "http://localhost:8321/api/trace/0123456789abcdef";
+    const original = "body\n\nhuginn-trace-url: " + url + "\n";
+    const fileContent = JSON.stringify({ result: original });
+    writeFileSync(filePath, fileContent, "utf8");
+
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(
+        makePlaceholder(filePath),
+        { stripTraceFromFile: false },
+      );
+      expect(recovered!.tracePointer).toBe(url);
+      expect(recovered!.rewritten).toBe(false);
+      expect(readFileSync(filePath, "utf8")).toBe(fileContent);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
 });

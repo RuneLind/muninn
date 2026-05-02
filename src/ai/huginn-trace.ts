@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { getLog } from "../logging.ts";
+import { parseHuginnTracePointer } from "./huginn-trace-pointer.ts";
 
 const log = getLog("ai", "huginn-trace");
 
@@ -168,10 +169,15 @@ const CLAUDE_CLI_OVERSIZED_RE =
 export interface OversizedRecovery {
   /** Path to the saved tool-result file. */
   filePath: string;
-  /** Parsed Huginn trace (null if no fence in the file). */
+  /** Parsed Huginn trace (null if no fence in the file, or pointer-mode). */
   trace: unknown | null;
-  /** True if the file was rewritten with the trace fence stripped — only
-   *  happens when `stripTraceFromFile` is set and a trace was actually found. */
+  /** Phase 2 trace fetch URL — populated when the diverted file ended with a
+   *  `huginn-trace-url:` line instead of an inline fence. Mutually exclusive
+   *  with `trace` (server is in either fence-mode or pointer-mode, not both). */
+  tracePointer: string | null;
+  /** True if the file was rewritten with the trace fence/pointer stripped —
+   *  only happens when `stripTraceFromFile` is set and a trace marker was
+   *  actually found. */
   rewritten: boolean;
 }
 
@@ -205,21 +211,41 @@ export function recoverOversizedClaudeCliToolResult(
       path: filePath,
       error: e instanceof Error ? e.message : String(e),
     });
-    return { filePath, trace: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { filePath, trace: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false };
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { filePath, trace: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false };
   }
   const obj = parsed as { result?: unknown };
   if (typeof obj.result !== "string") {
-    return { filePath, trace: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false };
+  }
+
+  // Try Phase 2 pointer first — Huginn in pointer-mode appends a single
+  // `huginn-trace-url:` line at the end of the result. Fence-mode is the
+  // legacy fallback for unflipped Huginn instances.
+  const pointer = parseHuginnTracePointer(obj.result);
+  if (pointer.fetchUrl !== null) {
+    let rewritten = false;
+    if (opts.stripTraceFromFile !== false) {
+      try {
+        writeFileSync(filePath, JSON.stringify({ ...obj, result: pointer.text }), "utf8");
+        rewritten = true;
+      } catch (e) {
+        log.warn("Could not strip pointer line from {path}: {error}", {
+          path: filePath,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    return { filePath, trace: null, tracePointer: pointer.fetchUrl, rewritten };
   }
 
   const { text: cleanedText, trace } = parseHuginnTrace(obj.result);
@@ -237,7 +263,7 @@ export function recoverOversizedClaudeCliToolResult(
     }
   }
 
-  return { filePath, trace, rewritten };
+  return { filePath, trace, tracePointer: null, rewritten };
 }
 
 function extractTextBlocks(blocks: unknown[]): string | null {

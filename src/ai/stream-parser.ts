@@ -202,6 +202,7 @@ export class StreamParser {
             if (recovery !== null) {
               pending.output = truncateOutput(raw);
               if (recovery.trace !== null) pending.searchTrace = recovery.trace;
+              if (recovery.tracePointer !== null) pending.searchTracePointer = recovery.tracePointer;
             } else {
               const parsed = parseHuginnTrace(raw);
               pending.output = truncateOutput(parsed.text);
