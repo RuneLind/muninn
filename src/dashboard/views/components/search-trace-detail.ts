@@ -94,7 +94,7 @@ export function searchTraceDetailStyles(): string {
     .stt-strip-legend { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; flex-wrap: wrap; }
     .stt-strip-legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 
-    /* Stage colors */
+    /* Stage colors — huginn */
     .stt-stage-indexFetch { background: #4f46e5; }
     .stt-stage-chunkLoad  { background: #0ea5e9; }
     .stt-stage-rerank     { background: #f59e0b; }
@@ -106,6 +106,19 @@ export function searchTraceDetailStyles(): string {
     .stt-leg-rerank::before     { background: #f59e0b; }
     .stt-leg-titleBoost::before { background: #ef4444; }
     .stt-leg-assembly::before   { background: #10b981; }
+
+    /* Stage colors — yggdrasil */
+    .stt-stage-embedding { background: #6366f1; }
+    .stt-stage-fts       { background: #0ea5e9; }
+    .stt-stage-semantic  { background: #8b5cf6; }
+    .stt-stage-name      { background: #f59e0b; }
+    .stt-stage-rrf       { background: #10b981; }
+
+    .stt-leg-embedding::before { background: #6366f1; }
+    .stt-leg-fts::before       { background: #0ea5e9; }
+    .stt-leg-semantic::before  { background: #8b5cf6; }
+    .stt-leg-name::before      { background: #f59e0b; }
+    .stt-leg-rrf::before       { background: #10b981; }
 
     /* Confidence axis */
     .stt-conf {
@@ -145,10 +158,25 @@ export function searchTraceDetailStyles(): string {
     .stt-cands th:hover { color: var(--text-soft); }
     .stt-cands td.stt-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-tertiary); }
     .stt-cands td.stt-title { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stt-cands td.stt-sym {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--text-faint);
+      font-size: 10px;
+    }
     .stt-cands tr.stt-disagree td { background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
     .stt-cands tr.stt-dropped td { color: var(--text-dim); }
     .stt-status-kept { color: var(--status-success); }
     .stt-status-dropped { color: var(--status-error); }
+    .stt-qf {
+      background: var(--bg-panel);
+      border: 1px solid var(--border-primary);
+      color: var(--text-soft);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      min-width: 200px;
+    }
+    .stt-qf:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
     .stt-toolbar { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
     .stt-toolbar button {
@@ -177,16 +205,34 @@ export function searchTraceDetailScript(): string {
     };
 
     function renderSearchTrace(trace) {
-      window.__sttState.trace = trace;
+      // New trace identity → reset sort/filter/qFilter so leftover state from
+      // the previous span (which may have been a different shape) doesn't
+      // silently flip ordering or hide rows.
+      if (window.__sttState.trace !== trace) {
+        window.__sttState.sortKey = 'final';
+        window.__sttState.sortDir = 'asc';
+        window.__sttState.filter = 'kept-top';
+        window.__sttState.qFilter = '';
+        window.__sttState.trace = trace;
+      }
       if (window.__sttState.showRaw) {
         return '<pre class="stt-raw">' + esc(JSON.stringify(trace, null, 2)) + '</pre>' +
                '<div class="stt-toolbar"><button class="stt-active" onclick="sttToggleRaw()">Show structured</button></div>';
+      }
+      if (sttIsYggdrasilTrace(trace)) {
+        return sttRenderYggdrasilPanel(trace);
       }
       return '<div class="stt-panel">' +
         sttRenderQuery(trace.query || {}) +
         sttRenderCollections(trace.collections || []) +
         '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
       '</div>';
+    }
+
+    function sttIsYggdrasilTrace(trace) {
+      return !!(trace && typeof trace.tool === 'string' &&
+                !Array.isArray(trace.collections) &&
+                Array.isArray(trace.candidates));
     }
 
     function sttToggleRaw() {
@@ -246,18 +292,26 @@ export function searchTraceDetailScript(): string {
       return collections.map((c, i) => sttRenderCollection(c, i)).join('');
     }
 
+    function sttBuildTimingsStrip(timings, keys, labels) {
+      let sum = 0;
+      for (const k of keys) if (timings[k] > 0) sum += timings[k];
+      const total = sum || timings.total || 0;
+      let segs = '';
+      let legend = '';
+      for (const k of keys) {
+        const ms = timings[k];
+        if (!(ms > 0)) continue;
+        const pct = total > 0 ? (ms / total) * 100 : 0;
+        segs += '<div class="stt-strip-seg stt-stage-' + k + '" style="width:' + pct + '%" title="' + labels[k] + ' — ' + ms + 'ms">' +
+          (pct > 8 ? labels[k] + ' ' + ms + 'ms' : '') + '</div>';
+        legend += '<span class="stt-leg-' + k + '">' + labels[k] + ' ' + ms + 'ms</span>';
+      }
+      return { segs, legend, total };
+    }
+
     function sttRenderCollection(c, idx) {
       const timings = c.timingsMs || {};
-      const total = STT_STAGES.reduce((s, k) => s + (timings[k] > 0 ? timings[k] : 0), 0) || timings.total || 0;
-      const stripSegs = STT_STAGES.filter(k => timings[k] > 0).map(k => {
-        const pct = total > 0 ? (timings[k] / total) * 100 : 0;
-        return '<div class="stt-strip-seg stt-stage-' + k + '" style="width:' + pct + '%" title="' + STT_STAGE_LABELS[k] + ' — ' + timings[k] + 'ms">' +
-          (pct > 8 ? STT_STAGE_LABELS[k] + ' ' + timings[k] + 'ms' : '') +
-        '</div>';
-      }).join('');
-      const legend = STT_STAGES.filter(k => timings[k] > 0).map(k =>
-        '<span class="stt-leg-' + k + '">' + STT_STAGE_LABELS[k] + ' ' + timings[k] + 'ms</span>'
-      ).join('');
+      const strip = sttBuildTimingsStrip(timings, STT_STAGES, STT_STAGE_LABELS);
 
       const conf = c.confidence || {};
       const confBlock = sttRenderConfidence(conf);
@@ -268,10 +322,10 @@ export function searchTraceDetailScript(): string {
           (c.indexer ? 'indexer=' + esc(c.indexer) : '') +
           (c.fetchK != null ? ' · fetchK=' + c.fetchK : '') +
           ' · candidates=' + (c.candidates || []).length +
-          ' · ' + (timings.total != null ? timings.total + 'ms' : total + 'ms') +
+          ' · ' + (timings.total != null ? timings.total + 'ms' : strip.total + 'ms') +
         '</span></h5>' +
-        '<div class="stt-strip">' + stripSegs + '</div>' +
-        (legend ? '<div class="stt-strip-legend">' + legend + '</div>' : '') +
+        '<div class="stt-strip">' + strip.segs + '</div>' +
+        (strip.legend ? '<div class="stt-strip-legend">' + strip.legend + '</div>' : '') +
         confBlock +
         candTable +
       '</div>';
@@ -367,7 +421,15 @@ export function searchTraceDetailScript(): string {
 
     function sttFmtRank(stage) {
       if (!stage || stage.rank == null) return '—';
-      return stage.rank + (typeof stage.score === 'number' ? ' (' + stage.score.toFixed(2) + ')' : '');
+      // yggdrasil emits name.score as a string ("1.0") in some cases —
+      // coerce before formatting so the cell doesn't render "undefined".
+      var n = null;
+      if (typeof stage.score === 'number' && isFinite(stage.score)) n = stage.score;
+      else if (typeof stage.score === 'string') {
+        var parsed = parseFloat(stage.score);
+        if (isFinite(parsed)) n = parsed;
+      }
+      return stage.rank + (n != null ? ' (' + n.toFixed(2) + ')' : '');
     }
 
     function sttFilterCandidates(cands, mode) {
@@ -395,6 +457,150 @@ export function searchTraceDetailScript(): string {
         if (va > vb) return 1 * mul;
         return 0;
       });
+    }
+
+    /* --- Yggdrasil branch (code-intelligence search) ---------------------- */
+
+    const STT_YGG_STAGES = ['fts','semantic','name','rrf','final'];
+    const STT_YGG_TIMING_KEYS = ['embedding','fts','semantic','name','rrf'];
+    const STT_YGG_SORT_KEYS = STT_YGG_STAGES.concat(['qualifiedName','kind']);
+    const STT_YGG_LABELS = {
+      embedding: 'embed', fts: 'FTS', semantic: 'semantic',
+      name: 'name', rrf: 'RRF', final: 'final',
+    };
+
+    function sttRenderYggdrasilPanel(trace) {
+      return '<div class="stt-panel">' +
+        sttRenderYggHeader(trace.query || {}) +
+        sttRenderYggTimings(trace.timingsMs || {}) +
+        sttRenderYggCandidates(trace.candidates || []) +
+        '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
+      '</div>';
+    }
+
+    function sttRenderYggHeader(q) {
+      var filterChips = '';
+      if (q.filters && typeof q.filters === 'object') {
+        var keys = Object.keys(q.filters);
+        for (var i = 0; i < keys.length; i++) {
+          var v = q.filters[keys[i]];
+          if (v == null) continue;
+          filterChips += '<span class="stt-chip"><span class="stt-chip-type">' +
+            esc(keys[i]) + '</span>' + esc(String(v)) + '</span>';
+        }
+      }
+      return '<div class="stt-section">' +
+        '<h5>Query <span class="stt-badge">tool: search</span></h5>' +
+        '<div class="stt-query">' +
+          '<div><span class="stt-label">raw:</span>' + esc(q.raw || '') + '</div>' +
+          (filterChips ? '<div class="stt-row" style="margin-top:8px">' + filterChips + '</div>' : '') +
+        '</div>' +
+      '</div>';
+    }
+
+    function sttRenderYggTimings(timings) {
+      const strip = sttBuildTimingsStrip(timings, STT_YGG_TIMING_KEYS, STT_YGG_LABELS);
+      if (!strip.segs) return '';
+      const totalLabel = timings.total != null ? timings.total : strip.total;
+      return '<div class="stt-section">' +
+        '<h5>Timings <span style="color:var(--text-faint);font-weight:normal;text-transform:none;letter-spacing:0">total=' + totalLabel + 'ms</span></h5>' +
+        '<div class="stt-strip">' + strip.segs + '</div>' +
+        (strip.legend ? '<div class="stt-strip-legend">' + strip.legend + '</div>' : '') +
+      '</div>';
+    }
+
+    function sttRenderYggCandidates(cands) {
+      if (!cands.length) return '';
+      const s = window.__sttState;
+      const qf = ((s.qFilter || '') + '').trim().toLowerCase();
+      let filtered = cands;
+      if (qf) {
+        filtered = cands.filter(c => (c.qualifiedName || '').toLowerCase().indexOf(qf) !== -1);
+      }
+      const visible = s.filter === 'all'
+        ? filtered.slice()
+        : filtered.filter(c => c.stages && c.stages.final).slice(0, 20);
+
+      const sortKey = STT_YGG_SORT_KEYS.indexOf(s.sortKey) !== -1 ? s.sortKey : 'final';
+      const mul = s.sortDir === 'asc' ? 1 : -1;
+      const valFor = (c) => {
+        if (sortKey === 'qualifiedName') return (c.qualifiedName || '').toLowerCase();
+        if (sortKey === 'kind') return c.kind || '';
+        const stage = c.stages && c.stages[sortKey];
+        return stage && typeof stage.rank === 'number' ? stage.rank : Infinity;
+      };
+      visible.sort((a, b) => {
+        const va = valFor(a), vb = valFor(b);
+        if (va < vb) return -1 * mul;
+        if (va > vb) return 1 * mul;
+        return 0;
+      });
+
+      const cols = [
+        { key: null,            label: '#'             },
+        { key: null,            label: 'symbol'        },
+        { key: 'qualifiedName', label: 'qualifiedName' },
+        { key: 'kind',          label: 'kind'          },
+        { key: 'fts',           label: 'FTS'           },
+        { key: 'semantic',      label: 'semantic'      },
+        { key: 'name',          label: 'name'          },
+        { key: 'rrf',           label: 'RRF'           },
+        { key: 'final',         label: 'final'         },
+      ];
+      const header = '<thead><tr>' + cols.map(col => {
+        if (!col.key) return '<th>' + esc(col.label) + '</th>';
+        const arrow = s.sortKey === col.key ? (s.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        return '<th onclick="sttSetSort(\\'' + col.key + '\\')">' + esc(col.label) + arrow + '</th>';
+      }).join('') + '</tr></thead>';
+
+      const rows = visible.map((c, i) => {
+        const stages = c.stages || {};
+        const symEsc = esc(c.symbolId || '');
+        const qnEsc = esc(c.qualifiedName || '');
+        const sym = c.symbolId ? c.symbolId.slice(0, 8) : '';
+        return '<tr>' +
+          '<td class="stt-num">' + (i + 1) + '</td>' +
+          '<td class="stt-sym" title="' + symEsc + '">' + esc(sym) + '</td>' +
+          '<td class="stt-title" title="' + qnEsc + '">' + qnEsc + '</td>' +
+          '<td>' + (c.kind ? '<span class="stt-chip">' + esc(c.kind) + '</span>' : '') + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.fts) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.semantic) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.name) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.rrf) + '</td>' +
+          '<td class="stt-num">' + sttFmtRank(stages.final) + '</td>' +
+        '</tr>';
+      }).join('');
+
+      const btn = (key, label) =>
+        '<button class="' + (s.filter === key ? 'stt-active' : '') +
+        '" onclick="sttSetFilter(\\'' + key + '\\')">' + label + '</button>';
+      return '<div style="margin-top:12px">' +
+        '<div class="stt-toolbar">' +
+          '<span>Candidates (' + visible.length + '/' + cands.length + ')</span>' +
+          btn('kept-top', 'top 20 final') +
+          btn('all', 'all') +
+          '<input class="stt-qf" type="text" placeholder="filter qualifiedName…" value="' + esc(s.qFilter || '') + '" oninput="sttSetQFilter(this.value)">' +
+        '</div>' +
+        '<div class="stt-cands-wrap"><table class="stt-cands">' + header + '<tbody>' + rows + '</tbody></table></div>' +
+      '</div>';
+    }
+
+    function sttSetQFilter(v) {
+      // Capture caret position before sttRerender swaps innerHTML — otherwise
+      // the cursor jumps to the end on every keystroke and editing mid-string
+      // becomes impossible.
+      const prev = document.querySelector('.stt-qf');
+      const start = prev ? prev.selectionStart : null;
+      const end = prev ? prev.selectionEnd : null;
+      window.__sttState.qFilter = v;
+      sttRerender();
+      const next = document.querySelector('.stt-qf');
+      if (next) {
+        next.focus();
+        if (start != null && end != null) {
+          try { next.setSelectionRange(start, end); } catch (e) {}
+        }
+      }
     }
   `;
 }

@@ -33,7 +33,7 @@ export function extractToolInputLabel(input: unknown): string {
 
 /** Strip the redundant MCP-server prefix from a tool span's display name when
  *  we're going to append a more specific identifier (e.g. a collection name). */
-const TOOL_NAME_PREFIX_RE = /^(knowledge|huginn)[-_]/;
+const TOOL_NAME_PREFIX_RE = /^(knowledge|huginn|yggdrasil)[-_]/;
 
 interface SpanLike {
   name?: string;
@@ -41,7 +41,9 @@ interface SpanLike {
     toolName?: unknown;
     toolId?: unknown;
     input?: unknown;
-    searchTrace?: { collections?: Array<{ name?: unknown }> } | unknown;
+    searchTrace?:
+      | { collections?: Array<{ name?: unknown }>; tool?: unknown }
+      | unknown;
   };
 }
 
@@ -81,12 +83,19 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
 }
 
 function collectionsFor(attrs: NonNullable<SpanLike["attributes"]>): string[] | null {
-  const trace = attrs.searchTrace as { collections?: Array<{ name?: unknown }> } | undefined;
+  const trace = attrs.searchTrace as
+    | { collections?: Array<{ name?: unknown }>; tool?: unknown }
+    | undefined;
   if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
     const names = trace.collections
       .map((c) => (c && typeof c.name === "string" ? c.name : null))
       .filter((n): n is string => !!n);
     if (names.length > 0) return names;
+  }
+  // Yggdrasil traces are flatter — no collections, but a `tool` discriminator.
+  // Synthesize a single producer chip so the trace dot still shows in the row.
+  if (trace && typeof trace.tool === "string" && trace.tool.length > 0) {
+    return ["yggdrasil"];
   }
   const raw = attrs.input;
   let input: Record<string, unknown> | null = null;
@@ -182,6 +191,9 @@ export function deriveSpanLabelScript(): string {
         }
         if (names.length > 0) collections = names;
       }
+      if (!collections && trace && typeof trace.tool === 'string' && trace.tool.length > 0) {
+        collections = ['yggdrasil'];
+      }
       if (!collections) {
         var input = null;
         var raw = attrs.input;
@@ -209,7 +221,7 @@ export function deriveSpanLabelScript(): string {
       for (var k = 0; k < buckets.length; k++) sorted = sorted.concat(buckets[k]);
       collections = sorted.concat(rest);
 
-      var verb = (span.name.replace(/^(knowledge|huginn)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
+      var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
       var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
       var hasTrace = !!(trace && trace.schemaVersion === 1);
 
