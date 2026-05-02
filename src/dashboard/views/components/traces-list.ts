@@ -41,6 +41,9 @@ export function tracesListStyles(): string {
 
     .tokens { color: var(--text-muted); font-size: 12px; }
     .badge-tools { background: color-mix(in srgb, var(--status-tool) 15%, transparent); color: var(--status-tool); margin-left: 6px; }
+    .backend-cell { font-size: 12px; color: var(--text-muted); }
+    .backend-connector { color: var(--accent-light); font-weight: 500; }
+    .backend-model { color: var(--text-dim); }
 
     .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
   `;
@@ -55,6 +58,7 @@ export function tracesListHtml(): string {
           <th>Name</th>
           <th>Bot</th>
           <th>User</th>
+          <th>Backend</th>
           <th>Duration</th>
           <th>Status</th>
           <th>Tools</th>
@@ -107,10 +111,20 @@ export function tracesListScript(): string {
       } catch (e) { console.error('Failed to load traces', e); }
     }
 
+    function fmtBackend(attrs) {
+      const connector = attrs?.connector;
+      const model = attrs?.model || attrs?.requestedModel;
+      if (!connector && !model) return '<span style="color:var(--text-disabled)">-</span>';
+      const parts = [];
+      if (connector) parts.push('<span class="backend-connector">' + esc(connector) + '</span>');
+      if (model) parts.push('<span class="backend-model">' + esc(model) + '</span>');
+      return '<span class="backend-cell">' + parts.join(' · ') + '</span>';
+    }
+
     function renderTraceList(traces) {
       const tbody = document.getElementById('traceList');
       if (traces.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty">No traces found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="empty">No traces found</td></tr>';
         return;
       }
       tbody.innerHTML = traces.map(t => {
@@ -125,6 +139,7 @@ export function tracesListScript(): string {
           '<td><span class="badge badge-name">' + esc(t.name) + '</span></td>' +
           '<td>' + (t.botName ? '<span class="badge badge-bot">' + esc(t.botName) + '</span>' : '-') + '</td>' +
           '<td>' + (t.username || t.userId || '-') + '</td>' +
+          '<td>' + fmtBackend(t.attributes) + '</td>' +
           '<td>' + fmtDuration(t.durationMs) + '</td>' +
           '<td><span class="badge badge-' + t.status + '">' + t.status + '</span></td>' +
           '<td>' + toolsBadge + '</td>' +

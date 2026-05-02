@@ -158,6 +158,53 @@ describe("traces", () => {
       expect(found.attributes.outputTokens).toBe(800);
     });
 
+    test("pulls connector + model from claude child span", async () => {
+      const root = makeRootSpan();
+      await saveSpan(root);
+
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: {
+          connector: "copilot-sdk",
+          requestedModel: "sonnet",
+          model: "claude-sonnet-4-6",
+          inputTokens: 1000,
+          outputTokens: 50,
+        },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.connector).toBe("copilot-sdk");
+      expect(found.attributes.requestedModel).toBe("sonnet");
+      expect(found.attributes.model).toBe("claude-sonnet-4-6");
+    });
+
+    test("connector + model fall back to legacy array attribute format", async () => {
+      const { getDb } = await import("./client.ts");
+      const sql = getDb();
+      const root = makeRootSpan();
+      await saveSpan(root);
+
+      // Legacy bug: array of [stringified-empty-object, real-object]
+      await sql`
+        INSERT INTO traces (id, trace_id, name, kind, parent_id, started_at, attributes)
+        VALUES (${crypto.randomUUID()}, ${root.traceId}, 'claude', 'span', ${root.id}, now(),
+                ${sql.json(["{}", { connector: "claude-cli", model: "sonnet", inputTokens: 100, outputTokens: 10 }])}
+        )
+      `;
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.connector).toBe("claude-cli");
+      expect(found.attributes.model).toBe("sonnet");
+    });
+
     test("returns null tokens when no claude child span exists", async () => {
       const root = makeRootSpan();
       await saveSpan(root);

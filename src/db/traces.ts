@@ -96,7 +96,7 @@ export async function getRecentTraces(
   const rows = await sql`
     SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
            t.started_at, t.duration_ms, t.attributes, t.created_at,
-           c.input_tokens, c.output_tokens, c.tool_count
+           c.input_tokens, c.output_tokens, c.tool_count, c.model, c.requested_model, c.connector
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -111,7 +111,19 @@ export async function getRecentTraces(
         (CASE
           WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'toolCount')::int
           ELSE NULL
-        END) AS tool_count
+        END) AS tool_count,
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'model'
+          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'model'
+        END) AS model,
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'requestedModel'
+          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'requestedModel'
+        END) AS requested_model,
+        (CASE
+          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'connector'
+          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'connector'
+        END) AS connector
       FROM traces cs
       WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
       LIMIT 1
@@ -244,10 +256,13 @@ function mapRow(r: Record<string, any>): SpanRow {
     }, {});
   }
 
-  // Merge token/tool data from child span join (if available and not already in attributes)
+  // Merge token/tool/connector data from child span join (if available and not already in attributes)
   if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
   if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
   if (r.tool_count != null && !attrs.toolCount) attrs = { ...attrs, toolCount: Number(r.tool_count) };
+  if (r.model != null && !attrs.model) attrs = { ...attrs, model: String(r.model) };
+  if (r.requested_model != null && !attrs.requestedModel) attrs = { ...attrs, requestedModel: String(r.requested_model) };
+  if (r.connector != null && !attrs.connector) attrs = { ...attrs, connector: String(r.connector) };
 
   return {
     id: r.id,
