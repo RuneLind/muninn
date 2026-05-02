@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority } from "./helpers.ts";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace } from "./helpers.ts";
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {
@@ -157,6 +157,130 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.html).toContain("wf-verb-search");
     expect(out!.html).toContain(">search<");
     expect(out!.html).toContain(">yggdrasil<");
+  });
+
+  test("renders a counts chip with kept/fetched for huginn collections", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{
+            name: "kb",
+            candidates: [
+              { kept: true, docTitle: "Top hit", stages: { final: { rank: 1 } } },
+              { kept: true, stages: { final: { rank: 2 } } },
+              { kept: false, dropReason: "noise" },
+            ],
+            confidence: { lowConfidence: false },
+            timingsMs: { total: 63 },
+          }],
+          totalMs: 71,
+        },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain('class="wf-chip wf-counts"');
+    expect(out!.html).toContain(">2/3<");
+    expect(out!.html).not.toContain("wf-low-conf");
+    expect(out!.tooltip).toContain("candidates: 2 kept / 3 fetched");
+    expect(out!.tooltip).toContain("top: Top hit");
+    expect(out!.tooltip).toContain("total: 71ms");
+  });
+
+  test("flips counts chip to low-conf variant when any collection is low-confidence", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{
+            name: "kb",
+            candidates: [{ kept: true, docTitle: "x" }],
+            confidence: { lowConfidence: true },
+          }],
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-counts wf-low-conf");
+    expect(out!.tooltip).toContain("low confidence");
+  });
+
+  test("renders counts chip and tooltip from yggdrasil flat candidates", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-search",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          tool: "search",
+          candidates: [
+            { qualifiedName: "com.example.Foo", stages: { final: { rank: 1 } } },
+            { qualifiedName: "com.example.Bar", stages: { final: { rank: 2 } } },
+            { qualifiedName: "com.example.Baz" }, // no final stage → not kept
+          ],
+          timingsMs: { total: 42 },
+        },
+      },
+    });
+    expect(out!.html).toContain(">2/3<");
+    expect(out!.tooltip).toContain("top: com.example.Foo");
+    expect(out!.tooltip).toContain("total: 42ms");
+  });
+});
+
+describe("summarizeSearchTrace", () => {
+  test("returns null for non-objects", () => {
+    expect(summarizeSearchTrace(null)).toBeNull();
+    expect(summarizeSearchTrace(undefined)).toBeNull();
+    expect(summarizeSearchTrace("foo")).toBeNull();
+  });
+
+  test("returns null when neither shape has candidates", () => {
+    expect(summarizeSearchTrace({ schemaVersion: 1 })).toBeNull();
+    expect(summarizeSearchTrace({ collections: [] })).toBeNull();
+    expect(summarizeSearchTrace({ candidates: [] })).toBeNull();
+  });
+
+  test("aggregates kept/fetched across multiple huginn collections", () => {
+    const s = summarizeSearchTrace({
+      collections: [
+        { candidates: [{ kept: true }, { kept: false }] },
+        { candidates: [{ kept: true }, { kept: true }, { kept: false }] },
+      ],
+    });
+    expect(s).toEqual({ kept: 3, fetched: 5, topTitle: null, lowConfidence: false, totalMs: null });
+  });
+
+  test("picks top hit by lowest final.rank from first huginn collection", () => {
+    const s = summarizeSearchTrace({
+      collections: [{
+        candidates: [
+          { docTitle: "second", stages: { final: { rank: 2 } } },
+          { docTitle: "first", stages: { final: { rank: 1 } } },
+        ],
+      }],
+    });
+    expect(s!.topTitle).toBe("first");
+  });
+
+  test("falls back to documentId when docTitle is missing", () => {
+    const s = summarizeSearchTrace({
+      collections: [{ candidates: [{ documentId: "doc-abc", stages: { final: { rank: 1 } } }] }],
+    });
+    expect(s!.topTitle).toBe("doc-abc");
+  });
+
+  test("yggdrasil shape: kept counts candidates with stages.final, top picks lowest rank", () => {
+    const s = summarizeSearchTrace({
+      tool: "search",
+      candidates: [
+        { qualifiedName: "B", stages: { final: { rank: 2 } } },
+        { qualifiedName: "A", stages: { final: { rank: 1 } } },
+        { qualifiedName: "C" },
+      ],
+      timingsMs: { total: 33 },
+    });
+    expect(s).toEqual({ kept: 2, fetched: 3, topTitle: "A", lowConfidence: false, totalMs: 33 });
   });
 });
 

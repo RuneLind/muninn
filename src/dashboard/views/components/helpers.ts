@@ -42,7 +42,18 @@ interface SpanLike {
     toolId?: unknown;
     input?: unknown;
     searchTrace?:
-      | { collections?: Array<{ name?: unknown }>; tool?: unknown }
+      | {
+          collections?: Array<{
+            name?: unknown;
+            candidates?: unknown[];
+            confidence?: { lowConfidence?: unknown };
+            timingsMs?: { total?: unknown };
+          }>;
+          candidates?: unknown[];
+          timingsMs?: { total?: unknown };
+          totalMs?: unknown;
+          tool?: unknown;
+        }
       | unknown;
   };
 }
@@ -61,6 +72,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
   const hasTrace = !!(attrs.searchTrace && (attrs.searchTrace as { schemaVersion?: unknown }).schemaVersion === 1);
+  const summary = summarizeSearchTrace(attrs.searchTrace);
 
   const traceDot = hasTrace
     ? '<span class="wf-trace-dot" title="search trace available — click for details">●</span>'
@@ -76,10 +88,111 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
     : '';
 
+  let countsChip = "";
+  if (summary) {
+    const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+    const tip = summary.lowConfidence
+      ? `${summary.kept} kept / ${summary.fetched} fetched · low confidence`
+      : `${summary.kept} kept / ${summary.fetched} fetched`;
+    countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
+  }
+
+  const tooltipLines = [span.name, "collections: " + collections.join(", ")];
+  if (summary) {
+    tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
+    if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
+    if (summary.totalMs != null) tooltipLines.push("total: " + summary.totalMs + "ms");
+    if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
+  }
+
   return {
-    html: traceDot + verbChip + firstChip + moreChip,
-    tooltip: span.name + "\ncollections: " + collections.join(", "),
+    html: traceDot + verbChip + firstChip + moreChip + countsChip,
+    tooltip: tooltipLines.join("\n"),
   };
+}
+
+interface SearchTraceSummary {
+  kept: number;
+  fetched: number;
+  topTitle: string | null;
+  lowConfidence: boolean;
+  totalMs: number | null;
+}
+
+/** Compress a v1 searchTrace blob into the bits we want to surface in the
+ *  waterfall row: candidate counts, top-ranked hit, low-confidence flag, total
+ *  ms. Handles both shapes — Huginn (collections[]) and Yggdrasil (flat
+ *  candidates[]). Returns null when there's nothing useful to show. */
+export function summarizeSearchTrace(trace: unknown): SearchTraceSummary | null {
+  if (!trace || typeof trace !== "object") return null;
+  const t = trace as {
+    collections?: Array<{
+      candidates?: unknown[];
+      confidence?: { lowConfidence?: unknown };
+      timingsMs?: { total?: unknown };
+    }>;
+    candidates?: unknown[];
+    timingsMs?: { total?: unknown };
+    totalMs?: unknown;
+  };
+
+  let kept = 0;
+  let fetched = 0;
+  let lowConfidence = false;
+  let topTitle: string | null = null;
+  let totalMs: number | null = null;
+
+  if (Array.isArray(t.collections) && t.collections.length > 0) {
+    for (const c of t.collections) {
+      const cands = Array.isArray(c?.candidates) ? c.candidates : [];
+      fetched += cands.length;
+      for (const cand of cands) {
+        if (cand && typeof cand === "object" && (cand as { kept?: unknown }).kept !== false) kept++;
+      }
+      if (c?.confidence && (c.confidence as { lowConfidence?: unknown }).lowConfidence === true) lowConfidence = true;
+    }
+    topTitle = pickTopTitle(t.collections[0]?.candidates ?? [], "doc");
+    if (typeof t.totalMs === "number") totalMs = t.totalMs;
+  } else if (Array.isArray(t.candidates)) {
+    fetched = t.candidates.length;
+    for (const c of t.candidates) {
+      if (c && typeof c === "object" && (c as { stages?: { final?: unknown } }).stages?.final) kept++;
+    }
+    topTitle = pickTopTitle(t.candidates, "symbol");
+    if (t.timingsMs && typeof (t.timingsMs as { total?: unknown }).total === "number") {
+      totalMs = (t.timingsMs as { total: number }).total;
+    }
+  } else {
+    return null;
+  }
+
+  if (fetched === 0) return null;
+  return { kept, fetched, topTitle, lowConfidence, totalMs };
+}
+
+type TopCandidate = { docTitle?: unknown; documentId?: unknown; qualifiedName?: unknown };
+
+function pickTopTitle(candidates: unknown[], shape: "doc" | "symbol"): string | null {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  let bestRank = Infinity;
+  let best: TopCandidate | null = null;
+  for (const c of candidates) {
+    if (!c || typeof c !== "object") continue;
+    const stages = (c as { stages?: { final?: { rank?: unknown } } }).stages;
+    const rank = typeof stages?.final?.rank === "number" ? stages.final.rank : Infinity;
+    if (rank < bestRank) {
+      bestRank = rank;
+      best = c as TopCandidate;
+    }
+  }
+  if (!best) return null;
+  if (shape === "doc") {
+    if (typeof best.docTitle === "string" && best.docTitle) return best.docTitle;
+    if (typeof best.documentId === "string" && best.documentId) return best.documentId;
+    return null;
+  }
+  if (typeof best.qualifiedName === "string" && best.qualifiedName) return best.qualifiedName;
+  return null;
 }
 
 function collectionsFor(attrs: NonNullable<SpanLike["attributes"]>): string[] | null {
@@ -257,10 +370,79 @@ export function deriveSpanLabelScript(): string {
         ? '<span class="wf-chip wf-coll-more" title="' + esc(collections.slice(1).join(', ')) + '">+' + (collections.length - 1) + '</span>'
         : '';
 
+      var summary = summarizeSearchTrace(trace);
+      var countsChip = '';
+      if (summary) {
+        var countsCls = summary.lowConfidence ? 'wf-chip wf-counts wf-low-conf' : 'wf-chip wf-counts';
+        var countsTip = summary.lowConfidence
+          ? summary.kept + ' kept / ' + summary.fetched + ' fetched · low confidence'
+          : summary.kept + ' kept / ' + summary.fetched + ' fetched';
+        countsChip = '<span class="' + countsCls + '" title="' + esc(countsTip) + '">' +
+          summary.kept + '/' + summary.fetched + '</span>';
+      }
+
+      var tooltipLines = [span.name, 'collections: ' + collections.join(', ')];
+      if (summary) {
+        tooltipLines.push('candidates: ' + summary.kept + ' kept / ' + summary.fetched + ' fetched');
+        if (summary.topTitle) tooltipLines.push('top: ' + summary.topTitle);
+        if (summary.totalMs != null) tooltipLines.push('total: ' + summary.totalMs + 'ms');
+        if (summary.lowConfidence) tooltipLines.push('\\u26A0 low confidence');
+      }
+
       return {
-        html: traceDot + verbChip + firstChip + moreChip,
-        tooltip: span.name + '\\ncollections: ' + collections.join(', '),
+        html: traceDot + verbChip + firstChip + moreChip + countsChip,
+        tooltip: tooltipLines.join('\\n'),
       };
+    }
+
+    function summarizeSearchTrace(trace) {
+      if (!trace || typeof trace !== 'object') return null;
+      var kept = 0, fetched = 0, lowConfidence = false, topTitle = null, totalMs = null;
+      if (Array.isArray(trace.collections) && trace.collections.length > 0) {
+        for (var i = 0; i < trace.collections.length; i++) {
+          var c = trace.collections[i] || {};
+          var cands = Array.isArray(c.candidates) ? c.candidates : [];
+          fetched += cands.length;
+          for (var j = 0; j < cands.length; j++) {
+            if (cands[j] && cands[j].kept !== false) kept++;
+          }
+          if (c.confidence && c.confidence.lowConfidence === true) lowConfidence = true;
+        }
+        topTitle = pickTopTitle((trace.collections[0] && trace.collections[0].candidates) || [], 'doc');
+        if (typeof trace.totalMs === 'number') totalMs = trace.totalMs;
+      } else if (Array.isArray(trace.candidates)) {
+        fetched = trace.candidates.length;
+        for (var k = 0; k < trace.candidates.length; k++) {
+          var cc = trace.candidates[k];
+          if (cc && cc.stages && cc.stages.final) kept++;
+        }
+        topTitle = pickTopTitle(trace.candidates, 'symbol');
+        if (trace.timingsMs && typeof trace.timingsMs.total === 'number') totalMs = trace.timingsMs.total;
+      } else {
+        return null;
+      }
+      if (fetched === 0) return null;
+      return { kept: kept, fetched: fetched, topTitle: topTitle, lowConfidence: lowConfidence, totalMs: totalMs };
+    }
+
+    function pickTopTitle(cands, shape) {
+      if (!Array.isArray(cands) || cands.length === 0) return null;
+      var bestRank = Infinity, best = null;
+      for (var i = 0; i < cands.length; i++) {
+        var c = cands[i];
+        if (!c) continue;
+        var rank = c.stages && c.stages.final && typeof c.stages.final.rank === 'number'
+          ? c.stages.final.rank : Infinity;
+        if (rank < bestRank) { bestRank = rank; best = c; }
+      }
+      if (!best) return null;
+      if (shape === 'doc') {
+        if (typeof best.docTitle === 'string' && best.docTitle) return best.docTitle;
+        if (typeof best.documentId === 'string' && best.documentId) return best.documentId;
+        return null;
+      }
+      if (typeof best.qualifiedName === 'string' && best.qualifiedName) return best.qualifiedName;
+      return null;
     }
   `;
 }

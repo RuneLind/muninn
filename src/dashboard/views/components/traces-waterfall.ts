@@ -72,6 +72,20 @@ export function tracesWaterfallStyles(): string {
       color: var(--text-dim);
       border: 1px solid color-mix(in srgb, white 10%, transparent);
     }
+    /* Counts chip — kept/fetched candidate count for search tool spans. The
+       low-conf variant flips to the warning palette so a "you got nothing
+       useful" search is visible without expanding the trace panel. */
+    .wf-chip.wf-counts {
+      background: color-mix(in srgb, white 6%, transparent);
+      color: var(--text-soft);
+      border: 1px solid color-mix(in srgb, white 12%, transparent);
+      font-variant-numeric: tabular-nums;
+    }
+    .wf-chip.wf-counts.wf-low-conf {
+      background: color-mix(in srgb, var(--status-warning) 14%, transparent);
+      color: var(--status-warning);
+      border-color: color-mix(in srgb, var(--status-warning) 35%, transparent);
+    }
     .wf-trace-dot {
       color: var(--status-success);
       font-size: 10px;
