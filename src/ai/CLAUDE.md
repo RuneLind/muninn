@@ -14,6 +14,8 @@
 | `result-parser.ts` | Legacy JSON parser — fallback when stream parser misses the result event |
 | `json-extract.ts` | Extract JSON objects from mixed text output |
 | `haiku-extraction.ts` | Shared Haiku executor for async extraction tasks (memories, goals, tasks) |
+| `huginn-trace.ts` | Inline-fence Huginn trace handling (legacy mode) — `parseHuginnTrace`, `extractMcpResultText`, oversized-CLI-divert recovery |
+| `huginn-trace-pointer.ts` | Phase 2 out-of-band trace channel — parses `huginn-trace-url:` line and fetches the trace from Huginn's `/api/trace/<id>` endpoint. Preferred when `HUGINN_TRACE_POINTER=1` is set on Huginn |
 | `connectors/` | Three connector implementations (see below) |
 
 ## Connector Abstraction

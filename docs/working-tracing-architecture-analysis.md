@@ -1,9 +1,9 @@
 # Working doc — Connector tracing architecture analysis
 
-**Branch:** `feature/connector-tracing-parity`
-**Status:** Analysis pass complete; Phase 2 (out-of-band trace channel) being scoped.
+**Branch:** `feature/connector-tracing-parity` (PR #81)
+**Status:** Phase 2 landed via trace-id pointer pattern — verified end-to-end on jarvis. Original "kill Phase 2" verdict (below) was reversed once we measured the actual trace size and realized the divert was a functional bug, not just complexity.
 
-This is a working document, not a final design. It captures (1) the current state after the connector parity branch, (2) why the "tool result is in context twice" claim from the bot was a red herring, and (3) the path forward to a cleaner architecture.
+This is a working document. It captures (1) the connector parity state, (2) why the "tool result is in context twice" claim from the bot was a red herring, (3) the dead-end exploration of MCP `_meta` as a side-channel, and (4) how we got out the other side with the pointer pattern that actually shipped.
 
 ## 1. The two channels (the principle)
 
@@ -113,15 +113,15 @@ This kills "out-of-band via `_meta`" as a clean architectural win. It does **not
 | **B. Trace-id pointer + Huginn store** | Huginn writes a single short line (`huginn-trace-id: <uuid>`) to the tool result text and stores the trace JSON behind a `GET /api/trace/<id>` endpoint. Muninn strips the line and fetches the trace via HTTP. | One unified strip path (regex one line, not 14 KB JSON). If strip ever fails, only ~50 bytes of pollution reach the model — harmless. Same pattern across all 3 connectors. | Requires Huginn-side trace store (in-memory + TTL is fine) + HTTP endpoint. Adds a localhost round-trip per search. |
 | **C. Two-channel split** | `_meta` for openai-compat, keep fence for claude-cli, copilot-sdk uses existing `contents[]` path. | Simplifies 1/3 connectors. | Increases connector divergence; the win doesn't justify the change. |
 
-**Recommendation: Option A.** The current architecture works (verified), is tested, and has bounded complexity. The "210k twice" panic that triggered this analysis turned out to be model confabulation, not a real bug. The Phase 2 motivation was complexity-removal, not bugfix; with `_meta` ruled out, the cleanup payoff shrinks below the cost of changing it.
+**Original recommendation (later reversed): Option A.** The reasoning at the time was that the existing architecture works, is tested, and the "210k twice" panic was confabulation rather than a real bug. With `_meta` ruled out, the cleanup payoff seemed too small to justify the change.
 
-If Option B ever becomes worth doing — likely trigger: a *third* trace-like side-channel needs to be added — the trace-id pattern is the right shape and is documented here so we don't have to rediscover it.
+**What actually happened: we did Option B.** A follow-up search on melosys produced a 232 KB tool result that *did* trip Claude CLI's divert — and DB inspection showed the trace alone was 188 KB (Huginn's hybrid indexer overfetches `fetch_k * 3` from each of FAISS and BM25, and the trace records every candidate). That made Phase 2 a functional bugfix, not just complexity-removal: the model was getting a 1 KB error placeholder instead of the actual hits and confabulating answers from nothing. We coordinated with the huginn peer to ship the trace-id pointer pattern (Huginn `feature/search-trace-pointer`, Muninn PR #81). Pipeline verified end-to-end on jarvis 2026-05-02. See `wiki/muninn/tracing.md` § *Phase 2 — out-of-band trace via pointer URL* for the canonical design.
 
 ## 6. Open questions / TODO
 
 - [x] **Verify divert-recovery actually works in production** — **Confirmed working** for the relevant case. For jarvis (the only Muninn-spawned claude-cli bot today), 0/7 of the saved tool-result files contain the trace fence. The 5/12 fence-bearing files in `bots-melosys` come from interactive `claude` sessions Rune ran from the bot directory, **not** from Muninn — melosys is configured `connector: copilot-sdk`, so Muninn's stream-parser was never in that loop. Probe of `recoverOversizedClaudeCliToolResult` against an actual fence-bearing file successfully extracted the trace, so the regex and recovery logic are sound. Capra has no diverted files at all (small results).
 - [x] **Probe `_meta` end-to-end for claude-cli** — done. `scripts/probe-meta-mcp-server.py` + `scripts/probe-claude-cli-meta.ts`. Result: `_meta` is stripped, `structuredContent` reaches the model. No side-channel through claude-cli.
-- [x] **Decide fallback** — Option A (keep current architecture). See verdict above. Option B (trace-id pointer + Huginn store) is documented as the path forward *if* a third trace-like side-channel ever appears.
+- [x] **Decide fallback** — initial verdict was Option A (keep current architecture). Reversed once we measured the 188 KB trace and saw the divert was real; shipped Option B (trace-id pointer + Huginn store) as `feature/search-trace-pointer` (huginn) + PR #81 (muninn).
 - [ ] **Squash `75c4198` into `68ad460`** before pushing the branch (carry-over from prior handover).
 - [ ] **Update `wiki/muninn/tracing.md`** — the "Future work" section currently lists "out-of-band trace channel via MCP `_meta`" as a Phase 2 item; update to reflect that this was probed and ruled out, with a pointer to this working doc for the rationale.
 
