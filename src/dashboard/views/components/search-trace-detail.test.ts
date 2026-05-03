@@ -148,7 +148,7 @@ describe("renderSearchTrace", () => {
     expect(html).toMatch(/<div class="stt-conf-mark-label stt-mk-best"[^>]*>best -0\.50</);
   });
 
-  test("confidence block adds axis labels, legend, and explainer help icon", () => {
+  test("confidence block adds legend and explainer help icon", () => {
     const html = sb.renderSearchTrace({
       schemaVersion: 1,
       query: {},
@@ -157,9 +157,6 @@ describe("renderSearchTrace", () => {
         confidence: { lowConfidence: false, bestScore: -0.987, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 },
       }],
     });
-    // Sign-convention reminder appears on the axis under the bar.
-    expect(html).toContain("more relevant");
-    expect(html).toContain("less relevant");
     // Per-marker legend with values.
     expect(html).toContain("stt-conf-leg-best");
     expect(html).toContain("best -0.987");
@@ -169,6 +166,10 @@ describe("renderSearchTrace", () => {
     expect(html).toContain('class="stt-help"');
     // Marker tooltips spell out the rule, not just the number.
     expect(html).toContain("more negative = more relevant");
+    // Axis labels were removed in favor of inline marker labels — they were
+    // colliding with the right-edge "noiseThr" label and adding no signal
+    // beyond what the per-marker labels already carry.
+    expect(html).not.toContain("stt-conf-axis");
   });
 
   test("collapsible response section renders truncation meta when collapsed and content when expanded", () => {

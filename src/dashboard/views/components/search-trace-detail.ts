@@ -164,14 +164,6 @@ export function searchTraceDetailStyles(): string {
     .stt-conf-summary.stt-good { color: var(--status-success); }
     .stt-conf-summary.stt-bad  { color: var(--status-error); }
     .stt-conf-summary .stt-margin { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-    .stt-conf-axis {
-      display: flex;
-      justify-content: space-between;
-      font-size: 10px;
-      color: var(--text-faint);
-      margin-top: 4px;
-    }
-    .stt-conf-axis em { font-style: normal; color: var(--text-dim); }
     .stt-conf-legend {
       display: flex;
       gap: 12px;
@@ -623,7 +615,6 @@ export function searchTraceDetailScript(): string {
           '<div class="stt-conf-best"  style="left:' + pos(best) + '%" title="' + esc(bestTip) + '"></div>' +
           bestLabel + lcLabel + nsLabel +
         '</div>' +
-        '<div class="stt-conf-axis"><span><em>←</em> more relevant</span><span>less relevant <em>→</em></span></div>' +
         '<div class="stt-conf-legend">' + legend + '</div>' +
         summaryHtml +
       '</div>';
