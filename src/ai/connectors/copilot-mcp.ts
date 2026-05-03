@@ -54,17 +54,6 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
     const raw: McpJsonFile = JSON.parse(readFileSync(mcpPath, "utf-8"));
     if (!raw.mcpServers) return {};
 
-    // Mirrors the claude-cli executor: stdio-spawned MCP children inherit
-    // the parent process env (PATH, HOME, HUGINN_TRACE_POINTER, …). Without
-    // this, the SDK's explicit `env` field replaces the inherited environment
-    // and pass-through vars (notably HUGINN_TRACE_POINTER) never reach the
-    // adapter. Only stdio entries are affected — http/sse entries connect to
-    // adapters that own their own environment.
-    const inheritedEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (typeof v === "string") inheritedEnv[k] = v;
-    }
-
     const result: Record<string, CopilotMcpServer> = {};
     for (const [name, entry] of Object.entries(raw.mcpServers)) {
       if (entry.type === "http" || entry.type === "sse") {
@@ -84,19 +73,14 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           continue;
         }
         const cwd = resolveBotCwd(entry.cwd, botDir);
-        // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
-        // servers ignore unknown env vars, so it's safe to set unconditionally.
-        // The bot's own .mcp.json env wins via spread order.
-        // Works end-to-end for copilot-sdk because the SDK's oversized-tool
-        // divert keeps the full payload on contents[] where extractMcpResultText
-        // can read it — searchTrace lands on attributes.searchTrace and the
-        // model only sees the SDK's "Output too large" placeholder.
+        // Inherit parent env so HUGINN_TRACE_POINTER etc. reach stdio children;
+        // forced HUGINN_TRACE_DEFAULT covers the legacy fence path; entry.env wins.
         result[name] = {
           type: "local",
           command: entry.command,
           args: entry.args ?? [],
           cwd,
-          env: { ...inheritedEnv, HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
+          env: { ...process.env, HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) } as Record<string, string>,
           tools: ["*"],
         };
       }

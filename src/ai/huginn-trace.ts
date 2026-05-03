@@ -29,17 +29,7 @@ const log = getLog("ai", "huginn-trace");
 /** Env var that opts a Huginn MCP adapter into emitting trace blobs. */
 export const HUGINN_TRACE_ENV = { HUGINN_TRACE_DEFAULT: "1" } as const;
 
-/**
- * Logs the on/off state of every trace env var that Muninn cares about, so a
- * dev tailing the log can answer "is pointer-mode actually engaged?" without
- * grepping the running process env. Both connectors call this at startup —
- * the flag dedupes so it only fires once per process even when both paths
- * (claude-cli + copilot-sdk) are active.
- *
- * Reads `process.env` directly because that's what spawned MCP children
- * inherit; .env values not loaded into process.env (e.g. added after
- * startup) will correctly show as "unset" here.
- */
+/** Logs trace env-var state once per process so devs can confirm what spawned MCP children will inherit. */
 let traceFlagsLogged = false;
 export function logTraceFlagsOnce(): void {
   if (traceFlagsLogged) return;
@@ -53,11 +43,6 @@ export function logTraceFlagsOnce(): void {
       yggDefault: process.env.YGGDRASIL_TRACE_DEFAULT ?? "unset",
     },
   );
-}
-
-/** Test-only: reset the once-flag so tests can assert the log fires. */
-export function _resetTraceFlagsLoggedForTest(): void {
-  traceFlagsLogged = false;
 }
 
 export interface HuginnTraceExtraction {
