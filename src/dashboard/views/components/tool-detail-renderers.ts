@@ -157,7 +157,31 @@ export function toolDetailRenderersStyles(): string {
       font-size: 11px;
     }
     .tdr-toolbar button:hover { color: var(--text-primary); }
+    .tdr-toolbar button.tdr-active {
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    }
     .tdr-raw-toggle { margin-left: auto; }
+
+    /* Inline help icon used in section headers — hover for explainer tooltip. */
+    .tdr-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border-primary);
+      color: var(--text-dim);
+      font-size: 9px;
+      font-weight: 600;
+      cursor: help;
+      margin-left: 6px;
+      user-select: none;
+    }
+    .tdr-help:hover { color: var(--text-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+    .tdr-response-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    .tdr-response-meta .tdr-response-trunc { color: var(--status-warning); }
     .tdr-raw-pre {
       background: var(--bg-inset);
       border: 1px solid var(--border-subtle);
@@ -175,10 +199,9 @@ export function toolDetailRenderersStyles(): string {
 
 export function toolDetailRenderersScript(): string {
   return `
-    /* State for the open tool detail panel — only showRaw and attrs need
-       to survive a re-render. Reset on every span open so the toggle starts
-       in structured mode. */
-    window.__tdrState = window.__tdrState || { showRaw: false, attrs: null };
+    /* State for the open tool detail panel — survives re-renders. Reset on
+       every span open so toggles start in their default state. */
+    window.__tdrState = window.__tdrState || { showRaw: false, attrs: null, showResponse: false };
 
     /* ============================================================
      * Dispatcher
@@ -190,13 +213,13 @@ export function toolDetailRenderersScript(): string {
     function renderToolDetail(span) {
       const attrs = (span && span.attributes) || {};
       window.__tdrState.attrs = attrs;
-      // v1 search trace owns its own panel — delegate. Pass the raw output
-      // so the panel can render the response that was actually returned to
-      // the LLM as a collapsible section at the bottom.
+      // v1 search trace owns its own panel — delegate. The response section
+      // (the actual text returned to the LLM) is appended generically below
+      // so that renderer doesn't have to know about output shape.
       if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
           attrs.searchTrace.schemaVersion === 1) {
         if (window.__sttState) window.__sttState.showRaw = false;
-        return renderSearchTrace(attrs.searchTrace, attrs.output);
+        return renderSearchTrace(attrs.searchTrace) + tdrRenderResponseSection(attrs.output);
       }
       if (window.__tdrState.showRaw) {
         return tdrRawView(attrs);
@@ -206,6 +229,45 @@ export function toolDetailRenderersScript(): string {
         return renderer ? renderer(attrs) : tdrRenderGeneric(attrs);
       } catch (e) {
         return tdrRenderError(e, attrs);
+      }
+    }
+
+    /** Collapsible "Response sent to LLM" section appended to the search-trace
+     *  panel. Output may be a JSON-encoded {head, _truncated, _originalBytes}
+     *  envelope (huginn truncates to fit MAX_MCP_OUTPUT_TOKENS) or plain text;
+     *  the parse is deferred until the user expands the section so we don't
+     *  pay JSON.parse on every render of the collapsed default. */
+    function tdrRenderResponseSection(output) {
+      if (output == null || output === '') return '';
+      var open = !!window.__tdrState.showResponse;
+      var helpTip = 'The exact text returned by this tool call to Claude. When truncated, only the "head" portion is shown — the original size is reported in the meta line.';
+      var btnLabel = open ? 'Hide response' : 'Show response sent to LLM';
+      var header = '<h5>Response sent to LLM <span class="tdr-help" title="' + esc(helpTip) + '">?</span></h5>';
+      var toolbar = '<div class="tdr-toolbar"><button class="' + (open ? 'tdr-active' : '') + '" onclick="tdrToggleResponse()">' + btnLabel + '</button></div>';
+      if (!open) return '<div class="tdr-section">' + header + toolbar + '</div>';
+      var parsed = tdrParseJson(output);
+      var head, truncated = false, originalBytes = null;
+      if (parsed && typeof parsed.head === 'string') {
+        head = parsed.head;
+        truncated = parsed._truncated === true;
+        if (typeof parsed._originalBytes === 'number') originalBytes = parsed._originalBytes;
+      } else {
+        head = String(output);
+      }
+      var meta = [head.length.toLocaleString() + ' chars rendered'];
+      if (truncated && originalBytes != null) meta.push('<span class="tdr-response-trunc">truncated from ' + originalBytes.toLocaleString() + ' bytes</span>');
+      else if (truncated) meta.push('<span class="tdr-response-trunc">truncated</span>');
+      return '<div class="tdr-section">' + header + toolbar +
+        '<div class="tdr-response-meta">' + meta.join(' · ') + '</div>' +
+        tdrText(head) +
+      '</div>';
+    }
+
+    function tdrToggleResponse() {
+      window.__tdrState.showResponse = !window.__tdrState.showResponse;
+      var host = document.getElementById('spanDetailsJson');
+      if (host && window.__tdrState.attrs) {
+        host.innerHTML = renderToolDetail({ attributes: window.__tdrState.attrs });
       }
     }
 

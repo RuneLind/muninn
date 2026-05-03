@@ -16,9 +16,9 @@ const SANDBOX_PRELUDE = `
   }
 `;
 
-function loadSandbox(): { renderSearchTrace: (t: unknown, output?: unknown) => string; reset: () => void; getState: () => Record<string, unknown> } {
+function loadSandbox(): { renderSearchTrace: (t: unknown) => string; reset: () => void; getState: () => Record<string, unknown> } {
   const script = SANDBOX_PRELUDE + searchTraceDetailScript() +
-    `\n;return { renderSearchTrace, reset: () => { window.__sttState = { sortKey: 'final', sortDir: 'asc', filter: 'kept-top', showRaw: false, trace: null, output: null, showResponse: false }; }, getState: () => window.__sttState };`;
+    `\n;return { renderSearchTrace, reset: () => { window.__sttState = { sortKey: 'final', sortDir: 'asc', filter: 'kept-top', showRaw: false, trace: null }; }, getState: () => window.__sttState };`;
   // Provide a window object the script writes to.
   const win: Record<string, unknown> = {};
   const fn = new Function("window", script);
@@ -291,39 +291,6 @@ describe("renderSearchTrace", () => {
     // colliding with the right-edge "noiseThr" label and adding no signal
     // beyond what the per-marker labels already carry.
     expect(html).not.toContain("stt-conf-axis");
-  });
-
-  test("collapsible response section renders truncation meta when collapsed and content when expanded", () => {
-    const trace = { schemaVersion: 1, query: {}, collections: [] };
-    const output = JSON.stringify({ _truncated: true, _originalBytes: 28880, head: "## Doc.md\n\ncontent here" });
-    let html = sb.renderSearchTrace(trace, output);
-    // Collapsed by default — section header + button visible, content hidden.
-    expect(html).toContain("Response sent to LLM");
-    expect(html).toContain("Show response sent to LLM");
-    expect(html).not.toContain("content here");
-    // Toggle open and re-render — body + truncation meta now visible.
-    sb.getState().showResponse = true;
-    html = sb.renderSearchTrace(trace, output);
-    expect(html).toContain("Hide response");
-    expect(html).toContain("content here");
-    expect(html).toContain("truncated from 28,880 bytes");
-  });
-
-  test("response section handles plain-text (non-JSON) output", () => {
-    const trace = { schemaVersion: 1, query: {}, collections: [] };
-    const output = "1. result a\n2. result b\n";
-    sb.renderSearchTrace(trace, output);
-    sb.getState().showResponse = true;
-    const html = sb.renderSearchTrace(trace, output);
-    expect(html).toContain("result a");
-    expect(html).toContain("result b");
-    // No truncation chip — that styling is only added when _truncated=true.
-    expect(html).not.toContain('class="stt-trunc"');
-  });
-
-  test("response section is omitted when output is null/empty", () => {
-    const html = sb.renderSearchTrace({ schemaVersion: 1, query: {}, collections: [] }, null);
-    expect(html).not.toContain("Response sent to LLM");
   });
 
   test("candidates table renders with default top-20 kept filter", () => {
