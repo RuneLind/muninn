@@ -468,7 +468,10 @@ export function tracesWaterfallScript(): string {
       // (Input + Output sections). Reset raw toggle on every span open so the
       // panel always opens in structured mode.
       if (typeof renderToolDetail === 'function') {
-        if (window.__tdrState) window.__tdrState.showRaw = false;
+        if (window.__tdrState) {
+          window.__tdrState.showRaw = false;
+          window.__tdrState.showResponse = false;
+        }
         host.innerHTML = renderToolDetail(span);
       } else {
         host.innerHTML = '<pre>' + esc(JSON.stringify(span.attributes || {}, null, 2)) + '</pre>';

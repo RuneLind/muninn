@@ -56,6 +56,127 @@ describe("renderSearchTrace", () => {
     expect(html).toContain(">A003<");
   });
 
+  test("expansion highlight does not match inside other words", () => {
+    // The naive global-replace would highlight "EØS" inside "EU/EØS" because
+    // there's no word-boundary check. We expect "EU/EØS" (the longer term) to
+    // win, plus the standalone "EØS" added later in the expanded line. The
+    // "EØS" inside "EU/EØS" must NOT get its own wrapper.
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "EU/EØS",
+        expanded: "EU/EØS EØS MELOSYS",
+        expansionTerms: ["EØS", "EU/EØS", "MELOSYS"],
+      },
+      collections: [],
+    });
+    // Exactly three highlighted spans: EU/EØS, standalone EØS, and MELOSYS.
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
+    expect(spans.length).toBe(3);
+    // Sanity-check the wrapped texts.
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EU\/EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>MELOSYS<\/span>/);
+    // No nested span inside EU/EØS.
+    expect(html).not.toMatch(/<span class="stt-expansion"[^>]*>EU\/<span/);
+  });
+
+  test("expansion highlight respects detected entity spans even when they are not in expansionTerms", () => {
+    // The real bug: "EU/EØS" is a Concept entity but only "EØS" is in the
+    // expansion list. The highlight pass must still treat "EU/EØS" as off
+    // limits so it doesn't wrap the EØS substring inside it.
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "journalføring EU/EØS",
+        expanded: "journalføring EU/EØS EØS MELOSYS",
+        expansionTerms: ["EØS", "MELOSYS"],
+        detectedEntities: [
+          { id: "entity:eu/eøs", type: "Concept", label: "EU/EØS" },
+          { id: "entity:eøs",    type: "Concept", label: "EØS" },
+        ],
+      },
+      collections: [],
+    });
+    // Two highlights: standalone EØS and MELOSYS. EU/EØS stays unwrapped.
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
+    expect(spans.length).toBe(2);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>MELOSYS<\/span>/);
+    // The EU/EØS in the expanded line is rendered as plain escaped text — no
+    // partial wrap inside it.
+    expect(html).toMatch(/journalf[^<]*EU\/EØS <span class="stt-expansion"[^>]*>EØS<\/span>/);
+  });
+
+  test("inline expansion-term highlights in the expanded line carry an origin tooltip", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: { raw: "x", expanded: "x EØS MELOSYS", expansionTerms: ["EØS", "MELOSYS"] },
+      collections: [],
+    });
+    // Every wrapped span has a title= attribute that explains its origin.
+    const wraps = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
+    expect(wraps.length).toBe(2);
+    for (const w of wraps) {
+      expect(w).toMatch(/title="[^"]*Expansion term appended[^"]*"/);
+    }
+  });
+
+  test("Concept and + chips carry origin tooltips", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "x", expanded: "x",
+        detectedEntities: [{ id: "e:foo", type: "Concept", label: "Foo" }],
+        expansionTerms: ["Bar"],
+      },
+      collections: [],
+    });
+    // Concept chip explains it's a graph entity.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Detected as a graph entity[^"]*">/);
+    // + chip explains it's an appended expansion term.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Expansion term appended[^"]*">\+ Bar/);
+  });
+
+  test("expansion highlight respects letter boundaries — skips embedded matches", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: { raw: "x", expanded: "EØSnoise EØS sak", expansionTerms: ["EØS"] },
+      collections: [],
+    });
+    // Only the standalone EØS gets wrapped — the "EØSnoise" prefix does not.
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
+    expect(spans.length).toBe(1);
+    expect(html).toContain("EØSnoise");
+    expect(html).not.toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>noise/);
+  });
+
+  test("entity chip is marked re-injected and the duplicate + chip is dropped", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "x", expanded: "x",
+        detectedEntities: [
+          { id: "entity:eøs", type: "Concept", label: "EØS" },
+          { id: "entity:journalføring", type: "Concept", label: "Journalføring" },
+        ],
+        expansionTerms: ["EØS", "MELOSYS", "Norge"],
+      },
+      collections: [],
+    });
+    // The Concept EØS chip carries the re-injected marker and tooltip.
+    expect(html).toMatch(/stt-chip stt-chip-reinjected[^>]*title="[^"]*re-injected[^"]*"/);
+    expect(html).toContain('class="stt-chip-plus"');
+    // Concept Journalføring is plain — not in the expansionTerms list — but
+    // still gets the base "detected as a graph entity" tooltip.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Detected as a graph entity[^"]*"><span class="stt-chip-type">Concept<\/span>Journalf/);
+    // Standalone "+ EØS" chip is gone (it's already represented by the entity chip).
+    expect(html).not.toMatch(/<span class="stt-chip">\+ EØS</);
+    // But "+ MELOSYS" and "+ Norge" survive — they have no entity chip.
+    expect(html).toContain("+ MELOSYS");
+    expect(html).toContain("+ Norge");
+  });
+
   test("renders graphAnswered and rerankerSkipped flag badges", () => {
     const html = sb.renderSearchTrace({
       schemaVersion: 1,
@@ -96,6 +217,80 @@ describe("renderSearchTrace", () => {
     expect(html).toContain("best=-0.050");
     expect(html).toContain("3 filtered");
     expect(html).toContain("stt-conf-best");
+  });
+
+  test("confidence block summary calls strong vs weak match correctly", () => {
+    // Strong match: -1.779 best, -0.1 cutoff, margin 1.679 → "strong match"
+    let html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "wiki", confidence: { lowConfidence: false, bestScore: -1.779, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 } }],
+    });
+    expect(html).toContain("strong match");
+    expect(html).toContain("1.679");
+    expect(html).toContain("below the cutoff");
+    expect(html).toContain("no noise filtering");
+    expect(html).toContain("stt-good");
+
+    // Weak / low confidence: -0.05 best, -0.1 cutoff, margin -0.05 → "weak match"
+    sb.reset();
+    html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "kb", confidence: { lowConfidence: true, bestScore: -0.05, lowConfidenceThreshold: -0.1, noiseThreshold: -0.01, filteredCount: 3 } }],
+    });
+    expect(html).toContain("weak match");
+    expect(html).toContain("0.050");
+    expect(html).toContain("above the cutoff");
+    expect(html).toContain("flagged as low confidence");
+    expect(html).toContain("3 candidates dropped");
+    expect(html).toContain("stt-bad");
+  });
+
+  test("confidence block renders inline marker labels and stacks duplicate thresholds", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "wiki", confidence: { lowConfidence: false, bestScore: -1.779, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 } }],
+    });
+    // All three markers carry their own inline label with the marker value.
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-best[^>]*>best -1\.78</);
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-thr[^>]*>lowConfThr -0\.1</);
+    // Both thresholds end at the right edge → noise label gets the right anchor
+    // and the stack-1 offset so the two labels don't write over each other.
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-thr stt-anchor-right[^>]*>lowConfThr -0\.1</);
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-noise stt-anchor-right stt-stack-1[^>]*>noiseThr -0\.1</);
+  });
+
+  test("confidence marker labels use plain anchor when not at an edge", () => {
+    // Use values where best lands well inside the bar (not within 5% of either edge).
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "kb", confidence: { lowConfidence: false, bestScore: -0.5, lowConfidenceThreshold: -0.1, noiseThreshold: -0.9, filteredCount: 0 } }],
+    });
+    // Best is in the middle → no edge-anchor class on its label.
+    expect(html).toMatch(/<div class="stt-conf-mark-label stt-mk-best"[^>]*>best -0\.50</);
+  });
+
+  test("confidence block adds legend and explainer help icon", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {},
+      collections: [{
+        name: "confluence",
+        confidence: { lowConfidence: false, bestScore: -0.987, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 },
+      }],
+    });
+    // Per-marker legend with values.
+    expect(html).toContain("stt-conf-leg-best");
+    expect(html).toContain("best -0.987");
+    expect(html).toContain("lowConfThr -0.1");
+    expect(html).toContain("noiseThr -0.1");
+    // Hover-only "?" explainer next to the badge.
+    expect(html).toContain('class="stt-help"');
+    // Marker tooltips spell out the rule, not just the number.
+    expect(html).toContain("more negative = more relevant");
+    // Axis labels were removed in favor of inline marker labels — they were
+    // colliding with the right-edge "noiseThr" label and adding no signal
+    // beyond what the per-marker labels already carry.
+    expect(html).not.toContain("stt-conf-axis");
   });
 
   test("candidates table renders with default top-20 kept filter", () => {

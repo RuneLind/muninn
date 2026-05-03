@@ -189,6 +189,34 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.tooltip).toContain("total: 71ms");
   });
 
+  test("counts chip tooltip notes the cross-collection sum when there are multiple collections", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [
+            { name: "wiki", candidates: [{ kept: true }, { kept: true }], confidence: { lowConfidence: false } },
+            { name: "jira", candidates: [{ kept: true }], confidence: { lowConfidence: false } },
+            { name: "kb",   candidates: [{ kept: true }], confidence: { lowConfidence: false } },
+          ],
+        },
+      },
+    });
+    expect(out!.html).toMatch(/title="[^"]*summed across 3 collections/);
+    // Single-collection case keeps the original short tooltip.
+    const single = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "wiki", candidates: [{ kept: true }], confidence: { lowConfidence: false } }],
+        },
+      },
+    });
+    expect(single!.html).not.toContain("summed across");
+  });
+
   test("flips counts chip to low-conf variant when any collection is low-confidence", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",

@@ -159,6 +159,42 @@ test("search_pattern renderer renders matches with line marker", () => {
   expect(html).toContain("after1");
 });
 
+test("response section is omitted when output is null/empty", () => {
+  const html = call("tdrRenderResponseSection", null);
+  expect(html).toBe("");
+  expect(call("tdrRenderResponseSection", "")).toBe("");
+});
+
+test("response section starts collapsed and exposes a toggle button", () => {
+  // Reset state so the section is in its default closed state.
+  (sandbox.window as { __tdrState: { showResponse: boolean } }).__tdrState.showResponse = false;
+  const html = call("tdrRenderResponseSection", "plain text payload");
+  expect(html).toContain("Response sent to LLM");
+  expect(html).toContain("Show response sent to LLM");
+  // Body is hidden when collapsed — neither the meta line nor the text show up.
+  expect(html).not.toContain("plain text payload");
+  expect(html).not.toContain("chars rendered");
+});
+
+test("response section expands to show plain-text output verbatim", () => {
+  (sandbox.window as { __tdrState: { showResponse: boolean } }).__tdrState.showResponse = true;
+  const html = call("tdrRenderResponseSection", "1. result a\n2. result b\n");
+  expect(html).toContain("Hide response");
+  expect(html).toContain("result a");
+  expect(html).toContain("result b");
+  // No truncation chip when the output isn't a {head, _truncated} envelope.
+  expect(html).not.toContain("tdr-response-trunc");
+});
+
+test("response section parses huginn's truncation envelope and reports original size", () => {
+  (sandbox.window as { __tdrState: { showResponse: boolean } }).__tdrState.showResponse = true;
+  const output = JSON.stringify({ _truncated: true, _originalBytes: 28880, head: "## Doc.md\n\ncontent here" });
+  const html = call("tdrRenderResponseSection", output);
+  expect(html).toContain("content here");
+  expect(html).toContain("truncated from 28,880 bytes");
+  expect(html).toContain("tdr-response-trunc");
+});
+
 test("renderer error is caught and shown gracefully", () => {
   // Force the symbol_context renderer to crash by passing bad output JSON
   // string that parses but lacks expected shape — the renderer handles this

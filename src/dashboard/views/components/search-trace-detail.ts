@@ -52,6 +52,18 @@ export function searchTraceDetailStyles(): string {
       white-space: nowrap;
     }
     .stt-chip .stt-chip-type { color: var(--text-dim); font-size: 10px; }
+    /* Marker on entity chips that were also re-injected as expansion terms.
+       Replaces the separate "+ X" duplicate chip — hover the chip for details. */
+    .stt-chip .stt-chip-plus {
+      margin-left: 4px;
+      padding: 0 4px;
+      font-size: 10px;
+      color: var(--accent-light);
+      border-left: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    .stt-chip-reinjected {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+    }
     .stt-badge {
       display: inline-block;
       padding: 2px 8px;
@@ -120,18 +132,89 @@ export function searchTraceDetailStyles(): string {
     .stt-leg-name::before      { background: #f59e0b; }
     .stt-leg-rrf::before       { background: #10b981; }
 
-    /* Confidence axis */
+    /* Confidence axis. Reserve room below the bar for inline marker labels
+       so they don't overlap the axis row underneath. */
     .stt-conf {
       position: relative;
       height: 36px;
       background: var(--bg-inset);
       border-radius: 4px;
       margin-top: 6px;
+      margin-bottom: 22px;
     }
     .stt-conf-best { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--status-cyan); }
     .stt-conf-thr  { position: absolute; top: 4px; bottom: 4px; width: 2px; background: var(--status-warning); }
     .stt-conf-noise{ position: absolute; top: 8px; bottom: 8px; width: 2px; background: var(--text-dim); }
+    /* Inline marker labels — sit just under the bar, anchored to the marker.
+       translateX(-50%) centers under the line; left/right edge variants flip
+       the anchor so labels at 0% / 100% don't overflow the bar. */
+    .stt-conf-mark-label {
+      position: absolute;
+      top: 38px;
+      font-size: 10px;
+      color: var(--text-dim);
+      transform: translateX(-50%);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .stt-conf-mark-label.stt-anchor-left  { transform: translateX(0); }
+    .stt-conf-mark-label.stt-anchor-right { transform: translateX(-100%); }
+    .stt-conf-mark-label.stt-mk-best  { color: var(--status-cyan); }
+    .stt-conf-mark-label.stt-mk-thr   { color: var(--status-warning); }
+    .stt-conf-mark-label.stt-mk-noise { color: var(--text-soft); }
+    /* Vertical stack offset when two thresholds collide (lowConfThr == noiseThr) —
+       move the second label down a row so they don't write over each other. */
+    .stt-conf-mark-label.stt-stack-1 { top: 52px; }
     .stt-conf-label { position: absolute; bottom: -16px; font-size: 10px; color: var(--text-dim); transform: translateX(-50%); }
+    /* Plain-English interpretation sentence under the legend. */
+    .stt-conf-summary {
+      font-size: 11px;
+      color: var(--text-soft);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+    .stt-conf-summary.stt-good { color: var(--status-success); }
+    .stt-conf-summary.stt-bad  { color: var(--status-error); }
+    .stt-conf-summary .stt-margin { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .stt-conf-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+    .stt-conf-legend span::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin-right: 4px;
+      vertical-align: middle;
+      border-radius: 1px;
+    }
+    .stt-conf-leg-best::before  { background: var(--status-cyan); }
+    .stt-conf-leg-thr::before   { background: var(--status-warning); }
+    .stt-conf-leg-noise::before { background: var(--text-dim); }
+
+    /* Inline help icon — tooltip-only, no popover */
+    .stt-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border-primary);
+      color: var(--text-dim);
+      font-size: 9px;
+      font-weight: 600;
+      cursor: help;
+      margin-left: 6px;
+      user-select: none;
+    }
+    .stt-help:hover { color: var(--text-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
 
     /* Candidates table — wrapper allows horizontal scroll when the panel is
        too narrow for all 9 columns (rank stages + Δboost + status). */
@@ -255,15 +338,59 @@ export function searchTraceDetailScript(): string {
     }
 
     function sttRenderQuery(q) {
-      const entityChips = (q.detectedEntities || []).map(e =>
-        '<span class="stt-chip"><span class="stt-chip-type">' + esc(e.type || '') + '</span>' + esc(e.label || e.id || '') + '</span>'
-      ).join('');
+      const entities = q.detectedEntities || [];
+      const expansionTerms = q.expansionTerms || [];
+      // Build a case-insensitive set of expansion terms so we can mark entity
+      // chips that were also re-injected as expansion terms — and drop the
+      // duplicate "+ X" chip below. Same-text-different-case treated as same.
+      const expSet = new Set();
+      for (const t of expansionTerms) {
+        if (typeof t === 'string') expSet.add(t.toLowerCase());
+      }
+      const entitySet = new Set();
+      for (const e of entities) {
+        const lbl = e && (e.label || e.id);
+        if (typeof lbl === 'string') entitySet.add(lbl.toLowerCase());
+      }
+
+      const entityBaseTip = 'Detected as a graph entity in the raw query — used for graph-aware retrieval and graph context enrichment.';
+      const entityReinjectedTip = entityBaseTip + ' Also re-injected into the query as an expansion term (see the "+" marker).';
+      const entityChips = entities.map(e => {
+        const lbl = e.label || e.id || '';
+        const reinjected = typeof lbl === 'string' && expSet.has(lbl.toLowerCase());
+        const cls = reinjected ? 'stt-chip stt-chip-reinjected' : 'stt-chip';
+        const tip = reinjected ? entityReinjectedTip : entityBaseTip;
+        const titleAttr = ' title="' + esc(tip) + '"';
+        const plus = reinjected ? '<span class="stt-chip-plus" aria-hidden="true">+</span>' : '';
+        return '<span class="' + cls + '"' + titleAttr + '>' +
+          '<span class="stt-chip-type">' + esc(e.type || '') + '</span>' + esc(lbl) + plus +
+        '</span>';
+      }).join('');
+
       const flags = [];
       if (q.graphAnswered === true) flags.push('<span class="stt-badge">graph answered</span>');
       if (q.rerankerSkipped === true) flags.push('<span class="stt-badge stt-warn">reranker skipped' +
         (q.rerankerSkipReason ? ': ' + esc(q.rerankerSkipReason) : '') + '</span>');
-      const expandedHtml = sttHighlightExpansion(q.raw || '', q.expanded || '', q.expansionTerms || []);
-      const expansionChips = (q.expansionTerms || []).map(t => '<span class="stt-chip">+ ' + esc(t) + '</span>').join('');
+      // Pass entity labels in too so a substring expansion term doesn't
+      // chew into a longer entity that wasn't itself in the expansion list
+      // (e.g. "EØS" matching inside "EU/EØS" — EU/EØS is a Concept entity
+      // but not always in expansionTerms). Exclude entities that ARE in
+      // expansionTerms — otherwise they'd block their own standalone
+      // occurrence from being highlighted.
+      const blockSpans = entities
+        .map(e => (e && (e.label || e.id)) || '')
+        .filter(s => typeof s === 'string' && s.length > 0 && !expSet.has(s.toLowerCase()));
+      const expandedHtml = sttHighlightExpansion(q.expanded || '', expansionTerms, blockSpans);
+      // Hide "+ X" chips for terms that already show up as entity chips above —
+      // those chips already carry the "+" indicator. Reduces visual triplication
+      // (entity + plus-chip + highlighted-in-expanded → entity-with-plus-marker).
+      const remainingExpansion = expansionTerms.filter(t =>
+        typeof t === 'string' && !entitySet.has(t.toLowerCase())
+      );
+      const expansionTip = 'Expansion term appended to the raw query before retrieval. Comes from graph expansion of detected entities (synonyms, related concepts, and tag co-occurrence).';
+      const expansionChips = remainingExpansion.map(t =>
+        '<span class="stt-chip" title="' + esc(expansionTip) + '">+ ' + esc(t) + '</span>'
+      ).join('');
       return '<div class="stt-section">' +
         '<h5>Query</h5>' +
         '<div class="stt-query">' +
@@ -276,15 +403,80 @@ export function searchTraceDetailScript(): string {
       '</div>';
     }
 
-    function sttHighlightExpansion(raw, expanded, terms) {
-      // Render expanded with the appended expansion terms wrapped for emphasis.
-      let html = esc(expanded);
-      for (const t of terms || []) {
-        if (!t) continue;
-        const re = new RegExp('(' + t.replace(/[.*+?^\${}()|[\\]\\\\]/g,'\\\\$&') + ')', 'g');
-        html = html.replace(re, '<span class="stt-expansion">$1</span>');
+    /** Wrap appended expansion terms in <span class="stt-expansion"> for visual
+     *  emphasis. Three pitfalls handled here:
+     *    1. Substring matches inside an expansion term: e.g. "EØS" naively
+     *       matched inside "EU/EØS" when both are in the expansion list. Sort
+     *       longer-first and skip ranges that overlap an already-wrapped span.
+     *    2. Substring matches inside a detected entity that isn't itself in
+     *       the expansion list: same problem, but the longer "EU/EØS" comes
+     *       from blockSpans (entity labels) instead. We claim those ranges
+     *       up front without wrapping them — they just block.
+     *    3. Word-boundary on Unicode: \\b doesn't fire around "Ø" / "æ", so
+     *       we avoid \\b entirely and require a non-letter neighbor on each
+     *       side (or string edge), defined as anything outside the Unicode
+     *       letter class. */
+    function sttHighlightExpansion(expanded, terms, blockSpans) {
+      const escaped = esc(expanded);
+      if ((!terms || terms.length === 0) && (!blockSpans || blockSpans.length === 0)) return escaped;
+      // Longer-first so "EU/EØS" matches before "EØS" can chew into it.
+      const sortedTerms = (terms || [])
+        .filter(t => typeof t === 'string' && t.length > 0)
+        .slice()
+        .sort(function (a, b) { return b.length - a.length; });
+      const sortedBlocks = (blockSpans || [])
+        .filter(t => typeof t === 'string' && t.length > 0)
+        .slice()
+        .sort(function (a, b) { return b.length - a.length; });
+      // Two parallel span lists. "wrapped" ones get a <span> around them in
+      // the final pass; "blocked" ones don't render anything but still reserve
+      // their range so substring matches can't claim them.
+      const wrapped = [];
+      const blocked = [];
+      const overlapsAny = function (start, end, list) {
+        for (let i = 0; i < list.length; i++) {
+          if (start < list[i].end && end > list[i].start) return true;
+        }
+        return false;
+      };
+      const isLetter = function (ch) {
+        if (!ch) return false;
+        return /\\p{L}/u.test(ch);
+      };
+      const claim = function (term, list, alsoBlockedBy) {
+        const escTerm = esc(term).replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+        const re = new RegExp(escTerm, 'g');
+        let m;
+        while ((m = re.exec(escaped)) !== null) {
+          const start = m.index;
+          const end = start + m[0].length;
+          const before = start > 0 ? escaped.charAt(start - 1) : '';
+          const after = end < escaped.length ? escaped.charAt(end) : '';
+          if (isLetter(before) || isLetter(after)) continue;
+          if (overlapsAny(start, end, list)) continue;
+          if (alsoBlockedBy && overlapsAny(start, end, alsoBlockedBy)) continue;
+          list.push({ start: start, end: end });
+        }
+      };
+      // Block longer entity labels first so they reserve their ranges before
+      // the (potentially shorter) expansion terms try to claim subranges.
+      for (const t of sortedBlocks) claim(t, blocked, null);
+      for (const t of sortedTerms) claim(t, wrapped, blocked);
+      if (wrapped.length === 0) return escaped;
+      wrapped.sort(function (a, b) { return a.start - b.start; });
+      // Same wording as the "+ X" chip tooltip — these underlines are the
+      // very same expansion terms shown in their query position.
+      const wrapTip = 'Expansion term appended to the raw query before retrieval. Comes from graph expansion of detected entities.';
+      const titleAttr = ' title="' + esc(wrapTip) + '"';
+      let out = '';
+      let cursor = 0;
+      for (const s of wrapped) {
+        out += escaped.slice(cursor, s.start) +
+               '<span class="stt-expansion"' + titleAttr + '>' + escaped.slice(s.start, s.end) + '</span>';
+        cursor = s.end;
       }
-      return html;
+      out += escaped.slice(cursor);
+      return out;
     }
 
     function sttRenderCollections(collections) {
@@ -342,23 +534,108 @@ export function searchTraceDetailScript(): string {
       const hi = Math.max.apply(null, vals.concat([best + 0.2]));
       const range = hi - lo || 1;
       const pos = v => ((v - lo) / range) * 100;
+
+      // Sign convention: CE scores are negative-distance-like — more negative
+      // means more relevant. So lowConfidence = bestScore > threshold (less
+      // negative than the cutoff). The badge tooltip explains this so a reader
+      // who hovers the badge doesn't have to chase the wiki.
+      const badgeTip = conf.lowConfidence
+        ? 'lowConfidence=true: best score (' + best.toFixed(3) + ') is greater than (less negative than) the threshold (' + (lcThr != null ? lcThr : '?') + '). CE scores: more negative = more relevant.'
+        : 'lowConfidence=false: best score (' + best.toFixed(3) + ') is less than (more negative than) the threshold (' + (lcThr != null ? lcThr : '?') + '). CE scores: more negative = more relevant.';
       const lowBadge = conf.lowConfidence
-        ? '<span class="stt-badge stt-err">low confidence</span>'
-        : '<span class="stt-badge">confident</span>';
+        ? '<span class="stt-badge stt-err" title="' + esc(badgeTip) + '">low confidence</span>'
+        : '<span class="stt-badge" title="' + esc(badgeTip) + '">confident</span>';
+      const filtTip = 'Documents whose best chunk score was greater than (less negative than) noiseThreshold and got dropped from the response.';
       const filt = conf.filteredCount != null && conf.filteredCount > 0
-        ? '<span class="stt-badge stt-warn">' + conf.filteredCount + ' filtered</span>'
+        ? '<span class="stt-badge stt-warn" title="' + esc(filtTip) + '">' + conf.filteredCount + ' filtered</span>'
         : '';
+
+      const helpTip = [
+        'Confidence axis — interpreting the markers',
+        '',
+        'CE scores are negative; more negative = more relevant (treat them like a distance, lower is better).',
+        '',
+        'best = best CE score across surviving documents (per-doc score = min over chunks).',
+        'noiseThr = drop docs with best chunk score > noiseThr.',
+        'lowConfThr = flag the whole result as low-confidence if best surviving score > lowConfThr.',
+        '',
+        'On the bar: "best" left of the thresholds = good; right of them = drop / low confidence.',
+      ].join('\\n');
+
+      // One descriptor per marker — drives the legend, the inline label under
+      // the bar, and the marker's own hover tooltip from a single source.
+      // When lowConfThr and noiseThr land on top of each other (the common
+      // case when both are -0.1), push the second label one row down so they
+      // don't render on top of each other.
+      const sameThr = (lcThr != null && nsThr != null && Math.abs(lcThr - nsThr) < 1e-9);
+      const markers = [
+        { kind: 'best', value: best, displayValue: best.toFixed(2), legendValue: best.toFixed(3),
+          label: 'best', tip: 'best CE score = ' + best.toFixed(3) + ' (lower / more negative = more relevant)' },
+      ];
+      if (lcThr != null) markers.push({ kind: 'thr', value: lcThr, displayValue: lcThr, legendValue: lcThr,
+        label: 'lowConfThr', tip: 'lowConfidenceThreshold = ' + lcThr + ' — flag low-confidence if best score is greater than (less negative than) this' });
+      if (nsThr != null) markers.push({ kind: 'noise', value: nsThr, displayValue: nsThr, legendValue: nsThr,
+        label: 'noiseThr', tip: 'noiseThreshold = ' + nsThr + ' — drop docs whose best chunk score is greater than (less negative than) this',
+        stackBelow: sameThr });
+
+      // Anchor inline marker labels so they don't overflow the bar at the edges.
+      // < 5%  → align to the marker's left edge; > 95% → align to the right edge;
+      // otherwise center under the line.
+      const anchorClass = (p) => p < 5 ? ' stt-anchor-left' : (p > 95 ? ' stt-anchor-right' : '');
+
+      const legend = markers.map(m =>
+        '<span class="stt-conf-leg-' + m.kind + '" title="' + esc(m.tip) + '">' +
+          m.label + ' ' + m.legendValue +
+        '</span>'
+      ).join('');
+
+      const inlineLabels = markers.map(m =>
+        '<div class="stt-conf-mark-label stt-mk-' + m.kind + anchorClass(pos(m.value)) +
+          (m.stackBelow ? ' stt-stack-1' : '') +
+        '" style="left:' + pos(m.value) + '%">' + m.label + ' ' + m.displayValue + '</div>'
+      ).join('');
+
+      // Plain-English interpretation. Pick the threshold to compare against:
+      // prefer lowConfThr (it's what flips the badge), fall back to noiseThr.
+      const cmpThr = lcThr != null ? lcThr : nsThr;
+      let summaryHtml = '';
+      if (cmpThr != null) {
+        const margin = cmpThr - best; // positive when best is more negative than threshold
+        const marginAbs = Math.abs(margin).toFixed(3);
+        const filteredNote = (conf.filteredCount != null && conf.filteredCount > 0)
+          ? ' — ' + conf.filteredCount + ' candidate' + (conf.filteredCount === 1 ? '' : 's') + ' dropped at the noise cutoff'
+          : ' — no noise filtering';
+        if (margin > 0) {
+          // best is more negative than threshold → confident
+          const strength = margin > 1 ? 'strong match' : (margin > 0.3 ? 'solid match' : 'borderline match');
+          summaryHtml = '<div class="stt-conf-summary stt-good">' +
+            esc(strength) + ' — best score <span class="stt-margin">' + marginAbs +
+            '</span> below the cutoff' + esc(filteredNote) + '.</div>';
+        } else if (margin < 0) {
+          summaryHtml = '<div class="stt-conf-summary stt-bad">' +
+            'weak match — best score <span class="stt-margin">' + marginAbs +
+            '</span> above the cutoff (flagged as low confidence)' + esc(filteredNote) + '.</div>';
+        } else {
+          summaryHtml = '<div class="stt-conf-summary">' +
+            'best score sits exactly at the cutoff' + esc(filteredNote) + '.</div>';
+        }
+      }
+
       return '<div style="margin-top:10px">' +
         '<div class="stt-row">' + lowBadge + filt +
+          '<span class="stt-help" title="' + esc(helpTip) + '">?</span>' +
           '<span style="color:var(--text-dim);font-size:11px;margin-left:8px">best=' + best.toFixed(3) +
           (lcThr != null ? ', lowConfThr=' + lcThr : '') +
           (nsThr != null ? ', noiseThr=' + nsThr : '') + '</span>' +
         '</div>' +
         '<div class="stt-conf">' +
-          (lcThr != null ? '<div class="stt-conf-thr"   style="left:' + pos(lcThr) + '%" title="lowConfThr=' + lcThr + '"></div>' : '') +
-          (nsThr != null ? '<div class="stt-conf-noise" style="left:' + pos(nsThr) + '%" title="noiseThr=' + nsThr + '"></div>' : '') +
-          '<div class="stt-conf-best"  style="left:' + pos(best) + '%" title="best=' + best.toFixed(3) + '"></div>' +
+          markers.map(m =>
+            '<div class="stt-conf-' + m.kind + '" style="left:' + pos(m.value) + '%" title="' + esc(m.tip) + '"></div>'
+          ).join('') +
+          inlineLabels +
         '</div>' +
+        '<div class="stt-conf-legend">' + legend + '</div>' +
+        summaryHtml +
       '</div>';
     }
 
