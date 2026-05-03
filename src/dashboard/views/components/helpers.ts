@@ -115,80 +115,77 @@ interface SearchTraceSummary {
   totalMs: number | null;
 }
 
-/** Compress a v1 searchTrace blob into the bits we want to surface in the
- *  waterfall row: candidate counts, top-ranked hit, low-confidence flag, total
- *  ms. Handles both shapes — Huginn (collections[]) and Yggdrasil (flat
- *  candidates[]). Returns null when there's nothing useful to show. */
+/** Compress a v1 searchTrace blob into the bits we surface in the waterfall
+ *  row: candidate counts, top-ranked hit, low-confidence flag, total ms.
+ *  Single pass over candidates regardless of producer shape (Huginn collections[]
+ *  or Yggdrasil flat candidates[]). Returns null when there's nothing useful. */
 export function summarizeSearchTrace(trace: unknown): SearchTraceSummary | null {
   if (!trace || typeof trace !== "object") return null;
   const t = trace as {
     collections?: Array<{
       candidates?: unknown[];
       confidence?: { lowConfidence?: unknown };
-      timingsMs?: { total?: unknown };
     }>;
     candidates?: unknown[];
     timingsMs?: { total?: unknown };
     totalMs?: unknown;
   };
 
-  let kept = 0;
-  let fetched = 0;
-  let lowConfidence = false;
-  let topTitle: string | null = null;
+  let buckets: Array<{ candidates: unknown[]; lowConfidence: boolean }>;
+  let isKept: (c: { kept?: unknown; stages?: { final?: unknown } }) => boolean;
+  let titleFields: readonly string[];
   let totalMs: number | null = null;
 
   if (Array.isArray(t.collections) && t.collections.length > 0) {
-    for (const c of t.collections) {
-      const cands = Array.isArray(c?.candidates) ? c.candidates : [];
-      fetched += cands.length;
-      for (const cand of cands) {
-        if (cand && typeof cand === "object" && (cand as { kept?: unknown }).kept !== false) kept++;
-      }
-      if (c?.confidence && (c.confidence as { lowConfidence?: unknown }).lowConfidence === true) lowConfidence = true;
-    }
-    topTitle = pickTopTitle(t.collections[0]?.candidates ?? [], "doc");
+    buckets = t.collections.map((c) => ({
+      candidates: Array.isArray(c?.candidates) ? c.candidates : [],
+      lowConfidence: !!(c?.confidence && (c.confidence as { lowConfidence?: unknown }).lowConfidence === true),
+    }));
+    isKept = (c) => c.kept !== false;
+    titleFields = ["docTitle", "documentId"];
     if (typeof t.totalMs === "number") totalMs = t.totalMs;
   } else if (Array.isArray(t.candidates)) {
-    fetched = t.candidates.length;
-    for (const c of t.candidates) {
-      if (c && typeof c === "object" && (c as { stages?: { final?: unknown } }).stages?.final) kept++;
-    }
-    topTitle = pickTopTitle(t.candidates, "symbol");
-    if (t.timingsMs && typeof (t.timingsMs as { total?: unknown }).total === "number") {
-      totalMs = (t.timingsMs as { total: number }).total;
-    }
+    buckets = [{ candidates: t.candidates, lowConfidence: false }];
+    isKept = (c) => !!(c.stages && c.stages.final);
+    titleFields = ["qualifiedName"];
+    const total = (t.timingsMs as { total?: unknown } | undefined)?.total;
+    if (typeof total === "number") totalMs = total;
   } else {
     return null;
   }
 
-  if (fetched === 0) return null;
-  return { kept, fetched, topTitle, lowConfidence, totalMs };
-}
-
-type TopCandidate = { docTitle?: unknown; documentId?: unknown; qualifiedName?: unknown };
-
-function pickTopTitle(candidates: unknown[], shape: "doc" | "symbol"): string | null {
-  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  let kept = 0;
+  let fetched = 0;
+  let lowConfidence = false;
   let bestRank = Infinity;
-  let best: TopCandidate | null = null;
-  for (const c of candidates) {
-    if (!c || typeof c !== "object") continue;
-    const stages = (c as { stages?: { final?: { rank?: unknown } } }).stages;
-    const rank = typeof stages?.final?.rank === "number" ? stages.final.rank : Infinity;
-    if (rank < bestRank) {
-      bestRank = rank;
-      best = c as TopCandidate;
+  let bestCand: Record<string, unknown> | null = null;
+
+  for (const b of buckets) {
+    if (b.lowConfidence) lowConfidence = true;
+    for (const cand of b.candidates) {
+      if (!cand || typeof cand !== "object") { fetched++; continue; }
+      const c = cand as { kept?: unknown; stages?: { final?: { rank?: unknown } } };
+      fetched++;
+      if (isKept(c)) kept++;
+      const rank = c.stages?.final?.rank;
+      if (typeof rank === "number" && rank < bestRank) {
+        bestRank = rank;
+        bestCand = cand as Record<string, unknown>;
+      }
     }
   }
-  if (!best) return null;
-  if (shape === "doc") {
-    if (typeof best.docTitle === "string" && best.docTitle) return best.docTitle;
-    if (typeof best.documentId === "string" && best.documentId) return best.documentId;
-    return null;
+
+  if (fetched === 0) return null;
+
+  let topTitle: string | null = null;
+  if (bestCand) {
+    for (const f of titleFields) {
+      const v = bestCand[f];
+      if (typeof v === "string" && v) { topTitle = v; break; }
+    }
   }
-  if (typeof best.qualifiedName === "string" && best.qualifiedName) return best.qualifiedName;
-  return null;
+
+  return { kept, fetched, topTitle, lowConfidence, totalMs };
 }
 
 function collectionsFor(attrs: NonNullable<SpanLike["attributes"]>): string[] | null {
@@ -391,52 +388,48 @@ export function deriveSpanLabelScript(): string {
 
     function summarizeSearchTrace(trace) {
       if (!trace || typeof trace !== 'object') return null;
-      var kept = 0, fetched = 0, lowConfidence = false, topTitle = null, totalMs = null;
+      var buckets, isKept, titleFields, totalMs = null;
       if (Array.isArray(trace.collections) && trace.collections.length > 0) {
-        for (var i = 0; i < trace.collections.length; i++) {
-          var c = trace.collections[i] || {};
-          var cands = Array.isArray(c.candidates) ? c.candidates : [];
-          fetched += cands.length;
-          for (var j = 0; j < cands.length; j++) {
-            if (cands[j] && cands[j].kept !== false) kept++;
-          }
-          if (c.confidence && c.confidence.lowConfidence === true) lowConfidence = true;
-        }
-        topTitle = pickTopTitle((trace.collections[0] && trace.collections[0].candidates) || [], 'doc');
+        buckets = trace.collections.map(function (c) {
+          return {
+            candidates: c && Array.isArray(c.candidates) ? c.candidates : [],
+            lowConfidence: !!(c && c.confidence && c.confidence.lowConfidence === true),
+          };
+        });
+        isKept = function (c) { return c.kept !== false; };
+        titleFields = ['docTitle', 'documentId'];
         if (typeof trace.totalMs === 'number') totalMs = trace.totalMs;
       } else if (Array.isArray(trace.candidates)) {
-        fetched = trace.candidates.length;
-        for (var k = 0; k < trace.candidates.length; k++) {
-          var cc = trace.candidates[k];
-          if (cc && cc.stages && cc.stages.final) kept++;
-        }
-        topTitle = pickTopTitle(trace.candidates, 'symbol');
+        buckets = [{ candidates: trace.candidates, lowConfidence: false }];
+        isKept = function (c) { return !!(c.stages && c.stages.final); };
+        titleFields = ['qualifiedName'];
         if (trace.timingsMs && typeof trace.timingsMs.total === 'number') totalMs = trace.timingsMs.total;
       } else {
         return null;
       }
+      var kept = 0, fetched = 0, lowConfidence = false, bestRank = Infinity, bestCand = null;
+      for (var i = 0; i < buckets.length; i++) {
+        if (buckets[i].lowConfidence) lowConfidence = true;
+        var cands = buckets[i].candidates;
+        for (var j = 0; j < cands.length; j++) {
+          var c = cands[j];
+          fetched++;
+          if (!c || typeof c !== 'object') continue;
+          if (isKept(c)) kept++;
+          var rank = c.stages && c.stages.final && typeof c.stages.final.rank === 'number'
+            ? c.stages.final.rank : Infinity;
+          if (rank < bestRank) { bestRank = rank; bestCand = c; }
+        }
+      }
       if (fetched === 0) return null;
+      var topTitle = null;
+      if (bestCand) {
+        for (var k = 0; k < titleFields.length; k++) {
+          var v = bestCand[titleFields[k]];
+          if (typeof v === 'string' && v) { topTitle = v; break; }
+        }
+      }
       return { kept: kept, fetched: fetched, topTitle: topTitle, lowConfidence: lowConfidence, totalMs: totalMs };
-    }
-
-    function pickTopTitle(cands, shape) {
-      if (!Array.isArray(cands) || cands.length === 0) return null;
-      var bestRank = Infinity, best = null;
-      for (var i = 0; i < cands.length; i++) {
-        var c = cands[i];
-        if (!c) continue;
-        var rank = c.stages && c.stages.final && typeof c.stages.final.rank === 'number'
-          ? c.stages.final.rank : Infinity;
-        if (rank < bestRank) { bestRank = rank; best = c; }
-      }
-      if (!best) return null;
-      if (shape === 'doc') {
-        if (typeof best.docTitle === 'string' && best.docTitle) return best.docTitle;
-        if (typeof best.documentId === 'string' && best.documentId) return best.documentId;
-        return null;
-      }
-      if (typeof best.qualifiedName === 'string' && best.qualifiedName) return best.qualifiedName;
-      return null;
     }
   `;
 }

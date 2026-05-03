@@ -244,10 +244,44 @@ export function tracesWaterfallHtml(): string {
 export function tracesWaterfallScript(): string {
   return `
     let currentWaterfallTraceId = null;
-    let waterfallSpans = []; // stored for click lookups
+    let waterfallSpans = []; // sorted in tree order (parent before children)
     let waterfallSpanById = {};
     let waterfallChildrenByParent = {};
     let collapsedSpanIds = new Set();
+
+    // Build id-to-span / parent-to-children indices and return spans flattened
+    // in tree order (parent immediately before its children, siblings by
+    // startedAt). The flat order matters because the DB sort by startedAt is
+    // unstable when a synthesized stage span starts at offset 0 from its tool
+    // parent, so without this the child can render above the parent.
+    function buildWaterfallState(spans) {
+      const spanById = {};
+      const childrenByParent = {};
+      spans.forEach(s => {
+        spanById[s.id] = s;
+        if (s.parentId) {
+          if (!childrenByParent[s.parentId]) childrenByParent[s.parentId] = [];
+          childrenByParent[s.parentId].push(s);
+        }
+      });
+      const byStart = (a, b) => a.startedAt - b.startedAt;
+      const roots = spans.filter(s => !s.parentId || !spanById[s.parentId]).sort(byStart);
+      Object.keys(childrenByParent).forEach(k => childrenByParent[k].sort(byStart));
+
+      const sorted = [];
+      const visited = new Set();
+      function visit(s) {
+        if (visited.has(s.id)) return; // cycle guard
+        visited.add(s.id);
+        sorted.push(s);
+        const kids = childrenByParent[s.id];
+        if (kids) kids.forEach(visit);
+      }
+      roots.forEach(visit);
+      // Append any unreachable nodes so a malformed tree doesn't silently drop spans.
+      spans.forEach(s => { if (!visited.has(s.id)) sorted.push(s); });
+      return { sorted, spanById, childrenByParent };
+    }
 
     async function loadWaterfall(traceId) {
       try {
@@ -263,31 +297,26 @@ export function tracesWaterfallScript(): string {
         document.getElementById('waterfallTitle').textContent =
           root.name + ' (' + fmtDuration(root.durationMs) + ')';
 
-        // Highlight the selected row
         document.querySelectorAll('.trace-table tr').forEach(r => r.classList.remove('expanded'));
         const row = document.querySelector('tr[data-trace="' + traceId + '"]');
         if (row) row.classList.add('expanded');
 
-        // Reset collapse state per trace and auto-collapse parents whose
-        // children are synthesized search-trace stage spans (index.fetch /
-        // boost.title / assemble). Those are noisy by default and the same
-        // info is in the search detail panel — operators can expand on demand.
+        // Single index pass per trace load — renderWaterfall and the collapse
+        // helpers all read from this cache, so chevron toggles don't re-walk.
+        const built = buildWaterfallState(spans);
+        waterfallSpans = built.sorted;
+        waterfallSpanById = built.spanById;
+        waterfallChildrenByParent = built.childrenByParent;
+
+        // Auto-collapse parents whose children are synthesized stage spans
+        // (index.fetch / boost.title / assemble). Same info is one click away
+        // in the search detail panel.
         collapsedSpanIds = new Set();
-        const childrenByParent = {};
-        spans.forEach(s => {
-          if (s.parentId) {
-            if (!childrenByParent[s.parentId]) childrenByParent[s.parentId] = [];
-            childrenByParent[s.parentId].push(s);
-          }
-        });
-        spans.forEach(s => {
-          const kids = childrenByParent[s.id] || [];
-          if (kids.some(k => k.attributes && k.attributes.synthesized === true)) {
-            collapsedSpanIds.add(s.id);
-          }
+        waterfallSpans.forEach(s => {
+          if (spanHasCollapsibleChildren(s.id)) collapsedSpanIds.add(s.id);
         });
 
-        renderWaterfall(spans);
+        renderWaterfall();
         document.getElementById('spanDetails').classList.remove('visible');
       } catch (e) { console.error('Failed to load waterfall', e); }
     }
@@ -297,66 +326,17 @@ export function tracesWaterfallScript(): string {
       return kids.some(k => k.attributes && k.attributes.synthesized === true);
     }
 
-    function isAnyAncestorCollapsed(span) {
-      let cur = span;
-      while (cur && cur.parentId) {
-        if (collapsedSpanIds.has(cur.parentId)) return true;
-        cur = waterfallSpanById[cur.parentId];
-        if (!cur) break;
-      }
-      return false;
-    }
-
     function toggleCollapse(spanId, event) {
       if (event) event.stopPropagation();
       if (collapsedSpanIds.has(spanId)) collapsedSpanIds.delete(spanId);
       else collapsedSpanIds.add(spanId);
-      renderWaterfall(waterfallSpans);
-    }
-
-    // Flatten the parent/child tree into render order: each parent immediately
-    // followed by its children (recursively), with siblings ordered by
-    // startedAt. Without this, synthesized stage spans whose startedAt ties
-    // with the tool parent can render before the parent because the DB
-    // sort-by-startedAt is unstable.
-    function sortSpansByTree(spans) {
-      const childrenByParent = {};
-      const idSet = new Set();
-      spans.forEach(s => { idSet.add(s.id); });
-      const roots = [];
-      spans.forEach(s => {
-        if (!s.parentId || !idSet.has(s.parentId)) {
-          roots.push(s);
-        } else {
-          if (!childrenByParent[s.parentId]) childrenByParent[s.parentId] = [];
-          childrenByParent[s.parentId].push(s);
-        }
-      });
-      const byStart = (a, b) => a.startedAt - b.startedAt;
-      roots.sort(byStart);
-      Object.keys(childrenByParent).forEach(k => childrenByParent[k].sort(byStart));
-
-      const out = [];
-      const visited = new Set();
-      function visit(s) {
-        if (visited.has(s.id)) return; // defensive against accidental cycles
-        visited.add(s.id);
-        out.push(s);
-        const kids = childrenByParent[s.id];
-        if (kids) kids.forEach(visit);
-      }
-      roots.forEach(visit);
-      // Append anything we couldn't reach (defensive — shouldn't happen) so we
-      // don't silently drop spans on a malformed tree.
-      spans.forEach(s => { if (!visited.has(s.id)) out.push(s); });
-      return out;
+      renderWaterfall();
     }
 
     // The AI span is recorded internally as "claude" regardless of which
     // connector handled the call. Render the label as "{connector}, {model}"
     // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
-    // actually ran. Defined at the top level so both renderWaterfall and the
-    // click handler below can see them.
+    // actually ran.
     function isAiSpan(s) {
       if (!s || s.name !== 'claude') return false;
       const a = s.attributes || {};
@@ -369,28 +349,23 @@ export function tracesWaterfallScript(): string {
       return model ? conn + ', ' + model : conn;
     }
 
-    function renderWaterfall(spans) {
-      // Sort spans so parents always appear immediately before their
-      // children. The DB returns by startedAt; that ties when a synthesized
-      // stage span starts at offset 0 from its tool parent (same startedAt),
-      // so the child can otherwise render above the parent.
-      spans = sortSpansByTree(spans);
-      waterfallSpans = spans;
+    function renderWaterfall() {
+      const spans = waterfallSpans;
       const el = document.getElementById('waterfall');
       if (spans.length === 0) { el.innerHTML = '<div class="empty">No spans</div>'; return; }
 
-      // Rebuild id-to-span and parent-to-children indices on every render so
-      // they stay in sync with the spans arg and the collapse helpers (which
-      // run outside this function) see the latest data.
-      waterfallSpanById = {};
-      waterfallChildrenByParent = {};
-      spans.forEach(s => {
-        waterfallSpanById[s.id] = s;
-        if (s.parentId) {
-          if (!waterfallChildrenByParent[s.parentId]) waterfallChildrenByParent[s.parentId] = [];
-          waterfallChildrenByParent[s.parentId].push(s);
+      // One DFS from each collapsed root marks every descendant — turns the
+      // per-row ancestor walk into an O(1) Set lookup.
+      const hiddenSpanIds = new Set();
+      function hideDescendants(parentId) {
+        const kids = waterfallChildrenByParent[parentId];
+        if (!kids) return;
+        for (const k of kids) {
+          hiddenSpanIds.add(k.id);
+          hideDescendants(k.id);
         }
-      });
+      }
+      collapsedSpanIds.forEach(hideDescendants);
 
       function nestingDepth(s) {
         let depth = 0;
@@ -411,20 +386,16 @@ export function tracesWaterfallScript(): string {
       const totalRange = Math.max(maxTime - minTime, 1);
 
       el.innerHTML = spans.map((s, i) => {
-        // Hide rows whose ancestor chain has been collapsed by the user (or
-        // the auto-collapse pass in loadWaterfall). The original index i is
-        // still preserved on visible rows so the click-to-detail handler
-        // can index back into waterfallSpans correctly.
-        if (isAnyAncestorCollapsed(s)) return '';
+        // Original index i is preserved on visible rows so the click-to-detail
+        // handler can index back into waterfallSpans regardless of how many
+        // rows the collapse filter dropped.
+        if (hiddenSpanIds.has(s.id)) return '';
 
         const left = ((s.startedAt - minTime) / totalRange) * 100;
         const width = s.kind === 'event' ? 0.3 : Math.max(((s.durationMs || 0) / totalRange) * 100, 0.3);
         const statusClass = s.status === 'error' ? ' status-error' : '';
         const depth = nestingDepth(s);
         const indent = '\\u00A0\\u00A0'.repeat(depth);
-        // Tool spans with a discoverable collection render as chips (verb + collection
-        // + +N more) with a green dot when extended search trace is available.
-        // Other spans (and tool spans without a collection) keep the plain text label.
         const chip = isToolSpan(s) && typeof deriveSpanLabelHtml === 'function'
           ? deriveSpanLabelHtml(s)
           : null;
