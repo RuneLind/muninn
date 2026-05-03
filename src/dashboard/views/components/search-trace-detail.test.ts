@@ -81,6 +81,49 @@ describe("renderSearchTrace", () => {
     expect(html).not.toContain('<span class="stt-expansion">EU/<span');
   });
 
+  test("expansion highlight respects detected entity spans even when they are not in expansionTerms", () => {
+    // The real bug: "EU/EØS" is a Concept entity but only "EØS" is in the
+    // expansion list. The highlight pass must still treat "EU/EØS" as off
+    // limits so it doesn't wrap the EØS substring inside it.
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "journalføring EU/EØS",
+        expanded: "journalføring EU/EØS EØS MELOSYS",
+        expansionTerms: ["EØS", "MELOSYS"],
+        detectedEntities: [
+          { id: "entity:eu/eøs", type: "Concept", label: "EU/EØS" },
+          { id: "entity:eøs",    type: "Concept", label: "EØS" },
+        ],
+      },
+      collections: [],
+    });
+    // Two highlights: standalone EØS and MELOSYS. EU/EØS stays unwrapped.
+    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    expect(spans.length).toBe(2);
+    expect(html).toContain('<span class="stt-expansion">EØS</span>');
+    expect(html).toContain('<span class="stt-expansion">MELOSYS</span>');
+    // The EU/EØS in the expanded line is rendered as plain escaped text — no
+    // partial wrap inside it.
+    expect(html).toMatch(/journalf[^<]*EU\/EØS <span class="stt-expansion">EØS<\/span>/);
+  });
+
+  test("Concept and + chips carry origin tooltips", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "x", expanded: "x",
+        detectedEntities: [{ id: "e:foo", type: "Concept", label: "Foo" }],
+        expansionTerms: ["Bar"],
+      },
+      collections: [],
+    });
+    // Concept chip explains it's a graph entity.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Detected as a graph entity[^"]*">/);
+    // + chip explains it's an appended expansion term.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Expansion term appended[^"]*">\+ Bar/);
+  });
+
   test("expansion highlight respects letter boundaries — skips embedded matches", () => {
     const html = sb.renderSearchTrace({
       schemaVersion: 1,
@@ -110,8 +153,9 @@ describe("renderSearchTrace", () => {
     // The Concept EØS chip carries the re-injected marker and tooltip.
     expect(html).toMatch(/stt-chip stt-chip-reinjected[^>]*title="[^"]*re-injected[^"]*"/);
     expect(html).toContain('class="stt-chip-plus"');
-    // Concept Journalføring is plain — not in the expansionTerms list.
-    expect(html).toMatch(/<span class="stt-chip"><span class="stt-chip-type">Concept<\/span>Journalf/);
+    // Concept Journalføring is plain — not in the expansionTerms list — but
+    // still gets the base "detected as a graph entity" tooltip.
+    expect(html).toMatch(/<span class="stt-chip" title="[^"]*Detected as a graph entity[^"]*"><span class="stt-chip-type">Concept<\/span>Journalf/);
     // Standalone "+ EØS" chip is gone (it's already represented by the entity chip).
     expect(html).not.toMatch(/<span class="stt-chip">\+ EØS</);
     // But "+ MELOSYS" and "+ Norge" survive — they have no entity chip.

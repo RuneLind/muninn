@@ -449,12 +449,14 @@ export function searchTraceDetailScript(): string {
         if (typeof lbl === 'string') entitySet.add(lbl.toLowerCase());
       }
 
+      const entityBaseTip = 'Detected as a graph entity in the raw query — used for graph-aware retrieval and graph context enrichment.';
+      const entityReinjectedTip = entityBaseTip + ' Also re-injected into the query as an expansion term (see the "+" marker).';
       const entityChips = entities.map(e => {
         const lbl = e.label || e.id || '';
         const reinjected = typeof lbl === 'string' && expSet.has(lbl.toLowerCase());
         const cls = reinjected ? 'stt-chip stt-chip-reinjected' : 'stt-chip';
-        const tip = reinjected ? 'Detected as a graph entity AND re-injected into the query as an expansion term.' : '';
-        const titleAttr = tip ? ' title="' + esc(tip) + '"' : '';
+        const tip = reinjected ? entityReinjectedTip : entityBaseTip;
+        const titleAttr = ' title="' + esc(tip) + '"';
         const plus = reinjected ? '<span class="stt-chip-plus" aria-hidden="true">+</span>' : '';
         return '<span class="' + cls + '"' + titleAttr + '>' +
           '<span class="stt-chip-type">' + esc(e.type || '') + '</span>' + esc(lbl) + plus +
@@ -465,14 +467,26 @@ export function searchTraceDetailScript(): string {
       if (q.graphAnswered === true) flags.push('<span class="stt-badge">graph answered</span>');
       if (q.rerankerSkipped === true) flags.push('<span class="stt-badge stt-warn">reranker skipped' +
         (q.rerankerSkipReason ? ': ' + esc(q.rerankerSkipReason) : '') + '</span>');
-      const expandedHtml = sttHighlightExpansion(q.raw || '', q.expanded || '', expansionTerms);
+      // Pass entity labels in too so a substring expansion term doesn't
+      // chew into a longer entity that wasn't itself in the expansion list
+      // (e.g. "EØS" matching inside "EU/EØS" — EU/EØS is a Concept entity
+      // but not always in expansionTerms). Exclude entities that ARE in
+      // expansionTerms — otherwise they'd block their own standalone
+      // occurrence from being highlighted.
+      const blockSpans = entities
+        .map(e => (e && (e.label || e.id)) || '')
+        .filter(s => typeof s === 'string' && s.length > 0 && !expSet.has(s.toLowerCase()));
+      const expandedHtml = sttHighlightExpansion(q.raw || '', q.expanded || '', expansionTerms, blockSpans);
       // Hide "+ X" chips for terms that already show up as entity chips above —
       // those chips already carry the "+" indicator. Reduces visual triplication
       // (entity + plus-chip + highlighted-in-expanded → entity-with-plus-marker).
       const remainingExpansion = expansionTerms.filter(t =>
         typeof t === 'string' && !entitySet.has(t.toLowerCase())
       );
-      const expansionChips = remainingExpansion.map(t => '<span class="stt-chip">+ ' + esc(t) + '</span>').join('');
+      const expansionTip = 'Expansion term appended to the raw query before retrieval. Comes from graph expansion of detected entities (synonyms, related concepts, and tag co-occurrence).';
+      const expansionChips = remainingExpansion.map(t =>
+        '<span class="stt-chip" title="' + esc(expansionTip) + '">+ ' + esc(t) + '</span>'
+      ).join('');
       return '<div class="stt-section">' +
         '<h5>Query</h5>' +
         '<div class="stt-query">' +
@@ -486,60 +500,69 @@ export function searchTraceDetailScript(): string {
     }
 
     /** Wrap appended expansion terms in <span class="stt-expansion"> for visual
-     *  emphasis. Two pitfalls handled here:
-     *    1. Substring matches: e.g. term "EØS" naively matched inside "EU/EØS".
-     *       Sort longer-first and skip ranges that fall inside an already-wrapped
-     *       span so the first match wins.
-     *    2. Word-boundary on Unicode: "\b" doesn't fire around "Ø" / "æ", so
-     *       we avoid \b entirely and instead require a non-letter neighbor on
-     *       each side (or string edge), defined as anything outside the Unicode
+     *  emphasis. Three pitfalls handled here:
+     *    1. Substring matches inside an expansion term: e.g. "EØS" naively
+     *       matched inside "EU/EØS" when both are in the expansion list. Sort
+     *       longer-first and skip ranges that overlap an already-wrapped span.
+     *    2. Substring matches inside a detected entity that isn't itself in
+     *       the expansion list: same problem, but the longer "EU/EØS" comes
+     *       from blockSpans (entity labels) instead. We claim those ranges
+     *       up front without wrapping them — they just block.
+     *    3. Word-boundary on Unicode: \\b doesn't fire around "Ø" / "æ", so
+     *       we avoid \\b entirely and require a non-letter neighbor on each
+     *       side (or string edge), defined as anything outside the Unicode
      *       letter class. */
-    function sttHighlightExpansion(raw, expanded, terms) {
+    function sttHighlightExpansion(raw, expanded, terms, blockSpans) {
       const escaped = esc(expanded);
-      if (!terms || terms.length === 0) return escaped;
+      if ((!terms || terms.length === 0) && (!blockSpans || blockSpans.length === 0)) return escaped;
       // Longer-first so "EU/EØS" matches before "EØS" can chew into it.
       const sortedTerms = (terms || [])
         .filter(t => typeof t === 'string' && t.length > 0)
         .slice()
         .sort(function (a, b) { return b.length - a.length; });
-      // Collect non-overlapping match spans across the un-rendered (escaped) text,
-      // then assemble the highlighted HTML in one pass at the end. Spans is
-      // kept sorted by start; we reject any new match that overlaps an existing
-      // one (longer-first handles the "which to keep" tie-breaker for free).
-      const spans = [];
-      const insertSpan = function (start, end) {
-        for (let i = 0; i < spans.length; i++) {
-          if (start < spans[i].end && end > spans[i].start) return;
+      const sortedBlocks = (blockSpans || [])
+        .filter(t => typeof t === 'string' && t.length > 0)
+        .slice()
+        .sort(function (a, b) { return b.length - a.length; });
+      // Two parallel span lists. "wrapped" ones get a <span> around them in
+      // the final pass; "blocked" ones don't render anything but still reserve
+      // their range so substring matches can't claim them.
+      const wrapped = [];
+      const blocked = [];
+      const overlapsAny = function (start, end, list) {
+        for (let i = 0; i < list.length; i++) {
+          if (start < list[i].end && end > list[i].start) return true;
         }
-        spans.push({ start: start, end: end });
+        return false;
       };
       const isLetter = function (ch) {
         if (!ch) return false;
-        // Unicode letter class — ES2018+; supported in every browser the
-        // dashboard targets.
         return /\\p{L}/u.test(ch);
       };
-      for (const t of sortedTerms) {
-        const escTerm = esc(t).replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+      const claim = function (term, list, alsoBlockedBy) {
+        const escTerm = esc(term).replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
         const re = new RegExp(escTerm, 'g');
         let m;
         while ((m = re.exec(escaped)) !== null) {
           const start = m.index;
           const end = start + m[0].length;
-          // Only treat as a match if there's no letter immediately on either
-          // side. Lets us catch "EU/EØS" (slash boundary) and standalone "EØS"
-          // (space boundary), but skip "EØS" embedded in "EØSnoise".
           const before = start > 0 ? escaped.charAt(start - 1) : '';
           const after = end < escaped.length ? escaped.charAt(end) : '';
           if (isLetter(before) || isLetter(after)) continue;
-          insertSpan(start, end);
+          if (overlapsAny(start, end, list)) continue;
+          if (alsoBlockedBy && overlapsAny(start, end, alsoBlockedBy)) continue;
+          list.push({ start: start, end: end });
         }
-      }
-      if (spans.length === 0) return escaped;
-      spans.sort(function (a, b) { return a.start - b.start; });
+      };
+      // Block longer entity labels first so they reserve their ranges before
+      // the (potentially shorter) expansion terms try to claim subranges.
+      for (const t of sortedBlocks) claim(t, blocked, null);
+      for (const t of sortedTerms) claim(t, wrapped, blocked);
+      if (wrapped.length === 0) return escaped;
+      wrapped.sort(function (a, b) { return a.start - b.start; });
       let out = '';
       let cursor = 0;
-      for (const s of spans) {
+      for (const s of wrapped) {
         out += escaped.slice(cursor, s.start) +
                '<span class="stt-expansion">' + escaped.slice(s.start, s.end) + '</span>';
         cursor = s.end;
