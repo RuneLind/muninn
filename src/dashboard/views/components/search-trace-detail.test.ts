@@ -71,14 +71,14 @@ describe("renderSearchTrace", () => {
       collections: [],
     });
     // Exactly three highlighted spans: EU/EØS, standalone EØS, and MELOSYS.
-    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
     expect(spans.length).toBe(3);
     // Sanity-check the wrapped texts.
-    expect(html).toContain('<span class="stt-expansion">EU/EØS</span>');
-    expect(html).toContain('<span class="stt-expansion">EØS</span>');
-    expect(html).toContain('<span class="stt-expansion">MELOSYS</span>');
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EU\/EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>MELOSYS<\/span>/);
     // No nested span inside EU/EØS.
-    expect(html).not.toContain('<span class="stt-expansion">EU/<span');
+    expect(html).not.toMatch(/<span class="stt-expansion"[^>]*>EU\/<span/);
   });
 
   test("expansion highlight respects detected entity spans even when they are not in expansionTerms", () => {
@@ -99,13 +99,27 @@ describe("renderSearchTrace", () => {
       collections: [],
     });
     // Two highlights: standalone EØS and MELOSYS. EU/EØS stays unwrapped.
-    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
     expect(spans.length).toBe(2);
-    expect(html).toContain('<span class="stt-expansion">EØS</span>');
-    expect(html).toContain('<span class="stt-expansion">MELOSYS</span>');
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>/);
+    expect(html).toMatch(/<span class="stt-expansion"[^>]*>MELOSYS<\/span>/);
     // The EU/EØS in the expanded line is rendered as plain escaped text — no
     // partial wrap inside it.
-    expect(html).toMatch(/journalf[^<]*EU\/EØS <span class="stt-expansion">EØS<\/span>/);
+    expect(html).toMatch(/journalf[^<]*EU\/EØS <span class="stt-expansion"[^>]*>EØS<\/span>/);
+  });
+
+  test("inline expansion-term highlights in the expanded line carry an origin tooltip", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: { raw: "x", expanded: "x EØS MELOSYS", expansionTerms: ["EØS", "MELOSYS"] },
+      collections: [],
+    });
+    // Every wrapped span has a title= attribute that explains its origin.
+    const wraps = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
+    expect(wraps.length).toBe(2);
+    for (const w of wraps) {
+      expect(w).toMatch(/title="[^"]*Expansion term appended[^"]*"/);
+    }
   });
 
   test("Concept and + chips carry origin tooltips", () => {
@@ -131,10 +145,10 @@ describe("renderSearchTrace", () => {
       collections: [],
     });
     // Only the standalone EØS gets wrapped — the "EØSnoise" prefix does not.
-    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    const spans = html.match(/<span class="stt-expansion"[^>]*>/g) || [];
     expect(spans.length).toBe(1);
     expect(html).toContain("EØSnoise");
-    expect(html).not.toContain('<span class="stt-expansion">EØS</span>noise');
+    expect(html).not.toMatch(/<span class="stt-expansion"[^>]*>EØS<\/span>noise/);
   });
 
   test("entity chip is marked re-injected and the duplicate + chip is dropped", () => {

@@ -560,11 +560,15 @@ export function searchTraceDetailScript(): string {
       for (const t of sortedTerms) claim(t, wrapped, blocked);
       if (wrapped.length === 0) return escaped;
       wrapped.sort(function (a, b) { return a.start - b.start; });
+      // Same wording as the "+ X" chip tooltip — these underlines are the
+      // very same expansion terms shown in their query position.
+      const wrapTip = 'Expansion term appended to the raw query before retrieval. Comes from graph expansion of detected entities.';
+      const titleAttr = ' title="' + esc(wrapTip) + '"';
       let out = '';
       let cursor = 0;
       for (const s of wrapped) {
         out += escaped.slice(cursor, s.start) +
-               '<span class="stt-expansion">' + escaped.slice(s.start, s.end) + '</span>';
+               '<span class="stt-expansion"' + titleAttr + '>' + escaped.slice(s.start, s.end) + '</span>';
         cursor = s.end;
       }
       out += escaped.slice(cursor);
