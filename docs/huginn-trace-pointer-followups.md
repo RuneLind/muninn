@@ -2,6 +2,8 @@
 
 Review notes from huginn-peer after PR #81 squash-merged as `b2fcdbe` on `main`. Three small follow-ups worth bundling into a single PR.
 
+> **Status (2026-05-03):** items **A** (host allow-list) and **C** (regex tightened to `/api/trace/<16hex>`) shipped in PR #82 (`be54b52`). Item **B** (5xx test) also landed in #82. This doc is now historical — kept for the rationale.
+
 Companion repo: huginn `main` `88b9212` ships the `/api/trace/<id>` endpoint + in-memory TTL store; this doc is muninn-side only.
 
 ## Context

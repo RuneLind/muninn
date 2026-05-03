@@ -185,26 +185,6 @@ describe("traces", () => {
       expect(found.attributes.model).toBe("claude-sonnet-4-6");
     });
 
-    test("connector + model fall back to legacy array attribute format", async () => {
-      const { getDb } = await import("./client.ts");
-      const sql = getDb();
-      const root = makeRootSpan();
-      await saveSpan(root);
-
-      // Legacy bug: array of [stringified-empty-object, real-object]
-      await sql`
-        INSERT INTO traces (id, trace_id, name, kind, parent_id, started_at, attributes)
-        VALUES (${crypto.randomUUID()}, ${root.traceId}, 'claude', 'span', ${root.id}, now(),
-                ${sql.json(["{}", { connector: "claude-cli", model: "sonnet", inputTokens: 100, outputTokens: 10 }])}
-        )
-      `;
-
-      const traces = await getRecentTraces(10);
-      const found = traces.find((t) => t.id === root.id)!;
-      expect(found.attributes.connector).toBe("claude-cli");
-      expect(found.attributes.model).toBe("sonnet");
-    });
-
     test("returns null tokens when no claude child span exists", async () => {
       const root = makeRootSpan();
       await saveSpan(root);
@@ -244,66 +224,25 @@ describe("traces", () => {
     });
   });
 
-  describe("mapRow legacy attribute normalization", () => {
-    test("handles double-encoded string attributes", async () => {
+  describe("mapRow attribute guard", () => {
+    test("non-object attributes (null / string / array) collapse to empty object", async () => {
+      // Producer code can't write these shapes today, but a hand-INSERTed row
+      // shouldn't poison the type contract for callers.
       const { getDb } = await import("./client.ts");
       const sql = getDb();
-      const id = crypto.randomUUID();
       const traceId = crypto.randomUUID();
+      const ids = { nul: crypto.randomUUID(), str: crypto.randomUUID(), arr: crypto.randomUUID() };
 
-      // Simulate legacy bug: attributes stored as JSON string (double-encoded)
-      // In JSONB, '"{}"' is a valid jsonb value of type 'string' containing the text "{}"
-      await sql`
-        INSERT INTO traces (id, trace_id, name, kind, started_at, attributes)
-        VALUES (${id}, ${traceId}, 'legacy_string', 'root', now(), '"{}"'::jsonb)
-      `;
-
-      const traces = await getRecentTraces(50);
-      const found = traces.find((t) => t.id === id)!;
-      expect(found).toBeTruthy();
-      // Double-encoded "{}" should be normalized to empty object
-      expect(typeof found.attributes).toBe("object");
-      expect(Array.isArray(found.attributes)).toBe(false);
-    });
-
-    test("handles legacy array-of-strings attributes", async () => {
-      const { getDb } = await import("./client.ts");
-      const sql = getDb();
-      const rootId = crypto.randomUUID();
-      const traceId = crypto.randomUUID();
-
-      // Simulate legacy bug: attributes stored as array of JSON strings
-      // This happened when saveSpan used JSON.stringify (stored as string "{}"),
-      // then updateSpan did `attributes || new_attrs` (Postgres wraps string+object into array)
-      await sql`
-        INSERT INTO traces (id, trace_id, name, kind, parent_id, started_at, attributes)
-        VALUES (${rootId}, ${traceId}, 'claude', 'span', ${crypto.randomUUID()}, now(),
-                ${sql.json(["{}",  '{"inputTokens":31849,"outputTokens":258}'])}
-        )
-      `;
+      await sql`INSERT INTO traces (id, trace_id, name, kind, started_at, attributes) VALUES (${ids.nul}, ${traceId}, 'nul', 'root', now(), null)`;
+      await sql`INSERT INTO traces (id, trace_id, name, kind, started_at, attributes) VALUES (${ids.str}, ${traceId}, 'str', 'root', now(), '"hi"'::jsonb)`;
+      await sql`INSERT INTO traces (id, trace_id, name, kind, started_at, attributes) VALUES (${ids.arr}, ${traceId}, 'arr', 'root', now(), '[1,2]'::jsonb)`;
 
       const spans = await getTrace(traceId);
-      const found = spans.find((s) => s.id === rootId)!;
-      expect(found).toBeTruthy();
-      expect(found.attributes.inputTokens).toBe(31849);
-      expect(found.attributes.outputTokens).toBe(258);
-    });
-
-    test("handles null attributes gracefully", async () => {
-      const { getDb } = await import("./client.ts");
-      const sql = getDb();
-      const id = crypto.randomUUID();
-      const traceId = crypto.randomUUID();
-
-      await sql`
-        INSERT INTO traces (id, trace_id, name, kind, started_at, attributes)
-        VALUES (${id}, ${traceId}, 'null_attrs', 'root', now(), null)
-      `;
-
-      const traces = await getRecentTraces(50);
-      const found = traces.find((t) => t.id === id)!;
-      expect(found).toBeTruthy();
-      expect(typeof found.attributes).toBe("object");
+      for (const s of spans) {
+        expect(typeof s.attributes).toBe("object");
+        expect(Array.isArray(s.attributes)).toBe(false);
+        expect(s.attributes).not.toBeNull();
+      }
     });
   });
 

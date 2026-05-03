@@ -223,6 +223,24 @@ describe("Tracer", () => {
       expect(childStart.getTime()).toBe(parentStart.getTime() + 5000);
     });
 
+    test("addChildSpan without startOffsetMs anchors so the bar ends at 'now'", () => {
+      // Regression: an undefined startOffsetMs used to anchor the span at the
+      // parent's startedAt, which made tool spans render at the very left of
+      // the waterfall. Fallback now matches addSubSpan: end edge at Date.now().
+      const tracer = new Tracer("request");
+      tracer.start("claude");
+      saveSpanCalls.length = 0;
+
+      const before = Date.now();
+      tracer.addChildSpan("claude", "tool:Read", 200);
+      const after = Date.now();
+
+      const child = saveSpanCalls[0]!;
+      const childStart = (child.startedAt as Date).getTime();
+      expect(childStart).toBeGreaterThanOrEqual(before - 200);
+      expect(childStart).toBeLessThanOrEqual(after - 200);
+    });
+
     test("addChildSpan returns the new span id matching the saved span", () => {
       const tracer = new Tracer("request");
       tracer.start("claude");
