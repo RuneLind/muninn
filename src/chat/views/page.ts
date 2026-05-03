@@ -623,9 +623,11 @@ const CHAT_SCRIPT = `
 
     // Check for pending research message (e.g. from Chrome extension)
     if (threadParam && activeConvId && activeThreadId) {
-      // Stamp connector from sidebar selection if thread has none
+      // Stamp connector from sidebar selection only if the thread has none.
+      // Threads created via the Jira plugin already carry the user's chosen
+      // connector — overwriting here would silently swap the model.
       if (selectedConnectorId) {
-        await stampConnectorOnThread(activeThreadId, selectedConnectorId);
+        await stampConnectorOnThread(activeThreadId, selectedConnectorId, true);
       }
       try {
         var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
@@ -647,9 +649,11 @@ const CHAT_SCRIPT = `
     var researchActions = chatMessages.querySelector('.research-actions');
     if (researchActions) researchActions.remove();
 
-    // Stamp connector from sidebar selection if thread has none
+    // Stamp connector from sidebar selection only if the thread has none.
+    // The thread's own connector wins over the sidebar default — explicit
+    // overrides go through the dropdown change handler instead.
     if (selectedConnectorId) {
-      await stampConnectorOnThread(activeThreadId, selectedConnectorId);
+      await stampConnectorOnThread(activeThreadId, selectedConnectorId, true);
     }
 
     var text = chatInput.value.trim();

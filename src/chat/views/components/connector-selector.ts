@@ -69,13 +69,22 @@ export function connectorSelectorScript(): string {
     }
   }
 
-  // Stamp a connector on a thread (connectorId '' or null clears it → bot default)
-  async function stampConnectorOnThread(threadId, connectorId) {
+  // Stamp a connector on a thread (connectorId '' or null clears it → bot default).
+  // When onlyIfEmpty=true, never overwrites an existing connector — used by the
+  // deep-link and send-message paths so the Jira plugin's chosen connector
+  // (already stamped on the thread) survives the sidebar's preferred-connector
+  // default. The dropdown-change path passes onlyIfEmpty=false to allow the
+  // user's explicit pick to override.
+  async function stampConnectorOnThread(threadId, connectorId, onlyIfEmpty) {
     if (!threadId) return;
     var effectiveId = connectorId || null;
-    // Check if thread already has this connector
     for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId && (threads[i].connectorId || null) === effectiveId) return;
+      if (threads[i].id === threadId) {
+        var current = threads[i].connectorId || null;
+        if (current === effectiveId) return;
+        if (onlyIfEmpty && current) return;
+        break;
+      }
     }
     try {
       await fetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
