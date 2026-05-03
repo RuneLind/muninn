@@ -14,6 +14,8 @@ const mockUpdateTaskPrompt = mock(() => Promise.resolve());
 mock.module("./executor.ts", () => ({
   spawnHaiku: mockSpawnHaiku,
   callHaiku: mock(() => Promise.resolve("")),
+  DEFAULT_MODEL: "claude-haiku-4-5-20251001",
+  HAIKU_TIMEOUT_MS: 60_000,
 }));
 
 mock.module("../db/scheduled-tasks.ts", () => ({
