@@ -321,6 +321,44 @@ export function tracesWaterfallScript(): string {
       renderWaterfall(waterfallSpans);
     }
 
+    // Flatten the parent/child tree into render order: each parent immediately
+    // followed by its children (recursively), with siblings ordered by
+    // startedAt. Without this, synthesized stage spans whose startedAt ties
+    // with the tool parent can render before the parent because the DB
+    // sort-by-startedAt is unstable.
+    function sortSpansByTree(spans) {
+      const childrenByParent = {};
+      const idSet = new Set();
+      spans.forEach(s => { idSet.add(s.id); });
+      const roots = [];
+      spans.forEach(s => {
+        if (!s.parentId || !idSet.has(s.parentId)) {
+          roots.push(s);
+        } else {
+          if (!childrenByParent[s.parentId]) childrenByParent[s.parentId] = [];
+          childrenByParent[s.parentId].push(s);
+        }
+      });
+      const byStart = (a, b) => a.startedAt - b.startedAt;
+      roots.sort(byStart);
+      Object.keys(childrenByParent).forEach(k => childrenByParent[k].sort(byStart));
+
+      const out = [];
+      const visited = new Set();
+      function visit(s) {
+        if (visited.has(s.id)) return; // defensive against accidental cycles
+        visited.add(s.id);
+        out.push(s);
+        const kids = childrenByParent[s.id];
+        if (kids) kids.forEach(visit);
+      }
+      roots.forEach(visit);
+      // Append anything we couldn't reach (defensive — shouldn't happen) so we
+      // don't silently drop spans on a malformed tree.
+      spans.forEach(s => { if (!visited.has(s.id)) out.push(s); });
+      return out;
+    }
+
     // The AI span is recorded internally as "claude" regardless of which
     // connector handled the call. Render the label as "{connector}, {model}"
     // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
@@ -339,6 +377,11 @@ export function tracesWaterfallScript(): string {
     }
 
     function renderWaterfall(spans) {
+      // Sort spans so parents always appear immediately before their
+      // children. The DB returns by startedAt; that ties when a synthesized
+      // stage span starts at offset 0 from its tool parent (same startedAt),
+      // so the child can otherwise render above the parent.
+      spans = sortSpansByTree(spans);
       waterfallSpans = spans;
       const el = document.getElementById('waterfall');
       if (spans.length === 0) { el.innerHTML = '<div class="empty">No spans</div>'; return; }
