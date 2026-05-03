@@ -46,6 +46,22 @@ export function tracesWaterfallStyles(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    /* Collapse-toggle chevron on parent rows that have synthesized stage
+       children (search trace stages). The spacer variant keeps non-collapsible
+       rows aligned with collapsible ones so the chip column stays straight. */
+    .waterfall-toggle {
+      display: inline-block;
+      width: 12px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 10px;
+      line-height: 16px;
+      cursor: pointer;
+      user-select: none;
+      margin-right: 2px;
+    }
+    .waterfall-toggle:hover { color: var(--text-soft); }
+    .waterfall-toggle-spacer { cursor: default; visibility: hidden; }
     /* Chip-rendered labels for tool spans with discoverable collections.
        Verb + first-collection + (+N) — color stable per collection name (HSL hash). */
     .wf-chip {
@@ -236,6 +252,9 @@ export function tracesWaterfallScript(): string {
   return `
     let currentWaterfallTraceId = null;
     let waterfallSpans = []; // stored for click lookups
+    let waterfallSpanById = {};
+    let waterfallChildrenByParent = {};
+    let collapsedSpanIds = new Set();
 
     async function loadWaterfall(traceId) {
       try {
@@ -256,9 +275,50 @@ export function tracesWaterfallScript(): string {
         const row = document.querySelector('tr[data-trace="' + traceId + '"]');
         if (row) row.classList.add('expanded');
 
+        // Reset collapse state per trace and auto-collapse parents whose
+        // children are synthesized search-trace stage spans (index.fetch /
+        // boost.title / assemble). Those are noisy by default and the same
+        // info is in the search detail panel — operators can expand on demand.
+        collapsedSpanIds = new Set();
+        const childrenByParent = {};
+        spans.forEach(s => {
+          if (s.parentId) {
+            if (!childrenByParent[s.parentId]) childrenByParent[s.parentId] = [];
+            childrenByParent[s.parentId].push(s);
+          }
+        });
+        spans.forEach(s => {
+          const kids = childrenByParent[s.id] || [];
+          if (kids.some(k => k.attributes && k.attributes.synthesized === true)) {
+            collapsedSpanIds.add(s.id);
+          }
+        });
+
         renderWaterfall(spans);
         document.getElementById('spanDetails').classList.remove('visible');
       } catch (e) { console.error('Failed to load waterfall', e); }
+    }
+
+    function spanHasCollapsibleChildren(spanId) {
+      const kids = waterfallChildrenByParent[spanId] || [];
+      return kids.some(k => k.attributes && k.attributes.synthesized === true);
+    }
+
+    function isAnyAncestorCollapsed(span) {
+      let cur = span;
+      while (cur && cur.parentId) {
+        if (collapsedSpanIds.has(cur.parentId)) return true;
+        cur = waterfallSpanById[cur.parentId];
+        if (!cur) break;
+      }
+      return false;
+    }
+
+    function toggleCollapse(spanId, event) {
+      if (event) event.stopPropagation();
+      if (collapsedSpanIds.has(spanId)) collapsedSpanIds.delete(spanId);
+      else collapsedSpanIds.add(spanId);
+      renderWaterfall(waterfallSpans);
     }
 
     // The AI span is recorded internally as "claude" regardless of which
@@ -283,16 +343,25 @@ export function tracesWaterfallScript(): string {
       const el = document.getElementById('waterfall');
       if (spans.length === 0) { el.innerHTML = '<div class="empty">No spans</div>'; return; }
 
-      // Build parent lookup for nesting depth
-      const spanById = {};
-      spans.forEach(s => { spanById[s.id] = s; });
+      // Rebuild id-to-span and parent-to-children indices on every render so
+      // they stay in sync with the spans arg and the collapse helpers (which
+      // run outside this function) see the latest data.
+      waterfallSpanById = {};
+      waterfallChildrenByParent = {};
+      spans.forEach(s => {
+        waterfallSpanById[s.id] = s;
+        if (s.parentId) {
+          if (!waterfallChildrenByParent[s.parentId]) waterfallChildrenByParent[s.parentId] = [];
+          waterfallChildrenByParent[s.parentId].push(s);
+        }
+      });
 
       function nestingDepth(s) {
         let depth = 0;
         let current = s;
-        while (current.parentId && spanById[current.parentId]) {
+        while (current.parentId && waterfallSpanById[current.parentId]) {
           depth++;
-          current = spanById[current.parentId];
+          current = waterfallSpanById[current.parentId];
         }
         return depth;
       }
@@ -306,6 +375,12 @@ export function tracesWaterfallScript(): string {
       const totalRange = Math.max(maxTime - minTime, 1);
 
       el.innerHTML = spans.map((s, i) => {
+        // Hide rows whose ancestor chain has been collapsed by the user (or
+        // the auto-collapse pass in loadWaterfall). The original index i is
+        // still preserved on visible rows so the click-to-detail handler
+        // can index back into waterfallSpans correctly.
+        if (isAnyAncestorCollapsed(s)) return '';
+
         const left = ((s.startedAt - minTime) / totalRange) * 100;
         const width = s.kind === 'event' ? 0.3 : Math.max(((s.durationMs || 0) / totalRange) * 100, 0.3);
         const statusClass = s.status === 'error' ? ' status-error' : '';
@@ -323,11 +398,18 @@ export function tracesWaterfallScript(): string {
           ? esc(indent) + chip.html
           : esc(indent + fallbackName);
         const labelTooltip = chip ? chip.tooltip : fallbackName;
+        const collapsible = spanHasCollapsibleChildren(s.id);
+        const isCollapsed = collapsedSpanIds.has(s.id);
+        const toggleHtml = collapsible
+          ? '<span class="waterfall-toggle" onclick="toggleCollapse(\\'' + s.id + '\\', event)" title="' +
+            (isCollapsed ? 'Expand stage spans' : 'Collapse stage spans') + '">' +
+            (isCollapsed ? '\\u25B8' : '\\u25BE') + '</span>'
+          : '<span class="waterfall-toggle waterfall-toggle-spacer"></span>';
         const barKind = isToolSpan(s) ? 'tool' : s.kind;
         const inputLabel = isToolSpan(s) ? toolInputLabel(s.attributes && s.attributes.input) : '';
         const inputHtml = inputLabel ? '<span class="waterfall-input" title="' + esc(inputLabel) + '">' + esc(inputLabel) + '</span>' : '';
         return '<div class="waterfall-row">' +
-          '<div class="waterfall-label" title="' + esc(labelTooltip) + '">' + labelInner + '</div>' +
+          '<div class="waterfall-label" title="' + esc(labelTooltip) + '">' + toggleHtml + labelInner + '</div>' +
           '<div class="waterfall-bar-container">' +
             '<div class="waterfall-bar kind-' + barKind + statusClass + '" ' +
               'style="left:' + left + '%;width:' + width + '%"' +
