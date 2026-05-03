@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
@@ -109,6 +109,7 @@ export async function executeClaudePrompt(
     const { result: parsed, rawLines } = await readAndParseIncrementally(
       proc.stdout, wallStart, onProgress, botConfig.name,
     );
+    captureStreamIfEnabled(botConfig.name, rawLines);
     const exitCode = await proc.exited;
 
     if (exitCode !== 0) {
@@ -213,4 +214,18 @@ async function readAndParseIncrementally(
   }
 
   return { result: null, rawLines };
+}
+
+function captureStreamIfEnabled(botName: string, rawLines: string[]): void {
+  if (process.env.MUNINN_DEBUG_CAPTURE_STREAM !== "1") return;
+  try {
+    const dir = join(process.cwd(), "logs", "stream-capture");
+    mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const path = join(dir, `${stamp}-${botName}.ndjson`);
+    writeFileSync(path, rawLines.join("\n") + "\n", "utf8");
+    log.info("Captured {n} stream-json lines to {path}", { botName, n: rawLines.length, path });
+  } catch (e) {
+    log.warn("Failed to capture stream-json: {error}", { botName, error: String(e) });
+  }
 }

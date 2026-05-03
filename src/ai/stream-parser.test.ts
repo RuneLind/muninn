@@ -165,6 +165,59 @@ describe("StreamParser", () => {
     expect(result.toolCalls![1]!.startOffsetMs).toBe(100);
   });
 
+  test("handles parallel tools split across separate assistant + user events (claude-cli pattern)", () => {
+    // Regression: claude-cli emits each parallel tool_use in its own
+    // assistant event and each tool_result in its own user event. Earlier
+    // versions of the parser called resolvePendingTools at the start of
+    // every assistant message and at the end of every user message, which
+    // flushed pending tools with output=undefined before their matching
+    // tool_result arrived. See logs/stream-capture for a captured example.
+    const t0 = 1000;
+    const parser = new StreamParser(t0);
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "mcp__knowledge__search_knowledge", input: { query: "x" } },
+    ])), t0 + 100);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_02", name: "mcp__yggdrasil__search", input: { query: "y" } },
+    ])), t0 + 110);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_01", content: "knowledge result", is_error: false },
+    ])), t0 + 4500);
+    parser.parseLine(JSON.stringify(makeUser([
+      { type: "tool_result", tool_use_id: "toolu_02", content: "yggdrasil result", is_error: false },
+    ])), t0 + 4600);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "text", text: "Done." },
+    ])), t0 + 5000);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), t0 + 5100);
+
+    const result = parser.getResult();
+    expect(result.toolCalls!.length).toBe(2);
+    const knowledge = result.toolCalls!.find((t) => t.id === "toolu_01")!;
+    const yggdrasil = result.toolCalls!.find((t) => t.id === "toolu_02")!;
+    expect(knowledge.output).toBe("knowledge result");
+    expect(yggdrasil.output).toBe("yggdrasil result");
+    expect(knowledge.durationMs).toBe(4400);
+    expect(yggdrasil.durationMs).toBe(4490);
+  });
+
+  test("drains pending tools at result event when tool_result never arrived", () => {
+    const t0 = 0;
+    const parser = new StreamParser(t0);
+
+    parser.parseLine(JSON.stringify(systemEvent), t0);
+    parser.parseLine(JSON.stringify(makeAssistant([
+      { type: "tool_use", id: "toolu_01", name: "mcp__x__y", input: {} },
+    ])), t0 + 100);
+    parser.parseLine(JSON.stringify(makeResult({ num_turns: 1 })), t0 + 500);
+
+    const result = parser.getResult();
+    expect(result.toolCalls!.length).toBe(1);
+    expect(result.toolCalls![0]!.output).toBeUndefined();
+  });
+
   test("handles multiple sequential tool turns", () => {
     const t0 = 0;
     const parser = new StreamParser(t0);
