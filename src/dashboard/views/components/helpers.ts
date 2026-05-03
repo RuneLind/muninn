@@ -71,12 +71,8 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
 
   const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
-  const hasTrace = !!(attrs.searchTrace && (attrs.searchTrace as { schemaVersion?: unknown }).schemaVersion === 1);
   const summary = summarizeSearchTrace(attrs.searchTrace);
 
-  const traceDot = hasTrace
-    ? '<span class="wf-trace-dot" title="search trace available — click for details">●</span>'
-    : '';
   const verbChip = verb
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
     : '';
@@ -106,7 +102,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   }
 
   return {
-    html: traceDot + verbChip + firstChip + moreChip + countsChip,
+    html: verbChip + firstChip + moreChip + countsChip,
     tooltip: tooltipLines.join("\n"),
   };
 }
@@ -336,7 +332,6 @@ export function deriveSpanLabelScript(): string {
 
       var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
       var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
-      var hasTrace = !!(trace && trace.schemaVersion === 1);
 
       function collHue(name) {
         var h = 0;
@@ -360,7 +355,6 @@ export function deriveSpanLabelScript(): string {
         return trailing.length > 0 ? initials + '-' + trailing.join('-') : initials;
       }
 
-      var traceDot = hasTrace ? '<span class="wf-trace-dot" title="search trace available — click for details">\\u25CF</span>' : '';
       var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
       var first = collections[0];
       var firstAbbr = abbreviateCollection(first);
@@ -390,7 +384,7 @@ export function deriveSpanLabelScript(): string {
       }
 
       return {
-        html: traceDot + verbChip + firstChip + moreChip + countsChip,
+        html: verbChip + firstChip + moreChip + countsChip,
         tooltip: tooltipLines.join('\\n'),
       };
     }

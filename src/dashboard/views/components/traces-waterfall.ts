@@ -34,7 +34,7 @@ export function tracesWaterfallStyles(): string {
     }
     .waterfall-row {
       display: grid;
-      grid-template-columns: 240px 1fr;
+      grid-template-columns: 300px 1fr;
       align-items: center;
       height: 28px;
       gap: 12px;
@@ -101,13 +101,6 @@ export function tracesWaterfallStyles(): string {
       background: color-mix(in srgb, var(--status-warning) 14%, transparent);
       color: var(--status-warning);
       border-color: color-mix(in srgb, var(--status-warning) 35%, transparent);
-    }
-    .wf-trace-dot {
-      color: var(--status-success);
-      font-size: 10px;
-      line-height: 16px;
-      vertical-align: middle;
-      margin-right: 4px;
     }
     .waterfall-bar-container {
       position: relative;

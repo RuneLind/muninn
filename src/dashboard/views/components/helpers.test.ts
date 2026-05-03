@@ -100,7 +100,7 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.html).toContain('title="melosys-confluence-v3, jira-issues"');
   });
 
-  test("emits the trace-dot when searchTrace.schemaVersion === 1", () => {
+  test("does not emit the legacy trace dot (counts chip + detail panel cover the same signal)", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",
       attributes: {
@@ -108,7 +108,8 @@ describe("deriveSpanLabelHtml", () => {
         searchTrace: { schemaVersion: 1, collections: [{ name: "kb" }] },
       },
     });
-    expect(out!.html.startsWith('<span class="wf-trace-dot"')).toBe(true);
+    expect(out!.html).not.toContain("wf-trace-dot");
+    expect(out!.html.startsWith('<span class="wf-chip wf-verb')).toBe(true);
   });
 
   test("uses verb class 'other' for tool names that don't reduce to letters-only", () => {
@@ -153,7 +154,6 @@ describe("deriveSpanLabelHtml", () => {
       attributes: { searchTrace: { schemaVersion: 1, tool: "search" } },
     });
     expect(out).not.toBeNull();
-    expect(out!.html).toContain("wf-trace-dot");
     expect(out!.html).toContain("wf-verb-search");
     expect(out!.html).toContain(">search<");
     expect(out!.html).toContain(">yggdrasil<");
