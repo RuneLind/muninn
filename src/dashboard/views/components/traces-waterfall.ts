@@ -279,7 +279,16 @@ export function tracesWaterfallScript(): string {
       }
       roots.forEach(visit);
       // Append any unreachable nodes so a malformed tree doesn't silently drop spans.
-      spans.forEach(s => { if (!visited.has(s.id)) sorted.push(s); });
+      // Surface the count to the operator console — an orphan means a parent_id
+      // pointed at a span that wasn't returned (deleted? cross-trace?) and would
+      // otherwise render unexplained at the bottom of the waterfall.
+      var orphans = 0;
+      spans.forEach(s => {
+        if (!visited.has(s.id)) { sorted.push(s); orphans++; }
+      });
+      if (orphans > 0) {
+        console.warn('[trace] ' + orphans + ' orphan span(s) attached at root — parent_id missing from trace');
+      }
       return { sorted, spanById, childrenByParent };
     }
 

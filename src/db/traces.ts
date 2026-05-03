@@ -100,30 +100,12 @@ export async function getRecentTraces(
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'inputTokens')::int
-          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN ((cs.attributes->>-1)::jsonb->>'inputTokens')::int
-        END) AS input_tokens,
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'outputTokens')::int
-          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN ((cs.attributes->>-1)::jsonb->>'outputTokens')::int
-        END) AS output_tokens,
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN (cs.attributes->>'toolCount')::int
-          ELSE NULL
-        END) AS tool_count,
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'model'
-          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'model'
-        END) AS model,
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'requestedModel'
-          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'requestedModel'
-        END) AS requested_model,
-        (CASE
-          WHEN jsonb_typeof(cs.attributes) = 'object' THEN cs.attributes->>'connector'
-          WHEN jsonb_typeof(cs.attributes) = 'array'  THEN (cs.attributes->>-1)::jsonb->>'connector'
-        END) AS connector
+        (cs.attributes->>'inputTokens')::int   AS input_tokens,
+        (cs.attributes->>'outputTokens')::int  AS output_tokens,
+        (cs.attributes->>'toolCount')::int     AS tool_count,
+        cs.attributes->>'model'                AS model,
+        cs.attributes->>'requestedModel'       AS requested_model,
+        cs.attributes->>'connector'            AS connector
       FROM traces cs
       WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
       LIMIT 1
@@ -239,29 +221,20 @@ export async function cleanupOldTraces(retentionDays: number): Promise<number> {
 }
 
 function mapRow(r: Record<string, any>): SpanRow {
-  // Normalize attributes: handle double-encoded strings/arrays from legacy bug
-  let attrs = r.attributes ?? {};
-  if (typeof attrs === "string") {
-    try { attrs = JSON.parse(attrs); } catch { attrs = {}; }
-  }
-  if (Array.isArray(attrs)) {
-    // Legacy bug: attributes stored as [string, object] array — merge all object entries
-    attrs = attrs.reduce((acc: Record<string, unknown>, item: unknown) => {
-      if (typeof item === "string") {
-        try { const parsed = JSON.parse(item); if (typeof parsed === "object" && parsed) Object.assign(acc, parsed); } catch {}
-      } else if (typeof item === "object" && item) {
-        Object.assign(acc, item);
-      }
-      return acc;
-    }, {});
-  }
+  // Guard against hand-INSERTed rows storing non-object JSONB.
+  let attrs: Record<string, unknown> = r.attributes ?? {};
+  if (typeof attrs !== "object" || attrs === null || Array.isArray(attrs)) attrs = {};
 
-  if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
-  if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
-  if (r.tool_count != null && !attrs.toolCount) attrs = { ...attrs, toolCount: Number(r.tool_count) };
-  if (r.model != null && !attrs.model) attrs = { ...attrs, model: String(r.model) };
-  if (r.requested_model != null && !attrs.requestedModel) attrs = { ...attrs, requestedModel: String(r.requested_model) };
-  if (r.connector != null && !attrs.connector) attrs = { ...attrs, connector: String(r.connector) };
+  // Backfill from the LATERAL JOIN in one pass — avoids 6 intermediate spreads
+  // per row in the trace-list query.
+  const delta: Record<string, unknown> = {};
+  if (r.input_tokens != null && !attrs.inputTokens) delta.inputTokens = Number(r.input_tokens);
+  if (r.output_tokens != null && !attrs.outputTokens) delta.outputTokens = Number(r.output_tokens);
+  if (r.tool_count != null && !attrs.toolCount) delta.toolCount = Number(r.tool_count);
+  if (r.model != null && !attrs.model) delta.model = String(r.model);
+  if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
+  if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);
+  if (Object.keys(delta).length > 0) attrs = { ...attrs, ...delta };
 
   return {
     id: r.id,
