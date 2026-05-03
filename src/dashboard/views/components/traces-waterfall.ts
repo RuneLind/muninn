@@ -82,7 +82,18 @@ export function tracesWaterfallStyles(): string {
     .wf-verb-search { background: color-mix(in srgb, var(--status-tool) 18%, transparent); color: var(--status-tool); border: 1px solid color-mix(in srgb, var(--status-tool) 40%, transparent); }
     .wf-verb-get    { background: color-mix(in srgb, var(--status-info) 18%, transparent); color: var(--status-info); border: 1px solid color-mix(in srgb, var(--status-info) 40%, transparent); }
     .wf-verb-list   { background: color-mix(in srgb, var(--status-cyan) 18%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 40%, transparent); }
+    .wf-verb-read   { background: color-mix(in srgb, var(--status-cyan) 14%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 35%, transparent); }
+    .wf-verb-symbol { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .wf-verb-other  { background: color-mix(in srgb, white 6%, transparent); color: var(--text-soft); border: 1px solid color-mix(in srgb, white 12%, transparent); }
+    /* Generic extra chip — used for ids, path tails, and patterns alongside
+       a repo/kind chip so the row carries the most distinguishing info. */
+    .wf-chip.wf-extra {
+      background: color-mix(in srgb, white 5%, transparent);
+      color: var(--text-soft);
+      border: 1px solid color-mix(in srgb, white 10%, transparent);
+      max-width: 200px;
+    }
+    .wf-chip.wf-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .wf-coll-more {
       background: color-mix(in srgb, white 5%, transparent);
       color: var(--text-dim);

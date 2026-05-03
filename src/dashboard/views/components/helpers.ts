@@ -58,53 +58,173 @@ interface SpanLike {
   };
 }
 
-/** Render the tool span label as a verb chip + per-collection chips with a
- *  stable color-by-hash, plus a "trace available" dot when the span carries a
- *  Huginn searchTrace. Returns null when no collection is discoverable, so the
- *  caller falls back to the plain text path. Exposed for testing. */
+/** Render the tool span label as a chip cluster: verb + per-collection chips
+ *  for search tools, OR verb + tool-specific extras (repo / id / path tail)
+ *  for non-search tools we recognise (graph_node, symbol_context, list_files,
+ *  read_source, search_pattern). Returns null when nothing useful can be
+ *  extracted, so the caller falls back to the plain tool name. Exposed for
+ *  testing — kept in sync with the JS twin in {@link deriveSpanLabelScript}. */
 export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: string } | null {
   if (!span || !span.name) return null;
   const attrs = span.attributes ?? {};
-  let collections = collectionsFor(attrs);
-  if (!collections || collections.length === 0) return null;
-  collections = sortCollectionsByPriority(collections);
 
   const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
-  const summary = summarizeSearchTrace(attrs.searchTrace);
-
   const verbChip = verb
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
     : '';
-  const first = collections[0]!;
-  const firstAbbr = abbreviateCollection(first);
-  const firstTitle = firstAbbr === first ? first : `${first} (${firstAbbr})`;
-  const firstChip = `<span class="wf-chip wf-coll" style="${collStyle(first)}" title="${escAttr(firstTitle)}">${escHtml(firstAbbr)}</span>`;
-  const moreChip = collections.length > 1
-    ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
-    : '';
 
-  let countsChip = "";
-  if (summary) {
-    const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
-    const tip = summary.lowConfidence
-      ? `${summary.kept} kept / ${summary.fetched} fetched · low confidence`
-      : `${summary.kept} kept / ${summary.fetched} fetched`;
-    countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
+  // Search-tool path: collection chips + counts chip, derived from searchTrace
+  // or input.collection.
+  let collections = collectionsFor(attrs);
+  if (collections && collections.length > 0) {
+    collections = sortCollectionsByPriority(collections);
+    const summary = summarizeSearchTrace(attrs.searchTrace);
+    const first = collections[0]!;
+    const firstAbbr = abbreviateCollection(first);
+    const firstTitle = firstAbbr === first ? first : `${first} (${firstAbbr})`;
+    const firstChip = `<span class="wf-chip wf-coll" style="${collStyle(first)}" title="${escAttr(firstTitle)}">${escHtml(firstAbbr)}</span>`;
+    const moreChip = collections.length > 1
+      ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
+      : '';
+    let countsChip = "";
+    if (summary) {
+      const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+      const tip = summary.lowConfidence
+        ? `${summary.kept} kept / ${summary.fetched} fetched · low confidence`
+        : `${summary.kept} kept / ${summary.fetched} fetched`;
+      countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
+    }
+    const tooltipLines = [span.name, "collections: " + collections.join(", ")];
+    if (summary) {
+      tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
+      if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
+      if (summary.totalMs != null) tooltipLines.push("total: " + summary.totalMs + "ms");
+      if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
+    }
+    return {
+      html: verbChip + firstChip + moreChip + countsChip,
+      tooltip: tooltipLines.join("\n"),
+    };
   }
 
-  const tooltipLines = [span.name, "collections: " + collections.join(", ")];
-  if (summary) {
-    tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
-    if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
-    if (summary.totalMs != null) tooltipLines.push("total: " + summary.totalMs + "ms");
-    if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
+  // Per-tool extras path: graph_node / symbol_context / list_files /
+  // read_source / search_pattern.
+  const extras = toolLabelExtras(span.name, attrs);
+  if (extras) {
+    return {
+      html: verbChip + extras.chips,
+      tooltip: [span.name, ...extras.tooltipLines].join("\n"),
+    };
+  }
+  return null;
+}
+
+interface ToolLabelExtras { chips: string; tooltipLines: string[]; }
+
+/** Per-tool chip extractor for non-search tools. Returns null when the tool
+ *  isn't one we have a recipe for, or its input is malformed. */
+function toolLabelExtras(name: string, attrs: NonNullable<SpanLike["attributes"]>): ToolLabelExtras | null {
+  const input = parseInputObject(attrs.input);
+  if (!input) return null;
+
+  if (/get_graph_node$/.test(name)) {
+    const id = strField(input, "node_id") || strField(input, "tag");
+    if (!id) return null;
+    const colonIdx = id.indexOf(":");
+    const kind = colonIdx > 0 ? id.slice(0, colonIdx) : "";
+    const tail = colonIdx > 0 ? id.slice(colonIdx + 1) : id;
+    const kindChip = kind
+      ? `<span class="wf-chip wf-coll" style="${collStyle(kind)}" title="${escAttr("kind: " + kind)}">${escHtml(kind)}</span>`
+      : "";
+    const idChip = `<span class="wf-chip wf-extra wf-mono" title="${escAttr(id)}">${escHtml(tail)}</span>`;
+    return { chips: kindChip + idChip, tooltipLines: ["node: " + id] };
   }
 
-  return {
-    html: verbChip + firstChip + moreChip + countsChip,
-    tooltip: tooltipLines.join("\n"),
-  };
+  if (/yggdrasil-symbol_context$/.test(name)) {
+    const repo = strField(input, "repo");
+    const qn = strField(input, "qualified_name") || strField(input, "qualifiedName");
+    if (!repo && !qn) return null;
+    const short = qn ? lastSegment(qn, ".") : "";
+    return {
+      chips: repoChip(repo) + (short ? extraChip(short, qn || short) : ""),
+      tooltipLines: [
+        repo ? "repo: " + repo : "",
+        qn ? "symbol: " + qn : "",
+      ].filter(Boolean),
+    };
+  }
+
+  if (/yggdrasil-list_files$/.test(name)) {
+    const repo = strField(input, "repo");
+    const path = strField(input, "path");
+    if (!repo && !path) return null;
+    const tail = path ? lastSegment(path, "/") : "";
+    return {
+      chips: repoChip(repo) + (tail ? extraChip(tail, path || tail) : ""),
+      tooltipLines: [
+        repo ? "repo: " + repo : "",
+        path ? "path: " + path : "",
+      ].filter(Boolean),
+    };
+  }
+
+  if (/yggdrasil-read_source$/.test(name)) {
+    const repo = strField(input, "repo");
+    const path = strField(input, "path");
+    if (!repo && !path) return null;
+    const base = path ? lastSegment(path, "/") : "";
+    return {
+      chips: repoChip(repo) + (base ? extraChip(base, path || base) : ""),
+      tooltipLines: [
+        repo ? "repo: " + repo : "",
+        path ? "path: " + path : "",
+      ].filter(Boolean),
+    };
+  }
+
+  if (/yggdrasil-search_pattern$/.test(name)) {
+    const repo = strField(input, "repo");
+    const pat = strField(input, "pattern");
+    if (!repo && !pat) return null;
+    return {
+      chips: repoChip(repo) + (pat ? extraChip(truncate(pat, 28), pat) : ""),
+      tooltipLines: [
+        repo ? "repo: " + repo : "",
+        pat ? "pattern: " + pat : "",
+      ].filter(Boolean),
+    };
+  }
+
+  return null;
+}
+
+function parseInputObject(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object") return raw as Record<string, unknown>;
+  if (typeof raw === "string" && raw.length > 0) {
+    try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; }
+  }
+  return null;
+}
+function strField(obj: Record<string, unknown>, key: string): string {
+  const v = obj[key];
+  return typeof v === "string" ? v : "";
+}
+function lastSegment(s: string, sep: string): string {
+  const trimmed = s.replace(new RegExp(escapeRegex(sep) + "+$"), "");
+  const idx = trimmed.lastIndexOf(sep);
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+function escapeRegex(s: string): string { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function truncate(s: string, n: number): string { return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+function repoChip(repo: string): string {
+  if (!repo) return "";
+  const abbr = abbreviateCollection(repo);
+  const title = abbr === repo ? repo : `${repo} (${abbr})`;
+  return `<span class="wf-chip wf-coll" style="${collStyle(repo)}" title="${escAttr(title)}">${escHtml(abbr)}</span>`;
+}
+function extraChip(text: string, tooltip: string): string {
+  return `<span class="wf-chip wf-extra wf-mono" title="${escAttr(tooltip)}">${escHtml(text)}</span>`;
 }
 
 interface SearchTraceSummary {
@@ -281,54 +401,13 @@ function escHtml(s: string): string {
 }
 function escAttr(s: string): string { return escHtml(s); }
 
-/** Inline JS twin of {@link deriveSpanLabelHtml} for the dashboard waterfall. */
+/** Inline JS twin of {@link deriveSpanLabelHtml} for the dashboard waterfall.
+ *  Keep in sync with the TS function — both must produce identical HTML. */
 export function deriveSpanLabelScript(): string {
   return `
     function deriveSpanLabelHtml(span) {
       if (!span || !span.name) return null;
       var attrs = span.attributes || {};
-      var collections = null;
-      var trace = attrs.searchTrace;
-      if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
-        var names = [];
-        for (var i = 0; i < trace.collections.length; i++) {
-          var c = trace.collections[i];
-          if (c && typeof c.name === 'string' && c.name.length > 0) names.push(c.name);
-        }
-        if (names.length > 0) collections = names;
-      }
-      if (!collections && trace && typeof trace.tool === 'string' && trace.tool.length > 0) {
-        collections = ['yggdrasil'];
-      }
-      if (!collections) {
-        var input = null;
-        var raw = attrs.input;
-        if (raw && typeof raw === 'object') input = raw;
-        else if (typeof raw === 'string') { try { input = JSON.parse(raw); } catch (e) {} }
-        if (input && typeof input.collection === 'string' && input.collection.length > 0) {
-          collections = [input.collection];
-        }
-      }
-      if (!collections || collections.length === 0) return null;
-      // Sort by priority — wiki collections lead so they become the primary chip.
-      var COLLECTION_PRIORITY = ['wiki'];
-      var sorted = [];
-      var rest = [];
-      var buckets = COLLECTION_PRIORITY.map(function () { return []; });
-      for (var i = 0; i < collections.length; i++) {
-        var name = collections[i];
-        var lower = name.toLowerCase();
-        var placed = false;
-        for (var j = 0; j < COLLECTION_PRIORITY.length; j++) {
-          if (lower.indexOf(COLLECTION_PRIORITY[j]) !== -1) { buckets[j].push(name); placed = true; break; }
-        }
-        if (!placed) rest.push(name);
-      }
-      for (var k = 0; k < buckets.length; k++) sorted = sorted.concat(buckets[k]);
-      collections = sorted.concat(rest);
-
-      var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
-      var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
 
       function collHue(name) {
         var h = 0;
@@ -351,8 +430,79 @@ export function deriveSpanLabelScript(): string {
         var initials = parts.map(function (p) { return p[0] || ''; }).join('');
         return trailing.length > 0 ? initials + '-' + trailing.join('-') : initials;
       }
+      function repoChip(repo) {
+        if (!repo) return '';
+        var abbr = abbreviateCollection(repo);
+        var title = abbr === repo ? repo : repo + ' (' + abbr + ')';
+        return '<span class="wf-chip wf-coll" style="' + collStyle(repo) + '" title="' + esc(title) + '">' + esc(abbr) + '</span>';
+      }
+      function extraChip(text, tooltip) {
+        return '<span class="wf-chip wf-extra wf-mono" title="' + esc(tooltip) + '">' + esc(text) + '</span>';
+      }
+      function lastSegment(s, sep) {
+        var trimmed = s;
+        while (trimmed.length > 1 && trimmed.charAt(trimmed.length - 1) === sep) {
+          trimmed = trimmed.slice(0, -1);
+        }
+        var idx = trimmed.lastIndexOf(sep);
+        return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+      }
+      function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+      function strField(obj, key) {
+        var v = obj && obj[key];
+        return typeof v === 'string' ? v : '';
+      }
+      function parseInputObject(raw) {
+        if (raw && typeof raw === 'object') return raw;
+        if (typeof raw === 'string' && raw.length > 0) {
+          try { return JSON.parse(raw); } catch (e) { return null; }
+        }
+        return null;
+      }
 
+      var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
+      var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
       var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
+
+      // Search-tool path
+      var collections = null;
+      var trace = attrs.searchTrace;
+      if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
+        var names = [];
+        for (var i = 0; i < trace.collections.length; i++) {
+          var c = trace.collections[i];
+          if (c && typeof c.name === 'string' && c.name.length > 0) names.push(c.name);
+        }
+        if (names.length > 0) collections = names;
+      }
+      if (!collections && trace && typeof trace.tool === 'string' && trace.tool.length > 0) {
+        collections = ['yggdrasil'];
+      }
+      if (!collections) {
+        var inp = parseInputObject(attrs.input);
+        if (inp && typeof inp.collection === 'string' && inp.collection.length > 0) {
+          collections = [inp.collection];
+        }
+      }
+
+      if (collections && collections.length > 0) {
+        // Sort by priority — wiki collections lead so they become the primary chip.
+        var COLLECTION_PRIORITY = ['wiki'];
+        var sorted = [];
+        var rest = [];
+        var buckets = COLLECTION_PRIORITY.map(function () { return []; });
+        for (var i = 0; i < collections.length; i++) {
+          var name = collections[i];
+          var lower = name.toLowerCase();
+          var placed = false;
+          for (var j = 0; j < COLLECTION_PRIORITY.length; j++) {
+            if (lower.indexOf(COLLECTION_PRIORITY[j]) !== -1) { buckets[j].push(name); placed = true; break; }
+          }
+          if (!placed) rest.push(name);
+        }
+        for (var k = 0; k < buckets.length; k++) sorted = sorted.concat(buckets[k]);
+        collections = sorted.concat(rest);
+
       var first = collections[0];
       var firstAbbr = abbreviateCollection(first);
       var firstTitle = firstAbbr === first ? first : first + ' (' + firstAbbr + ')';
@@ -380,9 +530,68 @@ export function deriveSpanLabelScript(): string {
         if (summary.lowConfidence) tooltipLines.push('\\u26A0 low confidence');
       }
 
+        return {
+          html: verbChip + firstChip + moreChip + countsChip,
+          tooltip: tooltipLines.join('\\n'),
+        };
+      }
+
+      // Per-tool extras path — graph_node / symbol_context / list_files /
+      // read_source / search_pattern. Mirrors the TS toolLabelExtras helper.
+      var input = parseInputObject(attrs.input);
+      if (!input) return null;
+      var name = span.name;
+      var chips = '';
+      var tip = [];
+
+      if (/get_graph_node\$/.test(name)) {
+        var id = strField(input, 'node_id') || strField(input, 'tag');
+        if (!id) return null;
+        var colonIdx = id.indexOf(':');
+        var kind = colonIdx > 0 ? id.slice(0, colonIdx) : '';
+        var tail = colonIdx > 0 ? id.slice(colonIdx + 1) : id;
+        chips = (kind
+          ? '<span class="wf-chip wf-coll" style="' + collStyle(kind) + '" title="' + esc('kind: ' + kind) + '">' + esc(kind) + '</span>'
+          : '') + extraChip(tail, id);
+        tip = ['node: ' + id];
+      } else if (/yggdrasil-symbol_context\$/.test(name)) {
+        var repo = strField(input, 'repo');
+        var qn = strField(input, 'qualified_name') || strField(input, 'qualifiedName');
+        if (!repo && !qn) return null;
+        var shortName = qn ? lastSegment(qn, '.') : '';
+        chips = repoChip(repo) + (shortName ? extraChip(shortName, qn || shortName) : '');
+        if (repo) tip.push('repo: ' + repo);
+        if (qn)   tip.push('symbol: ' + qn);
+      } else if (/yggdrasil-list_files\$/.test(name)) {
+        var repo2 = strField(input, 'repo');
+        var path2 = strField(input, 'path');
+        if (!repo2 && !path2) return null;
+        var tail2 = path2 ? lastSegment(path2, '/') : '';
+        chips = repoChip(repo2) + (tail2 ? extraChip(tail2, path2 || tail2) : '');
+        if (repo2) tip.push('repo: ' + repo2);
+        if (path2) tip.push('path: ' + path2);
+      } else if (/yggdrasil-read_source\$/.test(name)) {
+        var repo3 = strField(input, 'repo');
+        var path3 = strField(input, 'path');
+        if (!repo3 && !path3) return null;
+        var base3 = path3 ? lastSegment(path3, '/') : '';
+        chips = repoChip(repo3) + (base3 ? extraChip(base3, path3 || base3) : '');
+        if (repo3) tip.push('repo: ' + repo3);
+        if (path3) tip.push('path: ' + path3);
+      } else if (/yggdrasil-search_pattern\$/.test(name)) {
+        var repo4 = strField(input, 'repo');
+        var pat = strField(input, 'pattern');
+        if (!repo4 && !pat) return null;
+        chips = repoChip(repo4) + (pat ? extraChip(truncate(pat, 28), pat) : '');
+        if (repo4) tip.push('repo: ' + repo4);
+        if (pat)   tip.push('pattern: ' + pat);
+      } else {
+        return null;
+      }
+
       return {
-        html: verbChip + firstChip + moreChip + countsChip,
-        tooltip: tooltipLines.join('\\n'),
+        html: verbChip + chips,
+        tooltip: ([span.name].concat(tip)).join('\\n'),
       };
     }
 
