@@ -42,7 +42,18 @@ interface SpanLike {
     toolId?: unknown;
     input?: unknown;
     searchTrace?:
-      | { collections?: Array<{ name?: unknown }>; tool?: unknown }
+      | {
+          collections?: Array<{
+            name?: unknown;
+            candidates?: unknown[];
+            confidence?: { lowConfidence?: unknown };
+            timingsMs?: { total?: unknown };
+          }>;
+          candidates?: unknown[];
+          timingsMs?: { total?: unknown };
+          totalMs?: unknown;
+          tool?: unknown;
+        }
       | unknown;
   };
 }
@@ -60,11 +71,8 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
 
   const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
-  const hasTrace = !!(attrs.searchTrace && (attrs.searchTrace as { schemaVersion?: unknown }).schemaVersion === 1);
+  const summary = summarizeSearchTrace(attrs.searchTrace);
 
-  const traceDot = hasTrace
-    ? '<span class="wf-trace-dot" title="search trace available — click for details">●</span>'
-    : '';
   const verbChip = verb
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
     : '';
@@ -76,10 +84,108 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
     : '';
 
+  let countsChip = "";
+  if (summary) {
+    const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+    const tip = summary.lowConfidence
+      ? `${summary.kept} kept / ${summary.fetched} fetched · low confidence`
+      : `${summary.kept} kept / ${summary.fetched} fetched`;
+    countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
+  }
+
+  const tooltipLines = [span.name, "collections: " + collections.join(", ")];
+  if (summary) {
+    tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
+    if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
+    if (summary.totalMs != null) tooltipLines.push("total: " + summary.totalMs + "ms");
+    if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
+  }
+
   return {
-    html: traceDot + verbChip + firstChip + moreChip,
-    tooltip: span.name + "\ncollections: " + collections.join(", "),
+    html: verbChip + firstChip + moreChip + countsChip,
+    tooltip: tooltipLines.join("\n"),
   };
+}
+
+interface SearchTraceSummary {
+  kept: number;
+  fetched: number;
+  topTitle: string | null;
+  lowConfidence: boolean;
+  totalMs: number | null;
+}
+
+/** Compress a v1 searchTrace blob into the bits we surface in the waterfall
+ *  row: candidate counts, top-ranked hit, low-confidence flag, total ms.
+ *  Single pass over candidates regardless of producer shape (Huginn collections[]
+ *  or Yggdrasil flat candidates[]). Returns null when there's nothing useful. */
+export function summarizeSearchTrace(trace: unknown): SearchTraceSummary | null {
+  if (!trace || typeof trace !== "object") return null;
+  const t = trace as {
+    collections?: Array<{
+      candidates?: unknown[];
+      confidence?: { lowConfidence?: unknown };
+    }>;
+    candidates?: unknown[];
+    timingsMs?: { total?: unknown };
+    totalMs?: unknown;
+  };
+
+  let buckets: Array<{ candidates: unknown[]; lowConfidence: boolean }>;
+  let isKept: (c: { kept?: unknown; stages?: { final?: unknown } }) => boolean;
+  let titleFields: readonly string[];
+  let totalMs: number | null = null;
+
+  if (Array.isArray(t.collections) && t.collections.length > 0) {
+    buckets = t.collections.map((c) => ({
+      candidates: Array.isArray(c?.candidates) ? c.candidates : [],
+      lowConfidence: !!(c?.confidence && (c.confidence as { lowConfidence?: unknown }).lowConfidence === true),
+    }));
+    isKept = (c) => c.kept !== false;
+    titleFields = ["docTitle", "documentId"];
+    if (typeof t.totalMs === "number") totalMs = t.totalMs;
+  } else if (Array.isArray(t.candidates)) {
+    buckets = [{ candidates: t.candidates, lowConfidence: false }];
+    isKept = (c) => !!(c.stages && c.stages.final);
+    titleFields = ["qualifiedName"];
+    const total = (t.timingsMs as { total?: unknown } | undefined)?.total;
+    if (typeof total === "number") totalMs = total;
+  } else {
+    return null;
+  }
+
+  let kept = 0;
+  let fetched = 0;
+  let lowConfidence = false;
+  let bestRank = Infinity;
+  let bestCand: Record<string, unknown> | null = null;
+
+  for (const b of buckets) {
+    if (b.lowConfidence) lowConfidence = true;
+    for (const cand of b.candidates) {
+      if (!cand || typeof cand !== "object") { fetched++; continue; }
+      const c = cand as { kept?: unknown; stages?: { final?: { rank?: unknown } } };
+      fetched++;
+      if (isKept(c)) kept++;
+      const rank = c.stages?.final?.rank;
+      if (typeof rank === "number" && rank < bestRank) {
+        bestRank = rank;
+        bestCand = cand as Record<string, unknown>;
+      }
+    }
+  }
+
+  if (fetched === 0) return null;
+
+  let topTitle: string | null = null;
+  if (bestCand) {
+    for (const f of titleFields) {
+      const v = bestCand[f];
+      if (typeof v === "string" && v) { topTitle = v; break; }
+    }
+  }
+
+  return { kept, fetched, topTitle, lowConfidence, totalMs };
 }
 
 function collectionsFor(attrs: NonNullable<SpanLike["attributes"]>): string[] | null {
@@ -223,7 +329,6 @@ export function deriveSpanLabelScript(): string {
 
       var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
       var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
-      var hasTrace = !!(trace && trace.schemaVersion === 1);
 
       function collHue(name) {
         var h = 0;
@@ -247,7 +352,6 @@ export function deriveSpanLabelScript(): string {
         return trailing.length > 0 ? initials + '-' + trailing.join('-') : initials;
       }
 
-      var traceDot = hasTrace ? '<span class="wf-trace-dot" title="search trace available — click for details">\\u25CF</span>' : '';
       var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
       var first = collections[0];
       var firstAbbr = abbreviateCollection(first);
@@ -257,10 +361,75 @@ export function deriveSpanLabelScript(): string {
         ? '<span class="wf-chip wf-coll-more" title="' + esc(collections.slice(1).join(', ')) + '">+' + (collections.length - 1) + '</span>'
         : '';
 
+      var summary = summarizeSearchTrace(trace);
+      var countsChip = '';
+      if (summary) {
+        var countsCls = summary.lowConfidence ? 'wf-chip wf-counts wf-low-conf' : 'wf-chip wf-counts';
+        var countsTip = summary.lowConfidence
+          ? summary.kept + ' kept / ' + summary.fetched + ' fetched · low confidence'
+          : summary.kept + ' kept / ' + summary.fetched + ' fetched';
+        countsChip = '<span class="' + countsCls + '" title="' + esc(countsTip) + '">' +
+          summary.kept + '/' + summary.fetched + '</span>';
+      }
+
+      var tooltipLines = [span.name, 'collections: ' + collections.join(', ')];
+      if (summary) {
+        tooltipLines.push('candidates: ' + summary.kept + ' kept / ' + summary.fetched + ' fetched');
+        if (summary.topTitle) tooltipLines.push('top: ' + summary.topTitle);
+        if (summary.totalMs != null) tooltipLines.push('total: ' + summary.totalMs + 'ms');
+        if (summary.lowConfidence) tooltipLines.push('\\u26A0 low confidence');
+      }
+
       return {
-        html: traceDot + verbChip + firstChip + moreChip,
-        tooltip: span.name + '\\ncollections: ' + collections.join(', '),
+        html: verbChip + firstChip + moreChip + countsChip,
+        tooltip: tooltipLines.join('\\n'),
       };
+    }
+
+    function summarizeSearchTrace(trace) {
+      if (!trace || typeof trace !== 'object') return null;
+      var buckets, isKept, titleFields, totalMs = null;
+      if (Array.isArray(trace.collections) && trace.collections.length > 0) {
+        buckets = trace.collections.map(function (c) {
+          return {
+            candidates: c && Array.isArray(c.candidates) ? c.candidates : [],
+            lowConfidence: !!(c && c.confidence && c.confidence.lowConfidence === true),
+          };
+        });
+        isKept = function (c) { return c.kept !== false; };
+        titleFields = ['docTitle', 'documentId'];
+        if (typeof trace.totalMs === 'number') totalMs = trace.totalMs;
+      } else if (Array.isArray(trace.candidates)) {
+        buckets = [{ candidates: trace.candidates, lowConfidence: false }];
+        isKept = function (c) { return !!(c.stages && c.stages.final); };
+        titleFields = ['qualifiedName'];
+        if (trace.timingsMs && typeof trace.timingsMs.total === 'number') totalMs = trace.timingsMs.total;
+      } else {
+        return null;
+      }
+      var kept = 0, fetched = 0, lowConfidence = false, bestRank = Infinity, bestCand = null;
+      for (var i = 0; i < buckets.length; i++) {
+        if (buckets[i].lowConfidence) lowConfidence = true;
+        var cands = buckets[i].candidates;
+        for (var j = 0; j < cands.length; j++) {
+          var c = cands[j];
+          fetched++;
+          if (!c || typeof c !== 'object') continue;
+          if (isKept(c)) kept++;
+          var rank = c.stages && c.stages.final && typeof c.stages.final.rank === 'number'
+            ? c.stages.final.rank : Infinity;
+          if (rank < bestRank) { bestRank = rank; bestCand = c; }
+        }
+      }
+      if (fetched === 0) return null;
+      var topTitle = null;
+      if (bestCand) {
+        for (var k = 0; k < titleFields.length; k++) {
+          var v = bestCand[titleFields[k]];
+          if (typeof v === 'string' && v) { topTitle = v; break; }
+        }
+      }
+      return { kept: kept, fetched: fetched, topTitle: topTitle, lowConfidence: lowConfidence, totalMs: totalMs };
     }
   `;
 }
