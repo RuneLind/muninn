@@ -125,17 +125,10 @@ export class Tracer {
     const parentSpan = this.spans.get(parentLabel);
     const parentId = parentSpan?.id ?? this.rootSpanId;
 
-    // Position the child span at the correct time within its parent. When the
-    // caller doesn't supply an offset, mirror addSubSpan's fallback: anchor so
-    // the bar's right edge lands at "now". That matches reality (the operation
-    // just ended) instead of misrepresenting it as having started with the
-    // parent — which made tool spans render at the very left of the waterfall.
-    let startedAt: Date;
-    if (startOffsetMs != null && parentSpan) {
-      startedAt = new Date(parentSpan.startedAt.getTime() + startOffsetMs);
-    } else {
-      startedAt = new Date(Date.now() - Math.round(durationMs));
-    }
+    // No offset → anchor the bar's right edge at "now" (the call just ended).
+    const startedAt = startOffsetMs != null && parentSpan
+      ? new Date(parentSpan.startedAt.getTime() + startOffsetMs)
+      : nowMinusDuration(durationMs);
 
     saveSpan({
       id,
@@ -168,7 +161,7 @@ export class Tracer {
     if (!this.enabled) return id;
 
     const offset = opts?.startOffsetMs ?? 0;
-    const anchor = opts?.parentStartedAt ?? new Date(Date.now() - Math.round(durationMs));
+    const anchor = opts?.parentStartedAt ?? nowMinusDuration(durationMs);
     const startedAt = new Date(anchor.getTime() + offset);
 
     saveSpan({
@@ -249,4 +242,8 @@ export class Tracer {
 
 function logError(err: unknown): void {
   log.error("Failed to write span: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
+
+function nowMinusDuration(durationMs: number): Date {
+  return new Date(Date.now() - Math.round(durationMs));
 }

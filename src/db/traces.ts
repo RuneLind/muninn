@@ -221,19 +221,20 @@ export async function cleanupOldTraces(retentionDays: number): Promise<number> {
 }
 
 function mapRow(r: Record<string, any>): SpanRow {
-  // postgres-js returns JSONB as an already-parsed object. The producer side
-  // (saveSpan / updateSpan) only ever writes objects, so attrs is shape-safe.
-  // Cheap guard against accidental hand-INSERTed rows that store a string or
-  // array — fall back to empty object so callers can rely on the type.
-  let attrs: Record<string, unknown> = (r.attributes ?? {}) as Record<string, unknown>;
+  // Guard against hand-INSERTed rows storing non-object JSONB.
+  let attrs: Record<string, unknown> = r.attributes ?? {};
   if (typeof attrs !== "object" || attrs === null || Array.isArray(attrs)) attrs = {};
 
-  if (r.input_tokens != null && !attrs.inputTokens) attrs = { ...attrs, inputTokens: Number(r.input_tokens) };
-  if (r.output_tokens != null && !attrs.outputTokens) attrs = { ...attrs, outputTokens: Number(r.output_tokens) };
-  if (r.tool_count != null && !attrs.toolCount) attrs = { ...attrs, toolCount: Number(r.tool_count) };
-  if (r.model != null && !attrs.model) attrs = { ...attrs, model: String(r.model) };
-  if (r.requested_model != null && !attrs.requestedModel) attrs = { ...attrs, requestedModel: String(r.requested_model) };
-  if (r.connector != null && !attrs.connector) attrs = { ...attrs, connector: String(r.connector) };
+  // Backfill from the LATERAL JOIN in one pass — avoids 6 intermediate spreads
+  // per row in the trace-list query.
+  const delta: Record<string, unknown> = {};
+  if (r.input_tokens != null && !attrs.inputTokens) delta.inputTokens = Number(r.input_tokens);
+  if (r.output_tokens != null && !attrs.outputTokens) delta.outputTokens = Number(r.output_tokens);
+  if (r.tool_count != null && !attrs.toolCount) delta.toolCount = Number(r.tool_count);
+  if (r.model != null && !attrs.model) delta.model = String(r.model);
+  if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
+  if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);
+  if (Object.keys(delta).length > 0) attrs = { ...attrs, ...delta };
 
   return {
     id: r.id,
