@@ -240,13 +240,19 @@ export function toolDetailRenderersScript(): string {
                body +
              '</div>';
     }
-    function tdrChip(type, value, cls) {
+    function tdrChip(label, value, cls) {
       if (value == null || value === '') return '';
       var classes = 'tdr-chip' + (cls ? ' ' + cls : '');
       return '<span class="' + classes + '">' +
-               (type ? '<span class="tdr-chip-type">' + esc(type) + '</span>' : '') +
+               '<span class="tdr-chip-type">' + esc(label) + '</span>' +
                esc(value) +
              '</span>';
+    }
+    /** Chip with no label prefix — for status flags ("truncated") or already
+     *  self-describing values like the statusText line. */
+    function tdrFlagChip(text, cls) {
+      if (text == null || text === '') return '';
+      return '<span class="tdr-chip' + (cls ? ' ' + cls : '') + '">' + esc(text) + '</span>';
     }
     function tdrChips(chips) {
       var html = chips.filter(function(c) { return c; }).join('');
@@ -255,14 +261,12 @@ export function toolDetailRenderersScript(): string {
     function tdrCode(text, opts) {
       opts = opts || {};
       var s = String(text == null ? '' : text);
-      // Highlight a 1-based line number when caller passes opts.markLine
       if (typeof opts.markLine === 'number' && opts.markLine > 0) {
         var lines = s.split('\\n');
         var idx = opts.markLine - 1;
         if (lines[idx] != null) {
           lines[idx] = '<span class="tdr-line-mark">' + esc(lines[idx]) + '</span>';
         }
-        // Re-escape only the unmarked lines
         var out = lines.map(function(ln, i) {
           return i === idx ? ln : esc(ln);
         }).join('\\n');
@@ -542,7 +546,7 @@ export function toolDetailRenderersScript(): string {
         tdrChip('repo', repo, 'tdr-chip-muted'),
         tdrChip('path', basePath, 'tdr-chip-mono'),
         tdrChip('files', String(out.total_files != null ? out.total_files : files.length), 'tdr-chip-muted'),
-        out.truncated ? tdrChip('', 'truncated', 'tdr-chip-warn') : '',
+        out.truncated ? tdrFlagChip('truncated', 'tdr-chip-warn') : '',
       ]);
 
       var listHtml = files.length ? tdrRenderFileList(files, basePath) : tdrEmpty('no files');
@@ -656,7 +660,7 @@ export function toolDetailRenderersScript(): string {
 
       var headerChips = tdrChips([
         attrs.toolName ? tdrChip('tool', String(attrs.toolName), 'tdr-chip-muted') : '',
-        attrs.statusText ? tdrChip('', String(attrs.statusText), 'tdr-chip-mono') : '',
+        attrs.statusText ? tdrFlagChip(String(attrs.statusText), 'tdr-chip-mono') : '',
       ]);
 
       var inputHtml;
