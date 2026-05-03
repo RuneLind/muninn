@@ -450,17 +450,17 @@ export function tracesWaterfallScript(): string {
       const titleName = isAiSpan(span) ? aiSpanLabel(span) : span.name;
       document.getElementById('spanDetailsTitle').textContent =
         titleName + ' (' + span.kind + ', ' + span.status + ')';
-      const attrs = span.attributes || {};
       const host = document.getElementById('spanDetailsJson');
-      // If the span carries a v1 Huginn search trace, render the structured panel.
-      // Fall back to raw JSON for everything else (other span kinds, future schema
-      // versions, or if the renderer module isn't loaded).
-      if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
-          attrs.searchTrace.schemaVersion === 1) {
-        if (window.__sttState) window.__sttState.showRaw = false;
-        host.innerHTML = renderSearchTrace(attrs.searchTrace);
+      // renderToolDetail picks the best panel for this span: v1 search trace
+      // (delegates to renderSearchTrace), per-tool renderer (graph node, symbol
+      // context, list_files, read_source, search_pattern), or smart generic
+      // (Input + Output sections). Reset raw toggle on every span open so the
+      // panel always opens in structured mode.
+      if (typeof renderToolDetail === 'function') {
+        if (window.__tdrState) window.__tdrState.showRaw = false;
+        host.innerHTML = renderToolDetail(span);
       } else {
-        host.innerHTML = '<pre>' + esc(JSON.stringify(attrs, null, 2)) + '</pre>';
+        host.innerHTML = '<pre>' + esc(JSON.stringify(span.attributes || {}, null, 2)) + '</pre>';
       }
     });
 
