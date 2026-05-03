@@ -52,6 +52,18 @@ export function searchTraceDetailStyles(): string {
       white-space: nowrap;
     }
     .stt-chip .stt-chip-type { color: var(--text-dim); font-size: 10px; }
+    /* Marker on entity chips that were also re-injected as expansion terms.
+       Replaces the separate "+ X" duplicate chip — hover the chip for details. */
+    .stt-chip .stt-chip-plus {
+      margin-left: 4px;
+      padding: 0 4px;
+      font-size: 10px;
+      color: var(--accent-light);
+      border-left: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    .stt-chip-reinjected {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+    }
     .stt-badge {
       display: inline-block;
       padding: 2px 8px;
@@ -422,15 +434,45 @@ export function searchTraceDetailScript(): string {
     }
 
     function sttRenderQuery(q) {
-      const entityChips = (q.detectedEntities || []).map(e =>
-        '<span class="stt-chip"><span class="stt-chip-type">' + esc(e.type || '') + '</span>' + esc(e.label || e.id || '') + '</span>'
-      ).join('');
+      const entities = q.detectedEntities || [];
+      const expansionTerms = q.expansionTerms || [];
+      // Build a case-insensitive set of expansion terms so we can mark entity
+      // chips that were also re-injected as expansion terms — and drop the
+      // duplicate "+ X" chip below. Same-text-different-case treated as same.
+      const expSet = new Set();
+      for (const t of expansionTerms) {
+        if (typeof t === 'string') expSet.add(t.toLowerCase());
+      }
+      const entitySet = new Set();
+      for (const e of entities) {
+        const lbl = e && (e.label || e.id);
+        if (typeof lbl === 'string') entitySet.add(lbl.toLowerCase());
+      }
+
+      const entityChips = entities.map(e => {
+        const lbl = e.label || e.id || '';
+        const reinjected = typeof lbl === 'string' && expSet.has(lbl.toLowerCase());
+        const cls = reinjected ? 'stt-chip stt-chip-reinjected' : 'stt-chip';
+        const tip = reinjected ? 'Detected as a graph entity AND re-injected into the query as an expansion term.' : '';
+        const titleAttr = tip ? ' title="' + esc(tip) + '"' : '';
+        const plus = reinjected ? '<span class="stt-chip-plus" aria-hidden="true">+</span>' : '';
+        return '<span class="' + cls + '"' + titleAttr + '>' +
+          '<span class="stt-chip-type">' + esc(e.type || '') + '</span>' + esc(lbl) + plus +
+        '</span>';
+      }).join('');
+
       const flags = [];
       if (q.graphAnswered === true) flags.push('<span class="stt-badge">graph answered</span>');
       if (q.rerankerSkipped === true) flags.push('<span class="stt-badge stt-warn">reranker skipped' +
         (q.rerankerSkipReason ? ': ' + esc(q.rerankerSkipReason) : '') + '</span>');
-      const expandedHtml = sttHighlightExpansion(q.raw || '', q.expanded || '', q.expansionTerms || []);
-      const expansionChips = (q.expansionTerms || []).map(t => '<span class="stt-chip">+ ' + esc(t) + '</span>').join('');
+      const expandedHtml = sttHighlightExpansion(q.raw || '', q.expanded || '', expansionTerms);
+      // Hide "+ X" chips for terms that already show up as entity chips above —
+      // those chips already carry the "+" indicator. Reduces visual triplication
+      // (entity + plus-chip + highlighted-in-expanded → entity-with-plus-marker).
+      const remainingExpansion = expansionTerms.filter(t =>
+        typeof t === 'string' && !entitySet.has(t.toLowerCase())
+      );
+      const expansionChips = remainingExpansion.map(t => '<span class="stt-chip">+ ' + esc(t) + '</span>').join('');
       return '<div class="stt-section">' +
         '<h5>Query</h5>' +
         '<div class="stt-query">' +
@@ -443,15 +485,67 @@ export function searchTraceDetailScript(): string {
       '</div>';
     }
 
+    /** Wrap appended expansion terms in <span class="stt-expansion"> for visual
+     *  emphasis. Two pitfalls handled here:
+     *    1. Substring matches: e.g. term "EØS" naively matched inside "EU/EØS".
+     *       Sort longer-first and skip ranges that fall inside an already-wrapped
+     *       span so the first match wins.
+     *    2. Word-boundary on Unicode: "\b" doesn't fire around "Ø" / "æ", so
+     *       we avoid \b entirely and instead require a non-letter neighbor on
+     *       each side (or string edge), defined as anything outside the Unicode
+     *       letter class. */
     function sttHighlightExpansion(raw, expanded, terms) {
-      // Render expanded with the appended expansion terms wrapped for emphasis.
-      let html = esc(expanded);
-      for (const t of terms || []) {
-        if (!t) continue;
-        const re = new RegExp('(' + t.replace(/[.*+?^\${}()|[\\]\\\\]/g,'\\\\$&') + ')', 'g');
-        html = html.replace(re, '<span class="stt-expansion">$1</span>');
+      const escaped = esc(expanded);
+      if (!terms || terms.length === 0) return escaped;
+      // Longer-first so "EU/EØS" matches before "EØS" can chew into it.
+      const sortedTerms = (terms || [])
+        .filter(t => typeof t === 'string' && t.length > 0)
+        .slice()
+        .sort(function (a, b) { return b.length - a.length; });
+      // Collect non-overlapping match spans across the un-rendered (escaped) text,
+      // then assemble the highlighted HTML in one pass at the end. Spans is
+      // kept sorted by start; we reject any new match that overlaps an existing
+      // one (longer-first handles the "which to keep" tie-breaker for free).
+      const spans = [];
+      const insertSpan = function (start, end) {
+        for (let i = 0; i < spans.length; i++) {
+          if (start < spans[i].end && end > spans[i].start) return;
+        }
+        spans.push({ start: start, end: end });
+      };
+      const isLetter = function (ch) {
+        if (!ch) return false;
+        // Unicode letter class — ES2018+; supported in every browser the
+        // dashboard targets.
+        return /\\p{L}/u.test(ch);
+      };
+      for (const t of sortedTerms) {
+        const escTerm = esc(t).replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+        const re = new RegExp(escTerm, 'g');
+        let m;
+        while ((m = re.exec(escaped)) !== null) {
+          const start = m.index;
+          const end = start + m[0].length;
+          // Only treat as a match if there's no letter immediately on either
+          // side. Lets us catch "EU/EØS" (slash boundary) and standalone "EØS"
+          // (space boundary), but skip "EØS" embedded in "EØSnoise".
+          const before = start > 0 ? escaped.charAt(start - 1) : '';
+          const after = end < escaped.length ? escaped.charAt(end) : '';
+          if (isLetter(before) || isLetter(after)) continue;
+          insertSpan(start, end);
+        }
       }
-      return html;
+      if (spans.length === 0) return escaped;
+      spans.sort(function (a, b) { return a.start - b.start; });
+      let out = '';
+      let cursor = 0;
+      for (const s of spans) {
+        out += escaped.slice(cursor, s.start) +
+               '<span class="stt-expansion">' + escaped.slice(s.start, s.end) + '</span>';
+        cursor = s.end;
+      }
+      out += escaped.slice(cursor);
+      return out;
     }
 
     function sttRenderCollections(collections) {

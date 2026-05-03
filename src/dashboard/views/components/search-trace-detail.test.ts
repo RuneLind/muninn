@@ -56,6 +56,69 @@ describe("renderSearchTrace", () => {
     expect(html).toContain(">A003<");
   });
 
+  test("expansion highlight does not match inside other words", () => {
+    // The naive global-replace would highlight "EØS" inside "EU/EØS" because
+    // there's no word-boundary check. We expect "EU/EØS" (the longer term) to
+    // win, plus the standalone "EØS" added later in the expanded line. The
+    // "EØS" inside "EU/EØS" must NOT get its own wrapper.
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "EU/EØS",
+        expanded: "EU/EØS EØS MELOSYS",
+        expansionTerms: ["EØS", "EU/EØS", "MELOSYS"],
+      },
+      collections: [],
+    });
+    // Exactly three highlighted spans: EU/EØS, standalone EØS, and MELOSYS.
+    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    expect(spans.length).toBe(3);
+    // Sanity-check the wrapped texts.
+    expect(html).toContain('<span class="stt-expansion">EU/EØS</span>');
+    expect(html).toContain('<span class="stt-expansion">EØS</span>');
+    expect(html).toContain('<span class="stt-expansion">MELOSYS</span>');
+    // No nested span inside EU/EØS.
+    expect(html).not.toContain('<span class="stt-expansion">EU/<span');
+  });
+
+  test("expansion highlight respects letter boundaries — skips embedded matches", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: { raw: "x", expanded: "EØSnoise EØS sak", expansionTerms: ["EØS"] },
+      collections: [],
+    });
+    // Only the standalone EØS gets wrapped — the "EØSnoise" prefix does not.
+    const spans = html.match(/<span class="stt-expansion">/g) || [];
+    expect(spans.length).toBe(1);
+    expect(html).toContain("EØSnoise");
+    expect(html).not.toContain('<span class="stt-expansion">EØS</span>noise');
+  });
+
+  test("entity chip is marked re-injected and the duplicate + chip is dropped", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {
+        raw: "x", expanded: "x",
+        detectedEntities: [
+          { id: "entity:eøs", type: "Concept", label: "EØS" },
+          { id: "entity:journalføring", type: "Concept", label: "Journalføring" },
+        ],
+        expansionTerms: ["EØS", "MELOSYS", "Norge"],
+      },
+      collections: [],
+    });
+    // The Concept EØS chip carries the re-injected marker and tooltip.
+    expect(html).toMatch(/stt-chip stt-chip-reinjected[^>]*title="[^"]*re-injected[^"]*"/);
+    expect(html).toContain('class="stt-chip-plus"');
+    // Concept Journalføring is plain — not in the expansionTerms list.
+    expect(html).toMatch(/<span class="stt-chip"><span class="stt-chip-type">Concept<\/span>Journalf/);
+    // Standalone "+ EØS" chip is gone (it's already represented by the entity chip).
+    expect(html).not.toMatch(/<span class="stt-chip">\+ EØS</);
+    // But "+ MELOSYS" and "+ Norge" survive — they have no entity chip.
+    expect(html).toContain("+ MELOSYS");
+    expect(html).toContain("+ Norge");
+  });
+
   test("renders graphAnswered and rerankerSkipped flag badges", () => {
     const html = sb.renderSearchTrace({
       schemaVersion: 1,
