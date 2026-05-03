@@ -16,9 +16,9 @@ const SANDBOX_PRELUDE = `
   }
 `;
 
-function loadSandbox(): { renderSearchTrace: (t: unknown) => string; reset: () => void; getState: () => Record<string, unknown> } {
+function loadSandbox(): { renderSearchTrace: (t: unknown, output?: unknown) => string; reset: () => void; getState: () => Record<string, unknown> } {
   const script = SANDBOX_PRELUDE + searchTraceDetailScript() +
-    `\n;return { renderSearchTrace, reset: () => { window.__sttState = { sortKey: 'final', sortDir: 'asc', filter: 'kept-top', showRaw: false, trace: null }; }, getState: () => window.__sttState };`;
+    `\n;return { renderSearchTrace, reset: () => { window.__sttState = { sortKey: 'final', sortDir: 'asc', filter: 'kept-top', showRaw: false, trace: null, output: null, showResponse: false }; }, getState: () => window.__sttState };`;
   // Provide a window object the script writes to.
   const win: Record<string, unknown> = {};
   const fn = new Function("window", script);
@@ -96,6 +96,112 @@ describe("renderSearchTrace", () => {
     expect(html).toContain("best=-0.050");
     expect(html).toContain("3 filtered");
     expect(html).toContain("stt-conf-best");
+  });
+
+  test("confidence block summary calls strong vs weak match correctly", () => {
+    // Strong match: -1.779 best, -0.1 cutoff, margin 1.679 → "strong match"
+    let html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "wiki", confidence: { lowConfidence: false, bestScore: -1.779, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 } }],
+    });
+    expect(html).toContain("strong match");
+    expect(html).toContain("1.679");
+    expect(html).toContain("below the cutoff");
+    expect(html).toContain("no noise filtering");
+    expect(html).toContain("stt-good");
+
+    // Weak / low confidence: -0.05 best, -0.1 cutoff, margin -0.05 → "weak match"
+    sb.reset();
+    html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "kb", confidence: { lowConfidence: true, bestScore: -0.05, lowConfidenceThreshold: -0.1, noiseThreshold: -0.01, filteredCount: 3 } }],
+    });
+    expect(html).toContain("weak match");
+    expect(html).toContain("0.050");
+    expect(html).toContain("above the cutoff");
+    expect(html).toContain("flagged as low confidence");
+    expect(html).toContain("3 candidates dropped");
+    expect(html).toContain("stt-bad");
+  });
+
+  test("confidence block renders inline marker labels and stacks duplicate thresholds", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "wiki", confidence: { lowConfidence: false, bestScore: -1.779, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 } }],
+    });
+    // All three markers carry their own inline label with the marker value.
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-best[^>]*>best -1\.78</);
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-thr[^>]*>lowConfThr -0\.1</);
+    // Both thresholds end at the right edge → noise label gets the right anchor
+    // and the stack-1 offset so the two labels don't write over each other.
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-thr stt-anchor-right[^>]*>lowConfThr -0\.1</);
+    expect(html).toMatch(/stt-conf-mark-label stt-mk-noise stt-anchor-right stt-stack-1[^>]*>noiseThr -0\.1</);
+  });
+
+  test("confidence marker labels use plain anchor when not at an edge", () => {
+    // Use values where best lands well inside the bar (not within 5% of either edge).
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1, query: {},
+      collections: [{ name: "kb", confidence: { lowConfidence: false, bestScore: -0.5, lowConfidenceThreshold: -0.1, noiseThreshold: -0.9, filteredCount: 0 } }],
+    });
+    // Best is in the middle → no edge-anchor class on its label.
+    expect(html).toMatch(/<div class="stt-conf-mark-label stt-mk-best"[^>]*>best -0\.50</);
+  });
+
+  test("confidence block adds axis labels, legend, and explainer help icon", () => {
+    const html = sb.renderSearchTrace({
+      schemaVersion: 1,
+      query: {},
+      collections: [{
+        name: "confluence",
+        confidence: { lowConfidence: false, bestScore: -0.987, lowConfidenceThreshold: -0.1, noiseThreshold: -0.1, filteredCount: 0 },
+      }],
+    });
+    // Sign-convention reminder appears on the axis under the bar.
+    expect(html).toContain("more relevant");
+    expect(html).toContain("less relevant");
+    // Per-marker legend with values.
+    expect(html).toContain("stt-conf-leg-best");
+    expect(html).toContain("best -0.987");
+    expect(html).toContain("lowConfThr -0.1");
+    expect(html).toContain("noiseThr -0.1");
+    // Hover-only "?" explainer next to the badge.
+    expect(html).toContain('class="stt-help"');
+    // Marker tooltips spell out the rule, not just the number.
+    expect(html).toContain("more negative = more relevant");
+  });
+
+  test("collapsible response section renders truncation meta when collapsed and content when expanded", () => {
+    const trace = { schemaVersion: 1, query: {}, collections: [] };
+    const output = JSON.stringify({ _truncated: true, _originalBytes: 28880, head: "## Doc.md\n\ncontent here" });
+    let html = sb.renderSearchTrace(trace, output);
+    // Collapsed by default — section header + button visible, content hidden.
+    expect(html).toContain("Response sent to LLM");
+    expect(html).toContain("Show response sent to LLM");
+    expect(html).not.toContain("content here");
+    // Toggle open and re-render — body + truncation meta now visible.
+    sb.getState().showResponse = true;
+    html = sb.renderSearchTrace(trace, output);
+    expect(html).toContain("Hide response");
+    expect(html).toContain("content here");
+    expect(html).toContain("truncated from 28,880 bytes");
+  });
+
+  test("response section handles plain-text (non-JSON) output", () => {
+    const trace = { schemaVersion: 1, query: {}, collections: [] };
+    const output = "1. result a\n2. result b\n";
+    sb.renderSearchTrace(trace, output);
+    sb.getState().showResponse = true;
+    const html = sb.renderSearchTrace(trace, output);
+    expect(html).toContain("result a");
+    expect(html).toContain("result b");
+    // No truncation chip — that styling is only added when _truncated=true.
+    expect(html).not.toContain('class="stt-trunc"');
+  });
+
+  test("response section is omitted when output is null/empty", () => {
+    const html = sb.renderSearchTrace({ schemaVersion: 1, query: {}, collections: [] }, null);
+    expect(html).not.toContain("Response sent to LLM");
   });
 
   test("candidates table renders with default top-20 kept filter", () => {

@@ -190,11 +190,13 @@ export function toolDetailRenderersScript(): string {
     function renderToolDetail(span) {
       const attrs = (span && span.attributes) || {};
       window.__tdrState.attrs = attrs;
-      // v1 search trace owns its own panel — delegate.
+      // v1 search trace owns its own panel — delegate. Pass the raw output
+      // so the panel can render the response that was actually returned to
+      // the LLM as a collapsible section at the bottom.
       if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
           attrs.searchTrace.schemaVersion === 1) {
         if (window.__sttState) window.__sttState.showRaw = false;
-        return renderSearchTrace(attrs.searchTrace);
+        return renderSearchTrace(attrs.searchTrace, attrs.output);
       }
       if (window.__tdrState.showRaw) {
         return tdrRawView(attrs);

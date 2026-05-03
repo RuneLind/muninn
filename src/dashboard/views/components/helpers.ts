@@ -87,9 +87,12 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     let countsChip = "";
     if (summary) {
       const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+      const scope = collections.length > 1
+        ? ` (summed across ${collections.length} collections)`
+        : "";
       const tip = summary.lowConfidence
-        ? `${summary.kept} kept / ${summary.fetched} fetched · low confidence`
-        : `${summary.kept} kept / ${summary.fetched} fetched`;
+        ? `${summary.kept} kept / ${summary.fetched} fetched${scope} · low confidence`
+        : `${summary.kept} kept / ${summary.fetched} fetched${scope}`;
       countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
     }
     const tooltipLines = [span.name, "collections: " + collections.join(", ")];
@@ -588,9 +591,12 @@ export function deriveSpanLabelScript(): string {
         var countsChip = '';
         if (summary) {
           var countsCls = summary.lowConfidence ? 'wf-chip wf-counts wf-low-conf' : 'wf-chip wf-counts';
+          var scope = collections.length > 1
+            ? ' (summed across ' + collections.length + ' collections)'
+            : '';
           var countsTip = summary.lowConfidence
-            ? summary.kept + ' kept / ' + summary.fetched + ' fetched · low confidence'
-            : summary.kept + ' kept / ' + summary.fetched + ' fetched';
+            ? summary.kept + ' kept / ' + summary.fetched + ' fetched' + scope + ' · low confidence'
+            : summary.kept + ' kept / ' + summary.fetched + ' fetched' + scope;
           countsChip = '<span class="' + countsCls + '" title="' + esc(countsTip) + '">' +
             summary.kept + '/' + summary.fetched + '</span>';
         }

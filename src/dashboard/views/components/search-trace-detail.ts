@@ -120,18 +120,118 @@ export function searchTraceDetailStyles(): string {
     .stt-leg-name::before      { background: #f59e0b; }
     .stt-leg-rrf::before       { background: #10b981; }
 
-    /* Confidence axis */
+    /* Confidence axis. Reserve room below the bar for inline marker labels
+       so they don't overlap the axis row underneath. */
     .stt-conf {
       position: relative;
       height: 36px;
       background: var(--bg-inset);
       border-radius: 4px;
       margin-top: 6px;
+      margin-bottom: 22px;
     }
     .stt-conf-best { position: absolute; top: 0; bottom: 0; width: 3px; background: var(--status-cyan); }
     .stt-conf-thr  { position: absolute; top: 4px; bottom: 4px; width: 2px; background: var(--status-warning); }
     .stt-conf-noise{ position: absolute; top: 8px; bottom: 8px; width: 2px; background: var(--text-dim); }
+    /* Inline marker labels — sit just under the bar, anchored to the marker.
+       translateX(-50%) centers under the line; left/right edge variants flip
+       the anchor so labels at 0% / 100% don't overflow the bar. */
+    .stt-conf-mark-label {
+      position: absolute;
+      top: 38px;
+      font-size: 10px;
+      color: var(--text-dim);
+      transform: translateX(-50%);
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .stt-conf-mark-label.stt-anchor-left  { transform: translateX(0); }
+    .stt-conf-mark-label.stt-anchor-right { transform: translateX(-100%); }
+    .stt-conf-mark-label.stt-mk-best  { color: var(--status-cyan); }
+    .stt-conf-mark-label.stt-mk-thr   { color: var(--status-warning); }
+    .stt-conf-mark-label.stt-mk-noise { color: var(--text-soft); }
+    /* Vertical stack offset when two thresholds collide (lowConfThr == noiseThr) —
+       move the second label down a row so they don't write over each other. */
+    .stt-conf-mark-label.stt-stack-1 { top: 52px; }
     .stt-conf-label { position: absolute; bottom: -16px; font-size: 10px; color: var(--text-dim); transform: translateX(-50%); }
+    /* Plain-English interpretation sentence under the legend. */
+    .stt-conf-summary {
+      font-size: 11px;
+      color: var(--text-soft);
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+    .stt-conf-summary.stt-good { color: var(--status-success); }
+    .stt-conf-summary.stt-bad  { color: var(--status-error); }
+    .stt-conf-summary .stt-margin { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .stt-conf-axis {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-faint);
+      margin-top: 4px;
+    }
+    .stt-conf-axis em { font-style: normal; color: var(--text-dim); }
+    .stt-conf-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+    .stt-conf-legend span::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin-right: 4px;
+      vertical-align: middle;
+      border-radius: 1px;
+    }
+    .stt-conf-leg-best::before  { background: var(--status-cyan); }
+    .stt-conf-leg-thr::before   { background: var(--status-warning); }
+    .stt-conf-leg-noise::before { background: var(--text-dim); }
+
+    /* Inline help icon — tooltip-only, no popover */
+    .stt-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border-primary);
+      color: var(--text-dim);
+      font-size: 9px;
+      font-weight: 600;
+      cursor: help;
+      margin-left: 6px;
+      user-select: none;
+    }
+    .stt-help:hover { color: var(--text-soft); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+    /* Response viewer (output sent to the LLM) */
+    .stt-response {
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .stt-response-meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+    .stt-response-meta .stt-trunc { color: var(--status-warning); }
 
     /* Candidates table — wrapper allows horizontal scroll when the panel is
        too narrow for all 9 columns (rank stages + Δboost + status). */
@@ -202,31 +302,106 @@ export function searchTraceDetailScript(): string {
     /** State for an open searchTrace panel — sort + filter for the candidates table. */
     window.__sttState = window.__sttState || {
       sortKey: 'final', sortDir: 'asc', filter: 'kept-top', showRaw: false, trace: null,
+      output: null, showResponse: false,
     };
 
-    function renderSearchTrace(trace) {
+    function renderSearchTrace(trace, output) {
       // New trace identity → reset sort/filter/qFilter so leftover state from
       // the previous span (which may have been a different shape) doesn't
-      // silently flip ordering or hide rows.
+      // silently flip ordering or hide rows. Also reset the response section
+      // (collapsed by default — it's >10 KB and rarely needed at first glance).
       if (window.__sttState.trace !== trace) {
         window.__sttState.sortKey = 'final';
         window.__sttState.sortDir = 'asc';
         window.__sttState.filter = 'kept-top';
         window.__sttState.qFilter = '';
         window.__sttState.trace = trace;
+        window.__sttState.output = output != null ? output : null;
+        window.__sttState.showResponse = false;
       }
       if (window.__sttState.showRaw) {
         return '<pre class="stt-raw">' + esc(JSON.stringify(trace, null, 2)) + '</pre>' +
                '<div class="stt-toolbar"><button class="stt-active" onclick="sttToggleRaw()">Show structured</button></div>';
       }
       if (sttIsYggdrasilTrace(trace)) {
-        return sttRenderYggdrasilPanel(trace);
+        return sttRenderYggdrasilPanel(trace) + sttRenderResponse(window.__sttState.output);
       }
       return '<div class="stt-panel">' +
         sttRenderQuery(trace.query || {}) +
         sttRenderCollections(trace.collections || []) +
+        sttRenderResponse(window.__sttState.output) +
         '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
       '</div>';
+    }
+
+    /** Render the tool's "output" attribute (the text actually returned to the
+     *  LLM) as a collapsible section. Output may be:
+     *   - a JSON-encoded object {head, _truncated, _originalBytes} when huginn
+     *     truncated the response to fit MAX_MCP_OUTPUT_TOKENS — show the head
+     *     and surface the truncation as a warning chip;
+     *   - a plain text string when the response was small enough to keep
+     *     verbatim — render as-is. */
+    function sttRenderResponse(output) {
+      if (output == null || output === '') return '';
+      var head = '';
+      var truncated = false;
+      var originalBytes = null;
+      var renderedBytes = null;
+      if (typeof output === 'string') {
+        renderedBytes = output.length;
+        // Cheap shape sniff before parse — most responses are plain text.
+        if (output.length > 1 && output.charAt(0) === '{') {
+          try {
+            var parsed = JSON.parse(output);
+            if (parsed && typeof parsed === 'object' && typeof parsed.head === 'string') {
+              head = parsed.head;
+              truncated = parsed._truncated === true;
+              if (typeof parsed._originalBytes === 'number') originalBytes = parsed._originalBytes;
+              renderedBytes = head.length;
+            } else {
+              head = output;
+            }
+          } catch (e) {
+            head = output;
+          }
+        } else {
+          head = output;
+        }
+      } else if (typeof output === 'object') {
+        try {
+          head = typeof output.head === 'string' ? output.head : JSON.stringify(output, null, 2);
+          truncated = output._truncated === true;
+          if (typeof output._originalBytes === 'number') originalBytes = output._originalBytes;
+          renderedBytes = head.length;
+        } catch (e) {
+          head = String(output);
+        }
+      } else {
+        head = String(output);
+        renderedBytes = head.length;
+      }
+
+      var s = window.__sttState;
+      var open = !!s.showResponse;
+      var meta = [];
+      if (renderedBytes != null) meta.push(renderedBytes.toLocaleString() + ' chars rendered');
+      if (truncated && originalBytes != null) meta.push('<span class="stt-trunc">truncated from ' + originalBytes.toLocaleString() + ' bytes</span>');
+      else if (truncated) meta.push('<span class="stt-trunc">truncated</span>');
+      var metaHtml = meta.length ? '<div class="stt-response-meta">' + meta.join(' · ') + '</div>' : '';
+
+      var btnLabel = open ? 'Hide response' : 'Show response sent to LLM';
+      var helpTip = 'The exact text returned by this tool call to Claude. When truncated, only the "head" portion is shown — the original size is reported in the meta line.';
+
+      return '<div class="stt-section">' +
+        '<h5>Response sent to LLM <span class="stt-help" title="' + esc(helpTip) + '">?</span></h5>' +
+        '<div class="stt-toolbar"><button class="' + (open ? 'stt-active' : '') + '" onclick="sttToggleResponse()">' + btnLabel + '</button></div>' +
+        (open ? metaHtml + '<div class="stt-response">' + esc(head) + '</div>' : '') +
+      '</div>';
+    }
+
+    function sttToggleResponse() {
+      window.__sttState.showResponse = !window.__sttState.showResponse;
+      sttRerender();
     }
 
     function sttIsYggdrasilTrace(trace) {
@@ -342,23 +517,115 @@ export function searchTraceDetailScript(): string {
       const hi = Math.max.apply(null, vals.concat([best + 0.2]));
       const range = hi - lo || 1;
       const pos = v => ((v - lo) / range) * 100;
+
+      // Sign convention: CE scores are negative-distance-like — more negative
+      // means more relevant. So lowConfidence = bestScore > threshold (less
+      // negative than the cutoff). The badge tooltip explains this so a reader
+      // who hovers the badge doesn't have to chase the wiki.
+      const badgeTip = conf.lowConfidence
+        ? 'lowConfidence=true: best score (' + best.toFixed(3) + ') is greater than (less negative than) the threshold (' + (lcThr != null ? lcThr : '?') + '). CE scores: more negative = more relevant.'
+        : 'lowConfidence=false: best score (' + best.toFixed(3) + ') is less than (more negative than) the threshold (' + (lcThr != null ? lcThr : '?') + '). CE scores: more negative = more relevant.';
       const lowBadge = conf.lowConfidence
-        ? '<span class="stt-badge stt-err">low confidence</span>'
-        : '<span class="stt-badge">confident</span>';
+        ? '<span class="stt-badge stt-err" title="' + esc(badgeTip) + '">low confidence</span>'
+        : '<span class="stt-badge" title="' + esc(badgeTip) + '">confident</span>';
+      const filtTip = 'Documents whose best chunk score was greater than (less negative than) noiseThreshold and got dropped from the response.';
       const filt = conf.filteredCount != null && conf.filteredCount > 0
-        ? '<span class="stt-badge stt-warn">' + conf.filteredCount + ' filtered</span>'
+        ? '<span class="stt-badge stt-warn" title="' + esc(filtTip) + '">' + conf.filteredCount + ' filtered</span>'
         : '';
+
+      const helpTip = [
+        'Confidence axis — interpreting the markers',
+        '',
+        'CE scores are negative; more negative = more relevant (treat them like a distance, lower is better).',
+        '',
+        'best = best CE score across surviving documents (per-doc score = min over chunks).',
+        'noiseThr = drop docs with best chunk score > noiseThr.',
+        'lowConfThr = flag the whole result as low-confidence if best surviving score > lowConfThr.',
+        '',
+        'On the bar: "best" left of the thresholds = good; right of them = drop / low confidence.',
+      ].join('\\n');
+
+      const bestTip = 'best CE score = ' + best.toFixed(3) + ' (lower / more negative = more relevant)';
+      const lcTip = lcThr != null
+        ? 'lowConfidenceThreshold = ' + lcThr + ' — flag low-confidence if best score is greater than (less negative than) this'
+        : '';
+      const nsTip = nsThr != null
+        ? 'noiseThreshold = ' + nsThr + ' — drop docs whose best chunk score is greater than (less negative than) this'
+        : '';
+
+      const legend =
+        '<span class="stt-conf-leg-best" title="' + esc(bestTip) + '">best ' + best.toFixed(3) + '</span>' +
+        (lcThr != null ? '<span class="stt-conf-leg-thr" title="' + esc(lcTip) + '">lowConfThr ' + lcThr + '</span>' : '') +
+        (nsThr != null ? '<span class="stt-conf-leg-noise" title="' + esc(nsTip) + '">noiseThr ' + nsThr + '</span>' : '');
+
+      // Anchor inline marker labels so they don't overflow the bar at the edges.
+      // < 5%  → align to the marker's left edge; > 95% → align to the right edge;
+      // otherwise center under the line.
+      function anchorClass(p) {
+        if (p < 5)  return ' stt-anchor-left';
+        if (p > 95) return ' stt-anchor-right';
+        return '';
+      }
+      // When lowConfThr and noiseThr land on top of each other (the common case
+      // when both are -0.1), push the second label one row down so they don't
+      // render on top of each other.
+      const sameThr = (lcThr != null && nsThr != null && Math.abs(lcThr - nsThr) < 1e-9);
+
+      const bestLabel =
+        '<div class="stt-conf-mark-label stt-mk-best' + anchorClass(pos(best)) +
+        '" style="left:' + pos(best) + '%">best ' + best.toFixed(2) + '</div>';
+      const lcLabel = lcThr != null
+        ? '<div class="stt-conf-mark-label stt-mk-thr' + anchorClass(pos(lcThr)) +
+          '" style="left:' + pos(lcThr) + '%">lowConfThr ' + lcThr + '</div>'
+        : '';
+      const nsLabel = nsThr != null
+        ? '<div class="stt-conf-mark-label stt-mk-noise' + anchorClass(pos(nsThr)) +
+          (sameThr ? ' stt-stack-1' : '') +
+          '" style="left:' + pos(nsThr) + '%">noiseThr ' + nsThr + '</div>'
+        : '';
+
+      // Plain-English interpretation. Pick the threshold to compare against:
+      // prefer lowConfThr (it's what flips the badge), fall back to noiseThr.
+      const cmpThr = lcThr != null ? lcThr : nsThr;
+      let summaryHtml = '';
+      if (cmpThr != null) {
+        const margin = cmpThr - best; // positive when best is more negative than threshold
+        const marginAbs = Math.abs(margin).toFixed(3);
+        const filteredNote = (conf.filteredCount != null && conf.filteredCount > 0)
+          ? ' — ' + conf.filteredCount + ' candidate' + (conf.filteredCount === 1 ? '' : 's') + ' dropped at the noise cutoff'
+          : ' — no noise filtering';
+        if (margin > 0) {
+          // best is more negative than threshold → confident
+          const strength = margin > 1 ? 'strong match' : (margin > 0.3 ? 'solid match' : 'borderline match');
+          summaryHtml = '<div class="stt-conf-summary stt-good">' +
+            esc(strength) + ' — best score <span class="stt-margin">' + marginAbs +
+            '</span> below the cutoff' + esc(filteredNote) + '.</div>';
+        } else if (margin < 0) {
+          summaryHtml = '<div class="stt-conf-summary stt-bad">' +
+            'weak match — best score <span class="stt-margin">' + marginAbs +
+            '</span> above the cutoff (flagged as low confidence)' + esc(filteredNote) + '.</div>';
+        } else {
+          summaryHtml = '<div class="stt-conf-summary">' +
+            'best score sits exactly at the cutoff' + esc(filteredNote) + '.</div>';
+        }
+      }
+
       return '<div style="margin-top:10px">' +
         '<div class="stt-row">' + lowBadge + filt +
+          '<span class="stt-help" title="' + esc(helpTip) + '">?</span>' +
           '<span style="color:var(--text-dim);font-size:11px;margin-left:8px">best=' + best.toFixed(3) +
           (lcThr != null ? ', lowConfThr=' + lcThr : '') +
           (nsThr != null ? ', noiseThr=' + nsThr : '') + '</span>' +
         '</div>' +
         '<div class="stt-conf">' +
-          (lcThr != null ? '<div class="stt-conf-thr"   style="left:' + pos(lcThr) + '%" title="lowConfThr=' + lcThr + '"></div>' : '') +
-          (nsThr != null ? '<div class="stt-conf-noise" style="left:' + pos(nsThr) + '%" title="noiseThr=' + nsThr + '"></div>' : '') +
-          '<div class="stt-conf-best"  style="left:' + pos(best) + '%" title="best=' + best.toFixed(3) + '"></div>' +
+          (lcThr != null ? '<div class="stt-conf-thr"   style="left:' + pos(lcThr) + '%" title="' + esc(lcTip) + '"></div>' : '') +
+          (nsThr != null ? '<div class="stt-conf-noise" style="left:' + pos(nsThr) + '%" title="' + esc(nsTip) + '"></div>' : '') +
+          '<div class="stt-conf-best"  style="left:' + pos(best) + '%" title="' + esc(bestTip) + '"></div>' +
+          bestLabel + lcLabel + nsLabel +
         '</div>' +
+        '<div class="stt-conf-axis"><span><em>←</em> more relevant</span><span>less relevant <em>→</em></span></div>' +
+        '<div class="stt-conf-legend">' + legend + '</div>' +
+        summaryHtml +
       '</div>';
     }
 
