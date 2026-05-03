@@ -51,16 +51,16 @@ export function tracesWaterfallStyles(): string {
        rows aligned with collapsible ones so the chip column stays straight. */
     .waterfall-toggle {
       display: inline-block;
-      width: 12px;
+      width: 16px;
       text-align: center;
-      color: var(--text-dim);
-      font-size: 10px;
+      color: var(--text-soft);
+      font-size: 14px;
       line-height: 16px;
       cursor: pointer;
       user-select: none;
-      margin-right: 2px;
+      margin-right: 4px;
     }
-    .waterfall-toggle:hover { color: var(--text-soft); }
+    .waterfall-toggle:hover { color: var(--text-primary); }
     .waterfall-toggle-spacer { cursor: default; visibility: hidden; }
     /* Chip-rendered labels for tool spans with discoverable collections.
        Verb + first-collection + (+N) — color stable per collection name (HSL hash). */
