@@ -1,5 +1,6 @@
-import { describe, test, expect } from "bun:test";
-import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace } from "./helpers.ts";
+import { describe, test, expect, beforeAll } from "bun:test";
+import vm from "node:vm";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, deriveSpanLabelScript, escScript } from "./helpers.ts";
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {
@@ -226,6 +227,131 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.tooltip).toContain("top: com.example.Foo");
     expect(out!.tooltip).toContain("total: 42ms");
   });
+
+  // ─── Per-tool extras path (no searchTrace, no input.collection) ───────────
+  test("knowledge-get_graph_node renders kind + id chips from node_id", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-get_graph_node",
+      attributes: { input: { node_id: "epic:MELOSYS-7383" } },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-get");
+    expect(out!.html).toContain(">epic<");           // kind chip
+    expect(out!.html).toContain(">MELOSYS-7383<");   // id chip (after colon)
+    expect(out!.html).toContain("wf-extra");
+    expect(out!.tooltip).toContain("node: epic:MELOSYS-7383");
+  });
+
+  test("knowledge-get_graph_node falls back to bare id when no colon", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-get_graph_node",
+      attributes: { input: '{"node_id":"foo"}' }, // string-encoded input
+    });
+    expect(out!.html).toContain(">foo<");
+    expect(out!.html).not.toMatch(/>kind:/);
+  });
+
+  test("yggdrasil-symbol_context renders repo + short symbol name", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-symbol_context",
+      attributes: {
+        input: {
+          qualified_name: "no.nav.melosys.saksflyt.steg.soknad.OpprettOgFerdigstillJournalpostSøknad",
+          repo: "melosys-api",
+        },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-symbol");
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain(">OpprettOgFerdigstillJournalpostSøknad<");
+    expect(out!.tooltip).toContain("repo: melosys-api");
+    expect(out!.tooltip).toContain("symbol: no.nav.melosys.saksflyt.steg.soknad.OpprettOgFerdigstillJournalpostSøknad");
+  });
+
+  test("yggdrasil-list_files renders repo + last path segment", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-list_files",
+      attributes: { input: { repo: "melosys-api", path: "saksflyt/src/main/kotlin/no/nav/melosys/saksflyt/prosessflyt" } },
+    });
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain(">prosessflyt<");
+    expect(out!.tooltip).toContain("path: saksflyt/src/main/kotlin/no/nav/melosys/saksflyt/prosessflyt");
+  });
+
+  test("yggdrasil-read_source renders repo + basename", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-read_source",
+      attributes: { input: { repo: "melosys-api", path: "src/main/kotlin/Foo.kt" } },
+    });
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain(">Foo.kt<");
+  });
+
+  test("yggdrasil-search_pattern renders repo + truncated pattern", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-search_pattern",
+      attributes: {
+        input: { repo: "melosys-api", pattern: "MELOSYS_MOTTAK_EKSISTERENDE_DIGITAL|OPPRETT_GOSYS_OPPGAVE" },
+      },
+    });
+    expect(out!.html).toContain("wf-verb-search");
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain("…"); // truncation marker
+    expect(out!.tooltip).toContain("pattern: MELOSYS_MOTTAK_EKSISTERENDE_DIGITAL|OPPRETT_GOSYS_OPPGAVE");
+  });
+
+  test("repo chip uses the same color as the matching collection chip", () => {
+    // Same repo name on two different tools should produce the same inline style
+    // (deterministic HSL hash) so the user can visually correlate them.
+    const a = deriveSpanLabelHtml({
+      name: "yggdrasil-list_files",
+      attributes: { input: { repo: "melosys-api", path: "x" } },
+    });
+    const b = deriveSpanLabelHtml({
+      name: "yggdrasil-read_source",
+      attributes: { input: { repo: "melosys-api", path: "x.kt" } },
+    });
+    const styleA = /style="([^"]+)"[^>]*>melosys-api</.exec(a!.html)?.[1];
+    const styleB = /style="([^"]+)"[^>]*>melosys-api</.exec(b!.html)?.[1];
+    expect(styleA).toBe(styleB);
+    expect(styleA).toBeTruthy();
+  });
+
+  test("returns null when per-tool input is missing all extractable fields", () => {
+    expect(deriveSpanLabelHtml({
+      name: "yggdrasil-symbol_context",
+      attributes: { input: {} },
+    })).toBeNull();
+  });
+});
+
+describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
+  // Eval the inline JS twin in a vm context and compare its output to the TS
+  // function. They MUST stay in sync — the JS version is what actually runs in
+  // the dashboard. If a future change touches one but not the other this
+  // catches the drift.
+  const ctx: Record<string, unknown> = {};
+  beforeAll(() => {
+    vm.createContext(ctx);
+    vm.runInContext(`${escScript()}\n${deriveSpanLabelScript()}`, ctx);
+  });
+  const callJs = (span: unknown) => (ctx.deriveSpanLabelHtml as (s: unknown) => unknown)(span);
+
+  const cases: Array<[string, unknown]> = [
+    ["graph_node",     { name: "knowledge-get_graph_node",   attributes: { input: { node_id: "epic:MELOSYS-7383" } } }],
+    ["symbol_context", { name: "yggdrasil-symbol_context",   attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
+    ["list_files",     { name: "yggdrasil-list_files",       attributes: { input: { repo: "melosys-api", path: "src/main/foo" } } }],
+    ["read_source",    { name: "yggdrasil-read_source",      attributes: { input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
+    ["search_pattern", { name: "yggdrasil-search_pattern",   attributes: { input: { repo: "melosys-api", pattern: "FOO|BAR" } } }],
+    ["search w/ coll", { name: "knowledge-search_knowledge", attributes: { input: { collection: "jira-issues" } } }],
+    ["null case",      { name: "claude" }],
+  ];
+  for (const [label, span] of cases) {
+    test(`parity: ${label}`, () => {
+      expect(callJs(span)).toEqual(deriveSpanLabelHtml(span as Parameters<typeof deriveSpanLabelHtml>[0]) as unknown);
+    });
+  }
 });
 
 describe("summarizeSearchTrace", () => {

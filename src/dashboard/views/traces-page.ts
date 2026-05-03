@@ -7,6 +7,7 @@ import { tracesListStyles, tracesListHtml, tracesListScript } from "./components
 import { tracesWaterfallStyles, tracesWaterfallHtml, tracesWaterfallScript } from "./components/traces-waterfall.ts";
 import { tracesPromptModalStyles, tracesPromptModalHtml, tracesPromptModalScript } from "./components/traces-prompt-modal.ts";
 import { searchTraceDetailStyles, searchTraceDetailScript } from "./components/search-trace-detail.ts";
+import { toolDetailRenderersStyles, toolDetailRenderersScript } from "./components/tool-detail-renderers.ts";
 
 export function renderTracesPage(): string {
   return `<!DOCTYPE html>
@@ -24,6 +25,7 @@ export function renderTracesPage(): string {
     ${tracesWaterfallStyles()}
     ${tracesPromptModalStyles()}
     ${searchTraceDetailStyles()}
+    ${toolDetailRenderersStyles()}
   </style>
 </head>
 <body>
@@ -48,6 +50,7 @@ export function renderTracesPage(): string {
     ${tracesStatsScript()}
     ${tracesFiltersScript()}
     ${searchTraceDetailScript()}
+    ${toolDetailRenderersScript()}
     ${tracesWaterfallScript()}
     ${tracesPromptModalScript()}
 

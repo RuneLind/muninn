@@ -82,7 +82,18 @@ export function tracesWaterfallStyles(): string {
     .wf-verb-search { background: color-mix(in srgb, var(--status-tool) 18%, transparent); color: var(--status-tool); border: 1px solid color-mix(in srgb, var(--status-tool) 40%, transparent); }
     .wf-verb-get    { background: color-mix(in srgb, var(--status-info) 18%, transparent); color: var(--status-info); border: 1px solid color-mix(in srgb, var(--status-info) 40%, transparent); }
     .wf-verb-list   { background: color-mix(in srgb, var(--status-cyan) 18%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 40%, transparent); }
+    .wf-verb-read   { background: color-mix(in srgb, var(--status-cyan) 14%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 35%, transparent); }
+    .wf-verb-symbol { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .wf-verb-other  { background: color-mix(in srgb, white 6%, transparent); color: var(--text-soft); border: 1px solid color-mix(in srgb, white 12%, transparent); }
+    /* Generic extra chip — used for ids, path tails, and patterns alongside
+       a repo/kind chip so the row carries the most distinguishing info. */
+    .wf-chip.wf-extra {
+      background: color-mix(in srgb, white 5%, transparent);
+      color: var(--text-soft);
+      border: 1px solid color-mix(in srgb, white 10%, transparent);
+      max-width: 200px;
+    }
+    .wf-chip.wf-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .wf-coll-more {
       background: color-mix(in srgb, white 5%, transparent);
       color: var(--text-dim);
@@ -450,17 +461,17 @@ export function tracesWaterfallScript(): string {
       const titleName = isAiSpan(span) ? aiSpanLabel(span) : span.name;
       document.getElementById('spanDetailsTitle').textContent =
         titleName + ' (' + span.kind + ', ' + span.status + ')';
-      const attrs = span.attributes || {};
       const host = document.getElementById('spanDetailsJson');
-      // If the span carries a v1 Huginn search trace, render the structured panel.
-      // Fall back to raw JSON for everything else (other span kinds, future schema
-      // versions, or if the renderer module isn't loaded).
-      if (attrs.searchTrace && typeof renderSearchTrace === 'function' &&
-          attrs.searchTrace.schemaVersion === 1) {
-        if (window.__sttState) window.__sttState.showRaw = false;
-        host.innerHTML = renderSearchTrace(attrs.searchTrace);
+      // renderToolDetail picks the best panel for this span: v1 search trace
+      // (delegates to renderSearchTrace), per-tool renderer (graph node, symbol
+      // context, list_files, read_source, search_pattern), or smart generic
+      // (Input + Output sections). Reset raw toggle on every span open so the
+      // panel always opens in structured mode.
+      if (typeof renderToolDetail === 'function') {
+        if (window.__tdrState) window.__tdrState.showRaw = false;
+        host.innerHTML = renderToolDetail(span);
       } else {
-        host.innerHTML = '<pre>' + esc(JSON.stringify(attrs, null, 2)) + '</pre>';
+        host.innerHTML = '<pre>' + esc(JSON.stringify(span.attributes || {}, null, 2)) + '</pre>';
       }
     });
 
