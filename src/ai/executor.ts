@@ -6,6 +6,7 @@ import type { ClaudeResult } from "../types.ts";
 import { StreamParser, type StreamProgressCallback } from "./stream-parser.ts";
 import { parseClaudeOutput } from "./result-parser.ts";
 import { preflightMcpForRequest } from "./mcp-status.ts";
+import { logTraceFlagsOnce } from "./huginn-trace.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("ai", "executor");
@@ -22,6 +23,7 @@ export async function executeClaudePrompt(
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
   const wallStart = performance.now();
+  logTraceFlagsOnce();
 
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;

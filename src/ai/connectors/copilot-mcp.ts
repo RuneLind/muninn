@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBotCwd } from "../mcp-config-utils.ts";
+import { logTraceFlagsOnce } from "../huginn-trace.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("ai", "copilot-mcp");
@@ -47,9 +48,22 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
   const mcpPath = join(botDir, ".mcp.json");
   if (!existsSync(mcpPath)) return {};
 
+  logTraceFlagsOnce();
+
   try {
     const raw: McpJsonFile = JSON.parse(readFileSync(mcpPath, "utf-8"));
     if (!raw.mcpServers) return {};
+
+    // Mirrors the claude-cli executor: stdio-spawned MCP children inherit
+    // the parent process env (PATH, HOME, HUGINN_TRACE_POINTER, …). Without
+    // this, the SDK's explicit `env` field replaces the inherited environment
+    // and pass-through vars (notably HUGINN_TRACE_POINTER) never reach the
+    // adapter. Only stdio entries are affected — http/sse entries connect to
+    // adapters that own their own environment.
+    const inheritedEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string") inheritedEnv[k] = v;
+    }
 
     const result: Record<string, CopilotMcpServer> = {};
     for (const [name, entry] of Object.entries(raw.mcpServers)) {
@@ -82,7 +96,7 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           command: entry.command,
           args: entry.args ?? [],
           cwd,
-          env: { HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
+          env: { ...inheritedEnv, HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
           tools: ["*"],
         };
       }
