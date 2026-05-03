@@ -166,12 +166,6 @@ describe("StreamParser", () => {
   });
 
   test("handles parallel tools split across separate assistant + user events (claude-cli pattern)", () => {
-    // Regression: claude-cli emits each parallel tool_use in its own
-    // assistant event and each tool_result in its own user event. Earlier
-    // versions of the parser called resolvePendingTools at the start of
-    // every assistant message and at the end of every user message, which
-    // flushed pending tools with output=undefined before their matching
-    // tool_result arrived. See logs/stream-capture for a captured example.
     const t0 = 1000;
     const parser = new StreamParser(t0);
 

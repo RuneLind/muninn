@@ -162,11 +162,8 @@ export class StreamParser {
   }
 
   private handleUser(event: any, timestamp: number): void {
-    // User message = tool results. Claude CLI emits each tool_result in its
-    // own user event for parallel tool calls, so we resolve each match
-    // immediately instead of batch-flushing at the end — otherwise a still-
-    // pending sibling tool would be moved with output=undefined before its
-    // own tool_result event arrives.
+    // Claude CLI emits each tool_result in its own user event for parallel
+    // tool calls, so resolve each match inline rather than batch-flushing.
     const content = event.message?.content;
     if (!Array.isArray(content)) return;
 
@@ -260,9 +257,6 @@ export class StreamParser {
       this.model = event.model;
     }
 
-    // Final flush: any pending tool that never got a matching tool_result
-    // (e.g. CLI killed mid-stream) still gets a span so the waterfall isn't
-    // missing entries.
     this.drainPendingTools(performance.now());
   }
 
