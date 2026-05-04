@@ -6,7 +6,7 @@ import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { extractMcpResultText } from "../huginn-trace.ts";
-import { peelHuginnTraceChannel } from "../huginn-trace-pointer.ts";
+import { peelHuginnTraceChannel, fetchHuginnTrace } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -155,12 +155,14 @@ export async function executePrompt(
           let outputForStorage: string | undefined;
           let searchTrace: unknown | undefined;
           let searchTracePointer: string | undefined;
+          let searchTraceFetch: Promise<unknown | null> | undefined;
           const text = extractMcpResultText(resultPayload);
           if (text !== null) {
             const channel = peelHuginnTraceChannel(text);
             outputForStorage = truncateOutput(channel.text);
             searchTrace = channel.trace;
             searchTracePointer = channel.pointer;
+            if (channel.pointer) searchTraceFetch = fetchHuginnTrace(channel.pointer);
           } else {
             outputForStorage = truncateOutput(resultPayload);
           }
@@ -175,6 +177,7 @@ export async function executePrompt(
             output: outputForStorage,
             searchTrace,
             searchTracePointer,
+            searchTraceFetch,
           });
           pendingTools.delete(event.data.toolCallId);
           onProgress?.({ type: "tool_end", name: pending.name, displayName });

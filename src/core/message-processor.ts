@@ -25,6 +25,41 @@ export { extractChannelPosts } from "./response-handler.ts";
 
 const log = getLog("core", "processor");
 
+/**
+ * Trace-marker-emitting MCP tools whose spans benefit from an env snapshot.
+ * Pairs both connector formats (claude-cli's `mcp__server__tool` and
+ * copilot-sdk's `server-tool`) so dispatch is independent of toolName shape.
+ */
+const TRACE_EMITTING_PREFIXES = [
+  "mcp__knowledge__",
+  "knowledge-",
+  "mcp__yggdrasil__",
+  "yggdrasil-",
+] as const;
+
+interface McpEnvIntended {
+  huginnTracePointer: string | null;
+  huginnTraceDefault: string | null;
+}
+
+/**
+ * Capture the trace env muninn currently passes to MCP children, on tool spans
+ * that depend on it. Stable across calls within one process; diagnostic value
+ * is in pairing with the startup adapter audit — if the audit shows a stale
+ * adapter and a span shows the current intended env, the discrepancy explains
+ * a missing searchTrace.
+ *
+ * Returns null for tool spans that don't go through a trace-emitting MCP, so
+ * non-search tools don't get a noise attribute.
+ */
+export function mcpEnvSnapshotForTool(toolName: string): McpEnvIntended | null {
+  if (!TRACE_EMITTING_PREFIXES.some((p) => toolName.startsWith(p))) return null;
+  return {
+    huginnTracePointer: process.env.HUGINN_TRACE_POINTER ?? null,
+    huginnTraceDefault: process.env.HUGINN_TRACE_DEFAULT ?? null,
+  };
+}
+
 export interface ProcessMessageParams {
   text: string;
   userId: string;
@@ -167,20 +202,23 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCount,
     });
 
-    // Resolve any Phase-2 trace pointers in parallel before opening tool spans.
-    // Pointer-mode tools come back from the connector with a `searchTracePointer`
-    // (fetch URL) but no `searchTrace` — we hit the producer's /api/trace/<id>
-    // (huginn or yggdrasil; the fetch is producer-agnostic, the URL is the
-    // discriminator) and merge the result back onto the tool. Fail-soft: a null
-    // fetch leaves the span without `searchTrace`, never breaks the user-visible
-    // response.
+    // Resolve any Phase-2 trace pointers before opening tool spans. Connectors
+    // start the fetch eagerly the moment the pointer is peeled (see
+    // {@link ToolCall.searchTraceFetch}) — we just await the in-flight promises
+    // here. The eager start is essential: huginn's trace store has a short TTL,
+    // and a multi-tool claude session can run for many minutes, which used to
+    // 404 every pointer emitted at the start of the session. Fail-soft as before:
+    // a null fetch leaves the span without `searchTrace`, never breaks the
+    // user-visible response.
     if (result.toolCalls) {
       const pointerTools = result.toolCalls.filter(
         (tc) => tc.searchTracePointer && tc.searchTrace === undefined,
       );
       if (pointerTools.length > 0) {
         const fetched = await Promise.allSettled(
-          pointerTools.map((tc) => fetchHuginnTrace(tc.searchTracePointer!)),
+          pointerTools.map(
+            (tc) => tc.searchTraceFetch ?? fetchHuginnTrace(tc.searchTracePointer!),
+          ),
         );
         for (let i = 0; i < pointerTools.length; i++) {
           const r = fetched[i]!;
@@ -201,6 +239,13 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           input: tool.input,
           statusText: getToolStatus(tool.name, tool.input),
         };
+        // Snapshot the trace env muninn intends MCP children to inherit, so a
+        // missing searchTrace can be diagnosed against the current process'
+        // configuration rather than guessed at. The actual adapter env may
+        // diverge if the adapter is a stale orphan from a previous run — see
+        // the startup adapter audit and `bun run cleanup:kill`.
+        const mcpEnv = mcpEnvSnapshotForTool(tool.name);
+        if (mcpEnv !== null) attrs.mcpEnvIntended = mcpEnv;
         // Huginn search adapters embed a per-search trace blob in their output
         // when HUGINN_TRACE_DEFAULT=1 is set. Connectors that can intercept the
         // structured tool result (copilot-sdk) extract the trace themselves and
