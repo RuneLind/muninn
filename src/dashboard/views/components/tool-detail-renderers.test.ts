@@ -29,7 +29,7 @@ function call(fn: string, ...args: unknown[]): string {
   return f(...args);
 }
 
-test("dispatcher picks renderer by toolName", () => {
+test("dispatcher picks renderer by toolName (copilot-sdk dash form)", () => {
   const pick = sandbox.tdrPickRenderer as (n: string) => unknown;
   expect(pick("knowledge-get_graph_node")).toBe(sandbox.tdrRenderGraphNode);
   expect(pick("yggdrasil-symbol_context")).toBe(sandbox.tdrRenderSymbolContext);
@@ -38,6 +38,26 @@ test("dispatcher picks renderer by toolName", () => {
   expect(pick("yggdrasil-search_pattern")).toBe(sandbox.tdrRenderSearchPattern);
   expect(pick("knowledge-search_knowledge")).toBeNull();
   expect(pick("totally-unknown-tool")).toBeNull();
+});
+
+test("dispatcher picks renderer by toolName (claude-cli mcp__ form)", () => {
+  const pick = sandbox.tdrPickRenderer as (n: string) => unknown;
+  expect(pick("mcp__knowledge__get_graph_node")).toBe(sandbox.tdrRenderGraphNode);
+  expect(pick("mcp__yggdrasil__symbol_context")).toBe(sandbox.tdrRenderSymbolContext);
+  expect(pick("mcp__yggdrasil__list_files")).toBe(sandbox.tdrRenderListFiles);
+  expect(pick("mcp__yggdrasil__read_source")).toBe(sandbox.tdrRenderReadSource);
+  expect(pick("mcp__yggdrasil__search_pattern")).toBe(sandbox.tdrRenderSearchPattern);
+  expect(pick("mcp__yggdrasil__search")).toBeNull();
+  expect(pick("mcp__totally__unknown_tool")).toBeNull();
+});
+
+test("normalize helper converts mcp__ form to dash form", () => {
+  const norm = sandbox.tdrNormalizeToolName as (n: string) => string;
+  expect(norm("mcp__yggdrasil__symbol_context")).toBe("yggdrasil-symbol_context");
+  expect(norm("mcp__claude_ai_Context7__query-docs")).toBe("claude_ai_Context7-query-docs");
+  expect(norm("yggdrasil-symbol_context")).toBe("yggdrasil-symbol_context");
+  expect(norm("Read")).toBe("Read");
+  expect(norm("")).toBe("");
 });
 
 test("renderToolDetail falls back to generic for unknown tool", () => {

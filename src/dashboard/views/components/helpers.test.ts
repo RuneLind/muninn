@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 import vm from "node:vm";
-import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, deriveSpanLabelScript, escScript } from "./helpers.ts";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, deriveSpanLabelScript, escScript, normalizeToolName } from "./helpers.ts";
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {
@@ -352,6 +352,93 @@ describe("deriveSpanLabelHtml", () => {
       attributes: { input: {} },
     })).toBeNull();
   });
+
+  // Claude CLI emits "mcp__yggdrasil__symbol_context"; copilot SDK emits
+  // "yggdrasil-symbol_context". Both must produce the same chip cluster — the
+  // dispatcher used to only match the dash form, so claude-cli rows fell
+  // through to a plain text label.
+  test("claude-cli mcp__ form produces same chips as copilot-sdk dash form", () => {
+    const dash = deriveSpanLabelHtml({
+      name: "yggdrasil-symbol_context",
+      attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } },
+    });
+    const mcp = deriveSpanLabelHtml({
+      name: "mcp__yggdrasil__symbol_context",
+      attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } },
+    });
+    expect(mcp).not.toBeNull();
+    expect(mcp!.html).toBe(dash!.html);
+  });
+
+  // Production claude-cli spans store the *display-formatted* name in span.name
+  // ("symbol_context (yggdrasil)") and the raw tool name in attrs.toolName.
+  // Dispatcher must use attrs.toolName, not span.name — earlier this asymmetry
+  // is what made claude-cli rows render plain text in the trace waterfall.
+  test("dispatch uses attrs.toolName when set, ignoring formatted span.name", () => {
+    const out = deriveSpanLabelHtml({
+      name: "symbol_context (yggdrasil)",
+      attributes: {
+        toolName: "mcp__yggdrasil__symbol_context",
+        input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-symbol");
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain(">Foo<");
+  });
+
+  test("claude-cli mcp__ form: graph_node renders verb + kind + id", () => {
+    const out = deriveSpanLabelHtml({
+      name: "mcp__knowledge__get_graph_node",
+      attributes: { input: { node_id: "epic:MELOSYS-7383" } },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-get");
+    expect(out!.html).toContain(">epic<");
+    expect(out!.html).toContain(">MELOSYS-7383<");
+  });
+
+  test("claude-cli mcp__ form: read_source/list_files/search_pattern all render chips", () => {
+    expect(deriveSpanLabelHtml({
+      name: "mcp__yggdrasil__read_source",
+      attributes: { input: { repo: "melosys-api", path: "src/Foo.kt" } },
+    })!.html).toContain(">Foo.kt<");
+    expect(deriveSpanLabelHtml({
+      name: "mcp__yggdrasil__list_files",
+      attributes: { input: { repo: "melosys-api", path: "src/main" } },
+    })!.html).toContain(">main<");
+    expect(deriveSpanLabelHtml({
+      name: "mcp__yggdrasil__search_pattern",
+      attributes: { input: { repo: "melosys-api", pattern: "FOO" } },
+    })!.html).toContain(">FOO<");
+  });
+});
+
+describe("normalizeToolName", () => {
+  test("strips mcp__ prefix and converts last __ to dash", () => {
+    expect(normalizeToolName("mcp__yggdrasil__symbol_context")).toBe("yggdrasil-symbol_context");
+    expect(normalizeToolName("mcp__knowledge__get_graph_node")).toBe("knowledge-get_graph_node");
+  });
+
+  test("preserves underscores within the server name (only last __ converts)", () => {
+    expect(normalizeToolName("mcp__claude_ai_Context7__query-docs")).toBe("claude_ai_Context7-query-docs");
+  });
+
+  test("passes through dash form unchanged", () => {
+    expect(normalizeToolName("yggdrasil-symbol_context")).toBe("yggdrasil-symbol_context");
+    expect(normalizeToolName("knowledge-search_knowledge")).toBe("knowledge-search_knowledge");
+  });
+
+  test("passes through built-in tool names unchanged", () => {
+    expect(normalizeToolName("Read")).toBe("Read");
+    expect(normalizeToolName("Bash")).toBe("Bash");
+  });
+
+  test("handles empty / malformed input safely", () => {
+    expect(normalizeToolName("")).toBe("");
+    expect(normalizeToolName("mcp__notool")).toBe("mcp__notool");
+  });
 });
 
 describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
@@ -374,6 +461,16 @@ describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
     ["search_pattern", { name: "yggdrasil-search_pattern",   attributes: { input: { repo: "melosys-api", pattern: "FOO|BAR" } } }],
     ["search w/ coll", { name: "knowledge-search_knowledge", attributes: { input: { collection: "jira-issues" } } }],
     ["null case",      { name: "claude" }],
+    // Claude CLI emits the mcp__server__tool format. The TS and JS twins must
+    // both normalise it before dispatch, so chips show up regardless of connector.
+    ["mcp__ symbol_context", { name: "mcp__yggdrasil__symbol_context", attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
+    ["mcp__ graph_node",     { name: "mcp__knowledge__get_graph_node", attributes: { input: { node_id: "epic:MELOSYS-7383" } } }],
+    ["mcp__ read_source",    { name: "mcp__yggdrasil__read_source",    attributes: { input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
+    // Production span shape for claude-cli: span.name = formatted display name,
+    // attrs.toolName = raw mcp__server__tool. The dispatcher prefers toolName so
+    // chips render the same as the copilot-sdk dash form.
+    ["claude-cli production shape — symbol_context", { name: "symbol_context (yggdrasil)", attributes: { toolName: "mcp__yggdrasil__symbol_context", input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
+    ["claude-cli production shape — read_source",    { name: "read_source (yggdrasil)",    attributes: { toolName: "mcp__yggdrasil__read_source",    input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
   ];
   for (const [label, span] of cases) {
     test(`parity: ${label}`, () => {

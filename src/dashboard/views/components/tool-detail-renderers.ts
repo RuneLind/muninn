@@ -271,13 +271,27 @@ export function toolDetailRenderersScript(): string {
       }
     }
 
+    /** Canonicalise tool names so renderers can be picked by a single shape.
+     *  Copilot SDK emits "yggdrasil-symbol_context"; claude-cli emits
+     *  "mcp__yggdrasil__symbol_context". Strip the "mcp__" prefix and replace
+     *  the last "__" with "-" so both connectors converge on "server-tool". */
+    function tdrNormalizeToolName(name) {
+      if (!name) return '';
+      if (name.indexOf('mcp__') !== 0) return name;
+      var rest = name.slice(5);
+      var idx = rest.lastIndexOf('__');
+      if (idx === -1) return name;
+      return rest.slice(0, idx) + '-' + rest.slice(idx + 2);
+    }
+
     function tdrPickRenderer(name) {
-      if (!name) return null;
-      if (/get_graph_node$/.test(name)) return tdrRenderGraphNode;
-      if (/yggdrasil-symbol_context$/.test(name)) return tdrRenderSymbolContext;
-      if (/yggdrasil-list_files$/.test(name))     return tdrRenderListFiles;
-      if (/yggdrasil-read_source$/.test(name))    return tdrRenderReadSource;
-      if (/yggdrasil-search_pattern$/.test(name)) return tdrRenderSearchPattern;
+      var canon = tdrNormalizeToolName(name);
+      if (!canon) return null;
+      if (/get_graph_node$/.test(canon)) return tdrRenderGraphNode;
+      if (/yggdrasil-symbol_context$/.test(canon)) return tdrRenderSymbolContext;
+      if (/yggdrasil-list_files$/.test(canon))     return tdrRenderListFiles;
+      if (/yggdrasil-read_source$/.test(canon))    return tdrRenderReadSource;
+      if (/yggdrasil-search_pattern$/.test(canon)) return tdrRenderSearchPattern;
       return null;
     }
 

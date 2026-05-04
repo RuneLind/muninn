@@ -35,6 +35,19 @@ export function extractToolInputLabel(input: unknown): string {
  *  we're going to append a more specific identifier (e.g. a collection name). */
 const TOOL_NAME_PREFIX_RE = /^(knowledge|huginn|yggdrasil)[-_]/;
 
+/** Canonicalise tool names so verb extraction and recipe matching can ignore
+ *  connector format differences. Copilot SDK emits "yggdrasil-symbol_context";
+ *  claude-cli emits "mcp__yggdrasil__symbol_context". Both must converge on
+ *  "yggdrasil-symbol_context" before pattern matching, otherwise claude-cli
+ *  spans get plain text labels while copilot-sdk gets the rich chip cluster. */
+export function normalizeToolName(name: string): string {
+  if (!name || name.indexOf("mcp__") !== 0) return name;
+  const rest = name.slice(5);
+  const idx = rest.lastIndexOf("__");
+  if (idx === -1) return name;
+  return rest.slice(0, idx) + "-" + rest.slice(idx + 2);
+}
+
 interface SpanLike {
   name?: string;
   attributes?: {
@@ -68,7 +81,16 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   if (!span || !span.name) return null;
   const attrs = span.attributes ?? {};
 
-  const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
+  // Dispatch on the raw tool name (attrs.toolName) — span.name is set to the
+  // human-formatted display name in message-processor.ts, which means claude-cli
+  // spans store "symbol_context (yggdrasil)" instead of the raw
+  // "mcp__yggdrasil__symbol_context". The display form doesn't roundtrip through
+  // normalizeToolName, so chips would never match for claude-cli without this.
+  const rawName = typeof attrs.toolName === "string" && attrs.toolName.length > 0
+    ? attrs.toolName
+    : span.name;
+  const canonName = normalizeToolName(rawName);
+  const verb = (canonName.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
   const verbChip = verb
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
@@ -110,7 +132,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
 
   // Per-tool extras path: graph_node / symbol_context / list_files /
   // read_source / search_pattern.
-  const extras = toolLabelExtras(span.name, attrs);
+  const extras = toolLabelExtras(canonName, attrs);
   if (extras) {
     return {
       html: verbChip + extras.chips,
@@ -526,11 +548,20 @@ export function deriveSpanLabelScript(): string {
       } },
     ];
 
+    function _wfNormalizeToolName(name) {
+      if (!name || name.indexOf('mcp__') !== 0) return name;
+      var rest = name.slice(5);
+      var idx = rest.lastIndexOf('__');
+      if (idx === -1) return name;
+      return rest.slice(0, idx) + '-' + rest.slice(idx + 2);
+    }
+
     function _wfToolLabelExtras(name, attrs) {
       var input = _wfParseInput(attrs.input);
       if (!input) return null;
+      var canon = _wfNormalizeToolName(name);
       for (var i = 0; i < _wfExtrasRecipes.length; i++) {
-        if (_wfExtrasRecipes[i].match.test(name)) return _wfExtrasRecipes[i].build(input);
+        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input);
       }
       return null;
     }
@@ -539,7 +570,13 @@ export function deriveSpanLabelScript(): string {
       if (!span || !span.name) return null;
       var attrs = span.attributes || {};
 
-      var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
+      // Prefer attrs.toolName (raw mcp__server__tool / server-tool) over span.name
+      // (which carries the human-formatted display name for claude-cli).
+      var rawName = (typeof attrs.toolName === 'string' && attrs.toolName.length > 0)
+        ? attrs.toolName
+        : span.name;
+      var canonName = _wfNormalizeToolName(rawName);
+      var verb = (canonName.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
       var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
       var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
 
@@ -617,7 +654,7 @@ export function deriveSpanLabelScript(): string {
 
       // Per-tool extras path — graph_node / symbol_context / list_files /
       // read_source / search_pattern. Driven by the _wfExtrasRecipes table.
-      var extras = _wfToolLabelExtras(span.name, attrs);
+      var extras = _wfToolLabelExtras(canonName, attrs);
       if (extras) {
         return {
           html: verbChip + extras.chips,
