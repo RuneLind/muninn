@@ -53,3 +53,14 @@ chat.config.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Working / scratch docs belong in the mimir wiki repo, not here.
+# See ../mimir/plans/consolidate-working-docs-into-mimir.md for the policy.
+# muninn/docs/ keeps zero working docs after Phase 4 cleanup; docs/examples/ stays.
+docs/*.md
+docs/*.html
+docs/*.excalidraw
+/PLAN.md
+/We*.md
+/parallel-*.md
+/Vipps*.md
