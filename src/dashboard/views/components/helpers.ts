@@ -35,6 +35,17 @@ export function extractToolInputLabel(input: unknown): string {
  *  we're going to append a more specific identifier (e.g. a collection name). */
 const TOOL_NAME_PREFIX_RE = /^(knowledge|huginn|yggdrasil)[-_]/;
 
+/** Strip the `mcp__` prefix and rejoin server/tool with a dash so claude-cli's
+ *  `mcp__yggdrasil__symbol_context` converges on copilot-sdk's
+ *  `yggdrasil-symbol_context` for regex matching. */
+export function normalizeToolName(name: string): string {
+  if (!name || !name.startsWith("mcp__")) return name;
+  const rest = name.slice(5);
+  const idx = rest.lastIndexOf("__");
+  if (idx === -1) return name;
+  return rest.slice(0, idx) + "-" + rest.slice(idx + 2);
+}
+
 interface SpanLike {
   name?: string;
   attributes?: {
@@ -68,7 +79,12 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   if (!span || !span.name) return null;
   const attrs = span.attributes ?? {};
 
-  const verb = (span.name.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
+  // span.name is the display-formatted name for claude-cli; the raw form is on attrs.toolName.
+  const rawName = typeof attrs.toolName === "string" && attrs.toolName.length > 0
+    ? attrs.toolName
+    : span.name;
+  const canonName = normalizeToolName(rawName);
+  const verb = (canonName.replace(TOOL_NAME_PREFIX_RE, "").split(/[_-]/)[0] || "").toLowerCase();
   const verbClass = /^[a-z]+$/.test(verb) ? verb : "other";
   const verbChip = verb
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
@@ -110,7 +126,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
 
   // Per-tool extras path: graph_node / symbol_context / list_files /
   // read_source / search_pattern.
-  const extras = toolLabelExtras(span.name, attrs);
+  const extras = toolLabelExtras(canonName, attrs);
   if (extras) {
     return {
       html: verbChip + extras.chips,
@@ -164,19 +180,24 @@ const EXTRAS_RECIPES: ExtrasRecipe[] = [
   // chip = (repo, last path segment), tooltip = (repo, full path).
   { match: /yggdrasil-list_files$/,  build: buildRepoPathExtras },
   { match: /yggdrasil-read_source$/, build: buildRepoPathExtras },
-  {
-    match: /yggdrasil-search_pattern$/,
-    build: (input) => {
-      const repo = strField(input, "repo");
-      const pat = strField(input, "pattern");
-      if (!repo && !pat) return null;
-      return {
-        chips: collChip(repo) + (pat ? extraChip(truncate(pat, 28), pat) : ""),
-        tooltipLines: tipLines({ repo, pattern: pat }),
-      };
-    },
-  },
+  { match: /yggdrasil-search_pattern$/,   build: (input) => buildTwoFieldExtras(input, "repo", "pattern") },
+  // Fallback when collectionsFor() returns null (no searchTrace and no input.collection).
+  { match: /knowledge-search_knowledge$/, build: (input) => buildTwoFieldExtras(input, "collection", "query") },
 ];
+
+function buildTwoFieldExtras(
+  input: Record<string, unknown>,
+  primaryField: string,
+  secondaryField: string,
+): ToolLabelExtras | null {
+  const primary = strField(input, primaryField);
+  const secondary = strField(input, secondaryField);
+  if (!primary && !secondary) return null;
+  return {
+    chips: collChip(primary) + (secondary ? extraChip(truncate(secondary, 28), secondary) : ""),
+    tooltipLines: tipLines({ [primaryField]: primary, [secondaryField]: secondary }),
+  };
+}
 
 function toolLabelExtras(name: string, attrs: NonNullable<SpanLike["attributes"]>): ToolLabelExtras | null {
   const input = parseInputObject(attrs.input);
@@ -515,22 +536,38 @@ export function deriveSpanLabelScript(): string {
       } },
       { match: /yggdrasil-list_files$/,  build: _wfBuildRepoPathExtras },
       { match: /yggdrasil-read_source$/, build: _wfBuildRepoPathExtras },
-      { match: /yggdrasil-search_pattern$/, build: function (input) {
-          var repo = _wfStrField(input, 'repo');
-          var pat = _wfStrField(input, 'pattern');
-          if (!repo && !pat) return null;
-          return {
-            chips: _wfCollChip(repo) + (pat ? _wfExtraChip(_wfTruncate(pat, 28), pat) : ''),
-            tooltipLines: _wfTipLines({ repo: repo, pattern: pat }),
-          };
-      } },
+      { match: /yggdrasil-search_pattern$/,   build: function (input) { return _wfBuildTwoFieldExtras(input, 'repo', 'pattern'); } },
+      // Fallback when neither searchTrace nor input.collection is present.
+      { match: /knowledge-search_knowledge$/, build: function (input) { return _wfBuildTwoFieldExtras(input, 'collection', 'query'); } },
     ];
+
+    function _wfBuildTwoFieldExtras(input, primaryField, secondaryField) {
+      var primary = _wfStrField(input, primaryField);
+      var secondary = _wfStrField(input, secondaryField);
+      if (!primary && !secondary) return null;
+      var tip = {};
+      tip[primaryField] = primary;
+      tip[secondaryField] = secondary;
+      return {
+        chips: _wfCollChip(primary) + (secondary ? _wfExtraChip(_wfTruncate(secondary, 28), secondary) : ''),
+        tooltipLines: _wfTipLines(tip),
+      };
+    }
+
+    function _wfNormalizeToolName(name) {
+      if (!name || !name.startsWith('mcp__')) return name;
+      var rest = name.slice(5);
+      var idx = rest.lastIndexOf('__');
+      if (idx === -1) return name;
+      return rest.slice(0, idx) + '-' + rest.slice(idx + 2);
+    }
 
     function _wfToolLabelExtras(name, attrs) {
       var input = _wfParseInput(attrs.input);
       if (!input) return null;
+      var canon = _wfNormalizeToolName(name);
       for (var i = 0; i < _wfExtrasRecipes.length; i++) {
-        if (_wfExtrasRecipes[i].match.test(name)) return _wfExtrasRecipes[i].build(input);
+        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input);
       }
       return null;
     }
@@ -539,7 +576,12 @@ export function deriveSpanLabelScript(): string {
       if (!span || !span.name) return null;
       var attrs = span.attributes || {};
 
-      var verb = (span.name.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
+      // span.name is the display-formatted name for claude-cli; the raw form is on attrs.toolName.
+      var rawName = (typeof attrs.toolName === 'string' && attrs.toolName.length > 0)
+        ? attrs.toolName
+        : span.name;
+      var canonName = _wfNormalizeToolName(rawName);
+      var verb = (canonName.replace(/^(knowledge|huginn|yggdrasil)[-_]/, '').split(/[_-]/)[0] || '').toLowerCase();
       var verbClass = /^[a-z]+$/.test(verb) ? verb : 'other';
       var verbChip = verb ? '<span class="wf-chip wf-verb wf-verb-' + esc(verbClass) + '">' + esc(verb) + '</span>' : '';
 
@@ -617,7 +659,7 @@ export function deriveSpanLabelScript(): string {
 
       // Per-tool extras path — graph_node / symbol_context / list_files /
       // read_source / search_pattern. Driven by the _wfExtrasRecipes table.
-      var extras = _wfToolLabelExtras(span.name, attrs);
+      var extras = _wfToolLabelExtras(canonName, attrs);
       if (extras) {
         return {
           html: verbChip + extras.chips,
