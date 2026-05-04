@@ -64,3 +64,6 @@ docs/*.excalidraw
 /We*.md
 /parallel-*.md
 /Vipps*.md
+
+# Local-only Claude Code memory (private LLM-session redirect to mimir wiki repo)
+CLAUDE.local.md
