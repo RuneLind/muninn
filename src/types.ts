@@ -60,10 +60,19 @@ export interface ToolCall {
    * Phase 2 trace channel: a fetch URL the connector parsed from a
    * `huginn-trace-id`/`huginn-trace-url` pointer line in the tool result.
    * Set when the tool ran but `searchTrace` is not yet resolved — message-processor
-   * fetches the actual trace JSON from this URL after the tool loop and merges
-   * it into the span. See src/ai/huginn-trace-pointer.ts.
+   * awaits {@link searchTraceFetch} (started eagerly by the connector at peel time)
+   * and merges the result into the span. See src/ai/huginn-trace-pointer.ts.
    */
   searchTracePointer?: string;
+  /**
+   * In-flight fetch for {@link searchTracePointer}, started by the connector the
+   * moment the pointer is extracted. Huginn's trace store has a short TTL, so a
+   * deferred fetch (waiting for the full claude session to end) returns 404 for
+   * pointers emitted at the start of long multi-tool sessions. Eagerly kicking
+   * off the fetch keeps the latency near zero. Resolves to `null` on any error
+   * (404, timeout, network) — see {@link fetchHuginnTrace}.
+   */
+  searchTraceFetch?: Promise<unknown | null>;
 }
 
 export interface ClaudeResult {

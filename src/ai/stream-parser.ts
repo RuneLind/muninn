@@ -1,7 +1,7 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
 import { recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
-import { peelHuginnTraceChannel } from "./huginn-trace-pointer.ts";
+import { peelHuginnTraceChannel, fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -45,6 +45,13 @@ interface PendingToolCall {
   searchTrace?: unknown;
   /** Phase 2 trace channel: pointer URL to fetch trace from after the loop. */
   searchTracePointer?: string;
+  /**
+   * Eagerly-started fetch for {@link searchTracePointer}. Huginn's trace store
+   * has a short TTL — kicking the fetch off here (instead of after the entire
+   * claude session ends in message-processor.ts) keeps it well within the
+   * window even for sessions that run for many minutes.
+   */
+  searchTraceFetch?: Promise<unknown | null>;
 }
 
 export class StreamParser {
@@ -185,12 +192,16 @@ export class StreamParser {
           pending.output = truncateOutput(channel.text);
           pending.searchTrace = channel.trace;
           pending.searchTracePointer = channel.pointer;
+          if (channel.pointer) pending.searchTraceFetch = fetchHuginnTrace(channel.pointer);
         } else {
           const recovery = recoverOversizedClaudeCliToolResult(raw);
           if (recovery !== null) {
             pending.output = truncateOutput(raw);
             if (recovery.trace !== null) pending.searchTrace = recovery.trace;
-            if (recovery.tracePointer !== null) pending.searchTracePointer = recovery.tracePointer;
+            if (recovery.tracePointer !== null) {
+              pending.searchTracePointer = recovery.tracePointer;
+              pending.searchTraceFetch = fetchHuginnTrace(recovery.tracePointer);
+            }
           } else {
             pending.output = truncateOutput(channel.text);
           }
@@ -217,6 +228,7 @@ export class StreamParser {
       output: pending.output,
       searchTrace: pending.searchTrace,
       searchTracePointer: pending.searchTracePointer,
+      searchTraceFetch: pending.searchTraceFetch,
     });
     this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
   }

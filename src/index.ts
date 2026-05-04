@@ -11,12 +11,19 @@ import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
+import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
+
+// Surface any MCP adapter processes that survived `predev: cleanup:kill`. Stale
+// adapters captured a different HUGINN_TRACE_* env at module-load and silently
+// skip trace marker emission; this audit names them in the log so intermittent
+// search-trace failures stop being mysterious.
+await auditMcpAdapters();
 // Discover all bots with CLAUDE.md (dashboard/chat page needs all bots)
 const allBotConfigs = discoverAllBots();
 // For platform startup: only bots with Telegram/Slack tokens

@@ -297,6 +297,108 @@ describe("StreamParser", () => {
     expect(result.outputTokens).toBe(200);
   });
 
+  test("eagerly starts trace fetch when a pointer arrives, not deferred to result", async () => {
+    // Huginn's trace store has a short TTL. If muninn waits to fetch until the
+    // claude session ends (which can be many minutes for multi-tool sessions),
+    // the pointer 404s. The parser must kick the fetch off the moment the
+    // tool_result is parsed, so even a long subsequent session keeps the trace.
+    const origUrl = process.env.KNOWLEDGE_API_URL;
+    process.env.KNOWLEDGE_API_URL = "http://test-allowed.example.com";
+    const origFetch = globalThis.fetch;
+    let fetchInvocations = 0;
+    let fetchInvokedAtMs: number | null = null;
+    const start = performance.now();
+    globalThis.fetch = mock(async () => {
+      fetchInvocations++;
+      fetchInvokedAtMs = performance.now() - start;
+      return new Response(JSON.stringify({ schemaVersion: 1, query: "x", collections: [] }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      const parser = new StreamParser(0);
+      parser.parseLine(JSON.stringify(systemEvent), 0);
+      parser.parseLine(
+        JSON.stringify(
+          makeAssistant([{ type: "tool_use", id: "toolu_P", name: "mcp__knowledge__search_knowledge", input: { query: "x" } }]),
+        ),
+        100,
+      );
+      const pointer = "http://test-allowed.example.com/api/trace/0123456789abcdef";
+      parser.parseLine(
+        JSON.stringify(
+          makeUser([
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_P",
+              content: `1. **Hit.md** (75% relevant)\n   collection: knowledge\n\nhuginn-trace-url: ${pointer}\n`,
+              is_error: false,
+            },
+          ]),
+        ),
+        200,
+      );
+      parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+      const result = parser.getResult();
+      const tool = result.toolCalls![0]!;
+
+      // The fetch must have been initiated by the time parseLine returned.
+      expect(fetchInvocations).toBe(1);
+      expect(fetchInvokedAtMs).toBeLessThan(50); // well within ms of pointer arrival
+      expect(tool.searchTracePointer).toBe(pointer);
+      expect(tool.searchTraceFetch).toBeInstanceOf(Promise);
+
+      // The in-flight fetch resolves to the trace body — message-processor.ts
+      // will await this and merge onto attrs.searchTrace.
+      const fetched = await tool.searchTraceFetch!;
+      expect(fetched).toEqual({ schemaVersion: 1, query: "x", collections: [] });
+
+      // Output is unwrapped + stripped of the marker line.
+      expect(tool.output).not.toContain("huginn-trace-url");
+      expect(tool.searchTrace).toBeUndefined(); // pointer mode: trace lives behind the URL until awaited
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origUrl === undefined) delete process.env.KNOWLEDGE_API_URL;
+      else process.env.KNOWLEDGE_API_URL = origUrl;
+    }
+  });
+
+  test("does not start a fetch when no pointer is present", () => {
+    const origFetch = globalThis.fetch;
+    let invoked = 0;
+    globalThis.fetch = mock(async () => {
+      invoked++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const parser = new StreamParser(0);
+      parser.parseLine(JSON.stringify(systemEvent), 0);
+      parser.parseLine(
+        JSON.stringify(
+          makeAssistant([{ type: "tool_use", id: "toolu_X", name: "Read", input: { file_path: "/a" } }]),
+        ),
+        100,
+      );
+      parser.parseLine(
+        JSON.stringify(
+          makeUser([{ type: "tool_result", tool_use_id: "toolu_X", content: "plain output", is_error: false }]),
+        ),
+        200,
+      );
+      parser.parseLine(JSON.stringify(makeResult({ num_turns: 2 })), 300);
+
+      const tool = parser.getResult().toolCalls![0]!;
+      expect(invoked).toBe(0);
+      expect(tool.searchTraceFetch).toBeUndefined();
+      expect(tool.searchTracePointer).toBeUndefined();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
   test("ignores malformed lines", () => {
     const parser = new StreamParser();
     parser.parseLine("not valid json");
