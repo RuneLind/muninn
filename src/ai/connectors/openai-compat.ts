@@ -230,7 +230,6 @@ export async function executePrompt(
         cleaned = channel.text;
         searchTrace = channel.trace;
         searchTracePointer = channel.pointer;
-        // Eagerly fetch — see comment on ToolCall.searchTraceFetch.
         if (channel.pointer) searchTraceFetch = fetchHuginnTrace(channel.pointer);
       } else {
         cleaned = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);

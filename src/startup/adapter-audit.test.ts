@@ -32,15 +32,11 @@ describe("parseHuginnEnvFromPs", () => {
     });
   });
 
-  test("custom key list overrides the default", () => {
-    const sample = "FOO=bar BAZ=qux HUGINN_TRACE_POINTER=1";
-    expect(parseHuginnEnvFromPs(sample, ["FOO", "BAZ"])).toEqual({ FOO: "bar", BAZ: "qux" });
-  });
-
   test("captures only the first '=' in values containing '=' (e.g. URLs with query strings)", () => {
-    const sample = "KNOWLEDGE_API_URL=http://localhost:8321/x?a=b HUGINN_TRACE_POINTER=1";
-    expect(parseHuginnEnvFromPs(sample, ["KNOWLEDGE_API_URL", "HUGINN_TRACE_POINTER"])).toEqual({
-      KNOWLEDGE_API_URL: "http://localhost:8321/x?a=b",
+    // HUGINN_TRACE_DEFAULT is in the default key list and exercises the same parsing path.
+    const sample = "HUGINN_TRACE_DEFAULT=http://localhost:8321/x?a=b HUGINN_TRACE_POINTER=1";
+    expect(parseHuginnEnvFromPs(sample)).toEqual({
+      HUGINN_TRACE_DEFAULT: "http://localhost:8321/x?a=b",
       HUGINN_TRACE_POINTER: "1",
     });
   });

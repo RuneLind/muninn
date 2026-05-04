@@ -162,7 +162,6 @@ export async function executePrompt(
             outputForStorage = truncateOutput(channel.text);
             searchTrace = channel.trace;
             searchTracePointer = channel.pointer;
-            // Eagerly fetch — see comment on ToolCall.searchTraceFetch.
             if (channel.pointer) searchTraceFetch = fetchHuginnTrace(channel.pointer);
           } else {
             outputForStorage = truncateOutput(resultPayload);

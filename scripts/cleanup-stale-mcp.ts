@@ -28,6 +28,7 @@
  */
 
 import { $ } from "bun";
+import { pgrep } from "../src/startup/process-utils.ts";
 
 const args = new Set(Bun.argv.slice(2));
 const dryRun = !args.has("--kill");
@@ -38,11 +39,6 @@ interface Proc {
   ppid: number;
   etime: string;
   command: string;
-}
-
-async function pgrep(pattern: string): Promise<number[]> {
-  const out = await $`pgrep -f ${pattern}`.nothrow().text();
-  return out.trim().split("\n").filter(Boolean).map(Number);
 }
 
 async function describe(pid: number): Promise<Proc | null> {

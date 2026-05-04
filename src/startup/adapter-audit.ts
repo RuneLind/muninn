@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import { getLog } from "../logging.ts";
+import { pgrep } from "./process-utils.ts";
 
 const log = getLog("startup", "adapter-audit");
 
@@ -29,11 +30,6 @@ interface AdapterProc {
   env: Partial<Record<string, string>>;
 }
 
-async function pgrep(pattern: string): Promise<number[]> {
-  const out = await $`pgrep -f ${pattern}`.nothrow().text();
-  return out.trim().split("\n").filter(Boolean).map(Number);
-}
-
 async function describe(pid: number): Promise<{ ppid: number; etime: string } | null> {
   const out = await $`ps -o ppid=,etime= -p ${pid}`.nothrow().text();
   const m = out.trim().match(/^(\d+)\s+(\S+)$/);
@@ -46,13 +42,13 @@ async function describe(pid: number): Promise<{ ppid: number; etime: string } | 
  * tokenizing rules — split on whitespace, key=value with `=` strictly inside —
  * are independently testable without spawning a process.
  */
-export function parseHuginnEnvFromPs(text: string, keys: readonly string[] = ENV_KEYS_TO_REPORT): Partial<Record<string, string>> {
+export function parseHuginnEnvFromPs(text: string): Partial<Record<string, string>> {
   const env: Partial<Record<string, string>> = {};
   for (const tok of text.split(/\s+/)) {
     const eq = tok.indexOf("=");
     if (eq <= 0) continue;
     const key = tok.slice(0, eq);
-    if (keys.includes(key)) env[key] = tok.slice(eq + 1);
+    if (ENV_KEYS_TO_REPORT.includes(key)) env[key] = tok.slice(eq + 1);
   }
   return env;
 }
@@ -66,14 +62,14 @@ async function readHuginnEnv(pid: number): Promise<Partial<Record<string, string
 
 export async function findAdapters(target: { label: string; pattern: string }): Promise<AdapterProc[]> {
   const pids = await pgrep(target.pattern);
-  const procs: AdapterProc[] = [];
-  for (const pid of pids) {
-    const meta = await describe(pid);
-    if (!meta) continue;
-    const env = await readHuginnEnv(pid);
-    procs.push({ pid, ppid: meta.ppid, etime: meta.etime, env });
-  }
-  return procs;
+  const enriched = await Promise.all(
+    pids.map(async (pid) => {
+      const [meta, env] = await Promise.all([describe(pid), readHuginnEnv(pid)]);
+      if (!meta) return null;
+      return { pid, ppid: meta.ppid, etime: meta.etime, env };
+    }),
+  );
+  return enriched.filter((p): p is AdapterProc => p !== null);
 }
 
 /**
@@ -89,8 +85,10 @@ export async function findAdapters(target: { label: string; pattern: string }): 
  */
 export async function auditMcpAdapters(): Promise<void> {
   try {
-    for (const target of TARGETS) {
-      const procs = await findAdapters(target);
+    const results = await Promise.all(
+      TARGETS.map(async (target) => ({ target, procs: await findAdapters(target) })),
+    );
+    for (const { target, procs } of results) {
       if (procs.length === 0) {
         log.info("MCP audit: no {label} processes running", { label: target.label });
         continue;
