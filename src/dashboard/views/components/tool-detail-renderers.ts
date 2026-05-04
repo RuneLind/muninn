@@ -271,13 +271,9 @@ export function toolDetailRenderersScript(): string {
       }
     }
 
-    /** Canonicalise tool names so renderers can be picked by a single shape.
-     *  Copilot SDK emits "yggdrasil-symbol_context"; claude-cli emits
-     *  "mcp__yggdrasil__symbol_context". Strip the "mcp__" prefix and replace
-     *  the last "__" with "-" so both connectors converge on "server-tool". */
     function tdrNormalizeToolName(name) {
       if (!name) return '';
-      if (name.indexOf('mcp__') !== 0) return name;
+      if (!name.startsWith('mcp__')) return name;
       var rest = name.slice(5);
       var idx = rest.lastIndexOf('__');
       if (idx === -1) return name;

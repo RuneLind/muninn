@@ -63,9 +63,10 @@ describe("extractToolInputLabel", () => {
 });
 
 describe("deriveSpanLabelHtml", () => {
-  test("returns null when there's no collection to chip", () => {
+  test("returns null when there's nothing chippable", () => {
     expect(deriveSpanLabelHtml({ name: "claude" })).toBeNull();
-    expect(deriveSpanLabelHtml({ name: "knowledge-search_knowledge", attributes: { input: { query: "x" } } })).toBeNull();
+    // No trace, no collection input, no query input → genuinely nothing to show.
+    expect(deriveSpanLabelHtml({ name: "knowledge-search_knowledge", attributes: { input: {} } })).toBeNull();
   });
 
   test("renders verb chip + collection chip from input.collection", () => {
@@ -353,6 +354,43 @@ describe("deriveSpanLabelHtml", () => {
     })).toBeNull();
   });
 
+  // When huginn fails to attach a trace (intermittent — large responses get
+  // truncated past the trace fence) AND the input has no `collection` field,
+  // the row label was previously plain text. Recipe falls back to the query so
+  // the row stays informative.
+  test("knowledge-search_knowledge falls back to query chip when trace+collection both missing", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        toolName: "knowledge-search_knowledge",
+        input: { query: "MELOSYS-7999 journalføring søknad", brief: false },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-search");
+    expect(out!.html).toContain(">MELOSYS-7999"); // truncated query as extra chip
+    expect(out!.tooltip).toContain("query: MELOSYS-7999 journalføring søknad");
+  });
+
+  test("knowledge-search_knowledge: searchTrace path still wins when trace is present", () => {
+    // When trace IS attached, the collections-from-trace branch fires first and
+    // returns its rich count chip — the fallback recipe must not interfere.
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        toolName: "knowledge-search_knowledge",
+        input: { query: "x", brief: false },
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "jira-issues", candidates: [{ kept: true, stages: { final: { rank: 1 } } }] }],
+        },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain(">jira-issues<"); // came from trace, not from input
+    expect(out!.html).toContain("wf-counts"); // count chip from search-trace path
+  });
+
   // Claude CLI emits "mcp__yggdrasil__symbol_context"; copilot SDK emits
   // "yggdrasil-symbol_context". Both must produce the same chip cluster — the
   // dispatcher used to only match the dash form, so claude-cli rows fell
@@ -471,6 +509,9 @@ describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
     // chips render the same as the copilot-sdk dash form.
     ["claude-cli production shape — symbol_context", { name: "symbol_context (yggdrasil)", attributes: { toolName: "mcp__yggdrasil__symbol_context", input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
     ["claude-cli production shape — read_source",    { name: "read_source (yggdrasil)",    attributes: { toolName: "mcp__yggdrasil__read_source",    input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
+    // Trace-missing fallback: when huginn doesn't attach a trace AND input has
+    // no collection, the recipe shows the query so the row isn't blank.
+    ["knowledge-search_knowledge no-trace fallback", { name: "knowledge-search_knowledge", attributes: { toolName: "knowledge-search_knowledge", input: { query: "journalføring søknad", brief: false } } }],
   ];
   for (const [label, span] of cases) {
     test(`parity: ${label}`, () => {
