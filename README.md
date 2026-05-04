@@ -94,7 +94,13 @@ graph LR
 | `TRACING_ENABLED` | No | `true` | Enable request tracing |
 | `TRACING_RETENTION_DAYS` | No | `7` | Days to keep trace data |
 | `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep prompt snapshots |
+| `HUGINN_TRACE_POINTER` | No | — | `1` enables Huginn's out-of-band trace channel (recommended). The Huginn MCP adapter is `stdio`-spawned by muninn, so this var propagates to it from muninn's env. Adapter emits a `huginn-trace-url:` line; Muninn fetches the trace via HTTP and attaches it as `searchTracePointer`. |
+| `HUGINN_TRACE_DEFAULT` | No | `1` (forced) | Legacy inline-fence Huginn trace mode. Muninn forces this on for spawned MCP children regardless of `.env`, so it is always active as a fallback when pointer mode does not engage. |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable) |
+
+Trace env vars must be in `process.env` *before* muninn starts — Bun auto-loads `.env`, but if you edit `.env` after launch you must restart for the new values to reach spawned MCP adapters. On startup, both connectors log a single line like `Trace env: HUGINN_TRACE_POINTER=1 HUGINN_TRACE_DEFAULT=1 YGGDRASIL_TRACE_POINTER=unset YGGDRASIL_TRACE_DEFAULT=unset` so you can confirm what the running process actually sees.
+
+`YGGDRASIL_TRACE_POINTER` / `YGGDRASIL_TRACE_DEFAULT` are not in this table because yggdrasil runs as an `http`-mode MCP started separately from muninn — those flags belong in the yggdrasil server's own startup environment, not in muninn's `.env`. Same applies to any other `type: "http"` entry in a bot's `.mcp.json` (e.g. the Serena tool proxy). The startup log line still reports their values from muninn's process env so you can spot-check whether the parent shell is exporting them when you spawn yggdrasil from there.
 
 #### Per-Bot — Telegram
 

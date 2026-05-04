@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveBotCwd } from "../mcp-config-utils.ts";
+import { logTraceFlagsOnce } from "../huginn-trace.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("ai", "copilot-mcp");
@@ -47,6 +48,8 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
   const mcpPath = join(botDir, ".mcp.json");
   if (!existsSync(mcpPath)) return {};
 
+  logTraceFlagsOnce();
+
   try {
     const raw: McpJsonFile = JSON.parse(readFileSync(mcpPath, "utf-8"));
     if (!raw.mcpServers) return {};
@@ -70,19 +73,14 @@ export function parseMcpConfig(botDir: string): Record<string, CopilotMcpServer>
           continue;
         }
         const cwd = resolveBotCwd(entry.cwd, botDir);
-        // Huginn MCP adapters embed a search trace when this is set. Non-Huginn
-        // servers ignore unknown env vars, so it's safe to set unconditionally.
-        // The bot's own .mcp.json env wins via spread order.
-        // Works end-to-end for copilot-sdk because the SDK's oversized-tool
-        // divert keeps the full payload on contents[] where extractMcpResultText
-        // can read it — searchTrace lands on attributes.searchTrace and the
-        // model only sees the SDK's "Output too large" placeholder.
+        // Inherit parent env so HUGINN_TRACE_POINTER etc. reach stdio children;
+        // forced HUGINN_TRACE_DEFAULT covers the legacy fence path; entry.env wins.
         result[name] = {
           type: "local",
           command: entry.command,
           args: entry.args ?? [],
           cwd,
-          env: { HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) },
+          env: { ...process.env, HUGINN_TRACE_DEFAULT: "1", ...(entry.env ?? {}) } as Record<string, string>,
           tools: ["*"],
         };
       }

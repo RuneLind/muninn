@@ -4,6 +4,11 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
 describe("parseMcpConfig", () => {
   test("returns empty object when .mcp.json does not exist", () => {
     const result = parseMcpConfig("/nonexistent/path");
@@ -38,26 +43,73 @@ describe("parseMcpConfig", () => {
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
     try {
       const result = parseMcpConfig(dir);
-      expect(result).toEqual({
-        gmail: {
-          type: "local",
-          command: "npx",
-          args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-          cwd: dir,
-          env: { HUGINN_TRACE_DEFAULT: "1", TOKEN_PATH: "/tmp/token.json" },
-          tools: ["*"],
-        },
-        calendar: {
-          type: "local",
-          command: "node",
-          args: [],
-          cwd: dir,
-          env: { HUGINN_TRACE_DEFAULT: "1" },
-          tools: ["*"],
-        },
-      });
+      const gmail = result.gmail as { type: string; command: string; args: string[]; cwd: string; env: Record<string, string>; tools: string[] };
+      const calendar = result.calendar as { type: string; command: string; args: string[]; cwd: string; env: Record<string, string>; tools: string[] };
+
+      expect(gmail.type).toBe("local");
+      expect(gmail.command).toBe("npx");
+      expect(gmail.args).toEqual(["-y", "@gongrzhe/server-gmail-autoauth-mcp"]);
+      expect(gmail.cwd).toBe(dir);
+      expect(gmail.tools).toEqual(["*"]);
+      expect(gmail.env.HUGINN_TRACE_DEFAULT).toBe("1");
+      expect(gmail.env.TOKEN_PATH).toBe("/tmp/token.json");
+
+      expect(calendar.type).toBe("local");
+      expect(calendar.command).toBe("node");
+      expect(calendar.args).toEqual([]);
+      expect(calendar.env.HUGINN_TRACE_DEFAULT).toBe("1");
     } finally {
       rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("propagates trace-pointer env vars from process.env to spawned MCP children", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = { mcpServers: { huginn: { command: "uv", args: ["run", "x.py"] } } };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+
+    const previous = {
+      HUGINN_TRACE_POINTER: process.env.HUGINN_TRACE_POINTER,
+      YGGDRASIL_TRACE_POINTER: process.env.YGGDRASIL_TRACE_POINTER,
+      YGGDRASIL_TRACE_DEFAULT: process.env.YGGDRASIL_TRACE_DEFAULT,
+    };
+    process.env.HUGINN_TRACE_POINTER = "1";
+    process.env.YGGDRASIL_TRACE_POINTER = "1";
+    process.env.YGGDRASIL_TRACE_DEFAULT = "1";
+
+    try {
+      const result = parseMcpConfig(dir);
+      const huginn = result.huginn as { env: Record<string, string> };
+      expect(huginn.env.HUGINN_TRACE_POINTER).toBe("1");
+      expect(huginn.env.YGGDRASIL_TRACE_POINTER).toBe("1");
+      expect(huginn.env.YGGDRASIL_TRACE_DEFAULT).toBe("1");
+      // Forced flag still present.
+      expect(huginn.env.HUGINN_TRACE_DEFAULT).toBe("1");
+    } finally {
+      rmSync(dir, { recursive: true });
+      restoreEnv("HUGINN_TRACE_POINTER", previous.HUGINN_TRACE_POINTER);
+      restoreEnv("YGGDRASIL_TRACE_POINTER", previous.YGGDRASIL_TRACE_POINTER);
+      restoreEnv("YGGDRASIL_TRACE_DEFAULT", previous.YGGDRASIL_TRACE_DEFAULT);
+    }
+  });
+
+  test("bot's .mcp.json env wins over inherited process.env on key collision", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-test-"));
+    const mcpJson = {
+      mcpServers: { svc: { command: "node", env: { TOKEN_PATH: "/bot/specific" } } },
+    };
+    writeFileSync(join(dir, ".mcp.json"), JSON.stringify(mcpJson));
+
+    const previous = process.env.TOKEN_PATH;
+    process.env.TOKEN_PATH = "/from/process";
+
+    try {
+      const result = parseMcpConfig(dir);
+      const svc = result.svc as { env: Record<string, string> };
+      expect(svc.env.TOKEN_PATH).toBe("/bot/specific");
+    } finally {
+      rmSync(dir, { recursive: true });
+      restoreEnv("TOKEN_PATH", previous);
     }
   });
 

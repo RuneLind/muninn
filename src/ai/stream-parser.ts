@@ -131,9 +131,6 @@ export class StreamParser {
         (usage.cache_read_input_tokens ?? 0);
     }
 
-    // Resolve any pending tool calls — the assistant responding means tools finished
-    this.resolvePendingTools(timestamp);
-
     let hasToolUse = false;
     for (const block of content) {
       if (block.type === "text" && typeof block.text === "string") {
@@ -165,66 +162,69 @@ export class StreamParser {
   }
 
   private handleUser(event: any, timestamp: number): void {
-    // User message = tool results.
+    // Claude CLI emits each tool_result in its own user event for parallel
+    // tool calls, so resolve each match inline rather than batch-flushing.
     const content = event.message?.content;
-    if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block?.type !== "tool_result") continue;
-        const useId = block.tool_use_id;
-        if (typeof useId !== "string") continue;
-        const pending = this.pendingTools.find((p) => p.id === useId);
-        if (!pending) continue;
-        // Peel the Huginn search-trace fence (if present) from the raw text
-        // BEFORE truncateOutput runs — the closing ``` would otherwise fall
-        // past the 16 KB cap and the trace would never make it onto the
-        // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
-        const raw = extractToolResultContent(block);
-        if (typeof raw === "string") {
-          // Try inline channels (pointer or fence) first; if neither matched
-          // and the text is the CLI divert placeholder, recovery reads the
-          // saved file and peels the trace from there. Recovery rewrites the
-          // file fence-free so a later model Read doesn't pull the trace back
-          // into context.
-          const channel = peelHuginnTraceChannel(raw);
-          if (channel.pointer || channel.trace !== undefined) {
-            pending.output = truncateOutput(channel.text);
-            pending.searchTrace = channel.trace;
-            pending.searchTracePointer = channel.pointer;
-          } else {
-            const recovery = recoverOversizedClaudeCliToolResult(raw);
-            if (recovery !== null) {
-              pending.output = truncateOutput(raw);
-              if (recovery.trace !== null) pending.searchTrace = recovery.trace;
-              if (recovery.tracePointer !== null) pending.searchTracePointer = recovery.tracePointer;
-            } else {
-              pending.output = truncateOutput(channel.text);
-            }
-          }
+    if (!Array.isArray(content)) return;
+
+    for (const block of content) {
+      if (block?.type !== "tool_result") continue;
+      const useId = block.tool_use_id;
+      if (typeof useId !== "string") continue;
+      const idx = this.pendingTools.findIndex((p) => p.id === useId);
+      if (idx === -1) continue;
+      const pending = this.pendingTools[idx]!;
+      // Peel the Huginn search-trace fence (if present) from the raw text
+      // BEFORE truncateOutput runs — the closing ``` would otherwise fall
+      // past the 16 KB cap and the trace would never make it onto the
+      // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
+      const raw = extractToolResultContent(block);
+      if (typeof raw === "string") {
+        const channel = peelHuginnTraceChannel(raw);
+        if (channel.pointer || channel.trace !== undefined) {
+          pending.output = truncateOutput(channel.text);
+          pending.searchTrace = channel.trace;
+          pending.searchTracePointer = channel.pointer;
         } else {
-          pending.output = truncateOutput(raw);
+          const recovery = recoverOversizedClaudeCliToolResult(raw);
+          if (recovery !== null) {
+            pending.output = truncateOutput(raw);
+            if (recovery.trace !== null) pending.searchTrace = recovery.trace;
+            if (recovery.tracePointer !== null) pending.searchTracePointer = recovery.tracePointer;
+          } else {
+            pending.output = truncateOutput(channel.text);
+          }
         }
+      } else {
+        pending.output = truncateOutput(raw);
       }
+      this.pendingTools.splice(idx, 1);
+      this.pushResolved(pending, timestamp);
     }
-    this.resolvePendingTools(timestamp);
   }
 
-  private resolvePendingTools(endTimestamp: number): void {
+  private pushResolved(pending: PendingToolCall, endTimestamp: number): void {
+    const durationMs = Math.max(0, Math.round(endTimestamp - pending.startTimestamp));
+    const startOffsetMs = Math.max(0, Math.round(pending.startTimestamp - this.refTimestamp));
+    const displayName = formatToolDisplayName(pending.name);
+    this.toolCalls.push({
+      id: pending.id,
+      name: pending.name,
+      displayName,
+      durationMs,
+      startOffsetMs,
+      input: abbreviateInput(pending.input),
+      output: pending.output,
+      searchTrace: pending.searchTrace,
+      searchTracePointer: pending.searchTracePointer,
+    });
+    this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
+  }
+
+  /** Final-flush safety net for tools that never received a matching tool_result. */
+  private drainPendingTools(endTimestamp: number): void {
     for (const pending of this.pendingTools) {
-      const durationMs = Math.max(0, Math.round(endTimestamp - pending.startTimestamp));
-      const startOffsetMs = Math.max(0, Math.round(pending.startTimestamp - this.refTimestamp));
-      const displayName = formatToolDisplayName(pending.name);
-      this.toolCalls.push({
-        id: pending.id,
-        name: pending.name,
-        displayName,
-        durationMs,
-        startOffsetMs,
-        input: abbreviateInput(pending.input),
-        output: pending.output,
-        searchTrace: pending.searchTrace,
-        searchTracePointer: pending.searchTracePointer,
-      });
-      this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
+      this.pushResolved(pending, endTimestamp);
     }
     this.pendingTools = [];
   }
@@ -256,6 +256,8 @@ export class StreamParser {
     if (event.model && this.model === "unknown") {
       this.model = event.model;
     }
+
+    this.drainPendingTools(performance.now());
   }
 
   private handleStreamEvent(event: any): void {

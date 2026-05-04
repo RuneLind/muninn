@@ -29,6 +29,22 @@ const log = getLog("ai", "huginn-trace");
 /** Env var that opts a Huginn MCP adapter into emitting trace blobs. */
 export const HUGINN_TRACE_ENV = { HUGINN_TRACE_DEFAULT: "1" } as const;
 
+/** Logs trace env-var state once per process so devs can confirm what spawned MCP children will inherit. */
+let traceFlagsLogged = false;
+export function logTraceFlagsOnce(): void {
+  if (traceFlagsLogged) return;
+  traceFlagsLogged = true;
+  log.info(
+    "Trace env: HUGINN_TRACE_POINTER={huginnPointer} HUGINN_TRACE_DEFAULT={huginnDefault} YGGDRASIL_TRACE_POINTER={yggPointer} YGGDRASIL_TRACE_DEFAULT={yggDefault}",
+    {
+      huginnPointer: process.env.HUGINN_TRACE_POINTER ?? "unset",
+      huginnDefault: process.env.HUGINN_TRACE_DEFAULT ?? "unset",
+      yggPointer: process.env.YGGDRASIL_TRACE_POINTER ?? "unset",
+      yggDefault: process.env.YGGDRASIL_TRACE_DEFAULT ?? "unset",
+    },
+  );
+}
+
 export interface HuginnTraceExtraction {
   /** Tool output with the trace block stripped. Same type as input. */
   text: string;

@@ -247,8 +247,8 @@ PostgreSQL + pgvector via Docker (single container).
 | `TRACING_ENABLED` | No | `true` | Enable request tracing |
 | `TRACING_RETENTION_DAYS` | No | `7` | Days to keep trace data |
 | `PROMPT_SNAPSHOTS_RETENTION_DAYS` | No | `3` | Days to keep prompt snapshots |
-| `HUGINN_TRACE_POINTER` | No | — | Set to `1` to enable Huginn out-of-band trace channel (recommended). Adapter emits a short `huginn-trace-url:` line; Muninn fetches the trace via HTTP. Avoids the divert that triggers when an inline trace pushes search results past Claude CLI's `MAX_MCP_OUTPUT_TOKENS`. Inherited by spawned MCP adapters, so set in muninn's parent shell before startup. |
-| `HUGINN_TRACE_DEFAULT` | No | — | Set to `1` to enable Huginn inline-fence trace mode (legacy fallback). Pointer-mode is preferred. |
+| `HUGINN_TRACE_POINTER` | No | — | Set to `1` to enable Huginn out-of-band trace channel (recommended). Huginn's MCP adapter is `stdio`-spawned by muninn, so this var propagates to it from muninn's env. Adapter emits a `huginn-trace-url:` line; Muninn fetches the trace via HTTP. Avoids the divert that triggers when an inline trace pushes search results past Claude CLI's `MAX_MCP_OUTPUT_TOKENS`. Bun auto-loads `.env`, so editing it + restarting muninn is sufficient. **NB:** the adapter captures `TRACE_DEFAULT` at module-load, so a long-lived stale adapter (e.g. spawned by an orphaned benchmark run) won't pick up env changes. Run `bun run cleanup` after restarts if traces still look wrong — see `docs/stale-mcp-cleanup.md`. |
+| `HUGINN_TRACE_DEFAULT` | No | `1` (forced) | Huginn inline-fence trace mode. Muninn forces this on for spawned MCP children so it is always active as a fallback. |
 | `SLACK_BOT_TOKEN_<NAME>` | No | — | Slack bot token (per bot) |
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
