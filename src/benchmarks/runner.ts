@@ -267,6 +267,12 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   let scratchDir: string | null = null;
   let cellResult: RunCellResult;
 
+  // Captured so the finally block can restore even if the cell crashes
+  // mid-run. parseYggdrasilTracePointer's allow-list is built from
+  // YGGDRASIL_MCP_URL at every call, so overriding it scopes cleanly to
+  // the cell.
+  const originalYggdrasilMcpUrl = process.env.YGGDRASIL_MCP_URL;
+
   try {
     if (stackUsesSerena(stack)) {
       const usedPorts = new Set<number>();
@@ -298,6 +304,12 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
           worktreePath: wt.worktreePath,
         })),
       });
+      // Yggdrasil bakes its own port into the trace pointer URL it emits
+      // (yggdrasil/src/tracing/trace-store.ts), and Muninn's pointer parser
+      // gates fetches on YGGDRASIL_MCP_URL's origin. Without this override
+      // the bench-port URL is silently rejected and `searchTrace` never
+      // lands on the span.
+      process.env.YGGDRASIL_MCP_URL = yggdrasilInstance.mcpUrl;
     }
 
     // Step 3 — scratch bot dir with overlayed .mcp.json
@@ -361,6 +373,11 @@ export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
       totalCostUsd: totalCost,
     };
   } finally {
+    if (originalYggdrasilMcpUrl === undefined) {
+      delete process.env.YGGDRASIL_MCP_URL;
+    } else {
+      process.env.YGGDRASIL_MCP_URL = originalYggdrasilMcpUrl;
+    }
     // allSettled so one hung stop can't block the rest — each instance is
     // independent and a leaked process is worse than a noisy teardown log.
     const teardowns: Promise<unknown>[] = [];
