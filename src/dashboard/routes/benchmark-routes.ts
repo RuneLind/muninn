@@ -14,11 +14,9 @@ import {
 } from "../../benchmarks/treatment-discovery.ts";
 import { buildCellPreview } from "../../benchmarks/preview.ts";
 import { getTrace } from "../../db/traces.ts";
-import {
-  renderBenchmarkListPage,
-  renderBenchmarkDetailPage,
-  renderBenchmarkRunLivePage,
-} from "../views/benchmark-page.ts";
+import { renderBenchmarkListPage } from "../views/benchmark/list-page.ts";
+import { renderBenchmarkDetailPage } from "../views/benchmark/detail-page.ts";
+import { renderBenchmarkRunLivePage } from "../views/benchmark/live-page.ts";
 
 const log = getLog("dashboard", "benchmark");
 
