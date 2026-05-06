@@ -8,6 +8,7 @@ interface SpanLike {
     toolName?: unknown;
     toolId?: unknown;
     input?: unknown;
+    output?: unknown;
     searchTrace?:
       | {
           collections?: Array<{
@@ -96,7 +97,10 @@ interface ToolLabelExtras { chips: string; tooltipLines: string[]; }
 
 type ExtrasRecipe = {
   match: RegExp;
-  build: (input: Record<string, unknown>) => ToolLabelExtras | null;
+  build: (
+    input: Record<string, unknown>,
+    attrs: NonNullable<SpanLike["attributes"]>,
+  ) => ToolLabelExtras | null;
 };
 
 /** Recipes for non-search tools. Each entry pairs a tool-name pattern with
@@ -137,6 +141,7 @@ const EXTRAS_RECIPES: ExtrasRecipe[] = [
   { match: /yggdrasil-list_files$/,  build: buildRepoPathExtras },
   { match: /yggdrasil-read_source$/, build: buildRepoPathExtras },
   { match: /yggdrasil-search_pattern$/,   build: (input) => buildTwoFieldExtras(input, "repo", "pattern") },
+  { match: /yggdrasil-analyze_ticket$/,   build: buildAnalyzeTicketExtras },
   // Fallback when collectionsFor() returns null (no searchTrace and no input.collection).
   { match: /knowledge-search_knowledge$/, build: (input) => buildTwoFieldExtras(input, "collection", "query") },
 ];
@@ -159,9 +164,35 @@ function toolLabelExtras(name: string, attrs: NonNullable<SpanLike["attributes"]
   const input = parseInputObject(attrs.input);
   if (!input) return null;
   for (const r of EXTRAS_RECIPES) {
-    if (r.match.test(name)) return r.build(input);
+    if (r.match.test(name)) return r.build(input, attrs);
   }
   return null;
+}
+
+/** analyze_ticket inputs are large enough that the 500-char abbreviation
+ *  often drops the trailing `repo` field. Recover it from the response's
+ *  `summary.repos` (the canonical list of repos hit during analysis) so the
+ *  row keeps a colored repo chip — matching the symbol_context / list_files
+ *  rows that always have one. */
+function buildAnalyzeTicketExtras(
+  input: Record<string, unknown>,
+  attrs: NonNullable<SpanLike["attributes"]>,
+): ToolLabelExtras | null {
+  const ticket = strField(input, "ticket");
+  let repo = strField(input, "repo");
+  if (!repo) {
+    const out = parseInputObject(attrs.output);
+    const summary = out && typeof out.summary === "object" && out.summary !== null
+      ? (out.summary as Record<string, unknown>)
+      : null;
+    const repos = summary && Array.isArray(summary.repos) ? summary.repos : null;
+    if (repos && repos.length > 0 && typeof repos[0] === "string") repo = repos[0];
+  }
+  if (!repo && !ticket) return null;
+  return {
+    chips: collChip(repo) + (ticket ? extraChip(truncate(ticket, 28), ticket) : ""),
+    tooltipLines: tipLines({ repo, ticket }),
+  };
 }
 
 function buildRepoPathExtras(input: Record<string, unknown>): ToolLabelExtras | null {
@@ -187,9 +218,35 @@ function tipLines(pairs: Record<string, string>): string[] {
 function parseInputObject(raw: unknown): Record<string, unknown> | null {
   if (raw && typeof raw === "object") return raw as Record<string, unknown>;
   if (typeof raw === "string" && raw.length > 0) {
-    try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; }
+    try { return JSON.parse(raw) as Record<string, unknown>; } catch {
+      // Tool inputs are abbreviated to 500 chars upstream (see copilot-sdk's
+      // abbreviateInput) and end with `…` — strict JSON.parse fails on the
+      // unterminated string. Recover what we can via regex so recipes that
+      // only need a couple of fields (repo, ticket, …) still produce chips.
+      return recoverTruncatedJson(raw);
+    }
   }
   return null;
+}
+
+function recoverTruncatedJson(raw: string): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  // String values: match key + quoted value with an optional closing quote.
+  // The value capture stops at the first unescaped quote OR end of input —
+  // so a truncated final value is still recovered up to the cutoff.
+  const strRe = /"([^"\\]+)"\s*:\s*"((?:\\.|[^"\\])*)"?/g;
+  let m: RegExpExecArray | null;
+  while ((m = strRe.exec(raw)) !== null) {
+    out[m[1]!] = m[2]!.replace(/…$/, "");
+  }
+  const scalarRe = /"([^"\\]+)"\s*:\s*(-?\d+(?:\.\d+)?|true|false)/g;
+  while ((m = scalarRe.exec(raw)) !== null) {
+    if (out[m[1]!] === undefined) {
+      const v = m[2]!;
+      out[m[1]!] = v === "true" ? true : v === "false" ? false : Number(v);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 function strField(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
@@ -302,9 +359,28 @@ export function deriveSpanLabelScript(): string {
     function _wfParseInput(raw) {
       if (raw && typeof raw === 'object') return raw;
       if (typeof raw === 'string' && raw.length > 0) {
-        try { return JSON.parse(raw); } catch (e) { return null; }
+        try { return JSON.parse(raw); } catch (e) { return _wfRecoverTruncated(raw); }
       }
       return null;
+    }
+    /* Tool inputs are abbreviated to 500 chars upstream and end with '…'.
+       Strict JSON.parse fails — recover what we can via regex so recipes that
+       only need a couple of fields (repo, ticket, …) still produce chips. */
+    function _wfRecoverTruncated(raw) {
+      var out = {};
+      var strRe = /"([^"\\\\]+)"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"?/g;
+      var m;
+      while ((m = strRe.exec(raw)) !== null) {
+        out[m[1]] = m[2].replace(/\\u2026$/, '');
+      }
+      var scalarRe = /"([^"\\\\]+)"\\s*:\\s*(-?\\d+(?:\\.\\d+)?|true|false)/g;
+      while ((m = scalarRe.exec(raw)) !== null) {
+        if (out[m[1]] === undefined) {
+          var v = m[2];
+          out[m[1]] = v === 'true' ? true : v === 'false' ? false : Number(v);
+        }
+      }
+      return Object.keys(out).length > 0 ? out : null;
     }
     function _wfTipLines(pairs) {
       var out = [];
@@ -353,6 +429,7 @@ export function deriveSpanLabelScript(): string {
       { match: /yggdrasil-list_files$/,  build: _wfBuildRepoPathExtras },
       { match: /yggdrasil-read_source$/, build: _wfBuildRepoPathExtras },
       { match: /yggdrasil-search_pattern$/,   build: function (input) { return _wfBuildTwoFieldExtras(input, 'repo', 'pattern'); } },
+      { match: /yggdrasil-analyze_ticket$/,   build: _wfBuildAnalyzeTicketExtras },
       // Fallback when neither searchTrace nor input.collection is present.
       { match: /knowledge-search_knowledge$/, build: function (input) { return _wfBuildTwoFieldExtras(input, 'collection', 'query'); } },
     ];
@@ -383,9 +460,27 @@ export function deriveSpanLabelScript(): string {
       if (!input) return null;
       var canon = _wfNormalizeToolName(name);
       for (var i = 0; i < _wfExtrasRecipes.length; i++) {
-        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input);
+        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input, attrs);
       }
       return null;
+    }
+
+    /* analyze_ticket: recover repo from output.summary.repos when the
+       500-char-truncated input dropped the repo field. */
+    function _wfBuildAnalyzeTicketExtras(input, attrs) {
+      var ticket = _wfStrField(input, 'ticket');
+      var repo = _wfStrField(input, 'repo');
+      if (!repo) {
+        var out = _wfParseInput(attrs && attrs.output);
+        var summary = out && typeof out.summary === 'object' && out.summary !== null ? out.summary : null;
+        var repos = summary && Array.isArray(summary.repos) ? summary.repos : null;
+        if (repos && repos.length > 0 && typeof repos[0] === 'string') repo = repos[0];
+      }
+      if (!repo && !ticket) return null;
+      return {
+        chips: _wfCollChip(repo) + (ticket ? _wfExtraChip(_wfTruncate(ticket, 28), ticket) : ''),
+        tooltipLines: _wfTipLines({ repo: repo, ticket: ticket }),
+      };
     }
 
     function deriveSpanLabelHtml(span) {

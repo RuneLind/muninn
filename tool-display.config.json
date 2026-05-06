@@ -34,5 +34,9 @@
   },
   "yggdrasil/list_repos": {
     "label": "list_repos (yggdrasil)"
+  },
+  "yggdrasil/analyze_ticket": {
+    "label": "analyze_ticket (yggdrasil)",
+    "fields": ["repo", "top_k", "max_depth"]
   }
 }
