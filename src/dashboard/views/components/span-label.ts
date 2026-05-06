@@ -171,28 +171,19 @@ function toolLabelExtras(name: string, attrs: NonNullable<SpanLike["attributes"]
 
 /** analyze_ticket inputs are large enough that the 500-char abbreviation
  *  often drops the trailing `repo` field. Recover it from the response's
- *  `summary.repos` (the canonical list of repos hit during analysis) so the
- *  row keeps a colored repo chip — matching the symbol_context / list_files
- *  rows that always have one. */
+ *  `summary.repos` so the row keeps a colored repo chip — matching the
+ *  symbol_context / list_files rows that always have one. */
 function buildAnalyzeTicketExtras(
   input: Record<string, unknown>,
   attrs: NonNullable<SpanLike["attributes"]>,
 ): ToolLabelExtras | null {
-  const ticket = strField(input, "ticket");
   let repo = strField(input, "repo");
   if (!repo) {
     const out = parseInputObject(attrs.output);
-    const summary = out && typeof out.summary === "object" && out.summary !== null
-      ? (out.summary as Record<string, unknown>)
-      : null;
-    const repos = summary && Array.isArray(summary.repos) ? summary.repos : null;
-    if (repos && repos.length > 0 && typeof repos[0] === "string") repo = repos[0];
+    const repos = (out?.summary as { repos?: unknown } | undefined)?.repos;
+    if (Array.isArray(repos) && typeof repos[0] === "string") repo = repos[0];
   }
-  if (!repo && !ticket) return null;
-  return {
-    chips: collChip(repo) + (ticket ? extraChip(truncate(ticket, 28), ticket) : ""),
-    tooltipLines: tipLines({ repo, ticket }),
-  };
+  return buildTwoFieldExtras({ ...input, repo }, "repo", "ticket");
 }
 
 function buildRepoPathExtras(input: Record<string, unknown>): ToolLabelExtras | null {
@@ -219,34 +210,21 @@ function parseInputObject(raw: unknown): Record<string, unknown> | null {
   if (raw && typeof raw === "object") return raw as Record<string, unknown>;
   if (typeof raw === "string" && raw.length > 0) {
     try { return JSON.parse(raw) as Record<string, unknown>; } catch {
-      // Tool inputs are abbreviated to 500 chars upstream (see copilot-sdk's
-      // abbreviateInput) and end with `…` — strict JSON.parse fails on the
-      // unterminated string. Recover what we can via regex so recipes that
-      // only need a couple of fields (repo, ticket, …) still produce chips.
       return recoverTruncatedJson(raw);
     }
   }
   return null;
 }
 
+/** Tool inputs are abbreviated to 500 chars upstream (copilot-sdk's
+ *  `abbreviateInput`) and end with `…`. Strip the marker and append likely
+ *  closers so a string truncated mid-value still parses. */
 function recoverTruncatedJson(raw: string): Record<string, unknown> | null {
-  const out: Record<string, unknown> = {};
-  // String values: match key + quoted value with an optional closing quote.
-  // The value capture stops at the first unescaped quote OR end of input —
-  // so a truncated final value is still recovered up to the cutoff.
-  const strRe = /"([^"\\]+)"\s*:\s*"((?:\\.|[^"\\])*)"?/g;
-  let m: RegExpExecArray | null;
-  while ((m = strRe.exec(raw)) !== null) {
-    out[m[1]!] = m[2]!.replace(/…$/, "");
+  const stripped = raw.replace(/…$/, "");
+  for (const closer of ['"}', '}']) {
+    try { return JSON.parse(stripped + closer) as Record<string, unknown>; } catch { /* try next */ }
   }
-  const scalarRe = /"([^"\\]+)"\s*:\s*(-?\d+(?:\.\d+)?|true|false)/g;
-  while ((m = scalarRe.exec(raw)) !== null) {
-    if (out[m[1]!] === undefined) {
-      const v = m[2]!;
-      out[m[1]!] = v === "true" ? true : v === "false" ? false : Number(v);
-    }
-  }
-  return Object.keys(out).length > 0 ? out : null;
+  return null;
 }
 function strField(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
@@ -363,24 +341,15 @@ export function deriveSpanLabelScript(): string {
       }
       return null;
     }
-    /* Tool inputs are abbreviated to 500 chars upstream and end with '…'.
-       Strict JSON.parse fails — recover what we can via regex so recipes that
-       only need a couple of fields (repo, ticket, …) still produce chips. */
+    /* See parseInputObject TS twin for rationale — strip '…' and try a few
+       closers so 500-char-abbreviated input still parses. */
     function _wfRecoverTruncated(raw) {
-      var out = {};
-      var strRe = /"([^"\\\\]+)"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"?/g;
-      var m;
-      while ((m = strRe.exec(raw)) !== null) {
-        out[m[1]] = m[2].replace(/\\u2026$/, '');
+      var stripped = raw.replace(/\\u2026$/, '');
+      var closers = ['"}', '}'];
+      for (var i = 0; i < closers.length; i++) {
+        try { return JSON.parse(stripped + closers[i]); } catch (e) { /* try next */ }
       }
-      var scalarRe = /"([^"\\\\]+)"\\s*:\\s*(-?\\d+(?:\\.\\d+)?|true|false)/g;
-      while ((m = scalarRe.exec(raw)) !== null) {
-        if (out[m[1]] === undefined) {
-          var v = m[2];
-          out[m[1]] = v === 'true' ? true : v === 'false' ? false : Number(v);
-        }
-      }
-      return Object.keys(out).length > 0 ? out : null;
+      return null;
     }
     function _wfTipLines(pairs) {
       var out = [];
@@ -468,19 +437,14 @@ export function deriveSpanLabelScript(): string {
     /* analyze_ticket: recover repo from output.summary.repos when the
        500-char-truncated input dropped the repo field. */
     function _wfBuildAnalyzeTicketExtras(input, attrs) {
-      var ticket = _wfStrField(input, 'ticket');
       var repo = _wfStrField(input, 'repo');
       if (!repo) {
         var out = _wfParseInput(attrs && attrs.output);
-        var summary = out && typeof out.summary === 'object' && out.summary !== null ? out.summary : null;
-        var repos = summary && Array.isArray(summary.repos) ? summary.repos : null;
-        if (repos && repos.length > 0 && typeof repos[0] === 'string') repo = repos[0];
+        var repos = out && out.summary && Array.isArray(out.summary.repos) ? out.summary.repos : null;
+        if (repos && typeof repos[0] === 'string') repo = repos[0];
       }
-      if (!repo && !ticket) return null;
-      return {
-        chips: _wfCollChip(repo) + (ticket ? _wfExtraChip(_wfTruncate(ticket, 28), ticket) : ''),
-        tooltipLines: _wfTipLines({ repo: repo, ticket: ticket }),
-      };
+      var shimmed = repo ? Object.assign({}, input, { repo: repo }) : input;
+      return _wfBuildTwoFieldExtras(shimmed, 'repo', 'ticket');
     }
 
     function deriveSpanLabelHtml(span) {
