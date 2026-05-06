@@ -317,6 +317,75 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.html).toContain(">Foo.kt<");
   });
 
+  test("yggdrasil-analyze_ticket renders repo + truncated ticket excerpt", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-analyze_ticket",
+      attributes: {
+        input: {
+          repo: "melosys-api",
+          ticket: "Behandling skal ikke kunne avsluttes uten at det finnes et grunnlag",
+          top_k: 5,
+          max_depth: 2,
+        },
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-analyze");
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.html).toContain("…"); // truncation marker
+    expect(out!.tooltip).toContain("repo: melosys-api");
+    expect(out!.tooltip).toContain("ticket: Behandling skal ikke kunne avsluttes uten at det finnes et grunnlag");
+  });
+
+  test("yggdrasil-analyze_ticket renders ticket-only when repo is missing", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-analyze_ticket",
+      attributes: { input: { ticket: "Some short ticket" } },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-analyze");
+    expect(out!.html).toContain(">Some short ticket<");
+  });
+
+  // analyze_ticket inputs are large enough that the 500-char truncation
+  // typically cuts off the trailing `repo` field. Recover it from
+  // output.summary.repos so the row keeps a colored repo chip.
+  test("yggdrasil-analyze_ticket recovers repo from output.summary.repos when input lacks it", () => {
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-analyze_ticket",
+      attributes: {
+        input: { ticket: "MELOSYS-7999: ..." },
+        output: JSON.stringify({
+          ticket: { text: "..." },
+          symbols: [],
+          candidates: [],
+          summary: { total_candidates: 6, repos: ["melosys-api"] },
+        }),
+      },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-analyze");
+    expect(out!.html).toContain(">melosys-api<");
+    expect(out!.tooltip).toContain("repo: melosys-api");
+  });
+
+  // Tool inputs are abbreviated to 500 chars upstream — a long ticket arrives
+  // as malformed JSON ending with `…`. Strict JSON.parse fails, so the parser
+  // must recover string fields via regex; otherwise the row falls back to the
+  // bare tool name with no chips.
+  test("yggdrasil-analyze_ticket renders chips even when input JSON is truncated", () => {
+    const truncated =
+      '{"ticket":"MELOSYS-7999: Journalføring søknader på eksisterende eller ny sak — ' +
+      "lots of additional text that runs past the 500-char abbreviation cap and the closing quote is missing…";
+    const out = deriveSpanLabelHtml({
+      name: "yggdrasil-analyze_ticket",
+      attributes: { input: truncated },
+    });
+    expect(out).not.toBeNull();
+    expect(out!.html).toContain("wf-verb-analyze");
+    expect(out!.html).toContain("MELOSYS-7999"); // recovered from truncated JSON
+  });
+
   test("yggdrasil-search_pattern renders repo + truncated pattern", () => {
     const out = deriveSpanLabelHtml({
       name: "yggdrasil-search_pattern",
@@ -497,6 +566,9 @@ describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
     ["list_files",     { name: "yggdrasil-list_files",       attributes: { input: { repo: "melosys-api", path: "src/main/foo" } } }],
     ["read_source",    { name: "yggdrasil-read_source",      attributes: { input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
     ["search_pattern", { name: "yggdrasil-search_pattern",   attributes: { input: { repo: "melosys-api", pattern: "FOO|BAR" } } }],
+    ["analyze_ticket", { name: "yggdrasil-analyze_ticket",   attributes: { input: { repo: "melosys-api", ticket: "Behandling skal ikke kunne avsluttes uten grunnlag", top_k: 5, max_depth: 2 } } }],
+    ["analyze_ticket truncated", { name: "yggdrasil-analyze_ticket", attributes: { input: '{"ticket":"MELOSYS-7999: Journalføring søknader på eksisterende eller ny sak — lots of additional text that runs past the 500-char cap…' } }],
+    ["analyze_ticket repo-from-output", { name: "yggdrasil-analyze_ticket", attributes: { input: { ticket: "MELOSYS-7999: ..." }, output: JSON.stringify({ summary: { repos: ["melosys-api"] } }) } }],
     ["search w/ coll", { name: "knowledge-search_knowledge", attributes: { input: { collection: "jira-issues" } } }],
     ["null case",      { name: "claude" }],
     // Claude CLI emits the mcp__server__tool format. The TS and JS twins must

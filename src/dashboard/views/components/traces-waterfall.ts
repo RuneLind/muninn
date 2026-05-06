@@ -84,6 +84,7 @@ export function tracesWaterfallStyles(): string {
     .wf-verb-list   { background: color-mix(in srgb, var(--status-cyan) 18%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 40%, transparent); }
     .wf-verb-read   { background: color-mix(in srgb, var(--status-cyan) 14%, transparent); color: var(--status-cyan); border: 1px solid color-mix(in srgb, var(--status-cyan) 35%, transparent); }
     .wf-verb-symbol { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+    .wf-verb-analyze { background: color-mix(in srgb, var(--status-magenta) 18%, transparent); color: var(--status-magenta); border: 1px solid color-mix(in srgb, var(--status-magenta) 40%, transparent); }
     .wf-verb-other  { background: color-mix(in srgb, white 6%, transparent); color: var(--text-soft); border: 1px solid color-mix(in srgb, white 12%, transparent); }
     /* Generic extra chip — used for ids, path tails, and patterns alongside
        a repo/kind chip so the row carries the most distinguishing info. */

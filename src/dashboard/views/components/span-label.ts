@@ -8,6 +8,7 @@ interface SpanLike {
     toolName?: unknown;
     toolId?: unknown;
     input?: unknown;
+    output?: unknown;
     searchTrace?:
       | {
           collections?: Array<{
@@ -96,7 +97,10 @@ interface ToolLabelExtras { chips: string; tooltipLines: string[]; }
 
 type ExtrasRecipe = {
   match: RegExp;
-  build: (input: Record<string, unknown>) => ToolLabelExtras | null;
+  build: (
+    input: Record<string, unknown>,
+    attrs: NonNullable<SpanLike["attributes"]>,
+  ) => ToolLabelExtras | null;
 };
 
 /** Recipes for non-search tools. Each entry pairs a tool-name pattern with
@@ -137,6 +141,7 @@ const EXTRAS_RECIPES: ExtrasRecipe[] = [
   { match: /yggdrasil-list_files$/,  build: buildRepoPathExtras },
   { match: /yggdrasil-read_source$/, build: buildRepoPathExtras },
   { match: /yggdrasil-search_pattern$/,   build: (input) => buildTwoFieldExtras(input, "repo", "pattern") },
+  { match: /yggdrasil-analyze_ticket$/,   build: buildAnalyzeTicketExtras },
   // Fallback when collectionsFor() returns null (no searchTrace and no input.collection).
   { match: /knowledge-search_knowledge$/, build: (input) => buildTwoFieldExtras(input, "collection", "query") },
 ];
@@ -159,9 +164,26 @@ function toolLabelExtras(name: string, attrs: NonNullable<SpanLike["attributes"]
   const input = parseInputObject(attrs.input);
   if (!input) return null;
   for (const r of EXTRAS_RECIPES) {
-    if (r.match.test(name)) return r.build(input);
+    if (r.match.test(name)) return r.build(input, attrs);
   }
   return null;
+}
+
+/** analyze_ticket inputs are large enough that the 500-char abbreviation
+ *  often drops the trailing `repo` field. Recover it from the response's
+ *  `summary.repos` so the row keeps a colored repo chip — matching the
+ *  symbol_context / list_files rows that always have one. */
+function buildAnalyzeTicketExtras(
+  input: Record<string, unknown>,
+  attrs: NonNullable<SpanLike["attributes"]>,
+): ToolLabelExtras | null {
+  let repo = strField(input, "repo");
+  if (!repo) {
+    const out = parseInputObject(attrs.output);
+    const repos = (out?.summary as { repos?: unknown } | undefined)?.repos;
+    if (Array.isArray(repos) && typeof repos[0] === "string") repo = repos[0];
+  }
+  return buildTwoFieldExtras({ ...input, repo }, "repo", "ticket");
 }
 
 function buildRepoPathExtras(input: Record<string, unknown>): ToolLabelExtras | null {
@@ -187,7 +209,20 @@ function tipLines(pairs: Record<string, string>): string[] {
 function parseInputObject(raw: unknown): Record<string, unknown> | null {
   if (raw && typeof raw === "object") return raw as Record<string, unknown>;
   if (typeof raw === "string" && raw.length > 0) {
-    try { return JSON.parse(raw) as Record<string, unknown>; } catch { return null; }
+    try { return JSON.parse(raw) as Record<string, unknown>; } catch {
+      return recoverTruncatedJson(raw);
+    }
+  }
+  return null;
+}
+
+/** Tool inputs are abbreviated to 500 chars upstream (copilot-sdk's
+ *  `abbreviateInput`) and end with `…`. Strip the marker and append likely
+ *  closers so a string truncated mid-value still parses. */
+function recoverTruncatedJson(raw: string): Record<string, unknown> | null {
+  const stripped = raw.replace(/…$/, "");
+  for (const closer of ['"}', '}']) {
+    try { return JSON.parse(stripped + closer) as Record<string, unknown>; } catch { /* try next */ }
   }
   return null;
 }
@@ -302,7 +337,17 @@ export function deriveSpanLabelScript(): string {
     function _wfParseInput(raw) {
       if (raw && typeof raw === 'object') return raw;
       if (typeof raw === 'string' && raw.length > 0) {
-        try { return JSON.parse(raw); } catch (e) { return null; }
+        try { return JSON.parse(raw); } catch (e) { return _wfRecoverTruncated(raw); }
+      }
+      return null;
+    }
+    /* See parseInputObject TS twin for rationale — strip '…' and try a few
+       closers so 500-char-abbreviated input still parses. */
+    function _wfRecoverTruncated(raw) {
+      var stripped = raw.replace(/\\u2026$/, '');
+      var closers = ['"}', '}'];
+      for (var i = 0; i < closers.length; i++) {
+        try { return JSON.parse(stripped + closers[i]); } catch (e) { /* try next */ }
       }
       return null;
     }
@@ -353,6 +398,7 @@ export function deriveSpanLabelScript(): string {
       { match: /yggdrasil-list_files$/,  build: _wfBuildRepoPathExtras },
       { match: /yggdrasil-read_source$/, build: _wfBuildRepoPathExtras },
       { match: /yggdrasil-search_pattern$/,   build: function (input) { return _wfBuildTwoFieldExtras(input, 'repo', 'pattern'); } },
+      { match: /yggdrasil-analyze_ticket$/,   build: _wfBuildAnalyzeTicketExtras },
       // Fallback when neither searchTrace nor input.collection is present.
       { match: /knowledge-search_knowledge$/, build: function (input) { return _wfBuildTwoFieldExtras(input, 'collection', 'query'); } },
     ];
@@ -383,9 +429,22 @@ export function deriveSpanLabelScript(): string {
       if (!input) return null;
       var canon = _wfNormalizeToolName(name);
       for (var i = 0; i < _wfExtrasRecipes.length; i++) {
-        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input);
+        if (_wfExtrasRecipes[i].match.test(canon)) return _wfExtrasRecipes[i].build(input, attrs);
       }
       return null;
+    }
+
+    /* analyze_ticket: recover repo from output.summary.repos when the
+       500-char-truncated input dropped the repo field. */
+    function _wfBuildAnalyzeTicketExtras(input, attrs) {
+      var repo = _wfStrField(input, 'repo');
+      if (!repo) {
+        var out = _wfParseInput(attrs && attrs.output);
+        var repos = out && out.summary && Array.isArray(out.summary.repos) ? out.summary.repos : null;
+        if (repos && typeof repos[0] === 'string') repo = repos[0];
+      }
+      var shimmed = repo ? Object.assign({}, input, { repo: repo }) : input;
+      return _wfBuildTwoFieldExtras(shimmed, 'repo', 'ticket');
     }
 
     function deriveSpanLabelHtml(span) {

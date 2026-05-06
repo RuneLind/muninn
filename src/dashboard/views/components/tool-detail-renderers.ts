@@ -288,6 +288,7 @@ export function toolDetailRenderersScript(): string {
       if (/yggdrasil-list_files$/.test(canon))     return tdrRenderListFiles;
       if (/yggdrasil-read_source$/.test(canon))    return tdrRenderReadSource;
       if (/yggdrasil-search_pattern$/.test(canon)) return tdrRenderSearchPattern;
+      if (/yggdrasil-analyze_ticket$/.test(canon)) return tdrRenderAnalyzeTicket;
       return null;
     }
 
@@ -721,6 +722,104 @@ export function toolDetailRenderersScript(): string {
                  (startLine > 0 ? '<span class="tdr-line-no"> (lines ' + startLine + '–' + (startLine + before.length + after.length) + ')</span>' : '') +
                '</div>' +
                tdrCode(block, { markLine: markIdx }) +
+             '</div>';
+    }
+
+    /* ============================================================
+     * Renderer: yggdrasil-analyze_ticket
+     * Input:  { ticket, repo?, top_k?, max_depth? }
+     * Output: { ticket: { text },
+     *           candidates: SearchResult[],
+     *           symbols: [{ target: { name, qualified_name, kind, file, lines, signature, visibility },
+     *                       callers, callees,
+     *                       inheritance: { extends, implements, extended_by, implemented_by },
+     *                       blast_radius: { total, by_repo, top: [] },
+     *                       affected_tests: { total, top: [] } }],
+     *           summary: { total_candidates, total_blast_radius, total_affected_tests, repos[] } }
+     * ============================================================ */
+
+    function tdrRenderAnalyzeTicket(attrs) {
+      var input = tdrParseJson(attrs.input) || {};
+      var rawOut = attrs.output;
+      if (typeof rawOut === 'string' && tdrIsErrorOutput(rawOut)) {
+        return tdrPanel(
+          tdrSection('Query', tdrAnalyzeTicketQueryChips(input)),
+          tdrSection('Result', tdrError(rawOut))
+        );
+      }
+      var out = tdrParseJson(rawOut);
+      if (!out || (typeof out !== 'object')) {
+        return tdrPanel(
+          tdrSection('Query', tdrAnalyzeTicketQueryChips(input)),
+          tdrSection('Output', tdrText(typeof rawOut === 'string' ? rawOut : JSON.stringify(rawOut, null, 2)))
+        );
+      }
+      var summary = out.summary || {};
+      var symbols = Array.isArray(out.symbols) ? out.symbols : [];
+      var candidates = Array.isArray(out.candidates) ? out.candidates : [];
+      var ticketText = (out.ticket && typeof out.ticket.text === 'string')
+        ? out.ticket.text
+        : (typeof input.ticket === 'string' ? input.ticket : '');
+
+      var summaryChips = tdrChips([
+        tdrChip('candidates', summary.total_candidates != null ? String(summary.total_candidates) : String(candidates.length), 'tdr-chip-muted'),
+        tdrChip('symbols', String(symbols.length), 'tdr-chip-muted'),
+        summary.total_blast_radius != null ? tdrChip('blast', String(summary.total_blast_radius), 'tdr-chip-muted') : '',
+        summary.total_affected_tests != null ? tdrChip('tests', String(summary.total_affected_tests), 'tdr-chip-muted') : '',
+        Array.isArray(summary.repos) && summary.repos.length ? tdrChip('repos', summary.repos.join(', '), 'tdr-chip-muted') : '',
+      ]);
+
+      var ticketHtml = ticketText ? tdrText(ticketText.length > 600 ? ticketText.slice(0, 600) + '…' : ticketText) : '';
+
+      var symbolsHtml = symbols.length
+        ? symbols.map(tdrRenderAnalyzeTicketSymbol).join('')
+        : tdrEmpty('no symbols expanded');
+
+      return tdrPanel(
+        tdrSection('Query', tdrAnalyzeTicketQueryChips(input)),
+        ticketHtml ? tdrSection('Ticket', ticketHtml) : '',
+        tdrSection('Summary', summaryChips || tdrEmpty('no summary')),
+        tdrSection('Symbols (' + symbols.length + ')', symbolsHtml)
+      );
+    }
+
+    function tdrAnalyzeTicketQueryChips(input) {
+      return tdrChips([
+        tdrChip('repo', input.repo, 'tdr-chip-muted'),
+        input.top_k != null ? tdrChip('top_k', String(input.top_k), 'tdr-chip-muted') : '',
+        input.max_depth != null ? tdrChip('max_depth', String(input.max_depth), 'tdr-chip-muted') : '',
+      ]);
+    }
+
+    function tdrRenderAnalyzeTicketSymbol(s) {
+      var t = s.target || {};
+      var inh = s.inheritance || {};
+      var blast = s.blast_radius || {};
+      var tests = s.affected_tests || {};
+      var inhTotal =
+        (Array.isArray(inh.extends) ? inh.extends.length : 0) +
+        (Array.isArray(inh.implements) ? inh.implements.length : 0) +
+        (Array.isArray(inh.extended_by) ? inh.extended_by.length : 0) +
+        (Array.isArray(inh.implemented_by) ? inh.implemented_by.length : 0);
+
+      var headerChips = tdrChips([
+        t.kind ? tdrChip('kind', t.kind) : '',
+        t.visibility ? tdrChip('vis', t.visibility, 'tdr-chip-muted') : '',
+        Array.isArray(s.callers) ? tdrChip('callers', String(s.callers.length), 'tdr-chip-muted') : '',
+        Array.isArray(s.callees) ? tdrChip('callees', String(s.callees.length), 'tdr-chip-muted') : '',
+        inhTotal > 0 ? tdrChip('inh', String(inhTotal), 'tdr-chip-muted') : '',
+        blast.total != null ? tdrChip('blast', String(blast.total), 'tdr-chip-muted') : '',
+        tests.total != null ? tdrChip('tests', String(tests.total), 'tdr-chip-muted') : '',
+      ]);
+
+      var titleHtml = '<div class="tdr-title">' + esc(t.qualified_name || t.name || '') + '</div>';
+      var fileLine = t.file
+        ? '<div class="tdr-subtle">' + esc(t.file) + (t.lines ? ' :' + esc(t.lines) : '') + '</div>'
+        : '';
+
+      return '<div class="tdr-match">' +
+               '<div class="tdr-match-head">' + headerChips + '</div>' +
+               '<div style="padding:6px 8px;">' + titleHtml + fileLine + '</div>' +
              '</div>';
     }
 

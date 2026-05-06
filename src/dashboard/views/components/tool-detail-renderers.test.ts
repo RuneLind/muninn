@@ -36,6 +36,7 @@ test("dispatcher picks renderer by toolName (copilot-sdk dash form)", () => {
   expect(pick("yggdrasil-list_files")).toBe(sandbox.tdrRenderListFiles);
   expect(pick("yggdrasil-read_source")).toBe(sandbox.tdrRenderReadSource);
   expect(pick("yggdrasil-search_pattern")).toBe(sandbox.tdrRenderSearchPattern);
+  expect(pick("yggdrasil-analyze_ticket")).toBe(sandbox.tdrRenderAnalyzeTicket);
   expect(pick("knowledge-search_knowledge")).toBeNull();
   expect(pick("totally-unknown-tool")).toBeNull();
 });
@@ -47,6 +48,7 @@ test("dispatcher picks renderer by toolName (claude-cli mcp__ form)", () => {
   expect(pick("mcp__yggdrasil__list_files")).toBe(sandbox.tdrRenderListFiles);
   expect(pick("mcp__yggdrasil__read_source")).toBe(sandbox.tdrRenderReadSource);
   expect(pick("mcp__yggdrasil__search_pattern")).toBe(sandbox.tdrRenderSearchPattern);
+  expect(pick("mcp__yggdrasil__analyze_ticket")).toBe(sandbox.tdrRenderAnalyzeTicket);
   expect(pick("mcp__yggdrasil__search")).toBeNull();
   expect(pick("mcp__totally__unknown_tool")).toBeNull();
 });
@@ -177,6 +179,65 @@ test("search_pattern renderer renders matches with line marker", () => {
   expect(html).toContain("tdr-line-mark"); // hit line highlighted
   expect(html).toContain("before1");
   expect(html).toContain("after1");
+});
+
+test("analyze_ticket renderer surfaces summary chips and per-symbol counts", () => {
+  const out = {
+    ticket: { text: "Behandling skal ikke kunne avsluttes uten grunnlag" },
+    candidates: [
+      { name: "Behandling", qualified_name: "no.nav.melosys.domain.Behandling", repo: "melosys-api" },
+    ],
+    symbols: [{
+      target: {
+        name: "Behandling",
+        qualified_name: "no.nav.melosys.domain.Behandling",
+        kind: "class",
+        file: "melosys-api/domain/src/main/kotlin/Behandling.kt",
+        lines: "12-180",
+        signature: "class Behandling(...)",
+        visibility: "public",
+      },
+      callers: [{ qualified_name: "BehandlingService.lagre", kind: "method" }],
+      callees: [],
+      inheritance: { extends: [], implements: [{ qualified_name: "Auditable" }], extended_by: [], implemented_by: [] },
+      blast_radius: { total: 854, by_repo: { "melosys-api": 854 }, top: [] },
+      affected_tests: { total: 384, top: [] },
+    }],
+    summary: { total_candidates: 1, total_blast_radius: 854, total_affected_tests: 384, repos: ["melosys-api"] },
+  };
+  const html = call("tdrRenderAnalyzeTicket", {
+    toolName: "yggdrasil-analyze_ticket",
+    input: JSON.stringify({ ticket: out.ticket.text, repo: "melosys-api", top_k: 5, max_depth: 2 }),
+    output: JSON.stringify(out),
+  });
+  expect(html).toContain("melosys-api");
+  expect(html).toContain("top_k");
+  expect(html).toContain("max_depth");
+  expect(html).toContain("Behandling skal ikke");
+  expect(html).toContain("no.nav.melosys.domain.Behandling");
+  expect(html).toContain("class");
+  expect(html).toContain("854");           // blast total
+  expect(html).toContain("384");           // affected tests total
+  expect(html).toContain("Symbols (1)");
+});
+
+test("analyze_ticket renderer surfaces error string output", () => {
+  const html = call("tdrRenderAnalyzeTicket", {
+    toolName: "yggdrasil-analyze_ticket",
+    input: JSON.stringify({ ticket: "x", repo: "missing-repo" }),
+    output: "Error: repo not found",
+  });
+  expect(html).toContain("tdr-error");
+  expect(html).toContain("repo not found");
+});
+
+test("analyze_ticket renderer falls back to raw text when output isn't JSON", () => {
+  const html = call("tdrRenderAnalyzeTicket", {
+    toolName: "yggdrasil-analyze_ticket",
+    input: '{"ticket":"x"}',
+    output: "not actually json",
+  });
+  expect(html).toContain("not actually json");
 });
 
 test("response section is omitted when output is null/empty", () => {
