@@ -581,11 +581,34 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
   if (!dryRun && !args.skipJudge && benchmarkRunId) {
     try {
       const judgePromptPath = args.judgePromptPath ?? defaultJudgePromptPath();
+      // Stream the judge's text deltas to stderr so the dashboard live-page
+      // "Subprocess log (tail)" picks them up automatically. Set
+      // BENCHMARK_JUDGE_QUIET=1 to suppress (e.g. when running matrices in
+      // a terminal where you don't want the per-cell noise).
+      const judgeQuiet = process.env.BENCHMARK_JUDGE_QUIET === "1";
+      const onJudgeProgress = judgeQuiet
+        ? undefined
+        : (ev: { type: string; text?: string }) => {
+            if (ev.type === "text_delta" && ev.text) {
+              process.stderr.write(ev.text);
+            } else if (ev.type === "text") {
+              process.stderr.write("\n");
+            }
+          };
+      if (!judgeQuiet) {
+        process.stderr.write("\n[judge] streaming output:\n");
+      }
       const judgeResult = await runJudge({
         manifest,
         candidatePath,
         judgePromptPath,
+        ...(onJudgeProgress ? { onProgress: onJudgeProgress } : {}),
+        // Attach the judge's tracer as a child of the cell's analysis tracer
+        // so judge spans appear in the live-page waterfall alongside the
+        // analysis tools instead of in a separate trace.
+        parentTrace: tracer.context,
       });
+      if (!judgeQuiet) process.stderr.write("\n[judge] done\n");
       judgeTraceId = judgeResult.traceId;
       hitRate = judgeResult.result.stats.hitRate;
       highlightedRate = judgeResult.result.stats.highlightedRate;

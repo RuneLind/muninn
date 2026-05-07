@@ -248,6 +248,13 @@ function renderRejudgePanel(
     </p>
     ${formHtml}
     ${statusLine}
+    <div class="rejudge-stream" data-rejudge-stream style="display: none;">
+      <div class="rejudge-stream-header">
+        <span data-rejudge-stream-pass>Waiting for first pass…</span>
+        <button type="button" class="rejudge-stream-clear" onclick="document.querySelector('[data-rejudge-stream-pre]').textContent=''">Clear</button>
+      </div>
+      <pre data-rejudge-stream-pre></pre>
+    </div>
     ${childrenTable}
   </div>`;
 }
@@ -271,6 +278,7 @@ async function startRejudge(ev, runId) {
       throw new Error(err.error || ('HTTP ' + res.status));
     }
     pollRejudge(runId);
+    subscribeJudgeStream(runId);
   } catch (err) {
     button.disabled = false;
     button.textContent = 'Re-judge';
@@ -319,11 +327,84 @@ async function pollRejudge(runId) {
   tick();
 }
 
+function subscribeJudgeStream(runId) {
+  const wrap = document.querySelector('[data-rejudge-stream]');
+  const passLabel = document.querySelector('[data-rejudge-stream-pass]');
+  const pre = document.querySelector('[data-rejudge-stream-pre]');
+  if (!wrap || !passLabel || !pre) return;
+  wrap.style.display = 'block';
+  pre.textContent = '';
+
+  const es = new EventSource('/api/benchmark/runs/' + runId + '/judge-stream');
+
+  es.addEventListener('snapshot', (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.status === 'no-job') {
+        passLabel.textContent = 'No active job';
+        es.close();
+      } else if (data.status === 'running') {
+        passLabel.textContent = 'Pass ' + (data.completedPasses + 1) + '/' + data.totalPasses + ' — waiting for first delta…';
+      } else {
+        passLabel.textContent = 'Job ' + data.status;
+      }
+    } catch {}
+  });
+
+  const passDeltas = {};
+  es.addEventListener('pass_start', (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      passLabel.textContent = 'Pass ' + (data.passIndex + 1) + '/' + data.total + ' — streaming…';
+      pre.textContent += '\\n\\n=== pass ' + (data.passIndex + 1) + ' ===\\n';
+      pre.scrollTop = pre.scrollHeight;
+    } catch {}
+  });
+  es.addEventListener('delta', (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (typeof data.text === 'string') {
+        pre.textContent += data.text;
+        passDeltas[data.passIndex] = (passDeltas[data.passIndex] || 0) + data.text.length;
+        pre.scrollTop = pre.scrollHeight;
+      }
+    } catch {}
+  });
+  es.addEventListener('pass_end', (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      pre.textContent += '\\n[end of pass ' + (data.passIndex + 1) + ', ' + (passDeltas[data.passIndex] || 0) + ' chars]\\n';
+      pre.scrollTop = pre.scrollHeight;
+    } catch {}
+  });
+  es.addEventListener('done', (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      passLabel.textContent = 'Done (' + (data.passes || 0) + ' passes)';
+    } catch {
+      passLabel.textContent = 'Done';
+    }
+    es.close();
+  });
+  es.addEventListener('error', () => {
+    // Browser EventSource fires "error" on disconnects too; only update label
+    // if the stream isn't already closed.
+    if (es.readyState === EventSource.CLOSED) {
+      passLabel.textContent = 'Stream closed';
+    }
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const statusEl = document.querySelector('[data-rejudge-status]');
-  if (statusEl) {
-    const runIdMatch = window.location.pathname.match(/\\/benchmark\\/runs\\/([0-9a-f-]+)/);
-    if (runIdMatch) pollRejudge(runIdMatch[1]);
+  const runIdMatch = window.location.pathname.match(/\\/benchmark\\/runs\\/([0-9a-f-]+)/);
+  if (statusEl && runIdMatch) {
+    pollRejudge(runIdMatch[1]);
+    // If a rejudge is already running when the page loads, hook the live
+    // stream so we don't lose deltas while the user is on this page.
+    if (statusEl.classList.contains('running')) {
+      subscribeJudgeStream(runIdMatch[1]);
+    }
   }
 });
 `;

@@ -355,6 +355,44 @@ export const BENCHMARK_STYLES = `
   .rejudge-status.done { color: var(--status-success); }
   .rejudge-status.error { color: var(--status-error); }
 
+  .rejudge-stream {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+  }
+  .rejudge-stream-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .rejudge-stream-clear {
+    background: transparent;
+    color: var(--text-faint);
+    border: 1px solid var(--border-subtle);
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .rejudge-stream-clear:hover { color: var(--text-soft); border-color: var(--border-primary); }
+  .rejudge-stream pre {
+    margin: 0;
+    max-height: 360px;
+    overflow: auto;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: var(--text-soft);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   .rejudge-children {
     margin-top: 16px;
     width: 100%;

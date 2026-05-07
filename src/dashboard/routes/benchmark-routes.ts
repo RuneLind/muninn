@@ -1,4 +1,5 @@
 import type { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { resolve } from "node:path";
 import { getLog } from "../../logging.ts";
 import {
@@ -21,6 +22,30 @@ import { renderBenchmarkRunLivePage } from "../views/benchmark/live-page.ts";
 const log = getLog("dashboard", "benchmark");
 
 const activeRejudgeJobs = new Map<string, RejudgeJobState>();
+
+/**
+ * In-process pub/sub for live judge stream events keyed by parent run id.
+ * The rejudge POST handler publishes here as the judge streams text deltas;
+ * the /judge-stream SSE endpoint subscribes per browser tab. Cleared when
+ * the rejudge job finishes (and the stream sends a final `done` event so
+ * the client can close cleanly).
+ */
+type JudgeStreamEvent =
+  | { type: "delta"; passIndex: number; text: string }
+  | { type: "pass_start"; passIndex: number; total: number }
+  | { type: "pass_end"; passIndex: number }
+  | { type: "done"; passes: number }
+  | { type: "error"; error: string };
+type JudgeStreamListener = (ev: JudgeStreamEvent) => void;
+const judgeStreamListeners = new Map<string, Set<JudgeStreamListener>>();
+
+function emitJudgeStream(parentRunId: string, ev: JudgeStreamEvent): void {
+  const set = judgeStreamListeners.get(parentRunId);
+  if (!set) return;
+  for (const listener of set) {
+    try { listener(ev); } catch { /* listener errors are swallowed; SSE handler resubscribes on reconnect */ }
+  }
+}
 
 /**
  * Spawn run-cell.ts as a detached subprocess with BENCHMARK_TRACE_ID set so
@@ -274,6 +299,77 @@ export function registerBenchmarkRoutes(app: Hono): void {
     }
   });
 
+  // SSE: live judge stream for a rejudge job. Subscribers receive
+  // `pass_start`, `delta` (text chunks), `pass_end`, and a final `done` (or
+  // `error`) event. Closes when the job finishes or the client disconnects.
+  app.get("/api/benchmark/runs/:id/judge-stream", (c) => {
+    const id = c.req.param("id");
+    return streamSSE(c, async (stream) => {
+      let alive = true;
+      const listener: JudgeStreamListener = async (ev) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) });
+          if (ev.type === "done" || ev.type === "error") {
+            alive = false;
+          }
+        } catch {
+          alive = false;
+        }
+      };
+      let set = judgeStreamListeners.get(id);
+      if (!set) {
+        set = new Set();
+        judgeStreamListeners.set(id, set);
+      }
+      set.add(listener);
+
+      // Send a snapshot of the current job so a late subscriber can render
+      // status immediately rather than waiting for the next event.
+      const job = activeRejudgeJobs.get(id);
+      if (job) {
+        await stream.writeSSE({
+          event: "snapshot",
+          data: JSON.stringify({ status: job.status, completedPasses: job.completedPasses, totalPasses: job.totalPasses }),
+        });
+        if (job.status !== "running") {
+          // Job already finished — let the client close right away.
+          await stream.writeSSE({ event: "done", data: JSON.stringify({ type: "done", passes: job.completedPasses }) });
+          alive = false;
+        }
+      } else {
+        await stream.writeSSE({ event: "snapshot", data: JSON.stringify({ status: "no-job" }) });
+        alive = false;
+      }
+
+      const heartbeat = setInterval(async () => {
+        if (!alive) return;
+        try { await stream.writeSSE({ event: "heartbeat", data: "{}" }); }
+        catch { alive = false; }
+      }, 30_000);
+
+      stream.onAbort(() => {
+        alive = false;
+        const s = judgeStreamListeners.get(id);
+        if (s) {
+          s.delete(listener);
+          if (s.size === 0) judgeStreamListeners.delete(id);
+        }
+        clearInterval(heartbeat);
+      });
+
+      while (alive) {
+        await Bun.sleep(500);
+      }
+      const s = judgeStreamListeners.get(id);
+      if (s) {
+        s.delete(listener);
+        if (s.size === 0) judgeStreamListeners.delete(id);
+      }
+      clearInterval(heartbeat);
+    });
+  });
+
   app.post("/api/benchmark/runs/:id/rejudge", async (c) => {
     const id = c.req.param("id");
     if (activeRejudgeJobs.get(id)?.status === "running") {
@@ -311,14 +407,34 @@ export function registerBenchmarkRoutes(app: Hono): void {
     activeRejudgeJobs.set(id, job);
 
     // Fire-and-forget — the route returns immediately, the client polls
-    // /api/benchmark/runs/:id/rejudge-children to see progress.
+    // /api/benchmark/runs/:id/rejudge-children to see progress and (when
+    // it cares about live deltas) opens an SSE on /judge-stream.
     void (async () => {
+      // Track which pass we're on by intercepting passIndex in the callback.
+      // rejudge.ts runs passes sequentially so this stays in lockstep.
+      let lastPassIndex = -1;
       try {
         const result = await rejudgeCandidate(id, {
           passes,
           judgePromptPath: body.judgePromptPath,
           budgetUsd: body.budgetUsd,
+          onProgress: (ev) => {
+            if (ev.passIndex !== lastPassIndex) {
+              if (lastPassIndex >= 0) {
+                emitJudgeStream(id, { type: "pass_end", passIndex: lastPassIndex });
+              }
+              emitJudgeStream(id, { type: "pass_start", passIndex: ev.passIndex, total: passes });
+              lastPassIndex = ev.passIndex;
+            }
+            if (ev.type === "text_delta" && ev.text) {
+              emitJudgeStream(id, { type: "delta", passIndex: ev.passIndex, text: ev.text });
+            }
+          },
         });
+        if (lastPassIndex >= 0) {
+          emitJudgeStream(id, { type: "pass_end", passIndex: lastPassIndex });
+        }
+        emitJudgeStream(id, { type: "done", passes: result.passes.length });
         job.completedPasses = result.passes.length;
         job.childRunIds = result.passes.map((p) => p.runId);
         job.status = "done";
@@ -333,6 +449,7 @@ export function registerBenchmarkRoutes(app: Hono): void {
       } catch (err) {
         job.status = "error";
         job.error = err instanceof Error ? err.message : String(err);
+        emitJudgeStream(id, { type: "error", error: job.error });
         log.error("Re-judge failed for {parentRunId}: {error}", {
           parentRunId: id,
           error: job.error,
