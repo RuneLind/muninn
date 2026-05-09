@@ -105,7 +105,7 @@ export function parseHuginnTracePointer(
   return { text: output, fetchUrl: null };
 }
 
-export interface HuginnTraceChannel {
+interface HuginnTraceChannel {
   /** Tool output with the trace marker stripped, ready to store / forward. */
   text: string;
   /** Inline-fence trace, if Huginn ran in `HUGINN_TRACE_DEFAULT` (legacy) mode. */
@@ -115,14 +115,14 @@ export interface HuginnTraceChannel {
 }
 
 /**
- * Single entry point for connectors: try the pointer channel first, then fall
- * back to the inline-fence channel. Both modes coexist during rollout, and
- * the precedence rule is the same in every connector — wrap it once instead
- * of repeating the if/else in each call site.
+ * Try the pointer channel first, then fall back to the inline-fence channel.
+ * Both modes coexist during rollout, and the precedence rule is the same in
+ * every caller — keep it private to {@link processMcpToolResult} so connectors
+ * always go through the full unwrap → peel → fetch pipeline.
  *
  * Returns `text` unchanged when neither channel matched.
  */
-export function peelHuginnTraceChannel(
+function peelHuginnTraceChannel(
   text: string,
   allowedOrigins?: string[],
 ): HuginnTraceChannel {

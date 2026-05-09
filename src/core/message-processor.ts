@@ -11,7 +11,6 @@ import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/a
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { parseHuginnTrace } from "../ai/huginn-trace.ts";
-import { fetchHuginnTrace } from "../ai/huginn-trace-pointer.ts";
 import { emitSearchTraceSpans } from "./search-trace-spans.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
@@ -212,14 +211,10 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // user-visible response.
     if (result.toolCalls) {
       const pointerTools = result.toolCalls.filter(
-        (tc) => tc.searchTracePointer && tc.searchTrace === undefined,
+        (tc) => tc.searchTraceFetch && tc.searchTrace === undefined,
       );
       if (pointerTools.length > 0) {
-        const fetched = await Promise.allSettled(
-          pointerTools.map(
-            (tc) => tc.searchTraceFetch ?? fetchHuginnTrace(tc.searchTracePointer!),
-          ),
-        );
+        const fetched = await Promise.allSettled(pointerTools.map((tc) => tc.searchTraceFetch!));
         for (let i = 0; i < pointerTools.length; i++) {
           const r = fetched[i]!;
           if (r.status === "fulfilled" && r.value !== null) {
