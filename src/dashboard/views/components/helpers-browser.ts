@@ -11,6 +11,7 @@ import {
   timeAgo,
   deadlineText,
   fmtMs,
+  fmtDuration,
   fmtTokens,
   formatSchedule,
 } from "./helpers.ts";
@@ -26,6 +27,7 @@ Object.assign(globalThis, {
   timeAgo,
   deadlineText,
   fmtMs,
+  fmtDuration,
   fmtTokens,
   formatSchedule,
 });

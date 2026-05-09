@@ -1,5 +1,5 @@
 import { renderNav } from "../shared-styles.ts";
-import { helpersClientScript } from "../components/helpers.ts";
+import { helpersClientScript } from "../components/helpers-client.ts";
 import type { LiveJob } from "../../../benchmarks/live-job.ts";
 import { BENCHMARK_STYLES, esc, fmtTime } from "./shared.ts";
 

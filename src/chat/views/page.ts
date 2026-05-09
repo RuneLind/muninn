@@ -2,7 +2,7 @@ import { SHARED_STYLES, renderNav } from "../../dashboard/views/shared-styles.ts
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "../../dashboard/views/components/agent-status-ui.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "../../dashboard/views/components/request-progress-ui.ts";
 import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/components/bot-selector.ts";
-import { helpersClientScript } from "../../dashboard/views/components/helpers.ts";
+import { helpersClientScript } from "../../dashboard/views/components/helpers-client.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "../../dashboard/views/components/doc-panel.ts";
 import { chatStyles } from "./components/chat-styles.ts";
 import { webFormatClientScript } from "./components/web-format-client.ts";

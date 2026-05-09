@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { ytSubmitFormStyles, ytSubmitFormHtml, ytSubmitFormScript } from "./components/yt-submit-form.ts";
 import { ytJobCardStyles, ytJobCardHtml, ytJobCardScript } from "./components/yt-job-card.ts";
 import { ytRecentJobsStyles, ytRecentJobsHtml, ytRecentJobsScript } from "./components/yt-recent-jobs.ts";

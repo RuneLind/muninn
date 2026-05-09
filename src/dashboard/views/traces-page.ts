@@ -1,16 +1,23 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { tracesStatsStyles, tracesStatsHtml, tracesStatsScript } from "./components/traces-stats.ts";
 import { tracesFiltersStyles, tracesFiltersHtml, tracesPaginationHtml, tracesFiltersScript } from "./components/traces-filters.ts";
 import { tracesListStyles, tracesListHtml, tracesListScript } from "./components/traces-list.ts";
-import { tracesWaterfallStyles, tracesWaterfallHtml, tracesWaterfallScript } from "./components/traces-waterfall.ts";
+import {
+  tracesWaterfallStyles,
+  tracesWaterfallHtml,
+  tracesWaterfallClientScript,
+} from "./components/traces-waterfall.ts";
 import { tracesPromptModalStyles, tracesPromptModalHtml, tracesPromptModalScript } from "./components/traces-prompt-modal.ts";
 import { searchTraceDetailStyles, searchTraceDetailScript } from "./components/search-trace-detail.ts";
 import { toolDetailRenderersStyles, toolDetailRenderersScript } from "./components/tool-detail-renderers.ts";
 
 export async function renderTracesPage(): Promise<string> {
-  const helpers = await helpersClientScript();
+  const [helpers, waterfallScript] = await Promise.all([
+    helpersClientScript(),
+    tracesWaterfallClientScript(),
+  ]);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -50,7 +57,7 @@ export async function renderTracesPage(): Promise<string> {
     ${tracesFiltersScript()}
     ${searchTraceDetailScript()}
     ${toolDetailRenderersScript()}
-    ${tracesWaterfallScript()}
+    ${waterfallScript}
     ${tracesPromptModalScript()}
 
     // --- Bot selector (synced with dashboard via localStorage) ---

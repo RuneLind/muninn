@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { searchStatsStyles, searchStatsHtml, searchStatsScript } from "./components/search-stats.ts";
 import { searchFormStyles, searchFormHtml, searchFormScript } from "./components/search-form.ts";
