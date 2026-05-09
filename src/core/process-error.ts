@@ -2,7 +2,9 @@ import type { Tracer } from "../tracing/index.ts";
 import type { Platform } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { agentStatus } from "../dashboard/agent-status.ts";
+import { escapeHtml } from "../format/markdown-core.ts";
 import { getLog } from "../logging.ts";
+import type { LogProps } from "./message-processor.ts";
 
 const log = getLog("core", "process-error");
 
@@ -16,8 +18,7 @@ export interface ProcessErrorParams {
   userId: string;
   username: string;
   botName: string;
-  /** Log properties (botName/userId/username/platform) carried from the orchestrator. */
-  logProps: Record<string, unknown>;
+  logProps: LogProps;
 }
 
 /**
@@ -52,8 +53,7 @@ export async function handleProcessError(params: ProcessErrorParams): Promise<vo
   activityLog.push("error", errorMessage, { userId, username, botName });
 
   if (platform.startsWith("telegram")) {
-    const escaped = errorMessage.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    await say(`Something went wrong: ${escaped}`).catch(() => {});
+    await say(`Something went wrong: ${escapeHtml(errorMessage)}`).catch(() => {});
   } else {
     await say(`Something went wrong: ${errorMessage}`).catch(() => {});
   }

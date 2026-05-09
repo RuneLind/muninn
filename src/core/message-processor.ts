@@ -23,6 +23,18 @@ export { extractChannelPosts } from "./response-handler.ts";
 
 const log = getLog("core", "processor");
 
+/** Structured log properties carried through the processMessage pipeline.
+ *  Index signature satisfies LogTape's `Record<string, unknown>` parameter
+ *  while still requiring the four core fields.
+ */
+export interface LogProps {
+  botName: string;
+  userId: string;
+  username: string;
+  platform: Platform;
+  [key: string]: unknown;
+}
+
 export interface ProcessMessageParams {
   text: string;
   userId: string;
@@ -94,7 +106,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const isTelegram = platform.startsWith("telegram");
   const externalTracer = !!params.tracer;
   const t = params.tracer ?? new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
-  const props = { botName: botConfig.name, userId, username, platform };
+  const props: LogProps = { botName: botConfig.name, userId, username, platform };
 
   // Ensure user exists in DB (creates on first encounter, updates last_seen_at)
   const displayName = typeof userIdentity === "object" ? userIdentity.displayName : undefined;
@@ -114,15 +126,16 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     t.end("db_save_user");
   }
 
+  agentStatus.set("building_prompt", username);
+  agentStatus.updatePhase("building_prompt");
   const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
     text, userId, username, userIdentity, threadId, botConfig,
-    postToChannel, channelContext, recentChannelMessages,
+    slackEnabled: !!postToChannel, channelContext, recentChannelMessages,
     tracer: t, logProps: props,
   });
 
-  if (setStatus) await setStatus("Thinking...").catch(() => {});
-
   try {
+    if (setStatus) await setStatus("Thinking...").catch(() => {});
     agentStatus.set("calling_claude", username);
     agentStatus.updatePhase("calling_claude");
     setConnectorInfo(botConfig, config.claudeModel);

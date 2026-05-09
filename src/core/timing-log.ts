@@ -1,7 +1,9 @@
 import type { Tracer } from "../tracing/index.ts";
 import type { ClaudeResult } from "../types.ts";
 import type { PromptBuildResult } from "../ai/prompt-builder.ts";
+import { fmtTokens } from "../utils/timing.ts";
 import { getLog } from "../logging.ts";
+import type { LogProps } from "./message-processor.ts";
 
 const log = getLog("core", "timing");
 
@@ -9,15 +11,10 @@ export interface TimingLogParams {
   tracer: Tracer;
   result: ClaudeResult;
   promptMeta: PromptBuildResult["meta"];
-  logProps: Record<string, unknown>;
+  logProps: LogProps;
 }
 
-/**
- * Emit a multi-line breakdown of the request lifecycle: prompt-build (with
- * sub-timings + counts), claude (with startup/api split + token counts),
- * db_save, format+send, and total. Read by humans during incident triage —
- * structured properties stay on `logProps`.
- */
+/** Multi-line request lifecycle breakdown for human triage during incidents. */
 export function logRequestTiming(params: TimingLogParams): void {
   const { tracer, result, promptMeta, logProps } = params;
   const s = tracer.summary();
@@ -36,8 +33,4 @@ export function logRequestTiming(params: TimingLogParams): void {
 
 function pad(ms: number | undefined): string {
   return `${Math.round(ms ?? 0)}ms`.padEnd(7);
-}
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }

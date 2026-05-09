@@ -4,9 +4,9 @@ import type { Tracer } from "../tracing/index.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
 import type { PromptBuildResult } from "../ai/prompt-builder.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
-import { agentStatus } from "../dashboard/agent-status.ts";
 import { getLog } from "../logging.ts";
 import { slackPostCapability } from "./response-handler.ts";
+import type { LogProps } from "./message-processor.ts";
 
 const log = getLog("core", "prompt-assembly");
 
@@ -17,13 +17,12 @@ export interface AssemblePromptParams {
   userIdentity?: string | UserIdentity;
   threadId?: string;
   botConfig: BotConfig;
-  /** Slack-only — when present, append the channel-posting capability prompt. */
-  postToChannel?: unknown;
+  /** When true, append the Slack channel-posting capability prompt. */
+  slackEnabled: boolean;
   channelContext?: string;
   recentChannelMessages?: string[];
   tracer: Tracer;
-  /** Log properties (botName/userId/username/platform) carried from the orchestrator. */
-  logProps: Record<string, unknown>;
+  logProps: LogProps;
 }
 
 export interface AssembledPrompt {
@@ -34,21 +33,16 @@ export interface AssembledPrompt {
 
 /**
  * Build the system + user prompt, append Slack-specific additions, persist a
- * snapshot for offline inspection, and log a summary line.
- *
- * Tracer span management is co-located so callers see one call instead of the
- * `start("prompt_build") → buildPrompt → end → mutate` dance the orchestrator
- * used to inline.
+ * snapshot for offline inspection, and log a summary line. Tracer span
+ * management for `prompt_build` is co-located here.
  */
 export async function assemblePrompt(params: AssemblePromptParams): Promise<AssembledPrompt> {
   const {
     text, userId, username, userIdentity, threadId, botConfig,
-    postToChannel, channelContext, recentChannelMessages,
+    slackEnabled, channelContext, recentChannelMessages,
     tracer, logProps,
   } = params;
 
-  agentStatus.set("building_prompt", username);
-  agentStatus.updatePhase("building_prompt");
   tracer.start("prompt_build");
   const { systemPrompt, userPrompt, meta } = await buildPrompt({
     userId,
@@ -62,7 +56,7 @@ export async function assemblePrompt(params: AssemblePromptParams): Promise<Asse
   tracer.end("prompt_build", meta);
 
   let fullSystemPrompt = systemPrompt;
-  if (postToChannel) {
+  if (slackEnabled) {
     fullSystemPrompt += slackPostCapability(channelContext);
   }
   if (recentChannelMessages && recentChannelMessages.length > 0) {
