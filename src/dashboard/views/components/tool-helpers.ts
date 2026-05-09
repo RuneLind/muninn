@@ -38,25 +38,3 @@ export function normalizeToolName(name: string): string {
   return rest.slice(0, idx) + "-" + rest.slice(idx + 2);
 }
 
-/** Inline JS: extract a short readable summary from tool input JSON */
-export function toolInputLabelScript(): string {
-  return `
-    function toolInputLabel(input) {
-      if (!input) return '';
-      try {
-        var obj = typeof input === 'object' ? input : JSON.parse(input);
-        var keys = ${JSON.stringify(TOOL_INPUT_PRIORITY_KEYS)};
-        for (var i = 0; i < keys.length; i++) {
-          var v = obj[keys[i]];
-          if (typeof v === 'string' && v.length > 0) return v.length > ${TOOL_INPUT_MAX_LENGTH} ? v.slice(0, ${TOOL_INPUT_MAX_LENGTH - 3}) + '...' : v;
-        }
-        var allKeys = Object.keys(obj);
-        for (var j = 0; j < allKeys.length; j++) {
-          var val = obj[allKeys[j]];
-          if (typeof val === 'string' && val.length > 0) return val.length > ${TOOL_INPUT_MAX_LENGTH} ? val.slice(0, ${TOOL_INPUT_MAX_LENGTH - 3}) + '...' : val;
-        }
-      } catch (e) {}
-      return '';
-    }
-  `;
-}

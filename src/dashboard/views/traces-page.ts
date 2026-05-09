@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { escScript, toolInputLabelScript, deriveSpanLabelScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { tracesStatsStyles, tracesStatsHtml, tracesStatsScript } from "./components/traces-stats.ts";
 import { tracesFiltersStyles, tracesFiltersHtml, tracesPaginationHtml, tracesFiltersScript } from "./components/traces-filters.ts";
 import { tracesListStyles, tracesListHtml, tracesListScript } from "./components/traces-list.ts";
@@ -9,7 +9,8 @@ import { tracesPromptModalStyles, tracesPromptModalHtml, tracesPromptModalScript
 import { searchTraceDetailStyles, searchTraceDetailScript } from "./components/search-trace-detail.ts";
 import { toolDetailRenderersStyles, toolDetailRenderersScript } from "./components/tool-detail-renderers.ts";
 
-export function renderTracesPage(): string {
+export async function renderTracesPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -43,9 +44,7 @@ export function renderTracesPage(): string {
   ${tracesPromptModalHtml()}
 
   <script>
-    ${escScript()}
-    ${toolInputLabelScript()}
-    ${deriveSpanLabelScript()}
+    ${helpers}
     ${tracesListScript()}
     ${tracesStatsScript()}
     ${tracesFiltersScript()}
