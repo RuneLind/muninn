@@ -1,3 +1,5 @@
+import { Placeholders } from "../format/markdown-core.ts";
+
 /**
  * Converts Claude's markdown output to Slack mrkdwn format.
  * Slack uses its own formatting: *bold*, _italic_, ~strike~, <url|text>
@@ -5,20 +7,16 @@
 export function formatSlackMrkdwn(text: string): string {
   let result = text;
 
+  const placeholders = new Placeholders();
+
   // Preserve code blocks from further processing
-  const codeBlocks: string[] = [];
-  result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-    const idx = codeBlocks.length;
-    codeBlocks.push(`\`\`\`\n${code.trimEnd()}\n\`\`\``);
-    return `\x00CODEBLOCK${idx}\x00`;
+  result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
+    return placeholders.add("CODEBLOCK", `\`\`\`\n${code.trimEnd()}\n\`\`\``);
   });
 
   // Preserve inline code
-  const inlineCodes: string[] = [];
   result = result.replace(/`([^`]+)`/g, (_match, code) => {
-    const idx = inlineCodes.length;
-    inlineCodes.push(`\`${code}\``);
-    return `\x00INLINE${idx}\x00`;
+    return placeholders.add("INLINE", `\`${code}\``);
   });
 
   // Convert markdown tables to labeled bullet lists
@@ -51,28 +49,19 @@ export function formatSlackMrkdwn(text: string): string {
   result = result.replace(/<a href="([^"]+)">(.*?)<\/a>/g, "<$1|$2>");
 
   // Preserve Slack links before stripping HTML tags
-  const slackLinks: string[] = [];
   result = result.replace(/<(https?:\/\/[^>|]+)\|([^>]+)>/g, (_match, url, text) => {
-    const idx = slackLinks.length;
-    slackLinks.push(`<${url}|${text}>`);
-    return `\x00LINK${idx}\x00`;
+    return placeholders.add("LINK", `<${url}|${text}>`);
   });
   // Also preserve bare URL links <url> (no display text)
   result = result.replace(/<(https?:\/\/[^>]+)>/g, (_match, url) => {
-    const idx = slackLinks.length;
-    slackLinks.push(`<${url}>`);
-    return `\x00LINK${idx}\x00`;
+    return placeholders.add("LINK", `<${url}>`);
   });
 
   // Strip remaining HTML tags
   result = result.replace(/<\/?[^>]+>/g, "");
 
-  // Restore Slack links
-  result = result.replace(/\x00LINK(\d+)\x00/g, (_m, idx) => slackLinks[parseInt(idx)] ?? "");
-
-  // Restore code blocks and inline codes
-  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)] ?? "");
-  result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)] ?? "");
+  // Restore Slack links + code blocks + inline codes
+  result = placeholders.restore(result);
 
   // Strip empty bullet points (bullet char followed by only whitespace)
   result = result.replace(/^[•\-\*]\s*$/gm, "");
