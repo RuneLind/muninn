@@ -38,6 +38,10 @@ function renderBlock(block: Block): string {
     }
     case "text":
       return block.lines.map(renderInline).join("\n");
+    default: {
+      const _exhaustive: never = block;
+      return _exhaustive;
+    }
   }
 }
 
@@ -47,13 +51,12 @@ function renderInline(text: string): string {
 
   const ph = new Placeholders();
 
-  // Inline code → placeholder (HTML-escape contents).
   result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
     ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
   );
 
-  // Markdown links → placeholder. Link text is NOT inline-processed —
-  // prevents nested-tag tangles like <a><i>...</a></i> that Telegram rejects.
+  // Link text is NOT inline-processed — prevents nested-tag tangles like
+  // <a><i>...</a></i> that Telegram rejects.
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
     ph.add("LINK", `<a href="${url}">${label}</a>`),
   );
@@ -65,7 +68,8 @@ function renderInline(text: string): string {
 
   result = ph.restore(result);
 
-  // Escape any HTML tag Telegram doesn't allow.
+  // Telegram only renders a fixed set of HTML tags; anything else must be
+  // escaped or it returns a 400.
   result = result.replace(/<([^>]+)>/g, (match, inner: string) => {
     if (TG_ALLOWED_TAG.test(inner)) return match;
     return `&lt;${inner}&gt;`;

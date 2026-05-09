@@ -41,6 +41,10 @@ function renderBlock(block: Block): string {
     }
     case "text":
       return block.lines.map(renderInline).join("\n");
+    default: {
+      const _exhaustive: never = block;
+      return _exhaustive;
+    }
   }
 }
 
@@ -79,11 +83,14 @@ function renderInline(text: string): string {
   return ph.restore(result);
 }
 
+const BLOCK_TAG = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
+const NL_BEFORE_BLOCK = new RegExp(`\\n+(</?${BLOCK_TAG}[>\\s])`, "g");
+const NL_AFTER_BLOCK = new RegExp(`(</${BLOCK_TAG}>|<hr>)\\n+`, "g");
+
 /** Collapse excess blank lines, especially around block-level elements. */
 function collapseBlockSpacing(text: string): string {
-  let result = text.replace(/\n{3,}/g, "\n\n");
-  const blockRe = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
-  result = result.replace(new RegExp(`\\n+(</?${blockRe}[>\\s])`, "g"), "\n$1");
-  result = result.replace(new RegExp(`(</${blockRe}>|<hr>)\\n+`, "g"), "$1\n");
-  return result;
+  return text
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(NL_BEFORE_BLOCK, "\n$1")
+    .replace(NL_AFTER_BLOCK, "$1\n");
 }
