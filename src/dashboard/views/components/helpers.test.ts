@@ -1,6 +1,5 @@
-import { describe, test, expect, beforeAll } from "bun:test";
-import vm from "node:vm";
-import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, deriveSpanLabelScript, escScript, normalizeToolName } from "./helpers.ts";
+import { describe, test, expect } from "bun:test";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, normalizeToolName } from "./helpers.ts";
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {
@@ -546,50 +545,6 @@ describe("normalizeToolName", () => {
     expect(normalizeToolName("")).toBe("");
     expect(normalizeToolName("mcp__notool")).toBe("mcp__notool");
   });
-});
-
-describe("deriveSpanLabelHtml — TS / JS twin parity", () => {
-  // Eval the inline JS twin in a vm context and compare its output to the TS
-  // function. They MUST stay in sync — the JS version is what actually runs in
-  // the dashboard. If a future change touches one but not the other this
-  // catches the drift.
-  const ctx: Record<string, unknown> = {};
-  beforeAll(() => {
-    vm.createContext(ctx);
-    vm.runInContext(`${escScript()}\n${deriveSpanLabelScript()}`, ctx);
-  });
-  const callJs = (span: unknown) => (ctx.deriveSpanLabelHtml as (s: unknown) => unknown)(span);
-
-  const cases: Array<[string, unknown]> = [
-    ["graph_node",     { name: "knowledge-get_graph_node",   attributes: { input: { node_id: "epic:MELOSYS-7383" } } }],
-    ["symbol_context", { name: "yggdrasil-symbol_context",   attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
-    ["list_files",     { name: "yggdrasil-list_files",       attributes: { input: { repo: "melosys-api", path: "src/main/foo" } } }],
-    ["read_source",    { name: "yggdrasil-read_source",      attributes: { input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
-    ["search_pattern", { name: "yggdrasil-search_pattern",   attributes: { input: { repo: "melosys-api", pattern: "FOO|BAR" } } }],
-    ["analyze_ticket", { name: "yggdrasil-analyze_ticket",   attributes: { input: { repo: "melosys-api", ticket: "Behandling skal ikke kunne avsluttes uten grunnlag", top_k: 5, max_depth: 2 } } }],
-    ["analyze_ticket truncated", { name: "yggdrasil-analyze_ticket", attributes: { input: '{"ticket":"MELOSYS-7999: Journalføring søknader på eksisterende eller ny sak — lots of additional text that runs past the 500-char cap…' } }],
-    ["analyze_ticket repo-from-output", { name: "yggdrasil-analyze_ticket", attributes: { input: { ticket: "MELOSYS-7999: ..." }, output: JSON.stringify({ summary: { repos: ["melosys-api"] } }) } }],
-    ["search w/ coll", { name: "knowledge-search_knowledge", attributes: { input: { collection: "jira-issues" } } }],
-    ["null case",      { name: "claude" }],
-    // Claude CLI emits the mcp__server__tool format. The TS and JS twins must
-    // both normalise it before dispatch, so chips show up regardless of connector.
-    ["mcp__ symbol_context", { name: "mcp__yggdrasil__symbol_context", attributes: { input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
-    ["mcp__ graph_node",     { name: "mcp__knowledge__get_graph_node", attributes: { input: { node_id: "epic:MELOSYS-7383" } } }],
-    ["mcp__ read_source",    { name: "mcp__yggdrasil__read_source",    attributes: { input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
-    // Production span shape for claude-cli: span.name = formatted display name,
-    // attrs.toolName = raw mcp__server__tool. The dispatcher prefers toolName so
-    // chips render the same as the copilot-sdk dash form.
-    ["claude-cli production shape — symbol_context", { name: "symbol_context (yggdrasil)", attributes: { toolName: "mcp__yggdrasil__symbol_context", input: { qualified_name: "no.nav.x.Foo", repo: "melosys-api" } } }],
-    ["claude-cli production shape — read_source",    { name: "read_source (yggdrasil)",    attributes: { toolName: "mcp__yggdrasil__read_source",    input: { repo: "melosys-api", path: "src/main/Foo.kt" } } }],
-    // Trace-missing fallback: when huginn doesn't attach a trace AND input has
-    // no collection, the recipe shows the query so the row isn't blank.
-    ["knowledge-search_knowledge no-trace fallback", { name: "knowledge-search_knowledge", attributes: { toolName: "knowledge-search_knowledge", input: { query: "journalføring søknad", brief: false } } }],
-  ];
-  for (const [label, span] of cases) {
-    test(`parity: ${label}`, () => {
-      expect(callJs(span)).toEqual(deriveSpanLabelHtml(span as Parameters<typeof deriveSpanLabelHtml>[0]) as unknown);
-    });
-  }
 });
 
 describe("summarizeSearchTrace", () => {

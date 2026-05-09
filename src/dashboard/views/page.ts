@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { helpersScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { layoutStyles } from "./components/layout.ts";
 import { connectionStyles, connectionStatusHtml, connectionScript } from "./components/connection.ts";
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "./components/agent-status-ui.ts";
@@ -21,7 +21,8 @@ import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts"
 import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "./components/request-progress-ui.ts";
 
-export function renderDashboardPage(): string {
+export async function renderDashboardPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -98,7 +99,7 @@ export function renderDashboardPage(): string {
   ${activityFeedHtml()}
   ${tooltipHtml()}
   <script>
-    ${helpersScript()}
+    ${helpers}
     ${botSelectorScript()}
     ${sectionTabsScript()}
     ${overviewSectionScript()}

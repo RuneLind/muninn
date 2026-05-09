@@ -18,8 +18,8 @@ export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
 
   // Dashboard home page
-  app.get("/", (c) => {
-    return c.html(renderDashboardPage());
+  app.get("/", async (c) => {
+    return c.html(await renderDashboardPage());
   });
 
   registerDataRoutes(app);

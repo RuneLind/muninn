@@ -2,7 +2,7 @@ import { SHARED_STYLES, renderNav } from "../../dashboard/views/shared-styles.ts
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "../../dashboard/views/components/agent-status-ui.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "../../dashboard/views/components/request-progress-ui.ts";
 import { botSelectorStyles, botSelectorHtml } from "../../dashboard/views/components/bot-selector.ts";
-import { helpersScript } from "../../dashboard/views/components/helpers.ts";
+import { helpersClientScript } from "../../dashboard/views/components/helpers.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "../../dashboard/views/components/doc-panel.ts";
 import { chatStyles } from "./components/chat-styles.ts";
 import { webFormatClientScript } from "./components/web-format-client.ts";
@@ -14,7 +14,10 @@ import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 
 export async function renderChatPage(): Promise<string> {
-  const webFormatScript = await webFormatClientScript();
+  const [webFormatScript, helpersScript] = await Promise.all([
+    webFormatClientScript(),
+    helpersClientScript(),
+  ]);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -125,7 +128,7 @@ export async function renderChatPage(): Promise<string> {
 
   ${MARKED_CDN_SCRIPT}
   <script>
-    ${helpersScript()}
+    ${helpersScript}
     ${agentStatusScript()}
     ${requestProgressScript()}
     ${webFormatScript}

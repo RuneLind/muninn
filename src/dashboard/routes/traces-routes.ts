@@ -8,8 +8,8 @@ import { parseIntParam } from "./route-utils.ts";
 const log = getLog("dashboard");
 
 export function registerTracesRoutes(app: Hono): void {
-  app.get("/traces", (c) => {
-    return c.html(renderTracesPage());
+  app.get("/traces", async (c) => {
+    return c.html(await renderTracesPage());
   });
 
   app.get("/api/traces", async (c) => {
