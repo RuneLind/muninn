@@ -1,68 +1,77 @@
+import { type Block, parseBlocks } from "../format/markdown-ast.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
- * The AI outputs standard markdown; this converts to Telegram's HTML subset.
+ * Walks the shared block AST; each block emits Telegram's HTML subset and
+ * inline content runs through `renderInline`.
  */
 export function formatTelegramHtml(text: string): string {
-  let result = text;
+  const blocks = parseBlocks(text);
+  const rendered = blocks.map(renderBlock).join("\n");
+  return rendered.replace(/\n{3,}/g, "\n\n").trim();
+}
 
-  // Escape HTML entities first (but preserve any intentional HTML tags Claude sent)
-  // We selectively escape only & that aren't part of entities
-  result = result.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
+const TG_ALLOWED_TAG = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
 
-  const placeholders = new Placeholders();
+function renderBlock(block: Block): string {
+  switch (block.type) {
+    case "code_block": {
+      const openTag = block.lang ? `<code class="language-${block.lang}">` : "<code>";
+      return `<pre>${openTag}${escapeHtml(block.code)}</code></pre>`;
+    }
+    case "hr":
+      return "";
+    case "heading":
+      return `<b>${renderInline(block.content)}</b>`;
+    case "blockquote":
+      return block.lines.map((l) => `> ${renderInline(l)}`).join("\n");
+    case "ul":
+      return block.items.map((i) => `- ${renderInline(i)}`).join("\n");
+    case "ol":
+      return block.items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n");
+    case "table": {
+      const headerRow = `| ${block.headers.map(renderInline).join(" | ")} |`;
+      const sepRow = "|" + block.headers.map(() => "---").join("|") + "|";
+      const dataRows = block.rows.map((row) => `| ${row.map(renderInline).join(" | ")} |`);
+      return [headerRow, sepRow, ...dataRows].join("\n");
+    }
+    case "text":
+      return block.lines.map(renderInline).join("\n");
+  }
+}
 
-  // Preserve code blocks from further processing
-  result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-    const langAttr = lang ? `<code class="language-${lang}">` : "<code>";
-    return placeholders.add("CODEBLOCK", `<pre>${langAttr}${escapeHtml(code.trimEnd())}</code></pre>`);
-  });
+function renderInline(text: string): string {
+  // Selective ampersand escape — preserve existing entities verbatim.
+  let result = text.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
 
-  // Preserve inline code
-  result = result.replace(/`([^`]+)`/g, (_match, code) => {
-    return placeholders.add("INLINE", `<code>${escapeHtml(code)}</code>`);
-  });
+  const ph = new Placeholders();
 
-  // Convert markdown links early and protect from italic/bold processing
-  // (prevents overlapping tags like <a><i>...</a></i> when formatting crosses link boundaries)
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, text, url) => {
-    return placeholders.add("LINK", `<a href="${url}">${text}</a>`);
-  });
+  // Inline code → placeholder (HTML-escape contents).
+  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
+    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
+  );
 
-  // Convert markdown headings to bold lines
-  result = result.replace(/^#{1,6}\s+(.+)$/gm, "<b>$1</b>");
+  // Markdown links → placeholder. Link text is NOT inline-processed —
+  // prevents nested-tag tangles like <a><i>...</a></i> that Telegram rejects.
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
+    ph.add("LINK", `<a href="${url}">${label}</a>`),
+  );
 
-  // Remove horizontal rules
-  result = result.replace(/^---+$/gm, "");
-
-  // Convert **bold** to <b>bold</b>
   result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-
-  // Convert *italic* to <i>italic</i> (but not inside words like file*name)
   result = result.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, "<i>$1</i>");
-
-  // Convert _italic_ to <i>italic</i>
   result = result.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, "<i>$1</i>");
-
-  // Convert ~~strikethrough~~ to <s>strikethrough</s>
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-  // Restore links + code blocks + inline codes
-  result = placeholders.restore(result);
+  result = ph.restore(result);
 
-  // Escape any HTML tags that Telegram doesn't support
-  // Telegram allows: b, i, u, s, code, pre, a, tg-spoiler, tg-emoji, blockquote
-  const allowedTags = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
-  result = result.replace(/<([^>]+)>/g, (match, inner) => {
-    if (allowedTags.test(inner)) return match;
+  // Escape any HTML tag Telegram doesn't allow.
+  result = result.replace(/<([^>]+)>/g, (match, inner: string) => {
+    if (TG_ALLOWED_TAG.test(inner)) return match;
     return `&lt;${inner}&gt;`;
   });
 
-  // Clean up excessive blank lines
-  result = result.replace(/\n{3,}/g, "\n\n");
-
-  return result.trim();
+  return result;
 }
 
 /**
@@ -79,4 +88,3 @@ export function stripHtml(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
-
