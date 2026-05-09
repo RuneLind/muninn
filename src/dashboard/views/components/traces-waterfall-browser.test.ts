@@ -1,0 +1,166 @@
+import { test, expect, beforeAll } from "bun:test";
+import vm from "node:vm";
+import { helpersClientScript } from "./helpers.ts";
+import { tracesWaterfallClientScript } from "./traces-waterfall-client.ts";
+
+/**
+ * Eval the bundled waterfall script in a vm context with a stubbed DOM. The
+ * goal is to verify that:
+ *  1. The IIFE bundle loads without runtime errors against the elements the
+ *     traces page provides at script-injection time.
+ *  2. `loadWaterfall`, `closeWaterfall`, `closeSpanDetails`, `toggleCollapse`
+ *     end up reachable on globalThis (so HTML inline onclicks find them).
+ *  3. Loading a trace populates `globalThis.currentWaterfallTraceId` and
+ *     `globalThis.waterfallSpans` (so traces-prompt-modal.ts can read them).
+ *  4. Rendering a real-shape spans payload doesn't throw — exercises the
+ *     buildWaterfallState DFS, the chevron toggle HTML, and the span label
+ *     fallback that depends on globals (`fmtDuration`, `esc`, …).
+ */
+
+interface VmCtx {
+  loadWaterfall: (id: string) => Promise<void>;
+  closeWaterfall: () => void;
+  closeSpanDetails: () => void;
+  toggleCollapse: (id: string) => void;
+  currentWaterfallTraceId: string | null;
+  waterfallSpans: Array<{ id: string }>;
+  [k: string]: unknown;
+}
+
+let ctx: VmCtx;
+let nextFetchSpans: unknown[] = [];
+
+beforeAll(async () => {
+  // Each id maps to a stub Element with classList + a synthetic addEventListener
+  // that captures handlers for later invocation. innerHTML is just a string
+  // so the IIFE can write into it without throwing.
+  function makeEl(id: string) {
+    const el = {
+      id,
+      classList: {
+        _set: new Set<string>(),
+        add(c: string) {
+          this._set.add(c);
+        },
+        remove(c: string) {
+          this._set.delete(c);
+        },
+        contains(c: string) {
+          return this._set.has(c);
+        },
+      },
+      innerHTML: "",
+      textContent: "",
+      _listeners: {} as Record<string, Array<(e: unknown) => void>>,
+      addEventListener(evt: string, fn: (e: unknown) => void) {
+        if (!this._listeners[evt]) this._listeners[evt] = [];
+        this._listeners[evt]!.push(fn);
+      },
+    };
+    return el;
+  }
+  const elements: Record<string, ReturnType<typeof makeEl>> = {
+    waterfall: makeEl("waterfall"),
+    waterfallContainer: makeEl("waterfallContainer"),
+    waterfallTitle: makeEl("waterfallTitle"),
+    spanDetails: makeEl("spanDetails"),
+    spanDetailsTitle: makeEl("spanDetailsTitle"),
+    spanDetailsJson: makeEl("spanDetailsJson"),
+  };
+
+  // The waterfall script attaches a top-level keydown handler on `document`,
+  // so document needs its own addEventListener too.
+  const documentStub = {
+    _listeners: {} as Record<string, Array<(e: unknown) => void>>,
+    addEventListener(evt: string, fn: (e: unknown) => void) {
+      if (!this._listeners[evt]) this._listeners[evt] = [];
+      this._listeners[evt]!.push(fn);
+    },
+    getElementById(id: string) {
+      return elements[id] ?? null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+  };
+
+  ctx = {
+    window: {},
+    document: documentStub,
+    fetch: async () => ({ json: async () => ({ spans: nextFetchSpans }) }),
+    console,
+  } as unknown as VmCtx;
+  vm.createContext(ctx);
+  const helpers = await helpersClientScript();
+  const waterfall = await tracesWaterfallClientScript();
+  // `fmtDuration` is defined inline by `tracesListScript()` on the real page,
+  // which top-level-declares it in the same classic <script> so it lands on
+  // globalThis. Stub it here so loadWaterfall's title-rendering path resolves.
+  vm.runInContext(
+    `function fmtDuration(ms){ return ms == null ? '-' : ms + 'ms'; }\n${helpers}\n${waterfall}`,
+    ctx,
+  );
+});
+
+test("IIFE exposes click-bound handlers on globalThis", () => {
+  expect(typeof ctx.loadWaterfall).toBe("function");
+  expect(typeof ctx.closeWaterfall).toBe("function");
+  expect(typeof ctx.closeSpanDetails).toBe("function");
+  expect(typeof ctx.toggleCollapse).toBe("function");
+});
+
+test("globalThis is seeded with currentWaterfallTraceId and waterfallSpans for prompt-modal", () => {
+  expect(ctx.currentWaterfallTraceId).toBeNull();
+  expect(Array.isArray(ctx.waterfallSpans)).toBe(true);
+});
+
+test("loadWaterfall populates globals from a real-shape spans payload", async () => {
+  // Override fetch with a payload that exercises:
+  //  - root span (no parentId) — gets the title prefix + duration
+  //  - child span — triggers the DFS sort
+  //  - tool span with toolName — exercises isToolSpan + chevron toggle path
+  //  - synthesized child — auto-collapses the parent
+  nextFetchSpans = [
+    {
+      id: "root",
+      name: "request",
+      kind: "root",
+      status: "ok",
+      startedAt: 1000,
+      durationMs: 500,
+    },
+    {
+      id: "tool1",
+      parentId: "root",
+      name: "search",
+      kind: "tool",
+      status: "ok",
+      startedAt: 1100,
+      durationMs: 200,
+      attributes: { toolName: "knowledge-search_knowledge", input: '{"q":"hi"}' },
+    },
+    {
+      id: "stage1",
+      parentId: "tool1",
+      name: "index.fetch",
+      kind: "span",
+      status: "ok",
+      startedAt: 1100,
+      durationMs: 50,
+      attributes: { synthesized: true },
+    },
+  ];
+  await ctx.loadWaterfall("trace-xyz");
+  expect(ctx.currentWaterfallTraceId).toBe("trace-xyz");
+  expect(ctx.waterfallSpans.length).toBe(3);
+  // DFS order: root, tool1, stage1
+  expect(ctx.waterfallSpans.map((s) => s.id)).toEqual(["root", "tool1", "stage1"]);
+});
+
+test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () => {
+  ctx.closeSpanDetails();
+  ctx.closeWaterfall();
+});
