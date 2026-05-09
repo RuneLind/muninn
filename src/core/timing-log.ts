@@ -1,7 +1,7 @@
 import type { Tracer } from "../tracing/index.ts";
 import type { ClaudeResult } from "../types.ts";
 import type { PromptBuildResult } from "../ai/prompt-builder.ts";
-import { fmtTokens } from "../utils/timing.ts";
+import { fmtTokens } from "../utils/fmt-tokens.ts";
 import { getLog } from "../logging.ts";
 import type { LogProps } from "./message-processor.ts";
 
