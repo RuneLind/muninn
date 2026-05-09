@@ -27,8 +27,8 @@ Gi en oppsummering av:
 export function registerResearchRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/research", (c) => {
-    return c.html(renderResearchPage());
+  app.get("/research", async (c) => {
+    return c.html(await renderResearchPage());
   });
 
   // Research: list available bots

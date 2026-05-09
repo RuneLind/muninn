@@ -1,7 +1,8 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 
-export function renderSerenaPage(): string {
+export async function renderSerenaPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -245,7 +246,7 @@ export function renderSerenaPage(): string {
   </div>
 
   <script>
-    ${escScript()}
+    ${helpers}
 
     var instances = [];
     var proxyInfo = null;

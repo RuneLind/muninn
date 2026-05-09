@@ -1,7 +1,7 @@
 import { test, expect, beforeAll } from "bun:test";
 import vm from "node:vm";
 import { toolDetailRenderersScript } from "./tool-detail-renderers.ts";
-import { escScript } from "./helpers.ts";
+import { helpersClientScript } from "./helpers.ts";
 
 /**
  * Eval the embedded renderer script in a vm context so we can call the
@@ -10,7 +10,7 @@ import { escScript } from "./helpers.ts";
  * something sensible for realistic attrs shapes pulled from the live DB.
  */
 const sandbox: Record<string, unknown> = {};
-beforeAll(() => {
+beforeAll(async () => {
   // Polyfill the browser globals the renderer script touches (window,
   // document). We only hold state on window; document calls are never reached
   // when we invoke renderers directly.
@@ -18,8 +18,10 @@ beforeAll(() => {
     window: { __tdrState: { showRaw: false, attrs: null } },
     document: { getElementById: () => null },
   };
+  ctx.globalThis = ctx;
   vm.createContext(ctx);
-  vm.runInContext(`${escScript()}\n${toolDetailRenderersScript()}`, ctx);
+  const helpers = await helpersClientScript();
+  vm.runInContext(`${helpers}\n${toolDetailRenderersScript()}`, ctx);
   Object.assign(sandbox, ctx);
 });
 

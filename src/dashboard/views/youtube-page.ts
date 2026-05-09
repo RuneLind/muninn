@@ -1,12 +1,13 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { ytSubmitFormStyles, ytSubmitFormHtml, ytSubmitFormScript } from "./components/yt-submit-form.ts";
 import { ytJobCardStyles, ytJobCardHtml, ytJobCardScript } from "./components/yt-job-card.ts";
 import { ytRecentJobsStyles, ytRecentJobsHtml, ytRecentJobsScript } from "./components/yt-recent-jobs.ts";
 import { ytArticleLibraryStyles, ytArticleLibraryHtml, ytArticleLibraryScript } from "./components/yt-article-library.ts";
 
-export function renderYouTubePage(): string {
+export async function renderYouTubePage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -71,7 +72,7 @@ export function renderYouTubePage(): string {
 
   ${MARKED_CDN_SCRIPT}
   <script>
-    ${escScript()}
+    ${helpers}
     ${ytJobCardScript()}
     ${ytRecentJobsScript()}
     ${ytArticleLibraryScript()}

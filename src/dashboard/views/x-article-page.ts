@@ -1,8 +1,9 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, docPanelStyles, markdownContentStyles, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 
-export function renderXArticlePage(): string {
+export async function renderXArticlePage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -429,7 +430,7 @@ export function renderXArticlePage(): string {
 
   ${MARKED_CDN_SCRIPT}
   <script>
-    ${escScript()}
+    ${helpers}
 
     // --- Status & rendering ---
     var accumulatedText = '';

@@ -1,5 +1,4 @@
 /** MemSearch results — result cards, scoring, search execution, and rendering */
-import { escScript } from "./helpers.ts";
 
 export function memsearchResultsStyles(): string {
   return `
@@ -186,8 +185,6 @@ export function memsearchResultsHtml(): string {
 export function memsearchResultsScript(): string {
   return `
     let searchResults = [];
-
-    ${escScript()}
 
     function fmtDate(epochMs) {
       const d = new Date(epochMs);

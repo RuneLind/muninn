@@ -48,8 +48,8 @@ async function findExistingByVideoId(
 export function registerYouTubeRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/youtube", (c) => {
-    return c.html(renderYouTubePage());
+  app.get("/youtube", async (c) => {
+    return c.html(await renderYouTubePage());
   });
 
   // CORS preflight for Chrome extension

@@ -1,10 +1,12 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { memsearchStatsStyles, memsearchStatsHtml, memsearchStatsScript } from "./components/memsearch-stats.ts";
 import { memsearchFormStyles, memsearchFormHtml, memsearchFormScript } from "./components/memsearch-form.ts";
 import { memsearchResultsStyles, memsearchResultsHtml, memsearchResultsScript } from "./components/memsearch-results.ts";
 import { memsearchModalStyles, memsearchModalHtml, memsearchModalScript } from "./components/memsearch-modal.ts";
 
-export function renderMemsearchPage(): string {
+export async function renderMemsearchPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -27,6 +29,7 @@ export function renderMemsearchPage(): string {
   ${memsearchModalHtml()}
 
   <script>
+    ${helpers}
     ${memsearchFormScript()}
     ${memsearchResultsScript()}
     ${memsearchModalScript()}
