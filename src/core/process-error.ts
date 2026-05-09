@@ -39,10 +39,7 @@ export async function handleProcessError(params: ProcessErrorParams): Promise<vo
   const errorMessage = error instanceof Error ? error.message : String(error);
   const s = tracer.summary();
   const elapsed = Math.round(tracer.totalMs());
-  const lastPhase = Object.entries(s)
-    .filter(([, v]) => v != null)
-    .map(([k]) => k)
-    .pop() ?? "unknown";
+  const lastPhase = lastCompletedPhase(s);
 
   log.error(
     "Request failed after {elapsed}ms (last completed phase: {lastPhase})\n" +
@@ -57,4 +54,12 @@ export async function handleProcessError(params: ProcessErrorParams): Promise<vo
   } else {
     await say(`Something went wrong: ${errorMessage}`).catch(() => {});
   }
+}
+
+/** Phases are recorded chronologically, so `.pop()` yields the most recent one. */
+export function lastCompletedPhase(summary: Record<string, number | undefined>): string {
+  return Object.entries(summary)
+    .filter(([, v]) => v != null)
+    .map(([k]) => k)
+    .pop() ?? "unknown";
 }
