@@ -730,6 +730,57 @@ describe("StreamParser contextTokens (per-turn input tokens)", () => {
     ));
     expect(parser.getResult().contextTokens).toBeUndefined();
   });
+
+  test("emits usage_progress per assistant turn with usage", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(performance.now(), (e) => events.push(e));
+    parser.parseLine(JSON.stringify(systemEvent));
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "Working" }],
+        usage: { input_tokens: 1000, cache_read_input_tokens: 200, output_tokens: 50 },
+      },
+      parent_tool_use_id: null,
+    }));
+    parser.parseLine(JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "Done" }],
+        usage: { input_tokens: 2000, output_tokens: 80 },
+      },
+      parent_tool_use_id: null,
+    }));
+
+    const usageEvents = events.filter((e) => e.type === "usage_progress");
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents[0]).toEqual({
+      type: "usage_progress",
+      inputTokens: 1200,  // 1000 + 200 cache_read
+      outputTokens: 50,
+      model: "claude-sonnet-4-6",
+    });
+    // Second turn — output is cumulative across turns
+    expect(usageEvents[1]).toEqual({
+      type: "usage_progress",
+      inputTokens: 2000,  // last turn only
+      outputTokens: 130,  // 50 + 80
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  test("does not emit usage_progress when assistant message has no usage", () => {
+    const events: StreamProgressEvent[] = [];
+    const parser = new StreamParser(performance.now(), (e) => events.push(e));
+    parser.parseAll(buildStream(
+      systemEvent,
+      makeAssistant([{ type: "text", text: "Hi" }]),
+      makeResult(),
+    ));
+    expect(events.filter((e) => e.type === "usage_progress")).toHaveLength(0);
+  });
 });
 
 describe("StreamParser report_intent → intent event", () => {

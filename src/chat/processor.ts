@@ -134,6 +134,10 @@ export async function processChatMessage(
     chatState.publishToolStatus(conversationId, statusText, threadId ?? null);
   };
 
+  const onUsageProgress = (usage: { inputTokens: number; outputTokens: number; model?: string }): void => {
+    chatState.publishUsageProgress(conversationId, usage, threadId ?? null);
+  };
+
   try {
     const result = await processMessage({
       text,
@@ -151,6 +155,7 @@ export async function processChatMessage(
       onTextDelta,
       onIntent,
       onToolStatus,
+      onUsageProgress,
       skipExtractions,
     });
 

@@ -131,6 +131,12 @@ export async function executePrompt(
     if (streamResult!.reportedModel !== model) {
       reportedModel = streamResult!.reportedModel;
     }
+    onProgress?.({
+      type: "usage_progress",
+      inputTokens: lastTurnInputTokens,
+      outputTokens: totalOutputTokens,
+      model: reportedModel || undefined,
+    });
 
     // No tool calls → we have the final answer
     if (streamResult!.toolCalls.length === 0) {

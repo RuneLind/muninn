@@ -172,6 +172,12 @@ export async function executePrompt(
         totalInputTokens += lastTurnInputTokens;
         totalOutputTokens += event.data.outputTokens ?? 0;
         if (event.data.model) reportedModel = event.data.model;
+        onProgress?.({
+          type: "usage_progress",
+          inputTokens: lastTurnInputTokens,
+          outputTokens: totalOutputTokens,
+          model: reportedModel || undefined,
+        });
         break;
 
       case "subagent.started":

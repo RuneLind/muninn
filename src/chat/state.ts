@@ -39,6 +39,7 @@ export type ChatEvent =
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
+  | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
   | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] };
 
@@ -168,6 +169,22 @@ export class ChatState {
   /** Broadcast a tool status update (appended as separate lines in the UI) */
   publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
     this.publish({ type: "tool_status", conversationId, text, threadId });
+  }
+
+  /** Broadcast per-turn token usage while a response is in flight */
+  publishUsageProgress(
+    conversationId: string,
+    usage: { inputTokens: number; outputTokens: number; model?: string },
+    threadId?: string | null,
+  ): void {
+    this.publish({
+      type: "usage_progress",
+      conversationId,
+      threadId,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      model: usage.model,
+    });
   }
 
   /** Broadcast MCP server status for a bot (every open chat tab updates) */

@@ -24,7 +24,8 @@ export type StreamProgressEvent =
   | { type: "tool_end"; name: string; displayName: string }
   | { type: "text" }
   | { type: "text_delta"; text: string }
-  | { type: "intent"; text: string };
+  | { type: "intent"; text: string }
+  | { type: "usage_progress"; inputTokens: number; outputTokens: number; model?: string; turn?: number };
 
 export type StreamProgressCallback = (event: StreamProgressEvent) => void;
 
@@ -138,6 +139,15 @@ export class StreamParser {
         (usage.input_tokens ?? 0) +
         (usage.cache_creation_input_tokens ?? 0) +
         (usage.cache_read_input_tokens ?? 0);
+      // Accumulate output_tokens across turns so the live progress reflects
+      // total spend so far (the result event reports the same totals at end).
+      this.outputTokens += usage.output_tokens ?? 0;
+      this.onProgress?.({
+        type: "usage_progress",
+        inputTokens: this.lastTurnInputTokens,
+        outputTokens: this.outputTokens,
+        model: this.model !== "unknown" ? this.model : undefined,
+      });
     }
 
     let hasToolUse = false;

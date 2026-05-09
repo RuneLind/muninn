@@ -576,6 +576,20 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    if (event.type === 'usage_progress') {
+      if (event.conversationId !== activeConvId) return;
+      var upThread = event.threadId || null;
+      if (activeThreadId && upThread !== activeThreadId) return;
+      // Render a live snapshot in the Last-response card. Keep it minimal:
+      // tools/cost/duration only land on the final response_meta.
+      renderLastResponseCard({
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        model: event.model,
+      });
+      return;
+    }
+
     if (event.type === 'response_meta') {
       if (event.conversationId !== activeConvId) return;
       var rmThread = event.threadId || null;

@@ -62,6 +62,8 @@ export interface ProcessMessageParams {
   onIntent?: (text: string) => void;
   /** Callback for tool status updates (appended as separate lines, not replaced) */
   onToolStatus?: (text: string) => void;
+  /** Callback for per-turn token usage updates while the response is in flight */
+  onUsageProgress?: (usage: { inputTokens: number; outputTokens: number; model?: string }) => void;
   /** External tracer — if provided, processMessage uses it instead of creating a new one.
    *  The caller is responsible for calling tracer.finish() after processMessage returns. */
   tracer?: Tracer;
@@ -104,7 +106,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const {
     text, userId, username, userIdentity, platform, botConfig, config,
     say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
-    onTextDelta, onIntent, onToolStatus,
+    onTextDelta, onIntent, onToolStatus, onUsageProgress,
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
@@ -150,7 +152,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     log.info("Calling {connector} (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude", { connector: connectorType, requestedModel: effectiveModel });
     const progressCallback = buildProgressCallback(
-      { onTextDelta, onIntent, onToolStatus, setStatus },
+      { onTextDelta, onIntent, onToolStatus, onUsageProgress, setStatus },
       username,
     );
     const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
