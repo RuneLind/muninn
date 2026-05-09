@@ -2,6 +2,7 @@ import { test, expect, mock, beforeEach, afterEach } from "bun:test";
 import {
   parseHuginnTracePointer,
   fetchHuginnTrace,
+  processMcpToolResult,
 } from "./huginn-trace-pointer.ts";
 
 // ── parseHuginnTracePointer ──────────────────────────────────
@@ -221,4 +222,90 @@ test("returns null on timeout", async () => {
   ) as unknown as typeof fetch;
   const trace = await fetchHuginnTrace("http://x:1/api/trace/abc", 50);
   expect(trace).toBeNull();
+});
+
+// ── processMcpToolResult ──────────────────────────────────────
+//
+// Edge cases for each individual stage live in their dedicated tests above
+// and in huginn-trace.test.ts; these focus on how the stages compose.
+
+test("processMcpToolResult: MCP envelope with plain text returns inner text", () => {
+  const raw = { content: [{ type: "text", text: "hello world" }] };
+  const out = processMcpToolResult(raw);
+  expect(out.cleanedText).toBe("hello world");
+  expect(out.searchTrace).toBeUndefined();
+  expect(out.searchTracePointer).toBeUndefined();
+  expect(out.searchTraceFetch).toBeUndefined();
+});
+
+test("processMcpToolResult: MCP envelope with inline trace fence peels trace and strips fence", () => {
+  const inner =
+    "result body\n\n```huginn-trace\n{\"schemaVersion\":1,\"totalMs\":42}\n```";
+  const raw = { content: inner };
+  const out = processMcpToolResult(raw);
+  expect(out.cleanedText).toBe("result body");
+  expect(out.searchTrace).toEqual({ schemaVersion: 1, totalMs: 42 });
+  expect(out.searchTracePointer).toBeUndefined();
+  expect(out.searchTraceFetch).toBeUndefined();
+});
+
+test("processMcpToolResult: huginn pointer triggers fetch and strips line", async () => {
+  globalThis.fetch = mock(async () =>
+    new Response(JSON.stringify({ schemaVersion: 1, totalMs: 7 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  ) as unknown as typeof fetch;
+
+  const inner =
+    "search results\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef";
+  const out = processMcpToolResult({ content: inner });
+
+  expect(out.cleanedText).toBe("search results");
+  expect(out.searchTrace).toBeUndefined();
+  expect(out.searchTracePointer).toBe(
+    "http://localhost:8321/api/trace/cafef00ddeadbeef",
+  );
+  expect(out.searchTraceFetch).toBeInstanceOf(Promise);
+  await expect(out.searchTraceFetch).resolves.toEqual({
+    schemaVersion: 1,
+    totalMs: 7,
+  });
+});
+
+test("processMcpToolResult: plain string input passes through unchanged", () => {
+  const out = processMcpToolResult("just a string");
+  expect(out.cleanedText).toBe("just a string");
+  expect(out.searchTrace).toBeUndefined();
+  expect(out.searchTracePointer).toBeUndefined();
+});
+
+test("processMcpToolResult: error-shaped envelope falls back to JSON.stringify", () => {
+  // The connectors construct {error: ...} envelopes when MCP calls throw.
+  // extractMcpResultText returns null for this shape, so the fallback runs.
+  const out = processMcpToolResult({ error: { message: "boom" } });
+  expect(out.cleanedText).toBe('{"error":{"message":"boom"}}');
+  expect(out.searchTrace).toBeUndefined();
+  expect(out.searchTracePointer).toBeUndefined();
+});
+
+test("processMcpToolResult: null input returns 'null' string", () => {
+  // Defensive: callers occasionally hand us null when an MCP server returns
+  // an empty response. JSON.stringify(null) -> "null" is the documented
+  // fallback shape; never throw.
+  const out = processMcpToolResult(null);
+  expect(out.cleanedText).toBe("null");
+});
+
+test("processMcpToolResult: pointer fetch failure resolves to null (does not reject)", async () => {
+  globalThis.fetch = mock(async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+
+  const inner =
+    "x\n\nhuginn-trace-url: http://localhost:8321/api/trace/cafef00ddeadbeef";
+  const out = processMcpToolResult({ content: inner });
+
+  expect(out.searchTraceFetch).toBeInstanceOf(Promise);
+  await expect(out.searchTraceFetch).resolves.toBeNull();
 });
