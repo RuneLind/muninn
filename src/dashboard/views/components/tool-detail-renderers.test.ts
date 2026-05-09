@@ -18,7 +18,6 @@ beforeAll(async () => {
     window: { __tdrState: { showRaw: false, attrs: null } },
     document: { getElementById: () => null },
   };
-  ctx.globalThis = ctx;
   vm.createContext(ctx);
   const helpers = await helpersClientScript();
   vm.runInContext(`${helpers}\n${toolDetailRenderersScript()}`, ctx);

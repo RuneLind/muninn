@@ -142,7 +142,6 @@ export async function renderBenchmarkListPage(
 }
 
 const RUN_FORM_SCRIPT = `
-
 async function startRunCell(ev) {
   ev.preventDefault();
   const issue = document.getElementById('run-issue').value;
