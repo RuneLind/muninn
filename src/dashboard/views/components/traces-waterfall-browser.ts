@@ -211,8 +211,15 @@ function renderWaterfall(): void {
     return depth;
   }
 
-  const minTime = Math.min(...spans.map((s) => s.startedAt));
-  const maxTime = Math.max(...spans.map((s) => s.startedAt + (s.durationMs || 0)));
+  // spread + map allocates twice and risks "too many arguments" for traces
+  // with thousands of spans, so fold min/max in one pass.
+  let minTime = Infinity;
+  let maxTime = -Infinity;
+  for (const s of spans) {
+    if (s.startedAt < minTime) minTime = s.startedAt;
+    const end = s.startedAt + (s.durationMs || 0);
+    if (end > maxTime) maxTime = end;
+  }
   const totalRange = Math.max(maxTime - minTime, 1);
 
   el.innerHTML = spans

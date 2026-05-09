@@ -49,6 +49,13 @@ initDb(config);
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
+// Pre-build browser bundles so the first /traces and /chat request doesn't
+// pay Bun.build latency. The accessors memoize, so this just primes the cache;
+// any build error will resurface on the actual request.
+import("./dashboard/views/components/helpers-client.ts").then((m) => m.helpersClientScript()).catch(() => {});
+import("./dashboard/views/components/traces-waterfall-client.ts").then((m) => m.tracesWaterfallClientScript()).catch(() => {});
+import("./chat/views/components/web-format-client.ts").then((m) => m.webFormatClientScript()).catch(() => {});
+
 // Seed connector entries from bot configs (first run only)
 try {
   const { seedConnectorsFromBotConfigs } = await import("./db/connectors.ts");
