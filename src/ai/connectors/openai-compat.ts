@@ -4,8 +4,7 @@ import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { extractMcpResultText } from "../huginn-trace.ts";
-import { peelHuginnTraceChannel, fetchHuginnTrace } from "../huginn-trace-pointer.ts";
+import { processMcpToolResult } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
 import { callTool } from "../../dashboard/mcp-client.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -215,25 +214,10 @@ export async function executePrompt(
       const toolDurationMs = Math.round(performance.now() - toolStart);
       onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
-      // Peel the MCP envelope so the model only sees the inner text payload —
-      // shipping the full {"content":[{"type":"text","text":"..."}]} blob to a
-      // small-context model (e.g. local qwen3 35B) wastes thousands of tokens.
-      // Errors and plain-string outputs fall through to JSON.stringify so the
-      // model still gets a structured signal it can reason about.
-      const innerText = extractMcpResultText(rawResult);
-      let cleaned: string;
-      let searchTrace: unknown | undefined;
-      let searchTracePointer: string | undefined;
-      let searchTraceFetch: Promise<unknown | null> | undefined;
-      if (innerText !== null) {
-        const channel = peelHuginnTraceChannel(innerText);
-        cleaned = channel.text;
-        searchTrace = channel.trace;
-        searchTracePointer = channel.pointer;
-        if (channel.pointer) searchTraceFetch = fetchHuginnTrace(channel.pointer);
-      } else {
-        cleaned = typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult);
-      }
+      // cleanedText loops back into messages.push below — feeding the inner
+      // payload (not the full envelope) saves thousands of tokens per tool
+      // call on small-context local models like qwen3.
+      const processed = processMcpToolResult(rawResult);
 
       trackedToolCalls.push({
         id: tc.id,
@@ -242,17 +226,17 @@ export async function executePrompt(
         durationMs: toolDurationMs,
         startOffsetMs: Math.round(toolStart - wallStart),
         input: inputPreview,
-        output: truncateOutput(cleaned),
-        searchTrace,
-        searchTracePointer,
-        searchTraceFetch,
+        output: truncateOutput(processed.cleanedText),
+        searchTrace: processed.searchTrace,
+        searchTracePointer: processed.searchTracePointer,
+        searchTraceFetch: processed.searchTraceFetch,
       });
 
       // Add tool result to conversation
       messages.push({
         role: "tool",
         tool_call_id: tc.id,
-        content: cleaned,
+        content: processed.cleanedText,
       });
 
       log.info("Tool {tool} completed in {ms}ms", {

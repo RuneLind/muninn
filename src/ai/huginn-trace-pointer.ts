@@ -176,6 +176,52 @@ function matchPointer(
   return { text, fetchUrl };
 }
 
+export interface McpToolResultProcessing {
+  /** Inner tool output with trace fence/pointer stripped. Untruncated — the
+   *  caller decides whether to {@link truncateOutput} for storage or feed it
+   *  back into a model conversation as-is. */
+  cleanedText: string;
+  /** Inline-fence trace, if Huginn ran in legacy `HUGINN_TRACE_DEFAULT` mode. */
+  searchTrace?: unknown;
+  /** Phase 2 fetch URL, if Huginn/Yggdrasil ran in pointer mode. */
+  searchTracePointer?: string;
+  /** In-flight fetch for the pointer trace. Awaited downstream by the trace
+   *  attachment code; `null` resolution means the fetch failed (logged). */
+  searchTraceFetch?: Promise<unknown | null>;
+}
+
+/**
+ * Process a raw MCP tool result for trace storage and model re-injection:
+ *
+ *   1. Unwrap the MCP envelope via {@link extractMcpResultText}.
+ *   2. Peel any Huginn/Yggdrasil trace channel via {@link peelHuginnTraceChannel}.
+ *   3. Kick off a pointer-mode fetch via {@link fetchHuginnTrace} when present.
+ *
+ * Returns the inner text rather than the raw `{content: [{type:"text", text:...}]}`
+ * envelope so (a) the inspector shows readable content instead of a double-encoded
+ * blob and (b) connectors that loop the result back into a chat-completion
+ * request don't waste context on the wrapper. Falls back to string serialization
+ * for non-envelope inputs (e.g. `{error: ...}`) so callers always get a string.
+ */
+export function processMcpToolResult(rawResult: unknown): McpToolResultProcessing {
+  const innerText = extractMcpResultText(rawResult);
+  if (innerText !== null) {
+    const channel = peelHuginnTraceChannel(innerText);
+    const out: McpToolResultProcessing = {
+      cleanedText: channel.text,
+      searchTrace: channel.trace,
+      searchTracePointer: channel.pointer,
+    };
+    if (channel.pointer !== undefined) {
+      out.searchTraceFetch = fetchHuginnTrace(channel.pointer);
+    }
+    return out;
+  }
+  return {
+    cleanedText: typeof rawResult === "string" ? rawResult : JSON.stringify(rawResult),
+  };
+}
+
 /**
  * Fetch a trace by URL. Returns the parsed JSON body on 2xx, null otherwise
  * (404 expired, 5xx, network error). Never throws — Phase 2 traces are
