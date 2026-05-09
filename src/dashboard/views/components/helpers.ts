@@ -1,4 +1,5 @@
 export { escHtml, escAttr } from "./escape.ts";
+export { fmtTokens } from "../../../utils/fmt-tokens.ts";
 export {
   TOOL_INPUT_PRIORITY_KEYS,
   TOOL_INPUT_MAX_LENGTH,
@@ -55,10 +56,6 @@ export function fmtMs(ms: number): string {
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms == null) return "-";
   return fmtMs(ms);
-}
-
-export function fmtTokens(n: number): string {
-  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : "" + n;
 }
 
 interface ScheduleLike {

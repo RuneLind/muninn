@@ -1,3 +1,5 @@
+import { fmtTokens } from "./fmt-tokens.ts";
+
 interface Mark {
   label: string;
   startMs: number;
@@ -79,8 +81,4 @@ export class Timing {
 
 function fmtDuration(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-}
-
-export function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
