@@ -38,10 +38,20 @@ export class Placeholders {
     let result = text;
     for (const [marker, items] of this.stores) {
       result = result.replace(
-        new RegExp(`\\x00${marker}(\\d+)\\x00`, "g"),
+        restoreRegex(marker),
         (_m, idx) => items[parseInt(idx, 10)] ?? "",
       );
     }
     return result;
   }
+}
+
+const restoreRegexCache = new Map<string, RegExp>();
+function restoreRegex(marker: string): RegExp {
+  let re = restoreRegexCache.get(marker);
+  if (!re) {
+    re = new RegExp(`\\x00${marker}(\\d+)\\x00`, "g");
+    restoreRegexCache.set(marker, re);
+  }
+  return re;
 }
