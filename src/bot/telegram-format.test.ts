@@ -53,6 +53,12 @@ test("preserves inline code and escapes HTML inside", () => {
   );
 });
 
+test("escapes double quotes inside inline code (Telegram renders &quot; as \")", () => {
+  expect(formatTelegramHtml('say `a "b" c`')).toBe(
+    "say <code>a &quot;b&quot; c</code>",
+  );
+});
+
 test("does not convert bold/italic inside code blocks", () => {
   const input = "```\n**not bold**\n```";
   expect(formatTelegramHtml(input)).toBe(

@@ -1,3 +1,5 @@
+import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
  * The AI outputs standard markdown; this converts to Telegram's HTML subset.
@@ -9,30 +11,23 @@ export function formatTelegramHtml(text: string): string {
   // We selectively escape only & that aren't part of entities
   result = result.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
 
+  const placeholders = new Placeholders();
+
   // Preserve code blocks from further processing
-  const codeBlocks: string[] = [];
   result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
-    const idx = codeBlocks.length;
     const langAttr = lang ? `<code class="language-${lang}">` : "<code>";
-    codeBlocks.push(`<pre>${langAttr}${escapeHtml(code.trimEnd())}</code></pre>`);
-    return `\x00CODEBLOCK${idx}\x00`;
+    return placeholders.add("CODEBLOCK", `<pre>${langAttr}${escapeHtml(code.trimEnd())}</code></pre>`);
   });
 
   // Preserve inline code
-  const inlineCodes: string[] = [];
   result = result.replace(/`([^`]+)`/g, (_match, code) => {
-    const idx = inlineCodes.length;
-    inlineCodes.push(`<code>${escapeHtml(code)}</code>`);
-    return `\x00INLINE${idx}\x00`;
+    return placeholders.add("INLINE", `<code>${escapeHtml(code)}</code>`);
   });
 
   // Convert markdown links early and protect from italic/bold processing
   // (prevents overlapping tags like <a><i>...</a></i> when formatting crosses link boundaries)
-  const links: string[] = [];
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, text, url) => {
-    const idx = links.length;
-    links.push(`<a href="${url}">${text}</a>`);
-    return `\x00LINK${idx}\x00`;
+    return placeholders.add("LINK", `<a href="${url}">${text}</a>`);
   });
 
   // Convert markdown headings to bold lines
@@ -53,12 +48,8 @@ export function formatTelegramHtml(text: string): string {
   // Convert ~~strikethrough~~ to <s>strikethrough</s>
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
-  // Restore links
-  result = result.replace(/\x00LINK(\d+)\x00/g, (_m, idx) => links[parseInt(idx)] ?? "");
-
-  // Restore code blocks and inline codes
-  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)] ?? "");
-  result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)] ?? "");
+  // Restore links + code blocks + inline codes
+  result = placeholders.restore(result);
 
   // Escape any HTML tags that Telegram doesn't support
   // Telegram allows: b, i, u, s, code, pre, a, tg-spoiler, tg-emoji, blockquote
@@ -89,9 +80,3 @@ export function stripHtml(text: string): string {
     .trim();
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}

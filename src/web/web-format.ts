@@ -1,3 +1,5 @@
+import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+
 /**
  * Converts Claude's markdown output to rich HTML for the web chat.
  * Similar approach to formatTelegramHtml (extract code blocks, convert, restore)
@@ -12,21 +14,17 @@ export function formatWebHtml(text: string): string {
   // Normalize line endings
   result = result.replace(/\r\n/g, "\n");
 
+  const placeholders = new Placeholders();
+
   // Preserve code blocks from further processing
-  const codeBlocks: string[] = [];
   result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang: string, code: string) => {
-    const idx = codeBlocks.length;
     const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
-    codeBlocks.push(`<pre><code${langClass}>${escapeHtml(code.trimEnd())}</code></pre>`);
-    return `\x00CODEBLOCK${idx}\x00`;
+    return placeholders.add("CODEBLOCK", `<pre><code${langClass}>${escapeHtml(code.trimEnd())}</code></pre>`);
   });
 
   // Preserve inline code
-  const inlineCodes: string[] = [];
   result = result.replace(/`([^`]+)`/g, (_match, code: string) => {
-    const idx = inlineCodes.length;
-    inlineCodes.push(`<code>${escapeHtml(code)}</code>`);
-    return `\x00INLINE${idx}\x00`;
+    return placeholders.add("INLINE", `<code>${escapeHtml(code)}</code>`);
   });
 
   // Defensive normalization: Claude occasionally outputs Slack-style links (<url|text>)
@@ -39,10 +37,7 @@ export function formatWebHtml(text: string): string {
   // Escape HTML entities in regular text (code blocks already escaped above).
   // This prevents raw HTML in Claude's response from being interpreted as tags.
   // Must happen before markdown conversions so generated tags aren't affected.
-  result = result.replace(/&/g, "&amp;");
-  result = result.replace(/</g, "&lt;");
-  result = result.replace(/>/g, "&gt;");
-  result = result.replace(/"/g, "&quot;");
+  result = escapeHtml(result);
 
   // Convert markdown tables to HTML tables (uses | delimiters, unaffected by escaping)
   result = convertTables(result);
@@ -88,8 +83,7 @@ export function formatWebHtml(text: string): string {
   });
 
   // Restore code blocks and inline codes
-  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx)] ?? "");
-  result = result.replace(/\x00INLINE(\d+)\x00/g, (_m, idx) => inlineCodes[parseInt(idx)] ?? "");
+  result = placeholders.restore(result);
 
   // Clean up excessive blank lines
   result = result.replace(/\n{3,}/g, "\n\n");
@@ -101,14 +95,6 @@ export function formatWebHtml(text: string): string {
   result = result.replace(new RegExp(`(</${blockRe}>|<hr>)\\n+`, "g"), "$1\n");
 
   return result.trim();
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 /** Convert consecutive &gt; lines into <blockquote> (> is escaped to &gt; before this runs) */
