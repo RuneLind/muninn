@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mcpEnvSnapshotForTool } from "./message-processor.ts";
+import { mcpEnvSnapshotForTool } from "./tool-spans.ts";
 
 describe("mcpEnvSnapshotForTool", () => {
   const original = {

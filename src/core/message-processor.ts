@@ -2,61 +2,37 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { resolveConnector } from "../ai/connector.ts";
-import { buildPrompt } from "../ai/prompt-builder.ts";
 import type { UserIdentity } from "../types.ts";
 import { activityLog } from "../dashboard/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
-import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
-import { getToolStatus } from "../ai/tool-status.ts";
-import { parseHuginnTrace } from "../ai/huginn-trace.ts";
-import { emitSearchTraceSpans } from "./search-trace-spans.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
 
 import { buildProgressCallback } from "./progress-callbacks.ts";
 import { runExtractionPipelines } from "./metadata-extractor.ts";
-import { slackPostCapability, handleChannelPosts, formatAndSend } from "./response-handler.ts";
+import { handleChannelPosts, formatAndSend } from "./response-handler.ts";
+import { assemblePrompt } from "./prompt-assembly.ts";
+import { attachToolSpans } from "./tool-spans.ts";
+import { logRequestTiming } from "./timing-log.ts";
+import { handleProcessError } from "./process-error.ts";
 
 // Re-export extractChannelPosts so existing consumers don't break
 export { extractChannelPosts } from "./response-handler.ts";
 
 const log = getLog("core", "processor");
 
-/**
- * Trace-marker-emitting MCP tools whose spans benefit from an env snapshot.
- * Pairs both connector formats (claude-cli's `mcp__server__tool` and
- * copilot-sdk's `server-tool`) so dispatch is independent of toolName shape.
+/** Structured log properties carried through the processMessage pipeline.
+ *  Index signature satisfies LogTape's `Record<string, unknown>` parameter
+ *  while still requiring the four core fields.
  */
-const TRACE_EMITTING_PREFIXES = [
-  "mcp__knowledge__",
-  "knowledge-",
-  "mcp__yggdrasil__",
-  "yggdrasil-",
-] as const;
-
-interface McpEnvIntended {
-  huginnTracePointer: string | null;
-  huginnTraceDefault: string | null;
-}
-
-/**
- * Capture the trace env muninn currently passes to MCP children, on tool spans
- * that depend on it. Stable across calls within one process; diagnostic value
- * is in pairing with the startup adapter audit — if the audit shows a stale
- * adapter and a span shows the current intended env, the discrepancy explains
- * a missing searchTrace.
- *
- * Returns null for tool spans that don't go through a trace-emitting MCP, so
- * non-search tools don't get a noise attribute.
- */
-export function mcpEnvSnapshotForTool(toolName: string): McpEnvIntended | null {
-  if (!TRACE_EMITTING_PREFIXES.some((p) => toolName.startsWith(p))) return null;
-  return {
-    huginnTracePointer: process.env.HUGINN_TRACE_POINTER ?? null,
-    huginnTraceDefault: process.env.HUGINN_TRACE_DEFAULT ?? null,
-  };
+export interface LogProps {
+  botName: string;
+  userId: string;
+  username: string;
+  platform: Platform;
+  [key: string]: unknown;
 }
 
 export interface ProcessMessageParams {
@@ -130,7 +106,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const isTelegram = platform.startsWith("telegram");
   const externalTracer = !!params.tracer;
   const t = params.tracer ?? new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
-  const props = { botName: botConfig.name, userId, username, platform };
+  const props: LogProps = { botName: botConfig.name, userId, username, platform };
 
   // Ensure user exists in DB (creates on first encounter, updates last_seen_at)
   const displayName = typeof userIdentity === "object" ? userIdentity.displayName : undefined;
@@ -150,31 +126,16 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     t.end("db_save_user");
   }
 
-  // Build context-aware prompt
   agentStatus.set("building_prompt", username);
   agentStatus.updatePhase("building_prompt");
-  t.start("prompt_build");
-  const { systemPrompt, userPrompt, meta: promptMeta } = await buildPrompt({
-    userId, currentMessage: text, persona: botConfig.persona, botName: botConfig.name,
-    restrictedTools: botConfig.restrictedTools, userIdentity: userIdentity ?? username, threadId,
+  const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
+    text, userId, username, userIdentity, threadId, botConfig,
+    slackEnabled: !!postToChannel, channelContext, recentChannelMessages,
+    tracer: t, logProps: props,
   });
-  t.end("prompt_build", promptMeta);
-
-  // Append Slack-specific system prompt additions
-  let fullSystemPrompt = systemPrompt;
-  if (postToChannel) {
-    fullSystemPrompt += slackPostCapability(channelContext);
-  }
-  if (recentChannelMessages && recentChannelMessages.length > 0) {
-    fullSystemPrompt += `\n\n## Channel Context\nRecent messages in the channel/thread (for context):\n${recentChannelMessages.join("\n")}`;
-  }
-
-  savePromptSnapshot({ traceId: t.traceId, systemPrompt: fullSystemPrompt, userPrompt }).catch(() => {});
-  log.info("Prompt built in {ms}ms ({msgCount} msgs, {memCount} memories)", { ...props, ms: Math.round(t.summary().prompt_build ?? 0), msgCount: promptMeta.messagesCount, memCount: promptMeta.memoriesCount });
-
-  if (setStatus) await setStatus("Thinking...").catch(() => {});
 
   try {
+    if (setStatus) await setStatus("Thinking...").catch(() => {});
     agentStatus.set("calling_claude", username);
     agentStatus.updatePhase("calling_claude");
     setConnectorInfo(botConfig, config.claudeModel);
@@ -201,86 +162,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCount,
     });
 
-    // Resolve any Phase-2 trace pointers before opening tool spans. Connectors
-    // start the fetch eagerly the moment the pointer is peeled (see
-    // {@link ToolCall.searchTraceFetch}) — we just await the in-flight promises
-    // here. The eager start is essential: huginn's trace store has a short TTL,
-    // and a multi-tool claude session can run for many minutes, which used to
-    // 404 every pointer emitted at the start of the session. Fail-soft as before:
-    // a null fetch leaves the span without `searchTrace`, never breaks the
-    // user-visible response.
-    if (result.toolCalls) {
-      const pointerTools = result.toolCalls.filter(
-        (tc) => tc.searchTraceFetch && tc.searchTrace === undefined,
-      );
-      if (pointerTools.length > 0) {
-        const fetched = await Promise.allSettled(pointerTools.map((tc) => tc.searchTraceFetch!));
-        for (let i = 0; i < pointerTools.length; i++) {
-          const r = fetched[i]!;
-          if (r.status === "fulfilled" && r.value !== null) {
-            pointerTools[i]!.searchTrace = r.value;
-          }
-        }
-      }
-    }
-
-    // Create child spans for each tool call (positioned at their actual execution time)
-    if (result.toolCalls) {
-      const captureOutputs = config.tracingCaptureToolOutputs;
-      for (const tool of result.toolCalls) {
-        const attrs: Record<string, unknown> = {
-          toolId: tool.id,
-          toolName: tool.name,
-          input: tool.input,
-          statusText: getToolStatus(tool.name, tool.input),
-        };
-        // Snapshot the trace env muninn intends MCP children to inherit, so a
-        // missing searchTrace can be diagnosed against the current process'
-        // configuration rather than guessed at. The actual adapter env may
-        // diverge if the adapter is a stale orphan from a previous run — see
-        // the startup adapter audit and `bun run cleanup:kill`.
-        const mcpEnv = mcpEnvSnapshotForTool(tool.name);
-        if (mcpEnv !== null) attrs.mcpEnvIntended = mcpEnv;
-        // Huginn search adapters embed a per-search trace blob in their output
-        // when HUGINN_TRACE_DEFAULT=1 is set. Connectors that can intercept the
-        // structured tool result (copilot-sdk) extract the trace themselves and
-        // pass it through `tool.searchTrace`. For connectors that surface the
-        // result as a plain text blob (claude-cli stream parser), fall back to
-        // running the parser on the string here. Parser is a no-op otherwise.
-        // Phase-2 pointer-mode tools were already resolved above; their
-        // `searchTrace` is populated when the fetch succeeded.
-        let toolOutput = tool.output;
-        if (tool.searchTrace !== undefined) {
-          attrs.searchTrace = tool.searchTrace;
-        } else if (typeof toolOutput === "string") {
-          const { text, trace } = parseHuginnTrace(toolOutput);
-          if (trace !== null) {
-            attrs.searchTrace = trace;
-            toolOutput = text;
-          }
-        }
-        if (captureOutputs && toolOutput !== undefined) {
-          attrs.output = toolOutput;
-        }
-        const toolSpanId = t.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
-
-        // If the tool call carries a v1 Huginn search trace, synthesize per-stage
-        // child spans so the waterfall shows where the time went without the
-        // operator having to expand the trace JSON.
-        if (attrs.searchTrace !== undefined) {
-          const claudeStart = t.spanStartedAt("claude");
-          if (claudeStart) {
-            const toolStart = new Date(claudeStart.getTime() + (tool.startOffsetMs ?? 0));
-            emitSearchTraceSpans({
-              tracer: t,
-              toolSpanId,
-              toolStartedAt: toolStart,
-              searchTrace: attrs.searchTrace,
-            });
-          }
-        }
-      }
-    }
+    await attachToolSpans(t, result.toolCalls, !!config.tracingCaptureToolOutputs);
 
     const toolInfo = toolCount > 0 ? `, ${toolCount} tools: ${result.toolCalls!.map(tc => tc.displayName).join(", ")}` : "";
     log.info("Claude responded in {ms}ms ({numTurns} turns{toolInfo})", { ...props, ms: Math.round(t.summary().claude ?? 0), numTurns: result.numTurns, toolInfo });
@@ -388,18 +270,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
     }
 
-    // Timing breakdown
-    const s = t.summary();
-    log.info(
-      "Request timing breakdown:\n" +
-        `  prompt_build:   ${pad(s.prompt_build)}  (db: ${Math.round(promptMeta.dbHistoryMs)}ms, embed: ${Math.round(promptMeta.embeddingMs)}ms, search: ${Math.round(promptMeta.memorySearchMs)}ms | ${promptMeta.messagesCount} msgs, ${promptMeta.memoriesCount} memories)\n` +
-        `  claude:        ${pad(s.claude)}  (startup/mcp: ${Math.round(result.startupMs ?? 0)}ms, api: ${Math.round(result.durationApiMs)}ms, ${result.numTurns} turns, ${fmtTokens(result.inputTokens)} in / ${fmtTokens(result.outputTokens)} out)\n` +
-        `  db_save:        ${pad((s.db_save_user ?? 0) + (s.db_save_response ?? 0))}\n` +
-        `  format+send:    ${pad(s.send)}\n` +
-        `  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-        `  total:         ${pad(t.totalMs())}  ($${(result.costUsd ?? 0).toFixed(4)})`,
-      props,
-    );
+    logRequestTiming({ tracer: t, result, promptMeta, logProps: props });
 
     return {
       responseText,
@@ -414,40 +285,17 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
     };
   } catch (error) {
-    agentStatus.clearRequest();
-    agentStatus.set("idle");
-    if (!externalTracer) {
-      t.error(error instanceof Error ? error : String(error));
-    }
-
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const s = t.summary();
-    const elapsed = Math.round(t.totalMs());
-    const lastPhase = Object.entries(s)
-      .filter(([, v]) => v != null)
-      .map(([k]) => k)
-      .pop() ?? "unknown";
-    log.error(
-      "Request failed after {elapsed}ms (last completed phase: {lastPhase})\n" +
-        `  Error: ${errorMessage}\n` +
-        `  Phases: ${Object.entries(s).map(([k, v]) => `${k}=${Math.round(v ?? 0)}ms`).join(", ")}`,
-      { ...props, elapsed, lastPhase },
-    );
-    activityLog.push("error", errorMessage, { userId, username, botName: botConfig.name });
-    if (isTelegram) {
-      const escaped = errorMessage.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      await say(`Something went wrong: ${escaped}`).catch(() => {});
-    } else {
-      await say(`Something went wrong: ${errorMessage}`).catch(() => {});
-    }
+    await handleProcessError({
+      error,
+      tracer: t,
+      externalTracer,
+      platform,
+      say,
+      userId,
+      username,
+      botName: botConfig.name,
+      logProps: props,
+    });
     return undefined;
   }
-}
-
-function pad(ms: number | undefined): string {
-  return `${Math.round(ms ?? 0)}ms`.padEnd(7);
-}
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
