@@ -1,13 +1,6 @@
-/**
- * Bundles `helpers-browser.ts` into a self-contained IIFE for injection
- * into a dashboard page's inline `<script>`. The bundle inlines the TS
- * implementations of `esc`, `formatTime`, `deriveSpanLabelHtml`, etc. so
- * the browser uses the SAME functions as the server-side TS — eliminating
- * the hand-maintained JS twins that used to live inside `helpersScript()`,
- * `deriveSpanLabelScript()`, and `toolInputLabelScript()`.
- *
- * Memoized as a Promise — concurrent first-request callers share one build.
- */
+/** Bundles `helpers-browser.ts` into an IIFE for injection into a page's
+ *  inline `<script>`. Memoized as a Promise — concurrent first-request
+ *  callers share one build. */
 
 import { resolve } from "node:path";
 

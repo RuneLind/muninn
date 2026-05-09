@@ -30,8 +30,7 @@ interface SpanLike {
  *  for search tools, OR verb + tool-specific extras (repo / id / path tail)
  *  for non-search tools we recognise (graph_node, symbol_context, list_files,
  *  read_source, search_pattern). Returns null when nothing useful can be
- *  extracted, so the caller falls back to the plain tool name. Bundled into
- *  the dashboard's helpers-browser IIFE so the browser runs the same TS. */
+ *  extracted, so the caller falls back to the plain tool name. */
 export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: string } | null {
   if (!span || !span.name) return null;
   const attrs = span.attributes ?? {};
