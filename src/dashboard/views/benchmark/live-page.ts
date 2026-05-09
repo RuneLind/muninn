@@ -49,10 +49,10 @@ export async function renderBenchmarkRunLivePage(job: LiveJob): Promise<string> 
   </div>
 
   <script>
+    ${helpers}
+
     const TRACE_ID = ${JSON.stringify(job.traceId)};
     const STARTED_AT = ${job.startedAt};
-
-    ${helpers}
 
     function fmtDur(ms) {
       if (ms == null) return '—';

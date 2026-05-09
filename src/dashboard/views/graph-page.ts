@@ -284,6 +284,8 @@ export async function renderGraphPage(): Promise<string> {
   <script src="https://cdn.jsdelivr.net/npm/force-graph@1/dist/force-graph.min.js"></script>
   <script>
   (function() {
+    ${helpers}
+
     // Category colors
     const CAT_COLORS = {
       'ai/claude-code': '#6c63ff',
@@ -328,8 +330,6 @@ export async function renderGraphPage(): Promise<string> {
       if (commId < 0) return '#555';
       return COMM_PALETTE[commId % COMM_PALETTE.length];
     }
-
-    ${helpers}
 
     let graphData = null;
     let nodeMap = new Map();

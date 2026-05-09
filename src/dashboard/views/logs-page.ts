@@ -222,6 +222,8 @@ export async function renderLogsPage(): Promise<string> {
   </div>
 
   <script>
+    ${helpers}
+
     let allEntries = [];
     let filteredEntries = [];
     let expandedId = null; // numeric _id for stable row tracking
@@ -473,8 +475,6 @@ export async function renderLogsPage(): Promise<string> {
       return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) +
         '.' + String(d.getMilliseconds()).padStart(3, '0');
     }
-
-    ${helpers}
 
     // --- Init ---
     loadDates();
