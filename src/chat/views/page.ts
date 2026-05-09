@@ -13,7 +13,8 @@ import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 
-export function renderChatPage(): string {
+export async function renderChatPage(): Promise<string> {
+  const webFormatScript = await webFormatClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -127,7 +128,7 @@ export function renderChatPage(): string {
     ${helpersScript()}
     ${agentStatusScript()}
     ${requestProgressScript()}
-    ${webFormatClientScript()}
+    ${webFormatScript}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
   </script>
