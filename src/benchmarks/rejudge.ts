@@ -19,6 +19,7 @@ import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { loadManifestByKey } from "./manifest.ts";
 import { runJudge, findHighestJudgePromptVersion } from "./judge.ts";
+import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import {
   getBenchmarkRun,
   saveBenchmarkRun,
@@ -60,6 +61,14 @@ export interface RejudgeOptions {
    * are skipped. Defaults to BENCHMARK_BUDGET_USD or $10.
    */
   budgetUsd?: number;
+  /**
+   * Optional progress callback fired as each pass's judge stream produces
+   * text. Wired by the dashboard route so SSE subscribers can watch the
+   * judge JSON stream in real time. Receives the same StreamProgressEvent
+   * shape as runJudge, plus an extra `passIndex` so the UI can label deltas
+   * with which of N passes they belong to.
+   */
+  onProgress?: (event: { passIndex: number; type: string; text?: string }) => void;
 }
 
 export interface RejudgePassResult {
@@ -209,10 +218,23 @@ export async function rejudgeCandidate(
     });
 
     try {
+      const passIndex = i;
+      const onJudgeProgress: StreamProgressCallback | undefined = opts.onProgress
+        ? (ev) => {
+            // Forward only text/text_delta — tool events never fire on the
+            // judge call (no MCP tools) but keep the type aligned.
+            opts.onProgress!({
+              passIndex,
+              type: ev.type,
+              ...(ev.type === "text_delta" ? { text: ev.text } : {}),
+            });
+          }
+        : undefined;
       const judged = await runJudge({
         manifest,
         candidatePath: candidatePathForJudge,
         judgePromptPath,
+        ...(onJudgeProgress ? { onProgress: onJudgeProgress } : {}),
       });
 
       await completeBenchmarkRun(runId, {

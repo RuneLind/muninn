@@ -5,8 +5,11 @@ import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { extractJson } from "../ai/json-extract.ts";
 import { parseClaudeOutput } from "../ai/result-parser.ts";
+import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { Tracer } from "../tracing/index.ts";
+import type { TraceContext } from "../tracing/tracer.ts";
+import type { ClaudeResult } from "../types.ts";
 import type { BenchmarkManifest, JudgeResult, JudgeStats, GoldClaim } from "./types.ts";
 
 const log = getLog("benchmarks", "judge");
@@ -78,6 +81,22 @@ export interface RunJudgeOptions {
   model?: string;
   /** Timeout for the underlying CLI call */
   timeoutMs?: number;
+  /**
+   * Optional stream progress callback. Receives `text_delta` events as the
+   * judge generates its JSON, plus `tool_start`/`tool_end` (the judge has no
+   * MCP tools so these never fire today, but the type is kept aligned with
+   * the main stream parser). Use this from the score-report CLI to show
+   * live progress on stderr; leave undefined to run silently.
+   */
+  onProgress?: StreamProgressCallback;
+  /**
+   * When set, the judge's `benchmark_judge` span attaches as a child of the
+   * provided trace+parent instead of starting its own root trace. Used by
+   * the cell runner so the live-page waterfall shows judge spans inline with
+   * the analysis. Leave undefined to keep the historical standalone-trace
+   * behaviour (used by the rejudge flow and the score-report CLI).
+   */
+  parentTrace?: TraceContext;
 }
 
 export interface RunJudgeResult {
@@ -161,7 +180,15 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
 
   // Wrap the whole judge call in a Tracer span so it shows up in the
   // existing traces dashboard alongside every other AI call in muninn.
-  const tracer = new Tracer("benchmark_judge", { botName: "benchmarks" });
+  // When parentTrace is supplied, attach as a child of that trace (so the
+  // cell runner's live waterfall shows judge spans inline with analysis).
+  // Otherwise start a fresh root trace as before (rejudge / CLI score-report).
+  const tracer = new Tracer("benchmark_judge", {
+    botName: "benchmarks",
+    ...(opts.parentTrace
+      ? { traceId: opts.parentTrace.traceId, parentId: opts.parentTrace.parentId }
+      : {}),
+  });
   const traceId = tracer.traceId;
 
   tracer.start("claude-cli-call", {
@@ -173,33 +200,49 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
     promptChars: fullPrompt.length,
   });
 
+  // Wrap the caller's onProgress so we emit tracer events as the judge text
+  // streams in. Sampled (every ~500 chars) so a long judge response doesn't
+  // produce thousands of point-in-time events. Lets the trace detail page
+  // visualise progression even when the live-page subprocess log isn't
+  // available (e.g. for rejudge runs).
+  let streamedChars = 0;
+  let lastEventChars = 0;
+  const TRACE_EVENT_EVERY_CHARS = 500;
+  const wrappedOnProgress: StreamProgressCallback = (ev) => {
+    if (ev.type === "text_delta" && ev.text) {
+      streamedChars += ev.text.length;
+      if (streamedChars - lastEventChars >= TRACE_EVENT_EVERY_CHARS) {
+        tracer.event("judge_text", { chars: streamedChars });
+        lastEventChars = streamedChars;
+      }
+    }
+    opts.onProgress?.(ev);
+  };
+
   const startedAt = Date.now();
 
   type AttemptOk = {
     ok: true;
     stdoutText: string;
-    cliResult: ReturnType<typeof parseClaudeOutput>;
+    cliResult: ClaudeResult;
     result: JudgeResult;
   };
   type AttemptFail = {
     ok: false;
     error: Error;
     stdoutText?: string;
-    cliResult?: ReturnType<typeof parseClaudeOutput>;
+    cliResult?: ClaudeResult;
   };
 
   const runOneJudgeAttempt = async (): Promise<AttemptOk | AttemptFail> => {
     let stdoutText: string;
+    let cliResult: ClaudeResult;
     try {
-      stdoutText = await spawnSonnet(fullPrompt, model, timeoutMs);
+      const out = await spawnSonnetStreaming(fullPrompt, model, timeoutMs, wrappedOnProgress);
+      stdoutText = out.stdoutText;
+      cliResult = out.cliResult;
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
-    }
-    let cliResult: ReturnType<typeof parseClaudeOutput>;
-    try {
-      cliResult = parseClaudeOutput(stdoutText);
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err : new Error(String(err)), stdoutText };
     }
     try {
       const judgeResultRaw = extractJson<unknown>(cliResult.result);
@@ -252,6 +295,12 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
   // Prefer the resolved snapshot from the envelope over the alias we passed in
   const resolvedModel = cliResult.model !== "unknown" ? cliResult.model : model;
 
+  // Final flush so the chars-streamed timeline includes the tail beyond the
+  // last sampled event.
+  if (streamedChars > lastEventChars) {
+    tracer.event("judge_text", { chars: streamedChars, final: true });
+  }
+
   tracer.end("claude-cli-call", {
     inputTokens,
     outputTokens,
@@ -300,15 +349,40 @@ export async function runJudge(opts: RunJudgeOptions): Promise<RunJudgeResult> {
   };
 }
 
-async function spawnSonnet(
+interface SpawnSonnetResult {
+  /** Raw NDJSON stdout joined with newlines — kept for debug dumps on parse failure. */
+  stdoutText: string;
+  /** Parsed envelope (text + tokens + cost + model). */
+  cliResult: ClaudeResult;
+}
+
+/**
+ * Spawn Claude CLI in stream-json mode and parse output line-by-line so the
+ * caller can observe progress in real time via `onProgress`.
+ *
+ * Mirrors the executor.ts pattern: StreamParser is the primary path; if the
+ * CLI somehow doesn't emit a final result event, fall back to the legacy
+ * single-envelope parser on the joined raw lines (rarely hit, kept for parity
+ * with the main bot path).
+ */
+async function spawnSonnetStreaming(
   prompt: string,
   model: string,
   timeoutMs: number,
-): Promise<string> {
+  onProgress?: StreamProgressCallback,
+): Promise<SpawnSonnetResult> {
   // Run from /tmp so Claude CLI doesn't auto-discover muninn's .mcp.json
   // and waste startup time loading MCP servers we don't need for judging.
   const proc = Bun.spawn(
-    ["claude", "-p", prompt, "--output-format", "json", "--model", model],
+    [
+      "claude",
+      "-p",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--model", model,
+      "--", prompt,
+    ],
     {
       cwd: "/tmp",
       env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "benchmark-judge" },
@@ -318,7 +392,6 @@ async function spawnSonnet(
     },
   );
 
-  const stdoutPromise = new Response(proc.stdout).text().catch(() => "");
   const stderrPromise = new Response(proc.stderr).text().catch(() => "");
 
   let timeoutTimer: ReturnType<typeof setTimeout>;
@@ -334,7 +407,44 @@ async function spawnSonnet(
     }, timeoutMs);
   });
 
+  const refTimestamp = performance.now();
+  const parser = new StreamParser(refTimestamp, onProgress);
+  const rawLines: string[] = [];
+
+  const drainPromise = (async () => {
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line.trim()) {
+            rawLines.push(line);
+            try { parser.parseLine(line, performance.now()); } catch { /* keep raw line for fallback */ }
+          }
+        }
+      }
+      if (buffer.trim()) {
+        rawLines.push(buffer);
+        try { parser.parseLine(buffer, performance.now()); } catch { /* keep raw line for fallback */ }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
   try {
+    // Race drain against the timeout so a stuck CLI doesn't hang here forever.
+    // When the timeout fires it kills the proc, which closes stdout, which
+    // lets drainPromise resolve too — but the rejection from timeoutPromise
+    // wins the race and surfaces as the error.
+    await Promise.race([drainPromise, timeoutPromise]);
     const exitCode = await Promise.race([proc.exited, timeoutPromise]);
     if (exitCode !== 0) {
       const stderr = await stderrPromise;
@@ -344,7 +454,18 @@ async function spawnSonnet(
     clearTimeout(timeoutTimer!);
   }
 
-  return await stdoutPromise;
+  const stdoutText = rawLines.join("\n");
+  if (parser.complete) {
+    return { stdoutText, cliResult: parser.getResult() };
+  }
+  // Fallback: stream parser didn't see a result event — try the legacy
+  // envelope parser on the joined output. This matches executor.ts's
+  // recovery path for the known CLI bug where the result event is missed.
+  log.warn("Judge stream parser missed result event, falling back ({lineCount} lines)", {
+    botName: "benchmarks",
+    lineCount: rawLines.length,
+  });
+  return { stdoutText, cliResult: parseClaudeOutput(stdoutText) };
 }
 
 function formatHighlightedClaims(manifest: BenchmarkManifest): string {
