@@ -2,19 +2,22 @@ import { test, expect, describe } from "bun:test";
 import { webFormatClientScript } from "./web-format-client.ts";
 
 describe("webFormatClientScript", () => {
-  test("bundles browser entrypoint into a self-contained IIFE", async () => {
+  test("bundle attaches the three formatters as functions on globalThis", async () => {
     const script = await webFormatClientScript();
-    // IIFE wrapper
-    expect(script.startsWith("(() => {")).toBe(true);
-    // Globals attached for the surrounding chat-page IIFE to call by name
-    expect(script).toContain("g.formatWebHtml = formatWebHtml");
-    expect(script).toContain("g.renderSlackMrkdwn = renderSlackMrkdwn");
-    expect(script).toContain("g.sanitizeHtml = sanitizeHtml");
+    const sandbox: Record<string, unknown> = {};
+    new Function("globalThis", script)(sandbox);
+    expect(typeof sandbox.formatWebHtml).toBe("function");
+    expect(typeof sandbox.renderSlackMrkdwn).toBe("function");
+    expect(typeof sandbox.sanitizeHtml).toBe("function");
   });
 
-  test("memoizes the bundle (second call returns the same string)", async () => {
-    const a = await webFormatClientScript();
-    const b = await webFormatClientScript();
-    expect(a).toBe(b);
+  test("bundled formatWebHtml matches the server implementation", async () => {
+    const script = await webFormatClientScript();
+    const sandbox: Record<string, unknown> = {};
+    new Function("globalThis", script)(sandbox);
+    const bundled = sandbox.formatWebHtml as (s: string) => string;
+    const { formatWebHtml: server } = await import("../../../web/web-format.ts");
+    const input = "**bold** and *italic* with [link](https://x.com) and `code`";
+    expect(bundled(input)).toBe(server(input));
   });
 });

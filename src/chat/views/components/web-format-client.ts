@@ -5,13 +5,12 @@
  * functions as the server — eliminating the manual port that previously
  * had to be kept in sync by hand.
  *
- * Result is memoized — Bun.build runs at most once per process.
+ * Memoized as a Promise — concurrent first-request callers share one build.
  */
 
 import { resolve } from "node:path";
 
-let cachedScript: string | null = null;
-let inflight: Promise<string> | null = null;
+let cachedScript: Promise<string> | null = null;
 
 async function buildBundle(): Promise<string> {
   const entry = resolve(import.meta.dir, "web-format-browser.ts");
@@ -22,21 +21,11 @@ async function buildBundle(): Promise<string> {
     minify: false,
   });
   if (!result.success) {
-    const logs = result.logs.map((l) => String(l)).join("\n");
-    throw new Error(`web-format-browser bundle failed:\n${logs}`);
+    throw new Error(`web-format-browser bundle failed:\n${result.logs.join("\n")}`);
   }
-  const out = result.outputs[0];
-  if (!out) throw new Error("web-format-browser bundle produced no outputs");
-  return out.text();
+  return result.outputs[0]!.text();
 }
 
-export async function webFormatClientScript(): Promise<string> {
-  if (cachedScript !== null) return cachedScript;
-  if (!inflight) {
-    inflight = buildBundle().then((text) => {
-      cachedScript = text;
-      return text;
-    });
-  }
-  return inflight;
+export function webFormatClientScript(): Promise<string> {
+  return (cachedScript ??= buildBundle());
 }

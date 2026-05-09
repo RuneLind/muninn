@@ -4,9 +4,8 @@
  * (see web-format-client.ts) and injected as an IIFE into the chat HTML.
  *
  * `formatWebHtml` and `renderSlackMrkdwn` are re-exported as-is from their
- * canonical modules so the browser uses the SAME functions as the server —
- * no manual port to keep in sync. `sanitizeHtml` is browser-only because
- * it relies on the DOM.
+ * canonical modules so the browser uses the SAME functions as the server.
+ * `sanitizeHtml` is browser-only because it needs the DOM.
  *
  * All three are attached to `globalThis` so the surrounding inline script
  * (CHAT_SCRIPT in page.ts) can call them by bare name.
@@ -25,7 +24,6 @@ const WEB_TAGS = [
   "p", "details", "summary",
 ];
 
-/** Sanitize HTML — allow only safe tags and attributes. Requires DOM. */
 function sanitizeHtml(html: string, isWeb: boolean): string {
   const allowedTags = isWeb ? WEB_TAGS : TG_TAGS;
   const tmp = document.createElement("div");
@@ -60,12 +58,4 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
   return tmp.innerHTML;
 }
 
-type GlobalWithFormatters = typeof globalThis & {
-  formatWebHtml: typeof formatWebHtml;
-  renderSlackMrkdwn: typeof renderSlackMrkdwn;
-  sanitizeHtml: typeof sanitizeHtml;
-};
-const g = globalThis as GlobalWithFormatters;
-g.formatWebHtml = formatWebHtml;
-g.renderSlackMrkdwn = renderSlackMrkdwn;
-g.sanitizeHtml = sanitizeHtml;
+Object.assign(globalThis, { formatWebHtml, renderSlackMrkdwn, sanitizeHtml });
