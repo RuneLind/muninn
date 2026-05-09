@@ -1,7 +1,7 @@
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
 import { recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
-import { peelHuginnTraceChannel, fetchHuginnTrace } from "./huginn-trace-pointer.ts";
+import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -181,19 +181,21 @@ export class StreamParser {
       const idx = this.pendingTools.findIndex((p) => p.id === useId);
       if (idx === -1) continue;
       const pending = this.pendingTools[idx]!;
-      // Peel the Huginn search-trace fence (if present) from the raw text
-      // BEFORE truncateOutput runs — the closing ``` would otherwise fall
-      // past the 16 KB cap and the trace would never make it onto the
-      // span. Non-Huginn outputs round-trip unchanged through parseHuginnTrace.
+      // Peel the Huginn trace channel BEFORE truncateOutput — the trailing
+      // fence (or pointer line) sits at end-of-string and would otherwise
+      // fall past the 16 KB cap. processMcpToolResult also kicks off
+      // pointer-mode fetches eagerly so the trace store's short TTL stays warm.
       const raw = extractToolResultContent(block);
       if (typeof raw === "string") {
-        const channel = peelHuginnTraceChannel(raw);
-        if (channel.pointer || channel.trace !== undefined) {
-          pending.output = truncateOutput(channel.text);
-          pending.searchTrace = channel.trace;
-          pending.searchTracePointer = channel.pointer;
-          if (channel.pointer) pending.searchTraceFetch = fetchHuginnTrace(channel.pointer);
+        const processed = processMcpToolResult(raw);
+        if (processed.searchTrace !== undefined || processed.searchTracePointer !== undefined) {
+          pending.output = truncateOutput(processed.cleanedText);
+          pending.searchTrace = processed.searchTrace;
+          pending.searchTracePointer = processed.searchTracePointer;
+          pending.searchTraceFetch = processed.searchTraceFetch;
         } else {
+          // CLI redirected an oversized tool result to a tempfile — recover
+          // the trace from disk so the model doesn't re-pull it on next Read.
           const recovery = recoverOversizedClaudeCliToolResult(raw);
           if (recovery !== null) {
             pending.output = truncateOutput(raw);
@@ -203,7 +205,7 @@ export class StreamParser {
               pending.searchTraceFetch = fetchHuginnTrace(recovery.tracePointer);
             }
           } else {
-            pending.output = truncateOutput(channel.text);
+            pending.output = truncateOutput(processed.cleanedText);
           }
         }
       } else {
