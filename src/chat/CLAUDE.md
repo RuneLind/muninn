@@ -11,7 +11,7 @@
 | `chat-config.ts` | Chat user management via DB (ensureUser + ensureDefaultThread), config file migration |
 | `pending-messages.ts` | Temporary in-memory store for research messages from Chrome extension (5min TTL, consumed once) |
 | `views/page.ts` | Server-side HTML page generation for the chat UI |
-| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (inspector panel), `web-format-client.ts` (markdown/mrkdwn/sanitize), `connector-selector.ts` (connector dropdown), `research-card.ts` (Jira research cards), `streaming-ui.ts` (streaming deltas, tool status, response meta), `thread-manager.ts` (thread CRUD, modal, sidebar), `knowledge-links.ts` (URL normalization, doc panel links) |
+| `views/components/` | `chat-styles.ts` (CSS), `inspector-panel.ts` (inspector panel), `web-format-browser.ts` (browser entrypoint bundled into the chat page IIFE — exposes `formatWebHtml`/`renderSlackMrkdwn`/`sanitizeHtml` on `globalThis`), `web-format-client.ts` (`Bun.build` wrapper), `slack-mrkdwn.ts` (Slack mrkdwn renderer, shared by browser bundle and tests), `connector-selector.ts` (connector dropdown), `research-card.ts` (Jira research cards), `streaming-ui.ts` (streaming deltas, tool status, response meta), `thread-manager.ts` (thread CRUD, modal, sidebar), `knowledge-links.ts` (URL normalization, doc panel links) |
 
 ## Architecture
 
@@ -36,9 +36,9 @@
 - All web chat messages are stored with platform `"web"` regardless of original conversation type.
 - For Slack conversations, gathers last 15 messages as channel context and provides `postToChannel` callback.
 
-## Web Format Sync Obligation
+## Web Format
 
-Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page has a client-side copy in `views/components/web-format-client.ts` for streaming text deltas. **Both must stay in sync** — if you change markdown-to-HTML conversion in one, update the other.
+Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page also calls `formatWebHtml()` for streaming text deltas — but it imports the SAME function via `views/components/web-format-browser.ts`, which is bundled by `Bun.build()` (see `web-format-client.ts`) and injected into the page's inline `<script>` as a self-contained IIFE that attaches `formatWebHtml`, `renderSlackMrkdwn`, and `sanitizeHtml` to `globalThis`. There is no manual port to keep in sync.
 
 ## ConversationType
 
