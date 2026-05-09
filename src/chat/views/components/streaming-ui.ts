@@ -215,6 +215,7 @@ export function streamingUiScript(): string {
       lastResponseMeta[meta.conversationId] = meta;
       updateInspectorContextUsage(meta);
       updateInspectorToolUsage(meta);
+      renderLastResponseCard(meta);
       loadToolUsageStats(); // Refresh aggregate stats
     }
 

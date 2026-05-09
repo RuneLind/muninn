@@ -77,10 +77,10 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
 
   // Tokens: prefer usage object, fall back to top-level fields
   // Include cache tokens in total for accurate tracking
+  const cacheReadTokens = parsed.usage?.cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = parsed.usage?.cache_creation_input_tokens ?? 0;
   const inputTokens = parsed.usage
-    ? (parsed.usage.input_tokens ?? 0)
-      + (parsed.usage.cache_creation_input_tokens ?? 0)
-      + (parsed.usage.cache_read_input_tokens ?? 0)
+    ? (parsed.usage.input_tokens ?? 0) + cacheCreationTokens + cacheReadTokens
     : (parsed.input_tokens ?? 0);
   const outputTokens = parsed.usage?.output_tokens ?? parsed.output_tokens ?? 0;
 
@@ -100,5 +100,7 @@ export function parseClaudeOutput(stdout: string): ClaudeResult {
     model,
     inputTokens,
     outputTokens,
+    cacheReadTokens: cacheReadTokens || undefined,
+    cacheCreationTokens: cacheCreationTokens || undefined,
   };
 }

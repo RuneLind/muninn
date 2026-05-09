@@ -162,6 +162,8 @@ export async function processChatMessage(
         outputTokens: result.outputTokens,
         contextTokens: result.contextTokens,
         contextWindow: effectiveBotConfig.contextWindow,
+        cacheReadTokens: result.cacheReadTokens,
+        cacheCreationTokens: result.cacheCreationTokens,
         durationMs: result.durationMs,
         costUsd: result.costUsd,
         model: result.model,

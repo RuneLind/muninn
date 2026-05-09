@@ -594,7 +594,15 @@ export function chatStyles(): string {
       font-size: 12px;
     }
     .ins-info-label { color: var(--text-faint); }
-    .ins-info-value { color: var(--text-secondary); }
+    .ins-info-value { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+    .ins-info-value-cache { color: var(--status-ok, #27ae60); }
+    .ins-info-value-cost { color: var(--accent-light, #a8b4ff); }
+    .ins-info-detail {
+      color: var(--text-faint);
+      font-size: 10px;
+      margin-left: 2px;
+      font-variant-numeric: tabular-nums;
+    }
     .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 10px 0; }
     .ins-context-bar {
       height: 4px;

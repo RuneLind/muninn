@@ -39,7 +39,7 @@ export type ChatEvent =
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] }
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
@@ -182,6 +182,8 @@ export class ChatState {
     outputTokens: number;
     contextTokens?: number;
     contextWindow?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
     durationMs: number;
     costUsd: number;
     model: string;
@@ -196,6 +198,8 @@ export class ChatState {
       outputTokens: meta.outputTokens,
       contextTokens: meta.contextTokens,
       contextWindow: meta.contextWindow,
+      cacheReadTokens: meta.cacheReadTokens,
+      cacheCreationTokens: meta.cacheCreationTokens,
       durationMs: meta.durationMs,
       costUsd: meta.costUsd,
       model: meta.model,

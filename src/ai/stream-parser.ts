@@ -63,6 +63,8 @@ export class StreamParser {
   private model = "unknown";
   private inputTokens = 0;
   private outputTokens = 0;
+  private cacheReadTokens = 0;
+  private cacheCreationTokens = 0;
   /** Last assistant turn's input tokens — actual context window consumption.
    *  Result event reports cumulative across all turns; this tracks per-turn. */
   private lastTurnInputTokens = 0;
@@ -259,10 +261,12 @@ export class StreamParser {
     this.numTurns = event.num_turns ?? 1;
 
     if (event.usage) {
+      this.cacheReadTokens = event.usage.cache_read_input_tokens ?? 0;
+      this.cacheCreationTokens = event.usage.cache_creation_input_tokens ?? 0;
       this.inputTokens =
         (event.usage.input_tokens ?? 0) +
-        (event.usage.cache_creation_input_tokens ?? 0) +
-        (event.usage.cache_read_input_tokens ?? 0);
+        this.cacheCreationTokens +
+        this.cacheReadTokens;
       this.outputTokens = event.usage.output_tokens ?? 0;
     }
 
@@ -299,6 +303,8 @@ export class StreamParser {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
       contextTokens: this.lastTurnInputTokens || undefined,
+      cacheReadTokens: this.cacheReadTokens || undefined,
+      cacheCreationTokens: this.cacheCreationTokens || undefined,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,
     };
   }

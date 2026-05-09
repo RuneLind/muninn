@@ -86,6 +86,10 @@ export interface ProcessMessageResult {
   numTurns: number;
   /** Last turn's input tokens — actual context window usage (vs cumulative inputTokens) */
   contextTokens?: number;
+  /** Cache-read input tokens (cumulative). Subset of inputTokens. */
+  cacheReadTokens?: number;
+  /** Cache-creation input tokens (cumulative). Subset of inputTokens. */
+  cacheCreationTokens?: number;
   toolCalls?: { name: string; displayName: string; durationMs: number }[];
 }
 
@@ -183,6 +187,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       contextTokens: result.contextTokens,
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
       platform,
       threadId,
       traceId: t.traceId,
@@ -282,6 +288,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       model: result.model,
       numTurns: result.numTurns,
       contextTokens: result.contextTokens,
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
       toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
     };
   } catch (error) {

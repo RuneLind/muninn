@@ -87,6 +87,10 @@ export interface ClaudeResult {
   outputTokens: number;
   /** Last turn's input tokens — actual context window consumption (vs cumulative inputTokens) */
   contextTokens?: number;
+  /** Cache-read input tokens (cumulative across turns). Subset of inputTokens. */
+  cacheReadTokens?: number;
+  /** Cache-creation input tokens (cumulative across turns). Subset of inputTokens. */
+  cacheCreationTokens?: number;
   toolCalls?: ToolCall[];
 }
 
