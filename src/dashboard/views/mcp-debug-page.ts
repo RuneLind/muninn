@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { mcpServerPanelStyles, mcpServerPanelHtml, mcpServerPanelScript } from "./components/mcp-server-panel.ts";
 import { mcpToolListStyles, mcpToolListScript } from "./components/mcp-tool-list.ts";
 import { mcpToolDetailStyles, mcpToolDetailHtml, mcpToolDetailScript } from "./components/mcp-tool-detail.ts";

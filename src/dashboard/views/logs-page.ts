@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 
 export async function renderLogsPage(): Promise<string> {
   const helpers = await helpersClientScript();

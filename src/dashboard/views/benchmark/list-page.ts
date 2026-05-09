@@ -1,5 +1,5 @@
 import { renderNav } from "../shared-styles.ts";
-import { helpersClientScript } from "../components/helpers.ts";
+import { helpersClientScript } from "../components/helpers-client.ts";
 import type { BenchmarkRunRow } from "../../../db/benchmark-runs.ts";
 import type {
   DiscoveredIssue,

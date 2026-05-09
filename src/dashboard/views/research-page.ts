@@ -1,7 +1,7 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { markdownContentStyles, docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 
 export async function renderResearchPage(): Promise<string> {
   const helpers = await helpersClientScript();

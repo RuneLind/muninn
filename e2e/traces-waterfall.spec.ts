@@ -23,15 +23,10 @@ test.describe("Traces waterfall", () => {
     const firstTraceRow = page.locator(".trace-table tbody tr[data-trace]").first();
     if ((await firstTraceRow.count()) === 0) {
       test.skip(true, "No traces in DB — cannot exercise waterfall");
-      return;
     }
 
     await firstTraceRow.click();
     await expect(page.locator("#waterfallContainer")).toHaveClass(/visible/);
-    await expect(page.locator("#waterfall .waterfall-bar")).toHaveCount(
-      // We just need at least one bar; assert non-zero by checking the first bar is visible
-      await page.locator("#waterfall .waterfall-bar").count(),
-    );
     await expect(page.locator("#waterfall .waterfall-bar").first()).toBeVisible();
 
     await page.locator("#waterfall .waterfall-bar").first().click();

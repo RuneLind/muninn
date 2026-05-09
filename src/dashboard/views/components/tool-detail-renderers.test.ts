@@ -1,7 +1,7 @@
 import { test, expect, beforeAll } from "bun:test";
 import vm from "node:vm";
 import { toolDetailRenderersScript } from "./tool-detail-renderers.ts";
-import { helpersClientScript } from "./helpers.ts";
+import { helpersClientScript } from "./helpers-client.ts";
 
 /**
  * Eval the embedded renderer script in a vm context so we can call the

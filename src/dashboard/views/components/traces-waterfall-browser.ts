@@ -4,17 +4,22 @@
  * (see traces-waterfall-client.ts) and injected as an IIFE into the traces
  * page's inline `<script>`.
  *
- * Exposes the click-bound handlers (`loadWaterfall`, `closeWaterfall`,
- * `closeSpanDetails`, `toggleCollapse`) on `globalThis` so the inline HTML
- * onclick attributes — and `traces-list.ts`'s `loadWaterfall(traceId)` — can
- * call them by bare name. Also writes `currentWaterfallTraceId` and
- * `waterfallSpans` onto `globalThis` because `traces-prompt-modal.ts` reads
- * both directly from the inline-script global scope.
+ * Two cross-script bridges to mind:
+ *  - Writes `currentWaterfallTraceId` and `waterfallSpans` onto `globalThis`
+ *    because `traces-prompt-modal.ts` reads them as bare identifiers from the
+ *    surrounding inline-script global scope.
+ *  - Exposes the click handlers (`loadWaterfall`, `closeWaterfall`,
+ *    `closeSpanDetails`) on `globalThis` so HTML inline `onclick=` attrs and
+ *    `traces-list.ts`'s `loadWaterfall(traceId)` can call them by bare name.
  *
- * Reads its sibling globals (`fmtDuration`, `esc`, `toolInputLabel`,
- * `deriveSpanLabelHtml`, `renderToolDetail`, `__tdrState`) off `globalThis`
- * — they are provided by other inline scripts on the same page.
+ * `renderToolDetail` and `__tdrState` are read off `globalThis` because their
+ * source (`tool-detail-renderers.ts`) is still a JS-string component.
  */
+
+import { escHtml } from "./escape.ts";
+import { extractToolInputLabel } from "./tool-helpers.ts";
+import { deriveSpanLabelHtml } from "./span-label.ts";
+import { fmtDuration } from "./helpers.ts";
 
 interface WaterfallSpan {
   id: string;
@@ -33,36 +38,27 @@ interface WaterfallSpan {
     model?: string;
     requestedModel?: string;
     [k: string]: unknown;
-  } | null;
+  };
 }
 
-interface SpanLabel {
-  html: string;
-  tooltip: string;
-}
-
-interface DashboardGlobals {
-  fmtDuration: (ms: number | null | undefined) => string;
-  esc: (s: string) => string;
-  toolInputLabel: (input: unknown) => string;
-  deriveSpanLabelHtml: (s: WaterfallSpan) => SpanLabel | null;
+interface WaterfallGlobals {
+  currentWaterfallTraceId: string | null;
+  waterfallSpans: WaterfallSpan[];
+  loadWaterfall: (traceId: string) => Promise<void>;
+  closeWaterfall: () => void;
+  closeSpanDetails: () => void;
   renderToolDetail?: (span: WaterfallSpan) => string;
   __tdrState?: { showRaw: boolean; showResponse: boolean; attrs: unknown };
 }
 
-const g = globalThis as typeof globalThis & Partial<DashboardGlobals>;
+const g = globalThis as typeof globalThis & WaterfallGlobals;
+g.currentWaterfallTraceId = null;
+g.waterfallSpans = [];
 
-let currentWaterfallTraceId: string | null = null;
-let waterfallSpans: WaterfallSpan[] = [];
 let waterfallSpanById: Record<string, WaterfallSpan> = {};
 let waterfallChildrenByParent: Record<string, WaterfallSpan[]> = {};
 let collapsedSpanIds = new Set<string>();
 
-// Build id-to-span / parent-to-children indices and return spans flattened
-// in tree order (parent immediately before its children, siblings by
-// startedAt). The flat order matters because the DB sort by startedAt is
-// unstable when a synthesized stage span starts at offset 0 from its tool
-// parent, so without this the child can render above the parent.
 function buildWaterfallState(spans: WaterfallSpan[]): {
   sorted: WaterfallSpan[];
   spanById: Record<string, WaterfallSpan>;
@@ -77,6 +73,9 @@ function buildWaterfallState(spans: WaterfallSpan[]): {
       childrenByParent[s.parentId]!.push(s);
     }
   });
+  // The DB sort by startedAt is unstable when a synthesized stage span starts
+  // at offset 0 from its tool parent — without explicit DFS the child renders
+  // above the parent.
   const byStart = (a: WaterfallSpan, b: WaterfallSpan) => a.startedAt - b.startedAt;
   const roots = spans.filter((s) => !s.parentId || !spanById[s.parentId]).sort(byStart);
   Object.keys(childrenByParent).forEach((k) => childrenByParent[k]!.sort(byStart));
@@ -87,14 +86,12 @@ function buildWaterfallState(spans: WaterfallSpan[]): {
     if (visited.has(s.id)) return;
     visited.add(s.id);
     sorted.push(s);
-    const kids = childrenByParent[s.id];
-    if (kids) kids.forEach(visit);
+    childrenByParent[s.id]?.forEach(visit);
   }
   roots.forEach(visit);
-  // Append any unreachable nodes so a malformed tree doesn't silently drop spans.
-  // Surface the count to the operator console — an orphan means a parent_id
-  // pointed at a span that wasn't returned (deleted? cross-trace?) and would
-  // otherwise render unexplained at the bottom of the waterfall.
+  // Append unreachable nodes so a malformed tree doesn't silently drop spans.
+  // An orphan means a parent_id pointed at a span that wasn't returned —
+  // surface the count to the operator console.
   let orphans = 0;
   spans.forEach((s) => {
     if (!visited.has(s.id)) {
@@ -112,30 +109,28 @@ function buildWaterfallState(spans: WaterfallSpan[]): {
 
 async function loadWaterfall(traceId: string): Promise<void> {
   try {
-    currentWaterfallTraceId = traceId;
-    (g as unknown as { currentWaterfallTraceId: string | null }).currentWaterfallTraceId = traceId;
+    g.currentWaterfallTraceId = traceId;
     const res = await fetch("/api/traces/" + traceId);
     const { spans } = (await res.json()) as { spans: WaterfallSpan[] };
     if (spans.length === 0) return;
 
-    const container = document.getElementById("waterfallContainer")!;
-    container.classList.add("visible");
+    document.getElementById("waterfallContainer")!.classList.add("visible");
 
     const root = spans.find((s) => !s.parentId) || spans[0]!;
     document.getElementById("waterfallTitle")!.textContent =
-      root.name + " (" + g.fmtDuration!(root.durationMs) + ")";
+      root.name + " (" + fmtDuration(root.durationMs) + ")";
 
     document
       .querySelectorAll(".trace-table tr")
       .forEach((r) => r.classList.remove("expanded"));
-    const row = document.querySelector('tr[data-trace="' + traceId + '"]');
-    if (row) row.classList.add("expanded");
+    document
+      .querySelector('tr[data-trace="' + traceId + '"]')
+      ?.classList.add("expanded");
 
     // Single index pass per trace load — renderWaterfall and the collapse
     // helpers all read from this cache, so chevron toggles don't re-walk.
     const built = buildWaterfallState(spans);
-    waterfallSpans = built.sorted;
-    (g as unknown as { waterfallSpans: WaterfallSpan[] }).waterfallSpans = waterfallSpans;
+    g.waterfallSpans = built.sorted;
     waterfallSpanById = built.spanById;
     waterfallChildrenByParent = built.childrenByParent;
 
@@ -143,7 +138,7 @@ async function loadWaterfall(traceId: string): Promise<void> {
     // (index.fetch / boost.title / assemble). Same info is one click away
     // in the search detail panel.
     collapsedSpanIds = new Set();
-    waterfallSpans.forEach((s) => {
+    g.waterfallSpans.forEach((s) => {
       if (spanHasCollapsibleChildren(s.id)) collapsedSpanIds.add(s.id);
     });
 
@@ -156,11 +151,10 @@ async function loadWaterfall(traceId: string): Promise<void> {
 
 function spanHasCollapsibleChildren(spanId: string): boolean {
   const kids = waterfallChildrenByParent[spanId] || [];
-  return kids.some((k) => k.attributes && k.attributes.synthesized === true);
+  return kids.some((k) => k.attributes?.synthesized === true);
 }
 
-function toggleCollapse(spanId: string, event?: Event): void {
-  if (event) event.stopPropagation();
+function toggleCollapse(spanId: string): void {
   if (collapsedSpanIds.has(spanId)) collapsedSpanIds.delete(spanId);
   else collapsedSpanIds.add(spanId);
   renderWaterfall();
@@ -172,22 +166,22 @@ function toggleCollapse(spanId: string, event?: Event): void {
 // actually ran.
 function isAiSpan(s: WaterfallSpan): boolean {
   if (!s || s.name !== "claude") return false;
-  const a = s.attributes || {};
+  const a = s.attributes ?? {};
   return !!(a.connector || a.model || a.requestedModel);
 }
 function aiSpanLabel(s: WaterfallSpan): string {
-  const a = s.attributes || {};
+  const a = s.attributes ?? {};
   const conn = a.connector || "claude-cli";
   const model = a.model || a.requestedModel || "";
   return model ? conn + ", " + model : conn;
 }
 
 function isToolSpan(s: WaterfallSpan): boolean {
-  return !!(s.attributes && (s.attributes.toolName || s.attributes.toolId));
+  return !!(s.attributes?.toolName || s.attributes?.toolId);
 }
 
 function renderWaterfall(): void {
-  const spans = waterfallSpans;
+  const spans = g.waterfallSpans;
   const el = document.getElementById("waterfall")!;
   if (spans.length === 0) {
     el.innerHTML = '<div class="empty">No spans</div>';
@@ -232,85 +226,62 @@ function renderWaterfall(): void {
       const width =
         s.kind === "event" ? 0.3 : Math.max(((s.durationMs || 0) / totalRange) * 100, 0.3);
       const statusClass = s.status === "error" ? " status-error" : "";
-      const depth = nestingDepth(s);
-      const indent = "  ".repeat(depth);
-      const chip = isToolSpan(s) && g.deriveSpanLabelHtml ? g.deriveSpanLabelHtml(s) : null;
+      const indent = "  ".repeat(nestingDepth(s));
+      const chip = isToolSpan(s) ? deriveSpanLabelHtml(s) : null;
       const aiLabel = !chip && isAiSpan(s) ? aiSpanLabel(s) : null;
       const fallbackName = aiLabel || s.name;
-      const labelInner = chip ? g.esc!(indent) + chip.html : g.esc!(indent + fallbackName);
+      // chip.html is already escaped; the indent is plain NBSPs so it doesn't
+      // need escaping itself, but escHtml is a no-op on those characters.
+      const labelInner = chip ? escHtml(indent) + chip.html : escHtml(indent + fallbackName);
       const labelTooltip = chip ? chip.tooltip : fallbackName;
-      const collapsible = spanHasCollapsibleChildren(s.id);
       const isCollapsed = collapsedSpanIds.has(s.id);
-      const toggleHtml = collapsible
-        ? '<span class="waterfall-toggle" onclick="toggleCollapse(\'' +
-          s.id +
-          "', event)\" title=\"" +
-          (isCollapsed ? "Expand stage spans" : "Collapse stage spans") +
-          '">' +
-          (isCollapsed ? "▸" : "▾") +
-          "</span>"
+      const toggleHtml = spanHasCollapsibleChildren(s.id)
+        ? `<span class="waterfall-toggle" data-toggle-id="${s.id}" title="${
+            isCollapsed ? "Expand stage spans" : "Collapse stage spans"
+          }">${isCollapsed ? "▸" : "▾"}</span>`
         : '<span class="waterfall-toggle waterfall-toggle-spacer"></span>';
       const barKind = isToolSpan(s) ? "tool" : s.kind;
-      const inputLabel = isToolSpan(s) ? g.toolInputLabel!(s.attributes && s.attributes.input) : "";
+      const inputLabel = isToolSpan(s) ? extractToolInputLabel(s.attributes?.input) : "";
       const inputHtml = inputLabel
-        ? '<span class="waterfall-input" title="' +
-          g.esc!(inputLabel) +
-          '">' +
-          g.esc!(inputLabel) +
-          "</span>"
+        ? `<span class="waterfall-input" title="${escHtml(inputLabel)}">${escHtml(inputLabel)}</span>`
         : "";
       return (
-        '<div class="waterfall-row">' +
-        '<div class="waterfall-label" title="' +
-        g.esc!(labelTooltip) +
-        '">' +
-        toggleHtml +
-        labelInner +
-        "</div>" +
-        '<div class="waterfall-bar-container">' +
-        '<div class="waterfall-bar kind-' +
-        barKind +
-        statusClass +
-        '" ' +
-        'style="left:' +
-        left +
-        "%;width:" +
-        width +
-        '%"' +
-        ' data-span-index="' +
-        i +
-        '">' +
-        '<span class="waterfall-duration">' +
-        g.fmtDuration!(s.durationMs) +
-        "</span>" +
+        `<div class="waterfall-row">` +
+        `<div class="waterfall-label" title="${escHtml(labelTooltip)}">${toggleHtml}${labelInner}</div>` +
+        `<div class="waterfall-bar-container">` +
+        `<div class="waterfall-bar kind-${barKind}${statusClass}" ` +
+        `style="left:${left}%;width:${width}%" data-span-index="${i}">` +
+        `<span class="waterfall-duration">${fmtDuration(s.durationMs)}</span>` +
         inputHtml +
-        "</div>" +
-        "</div>" +
-        "</div>"
+        `</div></div></div>`
       );
     })
     .join("");
 }
 
-// Event delegation for waterfall bar clicks
+// Delegated click handler: chevron toggles take priority over bar clicks.
 document.getElementById("waterfall")!.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
+  const toggle = target.closest<HTMLElement>("[data-toggle-id]");
+  if (toggle) {
+    event.stopPropagation();
+    toggleCollapse(toggle.dataset.toggleId!);
+    return;
+  }
   const bar = target.closest<HTMLElement>("[data-span-index]");
   if (!bar) return;
   event.stopPropagation();
-  const span = waterfallSpans[parseInt(bar.dataset.spanIndex!, 10)];
+  const span = g.waterfallSpans[parseInt(bar.dataset.spanIndex!, 10)];
   if (!span) return;
-  const details = document.getElementById("spanDetails")!;
-  details.classList.add("visible");
+  document.getElementById("spanDetails")!.classList.add("visible");
   const titleName = isAiSpan(span) ? aiSpanLabel(span) : span.name;
   document.getElementById("spanDetailsTitle")!.textContent =
     titleName + " (" + span.kind + ", " + span.status + ")";
   const host = document.getElementById("spanDetailsJson")!;
-  // renderToolDetail picks the best panel for this span: v1 search trace
-  // (delegates to renderSearchTrace), per-tool renderer (graph node, symbol
-  // context, list_files, read_source, search_pattern), or smart generic
-  // (Input + Output sections). Reset raw toggle on every span open so the
-  // panel always opens in structured mode.
+  // renderToolDetail picks the best panel: v1 search trace, per-tool renderer
+  // (graph node, symbol context, list_files, read_source, search_pattern), or
+  // smart generic. Reset the raw toggle on every span open so the panel
+  // always opens in structured mode.
   if (typeof g.renderToolDetail === "function") {
     if (g.__tdrState) {
       g.__tdrState.showRaw = false;
@@ -318,8 +289,7 @@ document.getElementById("waterfall")!.addEventListener("click", (event) => {
     }
     host.innerHTML = g.renderToolDetail(span);
   } else {
-    host.innerHTML =
-      "<pre>" + g.esc!(JSON.stringify(span.attributes || {}, null, 2)) + "</pre>";
+    host.innerHTML = "<pre>" + escHtml(JSON.stringify(span.attributes || {}, null, 2)) + "</pre>";
   }
 });
 
@@ -333,28 +303,24 @@ function closeSpanDetails(): void {
   document.getElementById("spanDetails")!.classList.remove("visible");
 }
 
-// Esc closes the drawer first if open, then the waterfall. Doesn't preventDefault
-// unless something was actually closed, so other shortcuts are unaffected.
+// Esc closes the drawer first if open, then the waterfall. Doesn't
+// preventDefault unless something was actually closed, so other shortcuts
+// are unaffected.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const det = document.getElementById("spanDetails");
-  if (det && det.classList.contains("visible")) {
+  if (det?.classList.contains("visible")) {
     e.preventDefault();
     closeSpanDetails();
     return;
   }
   const wf = document.getElementById("waterfallContainer");
-  if (wf && wf.classList.contains("visible")) {
+  if (wf?.classList.contains("visible")) {
     e.preventDefault();
     closeWaterfall();
   }
 });
 
-Object.assign(globalThis, {
-  loadWaterfall,
-  closeWaterfall,
-  closeSpanDetails,
-  toggleCollapse,
-  currentWaterfallTraceId,
-  waterfallSpans,
-});
+g.loadWaterfall = loadWaterfall;
+g.closeWaterfall = closeWaterfall;
+g.closeSpanDetails = closeSpanDetails;

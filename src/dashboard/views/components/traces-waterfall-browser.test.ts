@@ -1,6 +1,6 @@
 import { test, expect, beforeAll } from "bun:test";
 import vm from "node:vm";
-import { helpersClientScript } from "./helpers.ts";
+import { helpersClientScript } from "./helpers-client.ts";
 import { tracesWaterfallClientScript } from "./traces-waterfall-client.ts";
 
 /**
@@ -21,7 +21,6 @@ interface VmCtx {
   loadWaterfall: (id: string) => Promise<void>;
   closeWaterfall: () => void;
   closeSpanDetails: () => void;
-  toggleCollapse: (id: string) => void;
   currentWaterfallTraceId: string | null;
   waterfallSpans: Array<{ id: string }>;
   [k: string]: unknown;
@@ -96,20 +95,13 @@ beforeAll(async () => {
   vm.createContext(ctx);
   const helpers = await helpersClientScript();
   const waterfall = await tracesWaterfallClientScript();
-  // `fmtDuration` is defined inline by `tracesListScript()` on the real page,
-  // which top-level-declares it in the same classic <script> so it lands on
-  // globalThis. Stub it here so loadWaterfall's title-rendering path resolves.
-  vm.runInContext(
-    `function fmtDuration(ms){ return ms == null ? '-' : ms + 'ms'; }\n${helpers}\n${waterfall}`,
-    ctx,
-  );
+  vm.runInContext(`${helpers}\n${waterfall}`, ctx);
 });
 
 test("IIFE exposes click-bound handlers on globalThis", () => {
   expect(typeof ctx.loadWaterfall).toBe("function");
   expect(typeof ctx.closeWaterfall).toBe("function");
   expect(typeof ctx.closeSpanDetails).toBe("function");
-  expect(typeof ctx.toggleCollapse).toBe("function");
 });
 
 test("globalThis is seeded with currentWaterfallTraceId and waterfallSpans for prompt-modal", () => {

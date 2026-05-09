@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { layoutStyles } from "./components/layout.ts";
 import { connectionStyles, connectionStatusHtml, connectionScript } from "./components/connection.ts";
 import { agentStatusStyles, agentStatusHtml, agentStatusScript } from "./components/agent-status-ui.ts";

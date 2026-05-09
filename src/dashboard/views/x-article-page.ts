@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, docPanelStyles, markdownContentStyles, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 
 export async function renderXArticlePage(): Promise<string> {
   const helpers = await helpersClientScript();

@@ -16,7 +16,6 @@ export {
   abbreviateCollection,
   deriveSpanLabelHtml,
 } from "./span-label.ts";
-export { helpersClientScript } from "./helpers-client.ts";
 
 export function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString("en-US", {
@@ -51,6 +50,11 @@ export function deadlineText(ts: number | null | undefined): string {
 
 export function fmtMs(ms: number): string {
   return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
+}
+
+export function fmtDuration(ms: number | null | undefined): string {
+  if (ms == null) return "-";
+  return fmtMs(ms);
 }
 
 export function fmtTokens(n: number): string {

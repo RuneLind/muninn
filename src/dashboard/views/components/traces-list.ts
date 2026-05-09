@@ -80,10 +80,6 @@ export function tracesListScript(): string {
       if (d.toDateString() === today.toDateString()) return fmtTime(epochMs);
       return d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' }) + ' ' + fmtTime(epochMs);
     }
-    function fmtDuration(ms) {
-      if (ms == null) return '-';
-      return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
-    }
     function fmtTokens(attrs) {
       const input = attrs?.inputTokens || attrs?.input_tokens || 0;
       const output = attrs?.outputTokens || attrs?.output_tokens || 0;

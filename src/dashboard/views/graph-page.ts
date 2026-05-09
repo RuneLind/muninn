@@ -1,5 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { helpersClientScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 
 export async function renderGraphPage(): Promise<string> {
   const helpers = await helpersClientScript();
