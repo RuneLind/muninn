@@ -1,5 +1,4 @@
 /** MemSearch panel — embedded in dashboard as a tab */
-import { escScript } from "./helpers.ts";
 
 export function memsearchPanelStyles(): string {
   return `
@@ -301,8 +300,6 @@ export function memsearchPanelScript(): string {
     var msSearchMode = 'hybrid';
     var msSearchResults = [];
     var msInitialized = false;
-
-    ${escScript()}
 
     function msFmtDate(epochMs) {
       var d = new Date(epochMs);

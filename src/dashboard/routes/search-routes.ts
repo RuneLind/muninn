@@ -7,14 +7,14 @@ import { knowledgeApiHandler } from "./knowledge-api-client.ts";
 export function registerSearchRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/search", (c) => {
-    return c.html(renderSearchPage());
+  app.get("/search", async (c) => {
+    return c.html(await renderSearchPage());
   });
 
-  app.get("/search/document/:collection/*", (c) => {
+  app.get("/search/document/:collection/*", async (c) => {
     const collection = c.req.param("collection");
     const docId = c.req.path.split(`/search/document/${collection}/`)[1] || "";
-    return c.html(renderSearchDocumentPage(collection, decodeURIComponent(docId)));
+    return c.html(await renderSearchDocumentPage(collection, decodeURIComponent(docId)));
   });
 
   app.get("/api/search/health", (c) => {

@@ -1,7 +1,8 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 
-export function renderGraphPage(): string {
+export async function renderGraphPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -328,7 +329,7 @@ export function renderGraphPage(): string {
       return COMM_PALETTE[commId % COMM_PALETTE.length];
     }
 
-    ${escScript()}
+    ${helpers}
 
     let graphData = null;
     let nodeMap = new Map();

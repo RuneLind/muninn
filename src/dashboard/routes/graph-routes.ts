@@ -103,8 +103,8 @@ async function extractWikilinkEdges(
 export function registerGraphRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/graph", (c) => {
-    return c.html(renderGraphPage());
+  app.get("/graph", async (c) => {
+    return c.html(await renderGraphPage());
   });
 
   // Proxy to Huginn collections list

@@ -51,7 +51,7 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 
 ### Pages
 
-`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `memsearch-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `youtube-page.ts`.
+`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `youtube-page.ts`.
 
 ## Real-Time Updates
 

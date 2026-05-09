@@ -19,8 +19,8 @@ async function readLogEntries(logDir: string, date: string): Promise<Record<stri
 export function registerLogsRoutes(app: Hono, config: Config): void {
   const LOG_DIR = config.logDir;
 
-  app.get("/logs", (c) => {
-    return c.html(renderLogsPage());
+  app.get("/logs", async (c) => {
+    return c.html(await renderLogsPage());
   });
 
   app.get("/api/logs/dates", async (c) => {

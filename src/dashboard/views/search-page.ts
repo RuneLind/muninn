@@ -1,11 +1,12 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { searchStatsStyles, searchStatsHtml, searchStatsScript } from "./components/search-stats.ts";
 import { searchFormStyles, searchFormHtml, searchFormScript } from "./components/search-form.ts";
 import { searchResultsStyles, searchResultsHtml, searchResultsScript } from "./components/search-results.ts";
 
-export function renderSearchPage(): string {
+export async function renderSearchPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -39,7 +40,7 @@ export function renderSearchPage(): string {
   ${searchResultsHtml()}
 
   <script>
-    ${escScript()}
+    ${helpers}
     ${searchResultsScript()}
     ${searchStatsScript()}
     ${searchFormScript()}

@@ -15,8 +15,8 @@ const XA_COLLECTION = "x-articles";
 export function registerXArticleRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/x-articles", (c) => {
-    return c.html(renderXArticlePage());
+  app.get("/x-articles", async (c) => {
+    return c.html(await renderXArticlePage());
   });
 
   // CORS preflight for Chrome extension

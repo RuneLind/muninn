@@ -1,8 +1,9 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 
-export function renderLogsPage(): string {
+export async function renderLogsPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -473,7 +474,7 @@ export function renderLogsPage(): string {
         '.' + String(d.getMilliseconds()).padStart(3, '0');
     }
 
-    ${escScript()}
+    ${helpers}
 
     // --- Init ---
     loadDates();

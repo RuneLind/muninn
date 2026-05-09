@@ -1,9 +1,10 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { markdownContentStyles, docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 
-export function renderResearchPage(): string {
+export async function renderResearchPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -135,7 +136,7 @@ export function renderResearchPage(): string {
 
   ${MARKED_CDN_SCRIPT}
   <script>
-    ${escScript()}
+    ${helpers}
 
     var collections = [];
     var botCollectionNames = [];

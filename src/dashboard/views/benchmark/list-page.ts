@@ -1,5 +1,5 @@
 import { renderNav } from "../shared-styles.ts";
-import { escScript } from "../components/helpers.ts";
+import { helpersClientScript } from "../components/helpers.ts";
 import type { BenchmarkRunRow } from "../../../db/benchmark-runs.ts";
 import type {
   DiscoveredIssue,
@@ -15,11 +15,12 @@ import {
   fmtTime,
 } from "./shared.ts";
 
-export function renderBenchmarkListPage(
+export async function renderBenchmarkListPage(
   runs: BenchmarkRunRow[],
   issues: DiscoveredIssue[] = [],
   treatments: DiscoveredTreatment[] = [],
-): string {
+): Promise<string> {
+  const helpers = await helpersClientScript();
   // Hide the highlighted column when *every* visible run has
   // highlighted_total < 3. If any run has enough highlighted claims to be
   // a real rate, keep the column on for consistency.
@@ -135,14 +136,12 @@ export function renderBenchmarkListPage(
     ${runFormHtml}
     ${rowsHtml}
   </div>
-  <script>${RUN_FORM_SCRIPT}</script>
+  <script>${helpers}${RUN_FORM_SCRIPT}</script>
 </body>
 </html>`;
 }
 
 const RUN_FORM_SCRIPT = `
-${escScript()}
-
 async function startRunCell(ev) {
   ev.preventDefault();
   const issue = document.getElementById('run-issue').value;

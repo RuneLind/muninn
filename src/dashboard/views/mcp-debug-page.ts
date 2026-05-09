@@ -1,11 +1,12 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { mcpServerPanelStyles, mcpServerPanelHtml, mcpServerPanelScript } from "./components/mcp-server-panel.ts";
 import { mcpToolListStyles, mcpToolListScript } from "./components/mcp-tool-list.ts";
 import { mcpToolDetailStyles, mcpToolDetailHtml, mcpToolDetailScript } from "./components/mcp-tool-detail.ts";
 import { mcpToolResultsStyles, mcpToolResultsScript } from "./components/mcp-tool-results.ts";
 
-export function renderMcpDebugPage(): string {
+export async function renderMcpDebugPage(): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29,7 +30,7 @@ export function renderMcpDebugPage(): string {
   </div>
 
   <script>
-    ${escScript()}
+    ${helpers}
     ${mcpServerPanelScript()}
     ${mcpToolListScript()}
     ${mcpToolDetailScript()}

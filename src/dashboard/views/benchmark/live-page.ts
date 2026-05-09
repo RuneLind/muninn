@@ -1,9 +1,10 @@
 import { renderNav } from "../shared-styles.ts";
-import { escScript } from "../components/helpers.ts";
+import { helpersClientScript } from "../components/helpers.ts";
 import type { LiveJob } from "../../../benchmarks/live-job.ts";
 import { BENCHMARK_STYLES, esc, fmtTime } from "./shared.ts";
 
-export function renderBenchmarkRunLivePage(job: LiveJob): string {
+export async function renderBenchmarkRunLivePage(job: LiveJob): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -51,7 +52,7 @@ export function renderBenchmarkRunLivePage(job: LiveJob): string {
     const TRACE_ID = ${JSON.stringify(job.traceId)};
     const STARTED_AT = ${job.startedAt};
 
-    ${escScript()}
+    ${helpers}
 
     function fmtDur(ms) {
       if (ms == null) return '—';

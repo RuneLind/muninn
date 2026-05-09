@@ -20,8 +20,8 @@ const getBotConfigs = () => {
 export function registerToolsRoutes(app: Hono): void {
   // --- MCP Debug page ---
 
-  app.get("/mcp-debug", (c) => {
-    return c.html(renderMcpDebugPage());
+  app.get("/mcp-debug", async (c) => {
+    return c.html(await renderMcpDebugPage());
   });
 
   app.get("/api/mcp/bots", (c) => {
@@ -95,8 +95,8 @@ export function registerToolsRoutes(app: Hono): void {
 
   // --- Serena MCP Proxy ---
 
-  app.get("/serena", (c) => {
-    return c.html(renderSerenaPage());
+  app.get("/serena", async (c) => {
+    return c.html(await renderSerenaPage());
   });
 
   app.get("/api/serena/instances", (c) => {

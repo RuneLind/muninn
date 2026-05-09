@@ -1,8 +1,9 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
-import { escScript } from "./components/helpers.ts";
+import { helpersClientScript } from "./components/helpers.ts";
 import { markdownContentStyles, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 
-export function renderSearchDocumentPage(collection: string, docId: string): string {
+export async function renderSearchDocumentPage(collection: string, docId: string): Promise<string> {
+  const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -97,7 +98,7 @@ export function renderSearchDocumentPage(collection: string, docId: string): str
 
   ${MARKED_CDN_SCRIPT}
   <script>
-    ${escScript()}
+    ${helpers}
     ${docPanelScript()}
 
     const collection = ${JSON.stringify(collection)};

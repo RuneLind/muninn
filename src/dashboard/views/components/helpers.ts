@@ -1,4 +1,4 @@
-export { escScript, escHtml, escAttr } from "./escape.ts";
+export { escHtml, escAttr } from "./escape.ts";
 export {
   TOOL_INPUT_PRIORITY_KEYS,
   TOOL_INPUT_MAX_LENGTH,

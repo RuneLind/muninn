@@ -126,7 +126,7 @@ export function registerBenchmarkRoutes(app: Hono): void {
         discoverIssues().catch(() => []),
         discoverTreatments().catch(() => []),
       ]);
-      return c.html(renderBenchmarkListPage(runs, issues, treatments));
+      return c.html(await renderBenchmarkListPage(runs, issues, treatments));
     } catch (err) {
       log.error("Failed to render benchmark list: {error}", {
         error: err instanceof Error ? err.message : String(err),
@@ -139,7 +139,7 @@ export function registerBenchmarkRoutes(app: Hono): void {
     const traceId = c.req.param("traceId");
     const job = liveJobSupervisor.get(traceId);
     if (!job) return c.html("Live job not found (or evicted after 10 min)", 404);
-    return c.html(renderBenchmarkRunLivePage(job));
+    return c.html(await renderBenchmarkRunLivePage(job));
   });
 
   app.get("/api/benchmark/preview", async (c) => {
