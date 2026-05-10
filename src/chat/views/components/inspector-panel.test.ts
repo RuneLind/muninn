@@ -346,15 +346,12 @@ describe("computeLastResponseRows", () => {
     expect(localModel.find((r) => r.label === "Cost")).toBeUndefined();
   });
 
-  test("renders tool count with pluralization", () => {
-    const one = computeLastResponseRows({ inputTokens: 100, toolCalls: [{ displayName: "Read" }] });
-    expect(one.find((r) => r.label === "Tools")?.value).toBe("1 call");
-
-    const many = computeLastResponseRows({
+  test("does not emit a Tools row (count rendered as subsection heading by renderLastResponseCard)", () => {
+    const rows = computeLastResponseRows({
       inputTokens: 100,
-      toolCalls: [{ displayName: "Read" }, { displayName: "Write" }, { displayName: "Read" }],
+      toolCalls: [{ displayName: "Read" }, { displayName: "Write" }],
     });
-    expect(many.find((r) => r.label === "Tools")?.value).toBe("3 calls");
+    expect(rows.find((r) => r.label === "Tools")).toBeUndefined();
   });
 
   test("omits Turns row for single-turn responses", () => {

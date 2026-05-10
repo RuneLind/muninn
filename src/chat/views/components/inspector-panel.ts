@@ -139,13 +139,11 @@ export function computeLastResponseRows(meta: ResponseMetaInput | null): LastRes
   if (meta.costUsd && meta.costUsd > 0) {
     rows.push({ label: "Cost", value: "$" + meta.costUsd.toFixed(4), emphasis: "cost" });
   }
-  if (meta.toolCalls && meta.toolCalls.length > 0) {
-    const n = meta.toolCalls.length;
-    rows.push({ label: "Tools", value: n + " call" + (n !== 1 ? "s" : "") });
-  }
   if (meta.numTurns && meta.numTurns > 1) {
     rows.push({ label: "Turns", value: String(meta.numTurns) });
   }
+  // Tool count is rendered as a subsection heading ("Tools (N calls)") so the
+  // per-tool breakdown can sit directly under it — see renderLastResponseCard.
   return rows;
 }
 
@@ -229,10 +227,6 @@ export function inspectorPanelScript(): string {
     if (cacheCreate > 0) rows.push({ label: 'Cache write', value: fmtNum(cacheCreate) });
     if (meta.durationMs && meta.durationMs > 0) rows.push({ label: 'Duration', value: fmtDuration(meta.durationMs) });
     if (meta.costUsd && meta.costUsd > 0) rows.push({ label: 'Cost', value: '$' + meta.costUsd.toFixed(4), emphasis: 'cost' });
-    if (meta.toolCalls && meta.toolCalls.length > 0) {
-      var n = meta.toolCalls.length;
-      rows.push({ label: 'Tools', value: n + ' call' + (n !== 1 ? 's' : '') });
-    }
     if (meta.numTurns && meta.numTurns > 1) rows.push({ label: 'Turns', value: String(meta.numTurns) });
     return rows;
   }
@@ -241,7 +235,8 @@ export function inspectorPanelScript(): string {
     var container = document.getElementById('insLastResponse');
     if (!container) return;
     var rows = computeLastResponseRows(meta);
-    if (rows.length === 0) { container.innerHTML = ''; return; }
+    var hasTools = !!(meta && meta.toolCalls && meta.toolCalls.length > 0);
+    if (rows.length === 0 && !hasTools) { container.innerHTML = ''; return; }
 
     var html = '<div class="ins-section"><div class="ins-section-title">Last response</div>';
     for (var i = 0; i < rows.length; i++) {
@@ -253,6 +248,23 @@ export function inspectorPanelScript(): string {
         + '<span class="ins-info-value' + emph + '">' + escapeHtml(r.value) + detail + '</span>'
         + '</div>';
     }
+
+    if (hasTools) {
+      var n = meta.toolCalls.length;
+      var title = 'Tools (' + n + ' call' + (n !== 1 ? 's' : '') + ')';
+      // Treat displayName as populated when at least one entry has it — during
+      // the live phase tool counts are synthesised with empty displayNames so
+      // we suppress the per-tool list until response_meta lands.
+      var hasNamedTools = false;
+      for (var k = 0; k < meta.toolCalls.length; k++) {
+        if (meta.toolCalls[k] && meta.toolCalls[k].displayName) { hasNamedTools = true; break; }
+      }
+      html += '<div class="ins-tool-subhead">' + escapeHtml(title) + '</div>';
+      if (hasNamedTools) {
+        html += renderToolList(aggregateToolCalls(meta.toolCalls));
+      }
+    }
+
     html += '</div>';
     container.innerHTML = html;
   }
@@ -281,20 +293,13 @@ export function inspectorPanelScript(): string {
 
   var aggregateToolUsage = null;
 
-  function updateInspectorToolUsage(meta) {
+  function updateInspectorToolUsage(_meta) {
     if (!inspectorToolUsage) return;
 
     var html = '';
 
-    // Last response tools (aggregated by name)
-    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
-      var lastAgg = aggregateToolCalls(meta.toolCalls);
-      html += '<hr class="ins-divider">'
-        + '<div class="ins-section"><div class="ins-section-title">Last Response (' + meta.toolCalls.length + ' calls)</div>'
-        + renderToolList(lastAgg) + '</div>';
-    }
-
-    // Aggregate tool usage (loaded from API)
+    // Cumulative aggregate across all responses (loaded from API). The
+    // last-response per-tool breakdown lives in the Last response card itself.
     if (aggregateToolUsage && aggregateToolUsage.length > 0) {
       var totalCalls = 0;
       for (var j = 0; j < aggregateToolUsage.length; j++) totalCalls += aggregateToolUsage[j].callCount;

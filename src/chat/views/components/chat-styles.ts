@@ -685,6 +685,16 @@ export function chatStyles(): string {
     }
     .ins-tool-name { color: var(--text-muted); }
     .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+    .ins-tool-subhead {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-faint);
+      font-weight: 600;
+      margin: 8px 0 4px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
 
     .ins-mcp-header {
       display: flex;
