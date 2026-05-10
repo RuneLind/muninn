@@ -241,17 +241,8 @@ export function inspectorPanelScript(): string {
     var container = document.getElementById('insLastResponse');
     if (!container) return;
     var rows = computeLastResponseRows(meta);
-    // Only render the Tools subsection (heading + breakdown) once response_meta
-    // has arrived — i.e. when toolCalls carry real displayNames. During live
-    // updates the synthesised entries have empty displayNames and the entire
-    // section stays hidden until the query finishes.
-    var hasNamedTools = false;
-    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
-      for (var k = 0; k < meta.toolCalls.length; k++) {
-        if (meta.toolCalls[k] && meta.toolCalls[k].displayName) { hasNamedTools = true; break; }
-      }
-    }
-    if (rows.length === 0 && !hasNamedTools) { container.innerHTML = ''; return; }
+    var hasTools = !!(meta && meta.toolCalls && meta.toolCalls.length > 0);
+    if (rows.length === 0 && !hasTools) { container.innerHTML = ''; return; }
 
     var html = '<div class="ins-section"><div class="ins-section-title">Last response</div>';
     for (var i = 0; i < rows.length; i++) {
@@ -264,7 +255,7 @@ export function inspectorPanelScript(): string {
         + '</div>';
     }
 
-    if (hasNamedTools) {
+    if (hasTools) {
       var n = meta.toolCalls.length;
       var title = 'Tools (' + n + ' call' + (n !== 1 ? 's' : '') + ')';
       html += '<div class="ins-tool-subhead">' + escapeHtml(title) + '</div>';
@@ -302,7 +293,7 @@ export function inspectorPanelScript(): string {
 
   var aggregateToolUsage = null;
 
-  function updateInspectorToolUsage(_meta) {
+  function updateInspectorToolUsage() {
     if (!inspectorToolUsage) return;
 
     var html = '';
@@ -346,8 +337,7 @@ export function inspectorPanelScript(): string {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         aggregateToolUsage = data.tools || [];
-        var meta = activeConvId ? lastResponseMeta[activeConvId] : null;
-        updateInspectorToolUsage(meta);
+        updateInspectorToolUsage();
       })
       .catch(function() { aggregateToolUsage = null; });
   }
@@ -676,7 +666,7 @@ export function inspectorPanelScript(): string {
     // Restore response meta if we have stored data for this conversation
     if (activeConvId && lastResponseMeta[activeConvId]) {
       updateInspectorContextUsage(lastResponseMeta[activeConvId]);
-      updateInspectorToolUsage(lastResponseMeta[activeConvId]);
+      updateInspectorToolUsage();
       renderLastResponseCard(lastResponseMeta[activeConvId]);
     }
 

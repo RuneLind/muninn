@@ -3,6 +3,10 @@ import { createProgressCallback } from "../dashboard/agent-status.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { formatToolDisplayName } from "../ai/stream-parser.ts";
 
+/** Status header text shown after the last tool finishes and the model
+ *  starts streaming the final answer. Replaces the prior tool's status. */
+const STATUS_WRITING_RESPONSE = "Writing response...";
+
 export interface UsageProgress {
   inputTokens: number;
   outputTokens: number;
@@ -60,7 +64,7 @@ export function buildProgressCallback(
   return (event: StreamProgressEvent) => {
     if (event.type === "text_delta") {
       if (pendingPostToolText && setStatus) {
-        setStatus("Writing response...").catch(() => {});
+        setStatus(STATUS_WRITING_RESPONSE).catch(() => {});
         pendingPostToolText = false;
       }
       onTextDelta?.(event.text);
