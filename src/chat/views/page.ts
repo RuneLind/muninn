@@ -236,6 +236,25 @@ const CHAT_SCRIPT = `
   var deepLinkHandled = false;
   var inspectorContextKey = null;
   var lastResponseMeta = {};    // Per-conversationId last response_meta
+  var liveSnapshot = {};        // Per-conversationId in-flight token + tool aggregation (cleared on user msg + response_meta)
+
+  function renderLiveSnapshot(convId) {
+    if (convId !== activeConvId) return;
+    var snap = liveSnapshot[convId];
+    if (!snap) return;
+    var meta = {
+      inputTokens: snap.inputTokens,
+      outputTokens: snap.outputTokens,
+      model: snap.model,
+    };
+    // Build a real toolCalls array carrying structured displayNames so
+    // renderLastResponseCard renders the per-tool breakdown live (same as
+    // the post-response card, just without per-call durations yet).
+    if (snap.tools && snap.tools.length > 0) {
+      meta.toolCalls = snap.tools;
+    }
+    renderLastResponseCard(meta);
+  }
   var selectedBot = '';         // From bot pills (localStorage-synced)
   var selectedUserId = null;    // Resolved from config for selected bot
   var selectedUsername = null;   // Display name
@@ -499,6 +518,11 @@ const CHAT_SCRIPT = `
       var conv = conversations[event.conversationId];
       if (conv) {
         conv.messages.push(event.message);
+        // Reset the in-flight live snapshot so tools/tokens from a prior
+        // response don't bleed into the next turn.
+        if (event.message.sender === 'user') {
+          delete liveSnapshot[event.conversationId];
+        }
         if (event.conversationId === activeConvId) {
           // Only append if the message belongs to the active thread
           var msgThread = event.message.threadId || null;
@@ -573,6 +597,50 @@ const CHAT_SCRIPT = `
       var tsThread = event.threadId || null;
       if (activeThreadId && tsThread !== activeThreadId) return;
       appendToolStatus(event.text);
+      // Append a structured tool call entry so the inspector aggregates live.
+      // displayName is sent by the server (falls back to event.name or text).
+      var displayName = event.displayName || event.name || event.text || 'tool';
+      var name = event.name || displayName;
+      liveSnapshot[event.conversationId] = liveSnapshot[event.conversationId] || {};
+      var snap = liveSnapshot[event.conversationId];
+      snap.tools = snap.tools || [];
+      snap.tools.push({ name: name, displayName: displayName, durationMs: 0 });
+      renderLiveSnapshot(event.conversationId);
+      return;
+    }
+
+    if (event.type === 'tool_end') {
+      if (event.conversationId !== activeConvId) return;
+      var teThread = event.threadId || null;
+      if (activeThreadId && teThread !== activeThreadId) return;
+      // Match the most recent unfilled entry with this displayName and stamp
+      // its tokensEstimate. Tool calls are sequential per turn so the latest
+      // entry without a tokensEstimate is the right target.
+      var snapEnd = liveSnapshot[event.conversationId];
+      if (snapEnd && snapEnd.tools) {
+        for (var ti = snapEnd.tools.length - 1; ti >= 0; ti--) {
+          var entry = snapEnd.tools[ti];
+          if (entry.displayName === event.displayName && entry.tokensEstimate == null) {
+            entry.tokensEstimate = event.tokensEstimate;
+            break;
+          }
+        }
+        renderLiveSnapshot(event.conversationId);
+      }
+      return;
+    }
+
+    if (event.type === 'usage_progress') {
+      if (event.conversationId !== activeConvId) return;
+      var upThread = event.threadId || null;
+      if (activeThreadId && upThread !== activeThreadId) return;
+      // Merge per-turn token usage into the live snapshot — tool count
+      // is tracked separately as tool_status events fire.
+      liveSnapshot[event.conversationId] = liveSnapshot[event.conversationId] || {};
+      liveSnapshot[event.conversationId].inputTokens = event.inputTokens;
+      liveSnapshot[event.conversationId].outputTokens = event.outputTokens;
+      liveSnapshot[event.conversationId].model = event.model;
+      renderLiveSnapshot(event.conversationId);
       return;
     }
 
@@ -580,6 +648,8 @@ const CHAT_SCRIPT = `
       if (event.conversationId !== activeConvId) return;
       var rmThread = event.threadId || null;
       if (activeThreadId && rmThread !== activeThreadId) return;
+      // Final meta wins — drop the live snapshot so the next turn starts fresh
+      delete liveSnapshot[event.conversationId];
       showResponseMeta(event);
       return;
     }

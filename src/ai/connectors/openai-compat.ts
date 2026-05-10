@@ -131,6 +131,12 @@ export async function executePrompt(
     if (streamResult!.reportedModel !== model) {
       reportedModel = streamResult!.reportedModel;
     }
+    onProgress?.({
+      type: "usage_progress",
+      inputTokens: lastTurnInputTokens,
+      outputTokens: totalOutputTokens,
+      model: reportedModel || undefined,
+    });
 
     // No tool calls → we have the final answer
     if (streamResult!.toolCalls.length === 0) {
@@ -212,12 +218,17 @@ export async function executePrompt(
       }
 
       const toolDurationMs = Math.round(performance.now() - toolStart);
-      onProgress?.({ type: "tool_end", name: tc.name, displayName });
 
       // cleanedText loops back into messages.push below — feeding the inner
       // payload (not the full envelope) saves thousands of tokens per tool
       // call on small-context local models like qwen3.
       const processed = processMcpToolResult(rawResult);
+      onProgress?.({
+        type: "tool_end",
+        name: tc.name,
+        displayName,
+        outputSize: processed.cleanedText ? processed.cleanedText.length : undefined,
+      });
 
       trackedToolCalls.push({
         id: tc.id,

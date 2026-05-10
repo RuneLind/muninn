@@ -14,6 +14,10 @@ export interface SaveMessageParams {
   outputTokens?: number;
   /** Last turn's input tokens — actual context window usage */
   contextTokens?: number;
+  /** Anthropic prompt-cache read tokens (subset of inputTokens) */
+  cacheReadTokens?: number;
+  /** Anthropic prompt-cache creation tokens (subset of inputTokens) */
+  cacheCreationTokens?: number;
   source?: string;
   platform?: Platform;
   threadId?: string;
@@ -26,8 +30,8 @@ export interface SaveMessageParams {
 export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   const sql = getDb();
   const [row] = await sql`
-    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, source, platform, thread_id, trace_id, from_peer_id)
-    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null}, ${msg.traceId ?? null}, ${msg.fromPeerId ?? null})
+    INSERT INTO messages (user_id, bot_name, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, context_tokens, cache_read_tokens, cache_creation_tokens, source, platform, thread_id, trace_id, from_peer_id)
+    VALUES (${msg.userId}, ${msg.botName}, ${msg.username ?? null}, ${msg.role}, ${msg.content}, ${msg.costUsd ?? null}, ${msg.durationMs ?? null}, ${msg.model ?? null}, ${msg.inputTokens ?? null}, ${msg.outputTokens ?? null}, ${msg.contextTokens ?? null}, ${msg.cacheReadTokens ?? null}, ${msg.cacheCreationTokens ?? null}, ${msg.source ?? null}, ${msg.platform ?? null}, ${msg.threadId ?? null}, ${msg.traceId ?? null}, ${msg.fromPeerId ?? null})
     RETURNING id
   `;
   return row!.id;
@@ -102,6 +106,8 @@ export interface LastResponseMeta {
   inputTokens: number;
   outputTokens: number;
   contextTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   costUsd: number;
   model: string;
   durationMs: number;
@@ -112,7 +118,7 @@ export async function getLastResponseMeta(userId: string, botName: string, threa
   const sql = getDb();
   const threadFilter = threadId ? sql`AND thread_id = ${threadId}` : sql``;
   const [row] = await sql`
-    SELECT input_tokens, output_tokens, context_tokens, cost_usd, model, duration_ms
+    SELECT input_tokens, output_tokens, context_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, model, duration_ms
     FROM messages
     WHERE user_id = ${userId} AND bot_name = ${botName} AND role = 'assistant'
       AND input_tokens IS NOT NULL
@@ -125,6 +131,8 @@ export async function getLastResponseMeta(userId: string, botName: string, threa
     inputTokens: Number(row.input_tokens ?? 0),
     outputTokens: Number(row.output_tokens ?? 0),
     contextTokens: row.context_tokens ? Number(row.context_tokens) : undefined,
+    cacheReadTokens: row.cache_read_tokens ? Number(row.cache_read_tokens) : undefined,
+    cacheCreationTokens: row.cache_creation_tokens ? Number(row.cache_creation_tokens) : undefined,
     costUsd: Number(row.cost_usd ?? 0),
     model: row.model ?? "",
     durationMs: Number(row.duration_ms ?? 0),

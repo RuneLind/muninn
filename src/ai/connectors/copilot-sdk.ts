@@ -101,6 +101,8 @@ export async function executePrompt(
   // Track usage from assistant.usage events
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalCacheReadTokens = 0;
+  let totalCacheCreationTokens = 0;
   let lastTurnInputTokens = 0;
   let reportedModel = model;
   let turnCount = 0;
@@ -148,6 +150,7 @@ export async function executePrompt(
             : { error: event.data.error ?? { message: "tool execution failed" } };
 
           const processed = processMcpToolResult(resultPayload);
+          const truncated = truncateOutput(processed.cleanedText);
 
           toolCalls.push({
             id: event.data.toolCallId,
@@ -156,13 +159,18 @@ export async function executePrompt(
             durationMs: Math.round(endMs - pending.startMs),
             startOffsetMs: Math.round(pending.startMs - wallStart),
             input: pending.input,
-            output: truncateOutput(processed.cleanedText),
+            output: truncated,
             searchTrace: processed.searchTrace,
             searchTracePointer: processed.searchTracePointer,
             searchTraceFetch: processed.searchTraceFetch,
           });
           pendingTools.delete(event.data.toolCallId);
-          onProgress?.({ type: "tool_end", name: pending.name, displayName });
+          onProgress?.({
+            type: "tool_end",
+            name: pending.name,
+            displayName,
+            outputSize: truncated ? truncated.length : undefined,
+          });
         }
         break;
       }
@@ -171,7 +179,15 @@ export async function executePrompt(
         lastTurnInputTokens = event.data.inputTokens ?? 0;
         totalInputTokens += lastTurnInputTokens;
         totalOutputTokens += event.data.outputTokens ?? 0;
+        totalCacheReadTokens += event.data.cacheReadTokens ?? 0;
+        totalCacheCreationTokens += event.data.cacheWriteTokens ?? 0;
         if (event.data.model) reportedModel = event.data.model;
+        onProgress?.({
+          type: "usage_progress",
+          inputTokens: lastTurnInputTokens,
+          outputTokens: totalOutputTokens,
+          model: reportedModel || undefined,
+        });
         break;
 
       case "subagent.started":
@@ -254,6 +270,8 @@ export async function executePrompt(
       inputTokens: totalInputTokens,
       outputTokens: totalOutputTokens,
       contextTokens: lastTurnInputTokens || undefined,
+      cacheReadTokens: totalCacheReadTokens || undefined,
+      cacheCreationTokens: totalCacheCreationTokens || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     };
   } catch (error) {

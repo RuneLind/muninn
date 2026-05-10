@@ -7,12 +7,16 @@ export interface ToolCallInput {
   name: string;
   displayName?: string;
   durationMs?: number;
+  /** Approximate tokens added to the next turn's context by this call's result */
+  tokensEstimate?: number;
 }
 
 export interface AggregatedTool {
   displayName: string;
   callCount: number;
   totalMs: number;
+  /** Sum of tokensEstimate across all calls aggregated under this name */
+  totalTokens: number;
 }
 
 export interface ContextMeta {
@@ -29,19 +33,39 @@ export interface ContextUsageResult {
   hasBar: boolean;
 }
 
+export interface ResponseMetaInput {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+  durationMs?: number;
+  model?: string;
+  numTurns?: number;
+  toolCalls?: { displayName: string; durationMs?: number }[];
+}
+
+export interface LastResponseRow {
+  label: string;
+  value: string;
+  detail?: string;
+  emphasis?: "cache" | "cost" | "warning";
+}
+
 // ── Pure functions ─────────────────────────────────────────────────────
 
-/** Group tool calls by displayName (or name), counting calls and summing duration. */
+/** Group tool calls by displayName (or name), summing call count, duration, and tokens. */
 export function aggregateToolCalls(toolCalls: ToolCallInput[]): AggregatedTool[] {
   const map: Record<string, AggregatedTool> = {};
   for (const tc of toolCalls) {
     const key = tc.displayName || tc.name;
-    if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+    if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0, totalTokens: 0 };
     map[key].callCount++;
     map[key].totalMs += tc.durationMs || 0;
+    map[key].totalTokens += tc.tokensEstimate || 0;
   }
   return Object.values(map).sort(
-    (a, b) => b.callCount - a.callCount || b.totalMs - a.totalMs,
+    (a, b) => b.callCount - a.callCount || b.totalTokens - a.totalTokens || b.totalMs - a.totalMs,
   );
 }
 
@@ -82,6 +106,52 @@ export function computeContextUsage(
   return { label, percentage: pct, barColor, hasBar: !!meta.contextWindow };
 }
 
+/** Format a duration in ms as "1.2s" or "12s" or "423ms". */
+export function fmtDuration(ms: number): string {
+  if (ms < 1000) return ms + "ms";
+  const secs = ms / 1000;
+  return secs >= 10 ? Math.round(secs) + "s" : secs.toFixed(1) + "s";
+}
+
+/** Build the rows shown in the inspector "Last response" card. Skips zero-value rows. */
+export function computeLastResponseRows(meta: ResponseMetaInput | null): LastResponseRow[] {
+  if (!meta) return [];
+
+  const rows: LastResponseRow[] = [];
+  const cacheRead = meta.cacheReadTokens ?? 0;
+  const cacheCreate = meta.cacheCreationTokens ?? 0;
+  const totalIn = meta.inputTokens ?? 0;
+  // inputTokens is a sum that already includes both cache buckets — subtract
+  // them out so the "Input" row shows only the fresh, billable input.
+  const freshIn = Math.max(0, totalIn - cacheRead - cacheCreate);
+
+  if (totalIn > 0) {
+    rows.push({ label: "Input", value: fmtNum(freshIn) });
+  }
+  if (meta.outputTokens && meta.outputTokens > 0) {
+    rows.push({ label: "Output", value: fmtNum(meta.outputTokens) });
+  }
+  if (cacheRead > 0) {
+    const pct = Math.round((cacheRead / Math.max(1, totalIn)) * 100);
+    rows.push({ label: "Cache hit", value: fmtNum(cacheRead), detail: pct + "%", emphasis: "cache" });
+  }
+  if (cacheCreate > 0) {
+    rows.push({ label: "Cache write", value: fmtNum(cacheCreate) });
+  }
+  if (meta.durationMs && meta.durationMs > 0) {
+    rows.push({ label: "Duration", value: fmtDuration(meta.durationMs) });
+  }
+  if (meta.costUsd && meta.costUsd > 0) {
+    rows.push({ label: "Cost", value: "$" + meta.costUsd.toFixed(4), emphasis: "cost" });
+  }
+  if (meta.numTurns && meta.numTurns > 1) {
+    rows.push({ label: "Turns", value: String(meta.numTurns) });
+  }
+  // Tool count is rendered as a subsection heading ("Tools (N calls)") so the
+  // per-tool breakdown can sit directly under it — see renderLastResponseCard.
+  return rows;
+}
+
 // ── Browser-injectable JS string ───────────────────────────────────────
 
 /** Returns all inspector panel functions as a browser-compatible JS string.
@@ -97,15 +167,16 @@ export function inspectorPanelScript(): string {
     for (var i = 0; i < toolCalls.length; i++) {
       var tc = toolCalls[i];
       var key = tc.displayName || tc.name;
-      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0, totalTokens: 0 };
       map[key].callCount++;
       map[key].totalMs += tc.durationMs || 0;
+      map[key].totalTokens += tc.tokensEstimate || 0;
     }
     var result = [];
     var keys = Object.keys(map);
     for (var j = 0; j < keys.length; j++) result.push(map[keys[j]]);
     result.sort(function(a, b) {
-      return b.callCount - a.callCount || b.totalMs - a.totalMs;
+      return b.callCount - a.callCount || b.totalTokens - a.totalTokens || b.totalMs - a.totalMs;
     });
     return result;
   }
@@ -139,6 +210,62 @@ export function inspectorPanelScript(): string {
     return { label: label, percentage: pct, barColor: barColor, hasBar: !!meta.contextWindow };
   }
 
+  function fmtDuration(ms) {
+    if (ms < 1000) return ms + 'ms';
+    var secs = ms / 1000;
+    return secs >= 10 ? Math.round(secs) + 's' : secs.toFixed(1) + 's';
+  }
+
+  function computeLastResponseRows(meta) {
+    if (!meta) return [];
+    var rows = [];
+    var cacheRead = meta.cacheReadTokens || 0;
+    var cacheCreate = meta.cacheCreationTokens || 0;
+    var totalIn = meta.inputTokens || 0;
+    var freshIn = Math.max(0, totalIn - cacheRead - cacheCreate);
+
+    if (totalIn > 0) rows.push({ label: 'Input', value: fmtNum(freshIn) });
+    if (meta.outputTokens && meta.outputTokens > 0) rows.push({ label: 'Output', value: fmtNum(meta.outputTokens) });
+    if (cacheRead > 0) {
+      var pct = Math.round((cacheRead / Math.max(1, totalIn)) * 100);
+      rows.push({ label: 'Cache hit', value: fmtNum(cacheRead), detail: pct + '%', emphasis: 'cache' });
+    }
+    if (cacheCreate > 0) rows.push({ label: 'Cache write', value: fmtNum(cacheCreate) });
+    if (meta.durationMs && meta.durationMs > 0) rows.push({ label: 'Duration', value: fmtDuration(meta.durationMs) });
+    if (meta.costUsd && meta.costUsd > 0) rows.push({ label: 'Cost', value: '$' + meta.costUsd.toFixed(4), emphasis: 'cost' });
+    if (meta.numTurns && meta.numTurns > 1) rows.push({ label: 'Turns', value: String(meta.numTurns) });
+    return rows;
+  }
+
+  function renderLastResponseCard(meta) {
+    var container = document.getElementById('insLastResponse');
+    if (!container) return;
+    var rows = computeLastResponseRows(meta);
+    var hasTools = !!(meta && meta.toolCalls && meta.toolCalls.length > 0);
+    if (rows.length === 0 && !hasTools) { container.innerHTML = ''; return; }
+
+    var html = '<div class="ins-section"><div class="ins-section-title">Last response</div>';
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var emph = r.emphasis ? ' ins-info-value-' + r.emphasis : '';
+      var detail = r.detail ? '<span class="ins-info-detail">&nbsp;' + escapeHtml(r.detail) + '</span>' : '';
+      html += '<div class="ins-info-row">'
+        + '<span class="ins-info-label">' + escapeHtml(r.label) + '</span>'
+        + '<span class="ins-info-value' + emph + '">' + escapeHtml(r.value) + detail + '</span>'
+        + '</div>';
+    }
+
+    if (hasTools) {
+      var n = meta.toolCalls.length;
+      var title = 'Tools (' + n + ' call' + (n !== 1 ? 's' : '') + ')';
+      html += '<div class="ins-tool-subhead">' + escapeHtml(title) + '</div>';
+      html += renderToolList(aggregateToolCalls(meta.toolCalls));
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
   // ── DOM helpers (need IIFE-scoped variables) ──────────────────────────
 
   function getBotInfo() {
@@ -153,9 +280,12 @@ export function inspectorPanelScript(): string {
     var html = '';
     for (var i = 0; i < items.length; i++) {
       var t = items[i];
+      var detail = t.callCount + 'x';
+      if (t.totalMs > 0) detail += ' · ' + fmtToolTime(t.totalMs);
+      if (t.totalTokens > 0) detail += ' · ~' + fmtNum(t.totalTokens);
       html += '<div class="ins-tool-item">'
         + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
-        + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + fmtToolTime(t.totalMs) + '</span>'
+        + '<span class="ins-tool-time">' + detail + '</span>'
         + '</div>';
     }
     return html;
@@ -163,20 +293,13 @@ export function inspectorPanelScript(): string {
 
   var aggregateToolUsage = null;
 
-  function updateInspectorToolUsage(meta) {
+  function updateInspectorToolUsage() {
     if (!inspectorToolUsage) return;
 
     var html = '';
 
-    // Last response tools (aggregated by name)
-    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
-      var lastAgg = aggregateToolCalls(meta.toolCalls);
-      html += '<hr class="ins-divider">'
-        + '<div class="ins-section"><div class="ins-section-title">Last Response (' + meta.toolCalls.length + ' calls)</div>'
-        + renderToolList(lastAgg) + '</div>';
-    }
-
-    // Aggregate tool usage (loaded from API)
+    // Cumulative aggregate across all responses (loaded from API). The
+    // last-response per-tool breakdown lives in the Last response card itself.
     if (aggregateToolUsage && aggregateToolUsage.length > 0) {
       var totalCalls = 0;
       for (var j = 0; j < aggregateToolUsage.length; j++) totalCalls += aggregateToolUsage[j].callCount;
@@ -214,8 +337,7 @@ export function inspectorPanelScript(): string {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         aggregateToolUsage = data.tools || [];
-        var meta = activeConvId ? lastResponseMeta[activeConvId] : null;
-        updateInspectorToolUsage(meta);
+        updateInspectorToolUsage();
       })
       .catch(function() { aggregateToolUsage = null; });
   }
@@ -233,13 +355,22 @@ export function inspectorPanelScript(): string {
             outputTokens: data.outputTokens,
             contextTokens: data.contextTokens,
             contextWindow: data.contextWindow,
+            cacheReadTokens: data.cacheReadTokens,
+            cacheCreationTokens: data.cacheCreationTokens,
             durationMs: data.durationMs,
             costUsd: data.costUsd,
             model: data.model,
           };
           updateInspectorContextUsage(syntheticMeta);
+          // Only populate the last-response card from API if the live event
+          // hasn't already filled it for this conversation (avoid stomping on
+          // fresher data with toolCalls / numTurns we don't persist).
+          if (!activeConvId || !lastResponseMeta[activeConvId]) {
+            renderLastResponseCard(syntheticMeta);
+          }
         } else {
           updateInspectorContextUsage(null);
+          renderLastResponseCard(null);
         }
       })
       .catch(function() {});
@@ -528,13 +659,15 @@ export function inspectorPanelScript(): string {
     html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
       + '<div id="insContextUsage"></div>'
-      + '<hr class="ins-divider">';
+      + '<hr class="ins-divider">'
+      + '<div id="insLastResponse"></div>';
     inspectorContent.innerHTML = html;
 
     // Restore response meta if we have stored data for this conversation
     if (activeConvId && lastResponseMeta[activeConvId]) {
       updateInspectorContextUsage(lastResponseMeta[activeConvId]);
-      updateInspectorToolUsage(lastResponseMeta[activeConvId]);
+      updateInspectorToolUsage();
+      renderLastResponseCard(lastResponseMeta[activeConvId]);
     }
 
     var contextKey = selectedUserId + ':' + selectedBot;

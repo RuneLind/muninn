@@ -3,7 +3,9 @@ import {
   aggregateToolCalls,
   fmtToolTime,
   fmtNum,
+  fmtDuration,
   computeContextUsage,
+  computeLastResponseRows,
 } from "./inspector-panel.ts";
 
 // ── aggregateToolCalls ─────────────────────────────────────────────────
@@ -18,7 +20,7 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 50 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 1, totalMs: 50 },
+      { displayName: "Read", callCount: 1, totalMs: 50, totalTokens: 0 },
     ]);
   });
 
@@ -29,7 +31,7 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 50 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 3, totalMs: 350 },
+      { displayName: "Read", callCount: 3, totalMs: 350, totalTokens: 0 },
     ]);
   });
 
@@ -49,7 +51,7 @@ describe("aggregateToolCalls", () => {
       { name: "mcp__serena__search", displayName: "Serena Search", durationMs: 200 },
     ]);
     expect(result).toEqual([
-      { displayName: "Serena Search", callCount: 2, totalMs: 300 },
+      { displayName: "Serena Search", callCount: 2, totalMs: 300, totalTokens: 0 },
     ]);
   });
 
@@ -83,8 +85,26 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 100 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 2, totalMs: 100 },
+      { displayName: "Read", callCount: 2, totalMs: 100, totalTokens: 0 },
     ]);
+  });
+
+  test("sums tokensEstimate across calls of the same tool", () => {
+    const result = aggregateToolCalls([
+      { name: "search", tokensEstimate: 1200 },
+      { name: "search", tokensEstimate: 800 },
+      { name: "bash", tokensEstimate: 50 },
+    ]);
+    expect(result.find((t) => t.displayName === "search")!.totalTokens).toBe(2000);
+    expect(result.find((t) => t.displayName === "bash")!.totalTokens).toBe(50);
+  });
+
+  test("entries without tokensEstimate contribute 0 tokens (live phase before tool_end)", () => {
+    const result = aggregateToolCalls([
+      { name: "search", durationMs: 100 },
+      { name: "search", durationMs: 200, tokensEstimate: 1500 },
+    ]);
+    expect(result[0]!.totalTokens).toBe(1500);
   });
 });
 
@@ -272,5 +292,91 @@ describe("computeContextUsage", () => {
     });
     // contextTokens is explicitly 0 — should return null (no data), not fall back to inputTokens
     expect(result).toBeNull();
+  });
+});
+
+// ── fmtDuration ────────────────────────────────────────────────────────
+
+describe("fmtDuration", () => {
+  test("sub-second values render as ms", () => {
+    expect(fmtDuration(0)).toBe("0ms");
+    expect(fmtDuration(999)).toBe("999ms");
+  });
+  test("1-9.9s renders with one decimal", () => {
+    expect(fmtDuration(1500)).toBe("1.5s");
+    expect(fmtDuration(9900)).toBe("9.9s");
+  });
+  test("10s+ renders as integer seconds", () => {
+    expect(fmtDuration(10000)).toBe("10s");
+    expect(fmtDuration(123456)).toBe("123s");
+  });
+});
+
+// ── computeLastResponseRows ────────────────────────────────────────────
+
+describe("computeLastResponseRows", () => {
+  test("null meta returns empty array", () => {
+    expect(computeLastResponseRows(null)).toEqual([]);
+  });
+
+  test("empty meta returns empty array", () => {
+    expect(computeLastResponseRows({})).toEqual([]);
+  });
+
+  test("subtracts cache tokens from inputTokens to show fresh input", () => {
+    // inputTokens is the sum (5k fresh + 8k cache_read + 1k cache_create = 14k total)
+    const rows = computeLastResponseRows({
+      inputTokens: 14000,
+      cacheReadTokens: 8000,
+      cacheCreationTokens: 1000,
+      outputTokens: 500,
+    });
+    const input = rows.find((r) => r.label === "Input")!;
+    expect(input.value).toBe("5.0k");
+  });
+
+  test("renders cache hit with percentage of total input", () => {
+    const rows = computeLastResponseRows({
+      inputTokens: 10000,
+      cacheReadTokens: 9000,
+      outputTokens: 100,
+    });
+    const cache = rows.find((r) => r.label === "Cache hit")!;
+    expect(cache.value).toBe("9.0k");
+    expect(cache.detail).toBe("90%");
+    expect(cache.emphasis).toBe("cache");
+  });
+
+  test("omits cache row when cacheReadTokens is missing or zero", () => {
+    const rows = computeLastResponseRows({
+      inputTokens: 1000,
+      outputTokens: 100,
+    });
+    expect(rows.find((r) => r.label === "Cache hit")).toBeUndefined();
+    expect(rows.find((r) => r.label === "Cache write")).toBeUndefined();
+  });
+
+  test("includes cost row only when costUsd > 0", () => {
+    const withCost = computeLastResponseRows({ inputTokens: 100, costUsd: 0.0123 });
+    expect(withCost.find((r) => r.label === "Cost")?.value).toBe("$0.0123");
+
+    const localModel = computeLastResponseRows({ inputTokens: 100, costUsd: 0 });
+    expect(localModel.find((r) => r.label === "Cost")).toBeUndefined();
+  });
+
+  test("does not emit a Tools row (count rendered as subsection heading by renderLastResponseCard)", () => {
+    const rows = computeLastResponseRows({
+      inputTokens: 100,
+      toolCalls: [{ displayName: "Read" }, { displayName: "Write" }],
+    });
+    expect(rows.find((r) => r.label === "Tools")).toBeUndefined();
+  });
+
+  test("omits Turns row for single-turn responses", () => {
+    const single = computeLastResponseRows({ inputTokens: 100, numTurns: 1 });
+    expect(single.find((r) => r.label === "Turns")).toBeUndefined();
+
+    const multi = computeLastResponseRows({ inputTokens: 100, numTurns: 4 });
+    expect(multi.find((r) => r.label === "Turns")?.value).toBe("4");
   });
 });

@@ -60,8 +60,14 @@ export interface ProcessMessageParams {
   onTextDelta?: (delta: string | null) => void;
   /** Callback for AI intent updates (what the model plans to do) */
   onIntent?: (text: string) => void;
-  /** Callback for tool status updates (appended as separate lines, not replaced) */
-  onToolStatus?: (text: string) => void;
+  /** Callback for tool status updates (appended as separate lines, not replaced).
+   *  Receives structured info: human-friendly text + tool name + displayName. */
+  onToolStatus?: (info: { text: string; name: string; displayName: string }) => void;
+  /** Callback when a tool completes — carries an approximate token count from
+   *  the result size, so the live inspector can sum tokens-per-tool. */
+  onToolEnd?: (info: { name: string; displayName: string; tokensEstimate?: number }) => void;
+  /** Callback for per-turn token usage updates while the response is in flight */
+  onUsageProgress?: (usage: { inputTokens: number; outputTokens: number; model?: string }) => void;
   /** External tracer — if provided, processMessage uses it instead of creating a new one.
    *  The caller is responsible for calling tracer.finish() after processMessage returns. */
   tracer?: Tracer;
@@ -86,7 +92,11 @@ export interface ProcessMessageResult {
   numTurns: number;
   /** Last turn's input tokens — actual context window usage (vs cumulative inputTokens) */
   contextTokens?: number;
-  toolCalls?: { name: string; displayName: string; durationMs: number }[];
+  /** Cache-read input tokens (cumulative). Subset of inputTokens. */
+  cacheReadTokens?: number;
+  /** Cache-creation input tokens (cumulative). Subset of inputTokens. */
+  cacheCreationTokens?: number;
+  toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[];
 }
 
 /**
@@ -100,7 +110,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const {
     text, userId, username, userIdentity, platform, botConfig, config,
     say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
-    onTextDelta, onIntent, onToolStatus,
+    onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress,
   } = params;
 
   const isTelegram = platform.startsWith("telegram");
@@ -146,7 +156,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     log.info("Calling {connector} (model: {model}, timeout: {timeout}ms)...", { ...props, connector: connectorLabel, model: effectiveModel, timeout: effectiveTimeout });
     t.start("claude", { connector: connectorType, requestedModel: effectiveModel });
     const progressCallback = buildProgressCallback(
-      { onTextDelta, onIntent, onToolStatus, setStatus },
+      { onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress, setStatus },
       username,
     );
     const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
@@ -183,6 +193,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       contextTokens: result.contextTokens,
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
       platform,
       threadId,
       traceId: t.traceId,
@@ -282,7 +294,14 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       model: result.model,
       numTurns: result.numTurns,
       contextTokens: result.contextTokens,
-      toolCalls: result.toolCalls?.map((tc) => ({ name: tc.name, displayName: tc.displayName, durationMs: tc.durationMs })),
+      cacheReadTokens: result.cacheReadTokens,
+      cacheCreationTokens: result.cacheCreationTokens,
+      toolCalls: result.toolCalls?.map((tc) => ({
+        name: tc.name,
+        displayName: tc.displayName,
+        durationMs: tc.durationMs,
+        tokensEstimate: tc.output ? Math.round(tc.output.length / 4) : undefined,
+      })),
     };
   } catch (error) {
     await handleProcessError({

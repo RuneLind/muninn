@@ -38,8 +38,10 @@ export type ChatEvent =
   | { type: "text_delta"; conversationId: string; delta: string; threadId?: string | null }
   | { type: "stream_clear"; conversationId: string; threadId?: string | null }
   | { type: "intent"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number }[] }
+  | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null; name?: string; displayName?: string }
+  | { type: "tool_end"; conversationId: string; threadId?: string | null; name: string; displayName: string; tokensEstimate?: number }
+  | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
@@ -165,9 +167,47 @@ export class ChatState {
     this.publish({ type: "intent", conversationId, text, threadId });
   }
 
-  /** Broadcast a tool status update (appended as separate lines in the UI) */
-  publishToolStatus(conversationId: string, text: string, threadId?: string | null): void {
-    this.publish({ type: "tool_status", conversationId, text, threadId });
+  /** Broadcast a tool status update (appended as separate lines in the UI). */
+  publishToolStatus(
+    conversationId: string,
+    text: string,
+    threadId?: string | null,
+    name?: string,
+    displayName?: string,
+  ): void {
+    this.publish({ type: "tool_status", conversationId, text, threadId, name, displayName });
+  }
+
+  /** Broadcast a tool completion with the result-size token estimate. */
+  publishToolEnd(
+    conversationId: string,
+    info: { name: string; displayName: string; tokensEstimate?: number },
+    threadId?: string | null,
+  ): void {
+    this.publish({
+      type: "tool_end",
+      conversationId,
+      threadId,
+      name: info.name,
+      displayName: info.displayName,
+      tokensEstimate: info.tokensEstimate,
+    });
+  }
+
+  /** Broadcast per-turn token usage while a response is in flight */
+  publishUsageProgress(
+    conversationId: string,
+    usage: { inputTokens: number; outputTokens: number; model?: string },
+    threadId?: string | null,
+  ): void {
+    this.publish({
+      type: "usage_progress",
+      conversationId,
+      threadId,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      model: usage.model,
+    });
   }
 
   /** Broadcast MCP server status for a bot (every open chat tab updates) */
@@ -182,11 +222,13 @@ export class ChatState {
     outputTokens: number;
     contextTokens?: number;
     contextWindow?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
     durationMs: number;
     costUsd: number;
     model: string;
     numTurns: number;
-    toolCalls?: { name: string; displayName: string; durationMs: number }[];
+    toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[];
   }): void {
     this.publish({
       type: "response_meta",
@@ -196,6 +238,8 @@ export class ChatState {
       outputTokens: meta.outputTokens,
       contextTokens: meta.contextTokens,
       contextWindow: meta.contextWindow,
+      cacheReadTokens: meta.cacheReadTokens,
+      cacheCreationTokens: meta.cacheCreationTokens,
       durationMs: meta.durationMs,
       costUsd: meta.costUsd,
       model: meta.model,

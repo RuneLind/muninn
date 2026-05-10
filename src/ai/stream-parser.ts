@@ -21,10 +21,11 @@ import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.t
 
 export type StreamProgressEvent =
   | { type: "tool_start"; name: string; displayName: string; input?: string }
-  | { type: "tool_end"; name: string; displayName: string }
+  | { type: "tool_end"; name: string; displayName: string; outputSize?: number }
   | { type: "text" }
   | { type: "text_delta"; text: string }
-  | { type: "intent"; text: string };
+  | { type: "intent"; text: string }
+  | { type: "usage_progress"; inputTokens: number; outputTokens: number; model?: string; turn?: number };
 
 export type StreamProgressCallback = (event: StreamProgressEvent) => void;
 
@@ -63,6 +64,8 @@ export class StreamParser {
   private model = "unknown";
   private inputTokens = 0;
   private outputTokens = 0;
+  private cacheReadTokens = 0;
+  private cacheCreationTokens = 0;
   /** Last assistant turn's input tokens — actual context window consumption.
    *  Result event reports cumulative across all turns; this tracks per-turn. */
   private lastTurnInputTokens = 0;
@@ -136,6 +139,15 @@ export class StreamParser {
         (usage.input_tokens ?? 0) +
         (usage.cache_creation_input_tokens ?? 0) +
         (usage.cache_read_input_tokens ?? 0);
+      // Accumulate output_tokens across turns so the live progress reflects
+      // total spend so far (the result event reports the same totals at end).
+      this.outputTokens += usage.output_tokens ?? 0;
+      this.onProgress?.({
+        type: "usage_progress",
+        inputTokens: this.lastTurnInputTokens,
+        outputTokens: this.outputTokens,
+        model: this.model !== "unknown" ? this.model : undefined,
+      });
     }
 
     let hasToolUse = false;
@@ -232,7 +244,12 @@ export class StreamParser {
       searchTracePointer: pending.searchTracePointer,
       searchTraceFetch: pending.searchTraceFetch,
     });
-    this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
+    this.onProgress?.({
+      type: "tool_end",
+      name: pending.name,
+      displayName,
+      outputSize: pending.output ? pending.output.length : undefined,
+    });
   }
 
   /** Final-flush safety net for tools that never received a matching tool_result. */
@@ -259,10 +276,12 @@ export class StreamParser {
     this.numTurns = event.num_turns ?? 1;
 
     if (event.usage) {
+      this.cacheReadTokens = event.usage.cache_read_input_tokens ?? 0;
+      this.cacheCreationTokens = event.usage.cache_creation_input_tokens ?? 0;
       this.inputTokens =
         (event.usage.input_tokens ?? 0) +
-        (event.usage.cache_creation_input_tokens ?? 0) +
-        (event.usage.cache_read_input_tokens ?? 0);
+        this.cacheCreationTokens +
+        this.cacheReadTokens;
       this.outputTokens = event.usage.output_tokens ?? 0;
     }
 
@@ -299,6 +318,8 @@ export class StreamParser {
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
       contextTokens: this.lastTurnInputTokens || undefined,
+      cacheReadTokens: this.cacheReadTokens || undefined,
+      cacheCreationTokens: this.cacheCreationTokens || undefined,
       toolCalls: this.toolCalls.length > 0 ? this.toolCalls : undefined,
     };
   }
