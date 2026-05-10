@@ -291,7 +291,7 @@ export function inspectorPanelScript(): string {
       var t = items[i];
       var detail = t.callCount + 'x';
       if (t.totalMs > 0) detail += ' · ' + fmtToolTime(t.totalMs);
-      if (t.totalTokens > 0) detail += ' · ~' + fmtNum(t.totalTokens) + ' tok';
+      if (t.totalTokens > 0) detail += ' · ~' + fmtNum(t.totalTokens);
       html += '<div class="ins-tool-item">'
         + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
         + '<span class="ins-tool-time">' + detail + '</span>'
