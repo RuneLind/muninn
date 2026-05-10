@@ -50,12 +50,26 @@ export function buildProgressCallback(
     return baseProgress;
   }
 
+  // The chat header status sticks until something else overwrites it. Once a
+  // tool sets "Searching: ..." we want it replaced as soon as the model
+  // starts streaming the final answer; otherwise the tool line lingers all
+  // the way through the response. Flip this on tool events and consume on
+  // the first text_delta.
+  let pendingPostToolText = false;
+
   return (event: StreamProgressEvent) => {
     if (event.type === "text_delta") {
+      if (pendingPostToolText && setStatus) {
+        setStatus("Writing response...").catch(() => {});
+        pendingPostToolText = false;
+      }
       onTextDelta?.(event.text);
     } else if (event.type === "intent") {
       onIntent?.(event.text);
       if (setStatus) setStatus(event.text).catch(() => {});
+      // An explicit intent overrides whatever was there — don't double-stomp
+      // it with "Writing response..." on the next text chunk.
+      pendingPostToolText = false;
     } else if (event.type === "usage_progress") {
       onUsageProgress?.({
         inputTokens: event.inputTokens,
@@ -73,6 +87,7 @@ export function buildProgressCallback(
         displayName: event.displayName,
         tokensEstimate,
       });
+      pendingPostToolText = true;
       baseProgress(event);
     } else {
       if (event.type === "tool_start") {
@@ -90,6 +105,9 @@ export function buildProgressCallback(
           });
           if (setStatus) setStatus(statusText).catch(() => {});
         }
+        // Tool just started — its own status takes over, so any pending
+        // post-tool transition from a previous tool round is moot.
+        pendingPostToolText = false;
       }
       baseProgress(event);
     }
