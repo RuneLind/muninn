@@ -609,6 +609,27 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    if (event.type === 'tool_end') {
+      if (event.conversationId !== activeConvId) return;
+      var teThread = event.threadId || null;
+      if (activeThreadId && teThread !== activeThreadId) return;
+      // Match the most recent unfilled entry with this displayName and stamp
+      // its tokensEstimate. Tool calls are sequential per turn so the latest
+      // entry without a tokensEstimate is the right target.
+      var snapEnd = liveSnapshot[event.conversationId];
+      if (snapEnd && snapEnd.tools) {
+        for (var ti = snapEnd.tools.length - 1; ti >= 0; ti--) {
+          var entry = snapEnd.tools[ti];
+          if (entry.displayName === event.displayName && entry.tokensEstimate == null) {
+            entry.tokensEstimate = event.tokensEstimate;
+            break;
+          }
+        }
+        renderLiveSnapshot(event.conversationId);
+      }
+      return;
+    }
+
     if (event.type === 'usage_progress') {
       if (event.conversationId !== activeConvId) return;
       var upThread = event.threadId || null;

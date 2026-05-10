@@ -20,7 +20,7 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 50 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 1, totalMs: 50 },
+      { displayName: "Read", callCount: 1, totalMs: 50, totalTokens: 0 },
     ]);
   });
 
@@ -31,7 +31,7 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 50 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 3, totalMs: 350 },
+      { displayName: "Read", callCount: 3, totalMs: 350, totalTokens: 0 },
     ]);
   });
 
@@ -51,7 +51,7 @@ describe("aggregateToolCalls", () => {
       { name: "mcp__serena__search", displayName: "Serena Search", durationMs: 200 },
     ]);
     expect(result).toEqual([
-      { displayName: "Serena Search", callCount: 2, totalMs: 300 },
+      { displayName: "Serena Search", callCount: 2, totalMs: 300, totalTokens: 0 },
     ]);
   });
 
@@ -85,8 +85,26 @@ describe("aggregateToolCalls", () => {
       { name: "Read", durationMs: 100 },
     ]);
     expect(result).toEqual([
-      { displayName: "Read", callCount: 2, totalMs: 100 },
+      { displayName: "Read", callCount: 2, totalMs: 100, totalTokens: 0 },
     ]);
+  });
+
+  test("sums tokensEstimate across calls of the same tool", () => {
+    const result = aggregateToolCalls([
+      { name: "search", tokensEstimate: 1200 },
+      { name: "search", tokensEstimate: 800 },
+      { name: "bash", tokensEstimate: 50 },
+    ]);
+    expect(result.find((t) => t.displayName === "search")!.totalTokens).toBe(2000);
+    expect(result.find((t) => t.displayName === "bash")!.totalTokens).toBe(50);
+  });
+
+  test("entries without tokensEstimate contribute 0 tokens (live phase before tool_end)", () => {
+    const result = aggregateToolCalls([
+      { name: "search", durationMs: 100 },
+      { name: "search", durationMs: 200, tokensEstimate: 1500 },
+    ]);
+    expect(result[0]!.totalTokens).toBe(1500);
   });
 });
 

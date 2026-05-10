@@ -21,7 +21,7 @@ import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.t
 
 export type StreamProgressEvent =
   | { type: "tool_start"; name: string; displayName: string; input?: string }
-  | { type: "tool_end"; name: string; displayName: string }
+  | { type: "tool_end"; name: string; displayName: string; outputSize?: number }
   | { type: "text" }
   | { type: "text_delta"; text: string }
   | { type: "intent"; text: string }
@@ -244,7 +244,12 @@ export class StreamParser {
       searchTracePointer: pending.searchTracePointer,
       searchTraceFetch: pending.searchTraceFetch,
     });
-    this.onProgress?.({ type: "tool_end", name: pending.name, displayName });
+    this.onProgress?.({
+      type: "tool_end",
+      name: pending.name,
+      displayName,
+      outputSize: pending.output ? pending.output.length : undefined,
+    });
   }
 
   /** Final-flush safety net for tools that never received a matching tool_result. */

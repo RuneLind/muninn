@@ -7,12 +7,16 @@ export interface ToolCallInput {
   name: string;
   displayName?: string;
   durationMs?: number;
+  /** Approximate tokens added to the next turn's context by this call's result */
+  tokensEstimate?: number;
 }
 
 export interface AggregatedTool {
   displayName: string;
   callCount: number;
   totalMs: number;
+  /** Sum of tokensEstimate across all calls aggregated under this name */
+  totalTokens: number;
 }
 
 export interface ContextMeta {
@@ -50,17 +54,18 @@ export interface LastResponseRow {
 
 // ── Pure functions ─────────────────────────────────────────────────────
 
-/** Group tool calls by displayName (or name), counting calls and summing duration. */
+/** Group tool calls by displayName (or name), summing call count, duration, and tokens. */
 export function aggregateToolCalls(toolCalls: ToolCallInput[]): AggregatedTool[] {
   const map: Record<string, AggregatedTool> = {};
   for (const tc of toolCalls) {
     const key = tc.displayName || tc.name;
-    if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+    if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0, totalTokens: 0 };
     map[key].callCount++;
     map[key].totalMs += tc.durationMs || 0;
+    map[key].totalTokens += tc.tokensEstimate || 0;
   }
   return Object.values(map).sort(
-    (a, b) => b.callCount - a.callCount || b.totalMs - a.totalMs,
+    (a, b) => b.callCount - a.callCount || b.totalTokens - a.totalTokens || b.totalMs - a.totalMs,
   );
 }
 
@@ -162,15 +167,16 @@ export function inspectorPanelScript(): string {
     for (var i = 0; i < toolCalls.length; i++) {
       var tc = toolCalls[i];
       var key = tc.displayName || tc.name;
-      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0 };
+      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0, totalTokens: 0 };
       map[key].callCount++;
       map[key].totalMs += tc.durationMs || 0;
+      map[key].totalTokens += tc.tokensEstimate || 0;
     }
     var result = [];
     var keys = Object.keys(map);
     for (var j = 0; j < keys.length; j++) result.push(map[keys[j]]);
     result.sort(function(a, b) {
-      return b.callCount - a.callCount || b.totalMs - a.totalMs;
+      return b.callCount - a.callCount || b.totalTokens - a.totalTokens || b.totalMs - a.totalMs;
     });
     return result;
   }
@@ -283,9 +289,12 @@ export function inspectorPanelScript(): string {
     var html = '';
     for (var i = 0; i < items.length; i++) {
       var t = items[i];
+      var detail = t.callCount + 'x';
+      if (t.totalMs > 0) detail += ' · ' + fmtToolTime(t.totalMs);
+      if (t.totalTokens > 0) detail += ' · ~' + fmtNum(t.totalTokens) + ' tok';
       html += '<div class="ins-tool-item">'
         + '<span class="ins-tool-name">' + escapeHtml(t.displayName) + '</span>'
-        + '<span class="ins-tool-time">' + t.callCount + 'x &middot; ' + fmtToolTime(t.totalMs) + '</span>'
+        + '<span class="ins-tool-time">' + detail + '</span>'
         + '</div>';
     }
     return html;

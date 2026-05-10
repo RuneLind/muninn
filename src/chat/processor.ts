@@ -134,6 +134,10 @@ export async function processChatMessage(
     chatState.publishToolStatus(conversationId, info.text, threadId ?? null, info.name, info.displayName);
   };
 
+  const onToolEnd = (info: { name: string; displayName: string; tokensEstimate?: number }): void => {
+    chatState.publishToolEnd(conversationId, info, threadId ?? null);
+  };
+
   const onUsageProgress = (usage: { inputTokens: number; outputTokens: number; model?: string }): void => {
     chatState.publishUsageProgress(conversationId, usage, threadId ?? null);
   };
@@ -155,6 +159,7 @@ export async function processChatMessage(
       onTextDelta,
       onIntent,
       onToolStatus,
+      onToolEnd,
       onUsageProgress,
       skipExtractions,
     });

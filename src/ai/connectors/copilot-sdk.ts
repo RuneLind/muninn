@@ -150,6 +150,7 @@ export async function executePrompt(
             : { error: event.data.error ?? { message: "tool execution failed" } };
 
           const processed = processMcpToolResult(resultPayload);
+          const truncated = truncateOutput(processed.cleanedText);
 
           toolCalls.push({
             id: event.data.toolCallId,
@@ -158,13 +159,18 @@ export async function executePrompt(
             durationMs: Math.round(endMs - pending.startMs),
             startOffsetMs: Math.round(pending.startMs - wallStart),
             input: pending.input,
-            output: truncateOutput(processed.cleanedText),
+            output: truncated,
             searchTrace: processed.searchTrace,
             searchTracePointer: processed.searchTracePointer,
             searchTraceFetch: processed.searchTraceFetch,
           });
           pendingTools.delete(event.data.toolCallId);
-          onProgress?.({ type: "tool_end", name: pending.name, displayName });
+          onProgress?.({
+            type: "tool_end",
+            name: pending.name,
+            displayName,
+            outputSize: truncated ? truncated.length : undefined,
+          });
         }
         break;
       }

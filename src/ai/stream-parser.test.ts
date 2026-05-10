@@ -477,8 +477,14 @@ describe("StreamParser progress callbacks", () => {
     ])), t0 + 2100);
 
     // User message with tool_result resolves pending tools → fires tool_end
+    // outputSize reflects the truncated result content's char count
     expect(events).toHaveLength(2);
-    expect(events[1]).toEqual({ type: "tool_end", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)" });
+    expect(events[1]).toEqual({
+      type: "tool_end",
+      name: "mcp__gmail__search_emails",
+      displayName: "search_emails (gmail)",
+      outputSize: "emails".length,
+    });
 
     // Final assistant response
     parser.parseLine(JSON.stringify(makeAssistant([

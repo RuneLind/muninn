@@ -15,10 +15,18 @@ export interface ToolStatusInfo {
   displayName: string;
 }
 
+export interface ToolEndInfo {
+  name: string;
+  displayName: string;
+  /** Approximate token count from the tool's result (chars / 4). */
+  tokensEstimate?: number;
+}
+
 export interface StreamCallbacks {
   onTextDelta?: (delta: string | null) => void;
   onIntent?: (text: string) => void;
   onToolStatus?: (info: ToolStatusInfo) => void;
+  onToolEnd?: (info: ToolEndInfo) => void;
   onUsageProgress?: (usage: UsageProgress) => void;
   setStatus?: (status: string) => Promise<void>;
 }
@@ -34,9 +42,9 @@ export function buildProgressCallback(
   username: string,
 ): (event: StreamProgressEvent) => void {
   const baseProgress = createProgressCallback("calling_claude", username);
-  const { onTextDelta, onIntent, onToolStatus, onUsageProgress, setStatus } = callbacks;
+  const { onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress, setStatus } = callbacks;
   const hasStreamCallbacks =
-    onTextDelta || onIntent || onToolStatus || onUsageProgress || setStatus;
+    onTextDelta || onIntent || onToolStatus || onToolEnd || onUsageProgress || setStatus;
 
   if (!hasStreamCallbacks) {
     return baseProgress;
@@ -54,6 +62,18 @@ export function buildProgressCallback(
         outputTokens: event.outputTokens,
         model: event.model,
       });
+    } else if (event.type === "tool_end") {
+      // Estimate result tokens from the truncated output's char count
+      // (chars / 4 is the standard rough-cut for English/code tokens).
+      const tokensEstimate = event.outputSize !== undefined
+        ? Math.round(event.outputSize / 4)
+        : undefined;
+      onToolEnd?.({
+        name: event.name,
+        displayName: event.displayName,
+        tokensEstimate,
+      });
+      baseProgress(event);
     } else {
       if (event.type === "tool_start") {
         // Clear streaming bubble when tools start (text was intermediate)
