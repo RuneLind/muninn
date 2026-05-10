@@ -477,7 +477,7 @@ export function inspectorPanelScript(): string {
     var refreshLabel = isLoading ? 'Probing...' : 'Refresh';
     inspectorMcpStatus.innerHTML =
       '<div class="ins-section">'
-      + '<div class="ins-section-title ins-mcp-header">'
+      + '<div class="ins-section-title ins-section-title-row">'
       + '<span>MCP servers</span>'
       + '<button type="button" class="ins-mcp-refresh" id="insMcpRefresh" '
       + (isLoading ? 'disabled' : '') + ' aria-label="Refresh MCP status">'
@@ -562,9 +562,24 @@ export function inspectorPanelScript(): string {
     var up = encodeURIComponent(userId);
 
     inspectorContext.innerHTML =
-      '<div class="ins-section"><div class="ins-section-title">Memories</div><div id="insMemories"><div class="ins-skeleton"></div><div class="ins-skeleton" style="width:70%"></div></div></div>'
+      '<div class="ins-section">'
+        + '<div class="ins-section-title ins-section-title-row">'
+          + '<span>Memories</span>'
+          + '<label class="ins-skip-extractions" title="When on, this thread will not run memory_extraction, goal_detection, or schedule_detection — useful for testing without polluting personal memory.">'
+            + '<input type="checkbox" id="skipExtractionsCheckbox">'
+            + '<span>Skip extractions</span>'
+          + '</label>'
+        + '</div>'
+        + '<div id="insMemories"><div class="ins-skeleton"></div><div class="ins-skeleton" style="width:70%"></div></div>'
+      + '</div>'
       + '<div class="ins-section"><div class="ins-section-title">Goals</div><div id="insGoals"><div class="ins-skeleton"></div></div></div>'
       + '<div class="ins-section"><div class="ins-section-title">Tasks</div><div id="insTasks"><div class="ins-skeleton"></div></div></div>';
+
+    var skipCb = document.getElementById('skipExtractionsCheckbox');
+    if (skipCb) {
+      skipCb.checked = getSkipExtractions();
+      skipCb.addEventListener('change', function() { setSkipExtractions(skipCb.checked); });
+    }
 
     // Memories
     fetch('/api/memories/user/' + up + '?limit=5&bot=' + bp)

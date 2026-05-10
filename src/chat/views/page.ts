@@ -63,10 +63,6 @@ export async function renderChatPage(): Promise<string> {
           <span class="chat-title">Select a thread</span>
           <div class="chat-description" id="chatDescription"></div>
         </div>
-        <label class="chat-header-pill skip-extractions-toggle" title="When on, this thread will not run memory_extraction, goal_detection, or schedule_detection — useful for testing without polluting personal memory.">
-          <input type="checkbox" id="skipExtractionsCheckbox">
-          <span>Skip extractions</span>
-        </label>
         <button class="chat-header-pill auto-respond-pill" id="autoRespondPill" hidden></button>
         <span class="chat-status" id="chatStatus"></span>
       </div>
@@ -262,6 +258,14 @@ const CHAT_SCRIPT = `
   // Bot selector init (synced with dashboard/traces/logs via localStorage)
   try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
 
+  var SKIP_EXTRACTIONS_KEY = 'muninn-skip-extractions';
+  function getSkipExtractions() {
+    try { return localStorage.getItem(SKIP_EXTRACTIONS_KEY) === '1'; } catch { return false; }
+  }
+  function setSkipExtractions(on) {
+    try { localStorage.setItem(SKIP_EXTRACTIONS_KEY, on ? '1' : '0'); } catch {}
+  }
+
   // DOM refs
   var threadList = document.getElementById('threadList');
   var chatMessages = document.getElementById('chatMessages');
@@ -269,15 +273,6 @@ const CHAT_SCRIPT = `
   var chatSend = document.getElementById('chatSend');
   var chatHeader = document.getElementById('chatHeader');
   var chatStatus = document.getElementById('chatStatus');
-  var skipExtractionsCheckbox = document.getElementById('skipExtractionsCheckbox');
-  try {
-    skipExtractionsCheckbox.checked = localStorage.getItem('muninn-skip-extractions') === '1';
-  } catch {}
-  skipExtractionsCheckbox.addEventListener('change', function() {
-    try {
-      localStorage.setItem('muninn-skip-extractions', skipExtractionsCheckbox.checked ? '1' : '0');
-    } catch {}
-  });
   var inspectorToolUsage = document.getElementById('inspectorToolUsage');
   var inspectorContent = document.getElementById('inspectorContent');
   var inspectorContext = document.getElementById('inspectorContext');
@@ -738,7 +733,7 @@ const CHAT_SCRIPT = `
       payload.connector = pendingConnector;
       pendingConnector = null;
     }
-    if (skipExtractionsCheckbox.checked) {
+    if (getSkipExtractions()) {
       payload.skipExtractions = true;
     }
     await fetch('/chat/conversations/' + activeConvId + '/messages', {

@@ -258,14 +258,6 @@ export function chatStyles(): string {
     .auto-respond-pill:hover { border-color: var(--accent, #58a6ff); }
     .auto-respond-pill.paused { color: #f0883e; border-color: #f0883e; }
     .auto-respond-pill[disabled] { opacity: 0.5; cursor: progress; }
-    .skip-extractions-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 4px;
-      user-select: none;
-    }
-    .skip-extractions-toggle input { margin: 0; cursor: pointer; }
     .chat-messages {
       flex: 1;
       overflow-y: auto;
@@ -627,6 +619,19 @@ export function chatStyles(): string {
       padding-bottom: 4px;
       border-bottom: 1px solid var(--border-subtle);
     }
+    .ins-skip-extractions {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    .ins-skip-extractions:hover { color: var(--text-primary); }
+    .ins-skip-extractions input { margin: 0; cursor: pointer; }
     .ins-mini-item {
       padding: 6px 8px;
       background: var(--bg-inset);
@@ -696,10 +701,11 @@ export function chatStyles(): string {
       border-bottom: 1px solid var(--border-subtle);
     }
 
-    .ins-mcp-header {
+    .ins-section-title-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 8px;
     }
     .ins-mcp-refresh {
       background: var(--bg-inset);
