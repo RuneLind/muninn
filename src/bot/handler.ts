@@ -42,9 +42,9 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     let statusChain: Promise<void> = Promise.resolve();
     const chatId = ctx.chat!.id;
 
-    const onToolStatus = (line: string) => {
+    const onToolStatus = (info: { text: string; name: string; displayName: string }) => {
       statusChain = statusChain.then(async () => {
-        statusLines.push(line);
+        statusLines.push(info.text);
         const text = statusLines.map(l => `⏳ ${l}`).join("\n");
         try {
           if (!statusMsgId) {

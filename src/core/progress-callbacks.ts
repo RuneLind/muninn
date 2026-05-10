@@ -1,6 +1,7 @@
 import type { StreamProgressEvent } from "../ai/stream-parser.ts";
 import { createProgressCallback } from "../dashboard/agent-status.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
+import { formatToolDisplayName } from "../ai/stream-parser.ts";
 
 export interface UsageProgress {
   inputTokens: number;
@@ -8,10 +9,16 @@ export interface UsageProgress {
   model?: string;
 }
 
+export interface ToolStatusInfo {
+  text: string;
+  name: string;
+  displayName: string;
+}
+
 export interface StreamCallbacks {
   onTextDelta?: (delta: string | null) => void;
   onIntent?: (text: string) => void;
-  onToolStatus?: (text: string) => void;
+  onToolStatus?: (info: ToolStatusInfo) => void;
   onUsageProgress?: (usage: UsageProgress) => void;
   setStatus?: (status: string) => Promise<void>;
 }
@@ -51,10 +58,16 @@ export function buildProgressCallback(
       if (event.type === "tool_start") {
         // Clear streaming bubble when tools start (text was intermediate)
         onTextDelta?.(null);
-        // Emit human-friendly tool status (appended as separate lines)
+        // Emit human-friendly tool status (appended as separate lines).
+        // Pass structured name + displayName alongside the text so the chat
+        // layer can aggregate per-tool counts live in the inspector card.
         const statusText = getToolStatus(event.name, event.input);
         if (statusText) {
-          onToolStatus?.(statusText);
+          onToolStatus?.({
+            text: statusText,
+            name: event.name,
+            displayName: event.displayName || formatToolDisplayName(event.name),
+          });
           if (setStatus) setStatus(statusText).catch(() => {});
         }
       }

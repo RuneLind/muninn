@@ -236,7 +236,7 @@ const CHAT_SCRIPT = `
   var deepLinkHandled = false;
   var inspectorContextKey = null;
   var lastResponseMeta = {};    // Per-conversationId last response_meta
-  var liveSnapshot = {};        // Per-conversationId in-flight token + tool counts (cleared on user msg + response_meta)
+  var liveSnapshot = {};        // Per-conversationId in-flight token + tool aggregation (cleared on user msg + response_meta)
 
   function renderLiveSnapshot(convId) {
     if (convId !== activeConvId) return;
@@ -247,11 +247,11 @@ const CHAT_SCRIPT = `
       outputTokens: snap.outputTokens,
       model: snap.model,
     };
-    if (snap.toolCount && snap.toolCount > 0) {
-      // computeLastResponseRows reads only toolCalls.length — synthesize a
-      // bare array so the Tools row reflects the running count.
-      meta.toolCalls = new Array(snap.toolCount);
-      for (var i = 0; i < snap.toolCount; i++) meta.toolCalls[i] = { displayName: '' };
+    // Build a real toolCalls array carrying structured displayNames so
+    // renderLastResponseCard renders the per-tool breakdown live (same as
+    // the post-response card, just without per-call durations yet).
+    if (snap.tools && snap.tools.length > 0) {
+      meta.toolCalls = snap.tools;
     }
     renderLastResponseCard(meta);
   }
@@ -597,9 +597,14 @@ const CHAT_SCRIPT = `
       var tsThread = event.threadId || null;
       if (activeThreadId && tsThread !== activeThreadId) return;
       appendToolStatus(event.text);
-      // Bump cumulative tool count for the live inspector card
+      // Append a structured tool call entry so the inspector aggregates live.
+      // displayName is sent by the server (falls back to event.name or text).
+      var displayName = event.displayName || event.name || event.text || 'tool';
+      var name = event.name || displayName;
       liveSnapshot[event.conversationId] = liveSnapshot[event.conversationId] || {};
-      liveSnapshot[event.conversationId].toolCount = (liveSnapshot[event.conversationId].toolCount || 0) + 1;
+      var snap = liveSnapshot[event.conversationId];
+      snap.tools = snap.tools || [];
+      snap.tools.push({ name: name, displayName: displayName, durationMs: 0 });
       renderLiveSnapshot(event.conversationId);
       return;
     }

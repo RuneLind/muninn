@@ -235,8 +235,17 @@ export function inspectorPanelScript(): string {
     var container = document.getElementById('insLastResponse');
     if (!container) return;
     var rows = computeLastResponseRows(meta);
-    var hasTools = !!(meta && meta.toolCalls && meta.toolCalls.length > 0);
-    if (rows.length === 0 && !hasTools) { container.innerHTML = ''; return; }
+    // Only render the Tools subsection (heading + breakdown) once response_meta
+    // has arrived — i.e. when toolCalls carry real displayNames. During live
+    // updates the synthesised entries have empty displayNames and the entire
+    // section stays hidden until the query finishes.
+    var hasNamedTools = false;
+    if (meta && meta.toolCalls && meta.toolCalls.length > 0) {
+      for (var k = 0; k < meta.toolCalls.length; k++) {
+        if (meta.toolCalls[k] && meta.toolCalls[k].displayName) { hasNamedTools = true; break; }
+      }
+    }
+    if (rows.length === 0 && !hasNamedTools) { container.innerHTML = ''; return; }
 
     var html = '<div class="ins-section"><div class="ins-section-title">Last response</div>';
     for (var i = 0; i < rows.length; i++) {
@@ -249,20 +258,11 @@ export function inspectorPanelScript(): string {
         + '</div>';
     }
 
-    if (hasTools) {
+    if (hasNamedTools) {
       var n = meta.toolCalls.length;
       var title = 'Tools (' + n + ' call' + (n !== 1 ? 's' : '') + ')';
-      // Treat displayName as populated when at least one entry has it — during
-      // the live phase tool counts are synthesised with empty displayNames so
-      // we suppress the per-tool list until response_meta lands.
-      var hasNamedTools = false;
-      for (var k = 0; k < meta.toolCalls.length; k++) {
-        if (meta.toolCalls[k] && meta.toolCalls[k].displayName) { hasNamedTools = true; break; }
-      }
       html += '<div class="ins-tool-subhead">' + escapeHtml(title) + '</div>';
-      if (hasNamedTools) {
-        html += renderToolList(aggregateToolCalls(meta.toolCalls));
-      }
+      html += renderToolList(aggregateToolCalls(meta.toolCalls));
     }
 
     html += '</div>';

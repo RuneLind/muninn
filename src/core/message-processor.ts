@@ -60,8 +60,9 @@ export interface ProcessMessageParams {
   onTextDelta?: (delta: string | null) => void;
   /** Callback for AI intent updates (what the model plans to do) */
   onIntent?: (text: string) => void;
-  /** Callback for tool status updates (appended as separate lines, not replaced) */
-  onToolStatus?: (text: string) => void;
+  /** Callback for tool status updates (appended as separate lines, not replaced).
+   *  Receives structured info: human-friendly text + tool name + displayName. */
+  onToolStatus?: (info: { text: string; name: string; displayName: string }) => void;
   /** Callback for per-turn token usage updates while the response is in flight */
   onUsageProgress?: (usage: { inputTokens: number; outputTokens: number; model?: string }) => void;
   /** External tracer — if provided, processMessage uses it instead of creating a new one.

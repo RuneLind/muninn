@@ -130,8 +130,8 @@ export async function processChatMessage(
     chatState.publishIntent(conversationId, intentText, threadId ?? null);
   };
 
-  const onToolStatus = (statusText: string): void => {
-    chatState.publishToolStatus(conversationId, statusText, threadId ?? null);
+  const onToolStatus = (info: { text: string; name: string; displayName: string }): void => {
+    chatState.publishToolStatus(conversationId, info.text, threadId ?? null, info.name, info.displayName);
   };
 
   const onUsageProgress = (usage: { inputTokens: number; outputTokens: number; model?: string }): void => {
