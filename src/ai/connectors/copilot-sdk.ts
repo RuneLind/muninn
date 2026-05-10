@@ -106,7 +106,6 @@ export async function executePrompt(
   let lastTurnInputTokens = 0;
   let reportedModel = model;
   let turnCount = 0;
-  let usageEventCount = 0;
 
   // Wire up streaming events
   const unsubscribe = session.on((event: SessionEvent) => {
@@ -171,21 +170,12 @@ export async function executePrompt(
       }
 
       case "assistant.usage":
-        usageEventCount++;
         lastTurnInputTokens = event.data.inputTokens ?? 0;
         totalInputTokens += lastTurnInputTokens;
         totalOutputTokens += event.data.outputTokens ?? 0;
         totalCacheReadTokens += event.data.cacheReadTokens ?? 0;
         totalCacheCreationTokens += event.data.cacheWriteTokens ?? 0;
         if (event.data.model) reportedModel = event.data.model;
-        log.info("Copilot SDK usage event #{n}: in={in} out={out} cacheRead={cr} cacheWrite={cw}", {
-          botName: botConfig.name,
-          n: usageEventCount,
-          in: lastTurnInputTokens,
-          out: event.data.outputTokens ?? 0,
-          cr: event.data.cacheReadTokens ?? 0,
-          cw: event.data.cacheWriteTokens ?? 0,
-        });
         onProgress?.({
           type: "usage_progress",
           inputTokens: lastTurnInputTokens,
