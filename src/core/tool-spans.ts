@@ -3,6 +3,7 @@ import type { ToolCall } from "../types.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { parseHuginnTrace } from "../ai/huginn-trace.ts";
 import { emitSearchTraceSpans } from "./search-trace-spans.ts";
+import { emitCorrectiveSpans } from "./corrective-trace-spans.ts";
 
 /**
  * Trace-marker-emitting MCP tools whose spans benefit from an env snapshot.
@@ -107,22 +108,39 @@ export async function attachToolSpans(
     if (captureOutputs && toolOutput !== undefined) {
       attrs.output = toolOutput;
     }
+    // CRAG-lite corrective-retrieval metadata, when the connector ran a
+    // grade-and-requery pass on this knowledge-search tool result.
+    if (tool.corrective !== undefined) attrs.corrective = tool.corrective;
+
     const toolSpanId = tracer.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
+
+    const claudeStart = tracer.spanStartedAt("claude");
+    const toolStart = claudeStart
+      ? new Date(claudeStart.getTime() + (tool.startOffsetMs ?? 0))
+      : undefined;
 
     // If the tool call carries a v1 Huginn search trace, synthesize per-stage
     // child spans so the waterfall shows where the time went without the
     // operator having to expand the trace JSON.
-    if (attrs.searchTrace !== undefined) {
-      const claudeStart = tracer.spanStartedAt("claude");
-      if (claudeStart) {
-        const toolStart = new Date(claudeStart.getTime() + (tool.startOffsetMs ?? 0));
-        emitSearchTraceSpans({
-          tracer,
-          toolSpanId,
-          toolStartedAt: toolStart,
-          searchTrace: attrs.searchTrace,
-        });
-      }
+    if (attrs.searchTrace !== undefined && toolStart) {
+      emitSearchTraceSpans({
+        tracer,
+        toolSpanId,
+        toolStartedAt: toolStart,
+        searchTrace: attrs.searchTrace,
+      });
+    }
+
+    // If the connector ran a corrective pass, synthesize knowledge_grade /
+    // knowledge_requery child spans after the tool's own work.
+    if (tool.corrective !== undefined && toolStart) {
+      emitCorrectiveSpans({
+        tracer,
+        toolSpanId,
+        toolStartedAt: toolStart,
+        toolDurationMs: tool.durationMs,
+        corrective: tool.corrective,
+      });
     }
   }
 }

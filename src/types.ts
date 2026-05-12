@@ -73,6 +73,32 @@ export interface ToolCall {
    * (404, timeout, network) — see {@link fetchHuginnTrace}.
    */
   searchTraceFetch?: Promise<unknown | null>;
+  /**
+   * CRAG-lite corrective-retrieval metadata, set when the copilot-sdk connector
+   * ran a grade-and-requery pass on this knowledge-search tool result. Drives
+   * the synthesized `knowledge_grade` / `knowledge_requery` waterfall spans.
+   * See src/ai/corrective-retrieval.ts.
+   */
+  corrective?: CorrectiveToolMeta;
+}
+
+export interface CorrectiveToolMeta {
+  /** Number of corrective re-queries actually issued (0–budget). */
+  retries: number;
+  /** Grader verdict from each grading pass, in order ("correct" | "ambiguous" | "insufficient"). */
+  verdicts: string[];
+  /** Grader reason per pass, parallel to `verdicts`. */
+  reasons: string[];
+  /** Re-query strings actually issued (excludes the original query). */
+  queriesTried: string[];
+  /** Collections each re-query was scoped to, parallel to `queriesTried`; `null` = all. */
+  collectionsTried?: (string[] | null)[];
+  /** Verdict from the final grading pass — whether the result set ended up usable. */
+  finalVerdict: string;
+  /** Total Haiku grader wall time across all passes, ms. */
+  graderMs?: number;
+  /** Wall time of each re-query HTTP call, parallel to `queriesTried`, ms. */
+  requeryMs?: number[];
 }
 
 export interface ClaudeResult {

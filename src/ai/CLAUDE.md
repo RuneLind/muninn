@@ -15,7 +15,11 @@
 | `json-extract.ts` | Extract JSON objects from mixed text output |
 | `haiku-extraction.ts` | Shared Haiku executor for async extraction tasks (memories, goals, tasks) |
 | `huginn-trace.ts` | Inline-fence Huginn trace handling (legacy mode) — `parseHuginnTrace`, `extractMcpResultText`, oversized-CLI-divert recovery |
-| `huginn-trace-pointer.ts` | Phase 2 out-of-band trace channel — parses `huginn-trace-url:` line and fetches the trace from Huginn's `/api/trace/<id>` endpoint. Preferred when `HUGINN_TRACE_POINTER=1` is set on Huginn. Also exports `processMcpToolResult()` — the unwrap → peel → fetch pipeline connectors run on every tool result |
+| `huginn-trace-pointer.ts` | Phase 2 out-of-band trace channel — parses `huginn-trace-url:` line and fetches the trace from Huginn's `/api/trace/<id>` endpoint. Preferred when `HUGINN_TRACE_POINTER=1` is set on Huginn. Also exports `processMcpToolResult()` — the unwrap → peel → fetch pipeline connectors run on every tool result — and `peelTraceMarkerForRewrite()` for connectors that rewrite a tool result and need to re-append the trace marker |
+| `knowledge-grader.ts` | CRAG-lite retrieval evaluator — an awaiting Haiku call that grades knowledge-search results (`correct`/`ambiguous`/`insufficient`) and proposes a rewritten query/collection. Fail-soft to `correct`. |
+| `corrective-retrieval.ts` | Corrective grade-and-requery orchestrator — `runCorrectiveRetrieval()`: grade → bounded re-query Huginn → merge+dedupe → consolidated text + `corrective` metadata. ≤1 retry (configurable to 2), non-recursive. |
+| `knowledge-search-client.ts` | HTTP client for Huginn's `/api/search` + a renderer mirroring the MCP adapter's result format, used by the corrective re-query path. |
+| `corrective-config.ts` | Resolves the per-bot corrective-retrieval toggle + retry budget (kill-switch > per-bot config.json > global env defaults). |
 | `connectors/` | Three connector implementations (see below) |
 
 ## Connector Abstraction

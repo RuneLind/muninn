@@ -105,6 +105,35 @@ export function parseHuginnTracePointer(
   return { text: output, fetchUrl: null };
 }
 
+/**
+ * Split a tool-result string into its body and its trailing Huginn trace
+ * marker (pointer line or inline `huginn-trace` fence), reconstructing the
+ * marker as a re-appendable string.
+ *
+ * Used by connectors that rewrite a knowledge-search tool result (e.g. the
+ * corrective-retrieval pass in copilot-sdk) before handing it to the model:
+ * peel the marker, splice new content into the body, then re-append `remainder`
+ * at the very end so the downstream {@link processMcpToolResult} call still
+ * finds and extracts the trace. Does not perform any network fetch.
+ *
+ * `remainder` is `""` when no marker was present (or a pointer-id form whose
+ * URL couldn't be resolved — in which case it wouldn't have been fetched
+ * anyway, so dropping it is harmless). Otherwise it includes the leading
+ * `\n\n` separator.
+ */
+export function peelTraceMarkerForRewrite(text: string): { body: string; remainder: string } {
+  const ptr = parseHuginnTracePointer(text);
+  if (ptr.text !== text) {
+    // A pointer line was stripped. Reconstruct the URL form when we have one.
+    return { body: ptr.text, remainder: ptr.fetchUrl ? `\n\nhuginn-trace-url: ${ptr.fetchUrl}` : "" };
+  }
+  const fence = parseHuginnTrace(text);
+  if (fence.trace !== null) {
+    return { body: fence.text, remainder: `\n\n\`\`\`huginn-trace\n${JSON.stringify(fence.trace)}\n\`\`\`` };
+  }
+  return { body: text, remainder: "" };
+}
+
 interface HuginnTraceChannel {
   /** Tool output with the trace marker stripped, ready to store / forward. */
   text: string;

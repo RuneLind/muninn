@@ -128,6 +128,24 @@ export function tracesWaterfallStyles(): string {
       color: var(--status-warning);
       border-color: color-mix(in srgb, var(--status-warning) 35%, transparent);
     }
+    /* Corrective-retrieval chip — marks a knowledge search that went through a
+       CRAG-lite grade/requery pass. Color = whether the result set ended usable. */
+    .wf-chip.wf-corrective { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .wf-chip.wf-corrective-ok {
+      background: color-mix(in srgb, var(--status-ok, var(--status-cyan)) 14%, transparent);
+      color: var(--status-ok, var(--status-cyan));
+      border: 1px solid color-mix(in srgb, var(--status-ok, var(--status-cyan)) 35%, transparent);
+    }
+    .wf-chip.wf-corrective-warn {
+      background: color-mix(in srgb, var(--status-warning) 14%, transparent);
+      color: var(--status-warning);
+      border: 1px solid color-mix(in srgb, var(--status-warning) 35%, transparent);
+    }
+    .wf-chip.wf-corrective-bad {
+      background: color-mix(in srgb, var(--status-error, var(--status-magenta)) 14%, transparent);
+      color: var(--status-error, var(--status-magenta));
+      border: 1px solid color-mix(in srgb, var(--status-error, var(--status-magenta)) 35%, transparent);
+    }
     .waterfall-bar-container {
       position: relative;
       height: 16px;

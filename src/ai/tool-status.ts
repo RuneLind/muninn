@@ -316,6 +316,16 @@ export function parseToolName(name: string): { server: string; tool: string } | 
 }
 
 /**
+ * True when `toolName` is Huginn's knowledge search tool (`search_knowledge`),
+ * in any connector's naming format. Used to gate the corrective-retrieval pass.
+ */
+export function isKnowledgeSearchTool(toolName: string): boolean {
+  const parsed = parseToolName(toolName);
+  const tool = parsed?.tool ?? toolName;
+  return tool === "search_knowledge";
+}
+
+/**
  * Get human-friendly status text for a tool call.
  * Returns undefined for tools that should not show status (e.g. report_intent).
  */

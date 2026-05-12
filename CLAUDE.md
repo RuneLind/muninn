@@ -217,6 +217,7 @@ All fields are optional — falls back to global `.env` values:
 | `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
 | `contextWindow` | number | — | Context window size in tokens (e.g. `32768`). Shown as usage in web chat and percentage in Telegram footer |
 | `prompts` | object | — | Configurable prompts: `jiraAnalysis` (Jira research instruction, content appended automatically), `investigateCode` (follow-up code investigation prompt) |
+| `correctiveRetrieval` | object | off | CRAG-lite corrective loop around the knowledge search tool — `{ enabled?: boolean, retryBudget?: 1\|2 }`. Only the `copilot-sdk` connector honours it; off by default. See "Corrective retrieval" below. |
 
 ### Database
 
@@ -253,6 +254,9 @@ PostgreSQL + pgvector via Docker (single container).
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
+| `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for the CRAG-lite corrective loop (per-bot `correctiveRetrieval.enabled` overrides) |
+| `CORRECTIVE_RETRIEVAL_BUDGET` | No | `1` | Default max corrective re-queries per knowledge search (clamped to 1–2) |
+| `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config |
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 
@@ -351,6 +355,20 @@ uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/
 | `src/serena/config.ts` | Config types + discovery from bot config.json |
 | `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
 | `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
+
+## Corrective Retrieval (CRAG-lite)
+
+A CRAG-style "grade the search results, re-query if they're weak" loop wrapped around Huginn's `search_knowledge` MCP tool. **Off by default**; enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true, "retryBudget": 1 }`), globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, or hard-disable everywhere with `CORRECTIVE_RETRIEVAL_DISABLED=1`.
+
+How it works (copilot-sdk connector only):
+1. The connector registers a Copilot SDK `onPostToolUse` hook. When a bot calls `search_knowledge`, the hook intercepts the result before the model sees it.
+2. `src/ai/knowledge-grader.ts` — a dedicated **awaiting** Haiku call grades the results (`correct` / `ambiguous` / `insufficient`) and, if weak, proposes a rewritten query and/or a better collection. Fail-soft: any Haiku error → `correct` (no change).
+3. `src/ai/corrective-retrieval.ts` — if not `correct` and the retry budget (1, configurable to 2) isn't spent, re-queries Huginn's `/api/search` (`src/ai/knowledge-search-client.ts`) with `rerank=true`, merges the fresh hits into the original result text (deduped by `collection/doc_id` parsed from the rendered output), and appends an inline note. Never recursive.
+4. Traces: `knowledge_grade` + `knowledge_requery` spans synthesized under the tool span (`src/core/corrective-trace-spans.ts`), rendered in the dashboard waterfall with a corrective chip on the parent tool span.
+
+**Connector asymmetry:** Claude-CLI bots run the MCP tool inside their own process, so the result can't be intercepted — they get nothing here (Phase 3 will add prompt-level corrective guidance instead). When the toggle is off, the hook isn't registered and behaviour is byte-identical to before.
+
+Key files: `src/ai/knowledge-grader.ts`, `src/ai/corrective-retrieval.ts`, `src/ai/knowledge-search-client.ts`, `src/ai/corrective-config.ts`, `src/core/corrective-trace-spans.ts`, hook wiring in `src/ai/connectors/copilot-sdk.ts`.
 
 ## Slack Bot
 When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.

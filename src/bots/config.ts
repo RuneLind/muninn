@@ -77,6 +77,16 @@ export interface BotConfig {
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */
   mcpStatus?: McpStatusConfig;
+  /** CRAG-lite corrective retrieval around the knowledge search tool (Phase 1).
+   *  Off unless `enabled: true` here or the global default is on. `retryBudget`
+   *  is clamped to 1–2. Only the copilot-sdk connector honours this. */
+  correctiveRetrieval?: CorrectiveRetrievalBotConfig;
+}
+
+export interface CorrectiveRetrievalBotConfig {
+  enabled?: boolean;
+  /** Max corrective re-queries per knowledge search. Clamped to 1–2. Default 1. */
+  retryBudget?: number;
 }
 
 export interface BotPrompts {
@@ -164,7 +174,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -208,6 +218,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
+      correctiveRetrieval: botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined,
     });
 
     const configParts: string[] = [];

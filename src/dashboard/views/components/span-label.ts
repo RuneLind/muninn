@@ -9,6 +9,12 @@ interface SpanLike {
     toolId?: unknown;
     input?: unknown;
     output?: unknown;
+    corrective?: {
+      retries?: unknown;
+      finalVerdict?: unknown;
+      verdicts?: unknown;
+      queriesTried?: unknown;
+    } | unknown;
     searchTrace?:
       | {
           collections?: Array<{
@@ -46,6 +52,11 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
     : '';
 
+  // Corrective-retrieval chip — present only on knowledge-search tool spans that
+  // went through a CRAG-lite grade/requery pass. Shows the final verdict and the
+  // retry count so a corrected search is visible at a glance.
+  const corr = correctiveChipFromAttrs(attrs.corrective);
+
   // Search-tool path: collection chips + counts chip, derived from searchTrace
   // or input.collection.
   let collections = collectionsFor(attrs);
@@ -74,22 +85,56 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
       if (summary.totalMs != null) tooltipLines.push("total: " + summary.totalMs + "ms");
       if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
     }
+    if (corr) tooltipLines.push(...corr.tooltipLines);
     return {
-      html: verbChip + firstChip + moreChip + countsChip,
+      html: verbChip + (corr ? corr.html : "") + firstChip + moreChip + countsChip,
       tooltip: tooltipLines.join("\n"),
     };
   }
 
   // Per-tool extras path: graph_node / symbol_context / list_files /
-  // read_source / search_pattern.
+  // read_source / search_pattern (also the knowledge-search fallback).
   const extras = toolLabelExtras(canonName, attrs);
   if (extras) {
     return {
-      html: verbChip + extras.chips,
-      tooltip: [span.name, ...extras.tooltipLines].join("\n"),
+      html: verbChip + (corr ? corr.html : "") + extras.chips,
+      tooltip: [span.name, ...(corr ? corr.tooltipLines : []), ...extras.tooltipLines].join("\n"),
+    };
+  }
+  if (corr) {
+    return {
+      html: verbChip + corr.html,
+      tooltip: [span.name ?? "", ...corr.tooltipLines].join("\n"),
     };
   }
   return null;
+}
+
+/** Build the corrective-retrieval chip from a tool span's `attributes.corrective`.
+ *  Returns null when the attribute is absent or malformed. Chip text is the
+ *  final verdict's symbol + retry count (e.g. `⟲1 ✓`); color reflects whether
+ *  the corrective pass left the result set usable. */
+function correctiveChipFromAttrs(raw: unknown): { html: string; tooltipLines: string[] } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as { retries?: unknown; finalVerdict?: unknown; verdicts?: unknown; queriesTried?: unknown };
+  const finalVerdict = typeof c.finalVerdict === "string" ? c.finalVerdict : undefined;
+  const verdicts = Array.isArray(c.verdicts) ? c.verdicts.map(String) : [];
+  if (!finalVerdict && verdicts.length === 0) return null;
+  const retries = typeof c.retries === "number" ? c.retries : 0;
+  const queries = Array.isArray(c.queriesTried) ? c.queriesTried.map(String) : [];
+
+  const cls =
+    finalVerdict === "correct" ? "wf-corrective wf-corrective-ok"
+      : finalVerdict === "ambiguous" ? "wf-corrective wf-corrective-warn"
+        : "wf-corrective wf-corrective-bad";
+  const sym = finalVerdict === "correct" ? "✓" : finalVerdict === "ambiguous" ? "≈" : "✗";
+  const text = retries > 0 ? `⟲${retries} ${sym}` : `grade ${sym}`;
+  const tip = `corrective retrieval: ${verdicts.join(" → ") || finalVerdict}` +
+    (queries.length ? `; re-queried: ${queries.map((q) => `"${q}"`).join(", ")}` : "; no re-query");
+  return {
+    html: `<span class="wf-chip ${cls}" title="${escAttr(tip)}">${escHtml(text)}</span>`,
+    tooltipLines: [tip],
+  };
 }
 
 interface ToolLabelExtras { chips: string; tooltipLines: string[]; }

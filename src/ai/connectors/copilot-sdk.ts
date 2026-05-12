@@ -1,17 +1,20 @@
-import { CopilotClient, approveAll, type SessionEvent, type CustomAgentConfig } from "@github/copilot-sdk";
+import { CopilotClient, approveAll, type SessionEvent, type SessionConfig, type CustomAgentConfig, type ToolResultObject } from "@github/copilot-sdk";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
 import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
-import { processMcpToolResult } from "../huginn-trace-pointer.ts";
-import type { ToolCall } from "../../types.ts";
+import { processMcpToolResult, peelTraceMarkerForRewrite } from "../huginn-trace-pointer.ts";
+import type { CorrectiveToolMeta, ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
+import { isKnowledgeSearchTool } from "../tool-status.ts";
+import { resolveCorrectiveConfig } from "../corrective-config.ts";
+import { runCorrectiveRetrieval, type CorrectiveMetadata, type CorrectiveRetrievalContext } from "../corrective-retrieval.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
@@ -80,6 +83,43 @@ export async function executePrompt(
   // Build custom subagents (e.g. verify-code for grep/diff verification)
   const customAgents = buildCustomAgents(botConfig);
 
+  // Corrective retrieval (CRAG-lite): when enabled for this bot, an onPostToolUse
+  // hook grades each knowledge-search result with Haiku and, if it's weak, does a
+  // bounded re-query — splicing the fresh hits into the result before the model
+  // sees it. Off by default (see src/ai/corrective-config.ts); when off, the hook
+  // isn't registered at all and behaviour is byte-identical to before.
+  const correctiveCfg = resolveCorrectiveConfig(botConfig);
+  const correctiveOutcomes: CorrectiveMetadata[] = [];
+  const correctiveEnabled = correctiveCfg.enabled && hasMcp;
+  const userQuestion = correctiveEnabled ? extractUserQuestion(prompt) : "";
+  const correctiveHooks: SessionConfig["hooks"] | undefined = correctiveEnabled
+    ? {
+        onPostToolUse: async (input) => {
+          if (!isKnowledgeSearchTool(input.toolName)) return;
+          try {
+            const result = await applyCorrectiveRetrieval({
+              toolName: input.toolName,
+              toolArgs: input.toolArgs,
+              toolResult: input.toolResult,
+              botConfig,
+              budget: correctiveCfg.retryBudget,
+              userQuestion,
+            });
+            if (result) {
+              correctiveOutcomes.push(result.metadata);
+              if (result.modifiedResult) return { modifiedResult: result.modifiedResult };
+            }
+          } catch (e) {
+            log.warn("Corrective retrieval hook failed: {error}", {
+              botName: botConfig.name,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+          return;
+        },
+      }
+    : undefined;
+
   // Create session per request (system prompt is dynamic — memories, goals, history change per message)
   const session = await cl.createSession({
     model,
@@ -92,6 +132,7 @@ export async function executePrompt(
     ...(hasMcp ? { mcpServers } : {}),
     ...(customAgents.length > 0 ? { customAgents } : {}),
     ...(botConfig.excludedTools?.length ? { excludedTools: botConfig.excludedTools } : {}),
+    ...(correctiveHooks ? { hooks: correctiveHooks } : {}),
   });
 
   // Track tool calls for waterfall
@@ -259,6 +300,11 @@ export async function executePrompt(
     const wallClockMs = performance.now() - wallStart;
     const content = response?.data?.content ?? "";
 
+    // Attach corrective-retrieval metadata to the matching knowledge-search tool
+    // calls so the traces waterfall can synthesize knowledge_grade / knowledge_requery
+    // spans (onPostToolUse gives no toolCallId, so this matches by tool order).
+    if (correctiveOutcomes.length > 0) attachCorrectiveOutcomes(toolCalls, correctiveOutcomes);
+
     return {
       result: content,
       costUsd: 0, // Copilot SDK doesn't report cost (subscription model)
@@ -331,4 +377,110 @@ function abbreviateInput(args: unknown): string | undefined {
   if (args == null) return undefined;
   const json = JSON.stringify(args);
   return json.length > 500 ? json.slice(0, 500) + "…" : json;
+}
+
+// ── Corrective retrieval (CRAG-lite) helpers ───────────────────────────────
+
+export interface ApplyCorrectiveArgs {
+  toolName: string;
+  toolArgs: unknown;
+  toolResult: ToolResultObject;
+  botConfig: Pick<BotConfig, "name" | "dir">;
+  budget: number;
+  userQuestion: string;
+  /** Injectable for tests — forwarded to {@link runCorrectiveRetrieval}. */
+  searchFn?: CorrectiveRetrievalContext["searchFn"];
+  gradeFn?: CorrectiveRetrievalContext["gradeFn"];
+}
+
+/**
+ * Run the corrective grade-and-requery pass on a knowledge-search tool result.
+ * Returns `null` when there's nothing to act on (empty result, tool error);
+ * otherwise always returns the `metadata` (for tracing) and, when results were
+ * merged in, a `modifiedResult` to hand back to the model. The trailing Huginn
+ * trace marker, if any, is peeled off the body before splicing and re-appended
+ * after, so downstream trace extraction is unaffected.
+ */
+export async function applyCorrectiveRetrieval(
+  args: ApplyCorrectiveArgs,
+): Promise<{ modifiedResult?: ToolResultObject; metadata: CorrectiveMetadata } | null> {
+  const { toolResult, toolArgs, botConfig, budget, userQuestion } = args;
+  const originalText = toolResult?.textResultForLlm;
+  if (typeof originalText !== "string" || originalText.length === 0) return null;
+  // Tool errors (server down, bad collection) carry an `error` field — don't
+  // grade those; the model handles the error itself.
+  if (toolResult.resultType && toolResult.resultType !== "success") return null;
+
+  const { body, remainder } = peelTraceMarkerForRewrite(originalText);
+
+  const argObj = toolArgs && typeof toolArgs === "object" ? (toolArgs as Record<string, unknown>) : {};
+  const originalQuery = typeof argObj.query === "string" ? argObj.query.trim() : "";
+  const originalCollections = normalizeCollections(argObj.collection);
+
+  const outcome = await runCorrectiveRetrieval({
+    question: userQuestion || originalQuery,
+    originalQuery,
+    originalCollections,
+    originalResultText: body,
+    budget,
+    botName: botConfig.name,
+    cwd: botConfig.dir,
+    log,
+    graderTimeoutMs: 30_000,
+    searchFn: args.searchFn,
+    gradeFn: args.gradeFn,
+  });
+
+  if (!outcome.changed) return { metadata: outcome.metadata };
+
+  return {
+    metadata: outcome.metadata,
+    modifiedResult: { ...toolResult, textResultForLlm: outcome.text + remainder },
+  };
+}
+
+function normalizeCollections(v: unknown): string[] | undefined {
+  if (typeof v === "string" && v.trim()) return [v.trim()];
+  if (Array.isArray(v)) {
+    const arr = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+    return arr.length > 0 ? arr : undefined;
+  }
+  return undefined;
+}
+
+/** Pull the current user turn out of the assembled prompt for grading. The
+ *  prompt-builder puts history in a `<conversation_history>` block followed by
+ *  the current message, so everything after the last close tag is the turn.
+ *  Capped so the grader prompt stays cheap. */
+export function extractUserQuestion(prompt: string): string {
+  const closeTag = "</conversation_history>";
+  const idx = prompt.lastIndexOf(closeTag);
+  const tail = idx !== -1 ? prompt.slice(idx + closeTag.length) : prompt;
+  const trimmed = tail.trim();
+  return trimmed.length > 1500 ? trimmed.slice(-1500).trim() : trimmed;
+}
+
+/** Attach corrective outcomes to the knowledge-search tool calls in order
+ *  (onPostToolUse exposes no toolCallId, so the i-th outcome maps to the i-th
+ *  knowledge-search tool call). */
+export function attachCorrectiveOutcomes(toolCalls: ToolCall[], outcomes: CorrectiveMetadata[]): void {
+  let i = 0;
+  for (const tc of toolCalls) {
+    if (i >= outcomes.length) break;
+    if (!isKnowledgeSearchTool(tc.name)) continue;
+    tc.corrective = correctiveMetaToToolMeta(outcomes[i++]!);
+  }
+}
+
+function correctiveMetaToToolMeta(m: CorrectiveMetadata): CorrectiveToolMeta {
+  return {
+    retries: m.retries,
+    verdicts: m.verdicts,
+    reasons: m.reasons,
+    queriesTried: m.queriesTried,
+    collectionsTried: m.collectionsTried.map((c) => c ?? null),
+    finalVerdict: m.finalVerdict,
+    graderMs: m.graderMs,
+    requeryMs: m.requeryMs,
+  };
 }
