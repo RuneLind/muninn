@@ -15,6 +15,16 @@ export function tracesWaterfallStyles(): string {
       margin: 8px 0 16px;
     }
     .waterfall-container.visible { display: block; }
+    /* When docked under a clicked row (see traces-waterfall-browser.ts) the
+       panel lives inside a full-width <td>. Strip the trace-table cell
+       defaults so it lays out the same as it does at the top of the page. */
+    .trace-table td.waterfall-host-cell {
+      padding: 0;
+      border-bottom: none;
+      white-space: normal;
+    }
+    #waterfallHostRow,
+    #waterfallHostRow:hover { background: transparent; cursor: default; }
     .waterfall-header {
       display: flex;
       justify-content: space-between;

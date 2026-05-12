@@ -126,6 +126,12 @@ export function tracesListScript(): string {
 
     function renderTraceList(traces) {
       const tbody = document.getElementById('traceList');
+      // The waterfall panel may currently be docked inside a row we're about
+      // to replace — park it back on .content first so this innerHTML reset
+      // doesn't take it down with the old rows. refreshWaterfallPlacement()
+      // re-docks it under the re-rendered row afterwards.
+      if (typeof parkWaterfallAtTop === 'function') parkWaterfallAtTop();
+
       if (traces.length === 0) {
         const colspan = document.querySelectorAll('.trace-table thead th').length;
         tbody.innerHTML = '<tr><td colspan="' + colspan + '" class="empty">No traces found</td></tr>';
@@ -150,6 +156,7 @@ export function tracesListScript(): string {
           '<td class="tokens">' + tokens + '</td>' +
           '</tr>';
       }).join('');
+      if (typeof refreshWaterfallPlacement === 'function') refreshWaterfallPlacement();
     }
   `;
 }
