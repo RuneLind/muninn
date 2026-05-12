@@ -130,10 +130,7 @@ export function tracesListScript(): string {
       // to replace — park it back on .content first so this innerHTML reset
       // doesn't take it down with the old rows. refreshWaterfallPlacement()
       // re-docks it under the re-rendered row afterwards.
-      const content = document.querySelector('.content');
-      const wf = document.getElementById('waterfallContainer');
-      if (wf && content && wf.parentElement !== content) content.insertBefore(wf, content.firstChild);
-      document.getElementById('waterfallHostRow')?.remove();
+      if (typeof parkWaterfallAtTop === 'function') parkWaterfallAtTop();
 
       if (traces.length === 0) {
         const colspan = document.querySelectorAll('.trace-table thead th').length;

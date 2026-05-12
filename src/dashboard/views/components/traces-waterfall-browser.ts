@@ -9,10 +9,11 @@
  *    because `traces-prompt-modal.ts` reads them as bare identifiers from the
  *    surrounding inline-script global scope.
  *  - Exposes the click handlers (`loadWaterfall`, `closeWaterfall`,
- *    `closeSpanDetails`) plus `refreshWaterfallPlacement` on `globalThis` so
- *    HTML inline `onclick=` attrs and `traces-list.ts` (which calls
- *    `loadWaterfall(traceId)` from row clicks and re-docks the panel after it
- *    re-renders the table body) can reach them by bare name.
+ *    `closeSpanDetails`) plus `parkWaterfallAtTop` / `refreshWaterfallPlacement`
+ *    on `globalThis` so HTML inline `onclick=` attrs and `traces-list.ts`
+ *    (which calls `loadWaterfall(traceId)` from row clicks, then parks the
+ *    panel before re-rendering the table body and re-docks it after) can reach
+ *    them by bare name.
  *
  * `renderToolDetail` and `__tdrState` are read off `globalThis` because their
  * source (`tool-detail-renderers.ts`) is still a JS-string component.
@@ -49,6 +50,7 @@ interface WaterfallGlobals {
   loadWaterfall: (traceId: string) => Promise<void>;
   closeWaterfall: () => void;
   closeSpanDetails: () => void;
+  parkWaterfallAtTop: () => void;
   refreshWaterfallPlacement: () => void;
   renderToolDetail?: (span: WaterfallSpan) => string;
   __tdrState?: { showRaw: boolean; showResponse: boolean; attrs: unknown };
@@ -389,4 +391,5 @@ document.addEventListener("keydown", (e) => {
 g.loadWaterfall = loadWaterfall;
 g.closeWaterfall = closeWaterfall;
 g.closeSpanDetails = closeSpanDetails;
+g.parkWaterfallAtTop = parkWaterfallAtTop;
 g.refreshWaterfallPlacement = refreshWaterfallPlacement;
