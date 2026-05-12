@@ -3,20 +3,22 @@ import { extractJson } from "./json-extract.ts";
 import type { Logger } from "@logtape/logtape";
 
 /**
- * CRAG-style retrieval evaluator for the knowledge search tool. Given the
- * user's question and the (rendered) search results — which carry per-result
- * `confidenceBand` annotations and a `*No confident match — try: …*` footer
- * from Huginn's MCP adapter — a dedicated Haiku call decides whether the
- * results are good enough to answer from, and if not, proposes a sharper
- * query and/or a better collection.
+ * Retrieval-quality judges for the knowledge search tool, used by the
+ * corrective-retrieval loop (see corrective-retrieval.ts):
  *
- * This is an **awaiting** Haiku call (it gates whether a corrective re-query
- * happens), so it uses {@link spawnHaiku} directly rather than the
- * fire-and-forget {@link runHaikuExtraction} pattern.
+ *   - {@link gradeFromSignal} — the **default**: no model call. Just reads the
+ *     cheap signal Huginn already emits (a `*Weak match …*` / `*No confident
+ *     match …*` footer, or a "No results found" body) and returns `insufficient`
+ *     when the search itself was unsure, `correct` otherwise. The re-query, when
+ *     one happens, uses Huginn's own `retryHints` (parsed from that footer).
+ *   - {@link gradeKnowledgeResults} — opt-in (`correctiveRetrieval.grader:
+ *     "haiku"`): a slimmed **awaiting** Haiku call that also reads the result
+ *     snippets and can propose a semantic rewrite / a better collection. Costs
+ *     ~3–5s per search, so it's not the default.
  *
- * Fail-soft: any Haiku error or unparseable output yields `verdict: "correct"`
- * — the corrective loop becomes a no-op and the model sees the original result
- * unchanged. The corrective feature must never make a search *worse*.
+ * Both are fail-soft: a Haiku error or unparseable output → `verdict: "correct"`
+ * (the corrective loop becomes a no-op and the model sees the original result
+ * unchanged). The corrective feature must never make a search *worse*.
  *
  * Plan: `../mimir/plans/huginn-muninn-corrective-rag.md` (Phase 1).
  */
@@ -25,25 +27,52 @@ export type GradeVerdict = "correct" | "ambiguous" | "insufficient";
 
 export interface KnowledgeGrade {
   verdict: GradeVerdict;
-  /** A single search string (not a question) to re-query with. Present only
-   *  when verdict is "ambiguous" or "insufficient" and the grader had a better
-   *  query to offer. */
+  /** A single search string (not a question) to re-query with. Present only in
+   *  Haiku mode when the grader had a better query to offer; signal mode never
+   *  sets it (the re-query query comes from Huginn's `retryHints` instead). */
   rewrittenQuery?: string;
   /** A collection name to try instead — only when the results hint another
-   *  collection is the right home. Never invented. */
+   *  collection is the right home. Never invented. Haiku mode only. */
   suggestedCollection?: string;
   /** One short sentence explaining the verdict. */
   reason: string;
 }
 
+// ── Signal grader (default — no model call) ────────────────────────────────
+
+/** Matches the `*Weak match …*` / `*No confident match …*` footer Huginn's MCP
+ *  adapter appends when `bestScore` is below its weak-result threshold or the
+ *  result list is empty. */
+const WEAK_FOOTER_RE = /(^|\n)\s*\*(?:No confident match|Weak match)\b/;
+const NO_RESULTS_RE = /(^|\n)No results found for /;
+
+/**
+ * Judge a search result purely from Huginn's emitted signal — no LLM. Returns
+ * `insufficient` (no rewritten query — the corrective loop will fall back to
+ * the `retryHints.broaderQuery` / `narrowerQuery` parsed from the footer) when
+ * Huginn flagged the result weak/empty, `correct` otherwise.
+ */
+export function gradeFromSignal(resultText: string): KnowledgeGrade {
+  const text = resultText ?? "";
+  if (NO_RESULTS_RE.test(text)) {
+    return { verdict: "insufficient", reason: "search returned no results" };
+  }
+  if (WEAK_FOOTER_RE.test(text)) {
+    return { verdict: "insufficient", reason: "Huginn flagged the result as low confidence" };
+  }
+  return { verdict: "correct", reason: "no low-confidence signal from the search" };
+}
+
+// ── Haiku grader (opt-in) ──────────────────────────────────────────────────
+
 export interface GradeKnowledgeOptions {
   question: string;
   /** The rendered search-result text the model would see (trace markers
-   *  already peeled). */
+   *  already peeled). Digested down to the top hits before being sent to Haiku. */
   toolResultText: string;
   botName: string;
   /** Working directory for the Haiku spawn — keeps the session out of the
-   *  project root and gives it the bot's MCP/settings context. */
+   *  project root. */
   cwd?: string;
   log: Logger;
   /** Haiku model override (defaults to the project's standard Haiku model). */
@@ -53,16 +82,15 @@ export interface GradeKnowledgeOptions {
   spawnFn?: typeof spawnHaiku;
 }
 
-/** Cap the result text fed into the grader prompt — keeps the Haiku call cheap
- *  and well under its context window. The trailing footer (retry hints) lives
- *  at the end of the text, so prefer keeping the head + tail. */
-const MAX_RESULT_CHARS = 12_000;
+/** Cap the (already-digested) result text fed into the grader prompt. Kept
+ *  small so the Haiku call stays in the ~3–5s range rather than ~10s+. */
+const MAX_GRADER_INPUT_CHARS = 4_000;
 
 export async function gradeKnowledgeResults(opts: GradeKnowledgeOptions): Promise<KnowledgeGrade> {
   const { question, botName, cwd, log } = opts;
-  const resultText = clampResultText(opts.toolResultText);
+  const digest = digestResultsForGrading(opts.toolResultText);
 
-  const prompt = buildGraderPrompt(question, resultText);
+  const prompt = buildGraderPrompt(question, digest);
 
   const spawn = opts.spawnFn ?? spawnHaiku;
   let raw: string;
@@ -121,21 +149,60 @@ export function normalizeGrade(parsed: Record<string, unknown>): KnowledgeGrade 
   return grade;
 }
 
-function clampResultText(text: string): string {
-  if (text.length <= MAX_RESULT_CHARS) return text;
-  const head = Math.floor(MAX_RESULT_CHARS * 0.7);
-  const tail = MAX_RESULT_CHARS - head;
-  return `${text.slice(0, head)}\n…[${text.length - MAX_RESULT_CHARS} chars omitted]…\n${text.slice(-tail)}`;
+/**
+ * Reduce a full rendered result text to a compact digest for the Haiku grader:
+ * the top result blocks (header line with title + confidence band, the
+ * breadcrumb/url line, and a short prefix of the body) plus the trailing
+ * weak-match footer if present. Keeps the prompt small without dropping the
+ * signal the grader needs (titles + bands + a taste of each hit + whether the
+ * search flagged itself unsure).
+ */
+export function digestResultsForGrading(text: string): string {
+  const src = (text ?? "").trim();
+  if (!src) return "";
+
+  // Pull off the trailing weak-match footer (a single `*…*` line at the end)
+  // so it's never lost to truncation.
+  let footer = "";
+  const footerMatch = src.match(/\n\s*(\*(?:No confident match|Weak match)[^\n]*\*)\s*$/);
+  const body = footerMatch ? src.slice(0, footerMatch.index).trimEnd() : src;
+  if (footerMatch) footer = footerMatch[1]!;
+
+  // Split into result blocks at `## ` headers (the MCP adapter's full-mode
+  // format). If there are no `## ` headers (brief mode uses `1. **Title**`),
+  // just take the head of the body.
+  const blocks = body.split(/\n(?=## )/);
+  const digestedBlocks: string[] = [];
+  let used = 0;
+  for (const block of blocks) {
+    if (used >= MAX_GRADER_INPUT_CHARS) break;
+    const lines = block.split("\n");
+    // Header + the next couple of lines (url / breadcrumb / collection), then a
+    // short prefix of whatever follows.
+    const headLines = lines.slice(0, 4).join("\n");
+    const rest = lines.slice(4).join("\n").replace(/\n{2,}/g, "\n").trim();
+    const restPrefix = rest.length > 240 ? rest.slice(0, 240) + "…" : rest;
+    const piece = restPrefix ? `${headLines}\n${restPrefix}` : headLines;
+    digestedBlocks.push(piece);
+    used += piece.length;
+  }
+
+  let out = digestedBlocks.join("\n\n");
+  if (out.length > MAX_GRADER_INPUT_CHARS) {
+    out = out.slice(0, MAX_GRADER_INPUT_CHARS) + "\n…[truncated]…";
+  }
+  if (footer) out = `${out}\n\n${footer}`;
+  return out;
 }
 
-function buildGraderPrompt(question: string, resultText: string): string {
+function buildGraderPrompt(question: string, resultDigest: string): string {
   return `You grade the quality of knowledge-base search results before an assistant answers from them.
 
 USER QUESTION:
 ${question}
 
-SEARCH RESULTS (each hit is annotated with a confidence band — high / medium / low; a trailing "No confident match" or "Weak match" line, if present, means the search itself was unsure):
-${resultText || "(no results were returned)"}
+SEARCH RESULTS (top hits — each annotated with a confidence band: high / medium / low; a trailing "No confident match" or "Weak match" line, if present, means the search itself was unsure):
+${resultDigest || "(no results were returned)"}
 
 Decide whether these results let the question be answered well, then respond with ONLY a JSON object — no prose, no markdown fence:
 {"verdict":"correct"|"ambiguous"|"insufficient","rewrittenQuery":"...","suggestedCollection":"...","reason":"..."}

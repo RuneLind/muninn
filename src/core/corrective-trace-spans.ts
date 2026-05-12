@@ -44,7 +44,7 @@ export function planCorrectiveSpans(
     durationMs: graderMs,
     startOffsetMs: cursor,
     attributes: {
-      model: "haiku",
+      mode: corrective.graderMode ?? "signal",
       passes: corrective.verdicts.length,
       verdicts: corrective.verdicts,
       finalVerdict: corrective.finalVerdict,

@@ -237,6 +237,19 @@ export function renderRetryHintsFooter(resp: Pick<KnowledgeSearchResponse, "retr
   return bits.length > 0 ? `\n\n*${prefix} — try: ${bits.join(" · ")}*` : `\n\n*${prefix}.*`;
 }
 
+/** A trailing `*Weak match …*` / `*No confident match …*` retry-hints footer
+ *  (Huginn's MCP adapter appends one; {@link renderRetryHintsFooter} produces
+ *  the same shape). */
+const TRAILING_RETRY_FOOTER_RE = /\n+\s*\*(?:No confident match|Weak match)[^\n]*\*\s*$/;
+
+/** Strip a trailing retry-hints footer from a rendered result text. Used when
+ *  splicing a corrective re-query in: the original "try X" footer is obsolete
+ *  once X has been tried, and leaving it would also confuse the next signal-mode
+ *  grade pass into re-detecting the *already-handled* weak signal. */
+export function stripTrailingRetryFooter(text: string): string {
+  return text.replace(TRAILING_RETRY_FOOTER_RE, "");
+}
+
 const DOC_ID_LINE_RE = /collection:\s*`([^`]+)`\s+doc_id:\s*`([^`]+)`/g;
 
 /** Extract `collection/doc_id` keys from rendered search-result text — used to

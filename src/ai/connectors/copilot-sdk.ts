@@ -84,10 +84,12 @@ export async function executePrompt(
   const customAgents = buildCustomAgents(botConfig);
 
   // Corrective retrieval (CRAG-lite): when enabled for this bot, an onPostToolUse
-  // hook grades each knowledge-search result with Haiku and, if it's weak, does a
-  // bounded re-query — splicing the fresh hits into the result before the model
-  // sees it. Off by default (see src/ai/corrective-config.ts); when off, the hook
-  // isn't registered at all and behaviour is byte-identical to before.
+  // hook judges each knowledge-search result and, if it's weak, does a bounded
+  // re-query — splicing the fresh hits into the result before the model sees it.
+  // Default judge is `"signal"` (no model call — re-query only when Huginn
+  // already flags the result weak, using Huginn's `retryHints`); `"haiku"` is
+  // an opt-in slower/smarter alternative. Off by default (see corrective-config.ts);
+  // when off, the hook isn't registered and behaviour is byte-identical to before.
   const correctiveCfg = resolveCorrectiveConfig(botConfig);
   const correctiveOutcomes: CorrectiveMetadata[] = [];
   const correctiveEnabled = correctiveCfg.enabled && hasMcp;
@@ -103,6 +105,7 @@ export async function executePrompt(
               toolResult: input.toolResult,
               botConfig,
               budget: correctiveCfg.retryBudget,
+              grader: correctiveCfg.grader,
               userQuestion,
             });
             if (result) {
@@ -387,6 +390,7 @@ export interface ApplyCorrectiveArgs {
   toolResult: ToolResultObject;
   botConfig: Pick<BotConfig, "name" | "dir">;
   budget: number;
+  grader?: CorrectiveRetrievalContext["grader"];
   userQuestion: string;
   /** Injectable for tests — forwarded to {@link runCorrectiveRetrieval}. */
   searchFn?: CorrectiveRetrievalContext["searchFn"];
@@ -395,11 +399,12 @@ export interface ApplyCorrectiveArgs {
 
 /**
  * Run the corrective grade-and-requery pass on a knowledge-search tool result.
- * Returns `null` when there's nothing to act on (empty result, tool error);
- * otherwise always returns the `metadata` (for tracing) and, when results were
- * merged in, a `modifiedResult` to hand back to the model. The trailing Huginn
- * trace marker, if any, is peeled off the body before splicing and re-appended
- * after, so downstream trace extraction is unaffected.
+ * Returns `null` when there's nothing to act on (empty result, tool error, or a
+ * fully uneventful signal-mode check — judged confident, no re-query — which
+ * isn't worth a trace span); otherwise returns the `metadata` (for tracing) and,
+ * when results were merged in, a `modifiedResult` to hand back to the model. The
+ * trailing Huginn trace marker, if any, is peeled off the body before splicing
+ * and re-appended after, so downstream trace extraction is unaffected.
  */
 export async function applyCorrectiveRetrieval(
   args: ApplyCorrectiveArgs,
@@ -423,6 +428,7 @@ export async function applyCorrectiveRetrieval(
     originalCollections,
     originalResultText: body,
     budget,
+    grader: args.grader,
     botName: botConfig.name,
     cwd: botConfig.dir,
     log,
@@ -431,7 +437,14 @@ export async function applyCorrectiveRetrieval(
     gradeFn: args.gradeFn,
   });
 
-  if (!outcome.changed) return { metadata: outcome.metadata };
+  if (!outcome.changed) {
+    // A signal-mode check that found nothing wrong is a free no-op — don't
+    // clutter the trace with a span for every confident search. A Haiku-mode
+    // check, or any pass that graded something non-"correct", is worth recording.
+    const uneventful =
+      outcome.metadata.graderMode === "signal" && outcome.metadata.verdicts.every((v) => v === "correct");
+    return uneventful ? null : { metadata: outcome.metadata };
+  }
 
   return {
     metadata: outcome.metadata,
@@ -480,6 +493,7 @@ function correctiveMetaToToolMeta(m: CorrectiveMetadata): CorrectiveToolMeta {
     queriesTried: m.queriesTried,
     collectionsTried: m.collectionsTried.map((c) => c ?? null),
     finalVerdict: m.finalVerdict,
+    graderMode: m.graderMode,
     graderMs: m.graderMs,
     requeryMs: m.requeryMs,
   };

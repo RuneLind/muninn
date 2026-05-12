@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveCorrectiveConfig, clampBudget } from "./corrective-config.ts";
+import { resolveCorrectiveConfig, clampBudget, normalizeGraderMode } from "./corrective-config.ts";
 
 describe("clampBudget", () => {
   test("clamps to the 1–2 range and floors", () => {
@@ -12,37 +12,56 @@ describe("clampBudget", () => {
   });
 });
 
+describe("normalizeGraderMode", () => {
+  test("only 'haiku' opts into the model grader; everything else is 'signal'", () => {
+    expect(normalizeGraderMode("haiku")).toBe("haiku");
+    expect(normalizeGraderMode("signal")).toBe("signal");
+    expect(normalizeGraderMode(undefined)).toBe("signal");
+    expect(normalizeGraderMode("nonsense")).toBe("signal");
+  });
+});
+
 describe("resolveCorrectiveConfig", () => {
-  test("off by default when nothing is configured", () => {
-    expect(resolveCorrectiveConfig({}, {})).toEqual({ enabled: false, retryBudget: 1 });
+  test("off, budget 1, signal grader by default", () => {
+    expect(resolveCorrectiveConfig({}, {})).toEqual({ enabled: false, retryBudget: 1, grader: "signal" });
   });
 
-  test("per-bot config enables it and clamps the budget", () => {
-    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: true, retryBudget: 9 } }, {})).toEqual({
+  test("per-bot config enables it, clamps the budget, and selects the grader", () => {
+    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: true, retryBudget: 9, grader: "haiku" } }, {})).toEqual({
       enabled: true,
       retryBudget: 2,
+      grader: "haiku",
     });
   });
 
-  test("global env default enables it when the bot doesn't say otherwise", () => {
-    const env = { CORRECTIVE_RETRIEVAL_ENABLED: "true", CORRECTIVE_RETRIEVAL_BUDGET: "2" };
-    expect(resolveCorrectiveConfig({}, env)).toEqual({ enabled: true, retryBudget: 2 });
+  test("global env defaults apply when the bot doesn't say otherwise", () => {
+    const env = { CORRECTIVE_RETRIEVAL_ENABLED: "true", CORRECTIVE_RETRIEVAL_BUDGET: "2", CORRECTIVE_RETRIEVAL_GRADER: "haiku" };
+    expect(resolveCorrectiveConfig({}, env)).toEqual({ enabled: true, retryBudget: 2, grader: "haiku" });
   });
 
   test("per-bot config overrides the global default (disable wins too)", () => {
-    const env = { CORRECTIVE_RETRIEVAL_ENABLED: "true" };
-    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: false } }, env).enabled).toBe(false);
+    const env = { CORRECTIVE_RETRIEVAL_ENABLED: "true", CORRECTIVE_RETRIEVAL_GRADER: "haiku" };
+    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: false, grader: "signal" } }, env)).toEqual({
+      enabled: false,
+      retryBudget: 1,
+      grader: "signal",
+    });
   });
 
   test("kill-switch overrides everything", () => {
     const env = { CORRECTIVE_RETRIEVAL_DISABLED: "1", CORRECTIVE_RETRIEVAL_ENABLED: "true" };
-    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: true, retryBudget: 2 } }, env)).toEqual({
+    expect(resolveCorrectiveConfig({ correctiveRetrieval: { enabled: true, retryBudget: 2, grader: "haiku" } }, env)).toEqual({
       enabled: false,
       retryBudget: 1,
+      grader: "signal",
     });
   });
 
-  test("a bare global enable defaults the budget to 1", () => {
-    expect(resolveCorrectiveConfig({}, { CORRECTIVE_RETRIEVAL_ENABLED: "true" })).toEqual({ enabled: true, retryBudget: 1 });
+  test("a bare global enable defaults the budget to 1 and the grader to signal", () => {
+    expect(resolveCorrectiveConfig({}, { CORRECTIVE_RETRIEVAL_ENABLED: "true" })).toEqual({
+      enabled: true,
+      retryBudget: 1,
+      grader: "signal",
+    });
   });
 });

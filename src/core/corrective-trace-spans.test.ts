@@ -11,18 +11,19 @@ describe("planCorrectiveSpans", () => {
   test("one knowledge_grade span when graded but not re-queried", () => {
     const corr: CorrectiveToolMeta = {
       retries: 0,
-      verdicts: ["correct"],
-      reasons: ["covered"],
+      verdicts: ["insufficient"],
+      reasons: ["Huginn flagged the result as low confidence"],
       queriesTried: [],
-      finalVerdict: "correct",
-      graderMs: 1200,
+      finalVerdict: "insufficient",
+      graderMode: "signal",
+      graderMs: 0,
     };
     const spans = planCorrectiveSpans(corr, 200);
     expect(spans.map((s) => s.name)).toEqual(["knowledge_grade"]);
     expect(spans[0]!.startOffsetMs).toBe(200);
-    expect(spans[0]!.durationMs).toBe(1200);
-    expect(spans[0]!.attributes.model).toBe("haiku");
-    expect(spans[0]!.attributes.finalVerdict).toBe("correct");
+    expect(spans[0]!.durationMs).toBe(1); // 1ms floor — signal mode has ~0 grader time
+    expect(spans[0]!.attributes.mode).toBe("signal");
+    expect(spans[0]!.attributes.finalVerdict).toBe("insufficient");
     expect(spans[0]!.attributes.passes).toBe(1);
   });
 
@@ -34,6 +35,7 @@ describe("planCorrectiveSpans", () => {
       queriesTried: ["q1", "q2"],
       collectionsTried: [null, ["confluence"]],
       finalVerdict: "correct",
+      graderMode: "haiku",
       graderMs: 900,
       requeryMs: [150, 220],
     };
@@ -41,6 +43,7 @@ describe("planCorrectiveSpans", () => {
     expect(spans.map((s) => s.name)).toEqual(["knowledge_grade", "knowledge_requery", "knowledge_requery"]);
     // grade [300, 1200), requery#1 [1200, 1350), requery#2 [1350, 1570)
     expect(spans[0]!.startOffsetMs).toBe(300);
+    expect(spans[0]!.attributes.mode).toBe("haiku");
     expect(spans[1]!.startOffsetMs).toBe(1200);
     expect(spans[1]!.durationMs).toBe(150);
     expect(spans[1]!.attributes.query).toBe("q1");
@@ -53,7 +56,7 @@ describe("planCorrectiveSpans", () => {
 
   test("uses a 1ms floor when timings are missing", () => {
     const spans = planCorrectiveSpans(
-      { retries: 1, verdicts: ["insufficient", "correct"], reasons: ["x", "y"], queriesTried: ["q"], finalVerdict: "correct" },
+      { retries: 1, verdicts: ["insufficient", "correct"], reasons: ["x", "y"], queriesTried: ["q"], finalVerdict: "correct", graderMode: "signal" },
       0,
     );
     expect(spans[0]!.durationMs).toBe(1);

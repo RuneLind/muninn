@@ -87,6 +87,11 @@ export interface CorrectiveRetrievalBotConfig {
   enabled?: boolean;
   /** Max corrective re-queries per knowledge search. Clamped to 1–2. Default 1. */
   retryBudget?: number;
+  /** Result-quality judge: `"signal"` (default — no model call; re-query only
+   *  when Huginn already flags the result weak, using Huginn's `retryHints`) or
+   *  `"haiku"` (a slimmed awaiting Haiku call that can also propose a semantic
+   *  rewrite — ~3–5s per search, opt-in). */
+  grader?: "signal" | "haiku";
 }
 
 export interface BotPrompts {

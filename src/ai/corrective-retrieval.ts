@@ -1,11 +1,13 @@
 import type { Logger } from "@logtape/logtape";
-import { gradeKnowledgeResults, type GradeVerdict, type KnowledgeGrade } from "./knowledge-grader.ts";
+import { gradeKnowledgeResults, gradeFromSignal, type GradeVerdict, type KnowledgeGrade } from "./knowledge-grader.ts";
+import type { GraderMode } from "./corrective-config.ts";
 import {
   searchKnowledge,
   renderSearchResults,
   renderRetryHintsFooter,
   extractDocKeysFromRenderedText,
   parseQueryHintsFromFooter,
+  stripTrailingRetryFooter,
   docKey,
   type KnowledgeSearchResponse,
 } from "./knowledge-search-client.ts";
@@ -14,25 +16,27 @@ import {
  * CRAG-lite corrective loop around the knowledge search tool. After a bot's
  * `search_knowledge` call returns, this:
  *
- *   1. Grades the result with Haiku ({@link gradeKnowledgeResults}).
+ *   1. Grades the result — by default the **`"signal"`** grader (no model call:
+ *      reads Huginn's `*Weak match …*` / "No results" signal — {@link
+ *      gradeFromSignal}); optionally the **`"haiku"`** grader (a slimmed
+ *      awaiting Haiku call that also reads snippets and can propose a semantic
+ *      rewrite — {@link gradeKnowledgeResults}).
  *   2. If the verdict is "ambiguous" / "insufficient" and the retry budget
  *      isn't spent, re-queries Huginn's `/api/search` with the grader's
- *      rewritten query (falling back to the Phase-0 `retryHints.broaderQuery` /
- *      `narrowerQuery` parsed from the result footer), optionally redirected to
- *      a `suggestedCollection`, forcing `rerank=true` so the re-query's
- *      `confidenceBand`s are trustworthy.
- *   3. Merges the fresh hits into the original result text — deduped against
- *      it by `collection/doc_id` — with an inline note explaining the retry.
+ *      rewritten query (Haiku mode) or the Phase-0 `retryHints.broaderQuery` /
+ *      `narrowerQuery` parsed from the result footer (signal mode), optionally
+ *      redirected to a `suggestedCollection`, forcing `rerank=true` so the
+ *      re-query's `confidenceBand`s are trustworthy.
+ *   3. Merges the fresh hits into the original result text — deduped against it
+ *      by `collection/doc_id` — with an inline note explaining the retry.
  *   4. Optionally re-grades and retries again, up to the (clamped 1–2) budget;
  *      never recursive.
  *
  * Returns the consolidated text to feed the model plus a `corrective` metadata
- * block for tracing (`{retries, verdicts, reasons, queriesTried, finalVerdict}`).
- *
- * Fail-soft throughout: a grader that can't be reached returns "correct" (no
- * change); a re-query HTTP error ends the loop with whatever's accumulated. The
- * caller is expected to gate on the per-bot toggle — this function assumes the
- * feature is enabled and `budget >= 1`.
+ * block for tracing. Fail-soft throughout: a grader that can't be reached
+ * returns "correct" (no change); a re-query HTTP error ends the loop with
+ * whatever's accumulated. The caller gates on the per-bot toggle — this
+ * function assumes the feature is enabled and `budget >= 1`.
  *
  * Plan: `../mimir/plans/huginn-muninn-corrective-rag.md` (Phase 1).
  */
@@ -52,7 +56,9 @@ export interface CorrectiveMetadata {
   /** The verdict from the last grading pass — i.e. whether the corrective
    *  pass left the result set in good shape. */
   finalVerdict: GradeVerdict;
-  /** Total wall time spent in the Haiku grader across all passes, ms. */
+  /** Which grader judged the result(s). */
+  graderMode: GraderMode;
+  /** Total wall time spent in the grader across all passes, ms (≈0 in signal mode). */
   graderMs: number;
   /** Wall time of each re-query HTTP call, parallel to `queriesTried`, ms. */
   requeryMs: number[];
@@ -83,11 +89,13 @@ export interface CorrectiveRetrievalContext {
   /** Max re-queries. Clamped to [1, 2]. The caller gates on the per-bot
    *  toggle; this function only sees enabled invocations. */
   budget: number;
+  /** Which grader to use. `"signal"` (default) makes no model call. */
+  grader?: GraderMode;
   botName: string;
-  /** Working directory for the grader's Haiku spawn. */
+  /** Working directory for the grader's Haiku spawn (Haiku mode only). */
   cwd?: string;
   log: Logger;
-  /** Haiku model override for the grader. */
+  /** Haiku model override for the grader (Haiku mode only). */
   graderModel?: string;
   graderTimeoutMs?: number;
   /** Injectable for tests. */
@@ -97,8 +105,9 @@ export interface CorrectiveRetrievalContext {
 
 export async function runCorrectiveRetrieval(ctx: CorrectiveRetrievalContext): Promise<CorrectiveOutcome> {
   const budget = Math.max(1, Math.min(2, Math.floor(ctx.budget)));
+  const graderMode: GraderMode = ctx.grader ?? "signal";
   const search = ctx.searchFn ?? searchKnowledge;
-  const grade = ctx.gradeFn ?? gradeKnowledgeResults;
+  const haikuGrade = ctx.gradeFn ?? gradeKnowledgeResults;
   const { question, originalQuery, originalResultText, botName, cwd, log } = ctx;
 
   let currentText = originalResultText;
@@ -116,22 +125,26 @@ export async function runCorrectiveRetrieval(ctx: CorrectiveRetrievalContext): P
   for (;;) {
     let g: KnowledgeGrade;
     const gradeStart = performance.now();
-    try {
-      g = await grade({
-        question,
-        toolResultText: currentText,
-        botName,
-        cwd,
-        log,
-        model: ctx.graderModel,
-        timeoutMs: ctx.graderTimeoutMs,
-      });
-    } catch (err) {
-      log.warn("corrective: grader threw — stopping with current results: {error}", {
-        botName,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      g = { verdict: "correct", reason: "grader error" };
+    if (graderMode === "haiku") {
+      try {
+        g = await haikuGrade({
+          question,
+          toolResultText: currentText,
+          botName,
+          cwd,
+          log,
+          model: ctx.graderModel,
+          timeoutMs: ctx.graderTimeoutMs,
+        });
+      } catch (err) {
+        log.warn("corrective: grader threw — stopping with current results: {error}", {
+          botName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        g = { verdict: "correct", reason: "grader error" };
+      }
+    } else {
+      g = gradeFromSignal(currentText);
     }
     graderMs += performance.now() - gradeStart;
     verdicts.push(g.verdict);
@@ -186,7 +199,9 @@ export async function runCorrectiveRetrieval(ctx: CorrectiveRetrievalContext): P
       collections,
       freshCount: fresh.length,
     });
-    currentText = `${currentText}\n\n---\n${note}\n\n${renderSearchResults(fresh)}${renderRetryHintsFooter(resp)}`;
+    // Drop the now-obsolete "try X" footer from what we had, append the note +
+    // fresh hits + (the re-query's own footer, if it too came back weak).
+    currentText = `${stripTrailingRetryFooter(currentText).trimEnd()}\n\n---\n${note}\n\n${renderSearchResults(fresh)}${renderRetryHintsFooter(resp)}`;
     currentCollections = collections;
   }
 
@@ -200,6 +215,7 @@ export async function runCorrectiveRetrieval(ctx: CorrectiveRetrievalContext): P
       queriesTried,
       collectionsTried,
       finalVerdict: verdicts[verdicts.length - 1] ?? "correct",
+      graderMode,
       graderMs: Math.round(graderMs),
       requeryMs,
     },

@@ -95,7 +95,9 @@ export interface CorrectiveToolMeta {
   collectionsTried?: (string[] | null)[];
   /** Verdict from the final grading pass — whether the result set ended up usable. */
   finalVerdict: string;
-  /** Total Haiku grader wall time across all passes, ms. */
+  /** Which grader judged the result(s): `"signal"` (no model call) or `"haiku"`. */
+  graderMode?: string;
+  /** Total grader wall time across all passes, ms (≈0 in signal mode). */
   graderMs?: number;
   /** Wall time of each re-query HTTP call, parallel to `queriesTried`, ms. */
   requeryMs?: number[];

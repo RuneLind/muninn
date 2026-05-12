@@ -39,10 +39,14 @@ function searchSequence(...responses: KnowledgeSearchResponse[]) {
   return Object.assign(fn, { calls });
 }
 
+// Most of these exercise the grader-agnostic loop logic (retry / merge / dedupe
+// / budget), driven through the opt-in Haiku grader with an injected fake. The
+// "signal grader" describe block at the bottom covers the default (no-model) path.
 const baseCtx = {
   question: "what SEDs belong to LA_BUC_02?",
   originalQuery: "LA_BUC_02",
   botName: "test",
+  grader: "haiku" as const,
   log,
 };
 
@@ -221,5 +225,95 @@ describe("runCorrectiveRetrieval", () => {
     expect(out.changed).toBe(false);
     expect(out.metadata.retries).toBe(0);
     expect(search.calls.length).toBe(0);
+  });
+
+  test("records graderMode in the metadata", async () => {
+    const out = await runCorrectiveRetrieval({
+      ...baseCtx,
+      originalResultText: "## Original\ncollection: `wiki` doc_id: `1`",
+      budget: 1,
+      gradeFn: gradeSequence({ verdict: "correct", reason: "ok" }),
+      searchFn: searchSequence(searchResponse([result({ id: "1", collection: "wiki" })])),
+    });
+    expect(out.metadata.graderMode).toBe("haiku");
+  });
+});
+
+describe("runCorrectiveRetrieval — signal grader (default, no model call)", () => {
+  const signalCtx = {
+    question: "what about LA_BUC_02?",
+    originalQuery: "LA_BUC_02 obscure phrasing",
+    botName: "test",
+    log,
+    // grader omitted → defaults to "signal"
+  };
+
+  test("confident result (no weak footer) → no grade-driven re-query, gradeFn never consulted", async () => {
+    const search = searchSequence(searchResponse([result({ id: "z", collection: "wiki" })]));
+    let graded = false;
+    const out = await runCorrectiveRetrieval({
+      ...signalCtx,
+      originalResultText: renderSearchResults([result({ id: "1", collection: "wiki" })]),
+      budget: 1,
+      gradeFn: async () => { graded = true; return { verdict: "insufficient", reason: "x" }; },
+      searchFn: search,
+    });
+    expect(graded).toBe(false);
+    expect(out.changed).toBe(false);
+    expect(out.metadata.graderMode).toBe("signal");
+    expect(out.metadata.verdicts).toEqual(["correct"]);
+    expect(search.calls.length).toBe(0);
+  });
+
+  test("Huginn 'Weak match' footer → re-queries with the broaderQuery hint, merges", async () => {
+    const original =
+      renderSearchResults([result({ id: "1", collection: "wiki", title: "Marginal" })]) +
+      '\n\n*Weak match — try: broader query: "LA_BUC concepts"*';
+    const search = searchSequence(searchResponse([result({ id: "2", collection: "wiki", title: "Wider hit" })]));
+    const out = await runCorrectiveRetrieval({
+      ...signalCtx,
+      originalResultText: original,
+      budget: 1,
+      searchFn: search,
+    });
+    expect(search.calls[0]?.query).toBe("LA_BUC concepts");
+    expect(out.changed).toBe(true);
+    expect(out.text).toContain("Wider hit");
+    expect(out.text).not.toContain("Weak match — try"); // obsolete footer stripped on merge
+    expect(out.metadata.graderMode).toBe("signal");
+    expect(out.metadata.verdicts).toEqual(["insufficient", "correct"]);
+    expect(out.metadata.queriesTried).toEqual(["LA_BUC concepts"]);
+    expect(out.metadata.graderMs).toBeLessThan(50); // ≈0 — no model call
+  });
+
+  test("weak footer with only related terms (no broader/narrower) → no re-query", async () => {
+    const original =
+      renderSearchResults([result({ id: "1", collection: "wiki" })]) + "\n\n*Weak match — try: related terms: foo, bar*";
+    const search = searchSequence(searchResponse([result({ id: "2", collection: "wiki" })]));
+    const out = await runCorrectiveRetrieval({
+      ...signalCtx,
+      originalResultText: original,
+      budget: 1,
+      searchFn: search,
+    });
+    expect(search.calls.length).toBe(0);
+    expect(out.changed).toBe(false);
+    expect(out.metadata.verdicts).toEqual(["insufficient"]);
+    expect(out.metadata.retries).toBe(0);
+  });
+
+  test("budget 2 does not loop in signal mode once the footer hint is exhausted", async () => {
+    const original =
+      renderSearchResults([result({ id: "1", collection: "wiki" })]) +
+      '\n\n*Weak match — try: narrower query: "LA_BUC_02 narrow"*';
+    const search = searchSequence(searchResponse([result({ id: "2", collection: "wiki" })]));
+    const out = await runCorrectiveRetrieval({
+      ...signalCtx,
+      originalResultText: original,
+      budget: 2,
+      searchFn: search,
+    });
+    expect(search.calls.map((c) => c.query)).toEqual(["LA_BUC_02 narrow"]);
+    expect(out.metadata.retries).toBe(1);
   });
 });
