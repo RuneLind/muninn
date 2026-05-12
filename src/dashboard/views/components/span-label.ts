@@ -57,6 +57,12 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   // retry count so a corrected search is visible at a glance.
   const corr = correctiveChipFromAttrs(attrs.corrective);
 
+  // Whether the search actually returned anything usable *to the model* —
+  // distinct from "how many candidates the pipeline kept". A search can keep
+  // hundreds of candidates yet hand the model "No results found / low
+  // confidence", which the candidate-count chip alone hides.
+  const resultSignal = searchResultSignal(attrs);
+
   // Search-tool path: collection chips + counts chip, derived from searchTrace
   // or input.collection.
   let collections = collectionsFor(attrs);
@@ -67,18 +73,23 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     const moreChip = collections.length > 1
       ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
       : '';
+    const lowConf = !!(summary?.lowConfidence) || resultSignal === "weak";
     let countsChip = "";
-    if (summary) {
-      const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
-      const scope = collections.length > 1
-        ? ` (summed across ${collections.length} collections)`
-        : "";
-      const tip = summary.lowConfidence
+    if (resultSignal === "empty") {
+      // The model got "No results found" — the kept/fetched count is candidate
+      // pipeline noise here, so show the honest outcome instead.
+      countsChip = `<span class="wf-chip wf-no-hits" title="search returned no results to the model${summary ? ` (${summary.fetched} candidates were fetched and filtered out)` : ""}">0 hits</span>`;
+    } else if (summary) {
+      const cls = lowConf ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+      const scope = collections.length > 1 ? ` (summed across ${collections.length} collections)` : "";
+      const tip = lowConf
         ? `${summary.kept} kept / ${summary.fetched} fetched${scope} · low confidence`
         : `${summary.kept} kept / ${summary.fetched} fetched${scope}`;
       countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
     }
     const tooltipLines = [span.name, "collections: " + collections.join(", ")];
+    if (resultSignal === "empty") tooltipLines.push("⚠ no results returned to the model");
+    else if (resultSignal === "weak") tooltipLines.push("⚠ low-confidence results (Huginn flagged a weak match)");
     if (summary) {
       tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
       if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
@@ -116,12 +127,14 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
  *  the corrective pass left the result set usable. */
 function correctiveChipFromAttrs(raw: unknown): { html: string; tooltipLines: string[] } | null {
   if (!raw || typeof raw !== "object") return null;
-  const c = raw as { retries?: unknown; finalVerdict?: unknown; verdicts?: unknown; queriesTried?: unknown };
+  const c = raw as { retries?: unknown; finalVerdict?: unknown; verdicts?: unknown; queriesTried?: unknown; reasons?: unknown; graderMode?: unknown };
   const finalVerdict = typeof c.finalVerdict === "string" ? c.finalVerdict : undefined;
   const verdicts = Array.isArray(c.verdicts) ? c.verdicts.map(String) : [];
   if (!finalVerdict && verdicts.length === 0) return null;
   const retries = typeof c.retries === "number" ? c.retries : 0;
   const queries = Array.isArray(c.queriesTried) ? c.queriesTried.map(String) : [];
+  const reason = Array.isArray(c.reasons) && typeof c.reasons[0] === "string" ? (c.reasons[0] as string) : "";
+  const mode = c.graderMode === "haiku" ? "haiku" : c.graderMode === "signal" ? "signal" : "";
 
   const cls =
     finalVerdict === "correct" ? "wf-corrective wf-corrective-ok"
@@ -129,12 +142,37 @@ function correctiveChipFromAttrs(raw: unknown): { html: string; tooltipLines: st
         : "wf-corrective wf-corrective-bad";
   const sym = finalVerdict === "correct" ? "✓" : finalVerdict === "ambiguous" ? "≈" : "✗";
   const text = retries > 0 ? `⟲${retries} ${sym}` : `grade ${sym}`;
-  const tip = `corrective retrieval: ${verdicts.join(" → ") || finalVerdict}` +
+  const tip =
+    `corrective retrieval${mode ? ` (${mode})` : ""}: ${verdicts.join(" → ") || finalVerdict}` +
+    (reason ? ` — ${reason}` : "") +
     (queries.length ? `; re-queried: ${queries.map((q) => `"${q}"`).join(", ")}` : "; no re-query");
   return {
     html: `<span class="wf-chip ${cls}" title="${escAttr(tip)}">${escHtml(text)}</span>`,
     tooltipLines: [tip],
   };
+}
+
+/** Whether a search-tool span's result was actually usable *by the model*:
+ *  `"empty"` ("No results found" / `noConfidentResults`), `"weak"` (a
+ *  `*Weak match*` / `*No confident match*` footer), or `null` (looks fine).
+ *  Reads the captured tool output first (ground truth of what the model saw),
+ *  falling back to the Huginn trace's Phase-0 `response` block. */
+function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty" | "weak" | null {
+  const out = typeof attrs.output === "string" ? attrs.output : null;
+  if (out) {
+    if (/(^|\n)\s*No results found for /.test(out)) return "empty";
+    if (/(^|\n)\s*\*(?:No confident match|Weak match)\b/.test(out)) return "weak";
+    return null;
+  }
+  const trace = attrs.searchTrace;
+  if (trace && typeof trace === "object") {
+    const resp = (trace as { response?: { noConfidentResults?: unknown; bestScore?: unknown } }).response;
+    if (resp) {
+      if (resp.noConfidentResults === true) return "empty";
+      if (typeof resp.bestScore === "number" && resp.bestScore < 0.45) return "weak";
+    }
+  }
+  return null;
 }
 
 interface ToolLabelExtras { chips: string; tooltipLines: string[]; }

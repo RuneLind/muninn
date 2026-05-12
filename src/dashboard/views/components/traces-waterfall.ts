@@ -128,6 +128,14 @@ export function tracesWaterfallStyles(): string {
       color: var(--status-warning);
       border-color: color-mix(in srgb, var(--status-warning) 35%, transparent);
     }
+    /* "0 hits" chip — the search returned nothing usable to the model, even if
+       the pipeline kept candidates. Replaces the kept/fetched count in that case. */
+    .wf-chip.wf-no-hits {
+      background: color-mix(in srgb, var(--status-error, var(--status-magenta)) 14%, transparent);
+      color: var(--status-error, var(--status-magenta));
+      border: 1px solid color-mix(in srgb, var(--status-error, var(--status-magenta)) 35%, transparent);
+      font-weight: 600;
+    }
     /* Corrective-retrieval chip — marks a knowledge search that went through a
        CRAG-lite grade/requery pass. Color = whether the result set ended usable. */
     .wf-chip.wf-corrective { font-variant-numeric: tabular-nums; font-weight: 600; }
