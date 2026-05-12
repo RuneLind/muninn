@@ -9,8 +9,10 @@
  *    because `traces-prompt-modal.ts` reads them as bare identifiers from the
  *    surrounding inline-script global scope.
  *  - Exposes the click handlers (`loadWaterfall`, `closeWaterfall`,
- *    `closeSpanDetails`) on `globalThis` so HTML inline `onclick=` attrs and
- *    `traces-list.ts`'s `loadWaterfall(traceId)` can call them by bare name.
+ *    `closeSpanDetails`) plus `refreshWaterfallPlacement` on `globalThis` so
+ *    HTML inline `onclick=` attrs and `traces-list.ts` (which calls
+ *    `loadWaterfall(traceId)` from row clicks and re-docks the panel after it
+ *    re-renders the table body) can reach them by bare name.
  *
  * `renderToolDetail` and `__tdrState` are read off `globalThis` because their
  * source (`tool-detail-renderers.ts`) is still a JS-string component.
@@ -47,6 +49,7 @@ interface WaterfallGlobals {
   loadWaterfall: (traceId: string) => Promise<void>;
   closeWaterfall: () => void;
   closeSpanDetails: () => void;
+  refreshWaterfallPlacement: () => void;
   renderToolDetail?: (span: WaterfallSpan) => string;
   __tdrState?: { showRaw: boolean; showResponse: boolean; attrs: unknown };
 }
@@ -114,8 +117,6 @@ async function loadWaterfall(traceId: string): Promise<void> {
     const { spans } = (await res.json()) as { spans: WaterfallSpan[] };
     if (spans.length === 0) return;
 
-    document.getElementById("waterfallContainer")!.classList.add("visible");
-
     const root = spans.find((s) => !s.parentId) || spans[0]!;
     document.getElementById("waterfallTitle")!.textContent =
       root.name + " (" + fmtDuration(root.durationMs) + ")";
@@ -126,6 +127,13 @@ async function loadWaterfall(traceId: string): Promise<void> {
     document
       .querySelector('tr[data-trace="' + traceId + '"]')
       ?.classList.add("expanded");
+
+    // Dock the panel directly under the row that was clicked rather than at
+    // the top of the page — clicking a row deep in the list shouldn't force a
+    // scroll back up to read its trace. Falls back to the top-of-content slot
+    // if the row isn't on the current page/filter.
+    placeWaterfallAfterRow(traceId);
+    document.getElementById("waterfallContainer")!.classList.add("visible");
 
     // Single index pass per trace load — renderWaterfall and the collapse
     // helpers all read from this cache, so chevron toggles don't re-walk.
@@ -147,6 +155,55 @@ async function loadWaterfall(traceId: string): Promise<void> {
   } catch (e) {
     console.error("Failed to load waterfall", e);
   }
+}
+
+/** Dock #waterfallContainer into a full-width row immediately below the
+ *  clicked trace row. Reuses a single host <tr>, so re-clicking another row
+ *  just re-parents it. When the row isn't present (filtered out, on another
+ *  page, or replaced by an auto-refresh) the panel falls back to its static
+ *  slot at the top of `.content`. */
+function placeWaterfallAfterRow(traceId: string): void {
+  const container = document.getElementById("waterfallContainer");
+  if (!container) return;
+  const row = document.querySelector<HTMLTableRowElement>('tr[data-trace="' + traceId + '"]');
+  const tbody = row?.parentElement ?? null;
+  if (!row || !tbody) {
+    parkWaterfallAtTop();
+    return;
+  }
+  let host = document.getElementById("waterfallHostRow") as HTMLTableRowElement | null;
+  if (!host) {
+    host = document.createElement("tr");
+    host.id = "waterfallHostRow";
+    const td = document.createElement("td");
+    td.className = "waterfall-host-cell";
+    host.appendChild(td);
+  }
+  const cell = host.firstElementChild as HTMLTableCellElement;
+  cell.colSpan = document.querySelectorAll(".trace-table thead th").length || 9;
+  tbody.insertBefore(host, row.nextSibling);
+  cell.appendChild(container);
+}
+
+/** Detach the panel from any in-table host row and return it to the static
+ *  slot at the top of `.content` where the server-rendered HTML puts it. */
+function parkWaterfallAtTop(): void {
+  const container = document.getElementById("waterfallContainer");
+  const content = document.querySelector(".content");
+  if (container && content && container.parentElement !== content) {
+    content.insertBefore(container, content.firstChild);
+  }
+  document.getElementById("waterfallHostRow")?.remove();
+}
+
+/** Re-dock the panel after renderTraceList() rebuilds the table body — the
+ *  old host row, and the row it sat under, were just replaced. No-op unless a
+ *  trace is currently open. Called by traces-list.ts via globalThis. */
+function refreshWaterfallPlacement(): void {
+  const container = document.getElementById("waterfallContainer");
+  if (!container || !container.classList.contains("visible")) return;
+  if (!g.currentWaterfallTraceId) return;
+  placeWaterfallAfterRow(g.currentWaterfallTraceId);
 }
 
 function spanHasCollapsibleChildren(spanId: string): boolean {
@@ -304,6 +361,7 @@ function closeWaterfall(): void {
   document.getElementById("waterfallContainer")!.classList.remove("visible");
   document.getElementById("spanDetails")!.classList.remove("visible");
   document.querySelectorAll(".trace-table tr").forEach((r) => r.classList.remove("expanded"));
+  parkWaterfallAtTop();
 }
 
 function closeSpanDetails(): void {
@@ -331,3 +389,4 @@ document.addEventListener("keydown", (e) => {
 g.loadWaterfall = loadWaterfall;
 g.closeWaterfall = closeWaterfall;
 g.closeSpanDetails = closeSpanDetails;
+g.refreshWaterfallPlacement = refreshWaterfallPlacement;
