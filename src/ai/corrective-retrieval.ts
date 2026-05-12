@@ -1,6 +1,6 @@
 import type { Logger } from "@logtape/logtape";
 import { gradeKnowledgeResults, gradeFromSignal, type GradeVerdict, type KnowledgeGrade } from "./knowledge-grader.ts";
-import type { GraderMode } from "./corrective-config.ts";
+import { clampBudget, type GraderMode } from "./corrective-config.ts";
 import {
   searchKnowledge,
   renderSearchResults,
@@ -36,9 +36,9 @@ import {
  * block for tracing. Fail-soft throughout: a grader that can't be reached
  * returns "correct" (no change); a re-query HTTP error ends the loop with
  * whatever's accumulated. The caller gates on the per-bot toggle — this
- * function assumes the feature is enabled and `budget >= 1`.
+ * function assumes the feature is enabled.
  *
- * Plan: `../mimir/plans/huginn-muninn-corrective-rag.md` (Phase 1).
+ * Design: `../mimir/plans/huginn-muninn-corrective-rag.md`.
  */
 
 export interface CorrectiveMetadata {
@@ -104,7 +104,7 @@ export interface CorrectiveRetrievalContext {
 }
 
 export async function runCorrectiveRetrieval(ctx: CorrectiveRetrievalContext): Promise<CorrectiveOutcome> {
-  const budget = Math.max(1, Math.min(2, Math.floor(ctx.budget)));
+  const budget = clampBudget(ctx.budget);
   const graderMode: GraderMode = ctx.grader ?? "signal";
   const search = ctx.searchFn ?? searchKnowledge;
   const haikuGrade = ctx.gradeFn ?? gradeKnowledgeResults;

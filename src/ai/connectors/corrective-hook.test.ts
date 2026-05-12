@@ -49,6 +49,16 @@ describe("attachCorrectiveOutcomes", () => {
     expect(calls[2]!.corrective?.collectionsTried).toEqual([null]);
   });
 
+  test("a null slot (a knowledge search with no outcome) doesn't shift later outcomes onto it", () => {
+    // search #1 produced nothing (e.g. confident signal-mode pass → null slot),
+    // search #2 produced an outcome — #2's metadata must land on call #2, not #1.
+    const calls = [tc("knowledge-search_knowledge"), tc("yggdrasil-symbol_context"), tc("knowledge-search_knowledge")];
+    attachCorrectiveOutcomes(calls, [null, meta("ambiguous")]);
+    expect(calls[0]!.corrective).toBeUndefined();
+    expect(calls[1]!.corrective).toBeUndefined();
+    expect(calls[2]!.corrective?.finalVerdict).toBe("ambiguous");
+  });
+
   test("no-op when there are no outcomes", () => {
     const calls = [tc("knowledge-search_knowledge")];
     attachCorrectiveOutcomes(calls, []);

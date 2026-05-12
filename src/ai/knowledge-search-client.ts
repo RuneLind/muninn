@@ -11,14 +11,12 @@ function knowledgeApiBaseUrl(): string {
 /**
  * Thin HTTP client for Huginn's `GET /api/search`, plus a renderer that mirrors
  * the shape Huginn's MCP adapter produces (so a corrective re-query's hits read
- * identically to the ones the model already saw) and a parser for the
- * `collection: \`x\` doc_id: \`y\`` lines those results carry (used to dedupe a
- * re-query against the original result text).
- *
- * Scope: this is the Phase-1 corrective-retrieval consumer of the Phase-0
- * contract — `bestScore`, per-result `confidenceBand`, `retryHints`,
- * `noConfidentResults`, `min_relevance`. See
- * `../mimir/plans/huginn-muninn-corrective-rag.md`.
+ * identically to the ones the model already saw) and parsers for the signal
+ * Huginn bakes into result text — the `collection: \`x\` doc_id: \`y\`` lines
+ * (for deduping a re-query) and the `*Weak match …*` / "No results" footer
+ * (for grading). Used by the corrective-retrieval loop; consumes Huginn's
+ * `bestScore` / `confidenceBand` / `retryHints` / `noConfidentResults` /
+ * `min_relevance` contract.
  */
 
 export type ConfidenceBand = "high" | "medium" | "low";
@@ -61,7 +59,6 @@ export interface KnowledgeSearchResponse {
   retryHints?: KnowledgeRetryHints;
   /** Present when Huginn returns a relational graph answer ahead of the hits. */
   graphAnswer?: string;
-  lowConfidence?: boolean;
 }
 
 export interface SearchKnowledgeOptions {
@@ -142,7 +139,6 @@ function normalizeResponse(data: Record<string, unknown>): KnowledgeSearchRespon
     noConfidentResults: data.noConfidentResults === true,
     retryHints: parseRetryHints(data.retryHints),
     graphAnswer: data.graph_answer ? String(data.graph_answer) : undefined,
-    lowConfidence: data.lowConfidence === true,
   };
 }
 
@@ -237,10 +233,44 @@ export function renderRetryHintsFooter(resp: Pick<KnowledgeSearchResponse, "retr
   return bits.length > 0 ? `\n\n*${prefix} — try: ${bits.join(" · ")}*` : `\n\n*${prefix}.*`;
 }
 
-/** A trailing `*Weak match …*` / `*No confident match …*` retry-hints footer
- *  (Huginn's MCP adapter appends one; {@link renderRetryHintsFooter} produces
- *  the same shape). */
-const TRAILING_RETRY_FOOTER_RE = /\n+\s*\*(?:No confident match|Weak match)[^\n]*\*\s*$/;
+/**
+ * Patterns describing the signal Huginn's MCP adapter emits about result
+ * quality (the renderer above produces the same shapes). Centralised here so
+ * the grader, the orchestrator and the dashboard all read the same thing.
+ *
+ * - {@link NO_RESULTS_BODY_RE} — a "No results found for …" body (matches
+ *   anywhere a line starts with it, so it still fires after merging).
+ * - {@link WEAK_MATCH_FOOTER_RE} — a `*Weak match …*` / `*No confident match …*`
+ *   line anywhere in the text (used for detection).
+ * - {@link TRAILING_RETRY_FOOTER_RE} — the same footer anchored at end-of-string,
+ *   with a capture group (used for stripping/extracting it).
+ */
+export const NO_RESULTS_BODY_RE = /(^|\n)\s*No results found for /;
+export const WEAK_MATCH_FOOTER_RE = /(^|\n)\s*\*(?:No confident match|Weak match)\b/;
+const TRAILING_RETRY_FOOTER_RE = /\n+\s*(\*(?:No confident match|Weak match)[^\n]*\*)\s*$/;
+
+/** Huginn's weak-result relevance threshold — a `bestScore` below this means
+ *  "found something, but nothing confidently relevant". Mirrors Huginn's
+ *  `WEAK_RESULT_RELEVANCE`. */
+export const WEAK_RESULT_RELEVANCE = 0.45;
+
+/** Classify a rendered search-result text by the quality signal Huginn baked
+ *  into it: `"empty"` (no results), `"weak"` (a weak/no-confident-match footer),
+ *  or `null` (looks fine). */
+export function classifyResultSignal(text: string): "empty" | "weak" | null {
+  if (!text) return null;
+  if (NO_RESULTS_BODY_RE.test(text)) return "empty";
+  if (WEAK_MATCH_FOOTER_RE.test(text)) return "weak";
+  return null;
+}
+
+/** Split a rendered result text into its body and trailing retry-hints footer
+ *  (`""` when there's no footer). */
+export function extractTrailingRetryFooter(text: string): { body: string; footer: string } {
+  const m = text.match(TRAILING_RETRY_FOOTER_RE);
+  if (!m) return { body: text, footer: "" };
+  return { body: text.slice(0, m.index).trimEnd(), footer: m[1]! };
+}
 
 /** Strip a trailing retry-hints footer from a rendered result text. Used when
  *  splicing a corrective re-query in: the original "try X" footer is obsolete
@@ -254,9 +284,9 @@ const DOC_ID_LINE_RE = /collection:\s*`([^`]+)`\s+doc_id:\s*`([^`]+)`/g;
 
 /** Extract `collection/doc_id` keys from rendered search-result text — used to
  *  dedupe a corrective re-query against the original result the model already
- *  has, since (per the chosen Phase-1 approach) we don't re-fetch the original
- *  in structured form. The `collection: \`…\` doc_id: \`…\`` line is emitted by
- *  Huginn's MCP adapter for every hit and is stable. */
+ *  has (we don't re-fetch the original in structured form). The
+ *  `collection: \`…\` doc_id: \`…\`` line is emitted by Huginn's MCP adapter
+ *  for every hit and is stable. */
 export function extractDocKeysFromRenderedText(text: string): Set<string> {
   const keys = new Set<string>();
   for (const m of text.matchAll(DOC_ID_LINE_RE)) {

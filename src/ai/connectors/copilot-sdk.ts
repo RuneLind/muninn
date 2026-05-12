@@ -91,13 +91,19 @@ export async function executePrompt(
   // an opt-in slower/smarter alternative. Off by default (see corrective-config.ts);
   // when off, the hook isn't registered and behaviour is byte-identical to before.
   const correctiveCfg = resolveCorrectiveConfig(botConfig);
-  const correctiveOutcomes: CorrectiveMetadata[] = [];
+  // One slot per knowledge-search tool call (in order); `null` when that search
+  // produced no corrective outcome (tool error / uneventful signal pass). Keeping
+  // the slot is what lets attachCorrectiveOutcomes map outcomes positionally
+  // without desyncing when an earlier search is skipped.
+  const correctiveOutcomes: (CorrectiveMetadata | null)[] = [];
   const correctiveEnabled = correctiveCfg.enabled && hasMcp;
   const userQuestion = correctiveEnabled ? extractUserQuestion(prompt) : "";
   const correctiveHooks: SessionConfig["hooks"] | undefined = correctiveEnabled
     ? {
         onPostToolUse: async (input) => {
           if (!isKnowledgeSearchTool(input.toolName)) return;
+          let metadata: CorrectiveMetadata | null = null;
+          let modified: { modifiedResult: ToolResultObject } | undefined;
           try {
             const result = await applyCorrectiveRetrieval({
               toolName: input.toolName,
@@ -109,8 +115,8 @@ export async function executePrompt(
               userQuestion,
             });
             if (result) {
-              correctiveOutcomes.push(result.metadata);
-              if (result.modifiedResult) return { modifiedResult: result.modifiedResult };
+              metadata = result.metadata;
+              if (result.modifiedResult) modified = { modifiedResult: result.modifiedResult };
             }
           } catch (e) {
             log.warn("Corrective retrieval hook failed: {error}", {
@@ -118,7 +124,8 @@ export async function executePrompt(
               error: e instanceof Error ? e.message : String(e),
             });
           }
-          return;
+          correctiveOutcomes.push(metadata);
+          return modified;
         },
       }
     : undefined;
@@ -384,6 +391,10 @@ function abbreviateInput(args: unknown): string | undefined {
 
 // ── Corrective retrieval (CRAG-lite) helpers ───────────────────────────────
 
+/** Timeout for the (opt-in) Haiku grader subprocess. Kept well under the bot's
+ *  overall response timeout so a slow grader can't dominate the request. */
+const GRADER_TIMEOUT_MS = 30_000;
+
 export interface ApplyCorrectiveArgs {
   toolName: string;
   toolArgs: unknown;
@@ -432,7 +443,7 @@ export async function applyCorrectiveRetrieval(
     botName: botConfig.name,
     cwd: botConfig.dir,
     log,
-    graderTimeoutMs: 30_000,
+    graderTimeoutMs: GRADER_TIMEOUT_MS,
     searchFn: args.searchFn,
     gradeFn: args.gradeFn,
   });
@@ -473,15 +484,16 @@ export function extractUserQuestion(prompt: string): string {
   return trimmed.length > 1500 ? trimmed.slice(-1500).trim() : trimmed;
 }
 
-/** Attach corrective outcomes to the knowledge-search tool calls in order
- *  (onPostToolUse exposes no toolCallId, so the i-th outcome maps to the i-th
- *  knowledge-search tool call). */
-export function attachCorrectiveOutcomes(toolCalls: ToolCall[], outcomes: CorrectiveMetadata[]): void {
+/** Attach corrective outcomes to the knowledge-search tool calls in order.
+ *  `onPostToolUse` exposes no toolCallId, so this maps positionally — which is
+ *  exact because the hook pushes one slot per knowledge-search call (a `null`
+ *  for ones with no outcome), parallel to the order they appear in `toolCalls`. */
+export function attachCorrectiveOutcomes(toolCalls: ToolCall[], outcomes: (CorrectiveMetadata | null)[]): void {
   let i = 0;
   for (const tc of toolCalls) {
-    if (i >= outcomes.length) break;
     if (!isKnowledgeSearchTool(tc.name)) continue;
-    tc.corrective = correctiveMetaToToolMeta(outcomes[i++]!);
+    const m = outcomes[i++];
+    if (m) tc.corrective = correctiveMetaToToolMeta(m);
   }
 }
 

@@ -82,11 +82,17 @@ export interface ToolCall {
   corrective?: CorrectiveToolMeta;
 }
 
+// These unions are duplicated (not imported) from src/ai because src/types.ts
+// is a leaf module imported widely — pulling in src/ai would invert the
+// dependency direction. The corrective-retrieval code asserts compatibility.
+export type CorrectiveVerdict = "correct" | "ambiguous" | "insufficient";
+export type CorrectiveGraderMode = "signal" | "haiku";
+
 export interface CorrectiveToolMeta {
   /** Number of corrective re-queries actually issued (0–budget). */
   retries: number;
-  /** Grader verdict from each grading pass, in order ("correct" | "ambiguous" | "insufficient"). */
-  verdicts: string[];
+  /** Grader verdict from each grading pass, in order. */
+  verdicts: CorrectiveVerdict[];
   /** Grader reason per pass, parallel to `verdicts`. */
   reasons: string[];
   /** Re-query strings actually issued (excludes the original query). */
@@ -94,9 +100,9 @@ export interface CorrectiveToolMeta {
   /** Collections each re-query was scoped to, parallel to `queriesTried`; `null` = all. */
   collectionsTried?: (string[] | null)[];
   /** Verdict from the final grading pass — whether the result set ended up usable. */
-  finalVerdict: string;
-  /** Which grader judged the result(s): `"signal"` (no model call) or `"haiku"`. */
-  graderMode?: string;
+  finalVerdict: CorrectiveVerdict;
+  /** Which grader judged the result(s). */
+  graderMode?: CorrectiveGraderMode;
   /** Total grader wall time across all passes, ms (≈0 in signal mode). */
   graderMs?: number;
   /** Wall time of each re-query HTTP call, parallel to `queriesTried`, ms. */

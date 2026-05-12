@@ -1,5 +1,6 @@
 import { spawnHaiku } from "../scheduler/executor.ts";
 import { extractJson } from "./json-extract.ts";
+import { classifyResultSignal, extractTrailingRetryFooter } from "./knowledge-search-client.ts";
 import type { Logger } from "@logtape/logtape";
 
 /**
@@ -19,8 +20,6 @@ import type { Logger } from "@logtape/logtape";
  * Both are fail-soft: a Haiku error or unparseable output → `verdict: "correct"`
  * (the corrective loop becomes a no-op and the model sees the original result
  * unchanged). The corrective feature must never make a search *worse*.
- *
- * Plan: `../mimir/plans/huginn-muninn-corrective-rag.md` (Phase 1).
  */
 
 export type GradeVerdict = "correct" | "ambiguous" | "insufficient";
@@ -40,12 +39,6 @@ export interface KnowledgeGrade {
 
 // ── Signal grader (default — no model call) ────────────────────────────────
 
-/** Matches the `*Weak match …*` / `*No confident match …*` footer Huginn's MCP
- *  adapter appends when `bestScore` is below its weak-result threshold or the
- *  result list is empty. */
-const WEAK_FOOTER_RE = /(^|\n)\s*\*(?:No confident match|Weak match)\b/;
-const NO_RESULTS_RE = /(^|\n)No results found for /;
-
 /**
  * Judge a search result purely from Huginn's emitted signal — no LLM. Returns
  * `insufficient` (no rewritten query — the corrective loop will fall back to
@@ -53,14 +46,14 @@ const NO_RESULTS_RE = /(^|\n)No results found for /;
  * Huginn flagged the result weak/empty, `correct` otherwise.
  */
 export function gradeFromSignal(resultText: string): KnowledgeGrade {
-  const text = resultText ?? "";
-  if (NO_RESULTS_RE.test(text)) {
-    return { verdict: "insufficient", reason: "search returned no results" };
+  switch (classifyResultSignal(resultText ?? "")) {
+    case "empty":
+      return { verdict: "insufficient", reason: "search returned no results" };
+    case "weak":
+      return { verdict: "insufficient", reason: "Huginn flagged the result as low confidence" };
+    default:
+      return { verdict: "correct", reason: "no low-confidence signal from the search" };
   }
-  if (WEAK_FOOTER_RE.test(text)) {
-    return { verdict: "insufficient", reason: "Huginn flagged the result as low confidence" };
-  }
-  return { verdict: "correct", reason: "no low-confidence signal from the search" };
 }
 
 // ── Haiku grader (opt-in) ──────────────────────────────────────────────────
@@ -161,12 +154,8 @@ export function digestResultsForGrading(text: string): string {
   const src = (text ?? "").trim();
   if (!src) return "";
 
-  // Pull off the trailing weak-match footer (a single `*…*` line at the end)
-  // so it's never lost to truncation.
-  let footer = "";
-  const footerMatch = src.match(/\n\s*(\*(?:No confident match|Weak match)[^\n]*\*)\s*$/);
-  const body = footerMatch ? src.slice(0, footerMatch.index).trimEnd() : src;
-  if (footerMatch) footer = footerMatch[1]!;
+  // Pull off the trailing weak-match footer so it's never lost to truncation.
+  const { body, footer } = extractTrailingRetryFooter(src);
 
   // Split into result blocks at `## ` headers (the MCP adapter's full-mode
   // format). If there are no `## ` headers (brief mode uses `1. **Title**`),

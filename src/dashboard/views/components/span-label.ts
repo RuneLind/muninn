@@ -9,12 +9,7 @@ interface SpanLike {
     toolId?: unknown;
     input?: unknown;
     output?: unknown;
-    corrective?: {
-      retries?: unknown;
-      finalVerdict?: unknown;
-      verdicts?: unknown;
-      queriesTried?: unknown;
-    } | unknown;
+    corrective?: unknown;
     searchTrace?:
       | {
           collections?: Array<{
@@ -121,6 +116,12 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   return null;
 }
 
+const CORRECTIVE_VERDICT_DISPLAY: Record<string, { cls: string; sym: string }> = {
+  correct: { cls: "wf-corrective wf-corrective-ok", sym: "✓" },
+  ambiguous: { cls: "wf-corrective wf-corrective-warn", sym: "≈" },
+  insufficient: { cls: "wf-corrective wf-corrective-bad", sym: "✗" },
+};
+
 /** Build the corrective-retrieval chip from a tool span's `attributes.corrective`.
  *  Returns null when the attribute is absent or malformed. Chip text is the
  *  final verdict's symbol + retry count (e.g. `⟲1 ✓`); color reflects whether
@@ -136,32 +137,35 @@ function correctiveChipFromAttrs(raw: unknown): { html: string; tooltipLines: st
   const reason = Array.isArray(c.reasons) && typeof c.reasons[0] === "string" ? (c.reasons[0] as string) : "";
   const mode = c.graderMode === "haiku" ? "haiku" : c.graderMode === "signal" ? "signal" : "";
 
-  const cls =
-    finalVerdict === "correct" ? "wf-corrective wf-corrective-ok"
-      : finalVerdict === "ambiguous" ? "wf-corrective wf-corrective-warn"
-        : "wf-corrective wf-corrective-bad";
-  const sym = finalVerdict === "correct" ? "✓" : finalVerdict === "ambiguous" ? "≈" : "✗";
-  const text = retries > 0 ? `⟲${retries} ${sym}` : `grade ${sym}`;
+  const display = CORRECTIVE_VERDICT_DISPLAY[finalVerdict ?? "insufficient"] ?? CORRECTIVE_VERDICT_DISPLAY.insufficient!;
+  const text = retries > 0 ? `⟲${retries} ${display.sym}` : `grade ${display.sym}`;
   const tip =
     `corrective retrieval${mode ? ` (${mode})` : ""}: ${verdicts.join(" → ") || finalVerdict}` +
     (reason ? ` — ${reason}` : "") +
     (queries.length ? `; re-queried: ${queries.map((q) => `"${q}"`).join(", ")}` : "; no re-query");
   return {
-    html: `<span class="wf-chip ${cls}" title="${escAttr(tip)}">${escHtml(text)}</span>`,
+    html: `<span class="wf-chip ${display.cls}" title="${escAttr(tip)}">${escHtml(text)}</span>`,
     tooltipLines: [tip],
   };
 }
+
+// Mirrors knowledge-search-client.ts's classifyResultSignal — kept local because
+// this file lives in the dashboard layer and shouldn't import from src/ai.
+const NO_RESULTS_OUTPUT_RE = /(^|\n)\s*No results found for /;
+const WEAK_FOOTER_OUTPUT_RE = /(^|\n)\s*\*(?:No confident match|Weak match)\b/;
+/** Huginn's weak-result relevance threshold (its `WEAK_RESULT_RELEVANCE`). */
+const WEAK_BEST_SCORE = 0.45;
 
 /** Whether a search-tool span's result was actually usable *by the model*:
  *  `"empty"` ("No results found" / `noConfidentResults`), `"weak"` (a
  *  `*Weak match*` / `*No confident match*` footer), or `null` (looks fine).
  *  Reads the captured tool output first (ground truth of what the model saw),
- *  falling back to the Huginn trace's Phase-0 `response` block. */
+ *  falling back to the Huginn trace's `response` block. */
 function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty" | "weak" | null {
   const out = typeof attrs.output === "string" ? attrs.output : null;
   if (out) {
-    if (/(^|\n)\s*No results found for /.test(out)) return "empty";
-    if (/(^|\n)\s*\*(?:No confident match|Weak match)\b/.test(out)) return "weak";
+    if (NO_RESULTS_OUTPUT_RE.test(out)) return "empty";
+    if (WEAK_FOOTER_OUTPUT_RE.test(out)) return "weak";
     return null;
   }
   const trace = attrs.searchTrace;
@@ -169,7 +173,7 @@ function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty"
     const resp = (trace as { response?: { noConfidentResults?: unknown; bestScore?: unknown } }).response;
     if (resp) {
       if (resp.noConfidentResults === true) return "empty";
-      if (typeof resp.bestScore === "number" && resp.bestScore < 0.45) return "weak";
+      if (typeof resp.bestScore === "number" && resp.bestScore < WEAK_BEST_SCORE) return "weak";
     }
   }
   return null;
