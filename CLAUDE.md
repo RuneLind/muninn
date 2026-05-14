@@ -217,7 +217,7 @@ All fields are optional — falls back to global `.env` values:
 | `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
 | `contextWindow` | number | — | Context window size in tokens (e.g. `32768`). Shown as usage in web chat and percentage in Telegram footer |
 | `prompts` | object | — | Configurable prompts: `jiraAnalysis` (Jira research instruction, content appended automatically), `investigateCode` (follow-up code investigation prompt) |
-| `correctiveRetrieval` | object | off | Prompt-level corrective retrieval (Path C) — `{ enabled?: boolean }`. When on, the system prompt gains a block telling the model to re-call `search_knowledge` with the `broaderQuery` / `narrowerQuery` hints Huginn emits in `*Weak match*` / `*No confident match*` footers. Works across all connectors. See "Corrective Retrieval" below. |
+| `correctiveRetrieval` | object | off | Prompt-level corrective retrieval (Path C, dormant fallback) — `{ enabled?: boolean }`. Leave **off** when the bot's huginn has Path D (the primary in-huginn rescue, always on). Only turn on for bots pointed at older huginn deploys that lack Path D. See "Corrective Retrieval" below. |
 
 ### Database
 
@@ -355,19 +355,41 @@ uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/
 | `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
 | `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
 
-## Corrective Retrieval (prompt-level, Path C)
+## Corrective Retrieval (two-layer: Path D primary, Path C dormant fallback)
 
-A prompt-level nudge that turns the model itself into a corrective retrieval loop around Huginn's `search_knowledge` MCP tool. **Off by default**; enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true }`), globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, or hard-disable everywhere with `CORRECTIVE_RETRIEVAL_DISABLED=1`.
+Two complementary layers handle weak knowledge searches; together they make sure the bot either answers from a rescued result or honestly says "the knowledge base doesn't cover this."
 
-How it works: when enabled, `src/ai/prompt-builder.ts` appends a short system-prompt block (after persona / memories / goals / alerts) telling the model to read `search_knowledge` results for a `*Weak match*` or `*No confident match*` footer. The footer is emitted by Huginn (PR #36 + PR #37 / phase0 + phase0b) and carries concrete `broaderQuery` / `narrowerQuery` rewrites the model is asked to re-issue before answering. When the model self-re-queries, the trace naturally shows a second `search_knowledge` tool span before the reply — no synthesized spans, no proxy.
+### Path D — corrective rescue inside huginn (primary, always on)
 
-**Connector coverage:** works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`) because the loop is driven entirely by the model through its existing tool surface.
+The rescue lives at huginn's `apply_corrective_signal` seam (`huginn` PR #38, commit `0c37b50`). When a `search_knowledge` call comes in:
 
-**History:** an earlier attempt (PR #113, retired) used a Copilot SDK `onPostToolUse` hook to intercept the tool result and splice in rescue hits. Two synchronous probes against the melosys peer on 2026-05-14 confirmed the SDK silently drops both `modifiedResult` and `additionalContext` — the hook is purely observational from the model's perspective. Path C bypasses the dead seam entirely. See `mimir/plans/muninn-corrective-rag-rework.md` for the full rationale.
+1. Huginn runs the user's query, computes the signal (`bestScore`, `noConfidentResults`, `retryHints`).
+2. If the signal is weak *and* there's a usable `broaderQuery` / `narrowerQuery` hint, huginn re-queries internally with that hint, merges + dedupes by `(collection, doc_id)`, drops the `*Weak match*` footer on successful rescue, and returns one consolidated result.
+3. The model sees a single tool result that already contains the rescue. No re-call, no prompt-level instruction needed.
 
-The dashboard waterfall row also surfaces a `0 hits` (red) chip when a search returned nothing usable, and a low-confidence palette flip on the `N/N` chip when Huginn flags a weak match (`src/dashboard/views/components/span-label.ts` — `searchResultSignal`). Operationally useful regardless of whether the toggle is on.
+**Knobs (per-call MCP arg / HTTP query param):** `corrective="auto"` (default — fire on weak + hint), `"off"` (today's pre-rescue behaviour), `"force"` (rescue whenever any hint exists, useful for testing). Models almost never need to override the default.
 
-Key files: `src/ai/corrective-config.ts`, `src/ai/prompt-builder.ts` (`CORRECTIVE_RETRIEVAL_PROMPT`), `src/dashboard/views/components/span-label.ts`.
+**Cross-agent reach:** because the rescue runs inside huginn's MCP/HTTP surface, every consumer auto-upgrades — muninn bots, Claude Code, OpenCode, ad-hoc curl. No `.mcp.json` migration required.
+
+**Trace visibility:** huginn writes a `corrective: { mode, retries, verdict, rescueFired, queriesTried }` block into the existing trace `response`. Muninn's trace-pointer fetcher pulls it as-is, and the dashboard waterfall row shows a blue `rescue ⟲N` chip when rescue fired (`src/dashboard/views/components/span-label.ts` — `searchRescueInfo`).
+
+### Path C — prompt-level corrective (dormant defence-in-depth, off by default)
+
+Enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true }`), globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, or hard-disable everywhere with `CORRECTIVE_RETRIEVAL_DISABLED=1`. When enabled, `src/ai/prompt-builder.ts` appends a short system-prompt block telling the model to read `search_knowledge` results for a `*Weak match*` / `*No confident match*` footer and re-call the tool with the suggested rewrite. The model becomes the corrective loop.
+
+**When to keep Path C on:** only when targeting a huginn instance that doesn't have Path D yet (older deploy, dev branch, custom fork). For any bot pointed at a Path-D-enabled huginn, leave Path C **off** — Path D handles rescue upstream and a second rescue layer on top just adds noise to the trace.
+
+**Connector coverage:** Path C works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`) because the loop is driven entirely by the model. Same as Path D in that respect.
+
+### Other operational chips
+
+The dashboard waterfall row also surfaces a red `0 hits` chip when a search returned nothing usable, and a yellow low-confidence palette flip on the `N/N` chip when huginn flags a weak match. These are independent of which corrective layer is active and stay useful regardless.
+
+### History
+
+The first attempt (muninn PR #113, retired) used a Copilot SDK `onPostToolUse` hook to splice rescue hits into the tool result post-hoc. Two synchronous probes against the melosys peer on 2026-05-14 confirmed the Copilot CLI silently drops both `modifiedResult` and `additionalContext` — the hook is purely observational from the model's perspective. The rework chose Path C (prompt-level) first because of its small footprint, then upgraded to Path D once we noticed huginn already produced the structured corrective signal natively and an in-huginn rescue gave every consumer the upgrade for free. See `mimir/plans/muninn-corrective-rag-rework.md` + `huginn-corrective-rag-in-adapter.md` for the full rationale.
+
+Key files: `src/ai/corrective-config.ts`, `src/ai/prompt-builder.ts` (`CORRECTIVE_RETRIEVAL_PROMPT`), `src/dashboard/views/components/span-label.ts` (`searchResultSignal`, `searchRescueInfo`). Path D itself lives in huginn (`main/core/search_response_formatter.py` — `run_corrective_search`).
 
 ## Slack Bot
 When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.

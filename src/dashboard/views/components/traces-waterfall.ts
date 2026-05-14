@@ -136,6 +136,16 @@ export function tracesWaterfallStyles(): string {
       border: 1px solid color-mix(in srgb, var(--status-error) 35%, transparent);
       font-weight: 600;
     }
+    /* Rescue chip — Huginn's Path-D corrective-rescue logic fired and merged a
+       broader/narrower re-query into the result the model saw. Distinct from
+       low-conf (warning palette): rescue is the *recovery*, not the problem. */
+    .wf-chip.wf-rescue {
+      background: color-mix(in srgb, var(--status-info) 14%, transparent);
+      color: var(--status-info);
+      border: 1px solid color-mix(in srgb, var(--status-info) 35%, transparent);
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
     .waterfall-bar-container {
       position: relative;
       height: 16px;
