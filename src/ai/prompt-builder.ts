@@ -42,19 +42,9 @@ export interface BuildPromptOptions {
 
 /**
  * Corrective-retrieval block appended near the bottom of the system prompt
- * when `correctiveRetrievalEnabled` is true. The wording references the
- * literal footer text Huginn emits in `*Weak match*` / `*No confident match*`
- * results so the model has a concrete pattern to grep for.
- *
- * Why this exists and why it's prompt-level instead of a hook: the Copilot
- * SDK's `onPostToolUse` `modifiedResult` is silently dropped by the CLI on
- * the other side of the JSON-RPC — empirically verified with two sentinel
- * probes on 2026-05-14. The hook seam can observe but not rescue. Prompt-level
- * guidance lets the model itself drive the corrective loop through whatever
- * tool surface the connector already exposes, so this works for every
- * connector (claude-cli, copilot-sdk, openai-compat). See
- * `mimir/plans/muninn-corrective-rag-rework.md` for the full rationale —
- * if a future reader is tempted to revive the hook, read that first.
+ * when `correctiveRetrievalEnabled` is true. References the literal footer
+ * text Huginn emits in `*Weak match*` / `*No confident match*` results — keep
+ * in sync if Huginn changes the footer.
  */
 export const CORRECTIVE_RETRIEVAL_PROMPT =
   "When searching the knowledge base: if the results carry a `*Weak match*` or `*No confident match*` footer, do not answer from them. " +
@@ -133,8 +123,8 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
     systemParts.push(formatAlerts(recentAlerts));
   }
 
-  // Path C corrective-retrieval block — placed last in the system prompt so
-  // it sits closest to the user turn, where instruction-following is best.
+  // Placed last so it sits closest to the user turn, where instruction-following
+  // is best.
   if (correctiveRetrievalEnabled) {
     systemParts.push(CORRECTIVE_RETRIEVAL_PROMPT);
   }

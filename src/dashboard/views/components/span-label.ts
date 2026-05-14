@@ -103,14 +103,14 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   return null;
 }
 
-/** Whether a search-tool span's result was actually usable *by the model*:
- *  `"empty"` ("No results found" / `noConfidentResults`), `"weak"` (a
- *  `*Weak match*` / `*No confident match*` footer), or `null` (looks fine).
+/** Mirror of Huginn's `WEAK_RESULT_RELEVANCE` (search_response_formatter.py). Kept
+ *  inline so the dashboard layer doesn't have to import from `src/ai/` — bump
+ *  in lockstep if Huginn changes the threshold. */
+const WEAK_RESULT_RELEVANCE = 0.45;
+
+/** Whether a search-tool span's result was actually usable *by the model*.
  *  Reads the captured tool output first (ground truth of what the model saw),
- *  falling back to the Huginn trace's Phase-0 `response` block.
- *
- *  Self-contained on purpose: this file is in the dashboard layer and avoids
- *  importing from `src/ai/`. The regexes mirror Huginn's MCP-adapter rendering. */
+ *  falling back to the trace's `response` block when output is missing. */
 function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty" | "weak" | null {
   const out = typeof attrs.output === "string" ? attrs.output : null;
   if (out) {
@@ -123,8 +123,7 @@ function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty"
     const resp = (trace as { response?: { noConfidentResults?: unknown; bestScore?: unknown } }).response;
     if (resp) {
       if (resp.noConfidentResults === true) return "empty";
-      // Huginn's WEAK_RESULT_RELEVANCE threshold.
-      if (typeof resp.bestScore === "number" && resp.bestScore < 0.45) return "weak";
+      if (typeof resp.bestScore === "number" && resp.bestScore < WEAK_RESULT_RELEVANCE) return "weak";
     }
   }
   return null;

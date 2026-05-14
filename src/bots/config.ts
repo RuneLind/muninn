@@ -78,11 +78,8 @@ export interface BotConfig {
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */
   mcpStatus?: McpStatusConfig;
-  /** Prompt-level corrective retrieval (Path C). When enabled, the system prompt
-   *  gains a block telling the model to re-call `search_knowledge` with the
-   *  `broaderQuery` / `narrowerQuery` hints Huginn emits in `*Weak match*` /
-   *  `*No confident match*` footers. Default off. See
-   *  mimir/plans/muninn-corrective-rag-path-c-implementation.md for context. */
+  /** Prompt-level corrective retrieval (Path C). See `resolveCorrectiveConfig`
+   *  + CLAUDE.md "Corrective Retrieval" section. */
   correctiveRetrieval?: CorrectiveRetrievalBotConfig;
 }
 
@@ -198,6 +195,8 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (hasTelegram) platforms.push("telegram");
     if (hasSlack) platforms.push("slack");
 
+    const correctiveRetrieval = botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined;
+
     bots.push({
       name,
       dir,
@@ -219,7 +218,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
-      correctiveRetrieval: botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined,
+      correctiveRetrieval,
     });
 
     const configParts: string[] = [];
@@ -228,12 +227,9 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
     if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
-    const corrective = resolveCorrectiveConfig({
-      correctiveRetrieval: botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined,
-    });
-    if (corrective.enabled) {
+    if (resolveCorrectiveConfig({ correctiveRetrieval }).enabled) {
       configParts.push("correctiveRetrieval: on");
-    } else if (botSettings.correctiveRetrieval) {
+    } else if (correctiveRetrieval) {
       configParts.push("correctiveRetrieval: off (configured but disabled)");
     }
 
