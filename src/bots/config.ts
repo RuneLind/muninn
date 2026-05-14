@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
+import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 
 const log = getLog("bots");
 
@@ -232,6 +233,12 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
     if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
+    const corrective = resolveCorrectiveConfig({ correctiveRetrieval: botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined });
+    if (corrective.enabled) {
+      configParts.push(`correctiveRetrieval: on (grader=${corrective.grader}, budget=${corrective.retryBudget})`);
+    } else if (botSettings.correctiveRetrieval) {
+      configParts.push("correctiveRetrieval: off (configured but disabled)");
+    }
 
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;
 
