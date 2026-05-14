@@ -94,7 +94,7 @@ mock.module("./embeddings.ts", () => ({
   generateEmbedding: mock(() => Promise.resolve(Array.from({ length: 384 }, () => 0.1))),
 }));
 
-const { buildPrompt } = await import("./prompt-builder.ts");
+const { buildPrompt, CORRECTIVE_RETRIEVAL_PROMPT } = await import("./prompt-builder.ts");
 
 const bp = (overrides: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
   buildPrompt({ userId: "u1", currentMessage: "hello", persona: "persona", botName: "testbot", ...overrides });
@@ -191,5 +191,23 @@ describe("buildPrompt", () => {
     expect(result.userPrompt).toContain("[user/Rune]");
     // Assistant messages should still show plain [assistant]
     expect(result.userPrompt).toContain("[assistant]");
+  });
+
+  test("appends corrective-retrieval block when enabled (Path C)", async () => {
+    const result = await bp({ correctiveRetrievalEnabled: true });
+    expect(result.systemPrompt).toContain(CORRECTIVE_RETRIEVAL_PROMPT);
+    // The block must sit after the alerts/goals/memories block so it's near
+    // the bottom of the system prompt where recent text gets more attention.
+    const blockIdx = result.systemPrompt.indexOf(CORRECTIVE_RETRIEVAL_PROMPT);
+    const goalsIdx = result.systemPrompt.indexOf("Learn Rust");
+    expect(blockIdx).toBeGreaterThan(goalsIdx);
+  });
+
+  test("omits corrective-retrieval block when disabled", async () => {
+    const offByDefault = await bp();
+    expect(offByDefault.systemPrompt).not.toContain(CORRECTIVE_RETRIEVAL_PROMPT);
+
+    const explicitlyOff = await bp({ correctiveRetrievalEnabled: false });
+    expect(explicitlyOff.systemPrompt).not.toContain(CORRECTIVE_RETRIEVAL_PROMPT);
   });
 });

@@ -35,10 +35,34 @@ export interface BuildPromptOptions {
   restrictedTools?: RestrictedTools;
   userIdentity?: string | UserIdentity;
   threadId?: string;
+  /** When true, append the corrective-retrieval block (Path C). The caller
+   *  resolves this via `resolveCorrectiveConfig(botConfig).enabled`. */
+  correctiveRetrievalEnabled?: boolean;
 }
 
+/**
+ * Corrective-retrieval block appended near the bottom of the system prompt
+ * when `correctiveRetrievalEnabled` is true. The wording references the
+ * literal footer text Huginn emits in `*Weak match*` / `*No confident match*`
+ * results so the model has a concrete pattern to grep for.
+ *
+ * Why this exists and why it's prompt-level instead of a hook: the Copilot
+ * SDK's `onPostToolUse` `modifiedResult` is silently dropped by the CLI on
+ * the other side of the JSON-RPC — empirically verified with two sentinel
+ * probes on 2026-05-14. The hook seam can observe but not rescue. Prompt-level
+ * guidance lets the model itself drive the corrective loop through whatever
+ * tool surface the connector already exposes, so this works for every
+ * connector (claude-cli, copilot-sdk, openai-compat). See
+ * `mimir/plans/muninn-corrective-rag-rework.md` for the full rationale —
+ * if a future reader is tempted to revive the hook, read that first.
+ */
+export const CORRECTIVE_RETRIEVAL_PROMPT =
+  "When searching the knowledge base: if the results carry a `*Weak match*` or `*No confident match*` footer, do not answer from them. " +
+  "The footer lists concrete suggestions like `broader query: \"...\"` or `narrower query: \"...\"` — call `search_knowledge` again using one of those suggestions before answering. " +
+  "Only answer once you have a confident match, or say plainly that the knowledge base does not cover the question.";
+
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
@@ -107,6 +131,12 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
 
   if (recentAlerts.length > 0) {
     systemParts.push(formatAlerts(recentAlerts));
+  }
+
+  // Path C corrective-retrieval block — placed last in the system prompt so
+  // it sits closest to the user turn, where instruction-following is best.
+  if (correctiveRetrievalEnabled) {
+    systemParts.push(CORRECTIVE_RETRIEVAL_PROMPT);
   }
 
   // The last message is dropped when it matches `currentMessage` because the

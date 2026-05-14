@@ -46,6 +46,12 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     ? `<span class="wf-chip wf-verb wf-verb-${escAttr(verbClass)}">${escHtml(verb)}</span>`
     : '';
 
+  // Whether the search actually returned anything usable *to the model* —
+  // distinct from "how many candidates the pipeline kept". A search can keep
+  // hundreds of candidates yet hand the model "No results found / low
+  // confidence", which the candidate-count chip alone hides.
+  const resultSignal = searchResultSignal(attrs);
+
   // Search-tool path: collection chips + counts chip, derived from searchTrace
   // or input.collection.
   let collections = collectionsFor(attrs);
@@ -56,18 +62,23 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
     const moreChip = collections.length > 1
       ? `<span class="wf-chip wf-coll-more" title="${escAttr(collections.slice(1).join(", "))}">+${collections.length - 1}</span>`
       : '';
+    const lowConf = !!(summary?.lowConfidence) || resultSignal === "weak";
     let countsChip = "";
-    if (summary) {
-      const cls = summary.lowConfidence ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
-      const scope = collections.length > 1
-        ? ` (summed across ${collections.length} collections)`
-        : "";
-      const tip = summary.lowConfidence
+    if (resultSignal === "empty") {
+      // The model got "No results found" — the kept/fetched count is candidate
+      // pipeline noise here, so show the honest outcome instead.
+      countsChip = `<span class="wf-chip wf-no-hits" title="search returned no results to the model${summary ? ` (${summary.fetched} candidates were fetched and filtered out)` : ""}">0 hits</span>`;
+    } else if (summary) {
+      const cls = lowConf ? "wf-chip wf-counts wf-low-conf" : "wf-chip wf-counts";
+      const scope = collections.length > 1 ? ` (summed across ${collections.length} collections)` : "";
+      const tip = lowConf
         ? `${summary.kept} kept / ${summary.fetched} fetched${scope} · low confidence`
         : `${summary.kept} kept / ${summary.fetched} fetched${scope}`;
       countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
     }
     const tooltipLines = [span.name, "collections: " + collections.join(", ")];
+    if (resultSignal === "empty") tooltipLines.push("⚠ no results returned to the model");
+    else if (resultSignal === "weak") tooltipLines.push("⚠ low-confidence results (Huginn flagged a weak match)");
     if (summary) {
       tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
       if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
@@ -88,6 +99,33 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
       html: verbChip + extras.chips,
       tooltip: [span.name, ...extras.tooltipLines].join("\n"),
     };
+  }
+  return null;
+}
+
+/** Whether a search-tool span's result was actually usable *by the model*:
+ *  `"empty"` ("No results found" / `noConfidentResults`), `"weak"` (a
+ *  `*Weak match*` / `*No confident match*` footer), or `null` (looks fine).
+ *  Reads the captured tool output first (ground truth of what the model saw),
+ *  falling back to the Huginn trace's Phase-0 `response` block.
+ *
+ *  Self-contained on purpose: this file is in the dashboard layer and avoids
+ *  importing from `src/ai/`. The regexes mirror Huginn's MCP-adapter rendering. */
+function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty" | "weak" | null {
+  const out = typeof attrs.output === "string" ? attrs.output : null;
+  if (out) {
+    if (/(^|\n)\s*No results found for /.test(out)) return "empty";
+    if (/(^|\n)\s*\*(?:No confident match|Weak match)\b/.test(out)) return "weak";
+    return null;
+  }
+  const trace = attrs.searchTrace;
+  if (trace && typeof trace === "object") {
+    const resp = (trace as { response?: { noConfidentResults?: unknown; bestScore?: unknown } }).response;
+    if (resp) {
+      if (resp.noConfidentResults === true) return "empty";
+      // Huginn's WEAK_RESULT_RELEVANCE threshold.
+      if (typeof resp.bestScore === "number" && resp.bestScore < 0.45) return "weak";
+    }
   }
   return null;
 }
