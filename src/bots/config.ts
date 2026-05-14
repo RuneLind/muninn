@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
+import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 
 const log = getLog("bots");
 
@@ -77,6 +78,13 @@ export interface BotConfig {
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */
   mcpStatus?: McpStatusConfig;
+  /** Prompt-level corrective retrieval (Path C). See `resolveCorrectiveConfig`
+   *  + CLAUDE.md "Corrective Retrieval" section. */
+  correctiveRetrieval?: CorrectiveRetrievalBotConfig;
+}
+
+export interface CorrectiveRetrievalBotConfig {
+  enabled?: boolean;
 }
 
 export interface BotPrompts {
@@ -134,7 +142,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     const hasSlack = !!slackBotToken && !!slackAppToken;
 
     if (opts.requireTokens && !hasTelegram && !hasSlack) {
-      log.info("Skipping bot \"{name}\" — no platform tokens found (need TELEGRAM_BOT_TOKEN_{env} or SLACK_BOT_TOKEN_{env} + SLACK_APP_TOKEN_{env})", { name, env: envName });
+      log.info("Skipping bot \"{name}\" — no platform tokens found (need TELEGRAM_BOT_TOKEN_{env} or SLACK_BOT_TOKEN_{env} + SLACK_APP_TOKEN_{env})", { botName: name, name, env: envName });
       continue;
     }
 
@@ -164,7 +172,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus"]);
+        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
@@ -187,6 +195,8 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (hasTelegram) platforms.push("telegram");
     if (hasSlack) platforms.push("slack");
 
+    const correctiveRetrieval = botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined;
+
     bots.push({
       name,
       dir,
@@ -208,6 +218,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
+      correctiveRetrieval,
     });
 
     const configParts: string[] = [];
@@ -216,6 +227,11 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
     if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
+    if (resolveCorrectiveConfig({ correctiveRetrieval }).enabled) {
+      configParts.push("correctiveRetrieval: on");
+    } else if (correctiveRetrieval) {
+      configParts.push("correctiveRetrieval: off (configured but disabled)");
+    }
 
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;
 
@@ -227,7 +243,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         `config.json: ${hasConfigJson ? `yes (${configParts.join(", ") || "empty"})` : "no"}, ` +
         `channelListening: ${channelListening?.enabled ? "yes" : "no"}, ` +
         `dir: ${dir})`,
-      { name, platforms: platforms.join("+") },
+      { botName: name, name, platforms: platforms.join("+") },
     );
   }
 

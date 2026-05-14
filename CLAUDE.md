@@ -217,6 +217,7 @@ All fields are optional — falls back to global `.env` values:
 | `showWaterfall` | boolean | `true` | Show request progress waterfall overlay in web chat |
 | `contextWindow` | number | — | Context window size in tokens (e.g. `32768`). Shown as usage in web chat and percentage in Telegram footer |
 | `prompts` | object | — | Configurable prompts: `jiraAnalysis` (Jira research instruction, content appended automatically), `investigateCode` (follow-up code investigation prompt) |
+| `correctiveRetrieval` | object | off | Prompt-level corrective retrieval (Path C) — `{ enabled?: boolean }`. When on, the system prompt gains a block telling the model to re-call `search_knowledge` with the `broaderQuery` / `narrowerQuery` hints Huginn emits in `*Weak match*` / `*No confident match*` footers. Works across all connectors. See "Corrective Retrieval" below. |
 
 ### Database
 
@@ -253,6 +254,8 @@ PostgreSQL + pgvector via Docker (single container).
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
+| `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for prompt-level corrective retrieval (per-bot `correctiveRetrieval.enabled` overrides). |
+| `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config. |
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 
@@ -351,6 +354,20 @@ uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/
 | `src/serena/config.ts` | Config types + discovery from bot config.json |
 | `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
 | `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
+
+## Corrective Retrieval (prompt-level, Path C)
+
+A prompt-level nudge that turns the model itself into a corrective retrieval loop around Huginn's `search_knowledge` MCP tool. **Off by default**; enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true }`), globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, or hard-disable everywhere with `CORRECTIVE_RETRIEVAL_DISABLED=1`.
+
+How it works: when enabled, `src/ai/prompt-builder.ts` appends a short system-prompt block (after persona / memories / goals / alerts) telling the model to read `search_knowledge` results for a `*Weak match*` or `*No confident match*` footer. The footer is emitted by Huginn (PR #36 + PR #37 / phase0 + phase0b) and carries concrete `broaderQuery` / `narrowerQuery` rewrites the model is asked to re-issue before answering. When the model self-re-queries, the trace naturally shows a second `search_knowledge` tool span before the reply — no synthesized spans, no proxy.
+
+**Connector coverage:** works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`) because the loop is driven entirely by the model through its existing tool surface.
+
+**History:** an earlier attempt (PR #113, retired) used a Copilot SDK `onPostToolUse` hook to intercept the tool result and splice in rescue hits. Two synchronous probes against the melosys peer on 2026-05-14 confirmed the SDK silently drops both `modifiedResult` and `additionalContext` — the hook is purely observational from the model's perspective. Path C bypasses the dead seam entirely. See `mimir/plans/muninn-corrective-rag-rework.md` for the full rationale.
+
+The dashboard waterfall row also surfaces a `0 hits` (red) chip when a search returned nothing usable, and a low-confidence palette flip on the `N/N` chip when Huginn flags a weak match (`src/dashboard/views/components/span-label.ts` — `searchResultSignal`). Operationally useful regardless of whether the toggle is on.
+
+Key files: `src/ai/corrective-config.ts`, `src/ai/prompt-builder.ts` (`CORRECTIVE_RETRIEVAL_PROMPT`), `src/dashboard/views/components/span-label.ts`.
 
 ## Slack Bot
 When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.

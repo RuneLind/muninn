@@ -217,6 +217,38 @@ describe("deriveSpanLabelHtml", () => {
     expect(single!.html).not.toContain("summed across");
   });
 
+  test("shows a '0 hits' chip (not the candidate count) when the search returned nothing to the model", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        output: "No results found for 'meningen med livet' (low confidence).\n\n*No confident match — try: related terms: a, b*",
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }, { kept: true }, { kept: true }], confidence: { lowConfidence: false } }],
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-no-hits");
+    expect(out!.html).toContain(">0 hits<");
+    expect(out!.html).not.toContain(">2/3<"); // candidate count suppressed
+    expect(out!.tooltip).toContain("no results returned to the model");
+  });
+
+  test("flips counts chip to low-conf variant when the output carries a weak-match footer", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        output: "## A doc (18% relevant · low)\ncollection: `kb` doc_id: `1`\n\nbody\n\n*Weak match — try: broader query: \"x\"*",
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }, { kept: true }], confidence: { lowConfidence: false } }],
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-counts wf-low-conf");
+    expect(out!.tooltip).toContain("low-confidence results");
+  });
+
   test("flips counts chip to low-conf variant when any collection is low-confidence", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",

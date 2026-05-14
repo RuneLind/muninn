@@ -35,10 +35,24 @@ export interface BuildPromptOptions {
   restrictedTools?: RestrictedTools;
   userIdentity?: string | UserIdentity;
   threadId?: string;
+  /** When true, append the corrective-retrieval block (Path C). The caller
+   *  resolves this via `resolveCorrectiveConfig(botConfig).enabled`. */
+  correctiveRetrievalEnabled?: boolean;
 }
 
+/**
+ * Corrective-retrieval block appended near the bottom of the system prompt
+ * when `correctiveRetrievalEnabled` is true. References the literal footer
+ * text Huginn emits in `*Weak match*` / `*No confident match*` results — keep
+ * in sync if Huginn changes the footer.
+ */
+export const CORRECTIVE_RETRIEVAL_PROMPT =
+  "When searching the knowledge base: if the results carry a `*Weak match*` or `*No confident match*` footer, do not answer from them. " +
+  "The footer lists concrete suggestions like `broader query: \"...\"` or `narrower query: \"...\"` — call `search_knowledge` again using one of those suggestions before answering. " +
+  "Only answer once you have a confident match, or say plainly that the knowledge base does not cover the question.";
+
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
@@ -107,6 +121,12 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
 
   if (recentAlerts.length > 0) {
     systemParts.push(formatAlerts(recentAlerts));
+  }
+
+  // Placed last so it sits closest to the user turn, where instruction-following
+  // is best.
+  if (correctiveRetrievalEnabled) {
+    systemParts.push(CORRECTIVE_RETRIEVAL_PROMPT);
   }
 
   // The last message is dropped when it matches `currentMessage` because the
