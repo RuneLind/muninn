@@ -249,7 +249,7 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.tooltip).toContain("low-confidence results");
   });
 
-  test("renders 'rescue ⟲N' chip when Huginn Path-D rescue fired", () => {
+  test("renders 'rescue ⟲N' chip with rescued-verdict tooltip when Path-D rescue improved the result", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",
       attributes: {
@@ -272,11 +272,39 @@ describe("deriveSpanLabelHtml", () => {
     });
     expect(out!.html).toContain("wf-chip wf-rescue");
     expect(out!.html).toContain("rescue ⟲1");
-    expect(out!.tooltip).toContain("Huginn rescued");
+    expect(out!.tooltip).toContain("Huginn rescued via 1 retry");
+    expect(out!.tooltip).not.toContain("still weak");
     expect(out!.tooltip).toContain("\"meningen med livet\" → \"meningen\"");
   });
 
-  test("rescue chip shows '⟲N' for multiple retries", () => {
+  test("renders rescue chip with still-weak tooltip when Path-D rescue fired but didn't find anything better", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: {
+            bestScore: 0,
+            noConfidentResults: true,
+            corrective: {
+              mode: "force",
+              retries: 1,
+              verdict: "still_weak",
+              rescueFired: true,
+              queriesTried: ["meningen med livet", "meningen"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-rescue");
+    expect(out!.html).toContain("rescue ⟲1");
+    expect(out!.tooltip).toContain("Huginn attempted rescue (still weak): 1 retry");
+    expect(out!.tooltip).not.toContain("Huginn rescued via");
+  });
+
+  test("rescue chip shows '⟲N' and plural 'retries' for multiple retries", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",
       attributes: {
@@ -287,6 +315,7 @@ describe("deriveSpanLabelHtml", () => {
             corrective: {
               rescueFired: true,
               retries: 2,
+              verdict: "rescued",
               queriesTried: ["q1", "q2", "q3"],
             },
           },
@@ -294,7 +323,7 @@ describe("deriveSpanLabelHtml", () => {
       },
     });
     expect(out!.html).toContain("rescue ⟲2");
-    expect(out!.tooltip).toContain("2 retries");
+    expect(out!.tooltip).toContain("Huginn rescued via 2 retries");
   });
 
   test("no rescue chip when corrective fired but didn't rescue (verdict=confident)", () => {
