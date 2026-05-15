@@ -277,6 +277,38 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.tooltip).toContain("\"meningen med livet\" → \"meningen\"");
   });
 
+  test("deduplicates collections from duplicate searchTrace entries (Path-D rescue pass)", () => {
+    // Huginn emits one `searchTrace.collections` entry per searcher.search()
+    // call, so a rescued single-collection search produces e.g.
+    // [{name: "nav-wiki"}, {name: "nav-wiki"}]. The dashboard should render
+    // the collection chip once, not as "nav-wiki +1".
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [
+            { name: "nav-wiki", candidates: [{ kept: true }] },
+            { name: "nav-wiki", candidates: [] }, // rescue pass, same collection
+          ],
+          response: {
+            corrective: {
+              rescueFired: true,
+              retries: 1,
+              verdict: "still_weak",
+              queriesTried: ["meningen med livet", "meningen"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("nav-wiki");
+    expect(out!.html).not.toContain("wf-coll-more");
+    expect(out!.html).not.toContain("+1");
+    // Rescue chip still renders alongside the deduped single-collection chip
+    expect(out!.html).toContain("rescue ⟲1");
+  });
+
   test("renders rescue chip with still-weak tooltip when Path-D rescue fired but didn't find anything better", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",
