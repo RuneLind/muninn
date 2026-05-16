@@ -38,6 +38,10 @@ export interface BuildPromptOptions {
   /** When true, append the corrective-retrieval block (Path C). The caller
    *  resolves this via `resolveCorrectiveConfig(botConfig).enabled`. */
   correctiveRetrievalEnabled?: boolean;
+  /** When true, append the one-line nudge telling the bot to prefer
+   *  `research_knowledge` for multi-part questions. Caller sets this from
+   *  `botConfig.hasResearchKnowledge`. */
+  researchKnowledgeAvailable?: boolean;
 }
 
 /**
@@ -51,8 +55,11 @@ export const CORRECTIVE_RETRIEVAL_PROMPT =
   "The footer lists concrete suggestions like `broader query: \"...\"` or `narrower query: \"...\"` — call `search_knowledge` again using one of those suggestions before answering. " +
   "Only answer once you have a confident match, or say plainly that the knowledge base does not cover the question.";
 
+export const RESEARCH_KNOWLEDGE_NUDGE =
+  "For multi-part or comparison questions (e.g. \"how does X differ from Y\", \"what triggers Z and W\"), prefer `research_knowledge` — it decomposes the question and searches each part. For simple single-topic lookups, use `search_knowledge`.";
+
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled, researchKnowledgeAvailable } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
@@ -125,6 +132,9 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
 
   // Placed last so it sits closest to the user turn, where instruction-following
   // is best.
+  if (researchKnowledgeAvailable) {
+    systemParts.push(RESEARCH_KNOWLEDGE_NUDGE);
+  }
   if (correctiveRetrievalEnabled) {
     systemParts.push(CORRECTIVE_RETRIEVAL_PROMPT);
   }

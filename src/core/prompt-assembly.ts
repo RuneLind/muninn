@@ -54,6 +54,7 @@ export async function assemblePrompt(params: AssemblePromptParams): Promise<Asse
     userIdentity: userIdentity ?? username,
     threadId,
     correctiveRetrievalEnabled: resolveCorrectiveConfig(botConfig).enabled,
+    researchKnowledgeAvailable: !!botConfig.hasResearchKnowledge,
   });
   tracer.end("prompt_build", meta);
 

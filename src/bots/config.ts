@@ -81,6 +81,15 @@ export interface BotConfig {
   /** Prompt-level corrective retrieval (Path C). See `resolveCorrectiveConfig`
    *  + CLAUDE.md "Corrective Retrieval" section. */
   correctiveRetrieval?: CorrectiveRetrievalBotConfig;
+  /** True when the bot's .mcp.json registers a `research` MCP server (the
+   *  muninn-side `research_knowledge` tool). Drives the one-line system-prompt
+   *  nudge in `buildPrompt`. Detected once at discovery. */
+  hasResearchKnowledge?: boolean;
+  /** Default collections from the bot's `knowledge` MCP server env
+   *  (`KNOWLEDGE_COLLECTIONS`). Resolved once at discovery so the research MCP
+   *  server doesn't re-read .mcp.json on every tool call. `undefined` means
+   *  "search all collections huginn knows about". */
+  defaultKnowledgeCollections?: string[];
 }
 
 export interface CorrectiveRetrievalBotConfig {
@@ -188,8 +197,36 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       }
     }
 
-    const hasMcp = existsSync(join(dir, ".mcp.json"));
+    const mcpJsonPath = join(dir, ".mcp.json");
+    const hasMcp = existsSync(mcpJsonPath);
     const hasSettings = existsSync(join(dir, ".claude", "settings.json")) || existsSync(join(dir, ".claude", "settings.local.json"));
+
+    let hasResearchKnowledge = false;
+    let defaultKnowledgeCollections: string[] | undefined;
+    if (hasMcp) {
+      try {
+        const mcp = JSON.parse(readFileSync(mcpJsonPath, "utf-8")) as {
+          mcpServers?: Record<string, { env?: Record<string, string> } | undefined>;
+        };
+        hasResearchKnowledge = !!mcp.mcpServers?.["research"];
+        for (const server of Object.values(mcp.mcpServers ?? {})) {
+          const value = server?.env?.KNOWLEDGE_COLLECTIONS;
+          if (value) {
+            defaultKnowledgeCollections = value
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            break;
+          }
+        }
+      } catch (err) {
+        log.warn("Failed to parse .mcp.json for bot \"{name}\": {error}", {
+          botName: name,
+          name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     const platforms: string[] = [];
     if (hasTelegram) platforms.push("telegram");
@@ -219,6 +256,8 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
       correctiveRetrieval,
+      hasResearchKnowledge,
+      defaultKnowledgeCollections,
     });
 
     const configParts: string[] = [];
