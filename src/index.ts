@@ -11,6 +11,7 @@ import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
+import { researchMcpServer } from "./research/mcp-server.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
@@ -96,6 +97,22 @@ try {
 hivemindManager.start(allBotConfigs, config).catch((err) => {
   log.warn("Hivemind manager failed to start: {error}", { error: err instanceof Error ? err.message : String(err) });
 });
+
+// Start research_knowledge MCP server. Bots opt in by adding the server to their
+// .mcp.json — bots without it just don't see the tool.
+try {
+  researchMcpServer.start();
+  for (const bot of allBotConfigs) {
+    researchMcpServer.registerBot({
+      botName: bot.name,
+      botDir: bot.dir,
+      knowledgeApiUrl: config.knowledgeApiUrl,
+      defaultCollections: bot.defaultKnowledgeCollections,
+    });
+  }
+} catch (err) {
+  log.warn("Research MCP server failed to start: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
 
 // Build the combined Hono app
 const dashboard = createDashboardRoutes(config);
@@ -198,6 +215,7 @@ async function shutdown() {
 
   server.stop();
   await hivemindManager.stop();
+  await researchMcpServer.stop();
   await serenaManager.stopAll();
   await disconnectAllMcp();
   await closeDb();

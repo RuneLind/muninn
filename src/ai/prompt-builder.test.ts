@@ -94,7 +94,7 @@ mock.module("./embeddings.ts", () => ({
   generateEmbedding: mock(() => Promise.resolve(Array.from({ length: 384 }, () => 0.1))),
 }));
 
-const { buildPrompt, CORRECTIVE_RETRIEVAL_PROMPT } = await import("./prompt-builder.ts");
+const { buildPrompt, CORRECTIVE_RETRIEVAL_PROMPT, RESEARCH_KNOWLEDGE_NUDGE } = await import("./prompt-builder.ts");
 
 const bp = (overrides: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
   buildPrompt({ userId: "u1", currentMessage: "hello", persona: "persona", botName: "testbot", ...overrides });
@@ -209,5 +209,18 @@ describe("buildPrompt", () => {
 
     const explicitlyOff = await bp({ correctiveRetrievalEnabled: false });
     expect(explicitlyOff.systemPrompt).not.toContain(CORRECTIVE_RETRIEVAL_PROMPT);
+  });
+
+  test("appends research_knowledge nudge when the bot has the tool", async () => {
+    const result = await bp({ researchKnowledgeAvailable: true });
+    expect(result.systemPrompt).toContain(RESEARCH_KNOWLEDGE_NUDGE);
+  });
+
+  test("omits research_knowledge nudge when the bot doesn't have the tool", async () => {
+    const defaultRun = await bp();
+    expect(defaultRun.systemPrompt).not.toContain(RESEARCH_KNOWLEDGE_NUDGE);
+
+    const explicitlyOff = await bp({ researchKnowledgeAvailable: false });
+    expect(explicitlyOff.systemPrompt).not.toContain(RESEARCH_KNOWLEDGE_NUDGE);
   });
 });
