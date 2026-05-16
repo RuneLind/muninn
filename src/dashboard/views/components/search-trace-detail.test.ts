@@ -726,6 +726,107 @@ describe("renderSearchTrace — yggdrasil shape", () => {
         expect(html).toContain("[" + strategy + "]");
       }
     });
+
+    test("renders strategy chip on the pass-2 queries-tried row when corrective.rescueStrategy is set (rescued)", () => {
+      // Phase 0c.1: on `rescued`, huginn drops retryHints but carries the picked
+      // strategy on `corrective.rescueStrategy`. The chip should still surface,
+      // attached to the rescue pass row in the timeline.
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "tibetansk pensjonsavtale vurdering" },
+        response: {
+          corrective: {
+            mode: "force", retries: 1, verdict: "rescued", rescueFired: true,
+            queriesTried: ["tibetansk pensjonsavtale vurdering", "tibetansk pensjonsavtale"],
+            rescueStrategy: "drop_last_word",
+          },
+          retryHints: null,
+        },
+        collections: [],
+      });
+      // Chip lives inside the pass-2 row, AFTER the stt-corr-tag span. Use a
+      // permissive match so we don't over-couple to whitespace in the template.
+      expect(html).toMatch(
+        /<span class="stt-corr-pass">2<\/span><span class="stt-corr-q">"tibetansk pensjonsavtale"<\/span><span class="stt-corr-tag">[a-z_]+<\/span><span class="stt-corr-strategy" title="Dropped the last content word \(skipping stopwords\) and trimmed any stopwords left behind\.">\[drop_last_word\]<\/span>/,
+      );
+    });
+
+    test("renders strategy chip on the pass-2 queries-tried row on still_weak too", () => {
+      // Phase 0c.1: on `still_weak`, retryHints survives AND corrective.rescueStrategy
+      // is set. Both chips appear (one in the timeline pass-2 row, one in the
+      // broaderQuery hint row) — they share the lookup table, no new wording.
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: {
+            mode: "force", retries: 1, verdict: "still_weak", rescueFired: true,
+            queriesTried: ["x", "y"],
+            rescueStrategy: "conjunction_split",
+          },
+          retryHints: { broaderQuery: "y", broaderQueryStrategy: "conjunction_split" },
+        },
+        collections: [],
+      });
+      const chips = html.match(/<span class="stt-corr-strategy"[^>]*>\[conjunction_split\]<\/span>/g) || [];
+      expect(chips.length).toBe(2);
+    });
+
+    test("does not render strategy chip on the pass-1 (original) row", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: {
+            mode: "force", retries: 1, verdict: "rescued", rescueFired: true,
+            queriesTried: ["x", "y"],
+            rescueStrategy: "drop_last_word",
+          },
+          retryHints: null,
+        },
+        collections: [],
+      });
+      // No chip directly after the pass-1 tag span — the rescue chip belongs to pass-2 only.
+      expect(html).not.toMatch(
+        /<span class="stt-corr-pass">1<\/span><span class="stt-corr-q">[^<]*<\/span><span class="stt-corr-tag">[^<]*<\/span><span class="stt-corr-strategy"/,
+      );
+    });
+
+    test("omits strategy chip on the timeline when corrective.rescueStrategy is absent (pre-0c.1 huginn)", () => {
+      // Backwards-compat: rescued traces from older huginn deploys don't carry
+      // rescueStrategy. The timeline should render unchanged.
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: { mode: "force", retries: 1, verdict: "rescued", rescueFired: true, queriesTried: ["x", "y"] },
+          retryHints: null,
+        },
+        collections: [],
+      });
+      // Timeline rendered, but no strategy chip anywhere in the panel.
+      expect(html).toContain('class="stt-corr-pass"');
+      expect(html).not.toContain("stt-corr-strategy");
+    });
+
+    test("rescue strategy chip falls back to generic tooltip on unknown enum value", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: {
+            mode: "force", retries: 1, verdict: "rescued", rescueFired: true,
+            queriesTried: ["x", "y"],
+            rescueStrategy: "future_huginn_strategy",
+          },
+          retryHints: null,
+        },
+        collections: [],
+      });
+      expect(html).toMatch(
+        /<span class="stt-corr-strategy" title="Rewrite heuristic name emitted by huginn \(no local description\)\.">\[future_huginn_strategy\]<\/span>/,
+      );
+    });
   });
 
   test("clicking a new trace resets sort/filter state from the previous trace", () => {
