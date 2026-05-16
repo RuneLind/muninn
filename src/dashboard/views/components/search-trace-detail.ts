@@ -578,10 +578,23 @@ export function searchTraceDetailScript(): string {
         (verdict === 'still_weak' || verdict === 'weak_no_hint') ? ' stt-warn' :
         '';
 
+      // Inline strategy chip — names the heuristic that produced the rewrite
+      // (huginn Phase 0c). Falls back to a generic tooltip when an unknown
+      // enum value lands (future huginn versions), so operators still see the
+      // chip and know to update muninn.
+      const strategyChip = function (strategy) {
+        if (typeof strategy !== 'string' || !strategy) return '';
+        const tip = STT_CORR_STRATEGY_TIPS[strategy] ||
+          'Rewrite heuristic name emitted by huginn (no local description).';
+        return '<span class="stt-corr-strategy" title="' + esc(tip) + '">[' + esc(strategy) + ']</span>';
+      };
+
       // Pass-by-pass timeline. Tag the first as "original" and subsequent ones
       // as "broader" / "narrower" / "rescue" based on whether they match the
       // emitted retryHints (so the operator can see *why* huginn picked that
-      // rewrite).
+      // rewrite). On rescued / still_weak verdicts huginn (Phase 0c.1) drops
+      // the recomputed retryHints — corrective.rescueStrategy carries the
+      // picked strategy through directly, so attach the chip to pass-2.
       const queryRows = queries.map((q, i) => {
         let tag = 'original';
         if (i > 0) {
@@ -593,19 +606,9 @@ export function searchTraceDetailScript(): string {
           '<span class="stt-corr-pass">' + (i + 1) + '</span>' +
           '<span class="stt-corr-q">"' + esc(q) + '"</span>' +
           '<span class="stt-corr-tag">' + esc(tag) + '</span>' +
+          (i === 1 ? strategyChip(corr.rescueStrategy) : '') +
         '</div>';
       }).join('');
-
-      // Inline strategy chip — names the heuristic that produced the rewrite
-      // (huginn Phase 0c). Falls back to a generic tooltip when an unknown
-      // enum value lands (future huginn versions), so operators still see the
-      // chip and know to update muninn.
-      const strategyChip = function (strategy) {
-        if (typeof strategy !== 'string' || !strategy) return '';
-        const tip = STT_CORR_STRATEGY_TIPS[strategy] ||
-          'Rewrite heuristic name emitted by huginn (no local description).';
-        return '<span class="stt-corr-strategy" title="' + esc(tip) + '">[' + esc(strategy) + ']</span>';
-      };
 
       // Available hints (whether or not huginn actually used them).
       const hintLines = [];
