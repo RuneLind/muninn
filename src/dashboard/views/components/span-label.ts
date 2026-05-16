@@ -51,6 +51,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
   // hundreds of candidates yet hand the model "No results found / low
   // confidence", which the candidate-count chip alone hides.
   const resultSignal = searchResultSignal(attrs);
+  const rescue = searchRescueInfo(attrs);
 
   // Search-tool path: collection chips + counts chip, derived from searchTrace
   // or input.collection.
@@ -76,9 +77,13 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
         : `${summary.kept} kept / ${summary.fetched} fetched${scope}`;
       countsChip = `<span class="${cls}" title="${escAttr(tip)}">${summary.kept}/${summary.fetched}</span>`;
     }
+    const rescueChip = rescue
+      ? `<span class="wf-chip wf-rescue" title="${escAttr(rescueTooltip(rescue))}">rescue ⟲${rescue.retries}</span>`
+      : "";
     const tooltipLines = [span.name, "collections: " + collections.join(", ")];
     if (resultSignal === "empty") tooltipLines.push("⚠ no results returned to the model");
     else if (resultSignal === "weak") tooltipLines.push("⚠ low-confidence results (Huginn flagged a weak match)");
+    if (rescue) tooltipLines.push(rescueTooltip(rescue));
     if (summary) {
       tooltipLines.push(`candidates: ${summary.kept} kept / ${summary.fetched} fetched`);
       if (summary.topTitle) tooltipLines.push("top: " + summary.topTitle);
@@ -86,7 +91,7 @@ export function deriveSpanLabelHtml(span: SpanLike): { html: string; tooltip: st
       if (summary.lowConfidence) tooltipLines.push("⚠ low confidence");
     }
     return {
-      html: verbChip + firstChip + moreChip + countsChip,
+      html: verbChip + firstChip + moreChip + countsChip + rescueChip,
       tooltip: tooltipLines.join("\n"),
     };
   }
@@ -127,6 +132,45 @@ function searchResultSignal(attrs: NonNullable<SpanLike["attributes"]>): "empty"
     }
   }
   return null;
+}
+
+/** Whether Huginn's Path-D corrective-rescue logic fired on this search.
+ *  Reads `searchTrace.response.corrective` — the block Huginn emits in the
+ *  trace response after `run_corrective_search`. Returns null when no rescue
+ *  happened (confident result, mode=off, or no usable hint). `verdict`
+ *  distinguishes whether rescue actually improved the result (`"rescued"`)
+ *  or fired but came up empty (`"still_weak"`); the chip renders either way
+ *  since "rescue fired" is the operationally interesting signal, but the
+ *  tooltip phrases the two cases differently. */
+function searchRescueInfo(
+  attrs: NonNullable<SpanLike["attributes"]>,
+): { retries: number; queriesTried: string[]; verdict: string } | null {
+  const trace = attrs.searchTrace;
+  if (!trace || typeof trace !== "object") return null;
+  const resp = (trace as { response?: { corrective?: unknown } }).response;
+  const corr = resp && typeof resp === "object" ? (resp as { corrective?: unknown }).corrective : null;
+  if (!corr || typeof corr !== "object") return null;
+  const c = corr as { rescueFired?: unknown; retries?: unknown; queriesTried?: unknown; verdict?: unknown };
+  if (c.rescueFired !== true) return null;
+  const retries = typeof c.retries === "number" && c.retries > 0 ? c.retries : 1;
+  const queriesTried = Array.isArray(c.queriesTried)
+    ? c.queriesTried.filter((q): q is string => typeof q === "string")
+    : [];
+  const verdict = typeof c.verdict === "string" ? c.verdict : "rescued";
+  return { retries, queriesTried, verdict };
+}
+
+function rescueTooltip(info: { retries: number; queriesTried: string[]; verdict: string }): string {
+  const qs = info.queriesTried;
+  const path = qs.length >= 2 ? `"${qs[0]}" → "${qs[qs.length - 1]}"` : qs[0] ? `"${qs[0]}"` : "";
+  const noun = info.retries === 1 ? "retry" : "retries";
+  // Only the explicit `still_weak` verdict gets the cautious phrasing — every
+  // other case (including missing verdict in older traces) reads as a
+  // successful rescue, matching the optimistic default.
+  const head = info.verdict === "still_weak"
+    ? `Huginn attempted rescue (still weak): ${info.retries} ${noun}`
+    : `Huginn rescued via ${info.retries} ${noun}`;
+  return `↻ ${head}${path ? " — " + path : ""}`;
 }
 
 interface ToolLabelExtras { chips: string; tooltipLines: string[]; }

@@ -87,9 +87,19 @@ export function collectionsFor(attrs: { searchTrace?: unknown; input?: unknown }
     | { collections?: Array<{ name?: unknown }>; tool?: unknown }
     | undefined;
   if (trace && Array.isArray(trace.collections) && trace.collections.length > 0) {
-    const names = trace.collections
-      .map((c) => (c && typeof c.name === "string" ? c.name : null))
-      .filter((n): n is string => !!n);
+    // Dedupe preserving first-seen order. Huginn emits one `collections` entry
+    // per `searcher.search()` call, so a Path-D rescued search shows the same
+    // collection twice (original + rescue pass) — without dedupe the row would
+    // claim "+1 more collection" misleadingly. The rescue itself is signalled
+    // by the separate `rescue ⟲N` chip.
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const c of trace.collections) {
+      if (c && typeof c.name === "string" && c.name.length > 0 && !seen.has(c.name)) {
+        seen.add(c.name);
+        names.push(c.name);
+      }
+    }
     if (names.length > 0) return names;
   }
   // Yggdrasil traces are flatter — no collections, but a `tool` discriminator.

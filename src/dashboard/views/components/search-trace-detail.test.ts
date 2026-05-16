@@ -492,6 +492,144 @@ describe("renderSearchTrace — yggdrasil shape", () => {
     expect(html).toContain("Collection");
   });
 
+  describe("Corrective Retrieval panel", () => {
+    test("renders verdict badge, mode, retries, and queries timeline when rescue fired", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "meningen med livet", expanded: "meningen med livet" },
+        response: {
+          bestScore: 0,
+          noConfidentResults: true,
+          corrective: {
+            mode: "force",
+            retries: 1,
+            verdict: "still_weak",
+            rescueFired: true,
+            queriesTried: ["meningen med livet", "meningen"],
+          },
+          retryHints: {
+            broaderQuery: "meningen",
+            relatedTerms: ["oppgaver/plukk", "fullmakt"],
+            detectedEntities: ["MED"],
+          },
+        },
+        collections: [],
+      });
+      expect(html).toContain("Corrective Retrieval");
+      expect(html).toContain("verdict: still_weak");
+      expect(html).toContain("stt-warn");
+      expect(html).toContain("mode: force");
+      expect(html).toContain("retries: 1");
+      expect(html).toContain(">original<");
+      expect(html).toContain(">broader<");
+      expect(html).toContain("relatedTerms:");
+      expect(html).toContain("oppgaver/plukk, fullmakt");
+      expect(html).toContain("detectedEntities:");
+      expect(html).toContain("Post-rescue:");
+      expect(html).toContain("bestScore 0.000");
+      expect(html).toContain("no confident results");
+    });
+
+    test("rescued verdict uses non-warn badge palette", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          bestScore: 0.954,
+          corrective: {
+            mode: "auto",
+            retries: 1,
+            verdict: "rescued",
+            rescueFired: true,
+            queriesTried: ["x", "y"],
+          },
+          retryHints: { broaderQuery: "y" },
+        },
+        collections: [],
+      });
+      expect(html).toContain("verdict: rescued");
+      const badge = html.match(/<span class="stt-badge[^"]*">verdict: rescued/);
+      expect(badge).not.toBeNull();
+      expect(badge![0]).not.toContain("stt-warn");
+    });
+
+    test("skips the panel entirely on confident searches with no hints", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          bestScore: 0.95,
+          corrective: {
+            mode: "auto",
+            retries: 0,
+            verdict: "confident",
+            rescueFired: false,
+            queriesTried: ["x"],
+          },
+        },
+        collections: [],
+      });
+      expect(html).not.toContain("Corrective Retrieval");
+    });
+
+    test("still renders for weak_no_hint verdict so operators see what huginn detected", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          bestScore: 0.2,
+          corrective: {
+            mode: "auto",
+            retries: 0,
+            verdict: "weak_no_hint",
+            rescueFired: false,
+            queriesTried: ["x"],
+          },
+          retryHints: { detectedEntities: ["ent1"] },
+        },
+        collections: [],
+      });
+      expect(html).toContain("Corrective Retrieval");
+      expect(html).toContain("verdict: weak_no_hint");
+      expect(html).toContain("detectedEntities:");
+      expect(html).toContain("ent1");
+    });
+
+    test("collection panels gain pass labels when corrective fired", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "meningen med livet" },
+        response: {
+          corrective: {
+            rescueFired: true,
+            retries: 1,
+            verdict: "still_weak",
+            queriesTried: ["meningen med livet", "meningen"],
+          },
+        },
+        collections: [
+          { name: "nav-wiki", candidates: [{ kept: true, docTitle: "first" }] },
+          { name: "nav-wiki", candidates: [{ kept: true, docTitle: "second" }] },
+        ],
+      });
+      expect(html).toContain("stt-coll-pass");
+      expect(html).toMatch(/pass 1[^"]*"meningen med livet"/);
+      expect(html).toMatch(/pass 2[^"]*"meningen"/);
+    });
+
+    test("collection panels stay unlabeled when no corrective block", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        collections: [
+          { name: "wiki", candidates: [{ kept: true, docTitle: "first" }] },
+        ],
+      });
+      expect(html).not.toContain("stt-coll-pass");
+      expect(html).not.toContain("pass 1");
+    });
+  });
+
   test("clicking a new trace resets sort/filter state from the previous trace", () => {
     const trace1 = yggFixture();
     sb.renderSearchTrace(trace1);

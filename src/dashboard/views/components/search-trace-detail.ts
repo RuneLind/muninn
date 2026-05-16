@@ -84,6 +84,47 @@ export function searchTraceDetailStyles(): string {
       border-color: color-mix(in srgb, var(--status-error) 35%, transparent);
     }
 
+    /* Corrective Retrieval panel — surfaces Huginn's Path-D corrective rescue
+       details when present in searchTrace.response.corrective. Mirrors the
+       chip on the waterfall row but with the full timeline. */
+    .stt-corrective .stt-corr-mode { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+    .stt-corrective .stt-corr-meta { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+    .stt-corrective .stt-corr-queries { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+    .stt-corrective .stt-corr-query {
+      display: flex; gap: 8px; align-items: center;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .stt-corrective .stt-corr-pass {
+      display: inline-block; min-width: 16px; text-align: center;
+      padding: 1px 6px; border-radius: 3px;
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent-light);
+      font-size: 10px; font-weight: 600;
+    }
+    .stt-corrective .stt-corr-q { color: var(--text-soft); }
+    .stt-corrective .stt-corr-tag {
+      font-size: 10px; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .stt-corrective .stt-corr-hints {
+      font-size: 12px; color: var(--text-soft);
+      display: flex; flex-direction: column; gap: 2px;
+      margin-bottom: 8px;
+    }
+    .stt-corrective .stt-corr-hints .stt-label { color: var(--text-dim); margin-right: 4px; }
+    .stt-corrective .stt-corr-summary { font-size: 11px; color: var(--text-dim); }
+    /* Pass label inline on the per-collection header when corrective was
+       active — clarifies whether you're looking at the original or rescue
+       candidate table (otherwise both say the same collection name). */
+    .stt-coll-pass {
+      display: inline-block; margin-left: 8px;
+      padding: 1px 6px; border-radius: 3px;
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent-light);
+      font-size: 10px; font-weight: 600;
+    }
+
     /* Stage timing strip */
     .stt-strip {
       display: flex;
@@ -305,9 +346,13 @@ export function searchTraceDetailScript(): string {
       if (sttIsYggdrasilTrace(trace)) {
         return sttRenderYggdrasilPanel(trace);
       }
+      const response = trace.response || {};
+      const corr = response.corrective || null;
+      const queriesTried = (corr && Array.isArray(corr.queriesTried)) ? corr.queriesTried : null;
       return '<div class="stt-panel">' +
         sttRenderQuery(trace.query || {}) +
-        sttRenderCollections(trace.collections || []) +
+        sttRenderCorrective(response) +
+        sttRenderCollections(trace.collections || [], queriesTried) +
         '<div class="stt-toolbar stt-raw-toggle"><button onclick="sttToggleRaw()">Show raw JSON</button></div>' +
       '</div>';
     }
@@ -479,9 +524,93 @@ export function searchTraceDetailScript(): string {
       return out;
     }
 
-    function sttRenderCollections(collections) {
+    /** Renders the Corrective Retrieval section from a v1 search-trace response
+     *  block. Skipped silently when there's nothing useful to show (confident
+     *  path with no hints). Renders even when queriesTried.length is 1 if
+     *  retryHints carry usable info — that's the "weak_no_hint" case where
+     *  rescue couldn't fire but the operator still benefits from seeing what
+     *  Huginn detected. */
+    function sttRenderCorrective(response) {
+      if (!response || typeof response !== 'object') return '';
+      const corr = response.corrective;
+      if (!corr || typeof corr !== 'object') return '';
+      const hints = (response.retryHints && typeof response.retryHints === 'object') ? response.retryHints : {};
+      const mode = corr.mode || 'auto';
+      const verdict = corr.verdict || 'confident';
+      const retries = (typeof corr.retries === 'number') ? corr.retries : 0;
+      const queries = Array.isArray(corr.queriesTried) ? corr.queriesTried : [];
+      const hasHints = !!(hints.broaderQuery || hints.narrowerQuery ||
+        (Array.isArray(hints.relatedTerms) && hints.relatedTerms.length) ||
+        (Array.isArray(hints.detectedEntities) && hints.detectedEntities.length));
+      // Skip the panel for confident searches with no hint context — no
+      // operational value over the existing chip + summary above.
+      if (verdict === 'confident' && queries.length <= 1 && !hasHints) return '';
+
+      const verdictClass =
+        verdict === 'rescued' ? '' :
+        (verdict === 'still_weak' || verdict === 'weak_no_hint') ? ' stt-warn' :
+        '';
+
+      // Pass-by-pass timeline. Tag the first as "original" and subsequent ones
+      // as "broader" / "narrower" / "rescue" based on whether they match the
+      // emitted retryHints (so the operator can see *why* huginn picked that
+      // rewrite).
+      const queryRows = queries.map((q, i) => {
+        let tag = 'original';
+        if (i > 0) {
+          if (hints.broaderQuery && q === hints.broaderQuery) tag = 'broader';
+          else if (hints.narrowerQuery && q === hints.narrowerQuery) tag = 'narrower';
+          else tag = 'rescue';
+        }
+        return '<div class="stt-corr-query">' +
+          '<span class="stt-corr-pass">' + (i + 1) + '</span>' +
+          '<span class="stt-corr-q">"' + esc(q) + '"</span>' +
+          '<span class="stt-corr-tag">' + esc(tag) + '</span>' +
+        '</div>';
+      }).join('');
+
+      // Available hints (whether or not huginn actually used them).
+      const hintLines = [];
+      if (hints.broaderQuery) {
+        hintLines.push('<div><span class="stt-label">broaderQuery:</span> "' + esc(hints.broaderQuery) + '"</div>');
+      }
+      if (hints.narrowerQuery) {
+        hintLines.push('<div><span class="stt-label">narrowerQuery:</span> "' + esc(hints.narrowerQuery) + '"</div>');
+      }
+      if (Array.isArray(hints.relatedTerms) && hints.relatedTerms.length) {
+        hintLines.push('<div><span class="stt-label">relatedTerms:</span> ' +
+          hints.relatedTerms.map(esc).join(', ') + '</div>');
+      }
+      if (Array.isArray(hints.detectedEntities) && hints.detectedEntities.length) {
+        hintLines.push('<div><span class="stt-label">detectedEntities:</span> ' +
+          hints.detectedEntities.map(esc).join(', ') + '</div>');
+      }
+
+      // Post-rescue summary — bestScore + noConfidentResults reflect the state
+      // the model actually saw (after any merge), so this is the right place
+      // for "did the rescue help" at a glance.
+      const summary = [];
+      if (response.bestScore != null) {
+        const score = Number(response.bestScore);
+        if (!isNaN(score)) summary.push('bestScore ' + score.toFixed(3));
+      }
+      if (response.noConfidentResults === true) summary.push('no confident results');
+
+      return '<div class="stt-section stt-corrective">' +
+        '<h5>Corrective Retrieval' +
+          ' <span class="stt-badge' + verdictClass + '">verdict: ' + esc(verdict) + '</span>' +
+          '<span class="stt-corr-mode">mode: ' + esc(mode) + '</span>' +
+          '<span class="stt-corr-meta">retries: ' + retries + '</span>' +
+        '</h5>' +
+        (queryRows ? '<div class="stt-corr-queries">' + queryRows + '</div>' : '') +
+        (hintLines.length ? '<div class="stt-corr-hints">' + hintLines.join('') + '</div>' : '') +
+        (summary.length ? '<div class="stt-corr-summary">Post-rescue: ' + summary.join(' · ') + '</div>' : '') +
+      '</div>';
+    }
+
+    function sttRenderCollections(collections, queriesTried) {
       if (!collections.length) return '';
-      return collections.map((c, i) => sttRenderCollection(c, i)).join('');
+      return collections.map((c, i) => sttRenderCollection(c, i, queriesTried)).join('');
     }
 
     function sttBuildTimingsStrip(timings, keys, labels) {
@@ -501,7 +630,7 @@ export function searchTraceDetailScript(): string {
       return { segs, legend, total };
     }
 
-    function sttRenderCollection(c, idx) {
+    function sttRenderCollection(c, idx, queriesTried) {
       const timings = c.timingsMs || {};
       const strip = sttBuildTimingsStrip(timings, STT_STAGES, STT_STAGE_LABELS);
 
@@ -509,8 +638,17 @@ export function searchTraceDetailScript(): string {
       const confBlock = sttRenderConfidence(conf);
       const candTable = sttRenderCandidates(c.candidates || []);
 
+      // When corrective fired, huginn emits one collections entry per pass
+      // (original + rescue), so the operator can otherwise only tell them
+      // apart by inspecting the candidate tables. This pass label maps the
+      // entry index back to the query that produced it.
+      const passLabel = (Array.isArray(queriesTried) && queriesTried.length > 1 && queriesTried[idx])
+        ? '<span class="stt-coll-pass">pass ' + (idx + 1) + ': "' + esc(queriesTried[idx]) + '"</span>'
+        : '';
+
       return '<div class="stt-section">' +
-        '<h5>Collection — ' + esc(c.name || '?') + ' <span style="color:var(--text-faint);font-weight:normal;text-transform:none;letter-spacing:0">' +
+        '<h5>Collection — ' + esc(c.name || '?') + passLabel +
+        ' <span style="color:var(--text-faint);font-weight:normal;text-transform:none;letter-spacing:0">' +
           (c.indexer ? 'indexer=' + esc(c.indexer) : '') +
           (c.fetchK != null ? ' · fetchK=' + c.fetchK : '') +
           ' · candidates=' + (c.candidates || []).length +

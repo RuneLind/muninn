@@ -249,6 +249,152 @@ describe("deriveSpanLabelHtml", () => {
     expect(out!.tooltip).toContain("low-confidence results");
   });
 
+  test("renders 'rescue ⟲N' chip with rescued-verdict tooltip when Path-D rescue improved the result", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: {
+            bestScore: 0.954,
+            noConfidentResults: false,
+            corrective: {
+              mode: "auto",
+              retries: 1,
+              verdict: "rescued",
+              rescueFired: true,
+              queriesTried: ["meningen med livet", "meningen"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-rescue");
+    expect(out!.html).toContain("rescue ⟲1");
+    expect(out!.tooltip).toContain("Huginn rescued via 1 retry");
+    expect(out!.tooltip).not.toContain("still weak");
+    expect(out!.tooltip).toContain("\"meningen med livet\" → \"meningen\"");
+  });
+
+  test("deduplicates collections from duplicate searchTrace entries (Path-D rescue pass)", () => {
+    // Huginn emits one `searchTrace.collections` entry per searcher.search()
+    // call, so a rescued single-collection search produces e.g.
+    // [{name: "nav-wiki"}, {name: "nav-wiki"}]. The dashboard should render
+    // the collection chip once, not as "nav-wiki +1".
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [
+            { name: "nav-wiki", candidates: [{ kept: true }] },
+            { name: "nav-wiki", candidates: [] }, // rescue pass, same collection
+          ],
+          response: {
+            corrective: {
+              rescueFired: true,
+              retries: 1,
+              verdict: "still_weak",
+              queriesTried: ["meningen med livet", "meningen"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("nav-wiki");
+    expect(out!.html).not.toContain("wf-coll-more");
+    expect(out!.html).not.toContain("+1");
+    // Rescue chip still renders alongside the deduped single-collection chip
+    expect(out!.html).toContain("rescue ⟲1");
+  });
+
+  test("renders rescue chip with still-weak tooltip when Path-D rescue fired but didn't find anything better", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: {
+            bestScore: 0,
+            noConfidentResults: true,
+            corrective: {
+              mode: "force",
+              retries: 1,
+              verdict: "still_weak",
+              rescueFired: true,
+              queriesTried: ["meningen med livet", "meningen"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("wf-chip wf-rescue");
+    expect(out!.html).toContain("rescue ⟲1");
+    expect(out!.tooltip).toContain("Huginn attempted rescue (still weak): 1 retry");
+    expect(out!.tooltip).not.toContain("Huginn rescued via");
+  });
+
+  test("rescue chip shows '⟲N' and plural 'retries' for multiple retries", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: {
+            corrective: {
+              rescueFired: true,
+              retries: 2,
+              verdict: "rescued",
+              queriesTried: ["q1", "q2", "q3"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).toContain("rescue ⟲2");
+    expect(out!.tooltip).toContain("Huginn rescued via 2 retries");
+  });
+
+  test("no rescue chip when corrective fired but didn't rescue (verdict=confident)", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: {
+            corrective: {
+              mode: "auto",
+              retries: 0,
+              verdict: "confident",
+              rescueFired: false,
+              queriesTried: ["foo"],
+            },
+          },
+        },
+      },
+    });
+    expect(out!.html).not.toContain("wf-rescue");
+    expect(out!.tooltip).not.toContain("rescued");
+  });
+
+  test("no rescue chip when corrective block is missing (pre-Path-D traces)", () => {
+    const out = deriveSpanLabelHtml({
+      name: "knowledge-search_knowledge",
+      attributes: {
+        searchTrace: {
+          schemaVersion: 1,
+          collections: [{ name: "kb", candidates: [{ kept: true }] }],
+          response: { bestScore: 0.8 },
+        },
+      },
+    });
+    expect(out!.html).not.toContain("wf-rescue");
+  });
+
   test("flips counts chip to low-conf variant when any collection is low-confidence", () => {
     const out = deriveSpanLabelHtml({
       name: "knowledge-search_knowledge",

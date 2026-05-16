@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { buildHashMetaTag, getDashboardBuildHash } from "../dashboard-build-hash.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { layoutStyles } from "./components/layout.ts";
 import { connectionStyles, connectionStatusHtml, connectionScript } from "./components/connection.ts";
@@ -23,11 +24,13 @@ import { requestProgressStyles, requestProgressHtml, requestProgressScript } fro
 
 export async function renderDashboardPage(): Promise<string> {
   const helpers = await helpersClientScript();
+  const buildHash = await getDashboardBuildHash();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${buildHashMetaTag(buildHash)}
   <title>Muninn Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <style>
