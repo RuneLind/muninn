@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { buildHashMetaTag, getDashboardBuildHash } from "../dashboard-build-hash.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { tracesStatsStyles, tracesStatsHtml, tracesStatsScript } from "./components/traces-stats.ts";
@@ -14,15 +15,17 @@ import { searchTraceDetailStyles, searchTraceDetailScript } from "./components/s
 import { toolDetailRenderersStyles, toolDetailRenderersScript } from "./components/tool-detail-renderers.ts";
 
 export async function renderTracesPage(): Promise<string> {
-  const [helpers, waterfallScript] = await Promise.all([
+  const [helpers, waterfallScript, buildHash] = await Promise.all([
     helpersClientScript(),
     tracesWaterfallClientScript(),
+    getDashboardBuildHash(),
   ]);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${buildHashMetaTag(buildHash)}
   <title>Muninn - Traces</title>
   <style>
     ${SHARED_STYLES}

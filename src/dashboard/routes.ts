@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { renderDashboardPage } from "./views/page.ts";
+import { getDashboardBuildHash } from "./dashboard-build-hash.ts";
 import { registerDataRoutes } from "./routes/data-routes.ts";
 import { registerTracesRoutes } from "./routes/traces-routes.ts";
 import { registerMemsearchRoutes } from "./routes/memsearch-routes.ts";
@@ -20,6 +21,13 @@ export function createDashboardRoutes(config: Config): Hono {
   // Dashboard home page
   app.get("/", async (c) => {
     return c.html(await renderDashboardPage());
+  });
+
+  // Build hash of the inlined browser bundles — the visibility-change watcher
+  // in helpers-browser.ts compares this against the meta tag the page was
+  // rendered with and shows a "Muninn was restarted" banner on mismatch.
+  app.get("/api/dashboard-build-hash", async (c) => {
+    return c.json({ hash: await getDashboardBuildHash() });
   });
 
   registerDataRoutes(app);
