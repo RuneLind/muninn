@@ -6,7 +6,10 @@ import { Tracer, type TraceContext } from "../tracing/index.ts";
 
 const log = getLog("ai", "research-knowledge");
 
-const SEARCH_TIMEOUT_MS = 10_000;
+// Cold-cache huginn searches against the melosys collections regularly land in
+// the 5–15s range, and N parallel queries can serialise inside huginn's
+// embedder. 30s gives generous headroom without hanging the bot indefinitely.
+const SEARCH_TIMEOUT_MS = 30_000;
 const TRACE_FETCH_TIMEOUT_MS = 2000;
 
 export interface ResearchKnowledgeOptions {
