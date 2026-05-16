@@ -628,6 +628,104 @@ describe("renderSearchTrace — yggdrasil shape", () => {
       expect(html).not.toContain("stt-coll-pass");
       expect(html).not.toContain("pass 1");
     });
+
+    test("renders inline strategy chip next to broaderQuery when broaderQueryStrategy is set", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "meningen med livet" },
+        response: {
+          corrective: { mode: "force", retries: 1, verdict: "still_weak", rescueFired: true, queriesTried: ["meningen med livet", "meningen med"] },
+          retryHints: { broaderQuery: "meningen med", broaderQueryStrategy: "drop_last_word" },
+        },
+        collections: [],
+      });
+      // Chip lives in the broaderQuery hint row, with the verbatim tooltip from Phase 0c.
+      expect(html).toMatch(
+        /broaderQuery:[^<]*<\/span> "meningen med"<span class="stt-corr-strategy" title="Dropped the last content word \(skipping stopwords\) and trimmed any stopwords left behind\.">\[drop_last_word\]<\/span>/,
+      );
+    });
+
+    test("renders inline strategy chip next to narrowerQuery when narrowerQueryStrategy is set", () => {
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "EØS" },
+        response: {
+          corrective: { mode: "auto", retries: 1, verdict: "rescued", rescueFired: true, queriesTried: ["EØS", "EØS EU/EØS"] },
+          retryHints: { narrowerQuery: "EØS EU/EØS", narrowerQueryStrategy: "entity_label_append" },
+        },
+        collections: [],
+      });
+      expect(html).toMatch(
+        /narrowerQuery:[^<]*<\/span> "EØS EU\/EØS"<span class="stt-corr-strategy" title="Appended the top detected entity label to the original query\.">\[entity_label_append\]<\/span>/,
+      );
+    });
+
+    test("omits strategy chip when hint is present but strategy is missing", () => {
+      // Defensive: huginn's contract is "both or neither", but older traces
+      // may carry only the rewrite. We render the row without a chip.
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: { mode: "auto", retries: 1, verdict: "still_weak", rescueFired: true, queriesTried: ["x", "y"] },
+          retryHints: { broaderQuery: "y" },
+        },
+        collections: [],
+      });
+      expect(html).toContain('broaderQuery:');
+      expect(html).not.toContain("stt-corr-strategy");
+    });
+
+    test("strategy chip uses generic fallback tooltip on unknown enum values", () => {
+      // Locks the upgrade story: when huginn adds a new strategy before muninn
+      // syncs, the chip still renders so operators see the new name.
+      const html = sb.renderSearchTrace({
+        schemaVersion: 1,
+        query: { raw: "x" },
+        response: {
+          corrective: { mode: "auto", retries: 1, verdict: "rescued", rescueFired: true, queriesTried: ["x", "y"] },
+          retryHints: { broaderQuery: "y", broaderQueryStrategy: "shiny_new_strategy" },
+        },
+        collections: [],
+      });
+      expect(html).toMatch(
+        /stt-corr-strategy" title="Rewrite heuristic name emitted by huginn \(no local description\)\.">\[shiny_new_strategy\]/,
+      );
+    });
+
+    test("strategy chip tooltips are locked to the Phase 0c wording for every enum value", () => {
+      // One render per strategy so the verbatim tooltip text is anchored in
+      // tests — if huginn changes the wording, this test fails loudly.
+      const cases: Array<[string, string]> = [
+        ["conjunction_split",   "Kept the first conjunct; dropped everything after ' og ' / ' and ' / ' vs ' / ', '."],
+        ["trailing_parens",     "Stripped a trailing parenthetical qualifier from the query."],
+        ["unquote",             "Removed quote marks from the query so phrases were searched as loose tokens."],
+        ["drop_last_word",      "Dropped the last content word (skipping stopwords) and trimmed any stopwords left behind."],
+        ["entity_label_append", "Appended the top detected entity label to the original query."],
+        ["fallback_seed",       "No entity detected; appended the closest-matching graph node's neighbour label."],
+      ];
+      for (const [strategy, tip] of cases) {
+        sb.reset();
+        const html = sb.renderSearchTrace({
+          schemaVersion: 1,
+          query: { raw: "x" },
+          response: {
+            corrective: { mode: "auto", retries: 1, verdict: "rescued", rescueFired: true, queriesTried: ["x", "y"] },
+            retryHints: { broaderQuery: "y", broaderQueryStrategy: strategy },
+          },
+          collections: [],
+        });
+        // esc() escapes single quotes to &#39; — check the escaped tooltip text appears.
+        const escapedTip = tip
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+        expect(html).toContain('title="' + escapedTip + '"');
+        expect(html).toContain("[" + strategy + "]");
+      }
+    });
   });
 
   test("clicking a new trace resets sort/filter state from the previous trace", () => {

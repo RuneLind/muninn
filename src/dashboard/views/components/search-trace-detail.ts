@@ -113,6 +113,22 @@ export function searchTraceDetailStyles(): string {
       margin-bottom: 8px;
     }
     .stt-corrective .stt-corr-hints .stt-label { color: var(--text-dim); margin-right: 4px; }
+    /* Strategy chip — inline next to broaderQuery / narrowerQuery values, names
+       the heuristic that produced the rewrite. Hover for the operator-facing
+       one-liner from Phase 0c (huginn-corrective-observability-phase-0c.md). */
+    .stt-corrective .stt-corr-strategy {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 0 6px;
+      border-radius: 3px;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-dim);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      line-height: 16px;
+      cursor: help;
+    }
     .stt-corrective .stt-corr-summary { font-size: 11px; color: var(--text-dim); }
     /* Pass label inline on the per-collection header when corrective was
        active — clarifies whether you're looking at the original or rescue
@@ -322,6 +338,17 @@ export function searchTraceDetailScript(): string {
   return `
     const STT_STAGES = ${JSON.stringify(STAGE_KEYS)};
     const STT_STAGE_LABELS = ${JSON.stringify(STAGE_NAMES)};
+    // Operator-facing tooltips per Phase 0c strategy enum value. Wording locked
+    // verbatim from mimir/plans/huginn-corrective-observability-phase-0c.md
+    // (table "Tooltip per strategy"). Keep in sync if huginn adds enum values.
+    const STT_CORR_STRATEGY_TIPS = {
+      conjunction_split:   "Kept the first conjunct; dropped everything after ' og ' / ' and ' / ' vs ' / ', '.",
+      trailing_parens:     "Stripped a trailing parenthetical qualifier from the query.",
+      unquote:             "Removed quote marks from the query so phrases were searched as loose tokens.",
+      drop_last_word:      "Dropped the last content word (skipping stopwords) and trimmed any stopwords left behind.",
+      entity_label_append: "Appended the top detected entity label to the original query.",
+      fallback_seed:       "No entity detected; appended the closest-matching graph node's neighbour label.",
+    };
 
     /** State for an open searchTrace panel — sort + filter for the candidates table. */
     window.__sttState = window.__sttState || {
@@ -569,13 +596,26 @@ export function searchTraceDetailScript(): string {
         '</div>';
       }).join('');
 
+      // Inline strategy chip — names the heuristic that produced the rewrite
+      // (huginn Phase 0c). Falls back to a generic tooltip when an unknown
+      // enum value lands (future huginn versions), so operators still see the
+      // chip and know to update muninn.
+      const strategyChip = function (strategy) {
+        if (typeof strategy !== 'string' || !strategy) return '';
+        const tip = STT_CORR_STRATEGY_TIPS[strategy] ||
+          'Rewrite heuristic name emitted by huginn (no local description).';
+        return '<span class="stt-corr-strategy" title="' + esc(tip) + '">[' + esc(strategy) + ']</span>';
+      };
+
       // Available hints (whether or not huginn actually used them).
       const hintLines = [];
       if (hints.broaderQuery) {
-        hintLines.push('<div><span class="stt-label">broaderQuery:</span> "' + esc(hints.broaderQuery) + '"</div>');
+        hintLines.push('<div><span class="stt-label">broaderQuery:</span> "' + esc(hints.broaderQuery) + '"' +
+          strategyChip(hints.broaderQueryStrategy) + '</div>');
       }
       if (hints.narrowerQuery) {
-        hintLines.push('<div><span class="stt-label">narrowerQuery:</span> "' + esc(hints.narrowerQuery) + '"</div>');
+        hintLines.push('<div><span class="stt-label">narrowerQuery:</span> "' + esc(hints.narrowerQuery) + '"' +
+          strategyChip(hints.narrowerQueryStrategy) + '</div>');
       }
       if (Array.isArray(hints.relatedTerms) && hints.relatedTerms.length) {
         hintLines.push('<div><span class="stt-label">relatedTerms:</span> ' +
