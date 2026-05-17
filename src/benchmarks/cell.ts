@@ -25,7 +25,7 @@ import { processMessage } from "../core/message-processor.ts";
 import type { ProcessMessageResult } from "../core/message-processor.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { loadConfig, type Config } from "../config.ts";
-import { getLog } from "../logging.ts";
+import { getLog, setupLogging } from "../logging.ts";
 import {
   saveBenchmarkRun,
   completeBenchmarkRun,
@@ -140,6 +140,15 @@ export function defaultBudget(): number {
 
 export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   const config = loadConfig();
+  // Idempotent — the main muninn process configures LogTape via index.ts; this
+  // call is only meaningful when runCell is invoked from a subprocess entry
+  // point like benchmarks/scripts/run-cell.ts that doesn't bootstrap logging
+  // itself. Without it every log.* call inside the runner (judge failures,
+  // empty-candidate errors, Bug 11 audit failures) becomes a silent no-op
+  // and the dashboard /logs page shows nothing — the only signal is the
+  // benchmark_runs.error column. runShakeout and runCellMultiPass both call
+  // runCell so this one hook covers every benchmark entry point.
+  await setupLogging(config.logDir);
   const manifest = await loadManifestByKey(opts.issueKey);
   const baseBotName = opts.baseBotName ?? "melosys";
   const baseBot = findBot(baseBotName);
