@@ -263,6 +263,23 @@ PostgreSQL + pgvector via Docker (single container).
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 
+### Switching Haiku backend (Copilot vs Anthropic vs CLI)
+
+The Haiku router (`src/ai/haiku-direct.ts`) currently powers the `research_knowledge` decomposer; other extractors still go through `spawnHaiku`. Default behaviour: a bot's `connector` decides — `copilot-sdk` → Copilot SDK, anything else → Claude CLI. Override per-process with `HAIKU_BACKEND`.
+
+| Goal | What to set | Auth |
+|---|---|---|
+| Bot uses Copilot for both chat + Haiku (e.g. melosys) | `bots/<name>/config.json` → `"connector": "copilot-sdk"` | `gh auth login` (Capra/NAV Copilot subscription) |
+| Bot uses Claude CLI for chat, Anthropic SDK for Haiku (faster decomposer) | `connector: "claude-cli"` + `HAIKU_BACKEND=anthropic` in `.env` | `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) |
+| Bot stays fully on Claude CLI (no SDK) | leave `connector` unset or `"claude-cli"` — nothing else | none (uses existing CLI auth) |
+| Force one backend everywhere (testing / debugging) | `HAIKU_BACKEND=cli` / `anthropic` / `copilot` | auth for chosen backend |
+| Reset to defaults | unset `HAIKU_BACKEND` *and* `HAIKU_DIRECT_ENABLED` | n/a |
+
+Diagnostics:
+- The dashboard `haiku_usage` table shows the actual model each call used — `claude-haiku-4.5` (Copilot) vs `claude-haiku-4-5-20251001` (Anthropic / CLI). If a bot's `knowledge_decompose` span shows the wrong model, the resolution order is doing something unexpected.
+- On any backend error the router falls back to CLI and logs `haiku-router <backend> failed, falling back to CLI` — check muninn logs if a bot regresses to CLI speeds.
+- `bun scripts/smoke-haiku-copilot.ts` re-runs the Copilot path end-to-end and prints the model id Copilot actually used.
+
 ### Adding a New Bot
 
 1. Create `bots/<name>/CLAUDE.md` with the bot's persona
