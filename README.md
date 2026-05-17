@@ -137,7 +137,7 @@ All fields are optional — falls back to global `.env` values:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, or `"openai-compat"` |
+| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
 | `model` | string | `CLAUDE_MODEL` env | Model name (e.g. `"claude-sonnet-4-6"`, `"qwen3:32b"`) |
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable). For openai-compat: used as `max_tokens` |
 | `timeoutMs` | number | `CLAUDE_TIMEOUT_MS` env | Response timeout in ms |
@@ -223,13 +223,14 @@ sequenceDiagram
 
 ## AI Connectors
 
-Each bot selects its AI backend via `connector` in `bots/<name>/config.json`. Three connectors are available:
+Each bot selects its AI backend via `connector` in `bots/<name>/config.json`. Four connectors are available:
 
 | Connector | Value | Description |
 |---|---|---|
 | Claude CLI | `"claude-cli"` | Spawns `claude -p` as subprocess (default) |
 | Copilot SDK | `"copilot-sdk"` | GitHub Copilot SDK with shared JSON-RPC client |
 | OpenAI-compat | `"openai-compat"` | Any OpenAI-compatible API (Ollama, LM Studio, vLLM) |
+| Claude SDK | `"claude-sdk"` | Anthropic's `@anthropic-ai/claude-agent-sdk` — direct API transport, no CLI subprocess |
 
 ### Claude CLI (default)
 
@@ -257,6 +258,23 @@ Uses GitHub Copilot SDK with a shared singleton client. MCP tools from `.mcp.jso
   "timeoutMs": 180000
 }
 ```
+
+### Claude SDK
+
+Uses Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable as a direct chat transport — no `claude` CLI subprocess, no Copilot subscription. Useful for personal bots that want smoother streaming and like-for-like benchmarks vs `copilot-sdk`.
+
+```json
+{
+  "connector": "claude-sdk",
+  "model": "claude-sonnet-4-6",
+  "thinkingMaxTokens": 16000,
+  "timeoutMs": 180000
+}
+```
+
+Auth comes from either `ANTHROPIC_API_KEY` (sent as `x-api-key`, use for production / shared deployments) or `CLAUDE_CODE_OAUTH_TOKEN` (sent as `Authorization: Bearer`, generate via `claude setup-token` for personal Max-subscription dev). Same env surface as the Haiku router.
+
+MCP servers from `.mcp.json` are converted to the Agent SDK shape (`src/ai/connectors/claude-sdk-mcp.ts`). Permission prompts are bypassed (`permissionMode: 'bypassPermissions'`, same trust model as the Copilot connector's `approveAll`) and `settingSources: []` keeps the SDK from auto-loading the user's global `~/.claude/settings.json` — muninn's `prompt-builder` delivers the full system prompt.
 
 ### OpenAI-compatible (Ollama, LM Studio, vLLM)
 
