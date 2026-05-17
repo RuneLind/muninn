@@ -229,6 +229,24 @@ describe("resolveBackend", () => {
   test("connector openai-compat → cli", () => {
     expect(resolveBackend({ connector: "openai-compat" })).toBe("cli");
   });
+
+  test("per-bot haikuBackend wins over connector default", () => {
+    expect(resolveBackend({ connector: "claude-cli", haikuBackend: "anthropic" })).toBe("anthropic");
+  });
+
+  test("per-bot haikuBackend wins over legacy HAIKU_DIRECT_ENABLED", () => {
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackend({ connector: "claude-cli", haikuBackend: "copilot" })).toBe("copilot");
+  });
+
+  test("HAIKU_BACKEND env still trumps per-bot haikuBackend", () => {
+    process.env.HAIKU_BACKEND = "cli";
+    expect(resolveBackend({ connector: "copilot-sdk", haikuBackend: "anthropic" })).toBe("cli");
+  });
+
+  test("explicit opts.backend trumps per-bot haikuBackend", () => {
+    expect(resolveBackend({ backend: "cli", haikuBackend: "anthropic" })).toBe("cli");
+  });
 });
 
 describe("callHaikuDirect auth selection", () => {

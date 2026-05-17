@@ -4,6 +4,7 @@ import type { TaskType, Platform } from "../types.ts";
 import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
 import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler", "detector");
@@ -16,6 +17,7 @@ interface DetectionInput {
   assistantResponse: string;
   platform?: Platform;
   connector?: ConnectorType;
+  haikuBackend?: HaikuBackend;
 }
 
 interface DetectionResult {
@@ -78,6 +80,7 @@ export function extractScheduleAsync(
     prompt,
     cwd: input.botDir,
     connector: input.connector,
+    haikuBackend: input.haikuBackend,
     log,
     traceContext,
     onResult: async (result, tracer) => {

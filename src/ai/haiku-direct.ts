@@ -27,7 +27,9 @@ export type HaikuBackend = "cli" | "anthropic" | "copilot";
 export interface HaikuRouterOptions extends SpawnHaikuOptions {
   /** Explicit backend override (top-priority in resolution). */
   backend?: HaikuBackend;
-  /** Bot's main connector — selects the per-bot default backend. */
+  /** Per-bot override from `BotConfig.haikuBackend`. See `resolveBackend` for priority. */
+  haikuBackend?: HaikuBackend;
+  /** Bot's main connector — selects the connector-derived fallback. */
   connector?: ConnectorType;
 }
 
@@ -52,15 +54,21 @@ function parseHaikuBackendEnv(): HaikuBackend | null {
 /**
  * Resolution order (top wins):
  *   1. explicit opts.backend
- *   2. HAIKU_BACKEND env (cli|anthropic|copilot)
- *   3. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
- *   4. opts.connector === "copilot-sdk" → copilot
- *   5. floor → cli
+ *   2. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
+ *   3. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
+ *   4. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
+ *   5. opts.connector === "copilot-sdk" → copilot
+ *   6. floor → cli
  */
-export function resolveBackend(opts: { backend?: HaikuBackend; connector?: ConnectorType }): HaikuBackend {
+export function resolveBackend(opts: {
+  backend?: HaikuBackend;
+  haikuBackend?: HaikuBackend;
+  connector?: ConnectorType;
+}): HaikuBackend {
   if (opts.backend) return opts.backend;
   const fromEnv = parseHaikuBackendEnv();
   if (fromEnv) return fromEnv;
+  if (opts.haikuBackend) return opts.haikuBackend;
   if (isHaikuDirectEnabled()) return "anthropic";
   if (opts.connector === "copilot-sdk") return "copilot";
   return "cli";

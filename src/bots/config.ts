@@ -4,6 +4,7 @@ import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
 import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
+import type { HaikuBackend } from "../ai/haiku-direct.ts";
 
 const log = getLog("bots");
 
@@ -42,6 +43,11 @@ export interface BotConfig {
   slackAllowedUserIds: string[];
   /** AI connector backend — defaults to "claude-cli" */
   connector?: ConnectorType;
+  /** Override the Haiku backend for this bot's async extractors + research_knowledge
+   *  decomposer. When unset, `resolveBackend()` picks via the connector default
+   *  (`copilot-sdk` → `copilot`, else `cli`). The process-wide `HAIKU_BACKEND` env
+   *  var still trumps this (debug knob). */
+  haikuBackend?: HaikuBackend;
   /** Claude model override (e.g. "opus", "sonnet") — falls back to global CLAUDE_MODEL */
   model?: string;
   /** Max thinking tokens for extended thinking — set 0 to disable, undefined = CLI default */
@@ -121,6 +127,22 @@ export function discoverActiveBots(): BotConfig[] {
   return discoverBotsInternal({ requireTokens: true });
 }
 
+function validateEnumField<T extends string>(
+  settings: Record<string, unknown>,
+  key: string,
+  valid: readonly T[],
+  botName: string,
+): void {
+  const value = settings[key];
+  if (value && !valid.includes(value as T)) {
+    log.warn(
+      `Bot "{name}" has unknown ${key} "{value}" — valid values: {valid}`,
+      { name: botName, value: String(value), valid: valid.join(", ") },
+    );
+    delete settings[key];
+  }
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
@@ -181,17 +203,13 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
         }
-        // Validate connector type
-        const validConnectors: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
-        if (botSettings.connector && !validConnectors.includes(botSettings.connector as ConnectorType)) {
-          log.warn("Bot \"{name}\" has unknown connector \"{connector}\" — valid values: {valid}", { name, connector: String(botSettings.connector), valid: validConnectors.join(", ") });
-          delete botSettings.connector;
-        }
+        validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat"] as const, name);
+        validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }
@@ -244,6 +262,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       slackAppToken,
       slackAllowedUserIds,
       connector: botSettings.connector as ConnectorType | undefined,
+      haikuBackend: botSettings.haikuBackend as HaikuBackend | undefined,
       model: botSettings.model as string | undefined,
       thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
       timeoutMs: botSettings.timeoutMs as number | undefined,
@@ -262,6 +281,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
 
     const configParts: string[] = [];
     if (botSettings.connector) configParts.push(`connector: ${botSettings.connector}`);
+    if (botSettings.haikuBackend) configParts.push(`haikuBackend: ${botSettings.haikuBackend}`);
     if (botSettings.model) configParts.push(`model: ${botSettings.model}`);
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
