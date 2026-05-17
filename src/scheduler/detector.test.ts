@@ -1,6 +1,6 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
 
-const mockSpawnHaiku = mock(() => Promise.resolve({
+const mockCallHaiku = mock(() => Promise.resolve({
   result: '{"has_schedule": false}',
   inputTokens: 50,
   outputTokens: 20,
@@ -11,11 +11,8 @@ const mockSaveScheduledTask = mock(() => Promise.resolve("task-1"));
 const mockFindSimilarTask = mock(() => Promise.resolve(null as any));
 const mockUpdateTaskPrompt = mock(() => Promise.resolve());
 
-mock.module("./executor.ts", () => ({
-  spawnHaiku: mockSpawnHaiku,
-  callHaiku: mock(() => Promise.resolve("")),
-  DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  HAIKU_TIMEOUT_MS: 60_000,
+mock.module("../ai/haiku-direct.ts", () => ({
+  callHaikuWithFallback: mockCallHaiku,
 }));
 
 mock.module("../db/scheduled-tasks.ts", () => ({
@@ -37,15 +34,15 @@ const { extractScheduleAsync } = await import("./detector.ts");
 const config = { databaseUrl: "test" } as any;
 
 beforeEach(() => {
-  mockSpawnHaiku.mockClear();
+  mockCallHaiku.mockClear();
   mockSaveScheduledTask.mockClear();
   mockFindSimilarTask.mockClear();
   mockUpdateTaskPrompt.mockClear();
 });
 
 describe("extractScheduleAsync", () => {
-  test("calls spawnHaiku with detection prompt", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+  test("calls Haiku with detection prompt", async () => {
+    mockCallHaiku.mockResolvedValueOnce({
       result: '{"has_schedule": false}',
       inputTokens: 50,
       outputTokens: 20,
@@ -61,14 +58,14 @@ describe("extractScheduleAsync", () => {
 
     await new Promise((r) => setTimeout(r, 100));
 
-    expect(mockSpawnHaiku).toHaveBeenCalledTimes(1);
-    const prompt = (mockSpawnHaiku.mock.calls[0] as any[])[0] as string;
+    expect(mockCallHaiku).toHaveBeenCalledTimes(1);
+    const prompt = (mockCallHaiku.mock.calls[0] as any[])[0] as string;
     expect(prompt).toContain("remind me every morning at 8");
     expect(prompt).toContain("I'll set that up!");
   });
 
   test("saves task when schedule detected", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         has_schedule: true,
         title: "Morning briefing",
@@ -105,7 +102,7 @@ describe("extractScheduleAsync", () => {
   });
 
   test("does not save when no schedule detected", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: '{"has_schedule": false}',
       inputTokens: 50,
       outputTokens: 20,
@@ -125,7 +122,7 @@ describe("extractScheduleAsync", () => {
   });
 
   test("saves interval-style task", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         has_schedule: true,
         title: "Stretch reminder",
@@ -154,7 +151,7 @@ describe("extractScheduleAsync", () => {
   });
 
   test("handles markdown-wrapped JSON", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: '```json\n{"has_schedule": true, "title": "Test", "task_type": "reminder", "hour": 9}\n```',
       inputTokens: 50,
       outputTokens: 20,
@@ -174,7 +171,7 @@ describe("extractScheduleAsync", () => {
   });
 
   test("handles invalid JSON gracefully", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: "invalid json",
       inputTokens: 50,
       outputTokens: 20,
@@ -194,7 +191,7 @@ describe("extractScheduleAsync", () => {
   });
 
   test("defaults task_type to reminder", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         has_schedule: true,
         title: "No type specified",
@@ -239,7 +236,7 @@ describe("extractScheduleAsync", () => {
       updatedAt: Date.now(),
     });
 
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         has_schedule: true,
         title: "Morning briefing",
@@ -287,7 +284,7 @@ describe("extractScheduleAsync", () => {
       updatedAt: Date.now(),
     });
 
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         has_schedule: true,
         title: "Morning briefing",

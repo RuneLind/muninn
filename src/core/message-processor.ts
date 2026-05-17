@@ -210,6 +210,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           userId, botName: botConfig.name, botDir: botConfig.dir,
           userMessage: text, assistantResponse: result.result,
           sourceMessageId: messageId, platform,
+          connector: botConfig.connector,
         },
         config,
         t.context,

@@ -3,6 +3,7 @@ import { saveMemory } from "../db/memories.ts";
 import { generateEmbedding } from "../ai/embeddings.ts";
 import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
 import type { TraceContext } from "../tracing/index.ts";
+import type { ConnectorType } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("memory");
@@ -14,6 +15,7 @@ interface ExtractionInput {
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
+  connector?: ConnectorType;
 }
 
 interface ExtractionResult {
@@ -58,6 +60,7 @@ export function extractMemoryAsync(input: ExtractionInput, _config: Config, trac
     userId: input.userId,
     prompt,
     cwd: input.botDir,
+    connector: input.connector,
     log,
     traceContext,
     onResult: async (result, tracer) => {

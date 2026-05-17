@@ -3,6 +3,7 @@ import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/sche
 import type { TaskType, Platform } from "../types.ts";
 import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
 import type { TraceContext } from "../tracing/index.ts";
+import type { ConnectorType } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler", "detector");
@@ -14,6 +15,7 @@ interface DetectionInput {
   userMessage: string;
   assistantResponse: string;
   platform?: Platform;
+  connector?: ConnectorType;
 }
 
 interface DetectionResult {
@@ -75,6 +77,7 @@ export function extractScheduleAsync(
     userId: input.userId,
     prompt,
     cwd: input.botDir,
+    connector: input.connector,
     log,
     traceContext,
     onResult: async (result, tracer) => {

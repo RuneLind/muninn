@@ -1,14 +1,15 @@
-import { spawnHaiku } from "../scheduler/executor.ts";
+import { callHaikuWithFallback } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import type { Logger } from "@logtape/logtape";
+import type { ConnectorType } from "../bots/config.ts";
 
 interface HaikuExtractionOptions<T> {
   /** Span name for tracing (e.g. "memory_extraction") */
   spanName: string;
-  /** Source label for spawnHaiku (e.g. "memory") */
+  /** Source label for the Haiku call (e.g. "memory") */
   source: string;
-  /** Entrypoint for spawnHaiku (e.g. "jarvis-memory") */
+  /** Entrypoint label for the Haiku call (e.g. "jarvis-memory") */
   entrypoint: string;
   /** The bot name */
   botName: string;
@@ -16,8 +17,10 @@ interface HaikuExtractionOptions<T> {
   userId: string;
   /** The prompt to send to Haiku */
   prompt: string;
-  /** Working directory for the Haiku process — keeps sessions out of project root */
+  /** Working directory for the CLI fallback — keeps sessions out of project root */
   cwd?: string;
+  /** Bot's main connector — fed into `resolveBackend()` to pick the Haiku backend. */
+  connector?: ConnectorType;
   /** Logger instance for error reporting */
   log: Logger;
   /** Optional trace context for parent span linking */
@@ -29,7 +32,7 @@ interface HaikuExtractionOptions<T> {
 /**
  * Shared fire-and-forget Haiku extraction pattern.
  * Handles: async wrapper with error logging, tracer setup,
- * spawnHaiku + extractJson parsing, and error/parse-failure handling.
+ * callHaikuWithFallback + extractJson parsing, and error/parse-failure handling.
  */
 export function runHaikuExtraction<T>(opts: HaikuExtractionOptions<T>): void {
   doExtract(opts).catch((err) => {
@@ -51,11 +54,12 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
     });
   }
 
-  const haiku = await spawnHaiku(opts.prompt, {
+  const haiku = await callHaikuWithFallback(opts.prompt, {
     source: opts.source,
     entrypoint: opts.entrypoint,
     cwd: opts.cwd,
     botName: opts.botName,
+    connector: opts.connector,
   });
 
   let result: T;

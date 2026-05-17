@@ -1,6 +1,6 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
 
-const mockSpawnHaiku = mock(() => Promise.resolve({
+const mockCallHaiku = mock(() => Promise.resolve({
   result: '{"worth_remembering": false}',
   inputTokens: 50,
   outputTokens: 20,
@@ -10,11 +10,8 @@ const mockSpawnHaiku = mock(() => Promise.resolve({
 const mockSaveMemory = mock(() => Promise.resolve("mem-1"));
 const mockGenerateEmbedding = mock(() => Promise.resolve(Array.from({ length: 384 }, () => 0.1)));
 
-mock.module("../scheduler/executor.ts", () => ({
-  spawnHaiku: mockSpawnHaiku,
-  callHaiku: mock(() => Promise.resolve("")),
-  DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  HAIKU_TIMEOUT_MS: 60_000,
+mock.module("../ai/haiku-direct.ts", () => ({
+  callHaikuWithFallback: mockCallHaiku,
 }));
 
 mock.module("../db/memories.ts", () => ({
@@ -38,14 +35,14 @@ const { extractMemoryAsync } = await import("./extractor.ts");
 const config = { databaseUrl: "test" } as any;
 
 beforeEach(() => {
-  mockSpawnHaiku.mockClear();
+  mockCallHaiku.mockClear();
   mockSaveMemory.mockClear();
   mockGenerateEmbedding.mockClear();
 });
 
 describe("extractMemoryAsync", () => {
-  test("calls spawnHaiku with extraction prompt", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+  test("calls Haiku with extraction prompt", async () => {
+    mockCallHaiku.mockResolvedValueOnce({
       result: '{"worth_remembering": false}',
       inputTokens: 50,
       outputTokens: 20,
@@ -62,14 +59,14 @@ describe("extractMemoryAsync", () => {
     // Wait for the async fire-and-forget to complete
     await new Promise((r) => setTimeout(r, 100));
 
-    expect(mockSpawnHaiku).toHaveBeenCalledTimes(1);
-    const prompt = (mockSpawnHaiku.mock.calls[0] as any[])[0] as string;
+    expect(mockCallHaiku).toHaveBeenCalledTimes(1);
+    const prompt = (mockCallHaiku.mock.calls[0] as any[])[0] as string;
     expect(prompt).toContain("I love TypeScript");
     expect(prompt).toContain("TypeScript is great!");
   });
 
   test("saves memory when worth remembering", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         worth_remembering: true,
         summary: "User prefers TypeScript",
@@ -102,7 +99,7 @@ describe("extractMemoryAsync", () => {
   });
 
   test("does not save when not worth remembering", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: '{"worth_remembering": false}',
       inputTokens: 50,
       outputTokens: 20,
@@ -122,7 +119,7 @@ describe("extractMemoryAsync", () => {
   });
 
   test("handles shared scope", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: JSON.stringify({
         worth_remembering: true,
         summary: "Team uses Bun runtime",
@@ -149,7 +146,7 @@ describe("extractMemoryAsync", () => {
   });
 
   test("handles markdown-wrapped JSON from Haiku", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: '```json\n{"worth_remembering": true, "summary": "test", "tags": ["test"], "scope": "personal"}\n```',
       inputTokens: 50,
       outputTokens: 20,
@@ -169,7 +166,7 @@ describe("extractMemoryAsync", () => {
   });
 
   test("handles invalid JSON from Haiku gracefully", async () => {
-    mockSpawnHaiku.mockResolvedValueOnce({
+    mockCallHaiku.mockResolvedValueOnce({
       result: "not valid json at all",
       inputTokens: 50,
       outputTokens: 20,

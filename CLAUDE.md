@@ -256,7 +256,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
 | `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for prompt-level corrective retrieval (per-bot `correctiveRetrieval.enabled` overrides). |
 | `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config. |
-| `HAIKU_BACKEND` | No | — | Override the Haiku router backend process-wide. Values: `cli` (Claude CLI subprocess), `anthropic` (`@anthropic-ai/sdk`), `copilot` (`@github/copilot-sdk`). Resolution order: explicit `opts.backend` > `HAIKU_BACKEND` > legacy `HAIKU_DIRECT_ENABLED=1` (alias for `anthropic`) > per-bot default (`copilot-sdk` connector → `copilot`, otherwise `cli`). Falls back to CLI on any error. Currently only affects the `research_knowledge` decomposer; extractors stay on CLI until a follow-up. |
+| `HAIKU_BACKEND` | No | — | Override the Haiku router backend process-wide. Values: `cli` (Claude CLI subprocess), `anthropic` (`@anthropic-ai/sdk`), `copilot` (`@github/copilot-sdk`). Resolution order: explicit `opts.backend` > `HAIKU_BACKEND` > legacy `HAIKU_DIRECT_ENABLED=1` (alias for `anthropic`) > per-bot default (`copilot-sdk` connector → `copilot`, otherwise `cli`). Falls back to CLI on any error. Affects the `research_knowledge` decomposer plus the memory / goal / schedule extractors. Watchers (email, calendar) stay on the CLI because they need Gmail MCP. |
 | `HAIKU_DIRECT_ENABLED` | No | `false` | **Deprecated** alias for `HAIKU_BACKEND=anthropic` — kept for backwards compatibility with PR #120. Prefer `HAIKU_BACKEND=anthropic`. Requires `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. |
 | `ANTHROPIC_API_KEY` | No | — | Anthropic API key for the `anthropic` backend. Sent as `x-api-key` header. Use for production/shared deployments. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | No | — | Claude Code OAuth token (generate via `claude setup-token`) for the `anthropic` backend. Sent as `Authorization: Bearer`. Use for personal/Max-subscription dev. Anthropic SDK uses `apiKey` first, falls back to this. |
@@ -265,7 +265,7 @@ PostgreSQL + pgvector via Docker (single container).
 
 ### Switching Haiku backend (Copilot vs Anthropic vs CLI)
 
-The Haiku router (`src/ai/haiku-direct.ts`) currently powers the `research_knowledge` decomposer; other extractors still go through `spawnHaiku`. Default behaviour: a bot's `connector` decides — `copilot-sdk` → Copilot SDK, anything else → Claude CLI. Override per-process with `HAIKU_BACKEND`.
+The Haiku router (`src/ai/haiku-direct.ts`) powers the `research_knowledge` decomposer and the three async extractors (memory / goals / schedule). Default behaviour: a bot's `connector` decides — `copilot-sdk` → Copilot SDK, anything else → Claude CLI. Override per-process with `HAIKU_BACKEND`. Watchers (email, calendar) still use `spawnHaiku` directly because they need Gmail MCP, which the one-shot helpers don't expose.
 
 | Goal | What to set | Auth |
 |---|---|---|
