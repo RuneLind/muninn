@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -34,20 +34,25 @@ import { executePrompt, assertHaveAuth } from "./claude-sdk.ts";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 
-function makeBot(): { botConfig: BotConfig; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "claude-sdk-test-"));
-  writeFileSync(join(dir, "CLAUDE.md"), "test persona");
-  return {
-    botConfig: {
-      name: "testbot",
-      dir,
-      persona: "test persona",
-      telegramAllowedUserIds: [],
-      slackAllowedUserIds: [],
-    },
-    cleanup: () => rmSync(dir, { recursive: true }),
-  };
-}
+// Single shared temp dir for the whole file — no per-test bot config changes
+// are persisted to disk, so a fresh dir per test is wasted I/O.
+let sharedBotDir: string;
+const baseBot = (): BotConfig => ({
+  name: "testbot",
+  dir: sharedBotDir,
+  persona: "test persona",
+  telegramAllowedUserIds: [],
+  slackAllowedUserIds: [],
+});
+
+beforeAll(() => {
+  sharedBotDir = mkdtempSync(join(tmpdir(), "claude-sdk-test-"));
+  writeFileSync(join(sharedBotDir, "CLAUDE.md"), "test persona");
+});
+
+afterAll(() => {
+  rmSync(sharedBotDir, { recursive: true });
+});
 
 const baseConfig = { claudeModel: "claude-sonnet-4-6", claudeTimeoutMs: 30_000 } as Config;
 
@@ -86,13 +91,8 @@ describe("claude-sdk assertHaveAuth", () => {
 
 describe("claude-sdk executePrompt", () => {
   test("returns text result and usage from result event", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
-      {
-        type: "system",
-        subtype: "init",
-        model: "claude-sonnet-4-6-20251001",
-      },
+      { type: "system", subtype: "init", model: "claude-sonnet-4-6-20251001" },
       {
         type: "assistant",
         message: {
@@ -110,30 +110,20 @@ describe("claude-sdk executePrompt", () => {
         duration_api_ms: 180,
         total_cost_usd: 0.001,
         is_error: false,
-        usage: {
-          input_tokens: 100,
-          output_tokens: 5,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
-        },
+        usage: { input_tokens: 100, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      const res = await executePrompt("hi", baseConfig, botConfig);
-      expect(res.result).toBe("Hello!");
-      expect(res.inputTokens).toBe(100);
-      expect(res.outputTokens).toBe(5);
-      expect(res.numTurns).toBe(1);
-      expect(res.model).toBe("claude-sonnet-4-6-20251001");
-      expect(res.costUsd).toBe(0.001);
-      expect(res.toolCalls).toBeUndefined();
-    } finally {
-      cleanup();
-    }
+    const res = await executePrompt("hi", baseConfig, baseBot());
+    expect(res.result).toBe("Hello!");
+    expect(res.inputTokens).toBe(100);
+    expect(res.outputTokens).toBe(5);
+    expect(res.numTurns).toBe(1);
+    expect(res.model).toBe("claude-sonnet-4-6-20251001");
+    expect(res.costUsd).toBe(0.001);
+    expect(res.toolCalls).toBeUndefined();
   });
 
   test("passes systemPrompt, cwd, model and bypassPermissions to query options", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "result",
@@ -147,24 +137,20 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      await executePrompt("hi", baseConfig, { ...botConfig, model: "claude-opus-4-7" }, "SYS");
-      const call = queryCalls[0]!;
-      expect(call.prompt).toBe("hi");
-      const opts = call.options as Record<string, unknown>;
-      expect(opts.systemPrompt).toBe("SYS");
-      expect(opts.cwd).toBe(botConfig.dir);
-      expect(opts.model).toBe("claude-opus-4-7");
-      expect(opts.permissionMode).toBe("bypassPermissions");
-      expect(opts.allowDangerouslySkipPermissions).toBe(true);
-      expect(opts.settingSources).toEqual([]);
-    } finally {
-      cleanup();
-    }
+    const bot = baseBot();
+    await executePrompt("hi", baseConfig, { ...bot, model: "claude-opus-4-7" }, "SYS");
+    const call = queryCalls[0]!;
+    expect(call.prompt).toBe("hi");
+    const opts = call.options as Record<string, unknown>;
+    expect(opts.systemPrompt).toBe("SYS");
+    expect(opts.cwd).toBe(bot.dir);
+    expect(opts.model).toBe("claude-opus-4-7");
+    expect(opts.permissionMode).toBe("bypassPermissions");
+    expect(opts.allowDangerouslySkipPermissions).toBe(true);
+    expect(opts.settingSources).toEqual([]);
   });
 
   test("falls back to preset systemPrompt when none provided", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "result",
@@ -178,29 +164,19 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      await executePrompt("hi", baseConfig, botConfig);
-      const opts = queryCalls[0]!.options as Record<string, unknown>;
-      expect(opts.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
-    } finally {
-      cleanup();
-    }
+    await executePrompt("hi", baseConfig, baseBot());
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   });
 
   test("extracts tool calls with timing and ordering", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "assistant",
         message: {
           model: "claude-sonnet-4-6",
           content: [
-            {
-              type: "tool_use",
-              id: "toolu_1",
-              name: "mcp__knowledge__search",
-              input: { query: "hello" },
-            },
+            { type: "tool_use", id: "toolu_1", name: "mcp__knowledge__search", input: { query: "hello" } },
           ],
           usage: { input_tokens: 50, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         },
@@ -208,13 +184,7 @@ describe("claude-sdk executePrompt", () => {
       {
         type: "user",
         message: {
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: "toolu_1",
-              content: "search result body",
-            },
-          ],
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "search result body" }],
         },
       },
       {
@@ -237,25 +207,20 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 110, output_tokens: 15, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      const res = await executePrompt("hi", baseConfig, botConfig);
-      expect(res.result).toBe("found it");
-      expect(res.toolCalls).toHaveLength(1);
-      const tc = res.toolCalls![0]!;
-      expect(tc.id).toBe("toolu_1");
-      expect(tc.name).toBe("mcp__knowledge__search");
-      expect(tc.displayName).toBe("search (knowledge)");
-      expect(tc.input).toBe(JSON.stringify({ query: "hello" }));
-      expect(tc.output).toBe("search result body");
-      expect(tc.durationMs).toBeGreaterThanOrEqual(0);
-      expect(tc.startOffsetMs).toBeGreaterThanOrEqual(0);
-    } finally {
-      cleanup();
-    }
+    const res = await executePrompt("hi", baseConfig, baseBot());
+    expect(res.result).toBe("found it");
+    expect(res.toolCalls).toHaveLength(1);
+    const tc = res.toolCalls![0]!;
+    expect(tc.id).toBe("toolu_1");
+    expect(tc.name).toBe("mcp__knowledge__search");
+    expect(tc.displayName).toBe("search (knowledge)");
+    expect(tc.input).toBe(JSON.stringify({ query: "hello" }));
+    expect(tc.output).toBe("search result body");
+    expect(tc.durationMs).toBeGreaterThanOrEqual(0);
+    expect(tc.startOffsetMs).toBeGreaterThanOrEqual(0);
   });
 
   test("flags is_error tool_result content as an error envelope", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "assistant",
@@ -268,14 +233,7 @@ describe("claude-sdk executePrompt", () => {
       {
         type: "user",
         message: {
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: "toolu_e",
-              is_error: true,
-              content: "command not found",
-            },
-          ],
+          content: [{ type: "tool_result", tool_use_id: "toolu_e", is_error: true, content: "command not found" }],
         },
       },
       {
@@ -290,39 +248,27 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      const res = await executePrompt("hi", baseConfig, botConfig);
-      const tc = res.toolCalls![0]!;
-      expect(tc.output).toContain("command not found");
-      expect(tc.output).toContain("error");
-    } finally {
-      cleanup();
-    }
+    const res = await executePrompt("hi", baseConfig, baseBot());
+    const tc = res.toolCalls![0]!;
+    expect(tc.output).toContain("command not found");
+    expect(tc.output).toContain("error");
   });
 
   test("emits intent events for report_intent tool calls", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "assistant",
         message: {
           model: "claude-sonnet-4-6",
           content: [
-            {
-              type: "tool_use",
-              id: "toolu_i",
-              name: "mcp__sys__report_intent",
-              input: { intent: "Looking at memories" },
-            },
+            { type: "tool_use", id: "toolu_i", name: "mcp__sys__report_intent", input: { intent: "Looking at memories" } },
           ],
           usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         },
       },
       {
         type: "user",
-        message: {
-          content: [{ type: "tool_result", tool_use_id: "toolu_i", content: "ok" }],
-        },
+        message: { content: [{ type: "tool_result", tool_use_id: "toolu_i", content: "ok" }] },
       },
       {
         type: "result",
@@ -336,28 +282,39 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      const seen: Array<{ type: string; text?: string }> = [];
-      await executePrompt("hi", baseConfig, botConfig, undefined, (ev) => {
-        seen.push({ type: ev.type, text: (ev as { text?: string }).text });
-      });
-      const intents = seen.filter((s) => s.type === "intent");
-      expect(intents).toHaveLength(1);
-      expect(intents[0]!.text).toBe("Looking at memories");
-    } finally {
-      cleanup();
-    }
+    const seen: Array<{ type: string; text?: string }> = [];
+    await executePrompt("hi", baseConfig, baseBot(), undefined, (ev) => {
+      seen.push({ type: ev.type, text: (ev as { text?: string }).text });
+    });
+    const intents = seen.filter((s) => s.type === "intent");
+    expect(intents).toHaveLength(1);
+    expect(intents[0]!.text).toBe("Looking at memories");
+  });
+
+  test("surfaces SDKResultError messages from the errors array", async () => {
+    fakeEvents = [
+      {
+        type: "result",
+        subtype: "error_max_turns",
+        is_error: true,
+        num_turns: 5,
+        duration_ms: 0,
+        duration_api_ms: 0,
+        total_cost_usd: 0,
+        errors: ["max turns hit"],
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    ];
+    await expect(executePrompt("hi", baseConfig, baseBot())).rejects.toThrow(/max turns hit/);
   });
 
   test("throws timeout error when query never returns", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [];
     fakeThrow = null;
-    // Build a long-running generator that aborts when the abortController fires.
     mock.module("@anthropic-ai/claude-agent-sdk", () => ({
       query: ({ options }: { options: { abortController?: AbortController } }) =>
         (async function* () {
-          await new Promise<void>((resolve, reject) => {
+          await new Promise<void>((_resolve, reject) => {
             const ac = options.abortController!;
             ac.signal.addEventListener("abort", () => reject(new Error("aborted")));
           });
@@ -365,12 +322,10 @@ describe("claude-sdk executePrompt", () => {
     }));
     try {
       const start = Date.now();
-      const res = executePrompt("hi", { ...baseConfig, claudeTimeoutMs: 50 }, botConfig);
+      const res = executePrompt("hi", { ...baseConfig, claudeTimeoutMs: 50 }, baseBot());
       await expect(res).rejects.toThrow(/timed out after 50ms/);
       expect(Date.now() - start).toBeLessThan(2000);
     } finally {
-      cleanup();
-      // Restore default fake
       mock.module("@anthropic-ai/claude-agent-sdk", () => ({
         query: (params: FakeQueryParams) => {
           queryCalls.push(params);
@@ -386,7 +341,6 @@ describe("claude-sdk executePrompt", () => {
   });
 
   test("forwards excludedTools as disallowedTools", async () => {
-    const { botConfig, cleanup } = makeBot();
     fakeEvents = [
       {
         type: "result",
@@ -400,16 +354,8 @@ describe("claude-sdk executePrompt", () => {
         usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       },
     ];
-    try {
-      await executePrompt(
-        "hi",
-        baseConfig,
-        { ...botConfig, excludedTools: ["Bash", "Read"] },
-      );
-      const opts = queryCalls[0]!.options as Record<string, unknown>;
-      expect(opts.disallowedTools).toEqual(["Bash", "Read"]);
-    } finally {
-      cleanup();
-    }
+    await executePrompt("hi", baseConfig, { ...baseBot(), excludedTools: ["Bash", "Read"] });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.disallowedTools).toEqual(["Bash", "Read"]);
   });
 });

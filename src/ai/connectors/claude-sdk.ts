@@ -1,8 +1,15 @@
 import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  BetaContentBlock,
+  BetaTextBlock,
+  BetaToolUseBlock,
+  BetaToolResultBlockParam,
+} from "@anthropic-ai/sdk/resources/beta/messages/messages.mjs";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import {
+  abbreviateInput,
   formatToolDisplayName,
   isReportIntentTool,
   extractIntentText,
@@ -10,6 +17,7 @@ import {
 } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { processMcpToolResult } from "../huginn-trace-pointer.ts";
+import { hasHaikuDirectAuth } from "../haiku-direct.ts";
 import type { ToolCall } from "../../types.ts";
 import { parseMcpConfig } from "./claude-sdk-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
@@ -23,34 +31,13 @@ interface PendingTool {
   input?: string;
 }
 
-interface ToolResultBlock {
-  type: "tool_result";
-  tool_use_id: string;
-  content?: unknown;
-  is_error?: boolean;
-}
-
-interface ToolUseBlock {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: unknown;
-}
-
-interface TextBlock {
-  type: "text";
-  text: string;
-}
-
-type ContentBlock = ToolUseBlock | TextBlock | ToolResultBlock | { type: string };
-
 /**
  * Auth check — the Agent SDK reads ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN
  * from process.env directly (same surface as `haiku-direct.ts`). Throw early so
  * a misconfigured bot fails with a clear message instead of cryptic SDK errors.
  */
 export function assertHaveAuth(): void {
-  if (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN) return;
+  if (hasHaikuDirectAuth()) return;
   throw new Error(
     "claude-sdk: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set — " +
       "run `claude setup-token` or set ANTHROPIC_API_KEY",
@@ -107,18 +94,11 @@ export async function executePrompt(
     abortController,
     cwd: botConfig.dir,
     model,
-    // bypass permission prompts — same trust model as Copilot SDK's approveAll
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
-    // Replace preset system prompt with muninn's built prompt (persona + memories
-    // + goals + history). If no systemPrompt was passed, fall back to the preset
-    // so the SDK still has something coherent to send.
     ...(systemPrompt
       ? { systemPrompt }
       : { systemPrompt: { type: "preset", preset: "claude_code" } }),
-    // No filesystem settings — we deliver the complete prompt via systemPrompt
-    // and trust bypassPermissions for tool access. Skips the user's global
-    // ~/.claude/settings.json so bot behaviour stays isolated.
     settingSources: [],
     ...(hasMcp ? { mcpServers } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
@@ -180,17 +160,17 @@ export async function executePrompt(
         });
       }
 
-      const content = msg.content as ContentBlock[] | undefined;
+      const content = msg.content as BetaContentBlock[] | undefined;
       if (!Array.isArray(content)) return;
 
       let hasToolUse = false;
       for (const block of content) {
-        if (block.type === "text" && typeof (block as TextBlock).text === "string") {
+        if (block.type === "text") {
           // Last assistant text block is the final answer; intermediate ones
           // get overwritten when the next turn produces text after tool calls.
-          resultText = (block as TextBlock).text;
+          resultText = (block as BetaTextBlock).text;
         } else if (block.type === "tool_use") {
-          const t = block as ToolUseBlock;
+          const t = block as BetaToolUseBlock;
           hasToolUse = true;
           const displayName = formatToolDisplayName(t.name);
           const input = abbreviateInput(t.input);
@@ -210,25 +190,24 @@ export async function executePrompt(
     }
 
     if (event.type === "user") {
-      const content = event.message?.content as ContentBlock[] | string | undefined;
+      const content = event.message?.content as BetaToolResultBlockParam[] | string | undefined;
       if (!Array.isArray(content)) return;
 
       for (const block of content) {
         if (block.type !== "tool_result") continue;
-        const tr = block as ToolResultBlock;
-        const pending = pendingTools.get(tr.tool_use_id);
+        const pending = pendingTools.get(block.tool_use_id);
         if (!pending) continue;
         const endMs = performance.now();
         const displayName = formatToolDisplayName(pending.name);
 
-        const rawPayload = tr.is_error
-          ? { error: tr.content ?? "tool execution failed" }
-          : tr.content;
+        const rawPayload = block.is_error
+          ? { error: block.content ?? "tool execution failed" }
+          : block.content;
         const processed = processMcpToolResult(rawPayload);
         const truncated = truncateOutput(processed.cleanedText);
 
         toolCalls.push({
-          id: tr.tool_use_id,
+          id: block.tool_use_id,
           name: pending.name,
           displayName,
           durationMs: Math.round(endMs - pending.startMs),
@@ -239,7 +218,7 @@ export async function executePrompt(
           searchTracePointer: processed.searchTracePointer,
           searchTraceFetch: processed.searchTraceFetch,
         });
-        pendingTools.delete(tr.tool_use_id);
+        pendingTools.delete(block.tool_use_id);
         onProgress?.({
           type: "tool_end",
           name: pending.name,
@@ -251,12 +230,14 @@ export async function executePrompt(
     }
 
     if (event.type === "result") {
-      if (event.subtype === "success" && typeof event.result === "string") {
-        resultText = event.result;
-      } else if (event.subtype !== "success") {
-        const errMsg =
-          (event as { error?: string }).error ?? "Claude Agent SDK returned an error result";
-        throw new Error(errMsg);
+      if (event.subtype === "success") {
+        if (typeof event.result === "string") resultText = event.result;
+      } else {
+        // SDKResultError exposes `errors: string[]` — join for a single
+        // throwable message, fall back to the subtype tag if empty.
+        const errs = event.errors;
+        const msg = errs && errs.length > 0 ? errs.join("; ") : event.subtype;
+        throw new Error(`Claude Agent SDK error: ${msg}`);
       }
       numTurns = event.num_turns ?? numTurns;
       durationMs = event.duration_ms ?? 0;
@@ -273,11 +254,4 @@ export async function executePrompt(
       return;
     }
   }
-}
-
-function abbreviateInput(input: unknown): string | undefined {
-  if (input == null) return undefined;
-  const json = JSON.stringify(input);
-  if (json.length <= 500) return json;
-  return json.slice(0, 497) + "...";
 }
