@@ -403,7 +403,7 @@ export function registerDataRoutes(app: Hono): void {
       if (!body.name || !body.connectorType) {
         return c.json({ error: "name and connectorType are required" }, 400);
       }
-      const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
+      const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"];
       if (!validTypes.includes(body.connectorType as ConnectorType)) {
         return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
       }
@@ -440,7 +440,7 @@ export function registerDataRoutes(app: Hono): void {
         timeoutMs?: number | null;
       }>();
       if (body.connectorType) {
-        const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat"];
+        const validTypes: ConnectorType[] = ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"];
         if (!validTypes.includes(body.connectorType as ConnectorType)) {
           return c.json({ error: `Invalid connectorType. Must be one of: ${validTypes.join(", ")}` }, 400);
         }

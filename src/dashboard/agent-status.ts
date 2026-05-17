@@ -206,6 +206,7 @@ export function getConnectorLabel(connectorType: string): string {
   switch (connectorType) {
     case "copilot-sdk": return "Copilot SDK";
     case "openai-compat": return "OpenAI";
+    case "claude-sdk": return "Claude SDK";
     default: return "Claude Code";
   }
 }

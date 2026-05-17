@@ -32,6 +32,11 @@ describe("resolveConnector", () => {
     expect(typeof connector).toBe("function");
   });
 
+  test("returns a lazy wrapper for claude-sdk", () => {
+    const connector = resolveConnector({ ...baseBotConfig, connector: "claude-sdk" });
+    expect(typeof connector).toBe("function");
+  });
+
   test("throws for unknown connector type", () => {
     expect(() => resolveConnector({ ...baseBotConfig, connector: "unknown" as any })).toThrow(
       "Unknown connector type: unknown",

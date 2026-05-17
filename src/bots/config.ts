@@ -29,7 +29,7 @@ export interface ChannelListeningConfig {
   topicHints?: string[];
 }
 
-export type ConnectorType = "claude-cli" | "copilot-sdk" | "openai-compat";
+export type ConnectorType = "claude-cli" | "copilot-sdk" | "openai-compat" | "claude-sdk";
 
 export interface BotConfig {
   name: string;
@@ -208,7 +208,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         if (unknownKeys.length > 0) {
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
         }
-        validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat"] as const, name);
+        validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const, name);
         validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
