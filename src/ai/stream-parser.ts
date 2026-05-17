@@ -388,8 +388,9 @@ export function extractIntentText(args: unknown): string | undefined {
   return typeof text === "string" ? text : undefined;
 }
 
-/** Abbreviate tool input to max 500 chars */
-function abbreviateInput(input: unknown): string | undefined {
+/** Abbreviate tool input to max 500 chars. Shared by stream-parser and the
+ *  SDK connectors so the wire format of `ToolCall.input` stays consistent. */
+export function abbreviateInput(input: unknown): string | undefined {
   if (input == null) return undefined;
   const json = JSON.stringify(input);
   if (json.length <= 500) return json;

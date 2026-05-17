@@ -258,6 +258,7 @@ export function connectorPanelHtml(): string {
               <option value="claude-cli">claude-cli</option>
               <option value="copilot-sdk">copilot-sdk</option>
               <option value="openai-compat">openai-compat</option>
+              <option value="claude-sdk">claude-sdk</option>
             </select>
           </div>
           <div class="connector-form-group">

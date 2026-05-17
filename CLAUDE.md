@@ -152,7 +152,7 @@ Each bot lives in `bots/<name>/` with its own:
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.json` — tool permissions
 
-Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"`, `"copilot-sdk"`, or `"openai-compat"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions. The OpenAI-compat connector calls any OpenAI-compatible API (Ollama, LM Studio, vLLM) with MCP tool execution and streaming.
+Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions. The OpenAI-compat connector calls any OpenAI-compatible API (Ollama, LM Studio, vLLM) with MCP tool execution and streaming. The Claude SDK connector uses Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable for a direct Anthropic chat transport without the CLI subprocess.
 
 A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOKEN_<NAME>` env var.
 
@@ -209,7 +209,7 @@ All fields are optional — falls back to global `.env` values:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, or `"openai-compat"` |
+| `connector` | string | `"claude-cli"` | AI backend: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"` |
 | `haikuBackend` | string | derived from `connector` | Per-bot Haiku backend for the `research_knowledge` decomposer and memory/goal/schedule extractors. One of `"cli"`, `"anthropic"`, `"copilot"`. Default is `copilot` for `copilot-sdk` bots, `cli` otherwise. See "Switching Haiku backend" below. |
 | `model` | string | `CLAUDE_MODEL` env | Model name (e.g. "claude-sonnet-4-6", "qwen3.5:35b") |
 | `thinkingMaxTokens` | number | CLI default | Max thinking tokens (0 = disable thinking). For openai-compat: used as max_tokens. |
@@ -281,6 +281,19 @@ Diagnostics:
 - The dashboard `haiku_usage` table shows the actual model each call used — `claude-haiku-4.5` (Copilot) vs `claude-haiku-4-5-20251001` (Anthropic / CLI). If a bot's `knowledge_decompose` span shows the wrong model, the resolution order is doing something unexpected.
 - On any backend error the router falls back to CLI and logs `haiku-router <backend> failed, falling back to CLI` — check muninn logs if a bot regresses to CLI speeds.
 - `bun scripts/smoke-haiku-copilot.ts` re-runs the Copilot path end-to-end and prints the model id Copilot actually used.
+
+### Switching chat connector (CLI vs Copilot vs Claude SDK vs OpenAI-compat)
+
+The chat connector handles the main bot turn — assembling the prompt, running tools, streaming the response. Separate from the Haiku router above (which only powers short async extraction calls). Set per-bot in `bots/<name>/config.json` via `connector`.
+
+| Goal | What to set | Auth |
+|---|---|---|
+| Default — spawns the `claude` CLI per turn (~5–7s cold-start, full MCP surface) | leave `connector` unset, or `"connector": "claude-cli"` | existing CLI login |
+| Bot on Capra/NAV Copilot subscription (e.g. melosys) | `"connector": "copilot-sdk"` | `gh auth login` |
+| Direct Anthropic transport — no CLI subprocess, no Copilot subscription. Personal bots that want smoother streaming and like-for-like benchmarks vs Copilot. | `"connector": "claude-sdk"` | `ANTHROPIC_API_KEY` (production) or `CLAUDE_CODE_OAUTH_TOKEN` (personal Max via `claude setup-token`) |
+| Local model via Ollama / LM Studio / vLLM | `"connector": "openai-compat"` + `"baseUrl": "http://localhost:11434/v1"` | none |
+
+The `claude-sdk` connector uses `@anthropic-ai/claude-agent-sdk` with `bypassPermissions` and `settingSources: []` — muninn's prompt-builder delivers the full system prompt, the SDK doesn't auto-load CLAUDE.md or `~/.claude/settings.json`. MCP servers are converted from `.mcp.json` to the SDK shape (`src/ai/connectors/claude-sdk-mcp.ts`). Per-server `cwd` is dropped because the SDK doesn't expose it — none of the current bots use it, but if a new `.mcp.json` adds one, you'll see a warning in the logs.
 
 ### Adding a New Bot
 
@@ -402,7 +415,7 @@ Enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true }`), 
 
 **When to keep Path C on:** only when targeting a huginn instance that doesn't have Path D yet (older deploy, dev branch, custom fork). For any bot pointed at a Path-D-enabled huginn, leave Path C **off** — Path D handles rescue upstream and a second rescue layer on top just adds noise to the trace.
 
-**Connector coverage:** Path C works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`) because the loop is driven entirely by the model. Same as Path D in that respect.
+**Connector coverage:** Path C works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`, `claude-sdk`) because the loop is driven entirely by the model. Same as Path D in that respect.
 
 ### Other operational chips
 
@@ -438,7 +451,7 @@ DB tests require the local Postgres container (`bun run db:up`) and a test datab
 - AI output: standard markdown — per-platform formatters convert at send time (`telegram-format.ts`, `web-format.ts`, `slack-format.ts`)
 - Conversation threads: per-user+bot named threads for chat isolation; memories/goals/tasks shared across threads. Commands: `/topic`, `/topics`, `/deltopic`. Pre-migration messages (NULL thread_id) visible only in `main` thread.
 - Prompt assembly: persona (from CLAUDE.md) + memories (personal + shared) + goals + scheduled tasks + thread-scoped conversation history
-- AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli`, `copilot-sdk`, or `openai-compat`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.
+- AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli`, `copilot-sdk`, `openai-compat`, or `claude-sdk`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature.
 - Claude CLI connector: spawned with `cwd: bots/<name>/` — auto-discovers MCP, settings, stores history there. Output: `--output-format stream-json --verbose` (NDJSON events with tool_use blocks); `--verbose` is required with `-p` flag. Falls back to legacy JSON parser if stream result event is missing (known CLI bug)
 - Copilot SDK connector: shared `CopilotClient` singleton (lazy-loaded), per-request sessions. Reads `.mcp.json` and converts to SDK format. Emits `assistant.intent` events shown as inline chat bubbles.
 - OpenAI-compat connector: calls any OpenAI-compatible API (Ollama, LM Studio, vLLM). Agent loop with MCP tool execution — loads tools from `.mcp.json`, sends as OpenAI `tools` parameter, executes tool_calls against MCP servers in a multi-turn loop. Handles Qwen3/Ollama thinking tokens (`reasoning` field + `<think>` tag stripping). Retries on empty responses (3x with 2s delay).

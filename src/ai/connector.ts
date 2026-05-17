@@ -30,6 +30,10 @@ const connectorLoaders: Record<ConnectorType, () => Promise<AiConnector>> = {
     const mod = await import("./connectors/openai-compat.ts");
     return mod.executePrompt;
   },
+  "claude-sdk": async () => {
+    const mod = await import("./connectors/claude-sdk.ts");
+    return mod.executePrompt;
+  },
 };
 
 /** Resolve the AI connector function for a given bot config. */
