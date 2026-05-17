@@ -18,6 +18,7 @@
 
 import { spawnHaiku } from "../src/scheduler/executor.ts";
 import { callHaikuDirect, hasHaikuDirectAuth } from "../src/ai/haiku-direct.ts";
+import { DECOMPOSE_PROMPT } from "../src/ai/knowledge-decomposer.ts";
 import { initDb, closeDb } from "../src/db/client.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -28,22 +29,7 @@ initDb(loadConfig());
 const question = process.argv[2]
   || "Hva er forskjellen mellom A001 og A002, og hva utløser hver av dem?";
 
-const DECOMPOSE_PROMPT = `You decompose a single user question into the smallest set of focused sub-questions needed to answer it well.
-
-Rules:
-- Return 1 sub-question when the input is a simple lookup (one topic, one fact). This is the cheap path — prefer it.
-- Return 2–4 sub-questions only when the input asks for a comparison, has distinct parts ("X and Y"), or chains facts across topics.
-- Never return 0 or more than 4. If you would, return 1 with the original question verbatim.
-- Each sub-question stands alone: a downstream knowledge-base search must be able to answer it without the others.
-- Keep sub-questions tight — they will be sent to a retrieval service, not back to a person.
-
-Respond with ONLY valid JSON (no markdown fences, no commentary):
-{"subQuestions": ["..."], "rationale": "short reason for the choice"}
-
-Question to decompose:
-"""
-${question}
-"""`;
+const prompt = DECOMPOSE_PROMPT.replace("{QUESTION}", question);
 
 if (!hasHaikuDirectAuth()) {
   console.error("✗ Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set.");
@@ -59,7 +45,7 @@ console.log("→ spawnHaiku (Claude CLI subprocess) ...");
 const cliStart = performance.now();
 let cliResult: Awaited<ReturnType<typeof spawnHaiku>>;
 try {
-  cliResult = await spawnHaiku(DECOMPOSE_PROMPT, {
+  cliResult = await spawnHaiku(prompt, {
     source: "smoke-haiku-direct",
     entrypoint: "smoke-cli",
     botName: "smoke",
@@ -78,7 +64,7 @@ console.log("→ callHaikuDirect (Anthropic SDK) ...");
 const sdkStart = performance.now();
 let sdkResult: Awaited<ReturnType<typeof callHaikuDirect>>;
 try {
-  sdkResult = await callHaikuDirect(DECOMPOSE_PROMPT, {
+  sdkResult = await callHaikuDirect(prompt, {
     source: "smoke-haiku-direct",
     entrypoint: "smoke-sdk",
     botName: "smoke",

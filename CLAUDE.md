@@ -256,6 +256,9 @@ PostgreSQL + pgvector via Docker (single container).
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
 | `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for prompt-level corrective retrieval (per-bot `correctiveRetrieval.enabled` overrides). |
 | `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config. |
+| `HAIKU_DIRECT_ENABLED` | No | `false` | Set to `1` to route no-MCP Haiku calls (currently just the `research_knowledge` decomposer) through `@anthropic-ai/sdk` instead of the Claude CLI subprocess. Requires `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Measured ~6× speedup on the decomposer hot path (8.5s CLI → 1.2s SDK) and ~260× fewer input tokens (CLI loads the bot's full MCP catalog; SDK sends just the prompt). Falls back to CLI on any SDK error. See [muninn-haiku-router-copilot.md](../mimir/plans/muninn-haiku-router-copilot.md) for the planned multi-backend router that will replace this binary flag. |
+| `ANTHROPIC_API_KEY` | No | — | Anthropic API key for `HAIKU_DIRECT_ENABLED=1`. Sent as `x-api-key` header. Use for production/shared deployments. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | No | — | Claude Code OAuth token (generate via `claude setup-token`) for `HAIKU_DIRECT_ENABLED=1`. Sent as `Authorization: Bearer`. Use for personal/Max-subscription dev. Anthropic SDK uses `apiKey` first, falls back to this. |
 | `GOAL_CHECK_INTERVAL_MS` | No | — | Legacy alias for `SCHEDULER_INTERVAL_MS` |
 | `GOAL_CHECK_ENABLED` | No | — | Legacy alias for `SCHEDULER_ENABLED` |
 

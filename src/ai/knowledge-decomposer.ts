@@ -23,7 +23,7 @@ export interface DecomposeResult {
 const MIN_SUB_QUESTIONS = 1;
 const MAX_SUB_QUESTIONS = 4;
 
-const DECOMPOSE_PROMPT = `You decompose a single user question into the smallest set of focused sub-questions needed to answer it well.
+export const DECOMPOSE_PROMPT = `You decompose a single user question into the smallest set of focused sub-questions needed to answer it well.
 
 Rules:
 - Return 1 sub-question when the input is a simple lookup (one topic, one fact). This is the cheap path — prefer it.

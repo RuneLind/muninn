@@ -1,10 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
 import {
   DEFAULT_MODEL,
   HAIKU_TIMEOUT_MS,
   spawnHaiku,
+  trackUsage,
   type HaikuResult,
   type SpawnHaikuOptions,
 } from "../scheduler/executor.ts";
@@ -39,6 +39,8 @@ function buildClient(): { client: Anthropic; authSource: "api-key" | "oauth" } {
   throw new Error("haiku-direct: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set");
 }
 
+// Client cache is process-lifetime — rotating ANTHROPIC_API_KEY /
+// CLAUDE_CODE_OAUTH_TOKEN at runtime requires a process restart.
 function getClient(): Anthropic {
   if (cachedClient) return cachedClient;
   const { client, authSource } = buildClient();
@@ -118,24 +120,4 @@ export async function callHaikuWithFallback(
     }
   }
   return spawnHaiku(prompt, opts);
-}
-
-function trackUsage(
-  source: string,
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  botName?: string,
-): void {
-  if (inputTokens === 0 && outputTokens === 0) return;
-  const sql = getDb();
-  sql`
-    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name)
-    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null})
-  `.catch((err) => {
-    log.error("Failed to track Haiku usage: {error}", {
-      botName: botName ?? "haiku",
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
 }
