@@ -291,6 +291,86 @@ describe("claude-sdk executePrompt", () => {
     expect(intents[0]!.text).toBe("Looking at memories");
   });
 
+  test("emits text_delta events from stream_event partial messages", async () => {
+    fakeEvents = [
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Hel" },
+        },
+      },
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "lo!" },
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "Hello!" }],
+          usage: { input_tokens: 5, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        result: "Hello!",
+        num_turns: 1,
+        duration_ms: 100,
+        duration_api_ms: 80,
+        total_cost_usd: 0,
+        is_error: false,
+        usage: { input_tokens: 5, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    ];
+    const deltas: string[] = [];
+    await executePrompt("hi", baseConfig, baseBot(), undefined, (ev) => {
+      if (ev.type === "text_delta") deltas.push(ev.text);
+    });
+    expect(deltas).toEqual(["Hel", "lo!"]);
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.includePartialMessages).toBe(true);
+  });
+
+  test("ignores non-text_delta stream_event variants", async () => {
+    fakeEvents = [
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: "{" },
+        },
+      },
+      {
+        type: "stream_event",
+        event: { type: "message_start", message: {} },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        result: "",
+        num_turns: 1,
+        duration_ms: 0,
+        duration_api_ms: 0,
+        total_cost_usd: 0,
+        is_error: false,
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    ];
+    const deltas: string[] = [];
+    await executePrompt("hi", baseConfig, baseBot(), undefined, (ev) => {
+      if (ev.type === "text_delta") deltas.push(ev.text);
+    });
+    expect(deltas).toEqual([]);
+  });
+
   test("surfaces SDKResultError messages from the errors array", async () => {
     fakeEvents = [
       {

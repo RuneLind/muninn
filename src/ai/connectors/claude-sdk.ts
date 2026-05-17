@@ -96,6 +96,10 @@ export async function executePrompt(
     model,
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
+    // Stream per-token text deltas to the web chat. Without this the SDK only
+    // emits the completed `assistant` message at the end of each turn, so the
+    // user waits for the whole response before seeing anything.
+    includePartialMessages: true,
     ...(systemPrompt
       ? { systemPrompt }
       : { systemPrompt: { type: "preset", preset: "claude_code" } }),
@@ -140,6 +144,21 @@ export async function executePrompt(
   function handleEvent(event: SDKMessage): void {
     if (event.type === "system" && event.subtype === "init") {
       if (event.model) reportedModel = event.model;
+      return;
+    }
+
+    if (event.type === "stream_event") {
+      // Per-token streaming from `includePartialMessages: true`. Mirrors the
+      // Claude CLI's `content_block_delta` path in stream-parser.ts so the web
+      // chat sees text as the model emits it.
+      const inner = event.event;
+      if (
+        inner?.type === "content_block_delta" &&
+        inner.delta?.type === "text_delta" &&
+        typeof inner.delta.text === "string"
+      ) {
+        onProgress?.({ type: "text_delta", text: inner.delta.text });
+      }
       return;
     }
 
