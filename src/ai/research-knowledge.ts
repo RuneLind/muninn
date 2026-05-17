@@ -3,6 +3,7 @@ import { decomposeQuestion } from "./knowledge-decomposer.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../dashboard/routes/knowledge-api-client.ts";
 import { fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
+import type { ConnectorType } from "../bots/config.ts";
 
 const log = getLog("ai", "research-knowledge");
 
@@ -27,6 +28,8 @@ export interface ResearchKnowledgeOptions {
   traceContext?: TraceContext;
   /** Optional user id for trace attribution. */
   userId?: string;
+  /** Bot's main connector — picks the per-bot default Haiku backend. */
+  connector?: ConnectorType;
 }
 
 export interface ResearchHit {
@@ -90,7 +93,7 @@ interface SearchResponse {
 }
 
 export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise<ResearchKnowledgeResult> {
-  const { question, collections, limit, botName, botDir, knowledgeApiUrl, traceContext, userId } = opts;
+  const { question, collections, limit, botName, botDir, knowledgeApiUrl, traceContext, userId, connector } = opts;
 
   const tracer = new Tracer("research_knowledge", {
     botName,
@@ -99,7 +102,7 @@ export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise
     parentId: traceContext?.parentId,
   });
 
-  const decomposition = await decomposeQuestion({ question, botName, botDir });
+  const decomposition = await decomposeQuestion({ question, botName, botDir, connector });
   tracer.addChildSpan(
     "knowledge_decompose",
     "knowledge_decompose",

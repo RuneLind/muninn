@@ -8,14 +8,30 @@ import {
   type HaikuResult,
   type SpawnHaikuOptions,
 } from "../scheduler/executor.ts";
+import type { ConnectorType } from "../bots/config.ts";
 
-const log = getLog("ai", "haiku-direct");
+const log = getLog("ai", "haiku-router");
 
 // Decomposer / memory / goal / schedule extractors all emit small JSON blobs.
 // 4096 is comfortable headroom without inviting runaway outputs.
 const DEFAULT_MAX_TOKENS = 4096;
 
-let cachedClient: Anthropic | null = null;
+// Copilot's model registry uses dotted ids ("claude-haiku-4.5") rather than
+// Anthropic's full date-suffixed form ("claude-haiku-4-5-20251001"). Verified
+// 2026-05-17 via `client.listModels()` — see scripts/smoke-haiku-copilot.ts.
+// Sending an unknown id silently substitutes Sonnet, so this must match exactly.
+const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
+
+export type HaikuBackend = "cli" | "anthropic" | "copilot";
+
+export interface HaikuRouterOptions extends SpawnHaikuOptions {
+  /** Explicit backend override (top-priority in resolution). */
+  backend?: HaikuBackend;
+  /** Bot's main connector — selects the per-bot default backend. */
+  connector?: ConnectorType;
+}
+
+let cachedAnthropic: Anthropic | null = null;
 let cachedAuthSource: "api-key" | "oauth" | null = null;
 
 export function isHaikuDirectEnabled(): boolean {
@@ -27,7 +43,30 @@ export function hasHaikuDirectAuth(): boolean {
   return !!(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN);
 }
 
-function buildClient(): { client: Anthropic; authSource: "api-key" | "oauth" } {
+function parseHaikuBackendEnv(): HaikuBackend | null {
+  const raw = process.env.HAIKU_BACKEND?.trim().toLowerCase();
+  if (raw === "cli" || raw === "anthropic" || raw === "copilot") return raw;
+  return null;
+}
+
+/**
+ * Resolution order (top wins):
+ *   1. explicit opts.backend
+ *   2. HAIKU_BACKEND env (cli|anthropic|copilot)
+ *   3. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
+ *   4. opts.connector === "copilot-sdk" → copilot
+ *   5. floor → cli
+ */
+export function resolveBackend(opts: { backend?: HaikuBackend; connector?: ConnectorType }): HaikuBackend {
+  if (opts.backend) return opts.backend;
+  const fromEnv = parseHaikuBackendEnv();
+  if (fromEnv) return fromEnv;
+  if (isHaikuDirectEnabled()) return "anthropic";
+  if (opts.connector === "copilot-sdk") return "copilot";
+  return "cli";
+}
+
+function buildAnthropic(): { client: Anthropic; authSource: "api-key" | "oauth" } {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (apiKey) {
     return { client: new Anthropic({ apiKey }), authSource: "api-key" };
@@ -36,21 +75,21 @@ function buildClient(): { client: Anthropic; authSource: "api-key" | "oauth" } {
   if (oauth) {
     return { client: new Anthropic({ apiKey: null, authToken: oauth }), authSource: "oauth" };
   }
-  throw new Error("haiku-direct: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set");
+  throw new Error("haiku-router: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set");
 }
 
 // Client cache is process-lifetime — rotating ANTHROPIC_API_KEY /
 // CLAUDE_CODE_OAUTH_TOKEN at runtime requires a process restart.
-function getClient(): Anthropic {
-  if (cachedClient) return cachedClient;
-  const { client, authSource } = buildClient();
-  cachedClient = client;
+function getAnthropic(): Anthropic {
+  if (cachedAnthropic) return cachedAnthropic;
+  const { client, authSource } = buildAnthropic();
+  cachedAnthropic = client;
   cachedAuthSource = authSource;
   return client;
 }
 
 export function _resetClientForTests(): void {
-  cachedClient = null;
+  cachedAnthropic = null;
   cachedAuthSource = null;
 }
 
@@ -65,7 +104,7 @@ export async function callHaikuDirect(
   const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
 
-  const client = getClient();
+  const client = getAnthropic();
 
   const response = await client.messages.create(
     {
@@ -99,22 +138,91 @@ export async function callHaikuDirect(
 }
 
 /**
- * Drop-in replacement for `spawnHaiku` that routes through the Anthropic SDK
- * when `HAIKU_DIRECT_ENABLED=1` and auth is available, falling back to the CLI
- * subprocess on any error. Call sites that don't need MCP tools can use this
- * to skip the multi-second CLI cold-start.
+ * Routes a one-shot Haiku call through the shared CopilotClient singleton.
+ * Reuses the same auth surface the bot's main chat uses. Session is lean —
+ * no MCP servers, no custom agents — and is destroyed in `finally`.
  */
-export async function callHaikuWithFallback(
+export async function callHaikuViaCopilot(
   prompt: string,
   opts: SpawnHaikuOptions,
 ): Promise<HaikuResult> {
-  if (isHaikuDirectEnabled() && hasHaikuDirectAuth()) {
+  // Lazy import: avoids pulling @github/copilot-sdk into bots that never use it.
+  const { getCopilotClient } = await import("./connectors/copilot-sdk.ts");
+  const cl = await getCopilotClient();
+  const model = opts.model ?? COPILOT_HAIKU_MODEL;
+  const timeoutMs = opts.timeoutMs ?? HAIKU_TIMEOUT_MS;
+
+  const session = await cl.createSession({
+    model,
+    streaming: false,
+  });
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let reportedModel = model;
+
+  const unsubscribe = session.on((event) => {
+    if (event.type === "assistant.usage") {
+      inputTokens += (event.data.inputTokens ?? 0)
+        + (event.data.cacheReadTokens ?? 0)
+        + (event.data.cacheWriteTokens ?? 0);
+      outputTokens += event.data.outputTokens ?? 0;
+      if (event.data.model) reportedModel = event.data.model;
+    }
+  });
+
+  try {
+    const response = await session.sendAndWait({ prompt }, timeoutMs);
+    const resultText = response?.data?.content ?? "";
+    trackUsage(opts.source, reportedModel, inputTokens, outputTokens, opts.botName);
+    return {
+      result: resultText,
+      inputTokens,
+      outputTokens,
+      model: reportedModel,
+    };
+  } finally {
+    unsubscribe();
+    session.destroy().catch((e) => {
+      log.warn("Failed to destroy Copilot Haiku session: {error}", { error: String(e) });
+    });
+  }
+}
+
+/**
+ * Drop-in replacement for `spawnHaiku` that routes through a backend picked
+ * by `resolveBackend()`. Falls back to the CLI subprocess on any error.
+ */
+export async function callHaikuWithFallback(
+  prompt: string,
+  opts: HaikuRouterOptions,
+): Promise<HaikuResult> {
+  const backend = resolveBackend(opts);
+
+  if (backend === "anthropic") {
+    if (!hasHaikuDirectAuth()) {
+      log.warn(
+        "haiku-router anthropic backend requested but no auth, falling back to CLI",
+        { botName: opts.botName ?? "haiku" },
+      );
+    } else {
+      try {
+        return await callHaikuDirect(prompt, opts);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(
+          "haiku-router anthropic failed, falling back to CLI: {error}",
+          { botName: opts.botName ?? "haiku", error: message },
+        );
+      }
+    }
+  } else if (backend === "copilot") {
     try {
-      return await callHaikuDirect(prompt, opts);
+      return await callHaikuViaCopilot(prompt, opts);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn(
-        "haiku-direct failed, falling back to spawnHaiku: {error}",
+        "haiku-router copilot failed, falling back to CLI: {error}",
         { botName: opts.botName ?? "haiku", error: message },
       );
     }

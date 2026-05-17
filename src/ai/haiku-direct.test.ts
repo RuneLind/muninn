@@ -51,11 +51,64 @@ mock.module("../scheduler/executor.ts", () => ({
       model: "claude-haiku-4-5-20251001",
     };
   },
+  trackUsage: () => {},
+}));
+
+// Mock the Copilot connector — exposes a `getCopilotClient` returning a fake
+// CopilotClient whose `createSession` returns a fake session.
+type FakeUsage = {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  model?: string;
+};
+
+const copilotCalls: Array<{
+  sessionConfig: unknown;
+  prompt: string;
+  timeout?: number;
+}> = [];
+let copilotResponseContent = "copilot-result";
+let copilotUsageEvents: FakeUsage[] = [
+  { inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" },
+];
+let copilotSessionThrow: Error | null = null;
+let copilotDestroyCount = 0;
+
+mock.module("./connectors/copilot-sdk.ts", () => ({
+  getCopilotClient: async () => ({
+    createSession: async (sessionConfig: unknown) => {
+      copilotCalls.push({ sessionConfig, prompt: "", timeout: undefined });
+      let handler: ((event: unknown) => void) | null = null;
+      return {
+        on(h: (event: unknown) => void) {
+          handler = h;
+          return () => { handler = null; };
+        },
+        async sendAndWait(opts: { prompt: string }, timeout?: number) {
+          const lastCall = copilotCalls[copilotCalls.length - 1]!;
+          lastCall.prompt = opts.prompt;
+          lastCall.timeout = timeout;
+          if (copilotSessionThrow) throw copilotSessionThrow;
+          for (const usage of copilotUsageEvents) {
+            handler?.({ type: "assistant.usage", data: usage });
+          }
+          return { data: { content: copilotResponseContent } };
+        },
+        async destroy() {
+          copilotDestroyCount++;
+        },
+      };
+    },
+  }),
 }));
 
 const {
   callHaikuDirect,
+  callHaikuViaCopilot,
   callHaikuWithFallback,
+  resolveBackend,
   isHaikuDirectEnabled,
   hasHaikuDirectAuth,
   _resetClientForTests,
@@ -65,16 +118,23 @@ const {
 beforeEach(() => {
   sdkCalls.length = 0;
   spawnCalls.length = 0;
+  copilotCalls.length = 0;
+  copilotResponseContent = "copilot-result";
+  copilotUsageEvents = [{ inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" }];
+  copilotSessionThrow = null;
+  copilotDestroyCount = 0;
   sdkThrow = null;
   constructorOpts = null;
   _resetClientForTests();
   delete process.env.HAIKU_DIRECT_ENABLED;
+  delete process.env.HAIKU_BACKEND;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 });
 
 afterEach(() => {
   delete process.env.HAIKU_DIRECT_ENABLED;
+  delete process.env.HAIKU_BACKEND;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
 });
@@ -113,6 +173,61 @@ describe("hasHaikuDirectAuth", () => {
   test("true with OAuth token", () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "oauth-test";
     expect(hasHaikuDirectAuth()).toBe(true);
+  });
+});
+
+describe("resolveBackend", () => {
+  test("defaults to cli with nothing set", () => {
+    expect(resolveBackend({})).toBe("cli");
+  });
+
+  test("opts.backend wins over everything", () => {
+    process.env.HAIKU_BACKEND = "anthropic";
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackend({ backend: "cli", connector: "copilot-sdk" })).toBe("cli");
+  });
+
+  test("HAIKU_BACKEND env wins over legacy flag and connector", () => {
+    process.env.HAIKU_BACKEND = "anthropic";
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackend({ connector: "copilot-sdk" })).toBe("anthropic");
+  });
+
+  test("HAIKU_BACKEND=cli forces cli even on copilot bot", () => {
+    process.env.HAIKU_BACKEND = "cli";
+    expect(resolveBackend({ connector: "copilot-sdk" })).toBe("cli");
+  });
+
+  test("HAIKU_BACKEND=copilot forces copilot on claude-cli bot", () => {
+    process.env.HAIKU_BACKEND = "copilot";
+    expect(resolveBackend({ connector: "claude-cli" })).toBe("copilot");
+  });
+
+  test("ignores invalid HAIKU_BACKEND values", () => {
+    process.env.HAIKU_BACKEND = "bogus";
+    expect(resolveBackend({ connector: "copilot-sdk" })).toBe("copilot");
+  });
+
+  test("legacy HAIKU_DIRECT_ENABLED=1 → anthropic", () => {
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackend({})).toBe("anthropic");
+  });
+
+  test("legacy flag wins over connector default", () => {
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackend({ connector: "copilot-sdk" })).toBe("anthropic");
+  });
+
+  test("connector copilot-sdk → copilot", () => {
+    expect(resolveBackend({ connector: "copilot-sdk" })).toBe("copilot");
+  });
+
+  test("connector claude-cli → cli", () => {
+    expect(resolveBackend({ connector: "claude-cli" })).toBe("cli");
+  });
+
+  test("connector openai-compat → cli", () => {
+    expect(resolveBackend({ connector: "openai-compat" })).toBe("cli");
   });
 });
 
@@ -204,8 +319,41 @@ describe("callHaikuDirect response handling", () => {
   });
 });
 
+describe("callHaikuViaCopilot", () => {
+  test("creates a lean session (no MCP, no streaming) and sums usage events", async () => {
+    copilotUsageEvents = [
+      { inputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1, outputTokens: 4, model: "claude-haiku-4-5-20251001" },
+      { inputTokens: 1, outputTokens: 1 },
+    ];
+    const result = await callHaikuViaCopilot("hi", { source: "test", botName: "melosys" });
+    expect(result.result).toBe("copilot-result");
+    expect(result.inputTokens).toBe(5 + 2 + 1 + 1);
+    expect(result.outputTokens).toBe(4 + 1);
+    expect(result.model).toBe("claude-haiku-4-5-20251001");
+
+    expect(copilotCalls).toHaveLength(1);
+    const { sessionConfig } = copilotCalls[0]!;
+    expect((sessionConfig as { streaming?: boolean }).streaming).toBe(false);
+    expect((sessionConfig as { mcpServers?: unknown }).mcpServers).toBeUndefined();
+    expect((sessionConfig as { workingDirectory?: string }).workingDirectory).toBeUndefined();
+  });
+
+  test("destroys the session even when sendAndWait throws", async () => {
+    copilotSessionThrow = new Error("copilot boom");
+    await expect(callHaikuViaCopilot("hi", { source: "test" })).rejects.toThrow("copilot boom");
+    expect(copilotDestroyCount).toBe(1);
+  });
+
+  test("forwards opts.model and opts.timeoutMs", async () => {
+    await callHaikuViaCopilot("hi", { source: "test", model: "custom-model", timeoutMs: 9999 });
+    const call = copilotCalls[0]!;
+    expect((call.sessionConfig as { model: string }).model).toBe("custom-model");
+    expect(call.timeout).toBe(9999);
+  });
+});
+
 describe("callHaikuWithFallback dispatch", () => {
-  test("uses CLI when flag is off", async () => {
+  test("cli backend uses CLI even with auth present", async () => {
     process.env.ANTHROPIC_API_KEY = "sk-test";
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("fallback-result");
@@ -213,7 +361,7 @@ describe("callHaikuWithFallback dispatch", () => {
     expect(spawnCalls).toHaveLength(1);
   });
 
-  test("uses CLI when flag is on but no auth", async () => {
+  test("legacy flag without auth falls through to CLI", async () => {
     process.env.HAIKU_DIRECT_ENABLED = "1";
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("fallback-result");
@@ -221,7 +369,7 @@ describe("callHaikuWithFallback dispatch", () => {
     expect(spawnCalls).toHaveLength(1);
   });
 
-  test("uses direct SDK when flag + auth are set", async () => {
+  test("legacy flag + auth routes to anthropic", async () => {
     process.env.HAIKU_DIRECT_ENABLED = "1";
     process.env.ANTHROPIC_API_KEY = "sk-test";
     sdkResponse = {
@@ -235,13 +383,57 @@ describe("callHaikuWithFallback dispatch", () => {
     expect(spawnCalls).toHaveLength(0);
   });
 
-  test("falls back to CLI when direct SDK throws", async () => {
+  test("anthropic backend falls back to CLI when SDK throws", async () => {
     process.env.HAIKU_DIRECT_ENABLED = "1";
     process.env.ANTHROPIC_API_KEY = "sk-test";
     sdkThrow = new Error("rate limited");
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("fallback-result");
     expect(sdkCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("connector copilot-sdk routes to copilot backend", async () => {
+    const result = await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk" });
+    expect(result.result).toBe("copilot-result");
+    expect(copilotCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test("copilot backend falls back to CLI on error", async () => {
+    copilotSessionThrow = new Error("copilot unreachable");
+    const result = await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk" });
+    expect(result.result).toBe("fallback-result");
+    expect(copilotCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("HAIKU_BACKEND=copilot forces copilot on a claude-cli bot", async () => {
+    process.env.HAIKU_BACKEND = "copilot";
+    const result = await callHaikuWithFallback("hi", { source: "test", connector: "claude-cli" });
+    expect(result.result).toBe("copilot-result");
+    expect(copilotCalls).toHaveLength(1);
+  });
+
+  test("HAIKU_BACKEND=cli overrides copilot connector default", async () => {
+    process.env.HAIKU_BACKEND = "cli";
+    const result = await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk" });
+    expect(result.result).toBe("fallback-result");
+    expect(copilotCalls).toHaveLength(0);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test("explicit opts.backend wins over env + connector", async () => {
+    process.env.HAIKU_BACKEND = "anthropic";
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    const result = await callHaikuWithFallback("hi", {
+      source: "test",
+      connector: "copilot-sdk",
+      backend: "cli",
+    });
+    expect(result.result).toBe("fallback-result");
+    expect(sdkCalls).toHaveLength(0);
+    expect(copilotCalls).toHaveLength(0);
     expect(spawnCalls).toHaveLength(1);
   });
 });
