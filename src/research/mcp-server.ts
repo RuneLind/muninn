@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { getLog } from "../logging.ts";
 import { researchKnowledge, formatResearchResultText } from "../ai/research-knowledge.ts";
+import type { ConnectorType } from "../bots/config.ts";
 
 const log = getLog("research", "mcp-server");
 
@@ -20,6 +21,9 @@ interface BotEntry {
   /** Resolved once at registration from the bot's .mcp.json KNOWLEDGE_COLLECTIONS.
    *  `undefined` means "search all collections huginn knows about". */
   defaultCollections?: string[];
+  /** Bot's main AI connector — drives the per-bot default Haiku backend used
+   *  by the decomposer. `copilot-sdk` bots route Haiku through Copilot. */
+  connector?: ConnectorType;
 }
 
 const TOOL_DESCRIPTION =
@@ -172,6 +176,7 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
           botName: entry.botName,
           botDir: entry.botDir,
           knowledgeApiUrl: entry.knowledgeApiUrl,
+          connector: entry.connector,
         });
 
         return {

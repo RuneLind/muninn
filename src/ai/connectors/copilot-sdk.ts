@@ -19,7 +19,7 @@ const log = getLog("ai", "copilot-sdk");
 let client: CopilotClient | null = null;
 let clientStarting: Promise<void> | null = null;
 
-async function getClient(): Promise<CopilotClient> {
+export async function getCopilotClient(): Promise<CopilotClient> {
   if (client) return client;
 
   if (!clientStarting) {
@@ -61,7 +61,7 @@ export async function executePrompt(
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
   const wallStart = performance.now();
-  const cl = await getClient();
+  const cl = await getCopilotClient();
 
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;

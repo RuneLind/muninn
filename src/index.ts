@@ -108,6 +108,7 @@ try {
       botDir: bot.dir,
       knowledgeApiUrl: config.knowledgeApiUrl,
       defaultCollections: bot.defaultKnowledgeCollections,
+      connector: bot.connector,
     });
   }
 } catch (err) {
