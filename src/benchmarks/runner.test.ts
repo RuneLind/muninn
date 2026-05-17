@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { findLeakedSpans } from "./runner.ts";
+import { disallowedToolsForConnector } from "./audit.ts";
 
 describe("findLeakedSpans (Bug 11 audit)", () => {
   test("returns empty for a clean trace", () => {
@@ -41,6 +42,41 @@ describe("findLeakedSpans (Bug 11 audit)", () => {
     expect(leaked).toContain("Monitor");
     expect(leaked).not.toContain("claude");
     expect(leaked).not.toContain("search_knowledge (knowledge)");
+  });
+
+  test("does NOT flag ToolSearch under claude-sdk (legitimate deferred-MCP discovery)", () => {
+    const trace = [
+      "claude",
+      "search_knowledge (knowledge)",
+      "ToolSearch",
+    ];
+    expect(findLeakedSpans(trace, "claude-sdk")).toEqual([]);
+  });
+
+  test("still flags other harness tools under claude-sdk", () => {
+    const trace = ["ToolSearch", "Agent", "Bash"];
+    const leaked = findLeakedSpans(trace, "claude-sdk");
+    expect(leaked).not.toContain("ToolSearch");
+    expect(leaked).toContain("Agent");
+    expect(leaked).toContain("Bash");
+  });
+
+  test("flags ToolSearch under claude-cli (CLI has no deferred-MCP use for it)", () => {
+    expect(findLeakedSpans(["ToolSearch"], "claude-cli")).toEqual(["ToolSearch"]);
+  });
+
+  test("disallowedToolsForConnector drops ToolSearch only for claude-sdk", () => {
+    expect(disallowedToolsForConnector("claude-cli")).toContain("ToolSearch");
+    expect(disallowedToolsForConnector("copilot-sdk")).toContain("ToolSearch");
+    expect(disallowedToolsForConnector("openai-compat")).toContain("ToolSearch");
+    expect(disallowedToolsForConnector(undefined)).toContain("ToolSearch");
+    expect(disallowedToolsForConnector("claude-sdk")).not.toContain("ToolSearch");
+    // Everything else stays for every connector
+    for (const c of ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk", undefined]) {
+      expect(disallowedToolsForConnector(c)).toContain("Bash");
+      expect(disallowedToolsForConnector(c)).toContain("Agent");
+      expect(disallowedToolsForConnector(c)).toContain("TaskCreate");
+    }
   });
 
   test("flags raw filesystem and shell tools", () => {

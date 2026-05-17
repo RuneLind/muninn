@@ -559,8 +559,10 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
 
   // Step 5a — Bug 11 isolation audit. Query the trace for any tool spans that
   // shouldn't have been reachable from this cell; fail loud if found, before
-  // the judge wastes tokens scoring contaminated output.
-  const leakedTools = await auditCellForLeaks(analysisTraceId);
+  // the judge wastes tokens scoring contaminated output. The connector is
+  // passed so claude-sdk's legitimate ToolSearch usage (deferred MCP discovery)
+  // is not flagged as a leak.
+  const leakedTools = await auditCellForLeaks(analysisTraceId, effectiveBot.connector);
   if (leakedTools.length > 0) {
     return failCellWithError({
       benchmarkRunId,
