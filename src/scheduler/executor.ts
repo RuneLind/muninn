@@ -142,7 +142,7 @@ export async function callHaiku(
   }
 }
 
-function trackUsage(
+export function trackUsage(
   source: string,
   model: string,
   inputTokens: number,
