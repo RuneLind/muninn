@@ -4,6 +4,7 @@ import { saveGoal, getActiveGoals, updateGoalStatus } from "../db/goals.ts";
 import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
 import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("goals");
@@ -17,6 +18,7 @@ interface DetectionInput {
   sourceMessageId?: string;
   platform?: Platform;
   connector?: ConnectorType;
+  haikuBackend?: HaikuBackend;
 }
 
 interface DetectionResult {
@@ -64,6 +66,7 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
     prompt,
     cwd: input.botDir,
     connector: input.connector,
+    haikuBackend: input.haikuBackend,
     log,
     traceContext,
     onResult: async (result, tracer) => {

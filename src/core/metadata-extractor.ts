@@ -2,6 +2,7 @@ import type { Config } from "../config.ts";
 import type { Platform } from "../types.ts";
 import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { extractMemoryAsync } from "../memory/extractor.ts";
 import { extractGoalAsync } from "../goals/detector.ts";
 import { extractScheduleAsync } from "../scheduler/detector.ts";
@@ -16,6 +17,8 @@ export interface ExtractionParams {
   platform: Platform;
   /** Bot's main connector — forwarded to the Haiku router for per-bot backend selection. */
   connector?: ConnectorType;
+  /** Per-bot override from `BotConfig.haikuBackend`. */
+  haikuBackend?: HaikuBackend;
 }
 
 /**
@@ -27,20 +30,20 @@ export function runExtractionPipelines(
   config: Config,
   traceCtx: TraceContext,
 ): void {
-  const { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector } = params;
+  const { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend } = params;
 
   extractMemoryAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, connector },
+    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, connector, haikuBackend },
     config,
     traceCtx,
   );
   extractGoalAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector },
+    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend },
     config,
     traceCtx,
   );
   extractScheduleAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, platform, connector },
+    { userId, botName, botDir, userMessage, assistantResponse, platform, connector, haikuBackend },
     config,
     traceCtx,
   );

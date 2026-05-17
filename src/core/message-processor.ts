@@ -211,6 +211,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
           userMessage: text, assistantResponse: result.result,
           sourceMessageId: messageId, platform,
           connector: botConfig.connector,
+          haikuBackend: botConfig.haikuBackend,
         },
         config,
         t.context,

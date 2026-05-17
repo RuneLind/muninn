@@ -1,4 +1,4 @@
-import { callHaikuWithFallback } from "./haiku-direct.ts";
+import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import type { Logger } from "@logtape/logtape";
@@ -19,8 +19,10 @@ interface HaikuExtractionOptions<T> {
   prompt: string;
   /** Working directory for the CLI fallback — keeps sessions out of project root */
   cwd?: string;
-  /** Bot's main connector — fed into `resolveBackend()` to pick the Haiku backend. */
+  /** Bot's main connector — fed into `resolveBackend()` for the connector-derived default. */
   connector?: ConnectorType;
+  /** Per-bot override from `BotConfig.haikuBackend`. */
+  haikuBackend?: HaikuBackend;
   /** Logger instance for error reporting */
   log: Logger;
   /** Optional trace context for parent span linking */
@@ -60,6 +62,7 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
     cwd: opts.cwd,
     botName: opts.botName,
     connector: opts.connector,
+    haikuBackend: opts.haikuBackend,
   });
 
   let result: T;

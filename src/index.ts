@@ -109,6 +109,7 @@ try {
       knowledgeApiUrl: config.knowledgeApiUrl,
       defaultCollections: bot.defaultKnowledgeCollections,
       connector: bot.connector,
+      haikuBackend: bot.haikuBackend,
     });
   }
 } catch (err) {
