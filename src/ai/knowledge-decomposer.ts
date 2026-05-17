@@ -1,4 +1,4 @@
-import { spawnHaiku } from "../scheduler/executor.ts";
+import { callHaikuWithFallback } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { getLog } from "../logging.ts";
 
@@ -60,7 +60,7 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
   const t0 = performance.now();
   let raw: string;
   try {
-    const haiku = await spawnHaiku(prompt, {
+    const haiku = await callHaikuWithFallback(prompt, {
       source: "knowledge-decompose",
       entrypoint: "knowledge-decomposer",
       cwd: botDir,
