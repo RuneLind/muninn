@@ -12,6 +12,7 @@ import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDef
 import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage } from "../db/messages.ts";
 import { hivemindManager } from "../hivemind/manager.ts";
 import { parsePeerThreadName } from "../hivemind/router.ts";
+import { setPendingPeer } from "../hivemind/correlation.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -581,6 +582,9 @@ async function handlePeerOutbound(
     return { status: 400, body: { error: "No prior peer message in this thread to reply to" } };
   }
 
+  // Record so an unsolicited reply from this peer routes back to this thread
+  // instead of falling into the default peer:<ns>/<name> thread for the bot.
+  setPendingPeer(thread.botName, targetPeerId, thread.id);
   const sent = client.sendMessage(targetPeerId, stripped);
   if (!sent) {
     return { status: 503, body: { error: "Failed to send to peer (WebSocket write failed)" } };
