@@ -42,7 +42,7 @@ export function stripReportFrontmatter(text: string): string {
 // Phase 0.3 captures the actual snapshot from the response so we can
 // pin properly for reproducibility in Phase 1+.
 export const JUDGE_MODEL_DEFAULT = "claude-sonnet-4-6";
-export const JUDGE_TIMEOUT_MS = 900_000; // 15 min — dense H7-style candidates pushed the 600s ceiling during the scoped re-baseline
+export const JUDGE_TIMEOUT_MS = 1_800_000; // 30 min — raised from 900s after multiple claude-sdk runs on MELOSYS-7588 hit the cap (one prior copilot-sdk run already brushed 876s, so 900s was operating without headroom)
 
 /**
  * Find the highest-versioned judge prompt in benchmarks/judge-prompts/.
