@@ -17,6 +17,7 @@ import { assemblePrompt } from "./prompt-assembly.ts";
 import { attachToolSpans } from "./tool-spans.ts";
 import { logRequestTiming } from "./timing-log.ts";
 import { handleProcessError } from "./process-error.ts";
+import { pushActiveTurn, popActiveTurn } from "../hivemind/active-turn.ts";
 
 // Re-export extractChannelPosts so existing consumers don't break
 export { extractChannelPosts } from "./response-handler.ts";
@@ -144,6 +145,10 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     tracer: t, logProps: props,
   });
 
+  // Expose the originating thread to the hivemind MCP tool handlers for the
+  // duration of the connector call so peer replies route back here, not into
+  // `peer:<ns>/<name>`. See src/hivemind/active-turn.ts + correlation.ts.
+  if (threadId) pushActiveTurn(botConfig.name, threadId);
   try {
     if (setStatus) await setStatus("Thinking...").catch(() => {});
     agentStatus.set("calling_claude", username);
@@ -318,5 +323,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       logProps: props,
     });
     return undefined;
+  } finally {
+    if (threadId) popActiveTurn(botConfig.name, threadId);
   }
 }

@@ -5,13 +5,14 @@ import type { Platform } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
-import { getOrCreatePeerThread, setThreadAutoRespondPaused } from "../db/threads.ts";
+import { getOrCreatePeerThread, getThreadById, setThreadAutoRespondPaused } from "../db/threads.ts";
 import { getBotDefaultUser } from "../db/chat-preferences.ts";
 import { processMessage as defaultProcessMessage } from "../core/message-processor.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import { Tracer } from "../tracing/index.ts";
 import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
+import { getPendingPeer, setPendingPeer } from "./correlation.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -100,8 +101,27 @@ export class HivemindRouter {
     }
 
     const peerName = peerNameFor(msg);
-    const threadName = `${msg.namespace}/${peerName}`;
-    const thread = await getOrCreatePeerThread(userId, botName, threadName);
+
+    // If this bot recently sent outbound to this peer from some other thread,
+    // route the reply back into that originating thread instead of the
+    // default peer:<ns>/<peerName> bucket. Correlation is set by
+    // mcp-server.ts (ask_peer/send_to_peer), chat/routes.ts (`>` outbound),
+    // and the autorespond reply below.
+    const correlatedThreadId = getPendingPeer(botName, msg.fromId);
+    let correlatedThread: Awaited<ReturnType<typeof getThreadById>> = null;
+    if (correlatedThreadId) {
+      const t = await getThreadById(correlatedThreadId);
+      if (t && t.userId === userId && t.botName === botName) {
+        correlatedThread = t;
+      } else if (t) {
+        log.warn(
+          "Stale peer correlation for {botName}/{fromId} → thread {threadId} (owner mismatch). Falling back to peer:<ns>/<name>.",
+          { botName, fromId: msg.fromId, threadId: correlatedThreadId },
+        );
+      }
+    }
+
+    const thread = correlatedThread ?? await getOrCreatePeerThread(userId, botName, `${msg.namespace}/${peerName}`);
 
     const platform: Platform = "web";
     const [messageId, conv] = await Promise.all([
@@ -220,6 +240,8 @@ export class HivemindRouter {
       if (result) {
         const client = deps.getClient(args.botName, args.msg.namespace);
         outboundSent = client?.sendMessage(args.msg.fromId, result.responseText) ?? false;
+        // Keep follow-up replies from this peer flowing into the same thread.
+        if (outboundSent) setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
       }
       tracer.event("peer_outbound", {
         toId: args.msg.fromId,

@@ -5,6 +5,8 @@ import { getLog } from "../logging.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace, Peer } from "./types.ts";
 import { DEFAULT_ASK_PEER_TIMEOUT_SEC } from "./config.ts";
+import { peekActiveTurn } from "./active-turn.ts";
+import { setPendingPeer } from "./correlation.ts";
 
 const log = getLog("hivemind", "mcp-server");
 
@@ -287,6 +289,12 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       if (!client) {
         return textResult("No hivemind client registered for this bot", true);
       }
+      // Tie any inbound message from this peer that arrives after we time out
+      // (or as an unsolicited follow-up) back to the thread that started this
+      // ask. ask_peer's blocking reply flows back as the tool result, but the
+      // late/follow-up cases need correlation.
+      const originThread = peekActiveTurn(botName);
+      if (originThread) setPendingPeer(botName, to, originThread);
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;
       const reply = await client.askPeer(to, message, timeout);
       switch (reply.status) {
@@ -315,6 +323,9 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       if (!client) {
         return textResult("No hivemind client registered for this bot", true);
       }
+      // Route the eventual reply back to this thread, not to peer:<ns>/<name>.
+      const originThread = peekActiveTurn(botName);
+      if (originThread) setPendingPeer(botName, to, originThread);
       const ok = client.sendMessage(to, message);
       if (!ok) return textResult("Failed to send — not connected to broker", true);
       return textResult(`Message sent to peer ${to}.`);
