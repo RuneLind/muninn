@@ -65,15 +65,9 @@ export function applyTreatmentOverlay(
   const prompts = jiraPromptOverride
     ? { ...base.prompts, jiraAnalysis: jiraPromptOverride }
     : base.prompts;
-  // spawnArgs only flow through to the claude-cli executor (--strict-mcp-config
-  // + --disallowedTools). copilot-sdk / claude-sdk / openai-compat ignore them,
-  // so we also set excludedTools — the SDK connectors forward it as the SDK's
-  // disallowedTools option, and the CLI executor turns it into a second
-  // --disallowedTools flag (harmless duplicate of spawnArgs).
-  //
-  // ToolSearch is omitted from the deny list for claude-sdk because the Agent
-  // SDK uses it as the deferred-MCP discovery channel; blocking it severs the
-  // bot's access to huginn / serena / yggdrasil. See audit.ts for the rule.
+  // spawnArgs only reach the CLI executor; SDK connectors read excludedTools
+  // instead. Set both so every connector is covered. See audit.ts for the
+  // per-connector ToolSearch rule.
   const connector = treatment.connector as ConnectorType;
   return {
     ...base,
@@ -83,7 +77,7 @@ export function applyTreatmentOverlay(
     baseUrl: treatment.baseUrl ?? base.baseUrl,
     prompts,
     spawnArgs: buildBenchmarkSpawnArgs(),
-    excludedTools: disallowedToolsForConnector(connector),
+    excludedTools: [...disallowedToolsForConnector(connector)],
   };
 }
 

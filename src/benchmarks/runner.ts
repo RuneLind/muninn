@@ -4,7 +4,7 @@
 // stable across the codebase.
 
 export {
-  BENCHMARK_DISALLOWED_TOOLS,
+  disallowedToolsForConnector,
   buildBenchmarkSpawnArgs,
   findLeakedSpans,
   auditCellForLeaks,

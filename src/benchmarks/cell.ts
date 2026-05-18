@@ -140,14 +140,8 @@ export function defaultBudget(): number {
 
 export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   const config = loadConfig();
-  // Idempotent — the main muninn process configures LogTape via index.ts; this
-  // call is only meaningful when runCell is invoked from a subprocess entry
-  // point like benchmarks/scripts/run-cell.ts that doesn't bootstrap logging
-  // itself. Without it every log.* call inside the runner (judge failures,
-  // empty-candidate errors, Bug 11 audit failures) becomes a silent no-op
-  // and the dashboard /logs page shows nothing — the only signal is the
-  // benchmark_runs.error column. runShakeout and runCellMultiPass both call
-  // runCell so this one hook covers every benchmark entry point.
+  // Bootstrap LogTape for subprocess entry points (benchmarks/scripts/run-cell.ts);
+  // idempotent when the main muninn process already configured it.
   await setupLogging(config.logDir);
   const manifest = await loadManifestByKey(opts.issueKey);
   const baseBotName = opts.baseBotName ?? "melosys";
@@ -566,11 +560,8 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
     },
   );
 
-  // Step 5a — Bug 11 isolation audit. Query the trace for any tool spans that
-  // shouldn't have been reachable from this cell; fail loud if found, before
-  // the judge wastes tokens scoring contaminated output. The connector is
-  // passed so claude-sdk's legitimate ToolSearch usage (deferred MCP discovery)
-  // is not flagged as a leak.
+  // Step 5a — Bug 11 isolation audit. Fail before judge tokens are spent on
+  // contaminated output.
   const leakedTools = await auditCellForLeaks(analysisTraceId, effectiveBot.connector);
   if (leakedTools.length > 0) {
     return failCellWithError({

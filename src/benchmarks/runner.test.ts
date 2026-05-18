@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { findLeakedSpans } from "./runner.ts";
 import { disallowedToolsForConnector } from "./audit.ts";
+import type { ConnectorType } from "../bots/config.ts";
 
 describe("findLeakedSpans (Bug 11 audit)", () => {
   test("returns empty for a clean trace", () => {
@@ -72,7 +73,10 @@ describe("findLeakedSpans (Bug 11 audit)", () => {
     expect(disallowedToolsForConnector(undefined)).toContain("ToolSearch");
     expect(disallowedToolsForConnector("claude-sdk")).not.toContain("ToolSearch");
     // Everything else stays for every connector
-    for (const c of ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk", undefined]) {
+    const all: (ConnectorType | undefined)[] = [
+      "claude-cli", "copilot-sdk", "openai-compat", "claude-sdk", undefined,
+    ];
+    for (const c of all) {
       expect(disallowedToolsForConnector(c)).toContain("Bash");
       expect(disallowedToolsForConnector(c)).toContain("Agent");
       expect(disallowedToolsForConnector(c)).toContain("TaskCreate");

@@ -12,6 +12,7 @@ import { getLog } from "../logging.ts";
 import { getDb } from "../db/client.ts";
 import { completeBenchmarkRun } from "../db/benchmark-runs.ts";
 import type { ProcessMessageResult } from "../core/message-processor.ts";
+import type { ConnectorType } from "../bots/config.ts";
 import type { SingleRunResult } from "./cell.ts";
 
 const log = getLog("benchmarks", "audit");
@@ -22,21 +23,16 @@ const log = getLog("benchmarks", "audit");
  * 1. Passed to the connector as `excludedTools` on the bot config — wired into
  *    `claude --disallowedTools` (CLI) or the SDK `query()` `disallowedTools`
  *    option (claude-sdk / copilot-sdk).
- * 2. Mirrored into the scratch `.claude/settings.json` deny list (belt-and-
- *    suspenders for the CLI path).
+ * 2. Mirrored into the scratch `.claude/settings.json` deny list for the CLI.
  *
- * The post-cell trace audit (`auditCellForLeaks`) is the canary that fires if
- * either layer is bypassed by version drift or a new harness tool.
+ * `auditCellForLeaks` is the canary that fires if either layer is bypassed.
  *
- * `ToolSearch` is special-cased: under the `claude-sdk` connector it is the
- * legitimate channel by which the Agent SDK exposes deferred MCP tools (see
- * sdk.d.ts — tools are deferred behind tool search by default). Blocking it
- * there breaks the bot's access to huginn / serena / yggdrasil. The Claude CLI
- * does not expose ToolSearch at all, so keeping it on the CLI deny list is a
- * harmless belt. See wiki/muninn/claude-sdk-task-reminder.md for the related
- * SDK-only behaviour we discovered alongside this.
+ * `ToolSearch` is excluded from the claude-sdk variant because the Agent SDK
+ * uses it as the legitimate channel for deferred MCP tool discovery — blocking
+ * it severs the bot's access to huginn / serena / yggdrasil. The CLI does not
+ * expose ToolSearch, so keeping it on the CLI list is a harmless belt.
  */
-const BENCHMARK_DISALLOWED_TOOLS_BASE = [
+const DISALLOWED_BASE = [
   // File / shell access — could read prod-HEAD code instead of the worktree
   "Bash", "BashOutput", "KillBash", "Read", "Write", "Edit", "MultiEdit",
   "Glob", "Grep", "NotebookEdit",
@@ -50,28 +46,11 @@ const BENCHMARK_DISALLOWED_TOOLS_BASE = [
   "CronCreate", "CronDelete", "CronList", "RemoteTrigger",
 ] as const;
 
-/** Connectors where ToolSearch is the SDK's legitimate deferred-MCP discovery channel. */
-const CONNECTORS_NEEDING_TOOL_SEARCH: ReadonlySet<string> = new Set([
-  "claude-sdk",
-]);
+const DISALLOWED_WITH_TOOL_SEARCH: readonly string[] = [...DISALLOWED_BASE, "ToolSearch"];
 
-/**
- * Returns the deny list for a given connector. Adds `ToolSearch` for any
- * connector that doesn't depend on it for MCP discovery — currently every
- * connector except `claude-sdk`.
- */
-export function disallowedToolsForConnector(connector: string | undefined): string[] {
-  const base = [...BENCHMARK_DISALLOWED_TOOLS_BASE];
-  if (connector && CONNECTORS_NEEDING_TOOL_SEARCH.has(connector)) return base;
-  return [...base, "ToolSearch"];
+export function disallowedToolsForConnector(connector: ConnectorType | undefined): readonly string[] {
+  return connector === "claude-sdk" ? DISALLOWED_BASE : DISALLOWED_WITH_TOOL_SEARCH;
 }
-
-/**
- * Back-compat export used by `preview.ts` and any other consumer that wants
- * a representative deny list. Returns the strictest variant (CLI / copilot)
- * so the preview overstates rather than understates what's blocked.
- */
-export const BENCHMARK_DISALLOWED_TOOLS: readonly string[] = disallowedToolsForConnector(undefined);
 
 const BENCHMARK_FORBIDDEN_SPAN_PATTERNS: RegExp[] = [
   /\(jetbrains\)$/,
@@ -79,12 +58,10 @@ const BENCHMARK_FORBIDDEN_SPAN_PATTERNS: RegExp[] = [
 ];
 
 export function buildBenchmarkSpawnArgs(): string[] {
-  // The CLI executor also reads `botConfig.excludedTools` and appends a
-  // matching `--disallowedTools` arg (see ai/executor.ts). The benchmark sets
-  // both — keeping the explicit flag here means a developer running the CLI
-  // executor without an excludedTools-aware bot config still gets the deny
-  // list applied. `--strict-mcp-config` prevents discovery of the user's
-  // global `~/.claude/settings.json` MCP servers.
+  // --strict-mcp-config blocks discovery of the user's global ~/.claude MCP
+  // servers. --disallowedTools is duplicated on botConfig.excludedTools so SDK
+  // connectors get it too; passing it here also covers CLI invocations that
+  // don't go through the scratch-bot overlay.
   return [
     "--strict-mcp-config",
     "--disallowedTools",
@@ -92,12 +69,8 @@ export function buildBenchmarkSpawnArgs(): string[] {
   ];
 }
 
-/**
- * Pure helper: check a list of span names for benchmark leakage. Optionally
- * scoped to a connector so `ToolSearch` is not flagged when the connector
- * legitimately needs it for deferred MCP discovery.
- */
-export function findLeakedSpans(spanNames: string[], connector?: string): string[] {
+/** Pure helper: check a list of span names for benchmark leakage. */
+export function findLeakedSpans(spanNames: string[], connector?: ConnectorType): string[] {
   const forbidden = new Set(disallowedToolsForConnector(connector));
   const leaked: string[] = [];
   for (const name of spanNames) {
@@ -113,14 +86,13 @@ export function findLeakedSpans(spanNames: string[], connector?: string): string
 }
 
 /**
- * Query the trace store for any spans under `traceId` whose name matches
- * the Bug 11 forbidden set. Returns the unique forbidden names found
- * (empty when the cell is clean). Pass `connector` so the audit knows
- * whether `ToolSearch` is legitimate (claude-sdk) or a leak (anything else).
+ * Query the trace store for any spans under `traceId` whose name matches the
+ * forbidden set. Pass `connector` so claude-sdk's legitimate ToolSearch usage
+ * (deferred MCP discovery) isn't flagged.
  */
 export async function auditCellForLeaks(
   traceId: string,
-  connector?: string,
+  connector?: ConnectorType,
 ): Promise<string[]> {
   const sql = getDb();
   const rows = await sql<Array<{ name: string }>>`

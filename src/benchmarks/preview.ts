@@ -19,12 +19,12 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { discoverAllBots, type BotConfig } from "../bots/config.ts";
+import { discoverAllBots, type BotConfig, type ConnectorType } from "../bots/config.ts";
 import { loadManifest } from "./manifest.ts";
 import type { BenchmarkManifest } from "./types.ts";
 import type { BenchmarkTreatment } from "../db/benchmark-runs.ts";
 import {
-  BENCHMARK_DISALLOWED_TOOLS,
+  disallowedToolsForConnector,
   buildBenchmarkSerenaInstanceName,
   buildDefaultMessage,
   loadPromptVariant,
@@ -257,7 +257,7 @@ function buildMcpPlan(
   return {
     stack,
     servers,
-    disallowedTools: BENCHMARK_DISALLOWED_TOOLS,
+    disallowedTools: disallowedToolsForConnector(treatment.connector as ConnectorType),
     worktrees,
   };
 }
