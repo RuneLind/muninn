@@ -26,7 +26,6 @@ describe("peer-correlation map", () => {
 
   test("entries expire after TTL", () => {
     setPendingPeer("jarvis", "peer-huginn", "thread-1", 1); // 1ms TTL
-    // Wait past the TTL — Date.now() resolves on the next event-loop tick.
     return new Promise<void>((resolve) => {
       setTimeout(() => {
         expect(getPendingPeer("jarvis", "peer-huginn")).toBeNull();

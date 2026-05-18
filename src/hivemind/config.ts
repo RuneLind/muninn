@@ -33,6 +33,8 @@ export interface HivemindBotConfig {
 
 export const DEFAULT_ASK_PEER_TIMEOUT_SEC = 120;
 export const DEFAULT_MAX_AUTO_TURNS_PER_HOUR = 20;
+/** How long a peer-correlation entry stays valid after an outbound — see correlation.ts. */
+export const PEER_CORRELATION_TTL_MS = 60 * 60 * 1000;
 
 /** Validate and normalize a hivemind block from a bot's config.json. */
 export function parseHivemindConfig(raw: unknown): HivemindBotConfig | null {

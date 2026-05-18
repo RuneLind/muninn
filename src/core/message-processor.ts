@@ -145,11 +145,11 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     tracer: t, logProps: props,
   });
 
-  // Expose the originating thread to the hivemind MCP tool handlers for the
-  // duration of the connector call so peer replies route back here, not into
-  // `peer:<ns>/<name>`. See src/hivemind/active-turn.ts + correlation.ts.
-  if (threadId) pushActiveTurn(botConfig.name, threadId);
   try {
+    // Expose the originating thread to the hivemind MCP tool handlers for the
+    // duration of the connector call so peer replies route back here, not into
+    // `peer:<ns>/<name>`. See src/hivemind/active-turn.ts + correlation.ts.
+    if (threadId) pushActiveTurn(botConfig.name, threadId);
     if (setStatus) await setStatus("Thinking...").catch(() => {});
     agentStatus.set("calling_claude", username);
     agentStatus.updatePhase("calling_claude");

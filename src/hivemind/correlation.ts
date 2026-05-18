@@ -14,10 +14,9 @@
  */
 
 import { getLog } from "../logging.ts";
+import { PEER_CORRELATION_TTL_MS } from "./config.ts";
 
 const log = getLog("hivemind", "correlation");
-
-const DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 interface PendingCorrelation {
   threadId: string;
@@ -39,7 +38,7 @@ export function setPendingPeer(
   botName: string,
   peerId: string,
   threadId: string,
-  ttlMs: number = DEFAULT_TTL_MS,
+  ttlMs: number = PEER_CORRELATION_TTL_MS,
 ): void {
   pending.set(makeKey(botName, peerId), {
     threadId,
