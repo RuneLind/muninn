@@ -12,6 +12,7 @@ import { getLog } from "../logging.ts";
 import { getDb } from "../db/client.ts";
 import { completeBenchmarkRun } from "../db/benchmark-runs.ts";
 import type { ProcessMessageResult } from "../core/message-processor.ts";
+import type { ConnectorType } from "../bots/config.ts";
 import type { SingleRunResult } from "./cell.ts";
 
 const log = getLog("benchmarks", "audit");
@@ -19,19 +20,24 @@ const log = getLog("benchmarks", "audit");
 /**
  * Tools the benchmark spawn must NOT have access to. Two layers of defense:
  *
- * 1. Passed to `claude --disallowedTools` at spawn time (hard CLI-level deny)
- * 2. Mirrored into the scratch `.claude/settings.json` deny list (belt-and-
- *    suspenders for any code path that bypasses --disallowedTools)
+ * 1. Passed to the connector as `excludedTools` on the bot config — wired into
+ *    `claude --disallowedTools` (CLI) or the SDK `query()` `disallowedTools`
+ *    option (claude-sdk / copilot-sdk).
+ * 2. Mirrored into the scratch `.claude/settings.json` deny list for the CLI.
  *
- * The post-cell trace audit (`auditCellForLeaks`) is the canary that fires if
- * either layer is bypassed by Claude CLI version drift or a new harness tool.
+ * `auditCellForLeaks` is the canary that fires if either layer is bypassed.
+ *
+ * `ToolSearch` is excluded from the claude-sdk variant because the Agent SDK
+ * uses it as the legitimate channel for deferred MCP tool discovery — blocking
+ * it severs the bot's access to huginn / serena / yggdrasil. The CLI does not
+ * expose ToolSearch, so keeping it on the CLI list is a harmless belt.
  */
-export const BENCHMARK_DISALLOWED_TOOLS = [
+const DISALLOWED_BASE = [
   // File / shell access — could read prod-HEAD code instead of the worktree
   "Bash", "BashOutput", "KillBash", "Read", "Write", "Edit", "MultiEdit",
   "Glob", "Grep", "NotebookEdit",
   // Agent-loop tools — can spawn sub-agents with their own (unrestricted) toolset
-  "Agent", "Skill", "Task", "ToolSearch", "Monitor",
+  "Agent", "Skill", "Task", "Monitor",
   // Task list — leaks state into the parent runner's task tracker
   "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
   // Out-of-process IO that defeats reproducibility
@@ -40,33 +46,35 @@ export const BENCHMARK_DISALLOWED_TOOLS = [
   "CronCreate", "CronDelete", "CronList", "RemoteTrigger",
 ] as const;
 
-/**
- * Span names that, if seen as children of a benchmark cell's `claude` span,
- * indicate Bug 11 leakage. Includes the global MCP servers known to be on
- * developer machines (jetbrains, claude-hivemind) plus all built-in tool
- * names from BENCHMARK_DISALLOWED_TOOLS.
- */
-const BENCHMARK_FORBIDDEN_SPAN_NAMES: ReadonlySet<string> = new Set([
-  ...BENCHMARK_DISALLOWED_TOOLS,
-]);
+const DISALLOWED_WITH_TOOL_SEARCH: readonly string[] = [...DISALLOWED_BASE, "ToolSearch"];
+
+export function disallowedToolsForConnector(connector: ConnectorType | undefined): readonly string[] {
+  return connector === "claude-sdk" ? DISALLOWED_BASE : DISALLOWED_WITH_TOOL_SEARCH;
+}
+
 const BENCHMARK_FORBIDDEN_SPAN_PATTERNS: RegExp[] = [
   /\(jetbrains\)$/,
   /\(claude-hivemind\)$/,
 ];
 
 export function buildBenchmarkSpawnArgs(): string[] {
+  // --strict-mcp-config blocks discovery of the user's global ~/.claude MCP
+  // servers. --disallowedTools is duplicated on botConfig.excludedTools so SDK
+  // connectors get it too; passing it here also covers CLI invocations that
+  // don't go through the scratch-bot overlay.
   return [
     "--strict-mcp-config",
     "--disallowedTools",
-    BENCHMARK_DISALLOWED_TOOLS.join(" "),
+    disallowedToolsForConnector("claude-cli").join(" "),
   ];
 }
 
 /** Pure helper: check a list of span names for benchmark leakage. */
-export function findLeakedSpans(spanNames: string[]): string[] {
+export function findLeakedSpans(spanNames: string[], connector?: ConnectorType): string[] {
+  const forbidden = new Set(disallowedToolsForConnector(connector));
   const leaked: string[] = [];
   for (const name of spanNames) {
-    if (BENCHMARK_FORBIDDEN_SPAN_NAMES.has(name)) {
+    if (forbidden.has(name)) {
       leaked.push(name);
       continue;
     }
@@ -78,16 +86,19 @@ export function findLeakedSpans(spanNames: string[]): string[] {
 }
 
 /**
- * Query the trace store for any spans under `traceId` whose name matches
- * the Bug 11 forbidden set. Returns the unique forbidden names found
- * (empty when the cell is clean).
+ * Query the trace store for any spans under `traceId` whose name matches the
+ * forbidden set. Pass `connector` so claude-sdk's legitimate ToolSearch usage
+ * (deferred MCP discovery) isn't flagged.
  */
-export async function auditCellForLeaks(traceId: string): Promise<string[]> {
+export async function auditCellForLeaks(
+  traceId: string,
+  connector?: ConnectorType,
+): Promise<string[]> {
   const sql = getDb();
   const rows = await sql<Array<{ name: string }>>`
     SELECT DISTINCT name FROM traces WHERE trace_id = ${traceId}
   `;
-  return findLeakedSpans(rows.map((r) => r.name));
+  return findLeakedSpans(rows.map((r) => r.name), connector);
 }
 
 /**

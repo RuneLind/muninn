@@ -14,7 +14,7 @@ import type { BenchmarkTreatment } from "../db/benchmark-runs.ts";
 import type { BenchmarkManifest } from "./types.ts";
 import type { BenchmarkSerenaInstance } from "./serena-benchmark.ts";
 import type { BenchmarkYggdrasilInstance } from "./yggdrasil-manager.ts";
-import { buildBenchmarkSpawnArgs } from "./audit.ts";
+import { buildBenchmarkSpawnArgs, disallowedToolsForConnector } from "./audit.ts";
 
 const log = getLog("benchmarks", "scratch-bot");
 
@@ -65,17 +65,19 @@ export function applyTreatmentOverlay(
   const prompts = jiraPromptOverride
     ? { ...base.prompts, jiraAnalysis: jiraPromptOverride }
     : base.prompts;
-  // spawnArgs only flow through to the claude-cli executor; copilot-sdk
-  // and openai-compat ignore them. Setting unconditionally is safe — the
-  // benchmark isolation requirement is the same for every connector.
+  // spawnArgs only reach the CLI executor; SDK connectors read excludedTools
+  // instead. Set both so every connector is covered. See audit.ts for the
+  // per-connector ToolSearch rule.
+  const connector = treatment.connector as ConnectorType;
   return {
     ...base,
     dir: scratchDir,
-    connector: treatment.connector as ConnectorType,
+    connector,
     model: treatment.model,
     baseUrl: treatment.baseUrl ?? base.baseUrl,
     prompts,
     spawnArgs: buildBenchmarkSpawnArgs(),
+    excludedTools: [...disallowedToolsForConnector(connector)],
   };
 }
 

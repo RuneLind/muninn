@@ -25,7 +25,7 @@ import { processMessage } from "../core/message-processor.ts";
 import type { ProcessMessageResult } from "../core/message-processor.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { loadConfig, type Config } from "../config.ts";
-import { getLog } from "../logging.ts";
+import { getLog, setupLogging } from "../logging.ts";
 import {
   saveBenchmarkRun,
   completeBenchmarkRun,
@@ -140,6 +140,9 @@ export function defaultBudget(): number {
 
 export async function runCell(opts: RunCellOptions): Promise<RunCellResult> {
   const config = loadConfig();
+  // Bootstrap LogTape for subprocess entry points (benchmarks/scripts/run-cell.ts);
+  // idempotent when the main muninn process already configured it.
+  await setupLogging(config.logDir);
   const manifest = await loadManifestByKey(opts.issueKey);
   const baseBotName = opts.baseBotName ?? "melosys";
   const baseBot = findBot(baseBotName);
@@ -557,10 +560,9 @@ async function runOneCell(args: RunOneCellArgs): Promise<SingleRunResult> {
     },
   );
 
-  // Step 5a — Bug 11 isolation audit. Query the trace for any tool spans that
-  // shouldn't have been reachable from this cell; fail loud if found, before
-  // the judge wastes tokens scoring contaminated output.
-  const leakedTools = await auditCellForLeaks(analysisTraceId);
+  // Step 5a — Bug 11 isolation audit. Fail before judge tokens are spent on
+  // contaminated output.
+  const leakedTools = await auditCellForLeaks(analysisTraceId, effectiveBot.connector);
   if (leakedTools.length > 0) {
     return failCellWithError({
       benchmarkRunId,
