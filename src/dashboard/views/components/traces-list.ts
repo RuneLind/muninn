@@ -80,12 +80,14 @@ export function tracesListScript(): string {
       if (d.toDateString() === today.toDateString()) return fmtTime(epochMs);
       return d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' }) + ' ' + fmtTime(epochMs);
     }
-    function fmtTokens(attrs) {
+    // NB: don't name this fmtTokens — the bundled helpers-browser.ts assigns a
+    // number-taking fmtTokens onto globalThis, which would shadow a local
+    // declaration here and render '[object Object]' in the tokens cell.
+    function fmtTokensCell(attrs) {
       const input = attrs?.inputTokens || attrs?.input_tokens || 0;
       const output = attrs?.outputTokens || attrs?.output_tokens || 0;
       if (!input && !output) return '';
-      const fmt = n => n >= 1000 ? (n/1000).toFixed(1) + 'k' : n;
-      return fmt(input) + ' / ' + fmt(output);
+      return fmtTokens(input) + ' / ' + fmtTokens(output);
     }
 
     async function loadTraces() {
@@ -139,7 +141,7 @@ export function tracesListScript(): string {
       }
       tbody.innerHTML = traces.map(t => {
         // Find token info from child spans' attributes
-        const tokens = fmtTokens(t.attributes);
+        const tokens = fmtTokensCell(t.attributes);
         const toolCount = t.attributes?.toolCount || 0;
         const toolsBadge = toolCount > 0
           ? '<span class="badge badge-tools">' + toolCount + '</span>'
