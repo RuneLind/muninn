@@ -30,9 +30,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  // Load users first (needed for connector preferences), then connectors
+  // Load users first (needed for connector preferences), then connectors and variants
   await loadUsers(settings);
-  await loadConnectors();
+  await Promise.all([loadConnectors(), loadVariants()]);
 
   $('#btn-index').addEventListener('click', () => handleAnalyze());
   $('#open-options').addEventListener('click', (e) => {
@@ -173,6 +173,50 @@ function getSelectedConnectorId() {
   return select?.value || null;
 }
 
+// Get the currently selected prompt variant id from the dropdown
+function getSelectedVariantId() {
+  const select = $('#variant-select');
+  return select?.value || 'default';
+}
+
+// Load Jira-analysis prompt variants from server and populate the dropdown
+async function loadVariants() {
+  const select = $('#variant-select');
+  const row = $('#variant-selector-row');
+  const storageKey = `lastVariant.${BOT_NAME}`;
+
+  let variants = [];
+  try {
+    const res = await fetch(`${muninnUrl}/api/research/variants?bot=${encodeURIComponent(BOT_NAME)}`);
+    if (res.ok) {
+      const data = await res.json();
+      variants = data.variants || [];
+    }
+  } catch {}
+
+  // Hide row when there are no variants beyond the default
+  if (variants.length <= 1) return;
+
+  const stored = await chrome.storage.sync.get({ [storageKey]: 'default' });
+  const lastSelected = stored[storageKey];
+  const selectedId = variants.find((v) => v.id === lastSelected) ? lastSelected : 'default';
+
+  select.innerHTML = '';
+  for (const v of variants) {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = v.label;
+    if (v.id === selectedId) opt.selected = true;
+    select.appendChild(opt);
+  }
+
+  select.addEventListener('change', () => {
+    chrome.storage.sync.set({ [storageKey]: select.value }).catch(() => {});
+  });
+
+  row.style.display = 'flex';
+}
+
 // Get the currently selected user from the dropdown
 function getSelectedUserId() {
   const select = $('#user-select');
@@ -258,6 +302,11 @@ async function handleAnalyze(forceNew) {
     const connectorId = getSelectedConnectorId();
     if (connectorId) {
       payload.connectorId = connectorId;
+    }
+    // Use the prompt variant from the dropdown (omit when default)
+    const variantId = getSelectedVariantId();
+    if (variantId && variantId !== 'default') {
+      payload.promptVariant = variantId;
     }
     if (forceNew) payload.forceNew = true;
 

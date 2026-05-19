@@ -202,6 +202,28 @@ describe("bot discovery", () => {
       expect(found!.prompts).toEqual({ jiraAnalysis: "Real prompt" });
     });
 
+    test("loads jiraAnalysis variants with label comment + fallback", () => {
+      setupTestBot("_test_variants", {
+        prompts: {
+          jiraAnalysis: "Default analysis",
+          "jiraAnalysis.coder": "<!-- label: Grundig kodeanalyse -->\nCoder body here",
+          "jiraAnalysis.brief": "Brief body without label",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_variants");
+      expect(found).toBeDefined();
+      expect(found!.prompts?.jiraAnalysis).toBe("Default analysis");
+
+      const variants = found!.prompts?.jiraAnalysisVariants ?? [];
+      // Sorted by id alphabetically: brief, coder
+      expect(variants).toEqual([
+        { id: "brief", label: "Brief", content: "Brief body without label" },
+        { id: "coder", label: "Grundig kodeanalyse", content: "Coder body here" },
+      ]);
+    });
+
     test("loads restrictedTools from config.json", () => {
       setupTestBot("_test_restrict", {
         config: {
