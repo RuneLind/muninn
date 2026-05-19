@@ -109,6 +109,33 @@ export interface BotPrompts {
   investigateCode?: string;
   /** Prompt for the "Deep Analysis" follow-up button after code investigation — parallel agent verification. */
   deepAnalysis?: string;
+  /** Prompt for the "Generate Test Spec" follow-up button after deep analysis. */
+  specGeneration?: string;
+}
+
+const PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration"] as const satisfies readonly (keyof BotPrompts)[];
+
+function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undefined {
+  const promptsDir = join(botDir, "prompts");
+  if (!existsSync(promptsDir)) return undefined;
+
+  const result: BotPrompts = {};
+  const known = new Set<string>(PROMPT_KEYS);
+  for (const entry of readdirSync(promptsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    const key = entry.name.slice(0, -3);
+    if (!known.has(key)) {
+      log.warn("Bot \"{name}\" has unknown prompt file prompts/{file} — expected one of: {keys}", {
+        name: botName,
+        file: entry.name,
+        keys: PROMPT_KEYS.join(", "),
+      });
+      continue;
+    }
+    result[key as keyof BotPrompts] = readFileSync(join(promptsDir, entry.name), "utf-8");
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /**
@@ -203,10 +230,13 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "prompts", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
-          log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?", { name, keys: unknownKeys.join(", ") });
+          const hint = unknownKeys.includes("prompts")
+            ? " (note: `prompts` moved to bots/<name>/prompts/<key>.md — see CLAUDE.md)"
+            : "";
+          log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?" + hint, { name, keys: unknownKeys.join(", ") });
         }
         validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const, name);
         validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
@@ -270,7 +300,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,
-      prompts: botSettings.prompts as BotPrompts | undefined,
+      prompts: loadPromptsFromDir(dir, name),
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,

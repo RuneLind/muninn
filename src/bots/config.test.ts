@@ -17,6 +17,7 @@ function setupTestBot(
     config?: Record<string, unknown>;
     configRaw?: string;
     noClaudeMd?: boolean;
+    prompts?: Record<string, string>;
   } = {},
 ): string {
   const dir = join(botsDir, name);
@@ -30,6 +31,13 @@ function setupTestBot(
   }
   if (opts.configRaw) {
     writeFileSync(join(dir, "config.json"), opts.configRaw);
+  }
+  if (opts.prompts) {
+    const promptsDir = join(dir, "prompts");
+    mkdirSync(promptsDir, { recursive: true });
+    for (const [key, value] of Object.entries(opts.prompts)) {
+      writeFileSync(join(promptsDir, `${key}.md`), value);
+    }
   }
   return dir;
 }
@@ -153,13 +161,12 @@ describe("bot discovery", () => {
       expect(found!.contextWindow).toBeUndefined();
     });
 
-    test("loads prompts from config.json", () => {
+    test("loads prompts from prompts/<key>.md files", () => {
       setupTestBot("_test_prompts", {
-        config: {
-          prompts: {
-            jiraAnalysis: "Analyze this Jira task",
-            investigateCode: "Look at the code",
-          },
+        prompts: {
+          jiraAnalysis: "Analyze this Jira task",
+          investigateCode: "Look at the code",
+          specGeneration: "Generate a test spec",
         },
       });
 
@@ -169,7 +176,30 @@ describe("bot discovery", () => {
       expect(found!.prompts).toEqual({
         jiraAnalysis: "Analyze this Jira task",
         investigateCode: "Look at the code",
+        specGeneration: "Generate a test spec",
       });
+    });
+
+    test("returns undefined prompts when prompts/ dir is missing", () => {
+      setupTestBot("_test_noprompts");
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_noprompts");
+      expect(found).toBeDefined();
+      expect(found!.prompts).toBeUndefined();
+    });
+
+    test("ignores unknown prompt filenames", () => {
+      setupTestBot("_test_unknownprompt", {
+        prompts: {
+          jiraAnalysis: "Real prompt",
+          notARealKey: "Should be ignored",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_unknownprompt");
+      expect(found).toBeDefined();
+      expect(found!.prompts).toEqual({ jiraAnalysis: "Real prompt" });
     });
 
     test("loads restrictedTools from config.json", () => {

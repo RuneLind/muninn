@@ -105,6 +105,21 @@ export function researchCardScript(): string {
       actions.appendChild(deepBtn);
     }
 
+    if (phase === 'deepAnalysis') {
+      var bot = bots.find(function(b) { return b.name === selectedBot; });
+      var specPrompt = bot && bot.prompts && bot.prompts.specGeneration;
+      if (specPrompt) {
+        var specBtn = document.createElement('button');
+        specBtn.innerHTML = '<span class="btn-icon">&#x1F4DD;</span> Generate Test Spec';
+        specBtn.onclick = function() {
+          actions.classList.add('used');
+          chatInput.value = '<!-- prompt:specGeneration -->' + specPrompt;
+          sendMessage();
+        };
+        actions.appendChild(specBtn);
+      }
+    }
+
     var buildBtn = document.createElement('button');
     buildBtn.innerHTML = '<span class="btn-icon">&#x1F680;</span> Start Building';
     buildBtn.onclick = async function() {
