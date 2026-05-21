@@ -2,8 +2,9 @@
 export function chatStyles(): string {
   return `
     /* ── Chat-page-scoped refined palette (dark). chatStyles() is served only on
-       /chat, so these :root overrides do NOT affect the dashboard. Promote to
-       shared-styles.ts in a later dashboard pass. ── */
+       /chat, so these :root overrides do NOT affect the dashboard. --bg-elevated
+       is a NEW token (not in shared-styles); the rest override shared values.
+       Promote both to shared-styles.ts in a later dashboard pass. ── */
     :root {
       --bg-page: #0b0b0f;
       --bg-panel: #101016;
@@ -284,7 +285,9 @@ export function chatStyles(): string {
       line-height: 1.6;
       word-wrap: break-word;
     }
-    /* Header band on every message (identity dot · name · model · time) */
+    /* Header band on every message (identity dot · name · model · time).
+       The negative margin must equal .msg padding (16px 24px) so the band
+       bleeds to the row edges; .msg-peer resets both for its card. */
     .msg-head {
       display: flex;
       align-items: center;
@@ -431,10 +434,8 @@ export function chatStyles(): string {
       border-radius: 4px;
       padding: 1px 6px;
     }
-    .thread-item-icon.peer { color: var(--accent-light, var(--accent)); }
     .thread-item.paused .thread-item-name,
     .thread-item.paused .thread-item-desc { color: var(--text-muted); }
-    .thread-item.paused .thread-item-icon { color: #f0883e; }
     .thread-item-tag {
       display: inline-block;
       margin-left: 6px;
@@ -453,7 +454,7 @@ export function chatStyles(): string {
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
     /* Shared web rich-content styles (used by both .msg-bot.web and .msg-streaming.web)
-       Since .msg uses white-space:pre-wrap, \\n\\n around block elements already adds a
+       Since .msg-body uses white-space:pre-wrap, \\n\\n around block elements already adds a
        blank line. Use minimal/negative margins on blocks to avoid double-spacing. */
     .web-content h2, .web-content h3, .web-content h4, .web-content h5, .web-content h6 {
       margin: -0.2em 0 0; font-weight: 600; line-height: 1.3; color: var(--text-primary);
@@ -518,18 +519,6 @@ export function chatStyles(): string {
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }
-    .msg-time {
-      font-size: 10px;
-      color: var(--text-faint);
-      margin-top: 4px;
-    }
-    .msg-response-meta {
-      font-size: 10px;
-      color: var(--text-faint);
-      margin-top: 2px;
-      opacity: 0.7;
-      font-variant-numeric: tabular-nums;
-    }
     .chat-input {
       padding: 12px 16px;
       border-top: 1px solid var(--border-primary);
@@ -1103,15 +1092,5 @@ export function chatStyles(): string {
       border-color: var(--accent) !important;
     }
     .thread-modal-save:hover { background: var(--accent-hover); }
-
-    /* Thread model label in sidebar */
-    .thread-item-model {
-      font-size: 10px;
-      color: var(--accent-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-top: 1px;
-    }
   `;
 }

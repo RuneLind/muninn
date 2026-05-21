@@ -807,30 +807,27 @@ const CHAT_SCRIPT = `
     return 'peer';
   }
 
-  // 24-hour clock (e.g. "21:38:28") — matches the redesigned message header.
-  function fmtClock(ts) {
-    try { return new Date(ts).toLocaleTimeString([], { hour12: false }); }
-    catch (e) { return new Date(ts).toLocaleTimeString(); }
-  }
-
   // Build a message header band: identity dot · name · model · time.
-  function buildMsgHead(name, dotColor, model, isPeer, timestamp) {
+  // Uses the shared formatTime() (24h HH:MM:SS) from helpers-client.
+  function buildMsgHead(opts) {
     var head = document.createElement('div');
     head.className = 'msg-head';
-    if (isPeer) {
+    var nameSpan = '<span class="msg-head-name">' + escapeHtml(opts.name) + '</span>';
+    var timeSpan = '<span class="msg-head-time">' + escapeHtml(formatTime(opts.timestamp)) + '</span>';
+    if (opts.isPeer) {
       head.innerHTML =
         '<span style="color:var(--accent-light)">\\u2726</span>'
-        + '<span class="msg-head-name">' + escapeHtml(name) + '</span>'
+        + nameSpan
         + '<span class="msg-peer-tag">peer</span>'
-        + '<span class="msg-head-time">' + escapeHtml(fmtClock(timestamp)) + '</span>';
+        + timeSpan;
     } else {
-      var hasModel = !!model;
+      var hasModel = !!opts.model;
       head.innerHTML =
-        '<span class="msg-head-dot" style="background:' + escapeAttr(dotColor) + '"></span>'
-        + '<span class="msg-head-name">' + escapeHtml(name) + '</span>'
+        '<span class="msg-head-dot" style="background:' + escapeAttr(opts.dotColor) + '"></span>'
+        + nameSpan
         + '<span class="msg-head-sep"' + (hasModel ? '' : ' style="display:none"') + '>\\u00b7</span>'
-        + '<span class="msg-head-model">' + escapeHtml(model || '') + '</span>'
-        + '<span class="msg-head-time">' + escapeHtml(fmtClock(timestamp)) + '</span>';
+        + '<span class="msg-head-model">' + escapeHtml(opts.model || '') + '</span>'
+        + timeSpan;
     }
     return head;
   }
@@ -868,19 +865,16 @@ const CHAT_SCRIPT = `
     var headModel = '';
     var isPeerMsg = msg.sender === 'peer';
 
-    if (msg.sender === 'bot' && (isWeb || isTg)) {
+    if (msg.sender === 'bot') {
       div.className = 'msg msg-bot';
       body.className = 'msg-body' + platformClass;
-      body.innerHTML = sanitizeHtml(msg.text, isWeb);
-      augmentIndexLinks(body);
-      augmentIssueLinks(body);
-      headName = selectedBot;
-      dotColor = avatarColor(selectedBot);
-      headModel = msg.model || '';
-    } else if (msg.sender === 'bot') {
-      div.className = 'msg msg-bot';
-      body.className = 'msg-body' + platformClass;
-      body.innerHTML = renderSlackMrkdwn(msg.text);
+      if (isWeb || isTg) {
+        body.innerHTML = sanitizeHtml(msg.text, isWeb);
+        augmentIndexLinks(body);
+        augmentIssueLinks(body);
+      } else {
+        body.innerHTML = renderSlackMrkdwn(msg.text);
+      }
       headName = selectedBot;
       dotColor = avatarColor(selectedBot);
       headModel = msg.model || '';
@@ -903,7 +897,7 @@ const CHAT_SCRIPT = `
       dotColor = avatarColor(selectedUsername || 'user');
     }
 
-    div.appendChild(buildMsgHead(headName, dotColor, headModel, isPeerMsg, msg.timestamp));
+    div.appendChild(buildMsgHead({ name: headName, dotColor: dotColor, model: headModel, isPeer: isPeerMsg, timestamp: msg.timestamp }));
     div.appendChild(body);
 
     // Track bot replies in research thread

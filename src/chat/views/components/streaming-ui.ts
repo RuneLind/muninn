@@ -73,6 +73,7 @@ export function streamingUiScript(): string {
     if (isWeb) {
       bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
       augmentIndexLinks(bubble);
+      augmentIssueLinks(bubble);
     }
     // Convert from streaming to permanent intermediate message with platform class
     bubble.classList.remove('msg-streaming');
@@ -224,7 +225,7 @@ export function streamingUiScript(): string {
     // Stamp the model into the last bot message's header. Live turns learn their
     // model here because the say() callback fires before result.model is known.
     if (meta.model) {
-      var msgs = chatMessages.querySelectorAll('.msg-bot');
+      var msgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
       var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
       if (lastBot) {
         var modelEl = lastBot.querySelector('.msg-head-model');

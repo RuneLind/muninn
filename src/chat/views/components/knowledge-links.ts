@@ -105,14 +105,17 @@ export function knowledgeLinksScript(): string {
     if (!container) return;
     var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
       acceptNode: function(node) {
-        // Skip text already inside a link or code block
+        // Cheap regex gate first — most nodes have no issue key, so skip the
+        // ancestor walk entirely for them.
+        if (!ISSUE_TEST.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+        // Then skip candidates that sit inside a link or code block.
         var p = node.parentNode;
         while (p && p !== container) {
           var tag = p.nodeName;
           if (tag === 'A' || tag === 'CODE' || tag === 'PRE') return NodeFilter.FILTER_REJECT;
           p = p.parentNode;
         }
-        return ISSUE_TEST.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
       }
     });
     var targets = [];
