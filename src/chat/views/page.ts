@@ -832,6 +832,16 @@ const CHAT_SCRIPT = `
     return head;
   }
 
+  // Human-readable label for a research action prompt (\`<!-- prompt:<type> -->\`).
+  // Mirrors the research-action button labels in research-card.ts.
+  function promptLabel(type) {
+    if (type === 'investigate') return 'Investigate Code';
+    if (type === 'deepAnalysis') return 'Deep Analysis';
+    if (type === 'specGeneration') return 'Generate Test Spec';
+    var s = type.replace(/([a-z])([A-Z])/g, '$1 $2');
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
   function appendMessage(msg, convType) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
@@ -854,6 +864,23 @@ const CHAT_SCRIPT = `
         checkReportExists(selectedBot, parsed.issueKey);
       }
       chatMessages.appendChild(rdiv);
+      scrollToBottom();
+      return;
+    }
+
+    // Research-action prompts (Investigate Code, Deep Analysis, …) render as a
+    // labeled card matching the Jira Research card — body formatted as markdown,
+    // not the old raw-text italic blob.
+    var promptMatch = msg.sender === 'user' ? msg.text.match(/^<!-- prompt:(\\w+) -->/) : null;
+    if (promptMatch) {
+      var pBody = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
+      var pdiv = document.createElement('div');
+      pdiv.className = 'msg msg-research-card msg-prompt-card';
+      pdiv.innerHTML = '<div class="research-card-header">' +
+        '<span class="research-card-label">' + escapeHtml(promptLabel(promptMatch[1])) + '</span>' +
+        '</div>' +
+        '<div class="research-card-body web-content">' + sanitizeHtml(formatWebHtml(pBody), true) + '</div>';
+      chatMessages.appendChild(pdiv);
       scrollToBottom();
       return;
     }
@@ -883,12 +910,6 @@ const CHAT_SCRIPT = `
       body.className = 'msg-body';
       body.textContent = msg.text;
       headName = peerLabelForMessage(msg);
-    } else if (msg.sender === 'user' && msg.text.indexOf('<!-- prompt:') === 0) {
-      div.className = 'msg msg-user msg-prompt';
-      body.className = 'msg-body';
-      body.textContent = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
-      headName = selectedUsername || 'You';
-      dotColor = avatarColor(selectedUsername || 'user');
     } else {
       div.className = 'msg msg-user';
       body.className = 'msg-body';
