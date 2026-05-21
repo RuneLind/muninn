@@ -910,8 +910,13 @@ const CHAT_SCRIPT = `
       headModel = msg.model || '';
     } else if (isPeerMsg) {
       div.className = 'msg msg-peer';
-      body.className = 'msg-body';
-      body.textContent = msg.text;
+      // Peer (hivemind) text arrives as raw markdown — it's never the
+      // assistant role, so the server-side formatWebHtml pass skips it.
+      // Format it here like bot messages so it renders as rich HTML.
+      body.className = 'msg-body web-content';
+      body.innerHTML = sanitizeHtml(formatWebHtml(msg.text), true);
+      augmentIndexLinks(body);
+      augmentIssueLinks(body);
       headName = peerLabelForMessage(msg);
     } else {
       div.className = 'msg msg-user';
