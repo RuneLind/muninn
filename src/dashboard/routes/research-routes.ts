@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { discoverAllBots, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { loadMcpConfig } from "../mcp-client.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
@@ -35,6 +35,23 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
   app.get("/api/research/bots", (c) => {
     const bots = discoverAllBots().map((b) => ({ name: b.name }));
     return c.json({ bots });
+  });
+
+  // Research: list jiraAnalysis prompt variants for a bot (Chrome extension dropdown)
+  app.get("/api/research/variants", (c) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    const botName = c.req.query("bot");
+    if (!botName) return c.json({ error: "Missing bot parameter" }, 400);
+    const bot = discoverAllBots().find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+
+    const variants: Array<{ id: string; label: string }> = [
+      { id: DEFAULT_VARIANT_ID, label: DEFAULT_VARIANT_LABEL },
+    ];
+    for (const v of bot.prompts?.jiraAnalysisVariants ?? []) {
+      variants.push({ id: v.id, label: v.label });
+    }
+    return c.json({ variants });
   });
 
   // Research: get KNOWLEDGE_COLLECTIONS for a bot from its .mcp.json
@@ -112,7 +129,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const body = await c.req.json<{
       bot?: string; title?: string; text: string;
       userId?: string; forceNew?: boolean; description?: string;
-      connectorId?: string;
+      connectorId?: string; promptVariant?: string;
     }>();
     if (!body.text) {
       return c.json({ error: "Missing required field: text" }, 400);
@@ -207,8 +224,20 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     // Create a dedicated thread for this research
     const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
 
-    // Build research prompt with machine-parseable marker for research card rendering
-    const jiraPrompt = botConfig.prompts?.jiraAnalysis ?? DEFAULT_JIRA_ANALYSIS_PROMPT;
+    // Resolve which Jira analysis prompt to use (default vs named variant)
+    const variantId = body.promptVariant && body.promptVariant !== DEFAULT_VARIANT_ID ? body.promptVariant : null;
+    let jiraPrompt: string;
+    if (variantId) {
+      const variant = botConfig.prompts?.jiraAnalysisVariants?.find((v) => v.id === variantId);
+      if (!variant) {
+        return c.json({
+          error: `Unknown promptVariant "${variantId}" for bot "${botConfig.name}"`,
+        }, 400);
+      }
+      jiraPrompt = variant.content;
+    } else {
+      jiraPrompt = botConfig.prompts?.jiraAnalysis ?? DEFAULT_JIRA_ANALYSIS_PROMPT;
+    }
     const prompt = `<!-- research:jira -->\n${jiraPrompt}\n\n---\n\n${body.text}`;
 
     log.info("Research chat created: {title} | bot={bot} | thread={threadId}", {

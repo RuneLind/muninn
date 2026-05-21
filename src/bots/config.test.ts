@@ -17,6 +17,7 @@ function setupTestBot(
     config?: Record<string, unknown>;
     configRaw?: string;
     noClaudeMd?: boolean;
+    prompts?: Record<string, string>;
   } = {},
 ): string {
   const dir = join(botsDir, name);
@@ -30,6 +31,13 @@ function setupTestBot(
   }
   if (opts.configRaw) {
     writeFileSync(join(dir, "config.json"), opts.configRaw);
+  }
+  if (opts.prompts) {
+    const promptsDir = join(dir, "prompts");
+    mkdirSync(promptsDir, { recursive: true });
+    for (const [key, value] of Object.entries(opts.prompts)) {
+      writeFileSync(join(promptsDir, `${key}.md`), value);
+    }
   }
   return dir;
 }
@@ -153,13 +161,12 @@ describe("bot discovery", () => {
       expect(found!.contextWindow).toBeUndefined();
     });
 
-    test("loads prompts from config.json", () => {
+    test("loads prompts from prompts/<key>.md files", () => {
       setupTestBot("_test_prompts", {
-        config: {
-          prompts: {
-            jiraAnalysis: "Analyze this Jira task",
-            investigateCode: "Look at the code",
-          },
+        prompts: {
+          jiraAnalysis: "Analyze this Jira task",
+          investigateCode: "Look at the code",
+          specGeneration: "Generate a test spec",
         },
       });
 
@@ -169,7 +176,87 @@ describe("bot discovery", () => {
       expect(found!.prompts).toEqual({
         jiraAnalysis: "Analyze this Jira task",
         investigateCode: "Look at the code",
+        specGeneration: "Generate a test spec",
       });
+    });
+
+    test("returns undefined prompts when prompts/ dir is missing", () => {
+      setupTestBot("_test_noprompts");
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_noprompts");
+      expect(found).toBeDefined();
+      expect(found!.prompts).toBeUndefined();
+    });
+
+    test("ignores unknown prompt filenames", () => {
+      setupTestBot("_test_unknownprompt", {
+        prompts: {
+          jiraAnalysis: "Real prompt",
+          notARealKey: "Should be ignored",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_unknownprompt");
+      expect(found).toBeDefined();
+      expect(found!.prompts).toEqual({ jiraAnalysis: "Real prompt" });
+    });
+
+    test("loads jiraAnalysis variants with label comment + fallback", () => {
+      setupTestBot("_test_variants", {
+        prompts: {
+          jiraAnalysis: "Default analysis",
+          "jiraAnalysis.coder": "<!-- label: Grundig kodeanalyse -->\nCoder body here",
+          "jiraAnalysis.brief": "Brief body without label",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_variants");
+      expect(found).toBeDefined();
+      expect(found!.prompts?.jiraAnalysis).toBe("Default analysis");
+
+      const variants = found!.prompts?.jiraAnalysisVariants ?? [];
+      // Sorted by id alphabetically: brief, coder
+      expect(variants).toEqual([
+        { id: "brief", label: "Brief", content: "Brief body without label" },
+        { id: "coder", label: "Grundig kodeanalyse", content: "Coder body here" },
+      ]);
+    });
+
+    test("title-cases hyphen/underscore ids and ignores a blank label", () => {
+      setupTestBot("_test_labels", {
+        prompts: {
+          jiraAnalysis: "Default",
+          "jiraAnalysis.code-review": "Body A",
+          "jiraAnalysis.deep_dive": "<!-- label:    -->\nBody B",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_labels");
+      expect(found!.prompts?.jiraAnalysisVariants).toEqual([
+        { id: "code-review", label: "Code Review", content: "Body A" },
+        // blank label falls back to the title-cased id; the comment line is stripped
+        { id: "deep_dive", label: "Deep Dive", content: "Body B" },
+      ]);
+    });
+
+    test("reserves the \"default\" variant id (file cannot shadow the synthetic default)", () => {
+      setupTestBot("_test_reserved", {
+        prompts: {
+          jiraAnalysis: "The default body",
+          "jiraAnalysis.default": "Unreachable — should be skipped",
+          "jiraAnalysis.coder": "Coder body",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_reserved");
+      expect(found!.prompts?.jiraAnalysis).toBe("The default body");
+      expect(found!.prompts?.jiraAnalysisVariants).toEqual([
+        { id: "coder", label: "Coder", content: "Coder body" },
+      ]);
     });
 
     test("loads restrictedTools from config.json", () => {
