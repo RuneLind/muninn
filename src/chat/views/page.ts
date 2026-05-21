@@ -224,6 +224,7 @@ const CHAT_SCRIPT = `
   var researchBotReplies = 0;   // Counts bot replies in research thread (actions shown after first)
   var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
   var reportExists = false;     // Whether a saved report file exists for current issue
+  var awaitingHandoffConfirm = false; // True between Start Building click and the bot's NAV-agent recommendation reply
   var threads = [];             // Thread list for current user+bot
   var bots = [];
   // Suppress waterfall until we know the selected bot's config
@@ -759,6 +760,7 @@ const CHAT_SCRIPT = `
     researchBotReplies = 0;
     researchIssueKey = null;
     reportExists = false;
+    awaitingHandoffConfirm = false;
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
@@ -939,9 +941,14 @@ const CHAT_SCRIPT = `
       }
     }
 
-    // Show action buttons after bot replies in a research thread
+    // Show action buttons after bot replies in a research thread. A pending
+    // Start Building handoff takes precedence — the recommendation reply gets a
+    // Confirm Handoff row instead of the phase buttons.
     if (isResearchThread && msg.sender === 'bot') {
-      if (researchBotReplies === 1) {
+      if (awaitingHandoffConfirm) {
+        awaitingHandoffConfirm = false;
+        showHandoffConfirm();
+      } else if (researchBotReplies === 1) {
         showResearchActions('analysis');
       } else if (researchBotReplies === 2) {
         showResearchActions('investigation');

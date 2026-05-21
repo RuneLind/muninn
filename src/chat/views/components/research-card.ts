@@ -120,18 +120,22 @@ export function researchCardScript(): string {
       }
     }
 
+    // Start Building hands the saved work plan to an online NAV agent via
+    // hivemind. Disabled until a work plan exists (Create Workplan re-renders
+    // this row on save, which flips reportExists → button enabled).
     var buildBtn = document.createElement('button');
     buildBtn.innerHTML = '<span class="btn-icon">&#x1F680;</span> Start Building';
-    buildBtn.onclick = async function() {
+    buildBtn.disabled = !reportExists;
+    if (!reportExists) buildBtn.title = 'Create a work plan first';
+    buildBtn.onclick = function() {
+      if (!reportExists || !researchIssueKey) return;
       actions.classList.add('used');
-      if (!reportExists && researchIssueKey) {
-        await saveResearchReport();
-      }
-      pendingConnector = 'copilot-sdk';
-      var reportRef = researchIssueKey && selectedUserId ? './reports/' + selectedUserId + '/' + researchIssueKey + '.md' : '';
-      chatInput.value = reportRef
-        ? 'Read the research report at ' + reportRef + ' for full context. Then implement the changes step by step.'
-        : 'Based on the analysis and code investigation above, start implementing this Jira task. Build the solution step by step, creating and modifying the necessary files.';
+      var bot = bots.find(function(b) { return b.name === selectedBot; });
+      var planPath = (bot && bot.dir && selectedUserId)
+        ? bot.dir + '/reports/' + selectedUserId + '/' + researchIssueKey + '.md'
+        : '';
+      awaitingHandoffConfirm = true;
+      chatInput.value = '<!-- prompt:startBuilding -->' + buildStartBuildingPrompt(planPath);
       sendMessage();
     };
     actions.appendChild(buildBtn);
@@ -151,6 +155,63 @@ export function researchCardScript(): string {
       };
       actions.appendChild(previewBtn);
     }
+
+    chatMessages.appendChild(actions);
+    scrollToBottom();
+  }
+
+  // What the receiving NAV agent is told to do with the plan: read it, verify
+  // it against the ACTUAL code, and use the knowledge base for domain facts —
+  // not just rubber-stamp the plan. Shared by the initial and confirm prompts.
+  function handoffReviewInstruction() {
+    return 'REVIEW the plan before any implementation: read it in full, verify every claim against the ACTUAL code in the repository (open the referenced files and functions — do not trust the plan\\'s summary), and use the knowledge base (search_knowledge) to verify domain / subject-matter ("faglige") facts. ' +
+      'Then write a reviewed plan into /Users/rune/source/nav/melosys-kode-wiki (follow that wiki\\'s CLAUDE.md conventions for placement and naming), noting any corrections, gaps, or risks found.';
+  }
+
+  // Instruction sent when Start Building is clicked. Asks the (hivemind-enabled)
+  // bot to find online NAV implementer agents and RECOMMEND one — but wait for
+  // the user to confirm before sending anything. The full handoff intent is
+  // stated up front so the bot has it in context when the user confirms.
+  function buildStartBuildingPrompt(planPath) {
+    var pathLine = planPath
+      ? 'The work plan for this task is saved at:\\n' + planPath + '\\n\\n'
+      : 'The work plan for this task is saved as the research report for ' + (researchIssueKey || 'this issue') + ' in your reports/ folder.\\n\\n';
+    return pathLine +
+      'Use the hivemind list_peers tool (scope: "machine") to see which agents are online. ' +
+      'Identify the candidate NAV implementer agents: peers in the "nav" namespace whose working directory is a repo under /Users/rune/source/nav/ (e.g. melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
+      'Ignore peers that are muninn bots (cwd under .../muninn/bots/) and other non-implementer infra peers.\\n\\n' +
+      'Read the work plan to understand which repo/area it touches. Then recommend the SINGLE best agent to implement it, weighing each candidate\\'s repo, current branch, and summary. Present:\\n' +
+      '- Your recommended agent (peer id) with its repo + branch and a one-line reason\\n' +
+      '- The other online NAV candidates as alternatives\\n\\n' +
+      'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation and wait — I will confirm or name a different agent. ' +
+      'When I confirm, send the chosen agent a hivemind message pointing it at the work plan (absolute path above) and instructing it to ' +
+      handoffReviewInstruction() + ' Then have it report back here what it produced.';
+  }
+
+  // Confirm row shown after the bot returns its NAV-agent recommendation.
+  // Clicking sends the go-ahead; the bot then performs the hivemind send_message.
+  function showHandoffConfirm() {
+    var existing = chatMessages.querySelector('.research-actions');
+    if (existing) existing.remove();
+
+    var actions = document.createElement('div');
+    actions.className = 'research-actions';
+
+    var confirmBtn = document.createElement('button');
+    confirmBtn.innerHTML = '<span class="btn-icon">&#x1F91D;</span> Confirm Handoff';
+    confirmBtn.onclick = function() {
+      actions.classList.add('used');
+      chatInput.value = '<!-- prompt:confirmHandoff -->Confirmed — proceed with the handoff to your recommended NAV agent now. ' +
+        'Send it the work plan via hivemind and instruct it to ' + handoffReviewInstruction() + ' ' +
+        'Then report back here what you sent and to whom.';
+      sendMessage();
+    };
+    actions.appendChild(confirmBtn);
+
+    var hint = document.createElement('span');
+    hint.className = 'research-actions-hint';
+    hint.textContent = 'or reply with a different agent to hand off to';
+    actions.appendChild(hint);
 
     chatMessages.appendChild(actions);
     scrollToBottom();
