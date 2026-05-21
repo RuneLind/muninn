@@ -326,6 +326,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
         threadId: m.threadId,
         traceId: m.traceId,
         fromPeerId: m.fromPeerId,
+        model: m.model,
       })),
     });
   });

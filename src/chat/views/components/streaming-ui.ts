@@ -208,7 +208,9 @@ export function streamingUiScript(): string {
 
   // ── Response metadata ────────────────────────────────────────────────
 
-  // Show response metadata (context usage) below the last bot message
+  // Apply response metadata: update the inspector and stamp the model into the
+  // last bot message's header. Per-turn token/duration now live in the inspector
+  // ("Last response") and the header pill, so no per-message meta bar is rendered.
   function showResponseMeta(meta) {
     // Store for inspector panel
     if (meta.conversationId) {
@@ -219,46 +221,20 @@ export function streamingUiScript(): string {
       loadToolUsageStats(); // Refresh aggregate stats
     }
 
-    // Find the last bot message to attach metadata to
-    var msgs = chatMessages.querySelectorAll('.msg-bot');
-    var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-    if (!lastBot) return;
-
-    // Remove any existing meta bar on this message
-    var existing = lastBot.querySelector('.msg-response-meta');
-    if (existing) existing.remove();
-
-    var bar = document.createElement('div');
-    bar.className = 'msg-response-meta';
-
-    var parts = [];
-
-    // Context usage: prefer contextTokens (last turn) over inputTokens (cumulative)
-    var ctxTokens = meta.contextTokens || meta.inputTokens;
-    if (ctxTokens) {
-      if (meta.contextWindow) {
-        parts.push('ctx ' + fmtNum(ctxTokens) + ' / ' + fmtNum(meta.contextWindow));
-      } else {
-        parts.push(fmtNum(ctxTokens) + ' in');
+    // Stamp the model into the last bot message's header. Live turns learn their
+    // model here because the say() callback fires before result.model is known.
+    if (meta.model) {
+      var msgs = chatMessages.querySelectorAll('.msg-bot');
+      var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+      if (lastBot) {
+        var modelEl = lastBot.querySelector('.msg-head-model');
+        if (modelEl && !modelEl.textContent) {
+          modelEl.textContent = meta.model;
+          var sepEl = lastBot.querySelector('.msg-head-sep');
+          if (sepEl) sepEl.style.display = '';
+        }
       }
     }
-    if (meta.outputTokens) {
-      parts.push(fmtNum(meta.outputTokens) + ' out');
-    }
-
-    // Duration
-    if (meta.durationMs) {
-      var secs = meta.durationMs / 1000;
-      parts.push(secs >= 10 ? Math.round(secs) + 's' : secs.toFixed(1) + 's');
-    }
-
-    // Cost (skip if zero — e.g. local models)
-    if (meta.costUsd && meta.costUsd > 0) {
-      parts.push('$' + meta.costUsd.toFixed(4));
-    }
-
-    bar.textContent = parts.join('  \\u00b7  ');
-    lastBot.appendChild(bar);
   }
 
   // ── Load tool calls from trace ───────────────────────────────────────

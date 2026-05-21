@@ -23,6 +23,8 @@ export interface ChatMessage {
   threadId?: string | null;
   /** Hivemind peer ID — only set for `sender: "peer"` messages. */
   fromPeerId?: string | null;
+  /** Model that produced this turn — shown in the message header (bot messages). */
+  model?: string | null;
 }
 
 export function roleToSender(role: string): ChatMessage["sender"] {
@@ -285,6 +287,7 @@ export class ChatState {
           text: isWebPlatform && m.role === "assistant" ? formatWebHtml(m.content) : m.content,
           threadId: m.threadId,
           fromPeerId: m.fromPeerId,
+          model: m.model,
         })),
       };
 
