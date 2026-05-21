@@ -163,11 +163,13 @@ export function threadManagerScript(): string {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var isPaused = isPeer && t.autoRespondPaused === true;
-      var iconClass = isPeer ? 'thread-item-icon peer' : 'thread-item-icon';
-      var icon = isPaused ? '⏸' : (isPeer ? '📡' : (t.name === 'main' ? '#' : '&bull;'));
       var displayName = isPeer ? peerDisplayName(t.name, currentBot) : t.name;
-      var meta = '';
-      if (t.messageCount > 0) meta += t.messageCount + ' msgs';
+
+      var dotClass = 'thread-item-dot' + (isPeer ? ' peer' : '') + (isPaused ? ' paused' : '');
+
+      var chips = '';
+      if (t.connectorName) chips += '<span class="thread-chip">' + escapeHtml(t.connectorName) + '</span>';
+      if (t.messageCount > 0) chips += '<span class="thread-chip count">' + t.messageCount + ' msgs</span>';
 
       var deleteBtn = t.name !== 'main'
         ? '<button class="thread-item-delete" data-delete-id="' + escapeAttr(t.id || '') + '" title="Delete thread" tabindex="-1">&times;</button>'
@@ -179,15 +181,14 @@ export function threadManagerScript(): string {
         + (isPaused ? ' paused' : '');
 
       return '<div class="' + classes + '" data-id="' + escapeAttr(t.id || '') + '">'
-        + '<div class="' + iconClass + '">' + icon + '</div>'
-        + '<div class="thread-item-content">'
-          + '<div class="thread-item-name">' + escapeHtml(displayName) + (isPeer ? ' <span class="thread-item-tag">peer</span>' : '') + '</div>'
-          + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
-          + (t.connectorName ? '<div class="thread-item-model">' + escapeHtml(t.connectorName) + '</div>' : '')
-          + (meta ? '<div class="thread-item-meta">' + meta + '</div>' : '')
+        + '<div class="thread-item-top">'
+          + '<span class="' + dotClass + '"></span>'
+          + '<span class="thread-item-name">' + escapeHtml(displayName) + (isPeer ? ' <span class="thread-item-tag">peer</span>' : '') + '</span>'
+          + (t.updatedAt ? '<span class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</span>' : '')
+          + deleteBtn
         + '</div>'
-        + (t.updatedAt ? '<div class="thread-item-time">' + escapeHtml(timeAgo(t.updatedAt)) + '</div>' : '')
-        + deleteBtn
+        + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
+        + (chips ? '<div class="thread-item-chips">' + chips + '</div>' : '')
         + '</div>';
     }).join('');
 

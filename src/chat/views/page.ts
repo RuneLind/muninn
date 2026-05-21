@@ -807,6 +807,31 @@ const CHAT_SCRIPT = `
     return 'peer';
   }
 
+  // Build a message header band: identity dot · name · model · time.
+  // Uses the shared formatTime() (24h HH:MM:SS) from helpers-client.
+  function buildMsgHead(opts) {
+    var head = document.createElement('div');
+    head.className = 'msg-head';
+    var nameSpan = '<span class="msg-head-name">' + escapeHtml(opts.name) + '</span>';
+    var timeSpan = '<span class="msg-head-time">' + escapeHtml(formatTime(opts.timestamp)) + '</span>';
+    if (opts.isPeer) {
+      head.innerHTML =
+        '<span style="color:var(--accent-light)">\\u2726</span>'
+        + nameSpan
+        + '<span class="msg-peer-tag">peer</span>'
+        + timeSpan;
+    } else {
+      var hasModel = !!opts.model;
+      head.innerHTML =
+        '<span class="msg-head-dot" style="background:' + escapeAttr(opts.dotColor) + '"></span>'
+        + nameSpan
+        + '<span class="msg-head-sep"' + (hasModel ? '' : ' style="display:none"') + '>\\u00b7</span>'
+        + '<span class="msg-head-model">' + escapeHtml(opts.model || '') + '</span>'
+        + timeSpan;
+    }
+    return head;
+  }
+
   function appendMessage(msg, convType) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
@@ -814,56 +839,71 @@ const CHAT_SCRIPT = `
     var isWeb = convType === 'web';
     var isTg = convType.startsWith('telegram');
     var platformClass = isWeb ? ' web web-content' : (isTg ? ' telegram' : ' slack');
-    var div = document.createElement('div');
 
-    // Detect research card messages (marker survives DB round-trip)
+    // Research card messages render as a standalone card (no header/body wrapper)
     var isResearchMsg = msg.sender === 'user' && msg.text.indexOf(RESEARCH_MARKER) === 0;
-
     if (isResearchMsg) {
       isResearchThread = true;
       researchBotReplies = 0;
-      div.className = 'msg msg-research-card';
+      var rdiv = document.createElement('div');
+      rdiv.className = 'msg msg-research-card';
       var parsed = parseResearchContent(msg.text);
-      div.innerHTML = renderResearchCard(parsed);
+      rdiv.innerHTML = renderResearchCard(parsed);
       if (parsed.issueKey) {
         researchIssueKey = parsed.issueKey;
         checkReportExists(selectedBot, parsed.issueKey);
       }
-    } else if (msg.sender === 'bot' && (isWeb || isTg)) {
-      div.className = 'msg msg-bot' + platformClass;
-      div.innerHTML = sanitizeHtml(msg.text, isWeb);
-      augmentIndexLinks(div);
-    } else if (msg.sender === 'bot') {
-      div.className = 'msg msg-bot' + platformClass;
-      div.innerHTML = renderSlackMrkdwn(msg.text);
-    } else if (msg.sender === 'peer') {
+      chatMessages.appendChild(rdiv);
+      scrollToBottom();
+      return;
+    }
+
+    var div = document.createElement('div');
+    var body = document.createElement('div');
+    var headName = '';
+    var dotColor = '';
+    var headModel = '';
+    var isPeerMsg = msg.sender === 'peer';
+
+    if (msg.sender === 'bot') {
+      div.className = 'msg msg-bot';
+      body.className = 'msg-body' + platformClass;
+      if (isWeb || isTg) {
+        body.innerHTML = sanitizeHtml(msg.text, isWeb);
+        augmentIndexLinks(body);
+        augmentIssueLinks(body);
+      } else {
+        body.innerHTML = renderSlackMrkdwn(msg.text);
+      }
+      headName = selectedBot;
+      dotColor = avatarColor(selectedBot);
+      headModel = msg.model || '';
+    } else if (isPeerMsg) {
       div.className = 'msg msg-peer';
-      var peerLabel = peerLabelForMessage(msg);
-      var fromEl = document.createElement('span');
-      fromEl.className = 'msg-peer-from';
-      fromEl.textContent = '[from ' + peerLabel + ']';
-      div.appendChild(fromEl);
-      var bodyEl = document.createElement('span');
-      bodyEl.className = 'msg-peer-body';
-      bodyEl.textContent = msg.text;
-      div.appendChild(bodyEl);
+      body.className = 'msg-body';
+      body.textContent = msg.text;
+      headName = peerLabelForMessage(msg);
     } else if (msg.sender === 'user' && msg.text.indexOf('<!-- prompt:') === 0) {
       div.className = 'msg msg-user msg-prompt';
-      div.textContent = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
+      body.className = 'msg-body';
+      body.textContent = msg.text.replace(/^<!-- prompt:\\w+ -->/, '').trim();
+      headName = selectedUsername || 'You';
+      dotColor = avatarColor(selectedUsername || 'user');
     } else {
       div.className = 'msg msg-user';
-      div.textContent = msg.text;
+      body.className = 'msg-body';
+      body.textContent = msg.text;
+      headName = selectedUsername || 'You';
+      dotColor = avatarColor(selectedUsername || 'user');
     }
+
+    div.appendChild(buildMsgHead({ name: headName, dotColor: dotColor, model: headModel, isPeer: isPeerMsg, timestamp: msg.timestamp }));
+    div.appendChild(body);
 
     // Track bot replies in research thread
     if (isResearchThread && msg.sender === 'bot') {
       researchBotReplies++;
     }
-
-    var time = document.createElement('div');
-    time.className = 'msg-time';
-    time.textContent = new Date(msg.timestamp).toLocaleTimeString();
-    div.appendChild(time);
 
     chatMessages.appendChild(div);
 

@@ -1,6 +1,22 @@
 /** Chat page styles — layout, sidebar, messages, inspector, modals */
 export function chatStyles(): string {
   return `
+    /* ── Chat-page-scoped refined palette (dark). chatStyles() is served only on
+       /chat, so these :root overrides do NOT affect the dashboard. --bg-elevated
+       is a NEW token (not in shared-styles); the rest override shared values.
+       Promote both to shared-styles.ts in a later dashboard pass. ── */
+    :root {
+      --bg-page: #0b0b0f;
+      --bg-panel: #101016;
+      --bg-surface: #1e1e29;
+      --bg-elevated: #282835;
+      --bg-inset: #0e0e13;
+      --border-primary: #2a2a38;
+      --border-secondary: #353544;
+      --border-subtle: #232330;
+      --chat-assistant-text: #b4b4bf;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
     body {
       display: flex;
       flex-direction: column;
@@ -73,68 +89,62 @@ export function chatStyles(): string {
       padding: 8px;
     }
     .thread-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
-      border-radius: 6px;
+      position: relative;
+      padding: 9px 11px;
+      border-radius: 9px;
       cursor: pointer;
-      transition: background 0.15s;
-      margin-bottom: 2px;
+      border: 1px solid transparent;
+      transition: background 0.15s, border-color 0.15s;
+      margin-bottom: 3px;
     }
-    .thread-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-    .thread-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
-    .thread-item-icon {
-      width: 32px;
-      height: 32px;
+    .thread-item:hover { background: var(--bg-surface); }
+    .thread-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+    .thread-item.active::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 99px; background: var(--accent); }
+    .thread-item-top { display: flex; align-items: center; gap: 7px; }
+    .thread-item-dot {
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
-      background: var(--bg-surface);
-      border: 1px solid var(--border-secondary);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      color: var(--text-muted);
+      border: 1.5px solid var(--text-faint);
+      box-sizing: border-box;
       flex-shrink: 0;
     }
-    .thread-item.active .thread-item-icon {
-      background: color-mix(in srgb, var(--accent) 20%, transparent);
-      border-color: var(--accent);
-      color: var(--accent);
-    }
-    .thread-item-content {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-    }
+    .thread-item.active .thread-item-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+    .thread-item-dot.peer { border-color: var(--accent-light); }
+    .thread-item-dot.paused { border-color: #f0883e; background: #f0883e; }
     .thread-item-name {
-      font-size: 13px;
+      font-family: var(--mono);
+      font-size: 12px;
       color: var(--text-secondary);
       font-weight: 500;
+      flex: 1;
+      min-width: 0;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
     .thread-item-desc {
-      font-size: 11px;
+      font-size: 12px;
       color: var(--text-muted);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-top: 1px;
+      margin: 3px 0 7px 14px;
     }
-    .thread-item-meta {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11px;
-      color: var(--text-dim);
-      margin-top: 2px;
-      white-space: nowrap;
-      overflow: hidden;
-    }
-    .thread-item-time {
+    .thread-item-chips { display: flex; gap: 5px; margin-left: 14px; flex-wrap: wrap; }
+    .thread-chip {
       font-size: 10px;
+      font-family: var(--mono);
+      color: var(--text-muted);
+      background: var(--bg-inset);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 1px 7px;
+      white-space: nowrap;
+    }
+    .thread-chip.count { color: var(--text-faint); }
+    .thread-item-time {
+      font-size: 10.5px;
       color: var(--text-faint);
       white-space: nowrap;
       flex-shrink: 0;
@@ -261,25 +271,42 @@ export function chatStyles(): string {
     .chat-messages {
       flex: 1;
       overflow-y: auto;
-      padding: 16px;
+      padding: 0;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 0;
     }
     .msg {
-      max-width: 85%;
-      padding: 8px 12px;
-      border-radius: 10px;
+      align-self: stretch;
+      max-width: none;
+      padding: 16px 24px;
+      border-radius: 0;
       font-size: 14px;
-      line-height: 1.5;
+      line-height: 1.6;
       word-wrap: break-word;
-      white-space: pre-wrap;
     }
+    /* Header band on every message (identity dot · name · model · time).
+       The negative margin must equal .msg padding (16px 24px) so the band
+       bleeds to the row edges; .msg-peer resets both for its card. */
+    .msg-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: -16px -24px 14px;
+      padding: 9px 24px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, var(--bg-page));
+      font-size: 11.5px;
+      color: var(--text-faint);
+    }
+    .msg-head-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .msg-head-name { font-size: 12.5px; font-weight: 650; color: var(--text-primary); }
+    .msg-head-model { font-family: var(--mono); color: var(--text-soft); }
+    .msg-head-sep { opacity: .4; }
+    .msg-head-time { font-family: var(--mono); color: var(--text-faint); margin-left: auto; }
+    .msg-body { white-space: pre-wrap; }
     .msg-user {
-      align-self: flex-end;
-      background: var(--chat-user-bg);
-      color: var(--chat-user-text);
-      border-bottom-right-radius: 2px;
+      color: var(--text-secondary);
     }
     .msg-prompt {
       background: color-mix(in srgb, var(--chat-user-bg) 50%, transparent);
@@ -289,7 +316,8 @@ export function chatStyles(): string {
     }
     .msg-research-card {
       align-self: stretch;
-      max-width: 100%;
+      max-width: none;
+      margin: 8px 24px;
       background: var(--bg-card, var(--bg-surface));
       border: 1px solid var(--border-primary);
       border-left: 3px solid var(--accent);
@@ -347,9 +375,9 @@ export function chatStyles(): string {
     .research-actions {
       display: flex;
       gap: 8px;
-      padding: 12px 0 4px;
+      padding: 12px 24px 4px;
       align-self: stretch;
-      max-width: 100%;
+      max-width: none;
     }
     .research-actions button {
       padding: 8px 16px;
@@ -373,31 +401,41 @@ export function chatStyles(): string {
     .research-actions button .btn-icon { font-size: 14px; }
     .research-actions.used button { opacity: 0.5; pointer-events: none; }
     .msg-bot {
-      align-self: flex-start;
-      background: var(--chat-assistant-bg);
       color: var(--chat-assistant-text);
-      border-bottom-left-radius: 2px;
-      border: 1px solid var(--border-primary);
     }
+    /* Peer (hivemind) messages keep their own labelled accent card */
     .msg-peer {
-      align-self: flex-start;
-      background: color-mix(in srgb, var(--accent) 12%, var(--chat-assistant-bg));
-      color: var(--chat-assistant-text);
-      border-bottom-left-radius: 2px;
+      margin: 8px 24px;
+      padding: 0;
+      background: color-mix(in srgb, var(--accent) 6%, transparent);
       border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-primary));
+      border-radius: 10px;
+      color: var(--chat-assistant-text);
     }
-    .msg-peer .msg-peer-from {
-      display: block;
-      font-size: 11px;
+    .msg-peer .msg-head {
+      margin: 0;
+      padding: 9px 14px;
+      border-radius: 10px 10px 0 0;
+      background: color-mix(in srgb, var(--accent) 9%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+      color: var(--accent-light);
+    }
+    .msg-peer .msg-head-name { color: var(--accent-light); }
+    .msg-peer .msg-body { padding: 0 14px 12px; }
+    .msg-peer-tag {
+      font-family: var(--mono);
+      font-size: 9px;
       font-weight: 600;
-      color: var(--accent-light, var(--accent));
-      letter-spacing: 0.3px;
-      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--accent-light);
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+      border-radius: 4px;
+      padding: 1px 6px;
     }
-    .thread-item-icon.peer { color: var(--accent-light, var(--accent)); }
     .thread-item.paused .thread-item-name,
     .thread-item.paused .thread-item-desc { color: var(--text-muted); }
-    .thread-item.paused .thread-item-icon { color: #f0883e; }
     .thread-item-tag {
       display: inline-block;
       margin-left: 6px;
@@ -416,10 +454,10 @@ export function chatStyles(): string {
     .msg-bot.telegram { font-family: inherit; }
     .msg-bot.slack { font-family: 'Slack-Lato', -apple-system, sans-serif; }
     /* Shared web rich-content styles (used by both .msg-bot.web and .msg-streaming.web)
-       Since .msg uses white-space:pre-wrap, \\n\\n around block elements already adds a
+       Since .msg-body uses white-space:pre-wrap, \\n\\n around block elements already adds a
        blank line. Use minimal/negative margins on blocks to avoid double-spacing. */
     .web-content h2, .web-content h3, .web-content h4, .web-content h5, .web-content h6 {
-      margin: -0.2em 0 0; font-weight: 600; line-height: 1.3;
+      margin: -0.2em 0 0; font-weight: 600; line-height: 1.3; color: var(--text-primary);
     }
     .web-content h2 { font-size: 1.25em; }
     .web-content h3 { font-size: 1.15em; }
@@ -477,22 +515,10 @@ export function chatStyles(): string {
       font-weight: 600;
     }
     .web-content p { margin: 0; }
-    .web-content strong { font-weight: 600; }
+    .web-content strong { font-weight: 600; color: var(--text-primary); }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }
-    .msg-time {
-      font-size: 10px;
-      color: var(--text-faint);
-      margin-top: 4px;
-    }
-    .msg-response-meta {
-      font-size: 10px;
-      color: var(--text-faint);
-      margin-top: 2px;
-      opacity: 0.7;
-      font-variant-numeric: tabular-nums;
-    }
     .chat-input {
       padding: 12px 16px;
       border-top: 1px solid var(--border-primary);
@@ -537,7 +563,7 @@ export function chatStyles(): string {
       background: color-mix(in srgb, var(--accent) 5%, transparent);
       border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
       border-radius: 6px;
-      margin-bottom: 8px;
+      margin: 8px 24px;
       flex-shrink: 0;
     }
 
@@ -835,21 +861,19 @@ export function chatStyles(): string {
 
     .empty-state { color: var(--text-disabled); font-size: 13px; text-align: center; padding: 24px 0; }
 
-    /* Streaming bubble */
+    /* Streaming bubble — full-width transient row */
     .msg-streaming {
-      align-self: flex-start;
-      background: var(--chat-assistant-bg);
+      align-self: stretch;
+      max-width: none;
       color: var(--chat-assistant-text);
-      border: 1px solid var(--border-primary);
-      max-width: 85%;
-      padding: 8px 12px;
-      border-radius: 10px 10px 10px 2px;
+      padding: 16px 24px;
       font-size: 14px;
-      line-height: 1.5;
+      line-height: 1.6;
       word-wrap: break-word;
       white-space: pre-wrap;
       opacity: 0.85;
     }
+    .msg-intermediate { white-space: pre-wrap; opacity: 0.92; }
     /* .msg-streaming.web inherits from .web-content — no duplicate rules needed */
 
     /* Intent bubble — shows what the AI plans to do */
@@ -889,6 +913,7 @@ export function chatStyles(): string {
     /* Tool activity container — sits between user query and bot response */
     .tool-activity {
       margin: 4px 0;
+      padding: 0 12px;
       align-self: flex-start;
       max-width: 90%;
     }
@@ -965,6 +990,17 @@ export function chatStyles(): string {
       background: color-mix(in srgb, var(--accent) 25%, transparent);
       border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     }
+
+    /* Jira issue-key links (MELOSYS-1234 → jira browse) */
+    .issue-link {
+      font-family: var(--mono);
+      font-size: 0.92em;
+      color: var(--accent-light);
+      text-decoration: none;
+      border-bottom: 1px solid color-mix(in srgb, var(--accent-light) 40%, transparent);
+      white-space: nowrap;
+    }
+    .issue-link:hover { border-bottom-color: var(--accent-light); }
 
     /* Thread creation modal */
     .thread-modal-backdrop {
@@ -1056,15 +1092,5 @@ export function chatStyles(): string {
       border-color: var(--accent) !important;
     }
     .thread-modal-save:hover { background: var(--accent-hover); }
-
-    /* Thread model label in sidebar */
-    .thread-item-model {
-      font-size: 10px;
-      color: var(--accent-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      margin-top: 1px;
-    }
   `;
 }

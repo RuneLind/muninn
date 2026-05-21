@@ -175,7 +175,7 @@ export async function getSimMessages(
   limit = 50,
   threadId?: string,
   allPlatforms?: boolean,
-): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null; traceId: string | null; fromPeerId: string | null }[]> {
+): Promise<{ id: string; role: string; content: string; createdAt: number; threadId: string | null; traceId: string | null; fromPeerId: string | null; model: string | null }[]> {
   const sql = getDb();
 
   const platformFilter = allPlatforms ? sql`` : sql`AND platform = ${platform}`;
@@ -189,7 +189,7 @@ export async function getSimMessages(
     : sql``;
 
   const rows = await sql`
-    SELECT id, role, content, created_at, thread_id, trace_id, from_peer_id
+    SELECT id, role, content, created_at, thread_id, trace_id, from_peer_id, model
     FROM messages
     WHERE user_id = ${userId}
       AND bot_name = ${botName}
@@ -207,6 +207,7 @@ export async function getSimMessages(
       threadId: (r.thread_id as string) ?? null,
       traceId: (r.trace_id as string) ?? null,
       fromPeerId: (r.from_peer_id as string) ?? null,
+      model: (r.model as string) ?? null,
     }))
     .reverse();
 }

@@ -91,5 +91,57 @@ export function knowledgeLinksScript(): string {
       }
     }
   }
+
+  // --- Jira issue-key links ---
+  // Turns "MELOSYS-7971" (and similar PROJECT-1234 keys) in bot messages into
+  // clickable links to the Jira browse URL. Generic — runs on every bot message,
+  // not just research cards. The \\d{3,} floor avoids false positives like
+  // "COVID-19" / "UTF-8" / "GPT-4". Base URL matches the Jira Chrome extension.
+  var JIRA_BASE = 'https://jira.adeo.no/browse/';
+  var ISSUE_TEST = /[A-Z][A-Z]+-\\d{3,}/;
+  var ISSUE_RE = /\\b[A-Z][A-Z]+-\\d{3,}\\b/g;
+
+  function augmentIssueLinks(container) {
+    if (!container) return;
+    var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        // Cheap regex gate first — most nodes have no issue key, so skip the
+        // ancestor walk entirely for them.
+        if (!ISSUE_TEST.test(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+        // Then skip candidates that sit inside a link or code block.
+        var p = node.parentNode;
+        while (p && p !== container) {
+          var tag = p.nodeName;
+          if (tag === 'A' || tag === 'CODE' || tag === 'PRE') return NodeFilter.FILTER_REJECT;
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var targets = [];
+    var n;
+    while ((n = walker.nextNode())) targets.push(n);
+    for (var i = 0; i < targets.length; i++) {
+      var textNode = targets[i];
+      var text = textNode.nodeValue;
+      var frag = document.createDocumentFragment();
+      var lastIdx = 0;
+      var m;
+      ISSUE_RE.lastIndex = 0;
+      while ((m = ISSUE_RE.exec(text))) {
+        if (m.index > lastIdx) frag.appendChild(document.createTextNode(text.slice(lastIdx, m.index)));
+        var a = document.createElement('a');
+        a.className = 'issue-link';
+        a.href = JIRA_BASE + m[0];
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = m[0];
+        frag.appendChild(a);
+        lastIdx = m.index + m[0].length;
+      }
+      if (lastIdx < text.length) frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+      textNode.parentNode.replaceChild(frag, textNode);
+    }
+  }
   `;
 }
