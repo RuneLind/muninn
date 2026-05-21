@@ -97,10 +97,10 @@ export function chatStyles(): string {
       transition: background 0.15s, border-color 0.15s;
       margin-bottom: 3px;
     }
-    .thread-item:hover { background: var(--bg-surface); }
+    .thread-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
     .thread-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
     .thread-item.active::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 99px; background: var(--accent); }
-    .thread-item-top { display: flex; align-items: center; gap: 7px; }
+    .thread-item-top { display: flex; align-items: center; gap: 7px; position: relative; }
     .thread-item-dot {
       width: 7px;
       height: 7px;
@@ -148,27 +148,36 @@ export function chatStyles(): string {
       color: var(--text-faint);
       white-space: nowrap;
       flex-shrink: 0;
+      transition: opacity 0.15s;
     }
+    /* Delete affordance: crossfades in over the timestamp slot on hover — no
+       layout shift, no abrupt display swap. Time keeps its space (fades to 0);
+       × overlays the right edge and fades in. */
     .thread-item-delete {
-      display: none;
+      position: absolute;
+      right: -2px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
       align-items: center;
       justify-content: center;
-      width: 22px;
-      height: 22px;
-      border-radius: 4px;
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
       border: none;
       background: transparent;
-      color: var(--text-muted);
-      font-size: 14px;
+      color: var(--text-faint);
+      font-size: 15px;
       cursor: pointer;
-      flex-shrink: 0;
       padding: 0;
       line-height: 1;
-      transition: background 0.15s, color 0.15s;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s, background 0.15s, color 0.15s;
     }
-    .thread-item:hover .thread-item-delete { display: flex; }
-    .thread-item:hover .thread-item-time { display: none; }
-    .thread-item-delete:hover { background: color-mix(in srgb, #e53935 15%, transparent); color: #e53935; }
+    .thread-item:hover .thread-item-time { opacity: 0; }
+    .thread-item:hover .thread-item-delete { opacity: 1; pointer-events: auto; }
+    .thread-item-delete:hover { background: color-mix(in srgb, #e53935 16%, transparent); color: #ff6b66; }
 
     /* Chat */
     .sim-chat {
@@ -307,12 +316,6 @@ export function chatStyles(): string {
     .msg-body { white-space: pre-wrap; }
     .msg-user {
       color: var(--text-secondary);
-    }
-    .msg-prompt {
-      background: color-mix(in srgb, var(--chat-user-bg) 50%, transparent);
-      color: var(--text-muted);
-      font-size: 12px;
-      font-style: italic;
     }
     .msg-research-card {
       align-self: stretch;
