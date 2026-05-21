@@ -49,10 +49,12 @@ export function chatStyles(): string {
       --accent: #6357f0;
       --accent-hover: #5247d8;
       --accent-light: #5247d8;
+      --accent-muted: #6b6f9a;
       --status-success: #16a34a;
       --status-error: #dc2626;
       --status-warning: #d97706;
       --status-info: #2563eb;
+      --status-tool: #c2620a;
       --chat-assistant-text: #4b4f5a;
     }
     body {

@@ -25,7 +25,7 @@ export async function renderChatPage(): Promise<string> {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Muninn Chat</title>
-  ${themeInitScript()}
+  <script>${themeInitScript()}</script>
   <style>
     ${SHARED_STYLES}
     ${agentStatusStyles()}

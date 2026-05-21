@@ -5,18 +5,17 @@
  * `[data-theme="light"]` block in chat-styles.ts). The chosen theme is persisted
  * under a chat-specific localStorage key, so it never leaks onto other pages.
  *
- * - `themeInitScript()` runs in <head> before paint to set data-theme from storage
- *   (avoids a dark→light flash for users who saved light). Default: dark.
+ * - `themeInitScript()` returns bare JS for a dedicated <head> <script> (wrapped by
+ *   the page) so it runs before paint, avoiding a dark→light flash. Default: dark.
  * - `themeToggleHtml()` is the header button (passed to renderNav via headerRight).
  * - `themeToggleScript()` wires the button + the `t` keyboard shortcut at end of body.
  */
 
 const THEME_KEY = "muninn-chat-theme";
 
-/** Early <head> script: applies the saved theme before first paint. */
+/** Bare JS for an early <head> script: applies the saved theme before first paint. */
 export function themeInitScript(): string {
   return `
-  <script>
     (function() {
       try {
         var t = localStorage.getItem('${THEME_KEY}');
@@ -24,8 +23,7 @@ export function themeInitScript(): string {
       } catch (e) {
         document.documentElement.dataset.theme = 'dark';
       }
-    })();
-  </script>`;
+    })();`;
 }
 
 /** Header toggle button. */
