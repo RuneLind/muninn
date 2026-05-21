@@ -50,6 +50,8 @@ export interface LastResponseRow {
   value: string;
   detail?: string;
   emphasis?: "cache" | "cost" | "warning";
+  /** Fill percentage for an optional bar under the row (e.g. cache-hit bar). */
+  barPct?: number;
 }
 
 // ── Pure functions ─────────────────────────────────────────────────────
@@ -133,7 +135,7 @@ export function computeLastResponseRows(meta: ResponseMetaInput | null): LastRes
   }
   if (cacheRead > 0) {
     const pct = Math.round((cacheRead / Math.max(1, totalIn)) * 100);
-    rows.push({ label: "Cache hit", value: fmtNum(cacheRead), detail: pct + "%", emphasis: "cache" });
+    rows.push({ label: "Cache hit", value: fmtNum(cacheRead), detail: pct + "%", emphasis: "cache", barPct: pct });
   }
   if (cacheCreate > 0) {
     rows.push({ label: "Cache write", value: fmtNum(cacheCreate) });
@@ -228,7 +230,7 @@ export function inspectorPanelScript(): string {
     if (meta.outputTokens && meta.outputTokens > 0) rows.push({ label: 'Output', value: fmtNum(meta.outputTokens) });
     if (cacheRead > 0) {
       var pct = Math.round((cacheRead / Math.max(1, totalIn)) * 100);
-      rows.push({ label: 'Cache hit', value: fmtNum(cacheRead), detail: pct + '%', emphasis: 'cache' });
+      rows.push({ label: 'Cache hit', value: fmtNum(cacheRead), detail: pct + '%', emphasis: 'cache', barPct: pct });
     }
     if (cacheCreate > 0) rows.push({ label: 'Cache write', value: fmtNum(cacheCreate) });
     if (meta.durationMs && meta.durationMs > 0) rows.push({ label: 'Duration', value: fmtDuration(meta.durationMs) });
@@ -253,10 +255,9 @@ export function inspectorPanelScript(): string {
         + '<span class="ins-info-label">' + escapeHtml(r.label) + '</span>'
         + '<span class="ins-info-value' + emph + '">' + escapeHtml(r.value) + detail + '</span>'
         + '</div>';
-      // Cache-hit gets a thin fill bar (prototype look) — pct already in r.detail.
-      if (r.emphasis === 'cache' && r.detail) {
-        var cachePct = parseInt(r.detail, 10) || 0;
-        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + cachePct + '%;background:var(--accent)"></div></div>';
+      // Cache-hit gets a thin accent fill bar (prototype look).
+      if (r.emphasis === 'cache' && r.barPct != null) {
+        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + r.barPct + '%;background:var(--accent)"></div></div>';
       }
     }
 

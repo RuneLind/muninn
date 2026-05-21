@@ -345,6 +345,7 @@ describe("computeLastResponseRows", () => {
     expect(cache.value).toBe("9.0k");
     expect(cache.detail).toBe("90%");
     expect(cache.emphasis).toBe("cache");
+    expect(cache.barPct).toBe(90);
   });
 
   test("omits cache row when cacheReadTokens is missing or zero", () => {
