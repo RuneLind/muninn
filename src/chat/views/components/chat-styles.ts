@@ -13,7 +13,7 @@ export function chatStyles(): string {
       --border-primary: #2a2a38;
       --border-secondary: #353544;
       --border-subtle: #232330;
-      --chat-assistant-text: #d8d8dc;
+      --chat-assistant-text: #b4b4bf;
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
     body {
@@ -456,7 +456,7 @@ export function chatStyles(): string {
        Since .msg uses white-space:pre-wrap, \\n\\n around block elements already adds a
        blank line. Use minimal/negative margins on blocks to avoid double-spacing. */
     .web-content h2, .web-content h3, .web-content h4, .web-content h5, .web-content h6 {
-      margin: -0.2em 0 0; font-weight: 600; line-height: 1.3;
+      margin: -0.2em 0 0; font-weight: 600; line-height: 1.3; color: var(--text-primary);
     }
     .web-content h2 { font-size: 1.25em; }
     .web-content h3 { font-size: 1.15em; }
@@ -514,7 +514,7 @@ export function chatStyles(): string {
       font-weight: 600;
     }
     .web-content p { margin: 0; }
-    .web-content strong { font-weight: 600; }
+    .web-content strong { font-weight: 600; color: var(--text-primary); }
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }
