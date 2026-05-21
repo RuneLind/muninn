@@ -224,6 +224,41 @@ describe("bot discovery", () => {
       ]);
     });
 
+    test("title-cases hyphen/underscore ids and ignores a blank label", () => {
+      setupTestBot("_test_labels", {
+        prompts: {
+          jiraAnalysis: "Default",
+          "jiraAnalysis.code-review": "Body A",
+          "jiraAnalysis.deep_dive": "<!-- label:    -->\nBody B",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_labels");
+      expect(found!.prompts?.jiraAnalysisVariants).toEqual([
+        { id: "code-review", label: "Code Review", content: "Body A" },
+        // blank label falls back to the title-cased id; the comment line is stripped
+        { id: "deep_dive", label: "Deep Dive", content: "Body B" },
+      ]);
+    });
+
+    test("reserves the \"default\" variant id (file cannot shadow the synthetic default)", () => {
+      setupTestBot("_test_reserved", {
+        prompts: {
+          jiraAnalysis: "The default body",
+          "jiraAnalysis.default": "Unreachable — should be skipped",
+          "jiraAnalysis.coder": "Coder body",
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_reserved");
+      expect(found!.prompts?.jiraAnalysis).toBe("The default body");
+      expect(found!.prompts?.jiraAnalysisVariants).toEqual([
+        { id: "coder", label: "Coder", content: "Coder body" },
+      ]);
+    });
+
     test("loads restrictedTools from config.json", () => {
       setupTestBot("_test_restrict", {
         config: {

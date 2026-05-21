@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { discoverAllBots, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { loadMcpConfig } from "../mcp-client.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
@@ -46,7 +46,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
 
     const variants: Array<{ id: string; label: string }> = [
-      { id: "default", label: "Standard" },
+      { id: DEFAULT_VARIANT_ID, label: DEFAULT_VARIANT_LABEL },
     ];
     for (const v of bot.prompts?.jiraAnalysisVariants ?? []) {
       variants.push({ id: v.id, label: v.label });
@@ -225,7 +225,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
 
     // Resolve which Jira analysis prompt to use (default vs named variant)
-    const variantId = body.promptVariant && body.promptVariant !== "default" ? body.promptVariant : null;
+    const variantId = body.promptVariant && body.promptVariant !== DEFAULT_VARIANT_ID ? body.promptVariant : null;
     let jiraPrompt: string;
     if (variantId) {
       const variant = botConfig.prompts?.jiraAnalysisVariants?.find((v) => v.id === variantId);
