@@ -25,7 +25,7 @@ export function chatStyles(): string {
     }
     .sim-layout {
       display: grid;
-      grid-template-columns: 280px 1fr 280px;
+      grid-template-columns: 280px 1fr 320px;
       flex: 1;
       min-height: 0;
       overflow: hidden;
@@ -574,7 +574,7 @@ export function chatStyles(): string {
     .sim-inspector {
       background: var(--bg-panel);
       border-left: 1px solid var(--border-primary);
-      padding: 12px 16px;
+      padding: 16px;
       overflow-y: auto;
     }
     .ins-heading {
@@ -587,109 +587,110 @@ export function chatStyles(): string {
     .ins-user-header {
       display: flex;
       align-items: center;
-      gap: 10px;
-      margin-bottom: 12px;
+      gap: 11px;
+      margin-bottom: 18px;
     }
     .ins-user-avatar {
-      width: 40px;
-      height: 40px;
+      width: 38px;
+      height: 38px;
       border-radius: 50%;
       background: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 16px;
-      font-weight: 600;
-      color: rgba(255,255,255,0.9);
-      text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+      font-size: 15px;
+      font-weight: 650;
+      color: rgba(255,255,255,0.92);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
       flex-shrink: 0;
     }
     .ins-user-info { flex: 1; min-width: 0; }
     .ins-user-name { font-size: 14px; font-weight: 600; color: var(--text-primary); }
-    .ins-user-id { font-size: 10px; color: var(--text-dim); font-family: monospace; margin-top: 2px; }
+    .ins-user-id { font-size: 11px; color: var(--text-faint); font-family: var(--mono); margin-top: 2px; }
     .ins-info-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 3px 0;
-      font-size: 12px;
+      padding: 4px 0;
+      font-size: 12.5px;
     }
     .ins-info-label { color: var(--text-faint); }
     .ins-info-value { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-    .ins-info-value-cache { color: var(--status-ok, #27ae60); }
-    .ins-info-value-cost { color: var(--accent-light, #a8b4ff); }
+    .ins-info-value-mono { font-family: var(--mono); font-size: 12px; }
+    .ins-info-value-cache { color: var(--status-success); }
+    .ins-info-value-cost { color: var(--accent-light); }
     .ins-info-detail {
       color: var(--text-faint);
       font-size: 10px;
       margin-left: 2px;
       font-variant-numeric: tabular-nums;
     }
-    .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 10px 0; }
+    .ins-divider { border: none; border-top: 1px solid var(--border-primary); margin: 14px 0; }
     .ins-context-bar {
       height: 4px;
-      background: var(--bg-tertiary, #2a2a3a);
-      border-radius: 2px;
+      background: var(--bg-inset);
+      border-radius: 99px;
       margin: 4px 0 2px;
       overflow: hidden;
     }
     .ins-context-fill {
       height: 100%;
-      border-radius: 2px;
+      border-radius: 99px;
       transition: width 0.3s ease;
     }
-    .ins-section { margin-bottom: 12px; }
+    .ins-section { margin-bottom: 18px; }
     .ins-section-title {
-      font-size: 11px;
+      font-size: 10.5px;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.6px;
       color: var(--text-faint);
-      font-weight: 600;
-      margin-bottom: 6px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid var(--border-subtle);
+      font-weight: 650;
+      margin-bottom: 9px;
     }
     .ins-skip-extractions {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       text-transform: none;
       letter-spacing: 0;
       font-weight: 500;
+      font-size: 11px;
       color: var(--text-muted);
       cursor: pointer;
       user-select: none;
     }
     .ins-skip-extractions:hover { color: var(--text-primary); }
-    .ins-skip-extractions input { margin: 0; cursor: pointer; }
+    .ins-skip-extractions input { margin: 0; cursor: pointer; accent-color: var(--accent); }
     .ins-mini-item {
-      padding: 6px 8px;
-      background: var(--bg-inset);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      font-size: 11px;
+      padding: 9px 11px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 9px;
+      font-size: 12px;
       color: var(--text-soft);
-      margin-bottom: 4px;
+      margin-bottom: 8px;
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
     .ins-mini-memory {
-      padding: 6px 8px;
-      background: var(--bg-inset);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      font-size: 11px;
-      color: var(--text-soft);
-      line-height: 1.4;
-      margin-bottom: 4px;
-    }
-    .ins-tags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
-    .ins-tag {
-      font-size: 9px;
-      padding: 1px 5px;
-      border-radius: 3px;
+      padding: 10px 11px;
       background: var(--bg-surface);
-      color: var(--accent-muted);
+      border: 1px solid var(--border-primary);
+      border-radius: 9px;
+      font-size: 12px;
+      color: var(--text-soft);
+      line-height: 1.5;
+      margin-bottom: 8px;
+    }
+    .ins-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+    .ins-tag {
+      font-size: 10px;
+      padding: 1px 7px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+      color: var(--accent-light);
     }
     .ins-skeleton {
       background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
@@ -700,10 +701,10 @@ export function chatStyles(): string {
       margin-bottom: 4px;
     }
     .ins-empty-hint {
-      font-size: 11px;
-      color: var(--text-disabled);
+      font-size: 11.5px;
+      color: var(--text-faint);
       font-style: italic;
-      padding: 4px 0;
+      padding: 2px 0;
     }
     @keyframes shimmer {
       0% { background-position: 200% 0; }
@@ -713,21 +714,27 @@ export function chatStyles(): string {
     .ins-tool-item {
       display: flex;
       justify-content: space-between;
-      align-items: center;
-      padding: 2px 0;
-      font-size: 11px;
+      align-items: baseline;
+      gap: 10px;
+      padding: 4px 0;
+      font-size: 12px;
     }
-    .ins-tool-name { color: var(--text-muted); }
-    .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+    .ins-tool-name {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ins-tool-time { color: var(--text-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
     .ins-tool-subhead {
-      font-size: 11px;
+      font-size: 10.5px;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.6px;
       color: var(--text-faint);
-      font-weight: 600;
-      margin: 8px 0 4px;
-      padding-bottom: 3px;
-      border-bottom: 1px solid var(--border-subtle);
+      font-weight: 650;
+      margin: 10px 0 6px;
     }
 
     .ins-section-title-row {
@@ -737,80 +744,74 @@ export function chatStyles(): string {
       gap: 8px;
     }
     .ins-mcp-refresh {
-      background: var(--bg-inset);
-      border: 1px solid var(--border-primary);
-      color: var(--text-secondary);
-      border-radius: 4px;
-      padding: 3px 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-faint);
+      border-radius: 5px;
+      padding: 2px 5px;
       font-size: 13px;
       cursor: pointer;
       line-height: 1;
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
       text-transform: none;
       letter-spacing: 0;
     }
     .ins-mcp-refresh:hover:not(:disabled) {
-      color: var(--text-primary);
+      color: var(--text-secondary);
       background: var(--bg-surface);
-      border-color: var(--accent, #7c6fe0);
     }
-    .ins-mcp-refresh:disabled { opacity: 0.5; cursor: default; }
+    .ins-mcp-refresh:disabled { opacity: 0.6; cursor: default; }
     .ins-mcp-row {
-      font-size: 11px;
+      font-size: 12px;
       color: var(--text-soft);
-      border-radius: 4px;
+      border-radius: 6px;
       margin-bottom: 1px;
-    }
-    .ins-mcp-row.critical {
-      background: rgba(231, 76, 60, 0.08);
-      color: var(--status-error, #e74c3c);
     }
     .ins-mcp-row-header {
       display: flex;
       align-items: center;
-      gap: 6px;
-      padding: 3px 6px;
-      border-radius: 4px;
+      gap: 8px;
+      padding: 5px 6px;
+      border-radius: 6px;
     }
     .ins-mcp-row-header.expandable {
       cursor: pointer;
       user-select: none;
     }
     .ins-mcp-row-header.expandable:hover {
-      background: var(--bg-inset);
+      background: var(--bg-surface);
     }
     .ins-mcp-caret {
-      width: 10px;
+      width: 9px;
       display: inline-block;
       color: var(--text-faint);
       font-size: 9px;
-      transition: transform 0.1s ease;
+      transition: transform 0.15s ease;
       flex-shrink: 0;
     }
     .ins-mcp-caret.open { transform: rotate(90deg); }
-    .ins-mcp-caret-spacer { width: 10px; display: inline-block; flex-shrink: 0; }
-    .ins-mcp-name { flex: 1; }
+    .ins-mcp-caret-spacer { width: 9px; display: inline-block; flex-shrink: 0; }
+    .ins-mcp-name { flex: 1; color: var(--text-secondary); }
     .ins-mcp-detail { color: var(--text-faint); font-variant-numeric: tabular-nums; }
-    .ins-mcp-row.critical .ins-mcp-detail { color: var(--status-error, #e74c3c); }
     .ins-mcp-detail-block {
-      padding: 4px 6px 8px 28px;
-      font-size: 11px;
+      padding: 2px 6px 8px 23px;
+      font-size: 11.5px;
     }
     .ins-mcp-subtitle {
       font-size: 10px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       color: var(--text-faint);
-      margin: 6px 0 3px;
+      margin: 7px 0 4px;
     }
     .ins-mcp-subtitle:first-child { margin-top: 0; }
     .ins-mcp-subitem {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 1px 0;
+      padding: 2px 0;
       color: var(--text-soft);
     }
     .ins-mcp-subname { flex: 1; }
@@ -822,34 +823,46 @@ export function chatStyles(): string {
     .ins-mcp-collerr {
       padding: 4px 6px;
       font-size: 11px;
-      color: var(--status-warning, #f39c12);
-      background: rgba(243, 156, 18, 0.08);
+      color: var(--status-warning);
+      background: color-mix(in srgb, var(--status-warning) 9%, transparent);
       border-radius: 4px;
       margin-bottom: 6px;
+    }
+    /* Dedicated connect-error block (down servers) — full message, red. */
+    .ins-mcp-error {
+      margin: 4px 6px 6px 23px;
+      padding: 7px 9px;
+      font-size: 11.5px;
+      line-height: 1.4;
+      color: var(--status-error);
+      background: color-mix(in srgb, var(--status-error) 9%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-error) 22%, transparent);
+      border-radius: 6px;
     }
     .ins-mcp-tool-chips {
       display: flex;
       flex-wrap: wrap;
-      gap: 3px;
+      gap: 4px;
     }
     .ins-mcp-tool-chip {
+      font-family: var(--mono);
       font-size: 10px;
-      padding: 1px 5px;
-      border-radius: 3px;
+      padding: 2px 7px;
+      border-radius: 6px;
       background: var(--bg-inset);
       color: var(--text-muted);
       border: 1px solid var(--border-subtle);
     }
     .ins-mcp-dot {
-      width: 8px;
-      height: 8px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       flex-shrink: 0;
       background: var(--text-disabled);
     }
-    .ins-mcp-dot.ok { background: var(--status-ok, #27ae60); }
-    .ins-mcp-dot.down { background: var(--status-warning, #f39c12); }
-    .ins-mcp-dot.down-critical { background: var(--status-error, #e74c3c); }
+    .ins-mcp-dot.ok { background: var(--status-success); }
+    .ins-mcp-dot.down { background: var(--status-warning); }
+    .ins-mcp-dot.down-critical { background: var(--status-error); }
     .ins-mcp-dot.unknown { background: var(--text-disabled); }
     .ins-mcp-spinner {
       width: 10px;
