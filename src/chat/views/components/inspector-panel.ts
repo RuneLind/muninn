@@ -253,6 +253,11 @@ export function inspectorPanelScript(): string {
         + '<span class="ins-info-label">' + escapeHtml(r.label) + '</span>'
         + '<span class="ins-info-value' + emph + '">' + escapeHtml(r.value) + detail + '</span>'
         + '</div>';
+      // Cache-hit gets a thin fill bar (prototype look) — pct already in r.detail.
+      if (r.emphasis === 'cache' && r.detail) {
+        var cachePct = parseInt(r.detail, 10) || 0;
+        html += '<div class="ins-context-bar"><div class="ins-context-fill" style="width:' + cachePct + '%;background:var(--accent)"></div></div>';
+      }
     }
 
     if (hasTools) {
@@ -319,7 +324,7 @@ export function inspectorPanelScript(): string {
     var usage = computeContextUsage(meta);
     if (!usage) { container.innerHTML = ''; return; }
 
-    var html = '<div class="ins-info-row"><span class="ins-info-label">Context</span><span class="ins-info-value">' + escapeHtml(usage.label) + '</span></div>';
+    var html = '<div class="ins-info-row"><span class="ins-info-label">Window</span><span class="ins-info-value">' + escapeHtml(usage.label) + '</span></div>';
 
     if (usage.hasBar) {
       var colorMap = { error: 'var(--status-error, #e74c3c)', warning: 'var(--status-warning, #f39c12)', accent: 'var(--accent, #7c6fe0)' };
@@ -417,8 +422,8 @@ export function inspectorPanelScript(): string {
       );
       var detail = s.status === 'ok'
         ? (s.toolCount != null ? s.toolCount + ' tools' : 'ok')
-        : (s.errorMessage ? truncateMcpError(s.errorMessage) : 'down');
-      var rowClass = 'ins-mcp-row' + (s.status === 'down' && s.critical ? ' critical' : '');
+        : (s.status === 'down' ? 'down' : '');
+      var rowClass = 'ins-mcp-row';
       var titleAttr = s.errorMessage ? ' title="' + escapeHtml(s.errorMessage) + '"' : '';
       var expandable = isExpandable(s);
       var expanded = isRowExpanded(s);
@@ -437,6 +442,11 @@ export function inspectorPanelScript(): string {
         + '<span class="ins-mcp-name">' + escapeHtml(s.displayName) + '</span>'
         + '<span class="ins-mcp-detail">' + escapeHtml(detail) + '</span>'
         + '</div>';
+
+      // Down servers: surface the full connect error in a dedicated red block.
+      if (s.status === 'down' && s.errorMessage) {
+        html += '<div class="ins-mcp-error">' + escapeHtml(s.errorMessage) + '</div>';
+      }
 
       if (expandable && expanded) {
         html += '<div class="ins-mcp-detail-block">';
@@ -655,6 +665,8 @@ export function inspectorPanelScript(): string {
           + '<div class="ins-user-id">' + escapeHtml(selectedUserId) + '</div>'
         + '</div>'
       + '</div>'
+      + '<div class="ins-section">'
+      + '<div class="ins-section-title">Context</div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Bot</span><span class="ins-info-value">' + escapeHtml(selectedBot) + '</span></div>';
 
     var botInfo = getBotInfo();
@@ -668,11 +680,12 @@ export function inspectorPanelScript(): string {
     if (effConnectorType) {
       html += '<div class="ins-info-row"><span class="ins-info-label">Connector</span><span class="ins-info-value">' + escapeHtml(effConnectorType) + '</span></div>';
     }
-    if (effModel) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value">' + escapeHtml(effModel) + '</span></div>';
+    if (effModel) html += '<div class="ins-info-row"><span class="ins-info-label">Model</span><span class="ins-info-value ins-info-value-mono">' + escapeHtml(effModel) + '</span></div>';
     if (effBaseUrl) html += '<div class="ins-info-row"><span class="ins-info-label">Endpoint</span><span class="ins-info-value" style="font-size:10px">' + escapeHtml(effBaseUrl) + '</span></div>';
 
     html += '<div class="ins-info-row"><span class="ins-info-label">Thread</span><span class="ins-info-value">' + escapeHtml(activeThreadId ? (function() { var m = null; for (var i = 0; i < threads.length; i++) { if (threads[i].id === activeThreadId) { m = threads[i].name; break; } } return m || 'main'; })() : 'none') + '</span></div>'
       + '<div class="ins-info-row"><span class="ins-info-label">Status</span><span class="ins-info-value">' + escapeHtml(statusText || 'idle') + '</span></div>'
+      + '</div>'
       + '<div id="insContextUsage"></div>'
       + '<hr class="ins-divider">'
       + '<div id="insLastResponse"></div>';
