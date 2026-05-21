@@ -3,11 +3,12 @@ export function chatStyles(): string {
   return `
     /* ── Chat-page-scoped refined palette (dark). chatStyles() is served only on
        /chat, so these :root overrides do NOT affect the dashboard. --bg-elevated
-       is a NEW token (not in shared-styles); the rest override shared values.
-       Promote both to shared-styles.ts in a later dashboard pass. ── */
+       and --bg-chat are NEW tokens (not in shared-styles); the rest override
+       shared values. Promote to shared-styles.ts in a later dashboard pass. ── */
     :root {
       --bg-page: #0b0b0f;
       --bg-panel: #101016;
+      --bg-chat: #0c0c11;
       --bg-surface: #1e1e29;
       --bg-elevated: #282835;
       --bg-inset: #0e0e13;
@@ -17,12 +18,69 @@ export function chatStyles(): string {
       --chat-assistant-text: #b4b4bf;
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
+
+    /* ── Light theme (chat-only). Set via [data-theme="light"] on <html> by the
+       theme toggle. Same attribute selector specificity as :root, declared later,
+       so it wins when active. The dashboard never sets data-theme (and never loads
+       chatStyles), so it stays dark — honoring "dashboard unchanged, dark default".
+       The app uses color-mix(... var(--accent) ...) inline throughout, so accent
+       tints adapt automatically; we only override base tokens here.
+       Status colors are darkened vs the dark ramp so they stay legible on light. ── */
+    [data-theme="light"] {
+      --bg-page: #f3f4f7;
+      --bg-panel: #ffffff;
+      --bg-chat: #fafbfc;
+      --bg-surface: #f1f2f6;
+      --bg-elevated: #ffffff;
+      --bg-inset: #eceef3;
+      --bg-deep: #eceef3;
+      --border-primary: #e2e4ea;
+      --border-secondary: #d2d5de;
+      --border-subtle: #edeef2;
+      --scrollbar-thumb: #d2d5de;
+      --text-primary: #14151a;
+      --text-secondary: #3a3d47;
+      --text-tertiary: #4a4d57;
+      --text-soft: #5a5e68;
+      --text-muted: #6c707d;
+      --text-dim: #80848f;
+      --text-faint: #9aa0ad;
+      --text-disabled: #b8bcc6;
+      --accent: #6357f0;
+      --accent-hover: #5247d8;
+      --accent-light: #5247d8;
+      --accent-muted: #6b6f9a;
+      --status-success: #16a34a;
+      --status-error: #dc2626;
+      --status-warning: #d97706;
+      --status-info: #2563eb;
+      --status-tool: #c2620a;
+      --chat-assistant-text: #4b4f5a;
+    }
     body {
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
     }
+
+    /* Theme toggle (chat header, right side) — light/dark switch */
+    .theme-toggle {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1;
+      font-family: inherit;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .theme-toggle:hover { color: var(--text-primary); border-color: var(--border-secondary); }
     .sim-layout {
       display: grid;
       grid-template-columns: 280px 1fr 320px;
@@ -183,7 +241,7 @@ export function chatStyles(): string {
     .sim-chat {
       display: flex;
       flex-direction: column;
-      background: var(--bg-inset);
+      background: var(--bg-chat);
       overflow: hidden;
     }
     .chat-body {
@@ -693,7 +751,7 @@ export function chatStyles(): string {
       color: var(--accent-light);
     }
     .ins-skeleton {
-      background: linear-gradient(90deg, var(--border-subtle) 25%, #22222e 50%, var(--border-subtle) 75%);
+      background: linear-gradient(90deg, var(--border-subtle) 25%, var(--border-secondary) 50%, var(--border-subtle) 75%);
       background-size: 200% 100%;
       animation: shimmer 1.5s infinite;
       border-radius: 6px;

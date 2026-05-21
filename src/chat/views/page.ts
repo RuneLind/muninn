@@ -12,6 +12,7 @@ import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
+import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme-toggle.ts";
 
 export async function renderChatPage(): Promise<string> {
   const [webFormatScript, helpersScript] = await Promise.all([
@@ -19,11 +20,12 @@ export async function renderChatPage(): Promise<string> {
     helpersClientScript(),
   ]);
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Muninn Chat</title>
+  <script>${themeInitScript()}</script>
   <style>
     ${SHARED_STYLES}
     ${agentStatusStyles()}
@@ -34,7 +36,7 @@ export async function renderChatPage(): Promise<string> {
   </style>
 </head>
 <body>
-  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml() })}
+  ${renderNav("chat", { headerLeftExtra: agentStatusHtml() + botSelectorHtml(), headerRight: themeToggleHtml() })}
 
   <div class="sim-layout">
     <!-- Left: Threads sidebar -->
@@ -130,6 +132,7 @@ export async function renderChatPage(): Promise<string> {
     ${webFormatScript}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
+    ${themeToggleScript()}
   </script>
 </body>
 </html>`;
