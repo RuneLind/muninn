@@ -130,7 +130,7 @@ export function researchCardScript(): string {
     buildBtn.onclick = function() {
       if (!reportExists || !researchIssueKey) return;
       actions.classList.add('used');
-      var bot = bots.find(function(b) { return b.name === selectedBot; });
+      var bot = getBotInfo();
       var planPath = (bot && bot.dir && selectedUserId)
         ? bot.dir + '/reports/' + selectedUserId + '/' + researchIssueKey + '.md'
         : '';
