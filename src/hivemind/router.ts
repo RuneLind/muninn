@@ -90,38 +90,47 @@ export class HivemindRouter {
   ) {}
 
   async route(botName: string, msg: InboundPeerMessage): Promise<string | null> {
-    const userId = await getBotDefaultUser(botName);
-    if (!userId) {
-      log.warn(
-        "Inbound peer message for bot {botName} dropped — no default user configured. " +
-          "Set one via the chat page or POST /chat/bot-preferences/{botName}/default-user.",
-        { botName, fromId: msg.fromId },
-      );
-      return null;
-    }
-
     const peerName = peerNameFor(msg);
 
-    // If this bot recently sent outbound to this peer from some other thread,
-    // route the reply back into that originating thread instead of the
-    // default peer:<ns>/<peerName> bucket. Correlation is set by
-    // mcp-server.ts (ask_peer/send_to_peer), chat/routes.ts (`>` outbound),
-    // and the autorespond reply below.
+    // If this bot recently sent outbound to this peer from some thread, route
+    // the reply back into that originating thread instead of the default
+    // peer:<ns>/<peerName> bucket. Correlation is set by mcp-server.ts
+    // (ask_peer/send_to_peer), chat/routes.ts (`>` outbound), and the
+    // autorespond reply below.
+    //
+    // The originating thread can belong to ANY user — whoever was talking to
+    // the peer — which is not necessarily the bot's default user. So we derive
+    // the destination user from the correlated thread itself. The bot default
+    // user is only used as a fallback for uncorrelated inbound (a peer reaching
+    // out unsolicited, with no thread to anchor to).
+    let thread: Awaited<ReturnType<typeof getThreadById>> = null;
     const correlatedThreadId = getPendingPeer(botName, msg.fromId);
-    let correlatedThread: Awaited<ReturnType<typeof getThreadById>> = null;
     if (correlatedThreadId) {
       const t = await getThreadById(correlatedThreadId);
-      if (t && t.userId === userId && t.botName === botName) {
-        correlatedThread = t;
+      if (t && t.botName === botName) {
+        thread = t;
       } else if (t) {
         log.warn(
-          "Stale peer correlation for {botName}/{fromId} → thread {threadId} (owner mismatch). Falling back to peer:<ns>/<name>.",
+          "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
           { botName, fromId: msg.fromId, threadId: correlatedThreadId },
         );
       }
     }
 
-    const thread = correlatedThread ?? await getOrCreatePeerThread(userId, botName, `${msg.namespace}/${peerName}`);
+    if (!thread) {
+      const defaultUserId = await getBotDefaultUser(botName);
+      if (!defaultUserId) {
+        log.warn(
+          "Inbound peer message for bot {botName} dropped — no default user configured. " +
+            "Set one via the chat page or POST /chat/bot-preferences/{botName}/default-user.",
+          { botName, fromId: msg.fromId },
+        );
+        return null;
+      }
+      thread = await getOrCreatePeerThread(defaultUserId, botName, `${msg.namespace}/${peerName}`);
+    }
+
+    const userId = thread.userId;
 
     const platform: Platform = "web";
     const [messageId, conv] = await Promise.all([
