@@ -7,6 +7,7 @@ import type { Config } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getOrCreatePeerThread, getThreadById, setThreadAutoRespondPaused } from "../db/threads.ts";
 import { getBotDefaultUser } from "../db/chat-preferences.ts";
+import { getUser } from "../db/users.ts";
 import { processMessage as defaultProcessMessage } from "../core/message-processor.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import { Tracer } from "../tracing/index.ts";
@@ -136,6 +137,10 @@ export class HivemindRouter {
     }
 
     const userId = thread.userId;
+    // Pass the user's real name so a peer-recreated conversation shell isn't
+    // stamped with the "chat-user" placeholder (which a later typed message
+    // would otherwise persist over the user's real username).
+    const user = await getUser(userId);
 
     const platform: Platform = "web";
     const [messageId, conv] = await Promise.all([
@@ -148,7 +153,7 @@ export class HivemindRouter {
         threadId: thread.id,
         fromPeerId: msg.fromId,
       }),
-      this.chatState.findOrCreateBotConversation({ botName, userId }),
+      this.chatState.findOrCreateBotConversation({ botName, userId, username: user?.username }),
     ]);
 
     const chatMessage: ChatMessage = {

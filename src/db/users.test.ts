@@ -87,6 +87,16 @@ describe("users", () => {
       expect(user!.username).toBe("realname");
     });
 
+    test("does not overwrite username with the 'chat-user' placeholder", async () => {
+      await ensureUser({ id: "web-400", username: "rune-tester-4", platform: "web" });
+      // A peer-recreated conversation shell defaults to "chat-user"; it must not
+      // clobber the user's real name.
+      await ensureUser({ id: "web-400", username: "chat-user", platform: "web" });
+
+      const user = await getUser("web-400");
+      expect(user!.username).toBe("rune-tester-4");
+    });
+
     test("updates lastSeenAt on subsequent calls", async () => {
       await ensureUser({ id: "tg-303", username: "alice", platform: "telegram" });
       const first = await getUser("tg-303");
