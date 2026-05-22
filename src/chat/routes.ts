@@ -49,6 +49,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.get("/bots", async (c) => {
     const bots = botConfigs.map((b) => ({
       name: b.name,
+      dir: b.dir,
       hasTelegram: !!b.telegramBotToken,
       hasSlack: !!b.slackBotToken,
       connector: b.connector ?? "claude-cli",

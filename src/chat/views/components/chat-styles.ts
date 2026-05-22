@@ -454,13 +454,20 @@ export function chatStyles(): string {
       align-items: center;
       gap: 6px;
     }
-    .research-actions button:hover {
+    .research-actions button:hover:not(:disabled) {
       background: var(--accent);
       color: var(--bg-primary);
       border-color: var(--accent);
     }
     .research-actions button .btn-icon { font-size: 14px; }
     .research-actions.used button { opacity: 0.5; pointer-events: none; }
+    .research-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .research-actions-hint {
+      align-self: center;
+      font-size: 12px;
+      color: var(--text-dim, var(--text-muted));
+      font-style: italic;
+    }
     .msg-bot {
       color: var(--chat-assistant-text);
     }

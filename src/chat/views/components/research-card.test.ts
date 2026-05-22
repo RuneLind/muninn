@@ -38,6 +38,40 @@ describe("researchCardScript", () => {
     expect(script).toContain("function saveResearchReport()");
   });
 
+  test("contains the hivemind handoff functions", () => {
+    const script = researchCardScript();
+    expect(script).toContain("function buildStartBuildingPrompt(planPath)");
+    expect(script).toContain("function showHandoffConfirm()");
+  });
+
+  test("Start Building is disabled until a work plan exists", () => {
+    const script = researchCardScript();
+    expect(script).toContain("buildBtn.disabled = !reportExists");
+  });
+
+  test("buildStartBuildingPrompt embeds the plan path, peer discovery, wait gate, and wiki target", () => {
+    const script = researchCardScript();
+    const fn = new Function(
+      script + "\nreturn buildStartBuildingPrompt;",
+    )();
+    const out: string = fn("/abs/reports/u1/MELOSYS-7546.md");
+    expect(out).toContain("/abs/reports/u1/MELOSYS-7546.md");
+    expect(out).toContain("list_peers");
+    expect(out).toContain("Do NOT message any agent yet");
+    expect(out).toContain("/Users/rune/source/nav/melosys-kode-wiki");
+  });
+
+  test("the handoff review instruction requires verifying code + knowledge", () => {
+    const script = researchCardScript();
+    const fn = new Function(
+      script + "\nreturn handoffReviewInstruction;",
+    )();
+    const out: string = fn();
+    expect(out).toContain("verify every claim against the ACTUAL code");
+    expect(out).toContain("search_knowledge");
+    expect(out).toContain("faglige");
+  });
+
   test("parseResearchContent handles title + prompt + body", () => {
     // Evaluate the JS string in a controlled scope to test parseResearchContent
     const script = researchCardScript();
