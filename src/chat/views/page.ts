@@ -224,7 +224,7 @@ const CHAT_SCRIPT = `
   var researchBotReplies = 0;   // Counts bot replies in research thread (actions shown after first)
   var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
   var reportExists = false;     // Whether a saved report file exists for current issue
-  var awaitingHandoffConfirm = false; // True between Start Building click and the bot's NAV-agent recommendation reply
+  var awaitingHandoffConfirm = false; // True between Start Building click and the bot's coding-agent recommendation reply
   var threads = [];             // Thread list for current user+bot
   var bots = [];
   // Suppress waterfall until we know the selected bot's config

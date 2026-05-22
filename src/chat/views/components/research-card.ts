@@ -120,7 +120,7 @@ export function researchCardScript(): string {
       }
     }
 
-    // Start Building hands the saved work plan to an online NAV agent via
+    // Start Building hands the saved work plan to an online coding agent via
     // hivemind. Disabled until a work plan exists (Create Workplan re-renders
     // this row on save, which flips reportExists → button enabled).
     var buildBtn = document.createElement('button');
@@ -160,7 +160,7 @@ export function researchCardScript(): string {
     scrollToBottom();
   }
 
-  // What the receiving NAV agent is told to do with the plan: read it, verify
+  // What the receiving coding agent is told to do with the plan: read it, verify
   // it against the ACTUAL code, and use the knowledge base for domain facts —
   // not just rubber-stamp the plan. Shared by the initial and confirm prompts.
   function handoffReviewInstruction() {
@@ -169,7 +169,7 @@ export function researchCardScript(): string {
   }
 
   // Instruction sent when Start Building is clicked. Asks the (hivemind-enabled)
-  // bot to find online NAV implementer agents and RECOMMEND one — but wait for
+  // bot to find online coding agents and RECOMMEND one — but wait for
   // the user to confirm before sending anything. The full handoff intent is
   // stated up front so the bot has it in context when the user confirms.
   function buildStartBuildingPrompt(planPath) {
@@ -178,17 +178,17 @@ export function researchCardScript(): string {
       : 'The work plan for this task is saved as the research report for ' + (researchIssueKey || 'this issue') + ' in your reports/ folder.\\n\\n';
     return pathLine +
       'Use the hivemind list_peers tool (scope: "machine") to see which agents are online. ' +
-      'Identify the candidate NAV implementer agents: peers in the "nav" namespace whose working directory is a repo under /Users/rune/source/nav/ (e.g. melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
+      'Identify the candidate coding agents: peers whose working directory is a code repository (e.g. in the "nav" namespace under /Users/rune/source/nav/ — melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
       'Ignore peers that are muninn bots (cwd under .../muninn/bots/) and other non-implementer infra peers.\\n\\n' +
       'Read the work plan to understand which repo/area it touches. Then recommend the SINGLE best agent to implement it, weighing each candidate\\'s repo, current branch, and summary. Present:\\n' +
       '- Your recommended agent (peer id) with its repo + branch and a one-line reason\\n' +
-      '- The other online NAV candidates as alternatives\\n\\n' +
+      '- The other online coding-agent candidates as alternatives\\n\\n' +
       'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation and wait — I will confirm or name a different agent. ' +
       'When I confirm, send the chosen agent a hivemind message pointing it at the work plan (absolute path above) and instructing it to ' +
       handoffReviewInstruction() + ' Then have it report back here what it produced.';
   }
 
-  // Confirm row shown after the bot returns its NAV-agent recommendation.
+  // Confirm row shown after the bot returns its coding-agent recommendation.
   // Clicking sends the go-ahead; the bot then performs the hivemind send_message.
   function showHandoffConfirm() {
     var existing = chatMessages.querySelector('.research-actions');
@@ -201,7 +201,7 @@ export function researchCardScript(): string {
     confirmBtn.innerHTML = '<span class="btn-icon">&#x1F91D;</span> Confirm Handoff';
     confirmBtn.onclick = function() {
       actions.classList.add('used');
-      chatInput.value = '<!-- prompt:confirmHandoff -->Confirmed — proceed with the handoff to your recommended NAV agent now. ' +
+      chatInput.value = '<!-- prompt:confirmHandoff -->Confirmed — proceed with the handoff to your recommended coding agent now. ' +
         'Send it the work plan via hivemind and instruct it to ' + handoffReviewInstruction() + ' ' +
         'Then report back here what you sent and to whom.';
       sendMessage();
