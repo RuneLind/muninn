@@ -10,7 +10,7 @@ import type { Config } from "../config.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
-import { setPendingPeer, _resetPendingPeersForTests } from "./correlation.ts";
+import { setPendingPeer } from "./correlation.ts";
 
 setupTestDb();
 
@@ -180,14 +180,12 @@ describe("HivemindRouter.route — peer correlation", () => {
   const CORR_BOT = "corr-router-bot";
   const CORR_OWNER = "corr-owner";
 
-  beforeEach(() => _resetPendingPeersForTests());
-
   test("routes inbound to the originating thread when correlation exists", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     // The "current" thread on this bot (e.g. a Jira research thread).
     const originating = await createThread(CORR_OWNER, CORR_BOT, "jira-research-RUNE-1234");
     // Outbound side recorded this when the bot called send_to_peer(huginn, ...).
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -210,7 +208,7 @@ describe("HivemindRouter.route — peer correlation", () => {
     // fresh peer:<ns>/<name> bucket under the default user.
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     const otherThread = await createThread("some-other-user", CORR_BOT, "other-user-thread");
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", otherThread.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", otherThread.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -232,7 +230,7 @@ describe("HivemindRouter.route — peer correlation", () => {
 
   test("falls back when the correlated thread was deleted", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", "00000000-0000-0000-0000-000000000000");
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", "00000000-0000-0000-0000-000000000000");
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -246,7 +244,7 @@ describe("HivemindRouter.route — peer correlation", () => {
   test("follow-up inbound from the same peer still routes to the originating thread (no consume)", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     const originating = await createThread(CORR_OWNER, CORR_BOT, "jira-research-followup");
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);

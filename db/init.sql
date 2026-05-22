@@ -388,6 +388,24 @@ CREATE TABLE bot_default_user (
 );
 
 -- ============================================================================
+-- Peer-reply correlation: maps an outbound (bot, peer) to the originating
+-- thread so an inbound reply routes back there instead of the default
+-- peer:<ns>/<name> bucket. Durable so it survives muninn restarts + long peer
+-- delays. No FK on thread_id — the router validates + lazily clears stale rows.
+-- ============================================================================
+CREATE TABLE peer_thread_correlation (
+  bot_name   TEXT        NOT NULL,
+  peer_id    TEXT        NOT NULL,
+  thread_id  UUID        NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (bot_name, peer_id)
+);
+
+CREATE INDEX idx_peer_thread_correlation_expires
+  ON peer_thread_correlation (expires_at);
+
+-- ============================================================================
 -- Traces: observability spans for request tracing
 -- ============================================================================
 CREATE TABLE traces (

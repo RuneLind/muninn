@@ -12,7 +12,7 @@ import type { processMessage as ProcessMessageFn } from "../core/message-process
 import { Tracer } from "../tracing/index.ts";
 import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
-import { getPendingPeer, setPendingPeer } from "./correlation.ts";
+import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -104,16 +104,21 @@ export class HivemindRouter {
     // user is only used as a fallback for uncorrelated inbound (a peer reaching
     // out unsolicited, with no thread to anchor to).
     let thread: Awaited<ReturnType<typeof getThreadById>> = null;
-    const correlatedThreadId = getPendingPeer(botName, msg.fromId);
+    const correlatedThreadId = await getPendingPeer(botName, msg.fromId);
     if (correlatedThreadId) {
       const t = await getThreadById(correlatedThreadId);
       if (t && t.botName === botName) {
         thread = t;
-      } else if (t) {
-        log.warn(
-          "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
-          { botName, fromId: msg.fromId, threadId: correlatedThreadId },
-        );
+      } else {
+        // Thread was deleted, or belongs to another bot — the binding is stale.
+        // Drop it so it can't keep mis-routing, then fall back below.
+        if (t) {
+          log.warn(
+            "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
+            { botName, fromId: msg.fromId, threadId: correlatedThreadId },
+          );
+        }
+        await clearPendingPeer(botName, msg.fromId);
       }
     }
 
@@ -250,7 +255,7 @@ export class HivemindRouter {
         const client = deps.getClient(args.botName, args.msg.namespace);
         outboundSent = client?.sendMessage(args.msg.fromId, result.responseText) ?? false;
         // Keep follow-up replies from this peer flowing into the same thread.
-        if (outboundSent) setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
+        if (outboundSent) await setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
       }
       tracer.event("peer_outbound", {
         toId: args.msg.fromId,

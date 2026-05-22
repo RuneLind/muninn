@@ -586,7 +586,7 @@ async function handlePeerOutbound(
 
   // Record so an unsolicited reply from this peer routes back to this thread
   // instead of falling into the default peer:<ns>/<name> thread for the bot.
-  setPendingPeer(thread.botName, targetPeerId, thread.id);
+  await setPendingPeer(thread.botName, targetPeerId, thread.id);
   const sent = client.sendMessage(targetPeerId, stripped);
   if (!sent) {
     return { status: 503, body: { error: "Failed to send to peer (WebSocket write failed)" } };
