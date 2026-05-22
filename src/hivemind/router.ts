@@ -104,6 +104,14 @@ export class HivemindRouter {
     // the destination user from the correlated thread itself. The bot default
     // user is only used as a fallback for uncorrelated inbound (a peer reaching
     // out unsolicited, with no thread to anchor to).
+    //
+    // Caveat: correlation is keyed (botName, peerId) last-write-wins, so if two
+    // users message the SAME peer on the SAME bot near-simultaneously, the later
+    // outbound overwrites the binding and the peer's reply routes to that user's
+    // thread. Dropping the old `t.userId === userId` guard widens the blast
+    // radius of that race from "default-user only" to any user. Rare for the
+    // single-primary-user bots we run today; the real fix is per-turn
+    // correlation tokens (bind threadId per MCP session) — see CLAUDE.md.
     let thread: Awaited<ReturnType<typeof getThreadById>> = null;
     const correlatedThreadId = await getPendingPeer(botName, msg.fromId);
     if (correlatedThreadId) {

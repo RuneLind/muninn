@@ -324,7 +324,15 @@ export class ChatState {
   }): Promise<ChatConversation> {
     const id = await deterministicId(`${params.userId}:${params.botName}:web`);
     const existing = this.conversations.get(id);
-    if (existing) return existing;
+    if (existing) {
+      // Refresh a stale/placeholder name once a real one is known (e.g. a peer
+      // reply recreated the shell as "chat-user" before the user's row had a
+      // name). Never downgrade a real name back to the placeholder.
+      if (params.username && params.username !== "chat-user" && existing.username !== params.username) {
+        existing.username = params.username;
+      }
+      return existing;
+    }
 
     while (this.conversations.size >= MAX_CONVERSATIONS) {
       const oldest = this.conversations.keys().next().value;

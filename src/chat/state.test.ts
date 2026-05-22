@@ -59,6 +59,23 @@ describe("ChatState", () => {
     });
   });
 
+  describe("findOrCreateBotConversation", () => {
+    test("refreshes a placeholder username on an existing conversation", async () => {
+      const a = await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4" });
+      expect(a.username).toBe("chat-user");
+
+      const b = await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4", username: "rune-tester-4" });
+      expect(b.id).toBe(a.id);
+      expect(b.username).toBe("rune-tester-4");
+    });
+
+    test("never downgrades a real username back to the placeholder", async () => {
+      await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4", username: "rune-tester-4" });
+      const again = await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4", username: "chat-user" });
+      expect(again.username).toBe("rune-tester-4");
+    });
+  });
+
   describe("addMessage", () => {
     test("adds message to conversation", () => {
       const conv = state.createConversation({
