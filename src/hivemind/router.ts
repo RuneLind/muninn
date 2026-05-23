@@ -14,6 +14,7 @@ import { Tracer } from "../tracing/index.ts";
 import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
 import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
+import { getThreadByCorrelationToken, clearCorrelationToken } from "./correlation-tokens.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -28,6 +29,10 @@ export interface InboundPeerMessage {
   /** Namespace the inbound WebSocket is registered in. Outbound autorespond
    *  goes back through the same namespace's client. */
   namespace: Namespace;
+  /** Opaque token the reply echoed, if any. Resolved against the minted-token
+   *  store first (the precise path); absent/foreign tokens fall back to the
+   *  `(bot, peer)` table. */
+  correlationId?: string;
 }
 
 /**
@@ -113,21 +118,49 @@ export class HivemindRouter {
     // single-primary-user bots we run today; the real fix is per-turn
     // correlation tokens (bind threadId per MCP session) — see CLAUDE.md.
     let thread: Awaited<ReturnType<typeof getThreadById>> = null;
-    const correlatedThreadId = await getPendingPeer(botName, msg.fromId);
-    if (correlatedThreadId) {
-      const t = await getThreadById(correlatedThreadId);
-      if (t && t.botName === botName) {
-        thread = t;
-      } else {
-        // Thread was deleted, or belongs to another bot — the binding is stale.
-        // Drop it so it can't keep mis-routing, then fall back below.
-        if (t) {
-          log.warn(
-            "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
-            { botName, fromId: msg.fromId, threadId: correlatedThreadId },
-          );
+
+    // Precise path first: if the reply echoed a token, resolve it against the
+    // minted-token store. Only tokens muninn issued resolve, so a foreign or
+    // absent token simply misses and we drop to the (bot, peer) fallback below.
+    // Same #136 validation as the fallback (bot match; user derived from thread).
+    if (msg.correlationId) {
+      const tokenThreadId = await getThreadByCorrelationToken(botName, msg.correlationId);
+      if (tokenThreadId) {
+        const t = await getThreadById(tokenThreadId);
+        if (t && t.botName === botName) {
+          thread = t;
+        } else {
+          // Thread deleted or belongs to another bot — the token is stale.
+          if (t) {
+            log.warn(
+              "Stale correlation token for {botName}/{cid} → thread {threadId} (bot mismatch). Falling back.",
+              { botName, cid: msg.correlationId, threadId: tokenThreadId },
+            );
+          }
+          await clearCorrelationToken(botName, msg.correlationId);
         }
-        await clearPendingPeer(botName, msg.fromId);
+      }
+    }
+
+    // Fallback: the (bot, peer) last-write-wins table — covers replies that
+    // carried no token (raw peers that didn't echo, or pre-broker-rollout).
+    if (!thread) {
+      const correlatedThreadId = await getPendingPeer(botName, msg.fromId);
+      if (correlatedThreadId) {
+        const t = await getThreadById(correlatedThreadId);
+        if (t && t.botName === botName) {
+          thread = t;
+        } else {
+          // Thread was deleted, or belongs to another bot — the binding is stale.
+          // Drop it so it can't keep mis-routing, then fall back below.
+          if (t) {
+            log.warn(
+              "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
+              { botName, fromId: msg.fromId, threadId: correlatedThreadId },
+            );
+          }
+          await clearPendingPeer(botName, msg.fromId);
+        }
       }
     }
 
@@ -266,7 +299,11 @@ export class HivemindRouter {
       let outboundSent = false;
       if (result) {
         const client = deps.getClient(args.botName, args.msg.namespace);
-        outboundSent = client?.sendMessage(args.msg.fromId, result.responseText) ?? false;
+        // Replying → echo the inbound token verbatim (never mint a fresh one),
+        // so the peer that initiated can resolve our reply against its own
+        // store. Rule: initiating → mint+store (mcp-server / chat `>`);
+        // replying → echo. Undefined when the inbound carried no token.
+        outboundSent = client?.sendMessage(args.msg.fromId, result.responseText, args.msg.correlationId) ?? false;
         // Keep follow-up replies from this peer flowing into the same thread.
         if (outboundSent) await setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
       }

@@ -13,6 +13,7 @@ import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, save
 import { hivemindManager } from "../hivemind/manager.ts";
 import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
+import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
@@ -586,8 +587,14 @@ async function handlePeerOutbound(
 
   // Record so an unsolicited reply from this peer routes back to this thread
   // instead of falling into the default peer:<ns>/<name> thread for the bot.
-  await setPendingPeer(thread.botName, targetPeerId, thread.id);
-  const sent = client.sendMessage(targetPeerId, stripped);
+  // Mint a token for the precise path; keep the (bot, peer) row as the
+  // un-echoed fallback for peers that don't echo it.
+  const correlationId = mintCorrelationToken();
+  await Promise.all([
+    setCorrelationToken(thread.botName, correlationId, thread.id),
+    setPendingPeer(thread.botName, targetPeerId, thread.id),
+  ]);
+  const sent = client.sendMessage(targetPeerId, stripped, correlationId);
   if (!sent) {
     return { status: 503, body: { error: "Failed to send to peer (WebSocket write failed)" } };
   }

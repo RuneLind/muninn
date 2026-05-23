@@ -12,7 +12,7 @@ interface BrokerStub {
   port: number;
   stop: () => void;
   /** Pretend to be peer X and send a message to the connected client. */
-  sendFrom(fromId: string, text: string, fromSummary?: string): void;
+  sendFrom(fromId: string, text: string, fromSummary?: string, correlationId?: string): void;
   /** Last register/list_peers/send_message/etc. received from the client. */
   lastClientMessage: ClientMessage | null;
   /** All client→broker messages received. */
@@ -63,7 +63,7 @@ beforeAll(() => {
   stub = {
     port: server.port ?? 0,
     stop: () => server.stop(),
-    sendFrom(fromId: string, text: string, fromSummary = "") {
+    sendFrom(fromId: string, text: string, fromSummary = "", correlationId?: string) {
       activeWs?.send(JSON.stringify({
         type: "message",
         from_id: fromId,
@@ -71,6 +71,7 @@ beforeAll(() => {
         from_cwd: "/tmp",
         text,
         sent_at: new Date().toISOString(),
+        ...(correlationId ? { correlation_id: correlationId } : {}),
       }));
     },
     get lastClientMessage() { return received[received.length - 1] ?? null; },
@@ -286,6 +287,91 @@ test("FIFO: two concurrent asks to same peer resolve in order", async () => {
   const r2 = await ask2;
   expect(r1.text).toBe("answer-1");
   expect(r2.text).toBe("answer-2");
+
+  await c.stop();
+});
+
+test("sendMessage forwards correlation_id on the wire", async () => {
+  received.length = 0;
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  c.sendMessage("peer-A", "with token", "cid-xyz");
+
+  await waitFor(() => received.find((m) => m.type === "send_message") ?? null);
+  const sent = received.find((m) => m.type === "send_message");
+  expect(sent).toMatchObject({ type: "send_message", to: "peer-A", text: "with token", correlation_id: "cid-xyz" });
+
+  await c.stop();
+});
+
+test("askPeer forwards correlation_id on the wire", async () => {
+  received.length = 0;
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  const askPromise = c.askPeer("peer-A", "q", 5, "cid-ask");
+  await waitFor(() => received.find((m) => m.type === "send_message") ?? null);
+  const sent = received.find((m) => m.type === "send_message");
+  expect(sent).toMatchObject({ type: "send_message", correlation_id: "cid-ask" });
+
+  stub.sendFrom("peer-A", "a", "", "cid-ask");
+  expect((await askPromise).text).toBe("a");
+
+  await c.stop();
+});
+
+test("token match resolves the right ask out of FIFO order", async () => {
+  // Two concurrent asks with distinct tokens. The reply echoes the SECOND
+  // token, so it must resolve ask2 — not ask1 (which FIFO would pick). This is
+  // the pitfall #5 fix: correlation by token, not arrival order.
+  received.length = 0;
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  const ask1 = c.askPeer("peer-A", "first", 5, "cid-1");
+  const ask2 = c.askPeer("peer-A", "second", 5, "cid-2");
+  await waitFor(() => received.filter((m) => m.type === "send_message").length === 2 ? true : null);
+
+  // Reply for the second ask arrives first, tagged with its token.
+  stub.sendFrom("peer-A", "answer-for-2", "", "cid-2");
+  const r2 = await ask2;
+  expect(r2.text).toBe("answer-for-2");
+
+  // The first ask is still pending; its tagged reply resolves it.
+  stub.sendFrom("peer-A", "answer-for-1", "", "cid-1");
+  const r1 = await ask1;
+  expect(r1.text).toBe("answer-for-1");
+
+  await c.stop();
+});
+
+test("token-bearing reply matching no pending ask falls through to onIncomingMessage", async () => {
+  // A late reply (its ask already timed out / resolved) carries a token but
+  // matches no pending ask — it must NOT consume an unrelated pending ask;
+  // it goes to the router via onIncomingMessage, carrying the token.
+  received.length = 0;
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  const onIncoming = mock((m: { fromId: string; text: string; correlationId?: string }) => { void m; });
+  c.onIncomingMessage = onIncoming;
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  // A different pending ask exists (different token); it must stay unresolved.
+  const pending = c.askPeer("peer-A", "still waiting", 5, "cid-pending");
+  await waitFor(() => received.find((m) => m.type === "send_message") ?? null);
+
+  stub.sendFrom("peer-A", "late reply", "", "cid-orphan");
+
+  await waitFor(() => onIncoming.mock.calls.length > 0 ? true : null);
+  expect(onIncoming.mock.calls[0]?.[0]).toMatchObject({ fromId: "peer-A", text: "late reply", correlationId: "cid-orphan" });
+
+  // The unrelated ask is untouched — resolve it explicitly so the test ends clean.
+  stub.sendFrom("peer-A", "real answer", "", "cid-pending");
+  expect((await pending).text).toBe("real answer");
 
   await c.stop();
 });

@@ -406,6 +406,28 @@ CREATE INDEX idx_peer_thread_correlation_expires
   ON peer_thread_correlation (expires_at);
 
 -- ============================================================================
+-- Precise peer-reply correlation via opaque minted tokens. An initiating
+-- outbound mints a fresh correlation_id, sends it on the wire, and stores
+-- token → originating thread here; the peer's reply echoes the token and the
+-- router resolves it to the exact thread (no last-write-wins collision).
+-- Primary path; peer_thread_correlation above stays as the (bot, peer) un-echoed
+-- fallback. Grows one row per outbound, so it has its own expires_at sweep
+-- (cleanup runs opportunistically on insert). No FK on thread_id — the router
+-- validates + lazily clears stale rows.
+-- ============================================================================
+CREATE TABLE peer_correlation_tokens (
+  bot_name       TEXT        NOT NULL,
+  correlation_id TEXT        NOT NULL,
+  thread_id      UUID        NOT NULL,
+  expires_at     TIMESTAMPTZ NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (bot_name, correlation_id)
+);
+
+CREATE INDEX idx_peer_correlation_tokens_expires
+  ON peer_correlation_tokens (expires_at);
+
+-- ============================================================================
 -- Traces: observability spans for request tracing
 -- ============================================================================
 CREATE TABLE traces (

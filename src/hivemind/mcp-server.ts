@@ -7,14 +7,28 @@ import type { Namespace, Peer } from "./types.ts";
 import { DEFAULT_ASK_PEER_TIMEOUT_SEC } from "./config.ts";
 import { peekActiveTurn } from "./active-turn.ts";
 import { setPendingPeer } from "./correlation.ts";
+import { mintCorrelationToken, setCorrelationToken } from "./correlation-tokens.ts";
 
 /** Tie any inbound reply from `to` back to the thread this outbound came from,
  *  so peer responses route into the originating chat thread instead of the
- *  default `peer:<ns>/<name>` bucket. No-op if no active turn (e.g. tool
- *  invoked from a context that didn't set one). */
-async function bindOutboundToOriginThread(botName: string, to: string): Promise<void> {
+ *  default `peer:<ns>/<name>` bucket.
+ *
+ *  Mints an opaque token bound to this exact outbound and returns it for the
+ *  caller to put on the wire — the peer's echoed reply then resolves to this
+ *  thread precisely, even if another outbound to the same peer races (the
+ *  precise path). Also writes the `(bot, peer)` row as the un-echoed fallback
+ *  for raw peers that don't echo the token. Returns undefined (no token) when
+ *  there's no active turn to bind to — the reply then falls back to the default
+ *  bucket, same as before. */
+async function bindOutboundToOriginThread(botName: string, to: string): Promise<string | undefined> {
   const originThread = peekActiveTurn(botName);
-  if (originThread) await setPendingPeer(botName, to, originThread);
+  if (!originThread) return undefined;
+  const correlationId = mintCorrelationToken();
+  await Promise.all([
+    setCorrelationToken(botName, correlationId, originThread),
+    setPendingPeer(botName, to, originThread),
+  ]);
+  return correlationId;
 }
 
 const log = getLog("hivemind", "mcp-server");
@@ -300,9 +314,9 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       }
       // ask_peer's blocking reply flows back as the tool result, but late
       // (post-timeout) and unsolicited follow-up replies still need correlation.
-      await bindOutboundToOriginThread(botName, to);
+      const correlationId = await bindOutboundToOriginThread(botName, to);
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;
-      const reply = await client.askPeer(to, message, timeout);
+      const reply = await client.askPeer(to, message, timeout, correlationId);
       switch (reply.status) {
         case "ok":
           return textResult(reply.text);
@@ -329,8 +343,8 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       if (!client) {
         return textResult("No hivemind client registered for this bot", true);
       }
-      await bindOutboundToOriginThread(botName, to);
-      const ok = client.sendMessage(to, message);
+      const correlationId = await bindOutboundToOriginThread(botName, to);
+      const ok = client.sendMessage(to, message, correlationId);
       if (!ok) return textResult("Failed to send — not connected to broker", true);
       return textResult(`Message sent to peer ${to}.`);
     },
