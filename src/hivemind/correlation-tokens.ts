@@ -15,9 +15,12 @@
  * Unlike the fallback table (one row per peer, updated in place), this grows
  * **one row per outbound**, so `setCorrelationToken` opportunistically sweeps
  * expired rows on each write — cheap with the `expires_at` index, and avoids a
- * standalone background job. TTL matches `PEER_CORRELATION_TTL_MS` so a token
- * never expires before its `(bot, peer)` fallback; an expired token simply
- * misses the lookup and the router falls back cleanly.
+ * standalone background job. Both stores use `PEER_CORRELATION_TTL_MS`; the
+ * `(bot, peer)` fallback refreshes its expiry on every outbound (in-place
+ * upsert) while a token's expiry is fixed at mint, so over a very long
+ * conversation the token may expire first — the safe direction: an expired
+ * token simply misses the lookup and the router falls back cleanly to
+ * `(bot, peer)`.
  *
  * DB errors degrade gracefully: a failed write means the reply falls back to the
  * `(bot, peer)` path (or the default `peer:<ns>/<name>` thread), same as a miss.
@@ -49,15 +52,24 @@ export async function setCorrelationToken(
   const expiresAt = new Date(Date.now() + ttlMs);
   try {
     const sql = getDb();
-    // Opportunistic sweep — keeps the one-row-per-outbound table bounded
-    // without a background job. Indexed on expires_at, so it's cheap.
-    await sql`DELETE FROM peer_correlation_tokens WHERE expires_at < now()`;
+    // Persist the freshly-minted token FIRST so the precise path is durable.
     await sql`
       INSERT INTO peer_correlation_tokens (bot_name, correlation_id, thread_id, expires_at)
       VALUES (${botName}, ${correlationId}, ${threadId}, ${expiresAt})
       ON CONFLICT (bot_name, correlation_id)
       DO UPDATE SET thread_id = EXCLUDED.thread_id, expires_at = EXCLUDED.expires_at
     `;
+    // Opportunistic sweep AFTER the insert — keeps the one-row-per-outbound
+    // table bounded without a background job (indexed on expires_at, cheap).
+    // Best-effort: a sweep failure must not lose the token we just persisted.
+    try {
+      await sql`DELETE FROM peer_correlation_tokens WHERE expires_at < now()`;
+    } catch (sweepErr) {
+      log.debug("Correlation-token sweep skipped: {error}", {
+        botName, bot: botName,
+        error: sweepErr instanceof Error ? sweepErr.message : String(sweepErr),
+      });
+    }
     log.debug("Recorded correlation token {bot}/{cid} → thread {thread}", {
       botName, bot: botName, cid: correlationId, thread: threadId,
     });
