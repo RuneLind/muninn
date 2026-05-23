@@ -119,11 +119,16 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const t = params.tracer ?? new Tracer(`${platform}_message`, { botName: botConfig.name, userId, username, platform });
   const props: LogProps = { botName: botConfig.name, userId, username, platform };
 
-  // Ensure user exists in DB (creates on first encounter, updates last_seen_at)
+  // Ensure user exists in DB (creates on first encounter, updates last_seen_at).
+  // Skipped for autorespond (skipUserSave): there the `username` is the peer's
+  // name and `userId` is the thread owner, so stamping it would overwrite the
+  // owner's real username with the peer's name.
   const displayName = typeof userIdentity === "object" ? userIdentity.displayName : undefined;
-  ensureUser({ id: userId, username: username || userId, displayName, platform }).catch((err) => {
-    log.warn("Failed to ensure user: {error}", { ...props, error: err instanceof Error ? err.message : String(err) });
-  });
+  if (!params.skipUserSave) {
+    ensureUser({ id: userId, username: username || userId, displayName, platform }).catch((err) => {
+      log.warn("Failed to ensure user: {error}", { ...props, error: err instanceof Error ? err.message : String(err) });
+    });
+  }
 
   activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
   agentStatus.set("receiving", username);

@@ -12,9 +12,9 @@ import { setPendingPeer } from "./correlation.ts";
  *  so peer responses route into the originating chat thread instead of the
  *  default `peer:<ns>/<name>` bucket. No-op if no active turn (e.g. tool
  *  invoked from a context that didn't set one). */
-function bindOutboundToOriginThread(botName: string, to: string): void {
+async function bindOutboundToOriginThread(botName: string, to: string): Promise<void> {
   const originThread = peekActiveTurn(botName);
-  if (originThread) setPendingPeer(botName, to, originThread);
+  if (originThread) await setPendingPeer(botName, to, originThread);
 }
 
 const log = getLog("hivemind", "mcp-server");
@@ -300,7 +300,7 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       }
       // ask_peer's blocking reply flows back as the tool result, but late
       // (post-timeout) and unsolicited follow-up replies still need correlation.
-      bindOutboundToOriginThread(botName, to);
+      await bindOutboundToOriginThread(botName, to);
       const timeout = wait_seconds ?? DEFAULT_ASK_PEER_TIMEOUT_SEC;
       const reply = await client.askPeer(to, message, timeout);
       switch (reply.status) {
@@ -329,7 +329,7 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
       if (!client) {
         return textResult("No hivemind client registered for this bot", true);
       }
-      bindOutboundToOriginThread(botName, to);
+      await bindOutboundToOriginThread(botName, to);
       const ok = client.sendMessage(to, message);
       if (!ok) return textResult("Failed to send — not connected to broker", true);
       return textResult(`Message sent to peer ${to}.`);

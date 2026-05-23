@@ -10,7 +10,7 @@ import type { Config } from "../config.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
-import { setPendingPeer, _resetPendingPeersForTests } from "./correlation.ts";
+import { setPendingPeer } from "./correlation.ts";
 
 setupTestDb();
 
@@ -180,14 +180,12 @@ describe("HivemindRouter.route — peer correlation", () => {
   const CORR_BOT = "corr-router-bot";
   const CORR_OWNER = "corr-owner";
 
-  beforeEach(() => _resetPendingPeersForTests());
-
   test("routes inbound to the originating thread when correlation exists", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     // The "current" thread on this bot (e.g. a Jira research thread).
     const originating = await createThread(CORR_OWNER, CORR_BOT, "jira-research-RUNE-1234");
     // Outbound side recorded this when the bot called send_to_peer(huginn, ...).
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -203,12 +201,14 @@ describe("HivemindRouter.route — peer correlation", () => {
     expect(threads.find((t) => t.name === "peer:private/huginn")).toBeUndefined();
   });
 
-  test("falls back to peer:<ns>/<name> when correlation points at a different user's thread", async () => {
+  test("routes inbound to the originating thread even when it belongs to a non-default user", async () => {
+    // Bot's default user is CORR_OWNER, but a *different* user (e.g. Rune-4 in
+    // a web chat while vy-tester-1 is the bot default) initiated the outbound to
+    // this peer. The reply must land in that user's originating thread, not a
+    // fresh peer:<ns>/<name> bucket under the default user.
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
-    // Create a thread belonging to a different user — owner mismatch should
-    // trigger a warn + fallback to the default peer thread.
     const otherThread = await createThread("some-other-user", CORR_BOT, "other-user-thread");
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", otherThread.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", otherThread.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -216,16 +216,21 @@ describe("HivemindRouter.route — peer correlation", () => {
     expect(messageId).toBeTruthy();
 
     const sql = getDb();
-    const [row] = await sql`SELECT thread_id FROM messages WHERE id = ${messageId!}`;
-    const threads = await listThreads(CORR_OWNER, CORR_BOT);
-    const fallback = threads.find((t) => t.name === "peer:private/huginn");
-    expect(fallback).toBeDefined();
-    expect(row?.thread_id).toBe(fallback!.id);
+    const [row] = await sql`SELECT thread_id, user_id FROM messages WHERE id = ${messageId!}`;
+    // Reply persisted in the originating thread, attributed to its owner.
+    expect(row?.thread_id).toBe(otherThread.id);
+    expect(row?.user_id).toBe("some-other-user");
+
+    // No fallback peer thread under either user.
+    const ownerThreads = await listThreads(CORR_OWNER, CORR_BOT);
+    expect(ownerThreads.find((t) => t.name === "peer:private/huginn")).toBeUndefined();
+    const otherThreads = await listThreads("some-other-user", CORR_BOT);
+    expect(otherThreads.find((t) => t.name === "peer:private/huginn")).toBeUndefined();
   });
 
   test("falls back when the correlated thread was deleted", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", "00000000-0000-0000-0000-000000000000");
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", "00000000-0000-0000-0000-000000000000");
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);
@@ -239,7 +244,7 @@ describe("HivemindRouter.route — peer correlation", () => {
   test("follow-up inbound from the same peer still routes to the originating thread (no consume)", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     const originating = await createThread(CORR_OWNER, CORR_BOT, "jira-research-followup");
-    setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
 
     const chat = new ChatState();
     const router = new HivemindRouter(chat);

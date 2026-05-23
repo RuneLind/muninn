@@ -8,45 +8,47 @@
  * (`chat/routes.ts` → handlePeerOutbound), and autorespond replies
  * (`router.ts` → maybeAutorespond). Last-write-wins per peer.
  *
- * In-memory only — muninn restart drops the correlation and replies fall
- * back to `peer:<ns>/<name>`. Acceptable for the first cut; promote to a
- * DB-backed table if restart loss becomes a real problem.
+ * Persisted in the `peer_thread_correlation` table so it survives muninn
+ * restarts (frequent under `--watch`) and peers that take longer than the TTL
+ * to reply. DB errors degrade gracefully: a failed write just means the reply
+ * falls back to the default `peer:<ns>/<name>` thread, same as a cache miss.
  */
 
 import { getLog } from "../logging.ts";
+import { getDb } from "../db/client.ts";
 import { PEER_CORRELATION_TTL_MS } from "./config.ts";
 
 const log = getLog("hivemind", "correlation");
-
-interface PendingCorrelation {
-  threadId: string;
-  expiresAt: number;
-}
-
-const pending = new Map<string, PendingCorrelation>();
-
-function makeKey(botName: string, peerId: string): string {
-  return `${botName}\x00${peerId}`;
-}
 
 /**
  * Record that outbound traffic from `threadId` (on `botName`) has gone to
  * `peerId`. Inbound replies from that peer will route back into this thread
  * until the TTL expires or another thread overwrites the mapping.
  */
-export function setPendingPeer(
+export async function setPendingPeer(
   botName: string,
   peerId: string,
   threadId: string,
   ttlMs: number = PEER_CORRELATION_TTL_MS,
-): void {
-  pending.set(makeKey(botName, peerId), {
-    threadId,
-    expiresAt: Date.now() + ttlMs,
-  });
-  log.debug("Recorded peer correlation {bot}/{peer} → thread {thread}", {
-    botName, bot: botName, peer: peerId, thread: threadId,
-  });
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + ttlMs);
+  try {
+    const sql = getDb();
+    await sql`
+      INSERT INTO peer_thread_correlation (bot_name, peer_id, thread_id, expires_at, updated_at)
+      VALUES (${botName}, ${peerId}, ${threadId}, ${expiresAt}, now())
+      ON CONFLICT (bot_name, peer_id)
+      DO UPDATE SET thread_id = EXCLUDED.thread_id, expires_at = EXCLUDED.expires_at, updated_at = now()
+    `;
+    log.debug("Recorded peer correlation {bot}/{peer} → thread {thread}", {
+      botName, bot: botName, peer: peerId, thread: threadId,
+    });
+  } catch (err) {
+    log.warn("Failed to persist peer correlation {bot}/{peer}: {error}", {
+      botName, bot: botName, peer: peerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -55,23 +57,33 @@ export function setPendingPeer(
  * consume the entry — follow-up replies from the same peer still route to
  * the originating thread until the TTL elapses.
  */
-export function getPendingPeer(botName: string, peerId: string): string | null {
-  const key = makeKey(botName, peerId);
-  const entry = pending.get(key);
-  if (!entry) return null;
-  if (entry.expiresAt < Date.now()) {
-    pending.delete(key);
+export async function getPendingPeer(botName: string, peerId: string): Promise<string | null> {
+  try {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT thread_id
+      FROM peer_thread_correlation
+      WHERE bot_name = ${botName} AND peer_id = ${peerId} AND expires_at > now()
+    `;
+    return rows.length > 0 ? (rows[0]!.thread_id as string) : null;
+  } catch (err) {
+    log.warn("Failed to read peer correlation {bot}/{peer}: {error}", {
+      botName, bot: botName, peer: peerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
-  return entry.threadId;
 }
 
-/** Drop a specific correlation entry. */
-export function clearPendingPeer(botName: string, peerId: string): void {
-  pending.delete(makeKey(botName, peerId));
-}
-
-/** Test-only — reset all correlations between tests. */
-export function _resetPendingPeersForTests(): void {
-  pending.clear();
+/** Drop a specific correlation entry (e.g. its thread was deleted). */
+export async function clearPendingPeer(botName: string, peerId: string): Promise<void> {
+  try {
+    const sql = getDb();
+    await sql`DELETE FROM peer_thread_correlation WHERE bot_name = ${botName} AND peer_id = ${peerId}`;
+  } catch (err) {
+    log.warn("Failed to clear peer correlation {bot}/{peer}: {error}", {
+      botName, bot: botName, peer: peerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

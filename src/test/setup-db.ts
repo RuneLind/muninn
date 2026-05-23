@@ -18,6 +18,7 @@ const ALL_TABLES = [
   "user_settings",
   "users",
   "bot_default_user",
+  "peer_thread_correlation",
 ];
 
 let dbInitialized = false;

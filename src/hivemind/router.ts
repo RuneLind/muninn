@@ -7,12 +7,13 @@ import type { Config } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getOrCreatePeerThread, getThreadById, setThreadAutoRespondPaused } from "../db/threads.ts";
 import { getBotDefaultUser } from "../db/chat-preferences.ts";
+import { getUser } from "../db/users.ts";
 import { processMessage as defaultProcessMessage } from "../core/message-processor.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import { Tracer } from "../tracing/index.ts";
 import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
-import { getPendingPeer, setPendingPeer } from "./correlation.ts";
+import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -90,38 +91,64 @@ export class HivemindRouter {
   ) {}
 
   async route(botName: string, msg: InboundPeerMessage): Promise<string | null> {
-    const userId = await getBotDefaultUser(botName);
-    if (!userId) {
-      log.warn(
-        "Inbound peer message for bot {botName} dropped — no default user configured. " +
-          "Set one via the chat page or POST /chat/bot-preferences/{botName}/default-user.",
-        { botName, fromId: msg.fromId },
-      );
-      return null;
-    }
-
     const peerName = peerNameFor(msg);
 
-    // If this bot recently sent outbound to this peer from some other thread,
-    // route the reply back into that originating thread instead of the
-    // default peer:<ns>/<peerName> bucket. Correlation is set by
-    // mcp-server.ts (ask_peer/send_to_peer), chat/routes.ts (`>` outbound),
-    // and the autorespond reply below.
-    const correlatedThreadId = getPendingPeer(botName, msg.fromId);
-    let correlatedThread: Awaited<ReturnType<typeof getThreadById>> = null;
+    // If this bot recently sent outbound to this peer from some thread, route
+    // the reply back into that originating thread instead of the default
+    // peer:<ns>/<peerName> bucket. Correlation is set by mcp-server.ts
+    // (ask_peer/send_to_peer), chat/routes.ts (`>` outbound), and the
+    // autorespond reply below.
+    //
+    // The originating thread can belong to ANY user — whoever was talking to
+    // the peer — which is not necessarily the bot's default user. So we derive
+    // the destination user from the correlated thread itself. The bot default
+    // user is only used as a fallback for uncorrelated inbound (a peer reaching
+    // out unsolicited, with no thread to anchor to).
+    //
+    // Caveat: correlation is keyed (botName, peerId) last-write-wins, so if two
+    // users message the SAME peer on the SAME bot near-simultaneously, the later
+    // outbound overwrites the binding and the peer's reply routes to that user's
+    // thread. Dropping the old `t.userId === userId` guard widens the blast
+    // radius of that race from "default-user only" to any user. Rare for the
+    // single-primary-user bots we run today; the real fix is per-turn
+    // correlation tokens (bind threadId per MCP session) — see CLAUDE.md.
+    let thread: Awaited<ReturnType<typeof getThreadById>> = null;
+    const correlatedThreadId = await getPendingPeer(botName, msg.fromId);
     if (correlatedThreadId) {
       const t = await getThreadById(correlatedThreadId);
-      if (t && t.userId === userId && t.botName === botName) {
-        correlatedThread = t;
-      } else if (t) {
-        log.warn(
-          "Stale peer correlation for {botName}/{fromId} → thread {threadId} (owner mismatch). Falling back to peer:<ns>/<name>.",
-          { botName, fromId: msg.fromId, threadId: correlatedThreadId },
-        );
+      if (t && t.botName === botName) {
+        thread = t;
+      } else {
+        // Thread was deleted, or belongs to another bot — the binding is stale.
+        // Drop it so it can't keep mis-routing, then fall back below.
+        if (t) {
+          log.warn(
+            "Stale peer correlation for {botName}/{fromId} → thread {threadId} (bot mismatch). Falling back to peer:<ns>/<name>.",
+            { botName, fromId: msg.fromId, threadId: correlatedThreadId },
+          );
+        }
+        await clearPendingPeer(botName, msg.fromId);
       }
     }
 
-    const thread = correlatedThread ?? await getOrCreatePeerThread(userId, botName, `${msg.namespace}/${peerName}`);
+    if (!thread) {
+      const defaultUserId = await getBotDefaultUser(botName);
+      if (!defaultUserId) {
+        log.warn(
+          "Inbound peer message for bot {botName} dropped — no default user configured. " +
+            "Set one via the chat page or POST /chat/bot-preferences/{botName}/default-user.",
+          { botName, fromId: msg.fromId },
+        );
+        return null;
+      }
+      thread = await getOrCreatePeerThread(defaultUserId, botName, `${msg.namespace}/${peerName}`);
+    }
+
+    const userId = thread.userId;
+    // Pass the user's real name so a peer-recreated conversation shell isn't
+    // stamped with the "chat-user" placeholder (which a later typed message
+    // would otherwise persist over the user's real username).
+    const user = await getUser(userId);
 
     const platform: Platform = "web";
     const [messageId, conv] = await Promise.all([
@@ -134,7 +161,7 @@ export class HivemindRouter {
         threadId: thread.id,
         fromPeerId: msg.fromId,
       }),
-      this.chatState.findOrCreateBotConversation({ botName, userId }),
+      this.chatState.findOrCreateBotConversation({ botName, userId, username: user?.username }),
     ]);
 
     const chatMessage: ChatMessage = {
@@ -241,7 +268,7 @@ export class HivemindRouter {
         const client = deps.getClient(args.botName, args.msg.namespace);
         outboundSent = client?.sendMessage(args.msg.fromId, result.responseText) ?? false;
         // Keep follow-up replies from this peer flowing into the same thread.
-        if (outboundSent) setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
+        if (outboundSent) await setPendingPeer(args.botName, args.msg.fromId, args.thread.id);
       }
       tracer.event("peer_outbound", {
         toId: args.msg.fromId,

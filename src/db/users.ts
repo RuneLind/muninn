@@ -14,7 +14,12 @@ export interface User {
 
 /**
  * Ensure a user exists in the DB. Creates on first encounter, updates last_seen_at on every call.
- * Username is updated only if a non-empty value is provided (prevents blanking).
+ *
+ * An existing username is only overwritten by a real value — not by an empty
+ * string, the user's own id, or the `chat-user` placeholder that the chat layer
+ * stamps onto a freshly-created (often peer-recreated) conversation shell. Without
+ * that last guard a peer reply could recreate a user's conversation with the
+ * placeholder name and the next typed message would clobber their real username.
  */
 export async function ensureUser(params: {
   id: string;
@@ -28,7 +33,9 @@ export async function ensureUser(params: {
     VALUES (${params.id}, ${params.username}, ${params.displayName ?? null}, ${params.platform}, now())
     ON CONFLICT (id) DO UPDATE SET
       username = CASE
-        WHEN EXCLUDED.username != '' AND EXCLUDED.username != users.id
+        WHEN EXCLUDED.username != ''
+          AND EXCLUDED.username != users.id
+          AND EXCLUDED.username != 'chat-user'
         THEN EXCLUDED.username
         ELSE users.username
       END,
