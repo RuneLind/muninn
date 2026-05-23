@@ -11,6 +11,7 @@ import type { processMessage as ProcessMessageFn } from "../core/message-process
 import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
+import { setCorrelationToken } from "./correlation-tokens.ts";
 
 setupTestDb();
 
@@ -228,6 +229,58 @@ describe("HivemindRouter.route — peer correlation", () => {
     expect(otherThreads.find((t) => t.name === "peer:private/huginn")).toBeUndefined();
   });
 
+  test("correlation token routes to the exact originating thread, beating the (bot,peer) fallback", async () => {
+    // The precision win: two outbounds to the SAME peer from two threads. The
+    // (bot,peer) table is last-write-wins → points at threadB. But the reply
+    // echoes threadA's token, so it must land in threadA, not threadB.
+    await setBotDefaultUser(CORR_BOT, CORR_OWNER);
+    const threadA = await createThread(CORR_OWNER, CORR_BOT, "research-A");
+    const threadB = await createThread(CORR_OWNER, CORR_BOT, "research-B");
+    await setCorrelationToken(CORR_BOT, "cid-A", threadA.id);
+    await setCorrelationToken(CORR_BOT, "cid-B", threadB.id);
+    // Last-write-wins fallback points at B (the later outbound).
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", threadB.id);
+
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+    const messageId = await router.route(CORR_BOT, makeMsg({ correlationId: "cid-A" }));
+    expect(messageId).toBeTruthy();
+
+    const sql = getDb();
+    const [row] = await sql`SELECT thread_id FROM messages WHERE id = ${messageId!}`;
+    expect(row?.thread_id).toBe(threadA.id);
+  });
+
+  test("falls back to the (bot,peer) table when the echoed token is unknown", async () => {
+    await setBotDefaultUser(CORR_BOT, CORR_OWNER);
+    const originating = await createThread(CORR_OWNER, CORR_BOT, "fallback-thread");
+    await setPendingPeer(CORR_BOT, "peer-uuid-aaa", originating.id);
+
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+    // Token muninn never minted — misses the token store, falls back.
+    const messageId = await router.route(CORR_BOT, makeMsg({ correlationId: "cid-foreign" }));
+    expect(messageId).toBeTruthy();
+
+    const sql = getDb();
+    const [row] = await sql`SELECT thread_id FROM messages WHERE id = ${messageId!}`;
+    expect(row?.thread_id).toBe(originating.id);
+  });
+
+  test("falls back when the token's thread was deleted", async () => {
+    await setBotDefaultUser(CORR_BOT, CORR_OWNER);
+    await setCorrelationToken(CORR_BOT, "cid-stale", "00000000-0000-0000-0000-000000000000");
+
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+    const messageId = await router.route(CORR_BOT, makeMsg({ correlationId: "cid-stale" }));
+    expect(messageId).toBeTruthy();
+
+    // No live token or (bot,peer) row → default peer thread.
+    const threads = await listThreads(CORR_OWNER, CORR_BOT);
+    expect(threads.find((t) => t.name === "peer:private/huginn")).toBeDefined();
+  });
+
   test("falls back when the correlated thread was deleted", async () => {
     await setBotDefaultUser(CORR_BOT, CORR_OWNER);
     await setPendingPeer(CORR_BOT, "peer-uuid-aaa", "00000000-0000-0000-0000-000000000000");
@@ -277,10 +330,10 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     } as BotConfig;
   }
 
-  function makeStubClient(sentRef: { calls: { to: string; text: string }[]; result: boolean }) {
+  function makeStubClient(sentRef: { calls: { to: string; text: string; correlationId?: string }[]; result: boolean }) {
     return {
-      sendMessage: (to: string, text: string) => {
-        sentRef.calls.push({ to, text });
+      sendMessage: (to: string, text: string, correlationId?: string) => {
+        sentRef.calls.push({ to, text, correlationId });
         return sentRef.result;
       },
     } as unknown as HivemindBotClient;
@@ -290,7 +343,7 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
 
   function makeDeps(opts: {
     botConfig: BotConfig | undefined;
-    sent: { calls: { to: string; text: string }[]; result: boolean };
+    sent: { calls: { to: string; text: string; correlationId?: string }[]; result: boolean };
     process: StubProcessMessage;
     clientLookups?: { calls: { botName: string; namespace: string }[] };
   }): AutorespondDeps {
@@ -360,6 +413,37 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     expect(sent.calls).toHaveLength(1);
     expect(sent.calls[0]!.to).toBe("auto-peer-1");
     expect(sent.calls[0]!.text).toBe("ack: index rebuild started");
+  });
+
+  test("autorespond echoes the inbound correlation token on its reply", async () => {
+    // Replying → echo the inbound token verbatim (set-vs-echo discipline), so
+    // the initiating peer can resolve our reply against its own token store.
+    await setBotDefaultUser(AR_BOT, AR_OWNER);
+    await clearAssistantMessagesForThread("private/huginn");
+    const chat = new ChatState();
+    const sent = { calls: [] as { to: string; text: string; correlationId?: string }[], result: true };
+    const stubProcess: StubProcessMessage = async (params) => {
+      await saveMessage({
+        userId: params.userId, botName: params.botConfig.name, role: "assistant",
+        content: "echoed reply", platform: "web", threadId: params.threadId,
+      });
+      return {
+        responseText: "echoed reply",
+        traceId: "t", durationMs: 1, inputTokens: 1, outputTokens: 1,
+        costUsd: 0, model: "stub", numTurns: 1,
+      };
+    };
+    const router = new HivemindRouter(chat, makeDeps({
+      botConfig: makeBotConfig(), sent, process: stubProcess,
+    }));
+
+    await router.route(AR_BOT, makeMsg({ correlationId: "inbound-cid" }));
+    await router.pendingAutorespond;
+
+    expect(sent.calls).toHaveLength(1);
+    expect(sent.calls[0]!.correlationId).toBe("inbound-cid");
+
+    await clearAssistantMessagesForThread("private/huginn");
   });
 
   test("does not autorespond when peer is not on the allowlist", async () => {

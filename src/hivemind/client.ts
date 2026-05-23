@@ -23,6 +23,9 @@ const REGISTRATION_TIMEOUT_MS = 5_000;
 
 interface PendingAsk {
   fromId: PeerId;
+  /** Opaque token minted for this ask, if any. A reply that echoes it resolves
+   *  this exact ask — disambiguating concurrent ask_peer calls to one peer. */
+  correlationId?: string;
   resolve: (reply: { text: string; sentAt: string }) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -65,6 +68,9 @@ export class HivemindBotClient {
         text: string;
         sentAt: string;
         namespace: Namespace;
+        /** Opaque token the reply echoed, if any — the router resolves it
+         *  against the minted-token store to find the originating thread. */
+        correlationId?: string;
       }) => void)
     | null = null;
 
@@ -135,9 +141,12 @@ export class HivemindBotClient {
     return this.send({ type: "set_summary", summary });
   }
 
-  /** Fire-and-forget message to a peer. Returns true if the WS write succeeded. */
-  sendMessage(toPeerId: PeerId, text: string): boolean {
-    return this.send({ type: "send_message", to: toPeerId, text });
+  /** Fire-and-forget message to a peer. Returns true if the WS write succeeded.
+   *  `correlationId`, when present, is either the token muninn minted for the
+   *  originating thread (initiating outbound) or the inbound token being echoed
+   *  back verbatim (reply outbound) — see correlation-tokens.ts / router.ts. */
+  sendMessage(toPeerId: PeerId, text: string, correlationId?: string): boolean {
+    return this.send({ type: "send_message", to: toPeerId, text, correlation_id: correlationId });
   }
 
   /**
@@ -146,7 +155,7 @@ export class HivemindBotClient {
    *
    * If multiple ask_peer calls target the same peer, replies match in FIFO order.
    */
-  askPeer(toPeerId: PeerId, text: string, timeoutSec: number): Promise<AskPeerResult> {
+  askPeer(toPeerId: PeerId, text: string, timeoutSec: number, correlationId?: string): Promise<AskPeerResult> {
     if (!this.isConnected) {
       return Promise.resolve({ status: "not_connected", text: "not connected to broker — message not sent", sentAt: new Date().toISOString() });
     }
@@ -154,6 +163,7 @@ export class HivemindBotClient {
     return new Promise((resolve) => {
       const ask: PendingAsk = {
         fromId: toPeerId,
+        correlationId,
         resolve: (reply) => resolve({ status: "ok", text: reply.text, sentAt: reply.sentAt }),
         timer: setTimeout(() => {
           this.dequeueAsk(toPeerId, ask);
@@ -165,7 +175,7 @@ export class HivemindBotClient {
       queue.push(ask);
       this.pendingAsks.set(toPeerId, queue);
 
-      const sent = this.send({ type: "send_message", to: toPeerId, text });
+      const sent = this.send({ type: "send_message", to: toPeerId, text, correlation_id: correlationId });
       if (!sent) {
         clearTimeout(ask.timer);
         this.dequeueAsk(toPeerId, ask);
@@ -332,12 +342,27 @@ export class HivemindBotClient {
   private dispatchInboundMessage(msg: Extract<BrokerMessage, { type: "message" }>): void {
     const queue = this.pendingAsks.get(msg.from_id);
     if (queue && queue.length > 0) {
-      const ask = queue.shift()!;
-      if (queue.length === 0) this.pendingAsks.delete(msg.from_id);
-      clearTimeout(ask.timer);
-      ask.resolve({ text: msg.text, sentAt: msg.sent_at });
-      log.debug("Resolved pending ask_peer from {fromId}", { botName: this.botName, fromId: msg.from_id });
-      return;
+      // Prefer the pending ask whose minted token this reply echoes; that
+      // disambiguates concurrent ask_peer calls to the same peer (pitfall #5).
+      // With no token (raw peer, or pre-broker-rollout) fall back to FIFO —
+      // oldest ask, same as before. A token-bearing reply that matches no
+      // pending ask is an unsolicited/late reply: fall through to the router so
+      // it can route by token instead of wrongly consuming an unrelated ask.
+      let idx = -1;
+      if (msg.correlation_id) {
+        idx = queue.findIndex((a) => a.correlationId === msg.correlation_id);
+      } else {
+        idx = 0;
+      }
+      if (idx >= 0) {
+        const ask = queue[idx]!;
+        queue.splice(idx, 1);
+        if (queue.length === 0) this.pendingAsks.delete(msg.from_id);
+        clearTimeout(ask.timer);
+        ask.resolve({ text: msg.text, sentAt: msg.sent_at });
+        log.debug("Resolved pending ask_peer from {fromId}", { botName: this.botName, fromId: msg.from_id });
+        return;
+      }
     }
     log.debug("Inbound message from {fromId} (no pending ask)", { botName: this.botName, fromId: msg.from_id });
     this.onIncomingMessage?.({
@@ -347,6 +372,7 @@ export class HivemindBotClient {
       text: msg.text,
       sentAt: msg.sent_at,
       namespace: this.namespace,
+      correlationId: msg.correlation_id,
     });
   }
 

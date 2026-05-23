@@ -40,7 +40,7 @@ export type ClientMessage =
       agent_type?: AgentType;
     }
   | { type: "set_summary"; summary: string }
-  | { type: "send_message"; to: PeerId; text: string }
+  | { type: "send_message"; to: PeerId; text: string; correlation_id?: string }
   | { type: "list_peers"; scope: "namespace" | "machine" }
   | { type: "heartbeat" };
 
@@ -55,6 +55,11 @@ export type BrokerMessage =
       from_cwd: string;
       text: string;
       sent_at: string;
+      /** Opaque correlation token, echoed from the originator's outbound.
+       *  Absent until the broker carries it (rollout: broker ships first). */
+      correlation_id?: string;
+      /** Broker row id — reserved for a future reply-by-id variant. */
+      message_id?: number;
     }
   | { type: "peers"; peers: Peer[] }
   | { type: "error"; error: string }
