@@ -1,5 +1,10 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
 
+// Force the CLI Haiku backend so the spawnHaiku mock below is actually exercised.
+// Without this the dev's ambient .env (HAIKU_BACKEND / ANTHROPIC_API_KEY) makes
+// the decomposer hit a real backend, bypassing the mock — flaky + env-sensitive.
+process.env.HAIKU_BACKEND = "cli";
+
 const mockSpawnHaiku = mock(() => Promise.resolve({
   result: '{"subQuestions": ["What is BUC 02?"], "rationale": "Single lookup"}',
   inputTokens: 10,
@@ -17,6 +22,9 @@ mock.module("../scheduler/executor.ts", () => ({
   spawnHaiku: mockSpawnHaiku,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
+  // trackUsage is imported transitively (haiku-direct.ts) — stub it so the
+  // partial module mock doesn't drop the export and break the import.
+  trackUsage: () => {},
 }));
 
 mock.module("../dashboard/routes/knowledge-api-client.ts", () => ({
