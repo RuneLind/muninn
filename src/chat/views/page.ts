@@ -832,7 +832,7 @@ const CHAT_SCRIPT = `
         }
       }
     }
-    if (msg.fromPeerId) return msg.fromPeerId.slice(0, 8);
+    if (msg.fromPeerId) return msg.fromPeerId;
     return 'peer';
   }
 
