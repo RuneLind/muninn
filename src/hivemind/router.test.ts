@@ -812,8 +812,14 @@ describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", 
   function makeBotConfig(over?: {
     autoReengageOnRed?: boolean;
     autoOrchestrate?: boolean;
+    reengageClassifier?: boolean;
     maxAutoTurnsPerHour?: number;
   }): BotConfig {
+    const hasDevLoop =
+      over &&
+      (over.autoReengageOnRed !== undefined ||
+        over.autoOrchestrate !== undefined ||
+        over.reengageClassifier !== undefined);
     return {
       name: P6_BOT,
       dir: `/tmp/bots/${P6_BOT}`,
@@ -824,20 +830,28 @@ describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", 
         enabled: true,
         namespaces: ["private"],
         maxAutoTurnsPerHour: over?.maxAutoTurnsPerHour,
-        devLoop:
-          over && (over.autoReengageOnRed !== undefined || over.autoOrchestrate !== undefined)
-            ? { autoReengageOnRed: over.autoReengageOnRed, autoOrchestrate: over.autoOrchestrate }
-            : undefined,
+        devLoop: hasDevLoop
+          ? {
+              autoReengageOnRed: over!.autoReengageOnRed,
+              autoOrchestrate: over!.autoOrchestrate,
+              reengageClassifier: over!.reengageClassifier,
+            }
+          : undefined,
       },
     } as BotConfig;
   }
 
-  function makeDeps(botConfig: BotConfig | undefined, process: typeof ProcessMessageFn): AutorespondDeps {
+  function makeDeps(
+    botConfig: BotConfig | undefined,
+    process: typeof ProcessMessageFn,
+    classify?: AutorespondDeps["classifyReengageRole"],
+  ): AutorespondDeps {
     return {
       getBotConfig: () => botConfig,
       getClient: () => null,
       config: {} as Config,
       processMessage: process,
+      classifyReengageRole: classify,
     };
   }
 
@@ -1034,5 +1048,78 @@ describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", 
     // the user can re-run e2e — recoverable, not stranded at a turn-less building.
     expect((await getDevRunById(run.id))!.status).toBe("ready_to_verify");
     expect((await getDevRunById(run.id))!.reengageCount).toBe(1); // the attempt stands
+  });
+
+  test("routes to the TEST agent when the classifier (opted in) judges spec/test drift", async () => {
+    const { run } = await seedVerifyingRun("research-6b000008");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const classifyCalls: Array<{ ctxHasCi: boolean }> = [];
+    const classify: AutorespondDeps["classifyReengageRole"] = async (ctx) => {
+      classifyCalls.push({ ctxHasCi: !!ctx.ciUrl });
+      return "test";
+    };
+    const router = new HivemindRouter(
+      chat,
+      makeDeps(makeBotConfig({ autoReengageOnRed: true, reengageClassifier: true }), stub.fn, classify),
+    );
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(classifyCalls).toHaveLength(1);
+    expect(classifyCalls[0]!.ctxHasCi).toBe(true); // got the failure context (CI URL)
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.text).toContain('role: "test"'); // routed to the test agent
+    expect(stub.calls[0]!.text).toContain("testpeer"); // re-delegate to the test peer
+    expect(stub.calls[0]!.text).not.toContain('role: "build"');
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("building");
+    expect(after.reengageCount).toBe(1);
+  });
+
+  test("routes to the BUILD agent when the classifier judges a feature bug", async () => {
+    const { run } = await seedVerifyingRun("research-6b000009");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const classify: AutorespondDeps["classifyReengageRole"] = async () => "build";
+    const router = new HivemindRouter(
+      chat,
+      makeDeps(makeBotConfig({ autoReengageOnRed: true, reengageClassifier: true }), stub.fn, classify),
+    );
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.text).toContain('role: "build"');
+    expect(stub.calls[0]!.text).toContain("buildpeer");
+    expect(stub.calls[0]!.text).not.toContain('role: "test"');
+  });
+
+  test("does NOT consult the classifier when reengageClassifier is off (always build)", async () => {
+    const { run } = await seedVerifyingRun("research-6b00000a");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    let classifyCount = 0;
+    const classify: AutorespondDeps["classifyReengageRole"] = async () => {
+      classifyCount++;
+      return "test";
+    };
+    const router = new HivemindRouter(
+      chat,
+      // autoReengageOnRed on, reengageClassifier OFF — the verified always-build path.
+      makeDeps(makeBotConfig({ autoReengageOnRed: true }), stub.fn, classify),
+    );
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(classifyCount).toBe(0); // classifier not consulted
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.text).toContain('role: "build"'); // default route stands
   });
 });

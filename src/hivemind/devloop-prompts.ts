@@ -51,6 +51,9 @@ export interface ReengageContext {
   orchestrateMessage?: string;
   /** peer_name of the build handoff to prefer re-delegating to (same branch). */
   buildPeer?: string;
+  /** peer_name of the test handoff to prefer re-delegating to, when the classifier
+   *  routes a red to the TEST agent (spec/test drift) instead of build. */
+  testPeer?: string;
 }
 
 /**
@@ -69,16 +72,21 @@ export function buildReengageContext(handoffs: DevRunHandoff[]): ReengageContext
   // may have several build rows (delegate_task always inserts). The latest is the
   // peer that did the work the failed e2e ran against, so prefer it for the fix.
   const buildPeer = handoffs.filter((h) => h.role === "build").at(-1)?.peerName;
+  // Same "most recent" rule for the test peer — used when the classifier routes
+  // the red to the TEST agent (spec/test drift) rather than build.
+  const testPeer = handoffs.filter((h) => h.role === "test").at(-1)?.peerName;
   return {
     ciUrl: parsed ? `https://github.com/${parsed.repo}/actions/runs/${parsed.runId}` : undefined,
     orchestrateMessage: orchMessage?.trim().slice(0, 1500),
     buildPeer,
+    testPeer,
   };
 }
 
 /** Instruction handed to the bot to re-engage the BUILD agent after a red e2e
- *  (Phase 6b). First cut: always route to build (most reds are feature bugs); a
- *  Haiku build-vs-test classifier is the follow-up. Mirrors the orchestrate
+ *  (Phase 6b). The default route — most reds are feature bugs. When the optional
+ *  Haiku classifier (`reengageClassifier`) instead judges the red to be spec/test
+ *  drift, `testReengagePrompt` routes to the test agent. Mirrors the orchestrate
  *  prompt's shape (recommend → delegate_task → report back). */
 export function buildReengagePrompt(ctx: ReengageContext): string {
   // Only fired on an orchestrate red (a failed cross-repo e2e), so the lead is
@@ -91,5 +99,22 @@ export function buildReengagePrompt(ctx: ReengageContext): string {
     ' to fix it: use the delegate_task tool (NOT send_to_peer), role: "build". Hand it the failure context above plus the workplan/spec, and ask it to diagnose the e2e failure, implement the fix, and report back done. ' +
     'PREFER the same build peer that did the original implementation so the fix lands on the same branch. ' +
     'AVAILABILITY GUARD: if it is offline, pick another online build agent (or tell me which to start). ' +
+    'Then report back here what you sent and to whom.';
+}
+
+/** Instruction handed to the bot to re-engage the TEST agent after a red e2e the
+ *  classifier judged to be spec/test drift (Phase 6b classifier follow-up) — the
+ *  feature code is fine; the e2e itself is wrong (stale selector, outdated
+ *  assertion, test data, or a spec that drifted from the implemented behaviour).
+ *  Mirrors `buildReengagePrompt`'s shape but routes role: "test". */
+export function testReengagePrompt(ctx: ReengageContext): string {
+  return 'The cross-repo e2e for this dev run came back RED, but the failure looks like TEST/SPEC drift rather than a feature-code bug — the e2e itself (selector, assertion, test data, or a spec that no longer matches the implemented behaviour) is most likely what needs fixing.\n\n' +
+    (ctx.ciUrl ? 'Failed CI run: ' + ctx.ciUrl + '\n' : '') +
+    (ctx.orchestrateMessage ? 'What the e2e agent reported:\n' + ctx.orchestrateMessage + '\n\n' : '\n') +
+    'Re-engage the TEST agent' + (ctx.testPeer ? ' (' + ctx.testPeer + ')' : '') +
+    ' to fix it: use the delegate_task tool (NOT send_to_peer), role: "test". Hand it the failure context above plus the domain spec, and ask it to diagnose the e2e failure, correct the test/spec (re-run `spec-from-analysis` so the binding refreshes against the approved domain spec WITHOUT clobbering valid technical binding), re-run, and report back done. ' +
+    'PREFER the same test peer that authored the e2e so the fix lands on the same branch. ' +
+    'If on diagnosis it turns out to be a genuine feature-code bug after all, say so and recommend re-engaging the build agent instead. ' +
+    'AVAILABILITY GUARD: if it is offline, pick another online test agent (or tell me which to start). ' +
     'Then report back here what you sent and to whom.';
 }

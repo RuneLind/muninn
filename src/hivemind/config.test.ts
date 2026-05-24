@@ -99,3 +99,22 @@ test("devLoop parses autoOrchestrate + autoReengageOnRed (PR 6a + 6b)", () => {
     })?.devLoop,
   ).toEqual({ autoReengageOnRed: true });
 });
+
+test("devLoop parses reengageClassifier (PR 6b classifier follow-up)", () => {
+  expect(
+    parseHivemindConfig({
+      enabled: true,
+      namespaces: ["private"],
+      devLoop: { autoReengageOnRed: true, reengageClassifier: true },
+    })?.devLoop,
+  ).toEqual({ autoReengageOnRed: true, reengageClassifier: true });
+
+  // Non-boolean reengageClassifier is ignored.
+  expect(
+    parseHivemindConfig({
+      enabled: true,
+      namespaces: ["private"],
+      devLoop: { reengageClassifier: "sometimes" },
+    })?.devLoop,
+  ).toBeUndefined();
+});
