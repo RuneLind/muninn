@@ -1,9 +1,3 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
-
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
@@ -41,75 +35,7 @@ test("hello world", () => {
 
 ## Frontend
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
-
-Server:
-
-```ts#index.ts
-import index from "./index.html"
-
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
-
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
+Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. If a client bundle is ever needed, use Bun HTML imports (`Bun.serve({ routes: { "/": index } })`), never webpack/vite.
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
@@ -117,7 +43,7 @@ For more information, read the Bun API docs in `node_modules/bun-types/docs/**.m
 
 ## Muninn Project
 
-Personal AI assistant — multi-bot Telegram platform with pluggable AI connectors (Claude CLI or Copilot SDK), a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
+Personal AI assistant — multi-bot Telegram platform with pluggable AI connectors (Claude CLI, Copilot SDK, OpenAI-compat, or Claude SDK), a live Hono dashboard, semantic memory, goal tracking, scheduled tasks, proactive watchers, and voice support.
 
 ### Running
 
@@ -152,7 +78,7 @@ Each bot lives in `bots/<name>/` with its own:
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.json` — tool permissions
 
-Each bot selects its AI connector via `config.json` (`"connector": "claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. The Copilot SDK connector uses a shared JSON-RPC client with per-request sessions. The OpenAI-compat connector calls any OpenAI-compatible API (Ollama, LM Studio, vLLM) with MCP tool execution and streaming. The Claude SDK connector uses Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable for a direct Anthropic chat transport without the CLI subprocess.
+Each bot selects its AI connector via `config.json` (`"connector"`: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. See "Switching chat connector" below for what each connector does and when to pick it; the Conventions section covers their internal mechanics.
 
 A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOKEN_<NAME>` env var.
 
@@ -163,7 +89,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Bot Discovery | `src/bots/config.ts` | Auto-discovers bot folders, loads persona + config |
 | Bot | `src/bot/` | Grammy Telegram handlers (text + voice), auth middleware |
 | Core | `src/core/` | Central message pipeline — `message-processor.ts` (shared by Telegram/Slack/web), metadata extraction, progress callbacks |
-| AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK + OpenAI-compat connectors, prompt builder, embeddings |
+| AI | `src/ai/` | Connector abstraction (`connector.ts`), Claude CLI + Copilot SDK + OpenAI-compat + Claude SDK connectors, prompt builder, embeddings |
 | Memory | `src/memory/extractor.ts` | Async Claude Haiku call to extract memories (personal or shared scope) |
 | Goals | `src/goals/detector.ts` | Goal detector (async Claude Haiku) |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
@@ -391,41 +317,16 @@ uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/
 | `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
 | `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
 
-## Corrective Retrieval (two-layer: Path D primary, Path C dormant fallback)
+## Corrective Retrieval (Path D primary, Path C dormant fallback)
 
-Two complementary layers handle weak knowledge searches; together they make sure the bot either answers from a rescued result or honestly says "the knowledge base doesn't cover this."
+Two layers rescue weak knowledge searches so the bot either answers from a rescued result or honestly says the knowledge base doesn't cover it.
 
-### Path D — corrective rescue inside huginn (primary, always on)
+- **Path D (primary, always on)** — the rescue runs inside huginn at the `apply_corrective_signal` seam: on a weak signal with a usable `broaderQuery`/`narrowerQuery` hint it re-queries, merges + dedupes by `(collection, doc_id)`, and returns one already-consolidated tool result — no model re-call. Every consumer (muninn bots, Claude Code, curl) auto-upgrades; no `.mcp.json` change. Per-call knob `corrective="auto"` (default) / `"off"` / `"force"`. The trace carries a `corrective` block and the dashboard waterfall shows a blue `rescue ⟲N` chip when it fired.
+- **Path C (dormant, off by default)** — prompt-level loop in `src/ai/prompt-builder.ts` (`CORRECTIVE_RETRIEVAL_PROMPT`); the model re-calls the tool on a `*Weak match*` footer. Enable per-bot via `correctiveRetrieval.enabled`, globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, hard-disable via `CORRECTIVE_RETRIEVAL_DISABLED=1`. **Only turn on for a bot pointed at an older huginn that lacks Path D** — otherwise it just adds trace noise. Works for every connector.
 
-The rescue lives at huginn's `apply_corrective_signal` seam (`huginn` PR #38, commit `0c37b50`). When a `search_knowledge` call comes in:
+Other waterfall chips (independent of either layer): red `0 hits` when a search returned nothing usable; yellow low-confidence palette flip on the `N/N` chip on a weak match.
 
-1. Huginn runs the user's query, computes the signal (`bestScore`, `noConfidentResults`, `retryHints`).
-2. If the signal is weak *and* there's a usable `broaderQuery` / `narrowerQuery` hint, huginn re-queries internally with that hint, merges + dedupes by `(collection, doc_id)`, drops the `*Weak match*` footer on successful rescue, and returns one consolidated result.
-3. The model sees a single tool result that already contains the rescue. No re-call, no prompt-level instruction needed.
-
-**Knobs (per-call MCP arg / HTTP query param):** `corrective="auto"` (default — fire on weak + hint), `"off"` (today's pre-rescue behaviour), `"force"` (rescue whenever any hint exists, useful for testing). Models almost never need to override the default.
-
-**Cross-agent reach:** because the rescue runs inside huginn's MCP/HTTP surface, every consumer auto-upgrades — muninn bots, Claude Code, OpenCode, ad-hoc curl. No `.mcp.json` migration required.
-
-**Trace visibility:** huginn writes a `corrective: { mode, retries, verdict, rescueFired, queriesTried }` block into the existing trace `response`. Muninn's trace-pointer fetcher pulls it as-is, and the dashboard waterfall row shows a blue `rescue ⟲N` chip when rescue fired (`src/dashboard/views/components/span-label.ts` — `searchRescueInfo`).
-
-### Path C — prompt-level corrective (dormant defence-in-depth, off by default)
-
-Enable per-bot in `config.json` (`"correctiveRetrieval": { "enabled": true }`), globally via `CORRECTIVE_RETRIEVAL_ENABLED=true`, or hard-disable everywhere with `CORRECTIVE_RETRIEVAL_DISABLED=1`. When enabled, `src/ai/prompt-builder.ts` appends a short system-prompt block telling the model to read `search_knowledge` results for a `*Weak match*` / `*No confident match*` footer and re-call the tool with the suggested rewrite. The model becomes the corrective loop.
-
-**When to keep Path C on:** only when targeting a huginn instance that doesn't have Path D yet (older deploy, dev branch, custom fork). For any bot pointed at a Path-D-enabled huginn, leave Path C **off** — Path D handles rescue upstream and a second rescue layer on top just adds noise to the trace.
-
-**Connector coverage:** Path C works for every connector (`claude-cli`, `copilot-sdk`, `openai-compat`, `claude-sdk`) because the loop is driven entirely by the model. Same as Path D in that respect.
-
-### Other operational chips
-
-The dashboard waterfall row also surfaces a red `0 hits` chip when a search returned nothing usable, and a yellow low-confidence palette flip on the `N/N` chip when huginn flags a weak match. These are independent of which corrective layer is active and stay useful regardless.
-
-### History
-
-The first attempt (muninn PR #113, retired) used a Copilot SDK `onPostToolUse` hook to splice rescue hits into the tool result post-hoc. Two synchronous probes against the melosys peer on 2026-05-14 confirmed the Copilot CLI silently drops both `modifiedResult` and `additionalContext` — the hook is purely observational from the model's perspective. The rework chose Path C (prompt-level) first because of its small footprint, then upgraded to Path D once we noticed huginn already produced the structured corrective signal natively and an in-huginn rescue gave every consumer the upgrade for free. See `mimir/plans/muninn-corrective-rag-rework.md` + `huginn-corrective-rag-in-adapter.md` for the full rationale.
-
-Key files: `src/ai/corrective-config.ts`, `src/ai/prompt-builder.ts` (`CORRECTIVE_RETRIEVAL_PROMPT`), `src/dashboard/views/components/span-label.ts` (`searchResultSignal`, `searchRescueInfo`). Path D itself lives in huginn (`main/core/search_response_formatter.py` — `run_corrective_search`).
+Muninn-side files: `src/ai/corrective-config.ts`, `src/ai/prompt-builder.ts`, `src/dashboard/views/components/span-label.ts` (`searchResultSignal`, `searchRescueInfo`). Path D lives in huginn (`main/core/search_response_formatter.py` — `run_corrective_search`). Full rationale + history (retired PR #113 hook approach, the C→D upgrade): `mimir/plans/muninn-corrective-rag-rework.md` + `huginn-corrective-rag-in-adapter.md`.
 
 ## Slack Bot
 When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.
@@ -496,3 +397,8 @@ After creating database migrations, always remind the user to run them against t
 ## Code Quality
 This project is primarily TypeScript. Always ensure code compiles cleanly (`tsc --noEmit` or equivalent) before committing. When fixing TypeScript errors, fix all of them — don't leave partial fixes.
 
+## Working Principles
+- **Think before coding** — state assumptions, ask rather than guess, stop when confused.
+- **Simplicity first** — minimum code that solves the problem; no speculative abstractions for single-use code.
+- **Surgical changes** — touch only what you must; don't refactor adjacent code; match existing style.
+- **Goal-driven** — define success criteria, then loop until verified.
