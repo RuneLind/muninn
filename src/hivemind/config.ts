@@ -15,6 +15,19 @@ import type { Namespace } from "./types.ts";
  * }
  * ```
  */
+/**
+ * Spec-driven dev loop autonomy (v2 / Phase 6). Default off ⇒ v1 behaviour
+ * (the run parks at `ready_to_verify` and waits for the user's orchestrate
+ * confirm). Lives under `hivemind.devLoop` because the dispatch trips in the
+ * inbound hivemind router (off the handoff interpreter), which already has the
+ * bot's hivemind config in hand.
+ */
+export interface DevLoopConfig {
+  /** Auto-fire the orchestrate (cross-repo e2e) turn when build ∧ test land done,
+   *  instead of parking at `ready_to_verify` for the user's confirm (PR 6a). */
+  autoOrchestrate?: boolean;
+}
+
 export interface HivemindBotConfig {
   enabled: boolean;
   /** Namespaces to register a peer in. Phase 1 supports the first only; multi-namespace lands in Phase 4. */
@@ -29,6 +42,8 @@ export interface HivemindBotConfig {
   askPeerDefaultTimeoutSec?: number;
   /** Whether to expose the hivemind tools to the bot's Claude (default true if enabled). */
   exposeToTools?: boolean;
+  /** Spec-driven dev loop autonomy (v2). Absent/empty ⇒ v1 park-and-confirm. */
+  devLoop?: DevLoopConfig;
 }
 
 export const DEFAULT_ASK_PEER_TIMEOUT_SEC = 120;
@@ -70,5 +85,16 @@ export function parseHivemindConfig(raw: unknown): HivemindBotConfig | null {
         ? r.askPeerDefaultTimeoutSec
         : undefined,
     exposeToTools: typeof r.exposeToTools === "boolean" ? r.exposeToTools : true,
+    devLoop: parseDevLoopConfig(r.devLoop),
   };
+}
+
+/** Validate the optional `hivemind.devLoop` autonomy sub-block. Returns
+ *  undefined when absent or empty so an unset block reads identically to v1. */
+function parseDevLoopConfig(raw: unknown): DevLoopConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const cfg: DevLoopConfig = {};
+  if (typeof r.autoOrchestrate === "boolean") cfg.autoOrchestrate = r.autoOrchestrate;
+  return Object.keys(cfg).length > 0 ? cfg : undefined;
 }

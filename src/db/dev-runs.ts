@@ -106,6 +106,24 @@ export async function getDevRunById(id: string): Promise<DevRun | null> {
 }
 
 /**
+ * Atomic compare-and-swap claim for the v2 auto-orchestrate fire (Phase 6a).
+ * Flips a run `ready_to_verify → verifying` only if it is *currently*
+ * `ready_to_verify`, returning the updated row to the single winner. Concurrent
+ * inbound-interpreter invocations (a build-done + a test-done marker arriving
+ * together) race here; the loser gets null and must NOT fire a second
+ * orchestrate turn. Returns null if the run is missing or already past the gate.
+ */
+export async function claimForVerify(runId: string): Promise<DevRun | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE dev_runs SET status = 'verifying', updated_at = now()
+    WHERE id = ${runId} AND status = 'ready_to_verify'
+    RETURNING *
+  `;
+  return row ? rowToDevRun(row) : null;
+}
+
+/**
  * Resolve the open run for an origin thread — the operative join for
  * delegate_task (later phase), since chat-started research has a synthetic
  * issue_key the model can't reproduce but the thread_id is always in hand.
@@ -149,6 +167,30 @@ export async function getDevRunsByIdPrefix(prefix: string): Promise<DevRun[]> {
     SELECT * FROM dev_runs WHERE id::text LIKE ${prefix.toLowerCase() + "%"} ORDER BY updated_at DESC
   `;
   return rows.map(rowToDevRun);
+}
+
+/**
+ * Persist a recomputed run status, but **never downgrade a run that has already
+ * moved past the verify gate** (Phase 6a). A late or duplicate build|test marker
+ * recomputes `ready_to_verify` from the still-`done` handoffs; if auto-orchestrate
+ * has already claimed the run (`verifying`) or it finished (`green`/`red`), that
+ * recompute must NOT reopen the gate — it would re-fire orchestrate. Only the
+ * `ready_to_verify` write is guarded (a conditional UPDATE); every other
+ * transition persists normally, so v1's flow is unchanged (a `building → ready_to_verify`
+ * first-arrival still lands). Returns the resulting run (the blocked case returns
+ * the unchanged current row).
+ */
+export async function persistRunStatus(runId: string, status: string): Promise<DevRun | null> {
+  if (status === "ready_to_verify") {
+    const sql = getDb();
+    const [row] = await sql`
+      UPDATE dev_runs SET status = ${status}, updated_at = now()
+      WHERE id = ${runId} AND status NOT IN ('verifying', 'green', 'red')
+      RETURNING *
+    `;
+    return row ? rowToDevRun(row) : getDevRunById(runId);
+  }
+  return updateDevRun(runId, { status });
 }
 
 export async function updateDevRun(

@@ -8,6 +8,8 @@ import {
   getDevRunByIdentity,
   getDevRunsByIdPrefix,
   updateDevRun,
+  claimForVerify,
+  persistRunStatus,
   linkSpecToDevRun,
   insertHandoff,
   updateHandoffStatus,
@@ -246,6 +248,48 @@ describe("dev-runs", () => {
       await insertHandoff({ runId: run.id, peerName: "rev", role: "review", status: "failed" });
       // review failed must not flip the run red, nor block ready_to_verify
       expect(await computeRunStatus(run.id)).toBe("ready_to_verify");
+    });
+  });
+
+  describe("claimForVerify + persistRunStatus (Phase 6a auto-orchestrate)", () => {
+    test("claimForVerify flips ready_to_verify → verifying for the single winner", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6A-1" });
+      await updateDevRun(run.id, { status: "ready_to_verify" });
+      const claimed = await claimForVerify(run.id);
+      expect(claimed?.status).toBe("verifying");
+      // A second concurrent claim loses — the run already moved past the gate.
+      expect(await claimForVerify(run.id)).toBeNull();
+    });
+
+    test("claimForVerify is a no-op (null) when the run isn't ready_to_verify", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6A-2" }); // status analyzing
+      expect(await claimForVerify(run.id)).toBeNull();
+      await updateDevRun(run.id, { status: "building" });
+      expect(await claimForVerify(run.id)).toBeNull();
+    });
+
+    test("persistRunStatus lands the first ready_to_verify (building → ready_to_verify)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6A-3" });
+      await updateDevRun(run.id, { status: "building" });
+      expect((await persistRunStatus(run.id, "ready_to_verify"))?.status).toBe("ready_to_verify");
+    });
+
+    test("persistRunStatus never downgrades a verify-in-flight / terminal run back to ready_to_verify", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6A-4" });
+      // A claimed run (verifying) must not be reopened by a late/duplicate build|test marker.
+      await updateDevRun(run.id, { status: "verifying" });
+      expect((await persistRunStatus(run.id, "ready_to_verify"))?.status).toBe("verifying");
+      // Terminal runs are likewise sticky.
+      await updateDevRun(run.id, { status: "green" });
+      expect((await persistRunStatus(run.id, "ready_to_verify"))?.status).toBe("green");
+    });
+
+    test("persistRunStatus passes through all non-ready_to_verify transitions normally", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6A-5" });
+      await updateDevRun(run.id, { status: "ready_to_verify" });
+      // verifying / green / red writes are unconditional (the green gate sets them).
+      expect((await persistRunStatus(run.id, "verifying"))?.status).toBe("verifying");
+      expect((await persistRunStatus(run.id, "green"))?.status).toBe("green");
     });
   });
 });
