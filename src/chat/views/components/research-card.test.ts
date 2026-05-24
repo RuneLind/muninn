@@ -141,6 +141,66 @@ describe("researchCardScript", () => {
     expect(buildOnly).not.toContain('role: "test"');
   });
 
+  test("contains the Phase 5 live dev_run helpers", () => {
+    const script = researchCardScript();
+    expect(script).toContain("function fetchDevRun(cb)");
+    expect(script).toContain("function renderRunAffordance()");
+    expect(script).toContain("function renderRunCard()");
+    expect(script).toContain("function onDevRunEvent(event)");
+    expect(script).toContain("function showOrchestrateConfirm()");
+    expect(script).toContain("function buildOrchestratePrompt(specPath, planPath)");
+    expect(script).toContain("function resendHandoffPrompt(handoff, pickAnother)");
+    expect(script).toContain("function phaseForStage(stage)");
+  });
+
+  test("the reply-counter is retired — no researchBotReplies references remain", () => {
+    // Phase 5: affordance visibility is driven off dev_run state (status +
+    // research_stage + handoff rows), not the positional client-side counter.
+    expect(researchCardScript()).not.toContain("researchBotReplies");
+  });
+
+  test("phaseForStage maps the dev_run research_stage to the analysis-phase button set", () => {
+    const script = researchCardScript();
+    const fn = new Function(script + "\nreturn phaseForStage;")();
+    expect(fn("investigation")).toBe("investigation");
+    expect(fn("deep")).toBe("deepAnalysis");
+    expect(fn("analysis")).toBe("analysis");
+    expect(fn(null)).toBe("analysis");
+    expect(fn(undefined)).toBe("analysis");
+  });
+
+  test("buildOrchestratePrompt delegates the cross-repo e2e and asks for the CI run URL", () => {
+    const script = researchCardScript();
+    const fn = new Function(script + "\nreturn buildOrchestratePrompt;")();
+    const out: string = fn("/abs/specs/u1/X-1.md", "/abs/reports/u1/X-1.md");
+    expect(out).toContain("delegate_task");
+    expect(out).toContain("NOT send_to_peer");
+    expect(out).toContain('role: "orchestrate"');
+    expect(out).toContain("orchestrate-e2e-flow");
+    expect(out).toContain("AVAILABILITY GUARD");
+    // The green gate keys on the CI conclusion — the reply must carry the run URL.
+    expect(out).toContain("GitHub Actions run URL");
+    expect(out).toContain("/abs/specs/u1/X-1.md");
+  });
+
+  test("the orchestrate confirm renders only when parked at ready_to_verify with no orchestrate handoff yet", () => {
+    const script = researchCardScript();
+    // Guards against a duplicate e2e: delegate_task records the orchestrate
+    // handoff but doesn't recompute dev_run.status, so the gate must also check
+    // no orchestrate handoff exists (not just the status + the in-flight flag).
+    expect(script).toContain("run.status === 'ready_to_verify' && !hasOrchestrate && !pendingOrchestrate");
+    expect(script).toContain("h.role === 'orchestrate'");
+  });
+
+  test("resendHandoffPrompt re-delegates a stale handoff via delegate_task (per role)", () => {
+    // String-contains targeting resendHandoffPrompt's body (it calls handoffPaths/
+    // getBotInfo from the IIFE scope, so it can't be eval'd standalone like the
+    // pure prompt builders). The role param + 'gone quiet' framing are unique to it.
+    const script = researchCardScript();
+    expect(script).toContain("has gone quiet");
+    expect(script).toContain("(NOT send_to_peer), role: \"' + handoff.role");
+  });
+
   test("saveDomainSpec flips the in-session specApproved gate on approval", () => {
     // Regression guard: clicking Approve Spec must set specApproved in-memory so
     // the build+test fan-out unlocks without a page reload (the re-render reads it).

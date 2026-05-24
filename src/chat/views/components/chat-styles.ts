@@ -468,6 +468,74 @@ export function chatStyles(): string {
       color: var(--text-dim, var(--text-muted));
       font-style: italic;
     }
+    /* Live dev_run card (spec-driven dev loop, Phase 5) */
+    .dev-run-card {
+      margin: 8px 24px 4px;
+      padding: 12px 14px;
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      background: var(--bg-card, var(--bg-surface));
+      align-self: stretch;
+      max-width: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .dev-run-head { display: flex; align-items: center; gap: 8px; }
+    .dev-run-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--accent-light, var(--accent));
+    }
+    .dev-run-status { font-size: 12px; font-weight: 600; }
+    .dev-run-spec { font-size: 12px; color: var(--text-dim, var(--text-muted)); }
+    .dev-run-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      padding: 2px 0;
+    }
+    .dev-run-role {
+      min-width: 84px;
+      font-weight: 600;
+      text-transform: capitalize;
+      color: var(--text-primary);
+    }
+    .dev-run-peer { color: var(--text-dim, var(--text-muted)); flex: 1; }
+    .dev-run-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 10px;
+      border: 1px solid var(--border-primary);
+    }
+    /* status palette — reused by both the run-status badge and per-handoff badge */
+    .dev-run-status-neutral, .dev-run-hstatus-neutral, .dev-run-spec-draft { color: var(--text-dim, var(--text-muted)); }
+    .dev-run-status-info, .dev-run-hstatus-info, .dev-run-spec-approved { color: var(--accent-light, var(--accent)); }
+    .dev-run-status-warn { color: var(--status-warn, #f59e0b); }
+    .dev-run-status-green, .dev-run-hstatus-green, .dev-run-spec-verified { color: var(--status-success, #4ade80); }
+    .dev-run-status-red, .dev-run-hstatus-red { color: var(--status-error, #ef4444); }
+    .dev-run-stale {
+      color: var(--status-warn, #f59e0b);
+      border-color: color-mix(in srgb, var(--status-warn, #f59e0b) 50%, transparent);
+    }
+    .dev-run-resend {
+      padding: 2px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .dev-run-resend:hover {
+      background: var(--accent);
+      color: var(--bg-primary);
+      border-color: var(--accent);
+    }
     .msg-bot {
       color: var(--chat-assistant-text);
     }

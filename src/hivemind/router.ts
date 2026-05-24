@@ -16,6 +16,7 @@ import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
 import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
 import { getThreadByCorrelationToken, clearCorrelationToken } from "./correlation-tokens.ts";
 import { interpretHandoffReply } from "./handoff-interpreter.ts";
+import { broadcastDevRun } from "../chat/dev-run-broadcast.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -221,7 +222,12 @@ export class HivemindRouter {
       routedThreadId: thread.id,
       deps: { getBotDir: (name) => this.autorespondDeps?.getBotConfig(name)?.dir },
     })
-      .then(() => {})
+      .then(async (result) => {
+        // Phase 5: push the rolled-up run to any open chat tab so the live run
+        // card + per-handoff rows update without a refresh. Best-effort — a
+        // broadcast failure must not surface to inbound delivery either.
+        if (result.runId) await broadcastDevRun(this.chatState, { runId: result.runId });
+      })
       .catch((err) => {
         log.error("Handoff interpret failed: {error}", {
           botName, peerName, fromId: msg.fromId,

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
-import { createChatRoutes } from "./routes.ts";
+import { createChatRoutes, researchStageForPrompt } from "./routes.ts";
 
 // The /specs endpoints persist the domain layer of a spec as a first-class
 // artifact (Phase 0). They mirror /reports and share the path-traversal guards.
@@ -33,6 +33,19 @@ const jsonPostWith = (payload: Record<string, unknown>) => ({
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify(payload),
+});
+
+// Phase 5: the Investigate / Deep prompt markers drive the dev_run research_stage
+// (server-authoritative) so the chat keys affordances off run state, not a count.
+test("researchStageForPrompt maps the analysis-phase markers, ignores the rest", () => {
+  expect(researchStageForPrompt("<!-- prompt:investigate -->find the code")).toBe("investigation");
+  expect(researchStageForPrompt("<!-- prompt:deepAnalysis -->verify")).toBe("deep");
+  // Other research markers + ordinary chat must not move the stage.
+  expect(researchStageForPrompt("<!-- prompt:specDomain -->draft the spec")).toBeNull();
+  expect(researchStageForPrompt("<!-- research:jira -->analyze")).toBeNull();
+  expect(researchStageForPrompt("just a normal message")).toBeNull();
+  // Marker must be at the start (mirrors the client's button prefix).
+  expect(researchStageForPrompt("noise <!-- prompt:investigate -->")).toBeNull();
 });
 
 test("spec round-trip: POST saves, GET returns, HEAD reports existence", async () => {
