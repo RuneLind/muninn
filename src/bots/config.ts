@@ -122,9 +122,13 @@ export interface BotPrompts {
   deepAnalysis?: string;
   /** Prompt for the "Generate Test Spec" follow-up button after deep analysis. */
   specGeneration?: string;
+  /** Prompt for the "Generate Spec" button after Jira analysis — produces the domain layer
+   *  (Forretningsregel + Gitt/Når/Så + Akseptansekriterier) drafted early, before code, for the
+   *  fagperson review gate. Distinct from `specGeneration`, which runs late and folds in code findings. */
+  specDomain?: string;
 }
 
-const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration"] as const satisfies readonly (keyof BotPrompts)[];
+const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain"] as const satisfies readonly (keyof BotPrompts)[];
 const VARIANT_PROMPT_KEYS = ["jiraAnalysis"] as const;
 
 /** Synthetic variant that maps back to the bare `jiraAnalysis.md` prompt. Reserved as

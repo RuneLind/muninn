@@ -15,6 +15,7 @@ import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
+import { linkSpecToDevRun } from "../db/dev-runs.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -463,6 +464,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
   const VALID_ISSUE_KEY = /^[A-Z]+-\d+$|^research-[a-f0-9]{8}$/;
   const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
+  // dev_run statuses a spec save may set: draft on Save Spec, approved at the fagperson gate.
+  const VALID_SPEC_STATUS = new Set(["spec_draft", "spec_approved"]);
 
   // Save a research report file to bots/<botName>/reports/<userId>/<issueKey>.md
   app.post("/reports/:botName/:userId/:issueKey", async (c) => {
@@ -533,15 +536,37 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
 
-    const body = await c.req.json<{ content: string }>();
+    const body = await c.req.json<{ content: string; status?: string }>();
     if (!body.content) return c.json({ error: "content is required" }, 400);
+    // Optional dev_run status flip: spec_draft on save, spec_approved at the
+    // fagperson gate. Validated up front so a bad status never writes the file.
+    if (body.status !== undefined && !VALID_SPEC_STATUS.has(body.status)) {
+      return c.json({ error: "Invalid status" }, 400);
+    }
 
     const enrichedContent = await enrichWithAnalysisTraceId(body.content, userId, botName, "spec");
+    const relPath = `specs/${userId}/${issueKey}.md`;
     const specPath = resolve(bot.dir, "specs", userId, `${issueKey}.md`);
     await mkdir(dirname(specPath), { recursive: true });
     await Bun.write(specPath, enrichedContent);
     log.info("Saved domain spec {path}", { botName, userId, path: specPath });
-    return c.json({ ok: true, path: `specs/${userId}/${issueKey}.md` }, 201);
+
+    // Best-effort: link the spec to its dev_run (born at research-thread
+    // creation, keyed by the same bot/user/issueKey). A DB hiccup or a missing
+    // run must never fail the save — the file is the artifact that matters.
+    if (body.status) {
+      try {
+        const linked = await linkSpecToDevRun({ botName, userId, issueKey, specPath: relPath, status: body.status });
+        if (!linked) log.warn("Saved spec but no dev_run to link {issueKey}", { botName, userId, issueKey });
+      } catch (err) {
+        log.warn("Failed to link spec to dev_run: {error}", {
+          botName,
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return c.json({ ok: true, path: relPath }, 201);
   });
 
   // Get a domain spec
