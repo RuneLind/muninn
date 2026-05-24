@@ -12,7 +12,7 @@ import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { setCorrelationToken } from "./correlation-tokens.ts";
-import { birthDevRun, insertHandoff, listHandoffs, getDevRunById } from "../db/dev-runs.ts";
+import { birthDevRun, insertHandoff, listHandoffs, getDevRunById, updateDevRun } from "../db/dev-runs.ts";
 import { shortRunId } from "./mcp-server.ts";
 
 setupTestDb();
@@ -710,6 +710,8 @@ describe("HivemindRouter auto-advance (Phase 6a — auto-fire orchestrate)", () 
     await setBotDefaultUser(P6_BOT, P6_OWNER);
     const thread = await createThread(P6_OWNER, P6_BOT, `research-${issueKey}`);
     const run = await birthDevRun({ botName: P6_BOT, userId: P6_OWNER, issueKey, threadId: thread.id });
+    // The approved spec's stored path (the auto prompt + verified-flip use this).
+    await updateDevRun(run.id, { specPath: `specs/${P6_OWNER}/${issueKey}.md` });
     await insertHandoff({ runId: run.id, peerName: "buildpeer", role: "build", status: "done" });
     await insertHandoff({ runId: run.id, peerName: "testpeer", role: "test", status: "sent" });
     return { run, thread };
@@ -778,5 +780,26 @@ describe("HivemindRouter auto-advance (Phase 6a — auto-fire orchestrate)", () 
 
     expect(stub.calls).toHaveLength(1); // not 2 — no double orchestrate
     expect((await getDevRunById(run.id))!.status).toBe("verifying");
+  });
+
+  test("a thrown orchestrate turn reverts the run off 'verifying' (no wedge)", async () => {
+    const { run } = await seedReadyMinusTest("research-6a000004");
+    const chat = new ChatState();
+    const calls: number[] = [];
+    const throwingProcess: typeof ProcessMessageFn = async () => {
+      calls.push(1);
+      throw new Error("connector boom");
+    };
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoOrchestrate: true }), throwingProcess));
+
+    await router.route(P6_BOT, testPeerDone(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun.catch(() => {}); // the turn throws + rethrows — swallow
+
+    expect(calls).toHaveLength(1); // it did fire
+    // No orchestrate handoff was inserted (the stub threw), so the compensating
+    // revert recomputes ready_to_verify — the run is recoverable, not wedged.
+    expect((await getDevRunById(run.id))!.status).toBe("ready_to_verify");
+    expect((await listHandoffs(run.id)).some((h) => h.role === "orchestrate")).toBe(false);
   });
 });
