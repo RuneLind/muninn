@@ -66,3 +66,36 @@ test("ignores invalid askPeerDefaultTimeoutSec", () => {
 test("DEFAULT_ASK_PEER_TIMEOUT_SEC is positive", () => {
   expect(DEFAULT_ASK_PEER_TIMEOUT_SEC).toBeGreaterThan(0);
 });
+
+test("devLoop is undefined when absent or empty (v1 park-and-confirm)", () => {
+  expect(parseHivemindConfig({ enabled: true, namespaces: ["private"] })?.devLoop).toBeUndefined();
+  expect(
+    parseHivemindConfig({ enabled: true, namespaces: ["private"], devLoop: {} })?.devLoop,
+  ).toBeUndefined();
+  // Non-boolean values are ignored, leaving the block empty → undefined.
+  expect(
+    parseHivemindConfig({
+      enabled: true,
+      namespaces: ["private"],
+      devLoop: { autoOrchestrate: "yes", autoReengageOnRed: 1 },
+    })?.devLoop,
+  ).toBeUndefined();
+});
+
+test("devLoop parses autoOrchestrate + autoReengageOnRed (PR 6a + 6b)", () => {
+  const cfg = parseHivemindConfig({
+    enabled: true,
+    namespaces: ["private"],
+    devLoop: { autoOrchestrate: true, autoReengageOnRed: true },
+  });
+  expect(cfg?.devLoop).toEqual({ autoOrchestrate: true, autoReengageOnRed: true });
+
+  // The two flags are independent — either can be set alone.
+  expect(
+    parseHivemindConfig({
+      enabled: true,
+      namespaces: ["private"],
+      devLoop: { autoReengageOnRed: true },
+    })?.devLoop,
+  ).toEqual({ autoReengageOnRed: true });
+});

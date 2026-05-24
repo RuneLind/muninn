@@ -6,7 +6,7 @@ function staleEntry(runId: string, handoffId: string): { run: DevRun; handoff: D
   return {
     run: {
       id: runId, botName: "b", userId: "u", issueKey: "K-" + runId,
-      status: "building", createdAt: 1, updatedAt: 2,
+      status: "building", reengageCount: 0, createdAt: 1, updatedAt: 2,
     },
     handoff: {
       id: handoffId, runId, peerName: "p", role: "build", status: "working",

@@ -153,6 +153,15 @@ describe("researchCardScript", () => {
     expect(script).toContain("function phaseForStage(stage)");
   });
 
+  test("Phase 6b: renders the auto-re-engage-exhausted affordance on a capped red run", () => {
+    const script = researchCardScript();
+    // Mirror constant + the gated surface live in the run card.
+    expect(script).toContain("var MAX_REENGAGE_ATTEMPTS = 2;");
+    expect(script).toContain("dev-run-exhausted");
+    expect(script).toContain("(run.reengageCount || 0) >= MAX_REENGAGE_ATTEMPTS");
+    expect(script).toContain("Auto-re-engage exhausted");
+  });
+
   test("the reply-counter is retired — no researchBotReplies references remain", () => {
     // Phase 5: affordance visibility is driven off dev_run state (status +
     // research_stage + handoff rows), not the positional client-side counter.

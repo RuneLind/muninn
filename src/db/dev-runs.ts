@@ -19,6 +19,9 @@ export interface DevRun {
   workplanPath?: string;
   status: string;
   researchStage?: string;
+  /** Phase 6b — number of autonomous re-engage-on-red attempts spent on this run.
+   *  Capped by claimForReengage at MAX_REENGAGE_ATTEMPTS. */
+  reengageCount: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -49,6 +52,7 @@ function rowToDevRun(r: Record<string, unknown>): DevRun {
     workplanPath: (r.workplan_path as string) ?? undefined,
     status: r.status as string,
     researchStage: (r.research_stage as string) ?? undefined,
+    reengageCount: Number(r.reengage_count ?? 0),
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
   };
@@ -128,6 +132,64 @@ export async function claimForVerify(runId: string): Promise<DevRun | null> {
  * delegate_task (later phase), since chat-started research has a synthetic
  * issue_key the model can't reproduce but the thread_id is always in hand.
  */
+/**
+ * Cap on autonomous re-engage-on-red attempts per run (Phase 6b). A red run is
+ * re-opened and the build agent re-engaged from code; after this many attempts a
+ * still-red run parks at `red` (the user takes over). ~2 keeps a genuine
+ * build-fix loop short while not burning the user's patience (or CI minutes) on
+ * a failure auto-re-engage can't fix — e.g. a test-spec drift the build-first
+ * cut doesn't target (the build-vs-test classifier is the follow-up).
+ */
+export const MAX_REENGAGE_ATTEMPTS = 2;
+
+/**
+ * Atomic compare-and-swap claim for the v2 re-engage-on-red fire (Phase 6b).
+ * Increments `reengage_count` and re-opens the run `red → building` only if it is
+ * *currently* `red` AND still under the cap, returning the updated row to the
+ * single winner. Two jobs in one statement:
+ *   - **once-per-red:** the `status = 'red'` guard means a duplicate/flapping red
+ *     marker (or two interpreter invocations racing) can't double-claim — after
+ *     the first claim the run is `building`, not `red`, so the CAS misses.
+ *   - **termination:** `reengage_count < maxAttempts` is the loop cap. When the
+ *     cap is reached the CAS returns null and the run stays `red` (the caller
+ *     surfaces an "exhausted — needs you" affordance).
+ * Re-opening to `building` is what lets the re-engaged build agent's reply flow
+ * back through the interpreter (the terminal guard ignores replies on a `red`
+ * run); the caller then clears the stale orchestrate handoff so the run can roll
+ * back up to `ready_to_verify` after the fix.
+ */
+export async function claimForReengage(
+  runId: string,
+  maxAttempts: number = MAX_REENGAGE_ATTEMPTS,
+): Promise<DevRun | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE dev_runs
+    SET reengage_count = reengage_count + 1, status = 'building', updated_at = now()
+    WHERE id = ${runId} AND status = 'red' AND reengage_count < ${maxAttempts}
+    RETURNING *
+  `;
+  return row ? rowToDevRun(row) : null;
+}
+
+/**
+ * Delete a run's orchestrate handoffs (Phase 6b re-engage reset). On a red
+ * re-engage the failed cross-repo e2e is abandoned: with the orchestrate handoff
+ * gone, once the re-engaged build reports done the run rolls back up to
+ * `ready_to_verify` (computeRunStatus sees build∧test done, no orchestrate) so a
+ * FRESH e2e re-runs — instead of staying `red` forever pinned by the old failed
+ * orchestrate row. Build/test/review rows are left intact (the build agent is
+ * re-delegated; its reply rolls up the existing build row(s) by peer_name).
+ * Returns the number of rows deleted.
+ */
+export async function clearOrchestrateHandoffs(runId: string): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    DELETE FROM dev_run_handoffs WHERE run_id = ${runId} AND role = 'orchestrate' RETURNING id
+  `;
+  return rows.length;
+}
+
 export async function getDevRunByThreadId(threadId: string): Promise<DevRun | null> {
   const sql = getDb();
   const [row] = await sql`

@@ -10,6 +10,8 @@ import {
   updateDevRun,
   claimForVerify,
   persistRunStatus,
+  claimForReengage,
+  clearOrchestrateHandoffs,
   linkSpecToDevRun,
   insertHandoff,
   updateHandoffStatus,
@@ -290,6 +292,89 @@ describe("dev-runs", () => {
       // verifying / green / red writes are unconditional (the green gate sets them).
       expect((await persistRunStatus(run.id, "verifying"))?.status).toBe("verifying");
       expect((await persistRunStatus(run.id, "green"))?.status).toBe("green");
+    });
+  });
+
+  describe("claimForReengage + clearOrchestrateHandoffs (Phase 6b re-engage on red)", () => {
+    test("a fresh run starts with reengage_count 0", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-0" });
+      expect(run.reengageCount).toBe(0);
+    });
+
+    test("claimForReengage increments + re-opens red → building for the single winner", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-1" });
+      await updateDevRun(run.id, { status: "red" });
+      const claimed = await claimForReengage(run.id);
+      expect(claimed?.status).toBe("building");
+      expect(claimed?.reengageCount).toBe(1);
+      // A concurrent second claim loses — the run already left `red`.
+      expect(await claimForReengage(run.id)).toBeNull();
+    });
+
+    test("claimForReengage is a no-op (null) when the run isn't red", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-2" }); // analyzing
+      expect(await claimForReengage(run.id)).toBeNull();
+      await updateDevRun(run.id, { status: "verifying" });
+      expect(await claimForReengage(run.id)).toBeNull();
+    });
+
+    test("claimForReengage stops at the cap (run stays red, count unchanged)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-3" });
+      // Simulate a run that has already spent both attempts and gone red again.
+      await updateDevRun(run.id, { status: "red" });
+      const sql = getDb();
+      await sql`UPDATE dev_runs SET reengage_count = ${2} WHERE id = ${run.id}`;
+      expect(await claimForReengage(run.id, 2)).toBeNull();
+      const after = await getDevRunById(run.id);
+      expect(after?.status).toBe("red");
+      expect(after?.reengageCount).toBe(2); // not bumped past the cap
+    });
+
+    test("claimForReengage honours a custom maxAttempts", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-4" });
+      await updateDevRun(run.id, { status: "red" });
+      // First attempt allowed (0 < 1).
+      expect((await claimForReengage(run.id, 1))?.reengageCount).toBe(1);
+      // Back to red; second attempt blocked (1 < 1 is false).
+      await updateDevRun(run.id, { status: "red" });
+      expect(await claimForReengage(run.id, 1)).toBeNull();
+    });
+
+    test("clearOrchestrateHandoffs deletes only orchestrate rows, leaving build/test/review", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-5" });
+      await insertHandoff({ runId: run.id, peerName: "api", role: "build", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "e2e", role: "test", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "rev", role: "review", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "orch", role: "orchestrate", status: "failed" });
+
+      expect(await clearOrchestrateHandoffs(run.id)).toBe(1);
+      const remaining = await listHandoffs(run.id);
+      expect(remaining.map((h) => h.role).sort()).toEqual(["build", "review", "test"]);
+    });
+
+    test("re-engage reset lets a re-fixed build roll back up to ready_to_verify", async () => {
+      // orchestrate-red run: build done, test done, orchestrate failed.
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "P6B-6" });
+      await insertHandoff({ runId: run.id, peerName: "api", role: "build", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "e2e", role: "test", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "orch", role: "orchestrate", status: "failed" });
+      await updateDevRun(run.id, { status: "red" });
+      expect(await computeRunStatus(run.id)).toBe("red");
+
+      // Claim + clear (what the router does on a red re-engage).
+      const claimed = await claimForReengage(run.id);
+      expect(claimed?.status).toBe("building");
+      await clearOrchestrateHandoffs(run.id);
+
+      // The re-engage turn re-delegates build (a fresh row, same peer); until it
+      // reports, the run is `building`.
+      await insertHandoff({ runId: run.id, peerName: "api", role: "build", status: "sent" });
+      expect(await computeRunStatus(run.id)).toBe("building");
+
+      // The build peer's reply rolls up ALL its build rows by (run, peer_name).
+      await updateHandoffStatus({ runId: run.id, peerName: "api", status: "done" });
+      // build∧test done, no orchestrate → ready to re-verify (a fresh e2e re-runs).
+      expect(await computeRunStatus(run.id)).toBe("ready_to_verify");
     });
   });
 });

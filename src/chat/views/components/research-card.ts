@@ -198,6 +198,12 @@ export function researchCardScript(): string {
       !!h.updatedAt && (Date.now() - h.updatedAt > STALE_HANDOFF_THRESHOLD_MS);
   }
 
+  // Mirror of MAX_REENGAGE_ATTEMPTS in src/db/dev-runs.ts (Phase 6b). A red run
+  // whose reengageCount has hit this has spent its auto-re-engage budget — the
+  // card surfaces an "exhausted, needs you" note instead of silently parking.
+  // KEEP IN SYNC with src/db/dev-runs.ts.
+  var MAX_REENGAGE_ATTEMPTS = 2;
+
   function handoffStatusMeta(status) {
     switch (status) {
       case 'sent': return { label: 'sent', cls: 'neutral' };
@@ -258,6 +264,17 @@ export function researchCardScript(): string {
         row.appendChild(makeResendButton(h, true, 'Pick another'));
       }
       card.appendChild(row);
+    }
+
+    // Phase 6b: a red run that has spent its auto-re-engage budget parks for the
+    // user — surface it so the run doesn't look silently abandoned. (A successful
+    // re-engage re-opens the run to building, so this only shows on a final red.)
+    if (run.status === 'red' && (run.reengageCount || 0) >= MAX_REENGAGE_ATTEMPTS) {
+      var exhausted = document.createElement('div');
+      exhausted.className = 'dev-run-exhausted';
+      exhausted.textContent = '\\u26A0 Auto-re-engage exhausted after ' + run.reengageCount +
+        ' attempt' + (run.reengageCount === 1 ? '' : 's') + ' \\u2014 needs you.';
+      card.appendChild(exhausted);
     }
 
     chatMessages.appendChild(card);
