@@ -17,8 +17,24 @@ import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.
 import { getThreadByCorrelationToken, clearCorrelationToken } from "./correlation-tokens.ts";
 import { resolve } from "node:path";
 import { interpretHandoffReply, type InterpretResult } from "./handoff-interpreter.ts";
-import { type DevRun, getDevRunById, claimForVerify, computeRunStatus, updateDevRun } from "../db/dev-runs.ts";
-import { buildOrchestratePrompt, handoffPathsFor } from "./devloop-prompts.ts";
+import {
+  type DevRun,
+  getDevRunById,
+  claimForVerify,
+  claimForReengage,
+  clearOrchestrateHandoffs,
+  listHandoffs,
+  computeRunStatus,
+  updateDevRun,
+  MAX_REENGAGE_ATTEMPTS,
+} from "../db/dev-runs.ts";
+import {
+  buildOrchestratePrompt,
+  buildReengagePrompt,
+  buildReengageContext,
+  handoffPathsFor,
+  type ReengageContext,
+} from "./devloop-prompts.ts";
 import { broadcastDevRun } from "../chat/dev-run-broadcast.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
@@ -94,11 +110,13 @@ export class HivemindRouter {
   pendingHandoffInterpret: Promise<void> = Promise.resolve();
 
   /**
-   * In-flight auto-advance promise (Phase 6a / v2) — same test-only seam as the
-   * two above. After the interpreter rolls a run up, this fires the autonomous
-   * code-triggered turn (auto-orchestrate) when the bot opted in. No-op (and
-   * v1's park-and-confirm stands) unless `hivemind.devLoop.autoOrchestrate` is on.
-   * Tests await `pendingHandoffInterpret` then this.
+   * In-flight auto-advance promise (Phase 6a + 6b / v2) — same test-only seam as
+   * the two above. After the interpreter rolls a run up, this fires the autonomous
+   * code-triggered turn when the bot opted in: auto-orchestrate on
+   * `ready_to_verify` (6a, `hivemind.devLoop.autoOrchestrate`) or build re-engage
+   * on `red` (6b, `hivemind.devLoop.autoReengageOnRed`). No-op (and v1's
+   * park-and-confirm stands) when neither flag is on. Tests await
+   * `pendingHandoffInterpret` then this.
    */
   pendingAdvanceRun: Promise<void> = Promise.resolve();
 
@@ -241,17 +259,31 @@ export class HivemindRouter {
         // its orchestrate-confirm button) for a run we're about to auto-advance, so
         // a user click can't race the auto-fire into a duplicate e2e. No-op (null)
         // when not opted in or the claim is lost.
-        const claimed = await this.claimAutoOrchestrate(result);
+        const claimedOrch = await this.claimAutoOrchestrate(result);
+        // Phase 6b / v2: on a red e2e, claim the run for build re-engage (CAS
+        // red → building, capped). Mutually exclusive with the orchestrate claim
+        // (they key on different statuses), but guard on it anyway. Claiming
+        // before the broadcast keeps the UI consistent (it shows `building`, not a
+        // momentary `red` with a stale confirm). Null when not opted in / capped /
+        // backstopped — the cap-hit case leaves the run `red` for the user.
+        const reengage = claimedOrch ? null : await this.claimAutoReengage(result);
         // Phase 5: push the rolled-up run to any open chat tab so the live run card
         // + per-handoff rows update without a refresh (now reflecting `verifying`
-        // if we just claimed it). Best-effort — a broadcast failure must not
-        // surface to inbound delivery.
+        // or `building` if we just claimed it). Best-effort — a broadcast failure
+        // must not surface to inbound delivery.
         if (result.runId) await broadcastDevRun(this.chatState, { runId: result.runId });
         // The (slow) bot turn runs as its own fire-and-forget seam so it doesn't
         // hold the interpret chain.
-        if (claimed) {
-          this.pendingAdvanceRun = this.runAutoOrchestrate(claimed).catch((err) => {
+        if (claimedOrch) {
+          this.pendingAdvanceRun = this.runAutoOrchestrate(claimedOrch).catch((err) => {
             log.error("Auto-advance failed: {error}", {
+              botName, peerName, fromId: msg.fromId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        } else if (reengage) {
+          this.pendingAdvanceRun = this.runAutoReengage(reengage.run, reengage.context).catch((err) => {
+            log.error("Auto-re-engage failed: {error}", {
               botName, peerName, fromId: msg.fromId,
               error: err instanceof Error ? err.message : String(err),
             });
@@ -494,6 +526,173 @@ export class HivemindRouter {
     }
 
     // Re-broadcast so the new orchestrate handoff row shows live.
+    await broadcastDevRun(this.chatState, { runId: run.id });
+  }
+
+  /**
+   * Phase 6b / v2 — the claim half of re-engage-on-red, run SYNCHRONOUSLY inside
+   * the interpret `.then` *before* the dev_run broadcast (mirrors
+   * `claimAutoOrchestrate`). When the run just went `red` and the bot opted into
+   * `hivemind.devLoop.autoReengageOnRed`:
+   *   1. **Hourly backstop** — `checkAutoRespond` on the research thread (defence
+   *      in depth on top of the per-run cap; the loop-guard 6a dropped). A manual
+   *      pause or the hourly cap skips the re-engage (run stays `red`).
+   *   2. **Atomic claim + cap** — `claimForReengage` CAS-increments `reengage_count`
+   *      and re-opens `red → building` only while under MAX_REENGAGE_ATTEMPTS.
+   *      The loser of a flapping-red race and the cap-hit case both get null.
+   *   3. **Reset** — capture the failure context (CI URL + the e2e agent's reply)
+   *      from the to-be-deleted orchestrate handoff, THEN clear it so the run can
+   *      roll back to `ready_to_verify` once the re-fixed build reports done.
+   * Returns the claimed run (status `building`) + the context, or null (not opted
+   * in / backstopped / capped / error → run stays `red`, the UI surfaces the
+   * exhausted affordance off `reengage_count`). Never throws.
+   */
+  private async claimAutoReengage(
+    result: InterpretResult,
+  ): Promise<{ run: DevRun; context: ReengageContext } | null> {
+    const deps = this.autorespondDeps;
+    if (!deps || result.runStatus !== "red" || !result.runId) return null;
+    try {
+      const run = await getDevRunById(result.runId);
+      if (!run || !run.threadId) return null;
+      const botCfg = deps.getBotConfig(run.botName);
+      const hiveCfg = botCfg?.hivemind;
+      // Opt-in only — absent flag keeps v1's park-at-red.
+      if (!hiveCfg?.devLoop?.autoReengageOnRed) return null;
+
+      // Only auto-re-engage a RED E2E (a failed orchestrate handoff). A build- or
+      // test-phase red (a failed build/test row, no orchestrate) is NOT safe for
+      // the build-first cut: clearing orchestrate wouldn't remove the failed row,
+      // so computeRunStatus would stay red and the run would burn the cap for
+      // nothing — and a test failure isn't build's to fix anyway. Park those for
+      // the user (the build-vs-test classifier is the follow-up). Read handoffs
+      // once here, before the claim, and reuse them for the failure context.
+      const handoffs = await listHandoffs(run.id);
+      if (!handoffs.some((h) => h.role === "orchestrate" && h.status === "failed")) {
+        log.debug("Run {run} is red without a failed e2e (build/test red) — parking for the user, not re-engaging", {
+          botName: run.botName, run: run.id,
+        });
+        return null;
+      }
+
+      // Hourly backstop on the research thread. Respect a manual pause; on the
+      // hourly cap, skip without persisting a pause (the per-run reengage_count
+      // cap is the durable bound — pausing a user-facing research thread is too
+      // blunt here). Either way the run stays `red` and surfaces to the user.
+      const thread = await getThreadById(run.threadId);
+      if (!thread) return null;
+      const maxPerHour = hiveCfg.maxAutoTurnsPerHour ?? DEFAULT_MAX_AUTO_TURNS_PER_HOUR;
+      const decision = await checkAutoRespond({
+        threadId: run.threadId,
+        alreadyPaused: thread.autoRespondPaused,
+        maxTurnsPerHour: maxPerHour,
+      });
+      if (!decision.allowed) {
+        log.warn("Auto-re-engage backstopped on run {run} ({reason}) — leaving red", {
+          botName: run.botName, run: run.id, reason: decision.reason,
+        });
+        return null;
+      }
+
+      // Capture the failure context from the (pre-clear) handoffs — the orchestrate
+      // handoff carries the CI URL — before the claim clears it.
+      const context = buildReengageContext(handoffs);
+      const claimed = await claimForReengage(run.id);
+      if (!claimed) {
+        // Lost the flapping-red race, or hit the per-run cap. Distinguish for the
+        // log; either way the run stays `red` and the UI surfaces it off the count.
+        const cur = await getDevRunById(run.id);
+        if (cur && cur.status === "red" && cur.reengageCount >= MAX_REENGAGE_ATTEMPTS) {
+          log.warn(
+            "Auto-re-engage exhausted for run {run} ({n}/{max} attempts) — parking red, needs the user",
+            { botName: run.botName, run: run.id, n: cur.reengageCount, max: MAX_REENGAGE_ATTEMPTS },
+          );
+        }
+        return null;
+      }
+
+      // Abandon the failed e2e so the re-fixed build re-rolls cleanly to
+      // ready_to_verify (a fresh e2e re-runs).
+      await clearOrchestrateHandoffs(claimed.id);
+      return { run: claimed, context };
+    } catch (err) {
+      log.error("Auto-re-engage claim failed for run {run}: {error}", {
+        run: result.runId, error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Phase 6b / v2 — fire the build re-engage turn for a run already CLAIMED by
+   * `claimAutoReengage` (status `building`, orchestrate handoff cleared). A
+   * CODE-TRIGGERED bot turn on the research thread (the bot's own `delegate_task`
+   * re-hands to the build peer), the same shape as `runAutoOrchestrate`.
+   *
+   * **No-wedge guarantee:** if the turn throws (connector/peer error) the run is
+   * already `building` with the orchestrate handoff gone, so we COMPENSATE —
+   * recompute the status from the remaining handoffs and persist + broadcast it,
+   * so the run reflects reality (back to `red` for a still-failed build, or
+   * `ready_to_verify` if build∧test are still done) rather than a stale `building`
+   * with no turn behind it. The `reengage_count` already spent stands — a retry
+   * is still bounded by the cap.
+   */
+  private async runAutoReengage(run: DevRun, context: ReengageContext): Promise<void> {
+    const deps = this.autorespondDeps;
+    if (!deps || !run.threadId) return;
+    const threadId = run.threadId;
+    const botCfg = deps.getBotConfig(run.botName);
+    if (!botCfg) return;
+
+    const user = await getUser(run.userId);
+    const conv = await this.chatState.findOrCreateBotConversation({
+      botName: run.botName, userId: run.userId, username: user?.username,
+    });
+
+    const tracer = new Tracer("devloop_autostep", {
+      botName: run.botName, userId: run.userId, username: user?.username ?? run.userId, platform: "web",
+    });
+    tracer.event("auto_reengage", { runId: run.id, issueKey: run.issueKey, attempt: run.reengageCount });
+
+    const runProcessMessage = deps.processMessage ?? defaultProcessMessage;
+    try {
+      const turn = await runProcessMessage({
+        text: "<!-- prompt:reengage -->" + buildReengagePrompt(context),
+        userId: run.userId,
+        username: user?.username ?? run.userId,
+        platform: "web",
+        botConfig: botCfg,
+        config: deps.config,
+        say: async (message: string) => {
+          this.chatState.appendBotMessage(conv.id, message, threadId);
+        },
+        threadId,
+        // Internal instruction, not a user message — don't persist it; `text` still
+        // reaches the model (assemblePrompt uses it).
+        skipUserSave: true,
+        tracer,
+      });
+      tracer.finish("ok", { inputTokens: turn?.inputTokens, outputTokens: turn?.outputTokens });
+      log.info("Auto-re-engaged build for run {run} ({issueKey}, attempt {attempt})", {
+        botName: run.botName, run: run.id, issueKey: run.issueKey, attempt: run.reengageCount,
+      });
+    } catch (err) {
+      tracer.error(err instanceof Error ? err : String(err));
+      // Compensating recompute so a failed turn doesn't strand the run at a
+      // turn-less `building` (mirrors runAutoOrchestrate's revert).
+      try {
+        const recovered = await computeRunStatus(run.id);
+        await updateDevRun(run.id, { status: recovered });
+        await broadcastDevRun(this.chatState, { runId: run.id });
+      } catch (revertErr) {
+        log.error("Auto-re-engage revert failed for run {run}: {error}", {
+          run: run.id, error: revertErr instanceof Error ? revertErr.message : String(revertErr),
+        });
+      }
+      throw err;
+    }
+
+    // Re-broadcast so the new build handoff row shows live.
     await broadcastDevRun(this.chatState, { runId: run.id });
   }
 }

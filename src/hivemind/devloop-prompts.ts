@@ -1,4 +1,6 @@
 import { resolve } from "node:path";
+import { parseGithubRunUrl } from "./ci-conclusion.ts";
+import type { DevRunHandoff } from "../db/dev-runs.ts";
 
 /**
  * Server-side mirror of the research-card client's handoff-path + orchestrate-
@@ -9,6 +11,9 @@ import { resolve } from "node:path";
  * KEEP IN SYNC with `research-card.ts` (`handoffPaths`, `buildOrchestratePrompt`):
  * both must produce the same instruction so an auto-fired verify behaves
  * identically to the user-clicked one.
+ *
+ * The re-engage prompt (Phase 6b) has NO client mirror — re-engage is autonomous
+ * only (no manual button), so it lives server-side alone.
  */
 
 /** The two handoff artifact paths for a run, derived deterministically from the
@@ -33,5 +38,58 @@ export function buildOrchestratePrompt(specPath: string): string {
     'AVAILABILITY GUARD: if no such peer is online, do NOT proceed — tell me which agent to start.\n\n' +
     'When ready, use the delegate_task tool (NOT send_to_peer), role: "orchestrate", to hand it the cross-repo e2e' +
     (specPath ? ' for the spec at ' + specPath : '') + ': instruct it to run the full e2e end to end (local + CI) and report back the GitHub Actions run URL so the result can be verified. ' +
+    'Then report back here what you sent and to whom.';
+}
+
+/** The failure context extracted from a red run's handoffs, fed into the
+ *  re-engage prompt (Phase 6b). */
+export interface ReengageContext {
+  /** The failed GitHub Actions run URL, reconstructed from the orchestrate
+   *  handoff's reply (the CI conclusion that came back not-green). */
+  ciUrl?: string;
+  /** The orchestrate peer's reply text (what the e2e agent reported), trimmed. */
+  orchestrateMessage?: string;
+  /** peer_name of the build handoff to prefer re-delegating to (same branch). */
+  buildPeer?: string;
+}
+
+/**
+ * Extract the re-engage failure context from a red run's handoff rows. Pulls the
+ * orchestrate peer's last reply (carrying the CI URL the green gate rejected) and
+ * the build peer to re-engage. Called BEFORE the orchestrate handoff is cleared,
+ * so the CI URL is preserved into the prompt even though the row is then deleted.
+ */
+export function buildReengageContext(handoffs: DevRunHandoff[]): ReengageContext {
+  const orchMessage = handoffs
+    .filter((h) => h.role === "orchestrate")
+    .map((h) => h.lastMessage)
+    .find((m): m is string => !!m);
+  const parsed = orchMessage ? parseGithubRunUrl(orchMessage) : null;
+  // The MOST RECENT build peer — handoffs are created_at ASC, and a re-engaged run
+  // may have several build rows (delegate_task always inserts). The latest is the
+  // peer that did the work the failed e2e ran against, so prefer it for the fix.
+  const buildPeer = handoffs.filter((h) => h.role === "build").at(-1)?.peerName;
+  return {
+    ciUrl: parsed ? `https://github.com/${parsed.repo}/actions/runs/${parsed.runId}` : undefined,
+    orchestrateMessage: orchMessage?.trim().slice(0, 1500),
+    buildPeer,
+  };
+}
+
+/** Instruction handed to the bot to re-engage the BUILD agent after a red e2e
+ *  (Phase 6b). First cut: always route to build (most reds are feature bugs); a
+ *  Haiku build-vs-test classifier is the follow-up. Mirrors the orchestrate
+ *  prompt's shape (recommend → delegate_task → report back). */
+export function buildReengagePrompt(ctx: ReengageContext): string {
+  // Only fired on an orchestrate red (a failed cross-repo e2e), so the lead is
+  // always e2e-centric. The CI URL may still be absent if the peer didn't report
+  // it on the red — degrade to the run-level statement then.
+  return 'The cross-repo e2e for this dev run came back RED — the acceptance criteria are NOT yet met, so the work needs another pass.\n\n' +
+    (ctx.ciUrl ? 'Failed CI run: ' + ctx.ciUrl + '\n' : '') +
+    (ctx.orchestrateMessage ? 'What the e2e agent reported:\n' + ctx.orchestrateMessage + '\n\n' : '\n') +
+    'Re-engage the BUILD agent' + (ctx.buildPeer ? ' (' + ctx.buildPeer + ')' : '') +
+    ' to fix it: use the delegate_task tool (NOT send_to_peer), role: "build". Hand it the failure context above plus the workplan/spec, and ask it to diagnose the e2e failure, implement the fix, and report back done. ' +
+    'PREFER the same build peer that did the original implementation so the fix lands on the same branch. ' +
+    'AVAILABILITY GUARD: if it is offline, pick another online build agent (or tell me which to start). ' +
     'Then report back here what you sent and to whom.';
 }

@@ -486,6 +486,10 @@ CREATE TABLE dev_runs (
   workplan_path     TEXT,
   status            TEXT NOT NULL DEFAULT 'analyzing',
   research_stage    TEXT,
+  -- Phase 6b: count of autonomous re-engage-on-red attempts; capped by
+  -- claimForReengage so a red → re-engage → red cycle terminates (see
+  -- db/migrations/042-dev-run-reengage-count.sql).
+  reengage_count    INTEGER NOT NULL DEFAULT 0,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );

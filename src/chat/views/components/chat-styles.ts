@@ -522,6 +522,12 @@ export function chatStyles(): string {
       color: var(--status-warn, #f59e0b);
       border-color: color-mix(in srgb, var(--status-warn, #f59e0b) 50%, transparent);
     }
+    .dev-run-exhausted {
+      margin-top: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--status-error, #ef4444);
+    }
     .dev-run-resend {
       padding: 2px 10px;
       border-radius: 6px;

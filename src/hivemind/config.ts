@@ -26,6 +26,12 @@ export interface DevLoopConfig {
   /** Auto-fire the orchestrate (cross-repo e2e) turn when build ∧ test land done,
    *  instead of parking at `ready_to_verify` for the user's confirm (PR 6a). */
   autoOrchestrate?: boolean;
+  /** On a red e2e, auto-re-engage the build agent (re-open the run + hand it the
+   *  failure context) up to MAX_REENGAGE_ATTEMPTS, then park at `red` for the user
+   *  (PR 6b). Independent of autoOrchestrate, though they compose: a re-engaged
+   *  build that lands done rolls the run back to `ready_to_verify`, where
+   *  autoOrchestrate (if on) re-fires the e2e. */
+  autoReengageOnRed?: boolean;
 }
 
 export interface HivemindBotConfig {
@@ -96,5 +102,6 @@ function parseDevLoopConfig(raw: unknown): DevLoopConfig | undefined {
   const r = raw as Record<string, unknown>;
   const cfg: DevLoopConfig = {};
   if (typeof r.autoOrchestrate === "boolean") cfg.autoOrchestrate = r.autoOrchestrate;
+  if (typeof r.autoReengageOnRed === "boolean") cfg.autoReengageOnRed = r.autoReengageOnRed;
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }

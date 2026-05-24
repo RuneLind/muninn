@@ -6,7 +6,7 @@ import type { DevRun, DevRunHandoff } from "../db/dev-runs.ts";
 function makeRun(over: Partial<DevRun> = {}): DevRun {
   return {
     id: "run-1", botName: "jarvis", userId: "u1", issueKey: "MELOSYS-1",
-    status: "building", threadId: "t1", createdAt: 1, updatedAt: 2, ...over,
+    status: "building", threadId: "t1", reengageCount: 0, createdAt: 1, updatedAt: 2, ...over,
   };
 }
 

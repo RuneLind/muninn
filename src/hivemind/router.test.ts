@@ -12,7 +12,7 @@ import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { setCorrelationToken } from "./correlation-tokens.ts";
-import { birthDevRun, insertHandoff, listHandoffs, getDevRunById, updateDevRun } from "../db/dev-runs.ts";
+import { birthDevRun, insertHandoff, listHandoffs, getDevRunById, updateDevRun, MAX_REENGAGE_ATTEMPTS } from "../db/dev-runs.ts";
 import { shortRunId } from "./mcp-server.ts";
 
 setupTestDb();
@@ -801,5 +801,238 @@ describe("HivemindRouter auto-advance (Phase 6a — auto-fire orchestrate)", () 
     // revert recomputes ready_to_verify — the run is recoverable, not wedged.
     expect((await getDevRunById(run.id))!.status).toBe("ready_to_verify");
     expect((await listHandoffs(run.id)).some((h) => h.role === "orchestrate")).toBe(false);
+  });
+});
+
+describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", () => {
+  const P6_BOT = "phase6b-bot";
+  const P6_OWNER = "phase6b-owner";
+  const CI_URL = "https://github.com/navikt/melosys-e2e-tests/actions/runs/26280001";
+
+  function makeBotConfig(over?: {
+    autoReengageOnRed?: boolean;
+    autoOrchestrate?: boolean;
+    maxAutoTurnsPerHour?: number;
+  }): BotConfig {
+    return {
+      name: P6_BOT,
+      dir: `/tmp/bots/${P6_BOT}`,
+      persona: "Test bot persona",
+      telegramAllowedUserIds: [],
+      slackAllowedUserIds: [],
+      hivemind: {
+        enabled: true,
+        namespaces: ["private"],
+        maxAutoTurnsPerHour: over?.maxAutoTurnsPerHour,
+        devLoop:
+          over && (over.autoReengageOnRed !== undefined || over.autoOrchestrate !== undefined)
+            ? { autoReengageOnRed: over.autoReengageOnRed, autoOrchestrate: over.autoOrchestrate }
+            : undefined,
+      },
+    } as BotConfig;
+  }
+
+  function makeDeps(botConfig: BotConfig | undefined, process: typeof ProcessMessageFn): AutorespondDeps {
+    return {
+      getBotConfig: () => botConfig,
+      getClient: () => null,
+      config: {} as Config,
+      processMessage: process,
+    };
+  }
+
+  /** A processMessage stub that records its calls (the real bot would call
+   *  delegate_task(role:"build") here). */
+  function makeStubProcess() {
+    const calls: Array<{ text: string; threadId?: string; skipUserSave?: boolean }> = [];
+    const fn: typeof ProcessMessageFn = async (params) => {
+      calls.push({ text: params.text, threadId: params.threadId, skipUserSave: params.skipUserSave });
+      return {
+        responseText: "re-engaged the build agent",
+        traceId: "t", durationMs: 1, inputTokens: 1, outputTokens: 1,
+        costUsd: 0, model: "stub", numTurns: 1,
+      };
+    };
+    return { calls, fn };
+  }
+
+  /** Seed a run mid-verify: build done, test done, orchestrate sent — the
+   *  orchestrate peer's `e2e: red` marker tips it red. Returns the run + thread. */
+  async function seedVerifyingRun(issueKey: string) {
+    await setBotDefaultUser(P6_BOT, P6_OWNER);
+    const thread = await createThread(P6_OWNER, P6_BOT, `research-${issueKey}`);
+    const run = await birthDevRun({ botName: P6_BOT, userId: P6_OWNER, issueKey, threadId: thread.id });
+    await updateDevRun(run.id, { specPath: `specs/${P6_OWNER}/${issueKey}.md`, status: "verifying" });
+    await insertHandoff({ runId: run.id, peerName: "buildpeer", role: "build", status: "done" });
+    await insertHandoff({ runId: run.id, peerName: "testpeer", role: "test", status: "done" });
+    await insertHandoff({ runId: run.id, peerName: "orchpeer", role: "orchestrate", status: "sent" });
+    return { run, thread };
+  }
+
+  /** The orchestrate peer's red marker (peerNameFor(cwd)=="orchpeer"), carrying
+   *  the failed CI URL the re-engage context extracts. */
+  function orchPeerRed(runId: string): InboundPeerMessage {
+    return makeMsg({
+      fromId: "orchpeer-uuid",
+      fromCwd: "/Users/test/source/nav/orchpeer",
+      text: `e2e failed — see ${CI_URL}\n<!-- e2e: red run:${shortRunId(runId)} -->`,
+    });
+  }
+
+  test("re-engages the build agent when opted in and the run goes red", async () => {
+    const { run, thread } = await seedVerifyingRun("research-6b000001");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoReengageOnRed: true }), stub.fn));
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.threadId).toBe(thread.id);
+    expect(stub.calls[0]!.text).toContain("delegate_task");
+    expect(stub.calls[0]!.text.toLowerCase()).toContain("build");
+    expect(stub.calls[0]!.text).toContain(CI_URL); // failure context fed in
+    expect(stub.calls[0]!.text).toContain("buildpeer"); // re-engage the same peer
+    expect(stub.calls[0]!.skipUserSave).toBe(true);
+
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("building"); // re-opened off red
+    expect(after.reengageCount).toBe(1);
+    // The failed e2e was abandoned so the re-fixed build can re-verify.
+    expect((await listHandoffs(run.id)).some((h) => h.role === "orchestrate")).toBe(false);
+  });
+
+  test("does NOT re-engage when the bot has not opted in (v1 parks at red)", async () => {
+    const { run } = await seedVerifyingRun("research-6b000002");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig(/* no devLoop */), stub.fn));
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(0);
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("red"); // parked for the user
+    expect(after.reengageCount).toBe(0);
+  });
+
+  test("does NOT re-engage a build-phase red (no failed e2e) — parks for the user", async () => {
+    // A build peer fails before any e2e runs: build failed, test done, NO
+    // orchestrate handoff. Re-engaging build here can't safely roll the run up
+    // (the failed build row would survive a cross-peer fix), so it must park.
+    await setBotDefaultUser(P6_BOT, P6_OWNER);
+    const thread = await createThread(P6_OWNER, P6_BOT, "research-6b000007");
+    const run = await birthDevRun({ botName: P6_BOT, userId: P6_OWNER, issueKey: "research-6b000007", threadId: thread.id });
+    await insertHandoff({ runId: run.id, peerName: "buildpeer", role: "build", status: "sent" });
+    await insertHandoff({ runId: run.id, peerName: "testpeer", role: "test", status: "done" });
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoReengageOnRed: true }), stub.fn));
+
+    // The build peer reports failed (peerNameFor(cwd)=="buildpeer").
+    const buildRed = makeMsg({
+      fromId: "buildpeer-uuid",
+      fromCwd: "/Users/test/source/nav/buildpeer",
+      text: `build failed\n<!-- status: failed run:${shortRunId(run.id)} -->`,
+    });
+    await router.route(P6_BOT, buildRed);
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(0); // no re-engage — build/test red parks
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("red");
+    expect(after.reengageCount).toBe(0); // cap untouched
+  });
+
+  test("stops at the per-run cap — a red run already at MAX doesn't re-fire", async () => {
+    const { run } = await seedVerifyingRun("research-6b000003");
+    // Pretend both attempts are spent and the run went red again on a failed e2e.
+    const sql = getDb();
+    await sql`UPDATE dev_runs SET status = 'red', reengage_count = ${MAX_REENGAGE_ATTEMPTS} WHERE id = ${run.id}`;
+    await sql`UPDATE dev_run_handoffs SET status = 'failed' WHERE run_id = ${run.id} AND role = 'orchestrate'`;
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoReengageOnRed: true }), stub.fn));
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(0); // exhausted — surfaced to the user, not re-fired
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("red");
+    expect(after.reengageCount).toBe(MAX_REENGAGE_ATTEMPTS); // not bumped past the cap
+  });
+
+  test("a flapping red marker doesn't re-fire (orchestrate handoff already cleared)", async () => {
+    const { run } = await seedVerifyingRun("research-6b000004");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoReengageOnRed: true }), stub.fn));
+
+    // First red tips + re-engages once (run re-opened, orchestrate handoff cleared).
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+    expect(stub.calls).toHaveLength(1);
+
+    // A re-sent red marker now misses the (run, peer_name) join (orchestrate row is
+    // gone) → no red verdict re-computed → no second re-engage.
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+    expect(stub.calls).toHaveLength(1); // not 2
+    expect((await getDevRunById(run.id))!.reengageCount).toBe(1);
+  });
+
+  test("the hourly backstop blocks re-engage on a busy thread", async () => {
+    const { run, thread } = await seedVerifyingRun("research-6b000005");
+    // One prior assistant turn trips a maxAutoTurnsPerHour of 1.
+    await saveMessage({
+      userId: P6_OWNER, botName: P6_BOT, role: "assistant",
+      content: "earlier turn", platform: "web", threadId: thread.id,
+    });
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const router = new HivemindRouter(
+      chat,
+      makeDeps(makeBotConfig({ autoReengageOnRed: true, maxAutoTurnsPerHour: 1 }), stub.fn),
+    );
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(stub.calls).toHaveLength(0); // backstopped
+    const after = (await getDevRunById(run.id))!;
+    expect(after.status).toBe("red"); // left red, not claimed/re-opened
+    expect(after.reengageCount).toBe(0);
+  });
+
+  test("a thrown re-engage turn recomputes the run (no wedge at building)", async () => {
+    const { run } = await seedVerifyingRun("research-6b000006");
+    const chat = new ChatState();
+    const calls: number[] = [];
+    const throwingProcess: typeof ProcessMessageFn = async () => {
+      calls.push(1);
+      throw new Error("connector boom");
+    };
+    const router = new HivemindRouter(chat, makeDeps(makeBotConfig({ autoReengageOnRed: true }), throwingProcess));
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun.catch(() => {}); // the turn throws + rethrows
+
+    expect(calls).toHaveLength(1); // it did fire
+    // The claim re-opened to building + cleared orchestrate; the compensating
+    // recompute (build∧test still done, no orchestrate) lands ready_to_verify, so
+    // the user can re-run e2e — recoverable, not stranded at a turn-less building.
+    expect((await getDevRunById(run.id))!.status).toBe("ready_to_verify");
+    expect((await getDevRunById(run.id))!.reengageCount).toBe(1); // the attempt stands
   });
 });

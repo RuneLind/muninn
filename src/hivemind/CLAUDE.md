@@ -186,6 +186,70 @@ forget after persist/broadcast) so a parse error can never block inbound deliver
   are in the main `bun run test` (`src/db/dev-runs.test.ts`). `gh` and file I/O are
   injectable, so no live CLI / real spec files in tests.
 
+## Spec-driven dev loop — auto-advance (Phase 6, v2)
+
+Turns v1's "park and wait for the user" into an autonomous loop. Both behaviors
+trip in `router.route()`'s interpret `.then` (no active turn there) and fire a
+**code-triggered bot turn** on the research thread — the bot's own `delegate_task`
+does the outbound, so all of v1's handoff machinery (insert row, `run:<id>` marker,
+correlation, green gate, terminal guard) is reused unchanged. Both are **per-bot
+opt-in, default off** (`hivemind.devLoop`); off ⇒ v1 (park + confirm) stands. The
+prompts live server-side in `devloop-prompts.ts` (the interpreter has no browser).
+The slow turn runs as `pendingAdvanceRun` (test-only seam, await it after
+`pendingHandoffInterpret`).
+
+- **6a — auto-fire orchestrate** (`autoOrchestrate`). On `ready_to_verify`,
+  `claimAutoOrchestrate` does an atomic CAS (`claimForVerify`: `ready_to_verify →
+  verifying`) **before the broadcast** — the claim is the once-per-run guard AND
+  closes the manual/auto double-delegate race (an open tab never sees the confirm
+  button for a run we're about to advance). `runAutoOrchestrate` then fires the
+  orchestrate turn (compensating revert recomputes status on a thrown turn so the
+  run isn't wedged at `verifying`). The interpreter persists status through
+  `persistRunStatus` (no-downgrade guard: a duplicate/late build|test marker can't
+  re-open a claimed `verifying`/terminal run and re-fire). No hourly loop-guard —
+  the CAS bounds it to once per run.
+- **6b — re-engage build on red** (`autoReengageOnRed`). On `red`,
+  `claimAutoReengage`: (1) **scope gate — RED E2E ONLY.** Fires only when a
+  `failed` orchestrate handoff exists (the cross-repo e2e ran and failed). A
+  build-/test-phase red (a `failed` build/test row, no orchestrate) PARKS for the
+  user — the build-first cut can't safely target it (clearing orchestrate wouldn't
+  remove the failed row, so `computeRunStatus` would stay red and the run would
+  burn the cap for nothing; a test failure isn't build's to fix anyway). (2)
+  **hourly backstop** (`checkAutoRespond` on the research thread — defence in
+  depth; a manual pause or the cap skips, leaving the run red — note: the default
+  20/hr won't block normal research, and a skip leaves the run plainly `red`). (3)
+  **atomic claim + cap** (`claimForReengage`: CAS-increments `reengage_count` and
+  re-opens `red → building` only while `status='red' AND reengage_count <
+  MAX_REENGAGE_ATTEMPTS` — the `status='red'` guard makes a flapping red
+  idempotent, the count is the loop terminator). (4) **reset** — capture the
+  failure context (CI URL + the e2e agent's reply) from the orchestrate handoff
+  BEFORE clearing it, then `clearOrchestrateHandoffs` so the run rolls back to
+  `ready_to_verify` once the re-fixed build reports done (a fresh e2e re-runs).
+  `buildReengageContext` names the MOST RECENT build peer (handoffs are created_at
+  ASC; a re-engaged run accumulates build rows). `runAutoReengage` fires a build
+  re-engage turn (`buildReengagePrompt`, always build — the Haiku build-vs-test
+  classifier is the follow-up); compensating recompute on a thrown turn.
+  **Re-opening to `building` is load-bearing** — the interpreter's terminal guard
+  ignores replies on a `red` run, so the loop can only continue off terminal. At
+  the cap the claim returns null, the run stays `red`, and the run card surfaces an
+  "auto-re-engage exhausted — needs you" note (`reengageCount >=
+  MAX_REENGAGE_ATTEMPTS`, mirrored client-side in `research-card.ts`). The two
+  flags compose: a re-engaged build that lands done → `ready_to_verify` → 6a (if
+  on) re-fires the e2e. **Migration 042** adds `dev_runs.reengage_count` (default
+  0 — no backfill).
+  - **Known bounded limitations (first cut):** (a) a duplicate/late build|test
+    `done` marker arriving in the brief window between the claim (status `building`,
+    build∧test still done, orchestrate cleared) and the re-engage turn's
+    `delegate_task` can recompute `ready_to_verify` and, with 6a on, re-fire the
+    e2e against not-yet-re-fixed code — wasteful but self-correcting (it reds again
+    → re-engage, bounded by the cap). (b) Re-delegating the fix to a DIFFERENT
+    build peer (original offline) leaves the original build row in place; the
+    same-peer path (the prompt's preference) rolls up cleanly via the
+    `(run_id, peer_name)` join. (c) Like 6a, if the bot's turn succeeds but it
+    never calls `delegate_task`, no handoff is inserted and the run sits at
+    `building` with no reply to roll it up (the shared "trust the turn to delegate"
+    risk of the code-triggered pattern).
+
 ## Bot setup
 
 1. Add `hivemind` block to `bots/<name>/config.json`. Use a single namespace
