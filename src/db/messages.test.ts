@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { makeMessage } from "../test/fixtures.ts";
-import { saveMessage, getRecentMessages, getRecentAlerts, getSimMessages } from "./messages.ts";
+import { saveMessage, getRecentMessages, getRecentAlerts, getSimMessages, getSimConversations } from "./messages.ts";
 import { createThread } from "./threads.ts";
+import { ensureUser } from "./users.ts";
 
 setupTestDb();
 
@@ -130,6 +131,33 @@ describe("messages", () => {
       const contents = all.map((m) => m.content);
       expect(contents).toContain("w");
       expect(contents).toContain("t");
+    });
+  });
+
+  describe("getSimConversations", () => {
+    test("uses the canonical users.username, not the latest message's label", async () => {
+      // The owner's real, canonical name.
+      await ensureUser({ id: "vy-1", username: "Vy KI-fagdag", platform: "web" });
+
+      // A human turn (older) followed by a hivemind autorespond assistant turn
+      // stamped with the PEER's name — the more recent message. Hydrating from the
+      // latest message's username is what used to clobber the owner's name.
+      await saveMessage(makeMessage({ userId: "vy-1", botName: "bot1", platform: "web", role: "user", username: "Vy KI-fagdag", content: "hei" }));
+      await saveMessage(makeMessage({ userId: "vy-1", botName: "bot1", platform: "web", role: "assistant", username: "claude-hivemind", content: "svar" }));
+
+      const convs = await getSimConversations();
+      const conv = convs.find((c) => c.userId === "vy-1" && c.botName === "bot1" && c.platform === "web");
+      expect(conv).toBeTruthy();
+      expect(conv!.username).toBe("Vy KI-fagdag");
+    });
+
+    test("falls back to the message label when no users row exists", async () => {
+      await saveMessage(makeMessage({ userId: "orphan-1", botName: "bot1", platform: "web", username: "drifter", content: "hi" }));
+
+      const convs = await getSimConversations();
+      const conv = convs.find((c) => c.userId === "orphan-1");
+      expect(conv).toBeTruthy();
+      expect(conv!.username).toBe("drifter");
     });
   });
 

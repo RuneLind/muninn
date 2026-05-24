@@ -20,24 +20,44 @@ export interface User {
  * stamps onto a freshly-created (often peer-recreated) conversation shell. Without
  * that last guard a peer reply could recreate a user's conversation with the
  * placeholder name and the next typed message would clobber their real username.
+ *
+ * `lockUsername` is the structural backstop for the recurring "user renamed by a
+ * hivemind peer" bug: when set, an already-established real username is NEVER
+ * overwritten — only a placeholder (NULL/''/the id/'chat-user') is filled in.
+ * Passive message turns on the **web** platform pass it (see message-processor),
+ * so a transient label flowing through `conversation.username` (e.g. a peer's name
+ * that leaked into the conversation shell) can't rename an established user. Names
+ * on web are set explicitly via `addChatUser`, which leaves it false. Telegram /
+ * Slack also leave it false because there the platform display name is
+ * authoritative and should keep syncing.
  */
 export async function ensureUser(params: {
   id: string;
   username: string;
   displayName?: string;
   platform: Platform | string;
+  lockUsername?: boolean;
 }): Promise<void> {
   const sql = getDb();
+  const lock = params.lockUsername ?? false;
   await sql`
     INSERT INTO users (id, username, display_name, platform, last_seen_at)
     VALUES (${params.id}, ${params.username}, ${params.displayName ?? null}, ${params.platform}, now())
     ON CONFLICT (id) DO UPDATE SET
       username = CASE
-        WHEN EXCLUDED.username != ''
-          AND EXCLUDED.username != users.id
-          AND EXCLUDED.username != 'chat-user'
-        THEN EXCLUDED.username
-        ELSE users.username
+        -- Incoming value is itself a placeholder → keep what we already have.
+        WHEN EXCLUDED.username = ''
+          OR EXCLUDED.username = users.id
+          OR EXCLUDED.username = 'chat-user'
+        THEN users.username
+        -- Locked passive turn → never rename an already-established real name.
+        WHEN ${lock}
+          AND users.username IS NOT NULL
+          AND users.username <> ''
+          AND users.username <> users.id
+          AND users.username <> 'chat-user'
+        THEN users.username
+        ELSE EXCLUDED.username
       END,
       display_name = COALESCE(EXCLUDED.display_name, users.display_name),
       last_seen_at = now()
