@@ -662,12 +662,23 @@ export class HivemindRouter {
     let role: ReengageRole = "build";
     if (botCfg.hivemind?.devLoop?.reengageClassifier) {
       const classify = deps.classifyReengageRole ?? classifyReengageRole;
-      role = await classify(context, {
-        botName: run.botName,
-        botDir: botCfg.dir,
-        connector: botCfg.connector,
-        haikuBackend: botCfg.haikuBackend,
-      });
+      // The real classifier never throws (it catches internally and returns
+      // "build"), but guard here too so an injected/future one can't escape into
+      // the already-claimed `building` state and bypass the turn's compensating
+      // recompute — defense in depth, defaulting to the safe build route.
+      try {
+        role = await classify(context, {
+          botName: run.botName,
+          botDir: botCfg.dir,
+          connector: botCfg.connector,
+          haikuBackend: botCfg.haikuBackend,
+        });
+      } catch (err) {
+        log.warn("reengage classifier threw for run {run}, defaulting to build: {error}", {
+          botName: run.botName, run: run.id, error: err instanceof Error ? err.message : String(err),
+        });
+        role = "build";
+      }
     }
     const reengagePrompt = role === "test" ? testReengagePrompt(context) : buildReengagePrompt(context);
 

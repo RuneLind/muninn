@@ -61,7 +61,12 @@ export async function classifyReengageRole(
     log.debug("reengage classifier: no e2e report for {bot}, defaulting to build", { botName: opts.botName });
     return "build";
   }
-  const prompt = CLASSIFY_PROMPT.replace("{CI}", ctx.ciUrl ?? "(not reported)").replace("{REPORT}", report);
+  // Function replacements — the report is raw e2e text that can contain `$&`,
+  // `$\``, `${...}` etc., which a STRING replacement would interpret as special
+  // patterns and mangle (leaking scaffolding / dropping the placeholder).
+  const prompt = CLASSIFY_PROMPT
+    .replace("{CI}", () => ctx.ciUrl ?? "(not reported)")
+    .replace("{REPORT}", () => report);
   try {
     const haiku = await callHaiku(prompt, {
       source: "devloop-reengage-classify",
@@ -81,20 +86,22 @@ export async function classifyReengageRole(
 }
 
 /**
- * Parse a Haiku verdict into a role. Accepts a clean one-word answer; tolerates
- * minor wrapping by treating an unambiguous single mention as the verdict. Any
- * ambiguity (both/neither word present) defaults to "build".
+ * Parse a Haiku verdict into a role. The prompt demands EXACTLY one lowercase
+ * word, so we accept only a clean one-word "build"/"test" (tolerating surrounding
+ * whitespace/punctuation/quotes). ANYTHING else — prose, a negation like "not a
+ * test issue", an empty string — defaults to "build" (the safe route). This is
+ * deliberately strict: a tolerant "contains \btest\b" parse would mis-route a
+ * negated mention ("this is NOT a test problem") to the test agent, the unsafe
+ * direction; routing uncertainty to build only ever wastes a capped cycle.
  */
 export function parseRole(raw: string, botName?: string): ReengageRole {
-  const t = (raw ?? "").toLowerCase();
-  const hasTest = /\btest\b/.test(t);
-  const hasBuild = /\bbuild\b/.test(t);
-  if (hasTest && !hasBuild) return "test";
-  if (hasBuild && !hasTest) return "build";
-  // Both present (e.g. "test, not build") or neither — fall back to build, but
-  // log so a systematically chatty model surfaces in diagnostics.
-  log.debug("reengage classifier verdict ambiguous, defaulting to build: {raw}", {
-    botName, raw: t.slice(0, 120),
+  // Trim, lowercase, then strip leading/trailing non-letters ("test." → "test",
+  // "**build**" → "build"); internal non-letters survive, so prose stays multi-token.
+  const t = (raw ?? "").trim().toLowerCase().replace(/^[^a-z]+|[^a-z]+$/g, "");
+  if (t === "test") return "test";
+  if (t === "build") return "build";
+  log.debug("reengage classifier verdict not a clean build/test answer, defaulting to build: {raw}", {
+    botName, raw: (raw ?? "").slice(0, 120),
   });
   return "build";
 }

@@ -31,14 +31,23 @@ describe("parseRole", () => {
     expect(parseRole("TEST")).toBe("test");
     expect(parseRole("Build")).toBe("build");
   });
-  test("tolerates trailing whitespace/punctuation", () => {
+  test("tolerates surrounding whitespace/punctuation/quotes", () => {
     expect(parseRole("test.\n")).toBe("test");
     expect(parseRole("  build  ")).toBe("build");
+    expect(parseRole('"test"')).toBe("test");
   });
-  test("an unambiguous single mention inside a sentence", () => {
-    expect(parseRole("This is a test problem.")).toBe("test");
+  test("prose defaults to build — only a clean one-word answer counts", () => {
+    // A single 'test' mention wrapped in prose is NOT a clean verdict → build.
+    expect(parseRole("This is a test problem.")).toBe("build");
   });
-  test("BOTH words present is ambiguous → defaults to build", () => {
+  test("a NEGATED test mention does not mis-route to the test agent", () => {
+    // The dangerous direction (should be build, must never return test): a
+    // negation has 'test' present and 'build' absent, which a tolerant
+    // \btest\b parse would wrongly route to test.
+    expect(parseRole("This is a feature bug, not a test issue")).toBe("build");
+    expect(parseRole("Not a test problem; the implementation is wrong.")).toBe("build");
+  });
+  test("BOTH words present → defaults to build", () => {
     expect(parseRole("It's a test issue, not a build bug")).toBe("build");
   });
   test("neither word present → defaults to build", () => {
@@ -86,5 +95,14 @@ describe("classifyReengageRole", () => {
   test("defaults to build on an ambiguous verdict", async () => {
     const haiku = stubHaiku("could be a test or a build problem");
     expect(await classifyReengageRole(CTX, OPTS, haiku.fn)).toBe("build");
+  });
+
+  test("feeds a report with $ sequences into the prompt verbatim (no replace-pattern mangling)", async () => {
+    const haiku = stubHaiku("build");
+    // $&, $`, $', $$, ${...} are all special in String.replace's replacement arg.
+    const tricky = "Selector `${submitBtn}` missing; regex /foo$/ ; literals $& $` $' $$ failed";
+    await classifyReengageRole({ ...CTX, orchestrateMessage: tricky }, OPTS, haiku.fn);
+    expect(haiku.prompts[0]).toContain(tricky); // passed through unchanged
+    expect(haiku.prompts[0]).not.toContain("{REPORT}"); // placeholder fully substituted
   });
 });
