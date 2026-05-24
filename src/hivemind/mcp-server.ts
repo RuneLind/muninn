@@ -23,7 +23,18 @@ import { getDevRunByThreadId, insertHandoff } from "../db/dev-runs.ts";
  *  there's no active turn to bind to — the reply then falls back to the default
  *  bucket, same as before. */
 async function bindOutboundToOriginThread(botName: string, to: string): Promise<string | undefined> {
-  const originThread = peekActiveTurn(botName);
+  return bindOutboundToThread(botName, to, peekActiveTurn(botName));
+}
+
+/** Like `bindOutboundToOriginThread` but for callers that have already resolved
+ *  the origin thread (e.g. `delegate_task`, which peeks once to resolve the run
+ *  AND bind the token to the *same* thread — peeking twice across an await could
+ *  pick a different thread if a concurrent turn on the bot races). */
+async function bindOutboundToThread(
+  botName: string,
+  to: string,
+  originThread: string | null,
+): Promise<string | undefined> {
   if (!originThread) return undefined;
   const correlationId = mintCorrelationToken();
   await Promise.all([
@@ -447,13 +458,16 @@ export async function runDelegateTask(
   const client = registry.pickClientFor(to);
   if (!client) return { text: "No hivemind client registered for this bot", isError: true };
 
+  // Peek the origin thread ONCE and reuse it for both run resolution and the
+  // token binding — peeking again inside the bind could pick a different thread
+  // if a concurrent turn on this bot races during the awaited DB read.
   const originThread = peekActiveTurn(botName);
   const run = originThread ? await getDevRunByThreadId(originThread) : null;
 
   // Mint the broker correlation token + write the (bot,peer) fallback — exactly
   // what send_to_peer does, so the legacy reply path keeps working alongside the
   // in-marker run id.
-  const correlationId = await bindOutboundToOriginThread(botName, to);
+  const correlationId = await bindOutboundToThread(botName, to, originThread);
 
   // Append the run marker so the peer echoes run:<id> back.
   const outgoing = run ? `${message}\n\n${runMarkerInstruction(run.id, role)}` : message;
@@ -472,7 +486,23 @@ export async function runDelegateTask(
     };
   }
 
-  const peerName = registry.peerNameFor(to) ?? to;
+  // The handoff's peer_name MUST match what the inbound router derives for the
+  // peer's reply (cwd-basename) — that's the (run_id, peer_name) join. On a cold
+  // cwd cache (no recent unfiltered list_peers) refresh it once; only if the peer
+  // is genuinely unknown do we fall back to the id and warn, since a UUID
+  // peer_name will never match the reply and the handoff would stick at 'sent'.
+  let peerName = registry.peerNameFor(to);
+  if (!peerName) {
+    await registry.listPeers("machine");
+    peerName = registry.peerNameFor(to);
+  }
+  if (!peerName) {
+    log.warn(
+      "delegate_task: no cwd cache for peer {to} after refresh — handoff peer_name falls back to the id, which won't match the inbound reply name (the run won't auto-roll-up)",
+      { botName, to, run: run.id },
+    );
+    peerName = to;
+  }
   try {
     await insertHandoff({ runId: run.id, peerName, role, peerId: to, correlationToken: correlationId });
   } catch (err) {

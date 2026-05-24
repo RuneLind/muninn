@@ -5,6 +5,7 @@ import type { Peer } from "./types.ts";
 import { setupTestDb } from "../test/setup-db.ts";
 import { pushActiveTurn, _resetActiveTurnsForTests } from "./active-turn.ts";
 import { birthDevRun, listHandoffs } from "../db/dev-runs.ts";
+import { getDb } from "../db/client.ts";
 
 /**
  * Build a minimal stub HivemindBotClient — only the surface the registry
@@ -281,6 +282,28 @@ describe("runDelegateTask", () => {
     expect(res.text).toContain("plain delegation");
     // No marker appended.
     expect(sends[0]!.text).toBe("do a thing");
+    // And nothing recorded — the no-run path must not insert any handoff.
+    const rows = await getDb()<{ count: number }[]>`SELECT count(*)::int AS count FROM dev_run_handoffs`;
+    expect(rows[0]!.count).toBe(0);
+  });
+
+  test("cold cwd cache → lazy-warms so peer_name is the basename, not the raw id", async () => {
+    const threadId = crypto.randomUUID();
+    const run = await birthDevRun({ botName: BOT, userId: "u", issueKey: "MELOSYS-52", threadId });
+    pushActiveTurn(BOT, threadId);
+
+    // Build the registry WITHOUT pre-warming the caches (no upfront list_peers),
+    // so runDelegateTask must refresh them itself to resolve the peer_name.
+    const p = peer("peer-cold", "nav", { cwd: "/Users/x/source/nav/melosys-web" });
+    const { client } = recordingStubClient({ botName: BOT, namespace: "nav", peers: [p] });
+    const reg = new BotClientRegistry();
+    reg.add("nav", client);
+
+    await runDelegateTask(BOT, reg, { to: "peer-cold", message: "build it", role: "build" });
+
+    const handoffs = await listHandoffs(run.id);
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]!.peerName).toBe("melosys-web");
   });
 
   test("returns an error when the peer has no registered client", async () => {

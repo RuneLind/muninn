@@ -120,7 +120,11 @@ the originating research thread's `dev_run` (see `src/db/dev-runs.ts`,
   (Phase 1.5), so keep it short; **Phase 4's inbound parser resolves it back to a
   `dev_run` by prefix match**, then `(run_id, peer_name)` picks the role's handoff.
   This rides in the message body the agent controls, so it survives even when the
-  broker correlation token isn't echoed (raw peers, multi-in-flight).
+  broker correlation token isn't echoed (raw peers, multi-in-flight). **Phase 4
+  caveat:** 8 hex is 32 bits, so the prefix is NOT collision-proof — the inbound
+  resolver must handle >1 matching `dev_run` (fall back to the correlation token,
+  or pick the most-recently-updated open run), not assume a unique match. Don't
+  lengthen the id without re-checking peers still echo it verbatim.
 - **`peer_name` = cwd-basename via the shared `peer-name.ts`.** Derived from the
   `list_peers` cwd cache, identical to the router's inbound naming, so the handoff
   row and the peer's reply agree on the name.
