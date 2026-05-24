@@ -62,8 +62,10 @@ export function researchCardScript(): string {
         reportExists = res.ok;
         // Refresh the affordance if a research-action row is currently showing so
         // Start Building reflects the resolved report existence. Re-renders off
-        // run state (renderRunAffordance), not a positional reply count.
-        if (chatMessages.querySelector('.research-actions')) renderRunAffordance();
+        // run state (renderRunAffordance), not a positional reply count. Skip when
+        // a transient gate is active (spec review / handoff confirm share the
+        // .research-actions class) so this late callback can't clobber it.
+        if (!pendingHandoffRoles.length && !awaitingSpecReview && chatMessages.querySelector('.research-actions')) renderRunAffordance();
       })
       .catch(function() { reportExists = false; });
   }
@@ -88,8 +90,10 @@ export function researchCardScript(): string {
         var statusMatch = fm ? fm[1].match(/(?:^|\\n)status:\\s*(\\w+)/) : null;
         specApproved = !!(statusMatch && statusMatch[1] === 'approved');
         // Refresh the action row if it's showing, so the Start Building gate
-        // reflects the resolved approval state. Re-renders off run state.
-        if (chatMessages.querySelector('.research-actions')) renderRunAffordance();
+        // reflects the resolved approval state. Re-renders off run state. Skip when
+        // a transient gate is active (spec review / handoff confirm share the
+        // .research-actions class) so this late callback can't clobber it.
+        if (!pendingHandoffRoles.length && !awaitingSpecReview && chatMessages.querySelector('.research-actions')) renderRunAffordance();
       })
       .catch(function() { specApproved = false; });
   }
@@ -152,7 +156,9 @@ export function researchCardScript(): string {
   function onDevRunEvent(event) {
     if (!event || !event.run || !isResearchThread) return;
     if (event.conversationId !== activeConvId) return;
-    if (event.run.threadId && activeThreadId && event.run.threadId !== activeThreadId) return;
+    // Strict thread match: a run must name THIS thread to paint here. (A missing
+    // threadId would otherwise bypass the filter and render an unrelated run.)
+    if (event.run.threadId !== activeThreadId) return;
     devRun = { run: event.run, handoffs: event.handoffs || [] };
     var cardShowing = !!chatMessages.querySelector('.dev-run-card');
     if (devRun.handoffs.length > 0 || cardShowing) renderRunAffordance();
@@ -207,10 +213,14 @@ export function researchCardScript(): string {
   // stale rows, and the orchestrate confirm gate when the run parks at
   // ready_to_verify.
   function renderRunCard() {
+    // Capture scroll intent BEFORE mutating the DOM so a background re-render
+    // (stale sweep / peer roll-up) doesn't yank a user who scrolled up to read.
+    var nearBottom = (chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight) < 160;
     clearResearchAffordance();
     var run = devRun && devRun.run;
     var handoffs = (devRun && devRun.handoffs) || [];
     if (!run) return;
+    var terminal = run.status === 'green' || run.status === 'red';
 
     var card = document.createElement('div');
     card.className = 'dev-run-card';
@@ -233,7 +243,9 @@ export function researchCardScript(): string {
     for (var i = 0; i < handoffs.length; i++) {
       var h = handoffs[i];
       var hmeta = handoffStatusMeta(h.status);
-      var stale = handoffStale(h);
+      // No re-send affordance once the run is terminal — re-delegating a finished
+      // run can't roll it up (the interpreter's terminal guard ignores the reply).
+      var stale = !terminal && handoffStale(h);
       var row = document.createElement('div');
       row.className = 'dev-run-row';
       var staleTag = stale ? '<span class="dev-run-badge dev-run-stale">stale</span>' : '';
@@ -252,10 +264,16 @@ export function researchCardScript(): string {
 
     // The dependency gate parks the run at ready_to_verify (build ∧ test done):
     // render the orchestrate confirm so the user kicks off the cross-repo e2e.
-    if (run.status === 'ready_to_verify' && !pendingOrchestrate) {
+    // Suppress it once an orchestrate handoff exists — delegate_task records the
+    // handoff but does NOT recompute dev_run.status (that waits for the peer's
+    // reply via the interpreter), so the persisted status alone would re-show the
+    // gate and invite a duplicate e2e delegation after the bot's confirmation
+    // reply or a reload while the run is still parked.
+    var hasOrchestrate = handoffs.some(function(h) { return h.role === 'orchestrate'; });
+    if (run.status === 'ready_to_verify' && !hasOrchestrate && !pendingOrchestrate) {
       showOrchestrateConfirm();
     }
-    scrollToBottom();
+    if (nearBottom) scrollToBottom();
   }
 
   // A re-send / pick-another button for a stale handoff row. Closure-captures the

@@ -400,16 +400,20 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
     // Phase 5: advance the dev_run's research_stage from the analysis-phase
     // prompt markers so the chat can drive affordance visibility off run state
-    // (not a positional reply counter). Fire-and-forget — a stage write must
-    // never block or delay the chat turn, and a runless thread is a no-op.
+    // (not a positional reply counter). Awaited (it's a single fast UPDATE) so the
+    // stage is committed BEFORE the bot turn even starts — the client re-reads it
+    // after the reply, so the write must win that race. A runless thread is a
+    // no-op; any error is swallowed so it never blocks the turn.
     if (body.threadId) {
       const stage = researchStageForPrompt(body.text);
       if (stage) {
-        setResearchStageByThread(body.threadId, stage).catch((err) => {
+        try {
+          await setResearchStageByThread(body.threadId, stage);
+        } catch (err) {
           log.warn("Failed to set research_stage: {error}", {
             error: err instanceof Error ? err.message : String(err),
           });
-        });
+        }
       }
     }
 

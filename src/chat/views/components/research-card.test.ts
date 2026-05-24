@@ -183,9 +183,13 @@ describe("researchCardScript", () => {
     expect(out).toContain("/abs/specs/u1/X-1.md");
   });
 
-  test("the orchestrate confirm renders only when the run parks at ready_to_verify", () => {
+  test("the orchestrate confirm renders only when parked at ready_to_verify with no orchestrate handoff yet", () => {
     const script = researchCardScript();
-    expect(script).toContain("run.status === 'ready_to_verify' && !pendingOrchestrate");
+    // Guards against a duplicate e2e: delegate_task records the orchestrate
+    // handoff but doesn't recompute dev_run.status, so the gate must also check
+    // no orchestrate handoff exists (not just the status + the in-flight flag).
+    expect(script).toContain("run.status === 'ready_to_verify' && !hasOrchestrate && !pendingOrchestrate");
+    expect(script).toContain("h.role === 'orchestrate'");
   });
 
   test("resendHandoffPrompt re-delegates a stale handoff via delegate_task (per role)", () => {
