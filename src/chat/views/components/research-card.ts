@@ -468,9 +468,14 @@ export function researchCardScript(): string {
         // Refresh action buttons to show Preview
         var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
         showResearchActions(phase);
-        // Brief visual feedback on the save button — Save/Workplan button position varies by phase
-        var saveBtnIdx = phase === 'analysis' ? 3 : phase === 'investigation' ? 3 : 2;
-        var btn = chatMessages.querySelector('.research-actions button:nth-child(' + saveBtnIdx + ')');
+        // Brief visual feedback on the Create Workplan button. Find it by label —
+        // its position in the row shifts when the Generate Spec button is present,
+        // so a fixed nth-child index would flash the wrong button.
+        var btn = null;
+        var rowBtns = chatMessages.querySelectorAll('.research-actions button');
+        for (var bi = 0; bi < rowBtns.length; bi++) {
+          if (rowBtns[bi].textContent.indexOf('Create Workplan') !== -1) { btn = rowBtns[bi]; break; }
+        }
         if (btn) {
           var orig = btn.innerHTML;
           btn.innerHTML = '<span class="btn-icon">&#x2705;</span> Saved!';

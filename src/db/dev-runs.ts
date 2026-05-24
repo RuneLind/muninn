@@ -174,7 +174,13 @@ export async function linkSpecToDevRun(input: {
 }): Promise<DevRun | null> {
   const run = await getDevRunByIdentity(input.botName, input.userId, input.issueKey);
   if (!run) return null;
-  return updateDevRun(run.id, { specPath: input.specPath, status: input.status });
+  // Don't regress an already-approved spec back to draft. The persistent "Save
+  // Spec" button always posts spec_draft, so a click after the fagperson gate's
+  // Approve would otherwise silently un-approve the run. The spec_path is still
+  // refreshed either way.
+  const status =
+    run.status === "spec_approved" && input.status === "spec_draft" ? run.status : input.status;
+  return updateDevRun(run.id, { specPath: input.specPath, status });
 }
 
 /** Insert a handoff row for a fan-out send. */

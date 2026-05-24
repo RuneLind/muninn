@@ -77,6 +77,28 @@ describe("dev-runs", () => {
     expect(linked!.status).toBe("spec_approved");
   });
 
+  test("linkSpecToDevRun does not regress an approved spec back to draft", async () => {
+    await birthDevRun({ botName: "b", userId: "u", issueKey: "MELOSYS-10", threadId: THREAD });
+    await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-10",
+      specPath: "specs/u/MELOSYS-10.md",
+      status: "spec_approved",
+    });
+    // A later Save Spec click posts spec_draft — must keep the run approved,
+    // but still refresh the spec_path.
+    const draft = await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-10",
+      specPath: "specs/u/MELOSYS-10-v2.md",
+      status: "spec_draft",
+    });
+    expect(draft!.status).toBe("spec_approved");
+    expect(draft!.specPath).toBe("specs/u/MELOSYS-10-v2.md");
+  });
+
   test("linkSpecToDevRun returns null (no throw) when no run matches", async () => {
     const linked = await linkSpecToDevRun({
       botName: "b",
