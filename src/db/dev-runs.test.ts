@@ -6,6 +6,7 @@ import {
   getDevRunByThreadId,
   getDevRunByIdentity,
   updateDevRun,
+  linkSpecToDevRun,
   insertHandoff,
   updateHandoffStatus,
   listHandoffs,
@@ -60,6 +61,53 @@ describe("dev-runs", () => {
     expect(upd!.specPath).toBe("specs/u/MELOSYS-2.md");
     expect(upd!.researchStage).toBe("deep");
     expect(upd!.status).toBe("spec_approved");
+  });
+
+  test("linkSpecToDevRun updates the matching run's specPath + status", async () => {
+    const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "MELOSYS-9", threadId: THREAD });
+    const linked = await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-9",
+      specPath: "specs/u/MELOSYS-9.md",
+      status: "spec_approved",
+    });
+    expect(linked!.id).toBe(run.id);
+    expect(linked!.specPath).toBe("specs/u/MELOSYS-9.md");
+    expect(linked!.status).toBe("spec_approved");
+  });
+
+  test("linkSpecToDevRun does not regress an approved spec back to draft", async () => {
+    await birthDevRun({ botName: "b", userId: "u", issueKey: "MELOSYS-10", threadId: THREAD });
+    await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-10",
+      specPath: "specs/u/MELOSYS-10.md",
+      status: "spec_approved",
+    });
+    // A later Save Spec click posts spec_draft — must keep the run approved,
+    // but still refresh the spec_path.
+    const draft = await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-10",
+      specPath: "specs/u/MELOSYS-10-v2.md",
+      status: "spec_draft",
+    });
+    expect(draft!.status).toBe("spec_approved");
+    expect(draft!.specPath).toBe("specs/u/MELOSYS-10-v2.md");
+  });
+
+  test("linkSpecToDevRun returns null (no throw) when no run matches", async () => {
+    const linked = await linkSpecToDevRun({
+      botName: "b",
+      userId: "u",
+      issueKey: "MELOSYS-MISSING",
+      specPath: "specs/u/MELOSYS-MISSING.md",
+      status: "spec_draft",
+    });
+    expect(linked).toBeNull();
   });
 
   describe("handoffs + computeRunStatus", () => {

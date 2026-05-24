@@ -5,7 +5,8 @@
 // activeThreadId, chatMessages, chatInput, bots, threads, connectors,
 // escapeHtml, sanitizeHtml, formatWebHtml, scrollToBottom, sendMessage,
 // pendingConnector, getBotInfo, isResearchThread, researchBotReplies,
-// researchIssueKey, reportExists.
+// researchIssueKey, reportExists, awaitingHandoffConfirm, awaitingSpecReview,
+// specGenerated.
 // Defines: RESEARCH_MARKER (used by appendMessage in page.ts).
 
 /** Returns all research card functions as a browser-compatible JS string. */
@@ -90,6 +91,23 @@ export function researchCardScript(): string {
         sendMessage();
       };
       actions.appendChild(investigateBtn);
+
+      // Generate Spec — drafts the domain layer (Forretningsregel + Gitt/Når/Så +
+      // Akseptansekriterier) early, from the issue not the code, so a fagperson can
+      // review it before any build/test handoff. Only for bots with a specDomain prompt.
+      var domainBot = bots.find(function(b) { return b.name === selectedBot; });
+      var domainPrompt = domainBot && domainBot.prompts && domainBot.prompts.specDomain;
+      if (domainPrompt) {
+        var specDomainBtn = document.createElement('button');
+        specDomainBtn.innerHTML = '<span class="btn-icon">&#x1F4DD;</span> Generate Spec';
+        specDomainBtn.onclick = function() {
+          actions.classList.add('used');
+          awaitingSpecReview = true;
+          chatInput.value = '<!-- prompt:specDomain -->' + domainPrompt;
+          sendMessage();
+        };
+        actions.appendChild(specDomainBtn);
+      }
     }
 
     if (phase === 'investigation') {
@@ -146,6 +164,18 @@ export function researchCardScript(): string {
       saveResearchReport();
     };
     actions.appendChild(saveBtn);
+
+    // Save Spec — persists the generated domain spec as a draft. Appears once a
+    // spec has been generated this thread; the fagperson gate's Approve does the
+    // same save with an 'approved' status flip.
+    if (specGenerated) {
+      var saveSpecBtn = document.createElement('button');
+      saveSpecBtn.innerHTML = '<span class="btn-icon">&#x1F4BE;</span> Save Spec';
+      saveSpecBtn.onclick = function() {
+        saveDomainSpec(false);
+      };
+      actions.appendChild(saveSpecBtn);
+    }
 
     if (reportExists && researchIssueKey) {
       var previewBtn = document.createElement('button');
@@ -215,6 +245,114 @@ export function researchCardScript(): string {
 
     chatMessages.appendChild(actions);
     scrollToBottom();
+  }
+
+  // Fagperson review gate — shown after the Generate Spec reply (the domain spec
+  // is already rendered above as a bot message). The reviewer approves to freeze
+  // the spec (status → approved), saves a draft to revisit, or replies to refine
+  // and regenerate. Catching wrong domain understanding here, before any code, is
+  // the highest-value property of spec-first dev.
+  function showSpecReview() {
+    var existing = chatMessages.querySelector('.research-actions');
+    if (existing) existing.remove();
+
+    var actions = document.createElement('div');
+    actions.className = 'research-actions';
+
+    var approveBtn = document.createElement('button');
+    approveBtn.innerHTML = '<span class="btn-icon">&#x2705;</span> Approve Spec';
+    approveBtn.onclick = function() {
+      actions.classList.add('used');
+      saveDomainSpec(true);
+    };
+    actions.appendChild(approveBtn);
+
+    var draftBtn = document.createElement('button');
+    draftBtn.innerHTML = '<span class="btn-icon">&#x1F4BE;</span> Save Draft';
+    draftBtn.onclick = function() {
+      actions.classList.add('used');
+      saveDomainSpec(false);
+    };
+    actions.appendChild(draftBtn);
+
+    var hint = document.createElement('span');
+    hint.className = 'research-actions-hint';
+    hint.textContent = 'review the domain spec above — approve to freeze it, or reply to refine then regenerate';
+    actions.appendChild(hint);
+
+    chatMessages.appendChild(actions);
+    scrollToBottom();
+  }
+
+  // Persist the generated domain spec (Phase 1). Pulls the bot reply that
+  // followed the Generate Spec prompt (the latest one wins, so re-generating
+  // then saving keeps the newest), wraps it in frontmatter, and POSTs to
+  // /chat/specs. \`approved\` flips both the frontmatter status and the dev_run
+  // status (spec_draft → spec_approved); the server links it to the dev_run.
+  async function saveDomainSpec(approved) {
+    if (!activeConvId || !activeThreadId || !selectedBot || !selectedUserId) return;
+    var issueKey = researchIssueKey || ('research-' + activeThreadId.slice(0, 8));
+
+    var url = '/chat/conversations/' + activeConvId + '/messages?raw=true';
+    if (activeThreadId) url += '&thread=' + encodeURIComponent(activeThreadId);
+    var res = await fetch(url);
+    var data = await res.json();
+    var msgs = data.messages || [];
+
+    // The domain spec is the bot message right after the specDomain prompt.
+    var domainSpec = '';
+    var awaitingReply = false;
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (m.sender === 'user' && m.text.indexOf('<!-- prompt:specDomain -->') === 0) {
+        awaitingReply = true;
+      } else if (awaitingReply && m.sender === 'bot') {
+        domainSpec = m.text;
+        awaitingReply = false;
+      }
+    }
+    if (!domainSpec) { console.error('No domain spec reply found to save'); return; }
+
+    var frontStatus = approved ? 'approved' : 'draft';
+    var devRunStatus = approved ? 'spec_approved' : 'spec_draft';
+    var now = new Date().toISOString().split('T')[0];
+    var sections = [];
+    sections.push('---');
+    sections.push('jira: ' + issueKey);
+    sections.push('bot: ' + selectedBot);
+    sections.push('status: ' + frontStatus);
+    sections.push('date: ' + now);
+    sections.push('---');
+    sections.push('');
+    sections.push(domainSpec);
+    var spec = sections.join('\\n');
+
+    try {
+      var saveRes = await fetch('/chat/specs/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: spec, status: devRunStatus }),
+      });
+      if (saveRes.ok) {
+        specGenerated = true;
+        if (!researchIssueKey) researchIssueKey = issueKey;
+        // Return to the analysis action row (now with Save Spec available), with
+        // a short-lived confirmation of what just happened.
+        showResearchActions('analysis');
+        var row = chatMessages.querySelector('.research-actions');
+        if (row) {
+          var note = document.createElement('span');
+          note.className = 'research-actions-hint';
+          note.textContent = approved ? 'Spec approved' : 'Spec draft saved';
+          row.appendChild(note);
+          setTimeout(function() { if (note.parentNode) note.parentNode.removeChild(note); }, 2500);
+        }
+      } else {
+        console.error('Failed to save spec: HTTP ' + saveRes.status);
+      }
+    } catch (err) {
+      console.error('Failed to save spec:', err);
+    }
   }
 
   async function saveResearchReport() {
@@ -330,9 +468,14 @@ export function researchCardScript(): string {
         // Refresh action buttons to show Preview
         var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
         showResearchActions(phase);
-        // Brief visual feedback on the save button — Save/Workplan button position varies by phase
-        var saveBtnIdx = phase === 'analysis' ? 3 : phase === 'investigation' ? 3 : 2;
-        var btn = chatMessages.querySelector('.research-actions button:nth-child(' + saveBtnIdx + ')');
+        // Brief visual feedback on the Create Workplan button. Find it by label —
+        // its position in the row shifts when the Generate Spec button is present,
+        // so a fixed nth-child index would flash the wrong button.
+        var btn = null;
+        var rowBtns = chatMessages.querySelectorAll('.research-actions button');
+        for (var bi = 0; bi < rowBtns.length; bi++) {
+          if (rowBtns[bi].textContent.indexOf('Create Workplan') !== -1) { btn = rowBtns[bi]; break; }
+        }
         if (btn) {
           var orig = btn.innerHTML;
           btn.innerHTML = '<span class="btn-icon">&#x2705;</span> Saved!';

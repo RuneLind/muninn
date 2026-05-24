@@ -158,6 +158,31 @@ export async function updateDevRun(
   return row ? rowToDevRun(row) : null;
 }
 
+/**
+ * Link a saved domain spec to its dev_run (Phase 1, Save Spec / approval gate).
+ * Resolves the run by identity — the spec save endpoint only knows
+ * (bot, user, issueKey), which is the same key the run was born with. Returns
+ * null (no throw) when no run matches, so the spec save stays best-effort:
+ * a spec can be saved even if the run row went missing.
+ */
+export async function linkSpecToDevRun(input: {
+  botName: string;
+  userId: string;
+  issueKey: string;
+  specPath: string;
+  status: string;
+}): Promise<DevRun | null> {
+  const run = await getDevRunByIdentity(input.botName, input.userId, input.issueKey);
+  if (!run) return null;
+  // Don't regress an already-approved spec back to draft. The persistent "Save
+  // Spec" button always posts spec_draft, so a click after the fagperson gate's
+  // Approve would otherwise silently un-approve the run. The spec_path is still
+  // refreshed either way.
+  const status =
+    run.status === "spec_approved" && input.status === "spec_draft" ? run.status : input.status;
+  return updateDevRun(run.id, { specPath: input.specPath, status });
+}
+
 /** Insert a handoff row for a fan-out send. */
 export async function insertHandoff(input: {
   runId: string;

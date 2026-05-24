@@ -29,6 +29,12 @@ const jsonPost = (content: string) => ({
   body: JSON.stringify({ content }),
 });
 
+const jsonPostWith = (payload: Record<string, unknown>) => ({
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(payload),
+});
+
 test("spec round-trip: POST saves, GET returns, HEAD reports existence", async () => {
   const { app, dir } = await appWithBot();
   const body = "# Domain spec\n\nForretningsregel: …";
@@ -73,4 +79,28 @@ test("GET / HEAD report 404 for a spec that does not exist", async () => {
   const { app } = await appWithBot();
   expect((await app.request("/specs/testbot/user_1/MELOSYS-404")).status).toBe(404);
   expect((await app.request("/specs/testbot/user_1/MELOSYS-404", { method: "HEAD" })).status).toBe(404);
+});
+
+test("spec POST accepts an optional dev_run status and saves regardless of the DB", async () => {
+  // The dev_run link is best-effort (try/caught) — with no DB initialized here
+  // the save must still succeed and write the file. (The link itself is covered
+  // by linkSpecToDevRun in the db test group.)
+  const { app, dir } = await appWithBot();
+  const post = await app.request(
+    "/specs/testbot/user_1/MELOSYS-200",
+    jsonPostWith({ content: "domain spec", status: "spec_approved" }),
+  );
+  expect(post.status).toBe(201);
+  expect(await readFile(join(dir, "specs", "user_1", "MELOSYS-200.md"), "utf8")).toBe("domain spec");
+});
+
+test("spec POST rejects an unknown status before writing the file", async () => {
+  const { app, dir } = await appWithBot();
+  const post = await app.request(
+    "/specs/testbot/user_1/MELOSYS-201",
+    jsonPostWith({ content: "x", status: "bogus" }),
+  );
+  expect(post.status).toBe(400);
+  // file must NOT have been written
+  await expect(readFile(join(dir, "specs", "user_1", "MELOSYS-201.md"), "utf8")).rejects.toBeDefined();
 });

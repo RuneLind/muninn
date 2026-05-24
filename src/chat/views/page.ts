@@ -225,6 +225,8 @@ const CHAT_SCRIPT = `
   var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
   var reportExists = false;     // Whether a saved report file exists for current issue
   var awaitingHandoffConfirm = false; // True between Start Building click and the bot's coding-agent recommendation reply
+  var awaitingSpecReview = false; // True between Generate Spec click and the bot's domain-spec reply (shows the review gate)
+  var specGenerated = false;    // True once a domain spec has been generated this thread (enables Save Spec)
   var threads = [];             // Thread list for current user+bot
   var bots = [];
   // Suppress waterfall until we know the selected bot's config
@@ -761,6 +763,8 @@ const CHAT_SCRIPT = `
     researchIssueKey = null;
     reportExists = false;
     awaitingHandoffConfirm = false;
+    awaitingSpecReview = false;
+    specGenerated = false;
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
@@ -843,6 +847,7 @@ const CHAT_SCRIPT = `
     if (type === 'investigate') return 'Investigate Code';
     if (type === 'deepAnalysis') return 'Deep Analysis';
     if (type === 'specGeneration') return 'Generate Test Spec';
+    if (type === 'specDomain') return 'Generate Spec';
     var s = type.replace(/([a-z])([A-Z])/g, '$1 $2');
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
@@ -860,6 +865,8 @@ const CHAT_SCRIPT = `
     if (isResearchMsg) {
       isResearchThread = true;
       researchBotReplies = 0;
+      awaitingSpecReview = false;
+      specGenerated = false;
       var rdiv = document.createElement('div');
       rdiv.className = 'msg msg-research-card';
       var parsed = parseResearchContent(msg.text);
@@ -953,6 +960,12 @@ const CHAT_SCRIPT = `
       if (awaitingHandoffConfirm) {
         awaitingHandoffConfirm = false;
         showHandoffConfirm();
+      } else if (awaitingSpecReview) {
+        // The reply to Generate Spec is the domain spec — show the fagperson
+        // review gate instead of the positional phase buttons.
+        awaitingSpecReview = false;
+        specGenerated = true;
+        showSpecReview();
       } else if (researchBotReplies === 1) {
         showResearchActions('analysis');
       } else if (researchBotReplies === 2) {

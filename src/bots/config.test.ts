@@ -167,6 +167,7 @@ describe("bot discovery", () => {
           jiraAnalysis: "Analyze this Jira task",
           investigateCode: "Look at the code",
           specGeneration: "Generate a test spec",
+          specDomain: "Draft the domain spec",
         },
       });
 
@@ -177,6 +178,7 @@ describe("bot discovery", () => {
         jiraAnalysis: "Analyze this Jira task",
         investigateCode: "Look at the code",
         specGeneration: "Generate a test spec",
+        specDomain: "Draft the domain spec",
       });
     });
 
