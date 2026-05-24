@@ -226,9 +226,21 @@ The slow turn runs as `pendingAdvanceRun` (test-only seam, await it after
   BEFORE clearing it, then `clearOrchestrateHandoffs` so the run rolls back to
   `ready_to_verify` once the re-fixed build reports done (a fresh e2e re-runs).
   `buildReengageContext` names the MOST RECENT build peer (handoffs are created_at
-  ASC; a re-engaged run accumulates build rows). `runAutoReengage` fires a build
-  re-engage turn (`buildReengagePrompt`, always build — the Haiku build-vs-test
-  classifier is the follow-up); compensating recompute on a thrown turn.
+  ASC; a re-engaged run accumulates build rows) AND the most-recent test peer.
+  `runAutoReengage` fires the re-engage turn; compensating recompute on a thrown
+  turn. **Routing — build (default) vs test (`reengageClassifier`).** Without the
+  opt-in flag it always routes to build (`buildReengagePrompt`) — the verified
+  first cut, since most reds are feature bugs. With `hivemind.devLoop.reengageClassifier`
+  on, `classifyReengageRole` (`devloop-classifier.ts`) makes a small Haiku call on
+  the e2e agent's failure report and routes spec/test drift (stale selector,
+  outdated assertion, test data, a spec that drifted) to the TEST agent
+  (`testReengagePrompt`, role `test`, re-runs `spec-from-analysis` without
+  clobbering valid binding) instead. **Every classifier miss/error/ambiguity falls
+  back to build** (no failure report → no Haiku call; throw → build; both/neither
+  word in the verdict → build), so enabling it can only refine, never strand, the
+  always-build path. The classifier is injectable via `AutorespondDeps.classifyReengageRole`
+  for router tests. The Haiku call uses the bot's own backend (`callHaikuWithFallback`,
+  same router as the decomposer/extractors).
   **Re-opening to `building` is load-bearing** — the interpreter's terminal guard
   ignores replies on a `red` run, so the loop can only continue off terminal. At
   the cap the claim returns null, the run stays `red`, and the run card surfaces an

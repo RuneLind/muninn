@@ -31,10 +31,12 @@ import {
 import {
   buildOrchestratePrompt,
   buildReengagePrompt,
+  testReengagePrompt,
   buildReengageContext,
   handoffPathsFor,
   type ReengageContext,
 } from "./devloop-prompts.ts";
+import { classifyReengageRole, type ReengageRole } from "./devloop-classifier.ts";
 import { broadcastDevRun } from "../chat/dev-run-broadcast.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
@@ -76,6 +78,10 @@ export interface AutorespondDeps {
   /** Defaults to the real `processMessage` from `core/message-processor.ts`.
    *  Tests inject a stub to avoid spinning up a real AI connector. */
   processMessage?: typeof ProcessMessageFn;
+  /** Defaults to the real `classifyReengageRole` (Haiku build-vs-test routing for
+   *  the 6b re-engage, gated on `reengageClassifier`). Tests inject a stub to
+   *  avoid a live Haiku call. */
+  classifyReengageRole?: typeof classifyReengageRole;
 }
 
 /** Build a peer thread name from the inbound namespace + cwd basename. */
@@ -649,15 +655,42 @@ export class HivemindRouter {
       botName: run.botName, userId: run.userId, username: user?.username,
     });
 
+    // Route the fix: build (default) or, when the bot opts into the classifier,
+    // test (spec/test drift). The classifier degrades to "build" on any
+    // miss/error, so the verified always-build path stands unless it's both
+    // enabled AND confident the e2e itself is wrong.
+    let role: ReengageRole = "build";
+    if (botCfg.hivemind?.devLoop?.reengageClassifier) {
+      const classify = deps.classifyReengageRole ?? classifyReengageRole;
+      // The real classifier never throws (it catches internally and returns
+      // "build"), but guard here too so an injected/future one can't escape into
+      // the already-claimed `building` state and bypass the turn's compensating
+      // recompute — defense in depth, defaulting to the safe build route.
+      try {
+        role = await classify(context, {
+          botName: run.botName,
+          botDir: botCfg.dir,
+          connector: botCfg.connector,
+          haikuBackend: botCfg.haikuBackend,
+        });
+      } catch (err) {
+        log.warn("reengage classifier threw for run {run}, defaulting to build: {error}", {
+          botName: run.botName, run: run.id, error: err instanceof Error ? err.message : String(err),
+        });
+        role = "build";
+      }
+    }
+    const reengagePrompt = role === "test" ? testReengagePrompt(context) : buildReengagePrompt(context);
+
     const tracer = new Tracer("devloop_autostep", {
       botName: run.botName, userId: run.userId, username: user?.username ?? run.userId, platform: "web",
     });
-    tracer.event("auto_reengage", { runId: run.id, issueKey: run.issueKey, attempt: run.reengageCount });
+    tracer.event("auto_reengage", { runId: run.id, issueKey: run.issueKey, attempt: run.reengageCount, role });
 
     const runProcessMessage = deps.processMessage ?? defaultProcessMessage;
     try {
       const turn = await runProcessMessage({
-        text: "<!-- prompt:reengage -->" + buildReengagePrompt(context),
+        text: "<!-- prompt:reengage -->" + reengagePrompt,
         userId: run.userId,
         username: user?.username ?? run.userId,
         platform: "web",
@@ -673,8 +706,8 @@ export class HivemindRouter {
         tracer,
       });
       tracer.finish("ok", { inputTokens: turn?.inputTokens, outputTokens: turn?.outputTokens });
-      log.info("Auto-re-engaged build for run {run} ({issueKey}, attempt {attempt})", {
-        botName: run.botName, run: run.id, issueKey: run.issueKey, attempt: run.reengageCount,
+      log.info("Auto-re-engaged {role} for run {run} ({issueKey}, attempt {attempt})", {
+        botName: run.botName, role, run: run.id, issueKey: run.issueKey, attempt: run.reengageCount,
       });
     } catch (err) {
       tracer.error(err instanceof Error ? err : String(err));

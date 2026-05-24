@@ -32,6 +32,12 @@ export interface DevLoopConfig {
    *  build that lands done rolls the run back to `ready_to_verify`, where
    *  autoOrchestrate (if on) re-fires the e2e. */
   autoReengageOnRed?: boolean;
+  /** When re-engaging on a red e2e (PR 6b), use a Haiku classifier to route the
+   *  fix to the BUILD agent (feature-code bug) vs the TEST agent (spec/test
+   *  drift — stale selector, outdated assertion, test data). Default off ⇒ the
+   *  verified always-build first cut. Only consulted when autoReengageOnRed is on;
+   *  any classifier miss/error falls back to build. */
+  reengageClassifier?: boolean;
 }
 
 export interface HivemindBotConfig {
@@ -103,5 +109,6 @@ function parseDevLoopConfig(raw: unknown): DevLoopConfig | undefined {
   const cfg: DevLoopConfig = {};
   if (typeof r.autoOrchestrate === "boolean") cfg.autoOrchestrate = r.autoOrchestrate;
   if (typeof r.autoReengageOnRed === "boolean") cfg.autoReengageOnRed = r.autoReengageOnRed;
+  if (typeof r.reengageClassifier === "boolean") cfg.reengageClassifier = r.reengageClassifier;
   return Object.keys(cfg).length > 0 ? cfg : undefined;
 }
