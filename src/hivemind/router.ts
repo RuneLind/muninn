@@ -15,7 +15,9 @@ import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
 import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
 import { getThreadByCorrelationToken, clearCorrelationToken } from "./correlation-tokens.ts";
-import { interpretHandoffReply } from "./handoff-interpreter.ts";
+import { interpretHandoffReply, type InterpretResult } from "./handoff-interpreter.ts";
+import { getDevRunById, claimForVerify } from "../db/dev-runs.ts";
+import { buildOrchestratePrompt, handoffPathsFor } from "./devloop-prompts.ts";
 import { broadcastDevRun } from "../chat/dev-run-broadcast.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
@@ -89,6 +91,15 @@ export class HivemindRouter {
    * surfaced to inbound delivery.
    */
   pendingHandoffInterpret: Promise<void> = Promise.resolve();
+
+  /**
+   * In-flight auto-advance promise (Phase 6a / v2) — same test-only seam as the
+   * two above. After the interpreter rolls a run up, this fires the autonomous
+   * code-triggered turn (auto-orchestrate) when the bot opted in. No-op (and
+   * v1's park-and-confirm stands) unless `hivemind.devLoop.autoOrchestrate` is on.
+   * Tests await `pendingHandoffInterpret` then this.
+   */
+  pendingAdvanceRun: Promise<void> = Promise.resolve();
 
   constructor(
     private chatState: ChatState,
@@ -227,6 +238,15 @@ export class HivemindRouter {
         // card + per-handoff rows update without a refresh. Best-effort — a
         // broadcast failure must not surface to inbound delivery either.
         if (result.runId) await broadcastDevRun(this.chatState, { runId: result.runId });
+        // Phase 6a / v2: autonomously advance the run (auto-fire orchestrate)
+        // when the bot opted in. Off the interpret promise as its own seam so a
+        // slow bot turn doesn't hold the interpret chain; no-op when not opted in.
+        this.pendingAdvanceRun = this.maybeAdvanceRun(result).catch((err) => {
+          log.error("Auto-advance failed: {error}", {
+            botName, peerName, fromId: msg.fromId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
       })
       .catch((err) => {
         log.error("Handoff interpret failed: {error}", {
@@ -351,5 +371,96 @@ export class HivemindRouter {
       tracer.error(err instanceof Error ? err : String(err));
       throw err;
     }
+  }
+
+  /**
+   * Phase 6a / v2 — autonomously advance a run past the verify gate. When the
+   * interpreter rolls a run up to `ready_to_verify` (build ∧ test done) and the
+   * bot opted into `hivemind.devLoop.autoOrchestrate`, fire the orchestrate turn
+   * here instead of parking for the user's confirm. This is a CODE-TRIGGERED bot
+   * turn on the research thread (no peer to relay to — the bot's own
+   * `delegate_task` does the outbound), the same shape as `maybeAutorespond`.
+   *
+   * Guards, in order: opt-in flag → an **atomic CAS claim** (`ready_to_verify →
+   * verifying`, so two concurrent interpreter invocations can't both fire) →
+   * the loop-guard hourly cap. Off by default ⇒ v1 park-and-confirm is unchanged.
+   */
+  private async maybeAdvanceRun(result: InterpretResult): Promise<void> {
+    const deps = this.autorespondDeps;
+    if (!deps) return;
+    if (result.runStatus !== "ready_to_verify" || !result.runId) return;
+
+    const run = await getDevRunById(result.runId);
+    if (!run || !run.threadId) return;
+    const threadId = run.threadId;
+
+    const botCfg = deps.getBotConfig(run.botName);
+    // Opt-in only — absent flag keeps v1's park-and-confirm.
+    if (!botCfg?.hivemind?.devLoop?.autoOrchestrate) return;
+
+    // Atomic claim: only one concurrent interpret wins the right to fire
+    // orchestrate (build-done + test-done markers can roll up in parallel).
+    const claimed = await claimForVerify(run.id);
+    if (!claimed) return;
+    // Reflect the verifying status immediately so the (now-moot) orchestrate
+    // confirm button — gated on ready_to_verify — doesn't render in open tabs.
+    await broadcastDevRun(this.chatState, { runId: run.id });
+
+    // Loop-guard backstop on the research thread (a flapping run can't spin).
+    const thread = await getThreadById(threadId);
+    if (!thread) return;
+    const maxPerHour = botCfg.hivemind.maxAutoTurnsPerHour ?? DEFAULT_MAX_AUTO_TURNS_PER_HOUR;
+    const decision = await checkAutoRespond({
+      threadId,
+      alreadyPaused: thread.autoRespondPaused,
+      maxTurnsPerHour: maxPerHour,
+    });
+    if (!decision.allowed) {
+      log.warn("Auto-orchestrate skipped on run {run}: {reason}", {
+        botName: run.botName, run: run.id, reason: decision.reason,
+      });
+      return;
+    }
+
+    const user = await getUser(run.userId);
+    const conv = await this.chatState.findOrCreateBotConversation({
+      botName: run.botName, userId: run.userId, username: user?.username,
+    });
+    const { specPath } = handoffPathsFor(botCfg.dir, run.userId, run.issueKey);
+
+    const tracer = new Tracer("devloop_autostep", {
+      botName: run.botName, userId: run.userId, username: user?.username ?? run.userId, platform: "web",
+    });
+    tracer.event("auto_orchestrate", { runId: run.id, issueKey: run.issueKey });
+
+    const runProcessMessage = deps.processMessage ?? defaultProcessMessage;
+    try {
+      const turn = await runProcessMessage({
+        text: buildOrchestratePrompt(specPath),
+        userId: run.userId,
+        username: user?.username ?? run.userId,
+        platform: "web",
+        botConfig: botCfg,
+        config: deps.config,
+        say: async (message: string) => {
+          this.chatState.appendBotMessage(conv.id, message, threadId);
+        },
+        threadId,
+        // The orchestrate prompt is an internal instruction, not a user message —
+        // don't persist it; `text` still reaches the model (assemblePrompt uses it).
+        skipUserSave: true,
+        tracer,
+      });
+      tracer.finish("ok", { inputTokens: turn?.inputTokens, outputTokens: turn?.outputTokens });
+      log.info("Auto-fired orchestrate for run {run} ({issueKey})", {
+        botName: run.botName, run: run.id, issueKey: run.issueKey,
+      });
+    } catch (err) {
+      tracer.error(err instanceof Error ? err : String(err));
+      throw err;
+    }
+
+    // Re-broadcast so the new orchestrate handoff row shows live.
+    await broadcastDevRun(this.chatState, { runId: run.id });
   }
 }

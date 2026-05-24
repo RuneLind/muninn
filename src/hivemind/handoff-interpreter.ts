@@ -6,7 +6,7 @@ import {
   getDevRunsByIdPrefix,
   listHandoffs,
   updateHandoffStatus,
-  updateDevRun,
+  persistRunStatus,
   computeRunStatus,
   TERMINAL_RUN_STATUSES,
 } from "../db/dev-runs.ts";
@@ -232,7 +232,13 @@ export async function interpretHandoffReply(args: {
     }
   }
 
-  await updateDevRun(run.id, { status: runStatus });
+  // Persist via the no-downgrade guard: a duplicate/late build|test marker that
+  // recomputes `ready_to_verify` must not reopen a run auto-orchestrate already
+  // claimed (`verifying`) — that would re-fire orchestrate (Phase 6a). The
+  // returned status reflects what actually persisted, so the auto-advance seam
+  // sees `verifying` (not `ready_to_verify`) on such a marker and no-ops.
+  const persisted = await persistRunStatus(run.id, runStatus);
+  if (persisted) runStatus = persisted.status;
   log.info("Handoff reply from {peer}: run {run} roles={roles} → {status}{verified}", {
     botName: args.botName, peer: args.peerName, run: run.id,
     roles: rolesUpdated.join(","), status: runStatus, verified: verified ? " (spec verified)" : "",
