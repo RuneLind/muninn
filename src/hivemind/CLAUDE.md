@@ -12,7 +12,9 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 | `client.ts` | `HivemindBotClient` — one WebSocket peer connection per (bot, namespace). Handles register, set_summary, list_peers, send_message, heartbeat, reconnect with exponential backoff. Inbound messages carry the client's `namespace`. |
 | `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). `BotClientRegistry` holds one `HivemindBotClient` per joined namespace plus `peer_id → namespace` and `peer_id → {cwd,summary}` caches, both populated from every `list_peers` response. Exposes `list_peers` (cross-namespace), `ask_peer`, `send_to_peer`, and `delegate_task` (spec-driven dev loop — see below). `registry.peerNameFor(peerId)` derives the stable `peer_name` from the cwd cache via the shared `peer-name.ts`. |
 | `peer-name.ts` | `peerNameFor({fromCwd, fromSummary, fromId})` — the single derivation of a peer's stable name (cwd-basename → summary-slug → `peer-<id8>`). Shared by the router (inbound thread naming + autorespond allowlist) and `delegate_task` (handoff recording) so both sides of the `(run_id, peer_name)` join agree. `router.ts` re-exports it for back-compat. |
-| `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages. Resolves peer-reply correlation **token-first** (echoed `correlation_id` → `correlation-tokens.ts`), then the `(botName, peerId)` fallback (`correlation.ts`), and routes the reply to the originating thread **regardless of which user owns it** (the destination user is derived from that thread, not the bot default user). Only uncorrelated inbound falls back to `peer:<namespace>/<cwd-basename>` threads under the bot's default user. Stale correlations (deleted/other-bot thread) are lazily cleared on both paths. Autorespond echoes the inbound `correlation_id` verbatim and looks up `getClient(botName, namespace)` so the outbound relay goes through the same WS the inbound came in on. `parsePeerThreadName` and `peerThreadNameFor` helpers expose the format. |
+| `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages. Resolves peer-reply correlation **token-first** (echoed `correlation_id` → `correlation-tokens.ts`), then the `(botName, peerId)` fallback (`correlation.ts`), and routes the reply to the originating thread **regardless of which user owns it** (the destination user is derived from that thread, not the bot default user). Only uncorrelated inbound falls back to `peer:<namespace>/<cwd-basename>` threads under the bot's default user. Stale correlations (deleted/other-bot thread) are lazily cleared on both paths. Autorespond echoes the inbound `correlation_id` verbatim and looks up `getClient(botName, namespace)` so the outbound relay goes through the same WS the inbound came in on. **After persist/broadcast** it also fires the Phase-4 handoff interpreter fire-and-forget (`pendingHandoffInterpret`, the same test-only seam as `pendingAutorespond`). `parsePeerThreadName` and `peerThreadNameFor` helpers expose the format. |
+| `handoff-interpreter.ts` | **Phase 4 inbound interpreter** — `interpretHandoffReply` turns a peer's `<!-- status/e2e: … run:<id> -->` reply into dev_run state, OFF the delivery path. `parseHandoffMarker` (last marker wins) → `resolveRun` (8-hex prefix, with the >1-collision fallbacks) → `updateHandoffStatus` on `(run_id, peer_name)` → recompute + persist `dev_run.status`. On a green orchestrate verdict it CI-confirms before flipping the spec (`setFrontmatterStatus`/`flipSpecToVerified`). See "Spec-driven dev loop — Phase 4" below. |
+| `ci-conclusion.ts` | `fetchCiConclusion(url)` via the `gh` CLI (`gh run view <id> --repo <o/r> --json conclusion,status`) + `parseGithubRunUrl` + `isConfirmedGreen` (completed ∧ success). The green gate's "verify, don't trust" step. Injectable `GhRunner` for tests; every failure mode returns null → gate stays closed. |
 | `loop-guard.ts` | `checkAutoRespond()` — hourly turn cap + already-paused check. Returns `{ allowed, reason?, capHit? }`; the router writes `auto_respond_paused=true` on cap hit. |
 | `active-turn.ts` | Per-bot LIFO stack of in-flight chat turns. `processMessage` pushes the originating `threadId` before the connector runs and pops in `finally`. MCP tool handlers `peek` it to find the originating thread for outbound `ask_peer`/`send_to_peer`. Concurrent turns on one bot race (last push wins) — acceptable for the typical single-user-per-bot case. |
 | `correlation.ts` | DB-backed `(botName, peerId) → threadId` map (`peer_thread_correlation` table, migration 039) with `PEER_CORRELATION_TTL_MS` TTL (7 days, `config.ts`). Async API. Set on every outbound (MCP tools, chat `>`, autorespond reply); read by `router.route()` so inbound peer replies route back to the originating thread instead of the default `peer:<ns>/<name>` bucket. **Now the un-echoed fallback** under the precise token path (`correlation-tokens.ts`). Last-write-wins per peer. Persisted — survives muninn restarts (frequent under `--watch`) and peers that take a long time to reply. DB errors degrade gracefully to the default thread. No FK on `thread_id`; the router validates the thread and lazily clears stale rows. |
@@ -133,6 +135,56 @@ the originating research thread's `dev_run` (see `src/db/dev-runs.ts`,
 - **No dev_run for the thread → sends plain, records nothing** (delegating outside
   a research run is allowed, just untracked). A handoff-insert failure does not
   fail the send. Core logic is the exported `runDelegateTask` (DB-tested).
+
+## Spec-driven dev loop — inbound interpreter + green gate (Phase 4)
+
+`handoff-interpreter.ts` closes the loop `delegate_task` opens: when a build/test/
+orchestrate peer replies with its marker, the run rolls up. It runs in
+`router.route()` **off the delivery path** (`pendingHandoffInterpret`, fire-and-
+forget after persist/broadcast) so a parse error can never block inbound delivery.
+
+- **Marker parse (`parseHandoffMarker`).** Matches `<!-- status: done|failed run:<id> -->`
+  (build/test/review) and `<!-- e2e: green|red run:<id> -->` (orchestrate),
+  tolerant of whitespace/case and an id 4–32 hex long. **Last marker wins** (a peer
+  may quote an earlier one). No marker → `{matched:false}`, the common case for
+  ordinary chatter, and the interpreter no-ops.
+- **Run resolution (`resolveRun`) — the 8-hex prefix is NOT unique.** `run:<id>` is
+  the first 8 hex of the run uuid (`shortRunId`), only 32 bits, so a prefix can
+  match >1 `dev_run` (`getDevRunsByIdPrefix`). Disambiguation, in order: (1) exactly
+  one match → use it; (2) several → prefer the match whose `thread_id` is the
+  **routed thread** (the router already resolved it token-first, then `(bot,peer)`,
+  so it encodes the right conversation), else the **most-recently-updated open run**,
+  else the newest overall; (3) no prefix / no prefix match → fall back to the routed
+  thread's run (`getDevRunByThreadId`). The routed thread IS the correlation-token
+  fallback — the interpreter doesn't re-resolve tokens.
+- **Handoff update — the `(run_id, peer_name)` join.** `verdictToHandoffStatus`
+  maps `done`/`green`→`done`, `failed`/`red`→`failed`; `updateHandoffStatus` updates
+  the role's row where `peer_name` = the inbound `peerNameFor(msg)`. A **0-row update**
+  means the join missed (the cwd-cache-cold `peer_name` drift `delegate_task` warns
+  about) → logged, run won't roll up. Then `computeRunStatus` is recomputed and
+  **persisted** onto `dev_run.status` (Phase 5 / the next chat turn renders off it).
+- **Dependency gate parks (v1).** build ∧ test done → `computeRunStatus` returns
+  `ready_to_verify`; the interpreter persists that and **stops** — the gate is hit in
+  the inbound router where there's no active turn, so the orchestrate confirm renders
+  off `dev_run.status` on the user's next chat turn. Auto-firing orchestrate is v2
+  (the `maybeAutorespond` code-triggered turn).
+- **Green gate — verify, don't trust (`ci-conclusion.ts`).** `status: verified` is the
+  one assertion humans take at face value, so a green orchestrate verdict is NOT
+  enough: pull the GitHub run URL from the reply (`parseGithubRunUrl`), fetch the
+  conclusion via the **`gh` CLI** (`fetchCiConclusion` → `gh run view`), and flip the
+  spec to `verified` (`flipSpecToVerified`, rewrites the leading-frontmatter
+  `status:`) + set `dev_run.status = green` only when `isConfirmedGreen` (completed ∧
+  success). No CI URL, in-progress, or non-success → `dev_run.status = verifying`,
+  spec untouched. Every CI-fetch failure mode returns null → gate stays closed.
+- **Stale-handoff detection.** `listStaleHandoffs(thresholdMs)` (`src/db/dev-runs.ts`,
+  default `STALE_HANDOFF_THRESHOLD_MS` = 6h) finds pending (`sent`/`working`) handoffs
+  past the threshold on non-terminal runs — a peer that accepted then died parks the
+  run forever (the 7-day TTL is on correlation tokens, not handoffs). The detection
+  primitive lands here; the periodic sweep + manual re-send affordance are Phase 5 UI.
+- **Tests run under `bun run test:hivemind`** (`handoff-interpreter.test.ts`,
+  `ci-conclusion.test.ts`, router wiring in `router.test.ts`); the dev-runs DB helpers
+  are in the main `bun run test` (`src/db/dev-runs.test.ts`). `gh` and file I/O are
+  injectable, so no live CLI / real spec files in tests.
 
 ## Bot setup
 
