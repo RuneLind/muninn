@@ -12,6 +12,8 @@ import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { setCorrelationToken } from "./correlation-tokens.ts";
+import { birthDevRun, insertHandoff, listHandoffs, getDevRunById } from "../db/dev-runs.ts";
+import { shortRunId } from "./mcp-server.ts";
 
 setupTestDb();
 
@@ -307,6 +309,51 @@ describe("HivemindRouter.route — peer correlation", () => {
     const sql = getDb();
     const rows = await sql`SELECT content, thread_id FROM messages WHERE thread_id = ${originating.id} AND role = 'peer' ORDER BY created_at`;
     expect(rows.map((r) => r.content)).toEqual(["first reply", "follow-up"]);
+  });
+});
+
+describe("HivemindRouter handoff interpret (Phase 4)", () => {
+  const HI_BOT = "phase4-handoff-bot";
+  const HI_OWNER = "phase4-handoff-owner";
+
+  test("a handoff reply routed to the run's thread rolls up the handoff off the delivery path", async () => {
+    await setBotDefaultUser(HI_BOT, HI_OWNER);
+    // The research thread + its dev_run (born at research-thread creation).
+    const thread = await createThread(HI_OWNER, HI_BOT, "research-handoff-1");
+    const run = await birthDevRun({ botName: HI_BOT, userId: HI_OWNER, issueKey: "research-aaaa1111", threadId: thread.id });
+    // delegate_task recorded a build handoff under the peer's cwd-basename name.
+    await insertHandoff({ runId: run.id, peerName: "huginn", role: "build" });
+    // The reply routes back to the originating thread via the (bot,peer) binding.
+    await setPendingPeer(HI_BOT, "peer-uuid-aaa", thread.id);
+
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+    const messageId = await router.route(HI_BOT, makeMsg({
+      text: `built it\n<!-- status: done run:${shortRunId(run.id)} -->`,
+    }));
+    expect(messageId).toBeTruthy();
+    await router.pendingHandoffInterpret;
+
+    const handoff = (await listHandoffs(run.id)).find((h) => h.peerName === "huginn")!;
+    expect(handoff.status).toBe("done");
+    // build-only run with the role done → computeRunStatus "building" persisted
+    // (no test role yet); the point is the roll-up ran and updated dev_run.
+    expect((await getDevRunById(run.id))!.status).toBe("building");
+  });
+
+  test("a non-marker reply leaves dev_run handoffs untouched", async () => {
+    await setBotDefaultUser(HI_BOT, HI_OWNER);
+    const thread = await createThread(HI_OWNER, HI_BOT, "research-handoff-2");
+    const run = await birthDevRun({ botName: HI_BOT, userId: HI_OWNER, issueKey: "research-bbbb2222", threadId: thread.id });
+    await insertHandoff({ runId: run.id, peerName: "huginn", role: "build" });
+    await setPendingPeer(HI_BOT, "peer-uuid-aaa", thread.id);
+
+    const chat = new ChatState();
+    const router = new HivemindRouter(chat);
+    await router.route(HI_BOT, makeMsg({ text: "just chatting, no marker here" }));
+    await router.pendingHandoffInterpret;
+
+    expect((await listHandoffs(run.id))[0]!.status).toBe("sent");
   });
 });
 

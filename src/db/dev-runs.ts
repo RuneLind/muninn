@@ -130,6 +130,27 @@ export async function getDevRunByIdentity(
   return row ? rowToDevRun(row) : null;
 }
 
+/** Run statuses that are terminal — the loop is finished, don't reopen them. */
+export const TERMINAL_RUN_STATUSES = new Set(["green", "red"]);
+
+/**
+ * Resolve dev_runs whose uuid starts with an 8-hex prefix — the in-marker
+ * `run:<id>` a peer echoes (Phase 4 inbound interpreter). 8 hex is only 32 bits,
+ * so the prefix is NOT collision-proof: this can return >1 row and the caller
+ * MUST disambiguate (the routed thread, or the most-recently-updated open run).
+ * Ordered most-recently-updated first so the caller's "newest open run" fallback
+ * is just `find(open)`. `prefix` must be hex (the marker regex guarantees it);
+ * non-hex input returns [] rather than risk a LIKE wildcard.
+ */
+export async function getDevRunsByIdPrefix(prefix: string): Promise<DevRun[]> {
+  if (!/^[0-9a-f]+$/i.test(prefix)) return [];
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM dev_runs WHERE id::text LIKE ${prefix.toLowerCase() + "%"} ORDER BY updated_at DESC
+  `;
+  return rows.map(rowToDevRun);
+}
+
 export async function updateDevRun(
   id: string,
   fields: {
@@ -231,6 +252,44 @@ export async function listHandoffs(runId: string): Promise<DevRunHandoff[]> {
   const sql = getDb();
   const rows = await sql`SELECT * FROM dev_run_handoffs WHERE run_id = ${runId} ORDER BY created_at`;
   return rows.map(rowToHandoff);
+}
+
+/** Handoff statuses that are still awaiting a terminal marker from the peer. */
+export const PENDING_HANDOFF_STATUSES = ["sent", "working"] as const;
+
+/**
+ * A handoff is stale once it sits in a non-terminal status past this threshold —
+ * the peer accepted the task then died or never emitted its terminal marker, so
+ * the run would otherwise park forever (the 7-day TTL is on correlation tokens,
+ * NOT on handoffs). 6h is long enough to cover a slow build/test/orchestrate run
+ * but short enough to surface a dead peer the same working day.
+ */
+export const STALE_HANDOFF_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Stale handoffs across all non-terminal runs — pending (`sent`/`working`) rows
+ * whose `updated_at` is older than `thresholdMs`, joined to their run so the
+ * caller can surface a manual re-send / pick-another-peer affordance (Phase 5
+ * UI). Detection lives here; the periodic sweep + re-send button are Phase 5.
+ */
+export async function listStaleHandoffs(
+  thresholdMs: number = STALE_HANDOFF_THRESHOLD_MS,
+): Promise<Array<{ run: DevRun; handoff: DevRunHandoff }>> {
+  const sql = getDb();
+  const cutoff = new Date(Date.now() - thresholdMs);
+  const rows = await sql`
+    SELECT h.*, row_to_json(r) AS run
+    FROM dev_run_handoffs h
+    JOIN dev_runs r ON r.id = h.run_id
+    WHERE h.status IN ${sql(PENDING_HANDOFF_STATUSES)}
+      AND h.updated_at < ${cutoff}
+      AND r.status NOT IN ${sql([...TERMINAL_RUN_STATUSES])}
+    ORDER BY h.updated_at
+  `;
+  return rows.map((r) => ({
+    handoff: rowToHandoff(r),
+    run: rowToDevRun(r.run as Record<string, unknown>),
+  }));
 }
 
 /**

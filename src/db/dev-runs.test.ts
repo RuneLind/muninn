@@ -1,19 +1,32 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import {
   birthDevRun,
   getDevRunById,
   getDevRunByThreadId,
   getDevRunByIdentity,
+  getDevRunsByIdPrefix,
   updateDevRun,
   linkSpecToDevRun,
   insertHandoff,
   updateHandoffStatus,
   listHandoffs,
+  listStaleHandoffs,
   computeRunStatus,
 } from "./dev-runs.ts";
 
 setupTestDb();
+
+/** Insert a dev_run with a crafted id so prefix-collision paths are testable
+ *  (birthDevRun uses gen_random_uuid(), which we can't steer to share a prefix). */
+async function insertRunWithId(id: string, issueKey: string, status = "building"): Promise<void> {
+  const sql = getDb();
+  await sql`
+    INSERT INTO dev_runs (id, bot_name, user_id, issue_key, status, research_stage)
+    VALUES (${id}, ${"b"}, ${"u"}, ${issueKey}, ${status}, ${"analysis"})
+  `;
+}
 
 const THREAD = "11111111-1111-1111-1111-111111111111";
 const THREAD2 = "22222222-2222-2222-2222-222222222222";
@@ -108,6 +121,68 @@ describe("dev-runs", () => {
       status: "spec_draft",
     });
     expect(linked).toBeNull();
+  });
+
+  describe("getDevRunsByIdPrefix", () => {
+    test("resolves a run by its 8-hex id prefix", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "MELOSYS-PFX-1", threadId: THREAD });
+      const prefix = run.id.slice(0, 8);
+      const matches = await getDevRunsByIdPrefix(prefix);
+      expect(matches.map((m) => m.id)).toContain(run.id);
+    });
+
+    test("non-hex prefix returns [] (no LIKE wildcard injection)", async () => {
+      expect(await getDevRunsByIdPrefix("abc%def")).toEqual([]);
+      expect(await getDevRunsByIdPrefix("zzzzzzzz")).toEqual([]);
+    });
+
+    test(">1 match returns all, most-recently-updated first", async () => {
+      // Two runs sharing the same 8-hex prefix — the collision the inbound
+      // resolver must handle. Crafted ids; bump one's updated_at to assert order.
+      await insertRunWithId("abcd1234-0000-4000-8000-000000000001", "PFX-COLLIDE-A");
+      await insertRunWithId("abcd1234-0000-4000-8000-000000000002", "PFX-COLLIDE-B");
+      const sql = getDb();
+      await sql`UPDATE dev_runs SET updated_at = now() + interval '1 second' WHERE id = ${"abcd1234-0000-4000-8000-000000000002"}`;
+
+      const matches = await getDevRunsByIdPrefix("abcd1234");
+      const ids = matches.map((m) => m.id);
+      expect(ids).toContain("abcd1234-0000-4000-8000-000000000001");
+      expect(ids).toContain("abcd1234-0000-4000-8000-000000000002");
+      // most-recently-updated first
+      expect(ids[0]).toBe("abcd1234-0000-4000-8000-000000000002");
+    });
+  });
+
+  describe("listStaleHandoffs", () => {
+    test("flags a pending handoff past the threshold, ignores terminal + recent ones", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "STALE-1", threadId: THREAD });
+      const stale = await insertHandoff({ runId: run.id, peerName: "dead-peer", role: "build" });
+      const fresh = await insertHandoff({ runId: run.id, peerName: "live-peer", role: "test" });
+      const doneHandoff = await insertHandoff({ runId: run.id, peerName: "done-peer", role: "review", status: "done" });
+      const sql = getDb();
+      // Backdate only the stale + the done handoff well past the threshold.
+      await sql`UPDATE dev_run_handoffs SET updated_at = now() - interval '1 day' WHERE id IN ${sql([stale.id, doneHandoff.id])}`;
+
+      const result = await listStaleHandoffs(60 * 60 * 1000); // 1h threshold
+      const flaggedIds = result.map((r) => r.handoff.id);
+      expect(flaggedIds).toContain(stale.id); // pending + old → stale
+      expect(flaggedIds).not.toContain(fresh.id); // pending but recent
+      expect(flaggedIds).not.toContain(doneHandoff.id); // old but terminal
+      const flagged = result.find((r) => r.handoff.id === stale.id)!;
+      expect(flagged.run.id).toBe(run.id);
+      expect(flagged.run.issueKey).toBe("STALE-1");
+    });
+
+    test("ignores handoffs whose run is already terminal", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "STALE-2", threadId: THREAD2 });
+      const h = await insertHandoff({ runId: run.id, peerName: "p", role: "build" });
+      const sql = getDb();
+      await sql`UPDATE dev_run_handoffs SET updated_at = now() - interval '1 day' WHERE id = ${h.id}`;
+      await updateDevRun(run.id, { status: "red" });
+
+      const result = await listStaleHandoffs(60 * 60 * 1000);
+      expect(result.map((r) => r.handoff.id)).not.toContain(h.id);
+    });
   });
 
   describe("handoffs + computeRunStatus", () => {

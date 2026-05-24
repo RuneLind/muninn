@@ -15,6 +15,7 @@ import { checkAutoRespond } from "./loop-guard.ts";
 import { DEFAULT_MAX_AUTO_TURNS_PER_HOUR } from "./config.ts";
 import { getPendingPeer, setPendingPeer, clearPendingPeer } from "./correlation.ts";
 import { getThreadByCorrelationToken, clearCorrelationToken } from "./correlation-tokens.ts";
+import { interpretHandoffReply } from "./handoff-interpreter.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -79,6 +80,14 @@ export class HivemindRouter {
    * logged via the `.catch` in `route()`.
    */
   pendingAutorespond: Promise<void> = Promise.resolve();
+
+  /**
+   * In-flight handoff-interpret promise (Phase 4) — same test-only seam as
+   * `pendingAutorespond`. The interpreter parses a peer's `run:<id>` marker and
+   * rolls up the dev_run off the delivery path; failures are logged, never
+   * surfaced to inbound delivery.
+   */
+  pendingHandoffInterpret: Promise<void> = Promise.resolve();
 
   constructor(
     private chatState: ChatState,
@@ -201,6 +210,24 @@ export class HivemindRouter {
       "Routed inbound peer message from {fromId} ({peerName}) to thread {threadName}",
       { botName, fromId: msg.fromId, peerName, threadName: thread.name },
     );
+
+    // Phase 4: interpret a handoff reply (run:<id> marker → dev_run roll-up) off
+    // the delivery path, AFTER persist/broadcast — a parse failure must never
+    // block inbound delivery. Cheap no-op (a regex miss) for ordinary chatter.
+    this.pendingHandoffInterpret = interpretHandoffReply({
+      botName,
+      peerName,
+      text: msg.text,
+      routedThreadId: thread.id,
+      deps: { getBotDir: (name) => this.autorespondDeps?.getBotConfig(name)?.dir },
+    })
+      .then(() => {})
+      .catch((err) => {
+        log.error("Handoff interpret failed: {error}", {
+          botName, peerName, fromId: msg.fromId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
 
     // Phase 3: kick off an autonomous bot turn if the peer is on the allowlist
     // and loop guards permit. Errors are logged but never break inbound delivery.
