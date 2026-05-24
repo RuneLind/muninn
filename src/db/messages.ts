@@ -143,18 +143,30 @@ export async function getLastResponseMeta(userId: string, botName: string, threa
  * Get distinct chat conversations from the DB, ordered by most recent activity.
  * Returns unique (user_id, bot_name, platform) tuples, limited to the 100 most
  * recently active conversations to avoid slow page loads with many users.
+ *
+ * The conversation's display `username` is the CANONICAL one from the `users`
+ * table — NOT the latest message's `username`. A hivemind autorespond turn saves
+ * its assistant message stamped with the peer's name (e.g. `claude-hivemind`); if
+ * we hydrated the conversation from that label, the next human turn would persist
+ * it back over the owner's real username via `ensureUser`, "renaming" the user in
+ * the sidebar. Reading the canonical name keeps `conversation.username` tied to
+ * the owner. Falls back to the latest message's label only for the rare case of a
+ * message with no matching `users` row.
  */
 export async function getSimConversations(): Promise<SimConversationRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT user_id, bot_name, platform, username FROM (
+    SELECT sub.user_id, sub.bot_name, sub.platform,
+      COALESCE(NULLIF(u.username, ''), sub.username) AS username
+    FROM (
       SELECT DISTINCT ON (user_id, bot_name, platform)
         user_id, bot_name, platform, username, created_at
       FROM messages
       WHERE platform IS NOT NULL
       ORDER BY user_id, bot_name, platform, created_at DESC
     ) sub
-    ORDER BY created_at DESC
+    LEFT JOIN users u ON u.id = sub.user_id
+    ORDER BY sub.created_at DESC
     LIMIT 100
   `;
   return rows.map((r) => ({
