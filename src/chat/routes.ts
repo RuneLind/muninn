@@ -15,7 +15,7 @@ import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
-import { linkSpecToDevRun } from "../db/dev-runs.ts";
+import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs } from "../db/dev-runs.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -23,6 +23,19 @@ import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("chat");
+
+/**
+ * Map an analysis-phase research prompt marker to the dev_run `research_stage` it
+ * advances to (Phase 5). The chat drives which research affordances to show off
+ * run state instead of a positional reply counter, so the Investigate / Deep
+ * buttons (which prefix their text with these markers) advance the stage here.
+ * Returns null for any other message. Exported for testing.
+ */
+export function researchStageForPrompt(text: string): "investigation" | "deep" | null {
+  if (text.startsWith("<!-- prompt:investigate -->")) return "investigation";
+  if (text.startsWith("<!-- prompt:deepAnalysis -->")) return "deep";
+  return null;
+}
 
 /**
  * Creates the chat Hono sub-router.
@@ -385,6 +398,21 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       }
     }
 
+    // Phase 5: advance the dev_run's research_stage from the analysis-phase
+    // prompt markers so the chat can drive affordance visibility off run state
+    // (not a positional reply counter). Fire-and-forget — a stage write must
+    // never block or delay the chat turn, and a runless thread is a no-op.
+    if (body.threadId) {
+      const stage = researchStageForPrompt(body.text);
+      if (stage) {
+        setResearchStageByThread(body.threadId, stage).catch((err) => {
+          log.warn("Failed to set research_stage: {error}", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    }
+
     // Process asynchronously — response comes via WebSocket
     processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, body.skipExtractions).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
@@ -597,6 +625,20 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
     const file = Bun.file(resolve(bot.dir, "specs", userId, `${issueKey}.md`));
     return c.body(null, (await file.exists()) ? 200 : 404);
+  });
+
+  // Live dev_run state for a research thread (Phase 5). The chat fetches this on
+  // entering a research thread and after each bot reply to render the live run
+  // card + per-handoff rows and to drive affordance visibility off run state.
+  // 404 when the thread has no run (older / non-research threads) — the client
+  // then falls back to the default analysis affordances.
+  app.get("/dev-run/by-thread/:threadId", async (c) => {
+    const threadId = c.req.param("threadId");
+    if (!isValidUuid(threadId)) return c.json({ error: "Invalid thread ID" }, 400);
+    const run = await getDevRunByThreadId(threadId);
+    if (!run) return c.json({ error: "No dev_run for thread" }, 404);
+    const handoffs = await listHandoffs(run.id);
+    return c.json({ run, handoffs });
   });
 
   return app;

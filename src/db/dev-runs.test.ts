@@ -13,6 +13,7 @@ import {
   updateHandoffStatus,
   listHandoffs,
   listStaleHandoffs,
+  setResearchStageByThread,
   computeRunStatus,
 } from "./dev-runs.ts";
 
@@ -121,6 +122,23 @@ describe("dev-runs", () => {
       status: "spec_draft",
     });
     expect(linked).toBeNull();
+  });
+
+  describe("setResearchStageByThread", () => {
+    test("advances the open run's research_stage by thread", async () => {
+      const tid = crypto.randomUUID();
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "STAGE-1", threadId: tid });
+      expect(run.researchStage).toBe("analysis");
+      const upd = await setResearchStageByThread(tid, "investigation");
+      expect(upd!.id).toBe(run.id);
+      expect(upd!.researchStage).toBe("investigation");
+      const upd2 = await setResearchStageByThread(tid, "deep");
+      expect(upd2!.researchStage).toBe("deep");
+    });
+
+    test("returns null (no throw) when the thread has no run", async () => {
+      expect(await setResearchStageByThread(crypto.randomUUID(), "investigation")).toBeNull();
+    });
   });
 
   describe("getDevRunsByIdPrefix", () => {

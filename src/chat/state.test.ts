@@ -337,6 +337,50 @@ describe("ChatState", () => {
     });
   });
 
+  describe("publishDevRun", () => {
+    test("broadcasts a dev_run event with run + handoffs", () => {
+      const events: ChatEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      const run = {
+        id: "run-1", botName: "jarvis", userId: "u1", issueKey: "MELOSYS-1",
+        status: "building", threadId: "t1", createdAt: 1, updatedAt: 2,
+      } as any;
+      const handoffs = [
+        { id: "h1", runId: "run-1", peerName: "melosys-api", role: "build", status: "working", createdAt: 1, updatedAt: 2 },
+      ] as any;
+      state.publishDevRun("conv-1", run, handoffs);
+
+      expect(events).toHaveLength(1);
+      const ev = events[0] as Extract<ChatEvent, { type: "dev_run" }>;
+      expect(ev.type).toBe("dev_run");
+      expect(ev.conversationId).toBe("conv-1");
+      expect(ev.run.id).toBe("run-1");
+      expect(ev.handoffs).toHaveLength(1);
+      expect(ev.handoffs[0]!.role).toBe("build");
+    });
+  });
+
+  describe("botConversationId", () => {
+    test("is deterministic and matches findOrCreateBotConversation's id", async () => {
+      const a = await state.botConversationId("Rune-4", "melosys");
+      const b = await state.botConversationId("Rune-4", "melosys");
+      expect(a).toBe(b);
+      // Same derivation as the conversation factory → broadcasters address the
+      // right conversation even before a shell exists.
+      const conv = await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4" });
+      expect(conv.id).toBe(a);
+    });
+
+    test("differs by user and by bot", async () => {
+      const u1 = await state.botConversationId("u1", "jarvis");
+      const u2 = await state.botConversationId("u2", "jarvis");
+      const b2 = await state.botConversationId("u1", "melosys");
+      expect(u1).not.toBe(u2);
+      expect(u1).not.toBe(b2);
+    });
+  });
+
   describe("setStatus", () => {
     test("updates status and publishes event", () => {
       const conv = state.createConversation({

@@ -221,10 +221,11 @@ const CHAT_SCRIPT = `
   var activeConvId = null;      // 1:1 with selected user+bot binding
   var activeThreadId = null;    // Currently selected thread
   var isResearchThread = false; // True when active thread has a research card
-  var researchBotReplies = 0;   // Counts bot replies in research thread (actions shown after first)
   var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
   var reportExists = false;     // Whether a saved report file exists for current issue
+  var devRun = null;            // Last-fetched dev_run state ({ run, handoffs }) — drives the live run card + phase affordances (replaces the positional reply counter)
   var pendingHandoffRoles = []; // Roles (['build'] or ['build','test']) awaiting the bot's agent recommendation after Start Building; empty = none pending
+  var pendingOrchestrate = false; // True between Run-e2e (verify) click and the bot's reply (suppresses a duplicate orchestrate confirm)
   var awaitingSpecReview = false; // True between Generate Spec click and the bot's domain-spec reply (shows the review gate)
   var specGenerated = false;    // True once a domain spec has been generated this thread (enables Save Spec)
   var specApproved = false;     // True once the domain spec is approved (gates the build+test fan-out for spec-loop bots)
@@ -536,7 +537,7 @@ const CHAT_SCRIPT = `
               setChatStatusText('');
               conv.status = '';
             }
-            appendMessage(event.message, conv.type);
+            appendMessage(event.message, conv.type, true);
           }
           updateInspector();
         }
@@ -663,6 +664,14 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    if (event.type === 'dev_run') {
+      // Phase 5: a background dev_run roll-up (handoff interpreter / stale sweep)
+      // — update the live run card without a refresh. onDevRunEvent filters to the
+      // active research thread + never spawns phase buttons mid-turn.
+      onDevRunEvent(event);
+      return;
+    }
+
     if (event.type === 'status') {
       var conv = conversations[event.conversationId];
       if (conv) {
@@ -760,10 +769,11 @@ const CHAT_SCRIPT = `
     activeToolContainer = null;
     activeToolCount = 0;
     isResearchThread = false;
-    researchBotReplies = 0;
     researchIssueKey = null;
     reportExists = false;
+    devRun = null;
     pendingHandoffRoles = [];
+    pendingOrchestrate = false;
     awaitingSpecReview = false;
     specGenerated = false;
     specApproved = false;
@@ -786,7 +796,15 @@ const CHAT_SCRIPT = `
       }
 
       for (var i = 0; i < msgs.length; i++) {
-        appendMessage(msgs[i], conv ? conv.type : 'web');
+        appendMessage(msgs[i], conv ? conv.type : 'web', false);
+      }
+      // Phase 5: after replaying history, render the research affordance off
+      // dev_run state (not a positional reply counter). Per-message rendering is
+      // skipped during replay (isLive=false) so this single fetch+render decides
+      // the final affordance — the live run card if handoffs exist, else the
+      // phase-appropriate research actions.
+      if (isResearchThread) {
+        fetchDevRun(function() { renderRunAffordance(); });
       }
       scrollToBottom();
     } catch {
@@ -850,11 +868,13 @@ const CHAT_SCRIPT = `
     if (type === 'deepAnalysis') return 'Deep Analysis';
     if (type === 'specGeneration') return 'Generate Test Spec';
     if (type === 'specDomain') return 'Generate Spec';
+    if (type === 'orchestrate') return 'Run e2e (verify)';
+    if (type === 'resend') return 'Re-send handoff';
     var s = type.replace(/([a-z])([A-Z])/g, '$1 $2');
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
 
-  function appendMessage(msg, convType) {
+  function appendMessage(msg, convType, isLive) {
     var existing = chatMessages.querySelector('.typing-indicator');
     if (existing && msg.sender === 'bot') existing.remove();
 
@@ -866,8 +886,9 @@ const CHAT_SCRIPT = `
     var isResearchMsg = msg.sender === 'user' && msg.text.indexOf(RESEARCH_MARKER) === 0;
     if (isResearchMsg) {
       isResearchThread = true;
-      researchBotReplies = 0;
+      devRun = null;
       pendingHandoffRoles = [];
+      pendingOrchestrate = false;
       awaitingSpecReview = false;
       specGenerated = false;
       specApproved = false;
@@ -943,11 +964,6 @@ const CHAT_SCRIPT = `
     div.appendChild(buildMsgHead({ name: headName, dotColor: dotColor, model: headModel, isPeer: isPeerMsg, timestamp: msg.timestamp }));
     div.appendChild(body);
 
-    // Track bot replies in research thread
-    if (isResearchThread && msg.sender === 'bot') {
-      researchBotReplies++;
-    }
-
     chatMessages.appendChild(div);
 
     // Load tool calls from trace for bots with showWaterfall=false
@@ -958,28 +974,30 @@ const CHAT_SCRIPT = `
       }
     }
 
-    // Show action buttons after bot replies in a research thread. A pending
-    // Start Building handoff takes precedence — the recommendation reply gets a
-    // Confirm Handoff row instead of the phase buttons.
-    if (isResearchThread && msg.sender === 'bot') {
+    // Show action buttons after a LIVE bot reply in a research thread. (Replayed
+    // history skips this — loadThreadMessages does one fetch+render at the end.)
+    // Two client-transient gates take precedence over run-state rendering:
+    //  - a pending Start Building handoff: the reply is the agent recommendation,
+    //    so show the role-aware Confirm Handoff row.
+    //  - awaiting a domain-spec review: the reply is the spec, show the gate.
+    // Otherwise re-fetch the dev_run and render off run state (live run card if
+    // handoffs exist, else the phase-appropriate research actions).
+    if (isResearchThread && msg.sender === 'bot' && isLive) {
       if (pendingHandoffRoles.length) {
-        // The reply to Start Building is the agent recommendation(s) — show the
-        // role-aware Confirm Handoff row naming exactly the pending roles.
         var handoffRoles = pendingHandoffRoles;
         pendingHandoffRoles = [];
         showHandoffConfirm(handoffRoles);
       } else if (awaitingSpecReview) {
-        // The reply to Generate Spec is the domain spec — show the fagperson
-        // review gate instead of the positional phase buttons.
         awaitingSpecReview = false;
         specGenerated = true;
         showSpecReview();
-      } else if (researchBotReplies === 1) {
-        showResearchActions('analysis');
-      } else if (researchBotReplies === 2) {
-        showResearchActions('investigation');
-      } else if (researchBotReplies === 3) {
-        showResearchActions('deepAnalysis');
+      } else {
+        // A fresh bot reply settles any in-flight orchestrate request, so the
+        // verify gate re-shows if the run is still parked at ready_to_verify
+        // (e.g. the delegate didn't land); a successful delegate moves it to
+        // verifying and the gate stays hidden.
+        pendingOrchestrate = false;
+        fetchDevRun(function() { renderRunAffordance(); });
       }
     }
 

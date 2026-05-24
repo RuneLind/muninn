@@ -4,10 +4,11 @@
 // Has access to IIFE-scoped variables: selectedBot, selectedUserId, activeConvId,
 // activeThreadId, chatMessages, chatInput, bots, threads, connectors,
 // escapeHtml, sanitizeHtml, formatWebHtml, scrollToBottom, sendMessage,
-// pendingConnector, getBotInfo, isResearchThread, researchBotReplies,
-// researchIssueKey, reportExists, pendingHandoffRoles, awaitingSpecReview,
+// pendingConnector, getBotInfo, isResearchThread, researchIssueKey, reportExists,
+// devRun, pendingHandoffRoles, pendingOrchestrate, awaitingSpecReview,
 // specGenerated, specApproved.
-// Defines: RESEARCH_MARKER (used by appendMessage in page.ts).
+// Defines: RESEARCH_MARKER (used by appendMessage in page.ts) + the Phase 5 live
+// dev_run helpers (fetchDevRun, renderRunAffordance, renderRunCard, onDevRunEvent).
 
 /** Returns all research card functions as a browser-compatible JS string. */
 export function researchCardScript(): string {
@@ -59,12 +60,10 @@ export function researchCardScript(): string {
     fetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
       .then(function(res) {
         reportExists = res.ok;
-        // Refresh action buttons if they're currently showing
-        var existing = chatMessages.querySelector('.research-actions');
-        if (existing && reportExists) {
-          var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
-          showResearchActions(phase);
-        }
+        // Refresh the affordance if a research-action row is currently showing so
+        // Start Building reflects the resolved report existence. Re-renders off
+        // run state (renderRunAffordance), not a positional reply count.
+        if (chatMessages.querySelector('.research-actions')) renderRunAffordance();
       })
       .catch(function() { reportExists = false; });
   }
@@ -89,14 +88,239 @@ export function researchCardScript(): string {
         var statusMatch = fm ? fm[1].match(/(?:^|\\n)status:\\s*(\\w+)/) : null;
         specApproved = !!(statusMatch && statusMatch[1] === 'approved');
         // Refresh the action row if it's showing, so the Start Building gate
-        // reflects the resolved approval state.
-        var existing = chatMessages.querySelector('.research-actions');
-        if (existing) {
-          var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
-          showResearchActions(phase);
-        }
+        // reflects the resolved approval state. Re-renders off run state.
+        if (chatMessages.querySelector('.research-actions')) renderRunAffordance();
       })
       .catch(function() { specApproved = false; });
+  }
+
+  // ── Live dev_run (spec-driven dev loop, Phase 5) ────────────────────────────
+  // The research affordances key off dev_run state (status + research_stage +
+  // handoff rows), not a positional reply counter. devRun = { run, handoffs } is
+  // re-fetched on entering a research thread + after each bot reply, and pushed
+  // live over the chat WebSocket when a peer's handoff reply rolls the run up.
+
+  // Map the dev_run research_stage to the analysis-phase button set.
+  function phaseForStage(stage) {
+    if (stage === 'investigation') return 'investigation';
+    if (stage === 'deep') return 'deepAnalysis';
+    return 'analysis';
+  }
+
+  // Fetch the active research thread's dev_run (run + handoffs). cb(devRun|null)
+  // runs after the fetch settles; a runless / older thread (404) yields null and
+  // the caller falls back to the default analysis affordances. Guards against a
+  // thread switch mid-flight.
+  function fetchDevRun(cb) {
+    if (!activeThreadId) { if (cb) cb(null); return; }
+    var tid = activeThreadId;
+    fetch('/chat/dev-run/by-thread/' + encodeURIComponent(tid))
+      .then(function(res) { return res.ok ? res.json() : null; })
+      .then(function(data) {
+        if (tid !== activeThreadId) { if (cb) cb(devRun); return; }
+        devRun = data;
+        if (cb) cb(data);
+      })
+      .catch(function() { if (cb) cb(devRun); });
+  }
+
+  function clearResearchAffordance() {
+    var a = chatMessages.querySelector('.research-actions');
+    if (a) a.remove();
+    var card = chatMessages.querySelector('.dev-run-card');
+    if (card) card.remove();
+  }
+
+  // Single entry point for the research affordance: the live run card once any
+  // handoff exists (the build/test fan-out has started), else the
+  // phase-appropriate research-action buttons. Reads the current devRun.
+  function renderRunAffordance() {
+    if (!isResearchThread) return;
+    var handoffs = (devRun && devRun.handoffs) || [];
+    if (handoffs.length > 0) {
+      renderRunCard();
+    } else {
+      var stage = devRun && devRun.run ? devRun.run.researchStage : null;
+      showResearchActions(phaseForStage(stage));
+    }
+  }
+
+  // A dev_run roll-up pushed over the WebSocket (handoff interpreter or stale
+  // sweep). Update devRun + live-refresh the run card — but only when there's
+  // something to show (handoffs) or a card is already up, so a background event
+  // never spawns phase buttons mid-turn.
+  function onDevRunEvent(event) {
+    if (!event || !event.run || !isResearchThread) return;
+    if (event.conversationId !== activeConvId) return;
+    if (event.run.threadId && activeThreadId && event.run.threadId !== activeThreadId) return;
+    devRun = { run: event.run, handoffs: event.handoffs || [] };
+    var cardShowing = !!chatMessages.querySelector('.dev-run-card');
+    if (devRun.handoffs.length > 0 || cardShowing) renderRunAffordance();
+  }
+
+  // Human label + palette class for the derived run status (computeRunStatus).
+  function runStatusMeta(status) {
+    switch (status) {
+      case 'analyzing': return { label: 'Analyzing', cls: 'neutral' };
+      case 'spec_draft': return { label: 'Spec draft', cls: 'neutral' };
+      case 'spec_approved': return { label: 'Spec approved', cls: 'info' };
+      case 'building': return { label: 'Building + testing', cls: 'info' };
+      case 'ready_to_verify': return { label: 'Ready to verify', cls: 'warn' };
+      case 'verifying': return { label: 'Verifying\\u2026', cls: 'warn' };
+      case 'green': return { label: 'Verified \\u2713', cls: 'green' };
+      case 'red': return { label: 'Failed \\u2717', cls: 'red' };
+      default: return { label: status || 'Run', cls: 'neutral' };
+    }
+  }
+
+  // Spec lifecycle label (draft → approved → verified) derived from run state.
+  // Build-only runs (no spec) return '' so the row is omitted.
+  function specStatusLabel(run) {
+    if (!run) return '';
+    if (run.status === 'green') return 'verified';
+    if (run.status === 'spec_draft') return 'draft';
+    if (run.specPath) return 'approved';
+    return '';
+  }
+
+  // A handoff is stale once it sits pending (sent/working) past the threshold —
+  // the peer accepted then went quiet. Mirrors STALE_HANDOFF_THRESHOLD_MS (6h) in
+  // src/db/dev-runs.ts; the server sweep nudges open tabs, this renders the badge.
+  var STALE_HANDOFF_THRESHOLD_MS = 6 * 60 * 60 * 1000;
+  function handoffStale(h) {
+    return (h.status === 'sent' || h.status === 'working') &&
+      !!h.updatedAt && (Date.now() - h.updatedAt > STALE_HANDOFF_THRESHOLD_MS);
+  }
+
+  function handoffStatusMeta(status) {
+    switch (status) {
+      case 'sent': return { label: 'sent', cls: 'neutral' };
+      case 'working': return { label: 'working', cls: 'info' };
+      case 'done': return { label: 'done', cls: 'green' };
+      case 'failed': return { label: 'failed', cls: 'red' };
+      default: return { label: status || '?', cls: 'neutral' };
+    }
+  }
+
+  // Build + append the live run card: status badge, spec lifecycle, one row per
+  // handoff (role · peer · status), with a re-send / pick-another affordance on
+  // stale rows, and the orchestrate confirm gate when the run parks at
+  // ready_to_verify.
+  function renderRunCard() {
+    clearResearchAffordance();
+    var run = devRun && devRun.run;
+    var handoffs = (devRun && devRun.handoffs) || [];
+    if (!run) return;
+
+    var card = document.createElement('div');
+    card.className = 'dev-run-card';
+
+    var meta = runStatusMeta(run.status);
+    var head = document.createElement('div');
+    head.className = 'dev-run-head';
+    head.innerHTML = '<span class="dev-run-label">Dev Run</span>' +
+      '<span class="dev-run-status dev-run-status-' + meta.cls + '">' + escapeHtml(meta.label) + '</span>';
+    card.appendChild(head);
+
+    var specLabel = specStatusLabel(run);
+    if (specLabel) {
+      var specRow = document.createElement('div');
+      specRow.className = 'dev-run-spec';
+      specRow.innerHTML = 'Spec: <span class="dev-run-badge dev-run-spec-' + specLabel + '">' + escapeHtml(specLabel) + '</span>';
+      card.appendChild(specRow);
+    }
+
+    for (var i = 0; i < handoffs.length; i++) {
+      var h = handoffs[i];
+      var hmeta = handoffStatusMeta(h.status);
+      var stale = handoffStale(h);
+      var row = document.createElement('div');
+      row.className = 'dev-run-row';
+      var staleTag = stale ? '<span class="dev-run-badge dev-run-stale">stale</span>' : '';
+      row.innerHTML = '<span class="dev-run-role">' + escapeHtml(h.role) + '</span>' +
+        '<span class="dev-run-peer">' + escapeHtml(h.peerName || '?') + '</span>' +
+        '<span class="dev-run-badge dev-run-hstatus-' + hmeta.cls + '">' + escapeHtml(hmeta.label) + '</span>' +
+        staleTag;
+      if (stale) {
+        row.appendChild(makeResendButton(h, false, 'Re-send'));
+        row.appendChild(makeResendButton(h, true, 'Pick another'));
+      }
+      card.appendChild(row);
+    }
+
+    chatMessages.appendChild(card);
+
+    // The dependency gate parks the run at ready_to_verify (build ∧ test done):
+    // render the orchestrate confirm so the user kicks off the cross-repo e2e.
+    if (run.status === 'ready_to_verify' && !pendingOrchestrate) {
+      showOrchestrateConfirm();
+    }
+    scrollToBottom();
+  }
+
+  // A re-send / pick-another button for a stale handoff row. Closure-captures the
+  // handoff so the click sends the right role's re-delegate prompt.
+  function makeResendButton(handoff, pickAnother, label) {
+    var btn = document.createElement('button');
+    btn.className = 'dev-run-resend';
+    btn.textContent = label;
+    btn.onclick = function() {
+      chatInput.value = '<!-- prompt:resend -->' + resendHandoffPrompt(handoff, pickAnother);
+      sendMessage();
+    };
+    return btn;
+  }
+
+  // The verify gate (Phase 4 parks the run here). Clicking fans the cross-repo
+  // e2e out to an orchestrate peer via delegate_task; the run then moves to
+  // verifying, and a CI-confirmed green flips the spec to verified.
+  function showOrchestrateConfirm() {
+    var actions = document.createElement('div');
+    actions.className = 'research-actions';
+    var btn = document.createElement('button');
+    btn.innerHTML = '<span class="btn-icon">&#x1F7E2;</span> Run e2e (verify)';
+    btn.onclick = function() {
+      actions.classList.add('used');
+      pendingOrchestrate = true;
+      var paths = handoffPaths();
+      chatInput.value = '<!-- prompt:orchestrate -->' + buildOrchestratePrompt(paths.specPath, paths.planPath);
+      sendMessage();
+    };
+    actions.appendChild(btn);
+    var hint = document.createElement('span');
+    hint.className = 'research-actions-hint';
+    hint.textContent = 'build + test are done — run the cross-repo e2e to verify';
+    actions.appendChild(hint);
+    chatMessages.appendChild(actions);
+  }
+
+  // Instruction sent on Run e2e (verify): hand the cross-repo e2e to an
+  // orchestrate peer via delegate_task. delegate_task appends the run marker the
+  // green gate keys on, so this just emphasises reporting back the GitHub run URL
+  // (the CI conclusion the verified-flip is gated on).
+  function buildOrchestratePrompt(specPath, planPath) {
+    return 'Build and test are both done for this dev run — now run the cross-repo e2e to verify it ("when everything is green, everything is good").\\n\\n' +
+      'Use the hivemind list_peers tool (scope: "machine") to find the agent that can run the orchestrate-e2e-flow skill (the melosys-e2e-tests agent, or a dedicated orchestrator).\\n' +
+      'AVAILABILITY GUARD: if no such peer is online, do NOT proceed — tell me which agent to start.\\n\\n' +
+      'When ready, use the delegate_task tool (NOT send_to_peer), role: "orchestrate", to hand it the cross-repo e2e' +
+      (specPath ? ' for the spec at ' + specPath : '') + ': instruct it to run the full e2e end to end (local + CI) and report back the GitHub Actions run URL so the result can be verified. ' +
+      'Then report back here what you sent and to whom.';
+  }
+
+  // Instruction sent on Re-send / Pick another for a stale handoff: re-delegate
+  // the role to the same peer (or a different one) so it is tracked under the run.
+  function resendHandoffPrompt(handoff, pickAnother) {
+    var paths = handoffPaths();
+    var roleInstr = handoff.role === 'test' ? testHandoffInstruction(paths.specPath, paths.planPath)
+      : handoff.role === 'orchestrate' ? 'run the cross-repo e2e end to end (local + CI) and report back the GitHub Actions run URL'
+      : handoffReviewInstruction();
+    var who = pickAnother
+      ? 'Use list_peers (scope: "machine") to find a DIFFERENT online ' + handoff.role + ' agent'
+      : 'Re-send it to ' + handoff.peerName + ' (or, if it is offline, pick another online ' + handoff.role + ' agent)';
+    return 'The ' + handoff.role + ' handoff to ' + handoff.peerName + ' has gone quiet — no terminal reply for a while.\\n' +
+      who + ', then use the delegate_task tool (NOT send_to_peer), role: "' + handoff.role + '", so the new handoff is tracked under this dev run. ' +
+      'The instruction: ' + roleInstr + '\\n' +
+      'Then report back here what you sent and to whom.';
   }
 
   function showResearchActions(phase) {
@@ -435,10 +659,13 @@ export function researchCardScript(): string {
         // linkSpecToDevRun no-downgrade guard — so don't clear it here.
         if (approved) specApproved = true;
         if (!researchIssueKey) researchIssueKey = issueKey;
+        // Refresh devRun in the background so a later run card reflects the new
+        // spec status (approved); the immediate gate uses the specApproved flag.
+        fetchDevRun();
         // Return to the analysis action row (now with Save Spec available, and —
         // after approval — Start Building enabled), with a short-lived
         // confirmation of what just happened.
-        showResearchActions('analysis');
+        renderRunAffordance();
         var row = chatMessages.querySelector('.research-actions');
         if (row) {
           var note = document.createElement('span');
@@ -565,9 +792,9 @@ export function researchCardScript(): string {
         reportExists = true;
         // Update researchIssueKey if it was a fallback
         if (!researchIssueKey) researchIssueKey = issueKey;
-        // Refresh action buttons to show Preview
-        var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
-        showResearchActions(phase);
+        // Refresh the affordance (now with Preview + Start Building enabled).
+        // Renders off run state, not a positional reply count.
+        renderRunAffordance();
         // Brief visual feedback on the Create Workplan button. Find it by label —
         // its position in the row shifts when the Generate Spec button is present,
         // so a fixed nth-child index would flash the wrong button.

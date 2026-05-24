@@ -204,6 +204,23 @@ export async function linkSpecToDevRun(input: {
   return updateDevRun(run.id, { specPath: input.specPath, status });
 }
 
+/**
+ * Advance a research thread's dev_run `research_stage` (Phase 5). The chat drives
+ * which research affordances to show off run state (research_stage + status)
+ * instead of a positional client-side reply counter, so the analysis-phase prompt
+ * markers (Investigate / Deep) write the stage here. Resolves the open run by
+ * thread; returns null (no throw) when none exists — a stage write must never
+ * block the chat turn.
+ */
+export async function setResearchStageByThread(
+  threadId: string,
+  stage: string,
+): Promise<DevRun | null> {
+  const run = await getDevRunByThreadId(threadId);
+  if (!run) return null;
+  return updateDevRun(run.id, { researchStage: stage });
+}
+
 /** Insert a handoff row for a fan-out send. */
 export async function insertHandoff(input: {
   runId: string;

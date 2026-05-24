@@ -1,6 +1,7 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import type { McpServerStatus } from "../ai/mcp-status.ts";
+import type { DevRun, DevRunHandoff } from "../db/dev-runs.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -44,7 +45,8 @@ export type ChatEvent =
   | { type: "tool_end"; conversationId: string; threadId?: string | null; name: string; displayName: string; tokensEstimate?: number }
   | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
   | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
-  | { type: "mcp_status"; botName: string; servers: McpServerStatus[] };
+  | { type: "mcp_status"; botName: string; servers: McpServerStatus[] }
+  | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -217,6 +219,13 @@ export class ChatState {
     this.publish({ type: "mcp_status", botName, servers });
   }
 
+  /** Broadcast a dev_run roll-up (spec-driven dev loop, Phase 5) so the research
+   *  card's live run state + per-handoff rows update without a page refresh. The
+   *  client filters by conversationId + the run's threadId. */
+  publishDevRun(conversationId: string, run: DevRun, handoffs: DevRunHandoff[]): void {
+    this.publish({ type: "dev_run", conversationId, run, handoffs });
+  }
+
   /** Broadcast response metadata (tokens, timing) after a response completes */
   publishResponseMeta(conversationId: string, meta: {
     threadId?: string | null;
@@ -314,6 +323,15 @@ export class ChatState {
       username,
       channelName,
     });
+  }
+
+  /** Deterministic web-conversation id for a (userId, botName) — the same id
+   *  hydrateFromDb / findOrCreateBotConversation use, computed WITHOUT creating a
+   *  conversation. Lets off-band broadcasters (dev_run roll-ups from the inbound
+   *  hivemind router) address the right conversation even when no in-memory shell
+   *  exists yet. */
+  async botConversationId(userId: string, botName: string): Promise<string> {
+    return deterministicId(`${userId}:${botName}:web`);
   }
 
   /** Same deterministic ID as hydrateFromDb so the conversation merges with hydrated state. */

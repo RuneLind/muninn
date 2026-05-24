@@ -12,6 +12,7 @@ import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
+import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
@@ -97,6 +98,10 @@ try {
 hivemindManager.start(allBotConfigs, config).catch((err) => {
   log.warn("Hivemind manager failed to start: {error}", { error: err instanceof Error ? err.message : String(err) });
 });
+
+// Periodic stale-handoff sweep (spec-driven dev loop, Phase 5): nudges open chat
+// tabs so a run parked on a dead/silent peer surfaces its re-send affordance.
+startStaleHandoffSweep();
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
 // .mcp.json — bots without it just don't see the tool.
@@ -205,6 +210,7 @@ setTimeout(() => {
 async function shutdown() {
   log.info("Shutting down...");
   stopScheduler();
+  stopStaleHandoffSweep();
   await waitForPendingTicks(10_000);
 
   for (const bot of telegramBotMap.values()) {
