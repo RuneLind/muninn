@@ -10,7 +10,8 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
 | `config.ts` | Per-bot `hivemind` config block parser. Returns `null` unless `enabled: true` and at least one valid namespace is set. Knows `autoRespondPeers` + `maxAutoTurnsPerHour` (default 20). |
 | `broker.ts` | `ensureBrokerRunning()` — health-checks `localhost:7899`, spawns `bun ~/source/private/claude-hivemind/src/broker.ts` if missing. Override path with `HIVEMIND_BROKER_SCRIPT`. |
 | `client.ts` | `HivemindBotClient` — one WebSocket peer connection per (bot, namespace). Handles register, set_summary, list_peers, send_message, heartbeat, reconnect with exponential backoff. Inbound messages carry the client's `namespace`. |
-| `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). `BotClientRegistry` holds one `HivemindBotClient` per joined namespace and a `peer_id → namespace` cache populated from every `list_peers` response. Exposes `list_peers` (cross-namespace), `ask_peer`, `send_to_peer` — tool signatures unchanged from Phase 3 except for an optional `namespace?` filter on `list_peers`. |
+| `mcp-server.ts` | `HivemindMcpServer` — single HTTP MCP server on port 9180 with per-bot URL paths (`/mcp/<botName>`). `BotClientRegistry` holds one `HivemindBotClient` per joined namespace plus `peer_id → namespace` and `peer_id → {cwd,summary}` caches, both populated from every `list_peers` response. Exposes `list_peers` (cross-namespace), `ask_peer`, `send_to_peer`, and `delegate_task` (spec-driven dev loop — see below). `registry.peerNameFor(peerId)` derives the stable `peer_name` from the cwd cache via the shared `peer-name.ts`. |
+| `peer-name.ts` | `peerNameFor({fromCwd, fromSummary, fromId})` — the single derivation of a peer's stable name (cwd-basename → summary-slug → `peer-<id8>`). Shared by the router (inbound thread naming + autorespond allowlist) and `delegate_task` (handoff recording) so both sides of the `(run_id, peer_name)` join agree. `router.ts` re-exports it for back-compat. |
 | `router.ts` | `HivemindRouter` — routes unsolicited inbound peer messages. Resolves peer-reply correlation **token-first** (echoed `correlation_id` → `correlation-tokens.ts`), then the `(botName, peerId)` fallback (`correlation.ts`), and routes the reply to the originating thread **regardless of which user owns it** (the destination user is derived from that thread, not the bot default user). Only uncorrelated inbound falls back to `peer:<namespace>/<cwd-basename>` threads under the bot's default user. Stale correlations (deleted/other-bot thread) are lazily cleared on both paths. Autorespond echoes the inbound `correlation_id` verbatim and looks up `getClient(botName, namespace)` so the outbound relay goes through the same WS the inbound came in on. `parsePeerThreadName` and `peerThreadNameFor` helpers expose the format. |
 | `loop-guard.ts` | `checkAutoRespond()` — hourly turn cap + already-paused check. Returns `{ allowed, reason?, capHit? }`; the router writes `auto_respond_paused=true` on cap hit. |
 | `active-turn.ts` | Per-bot LIFO stack of in-flight chat turns. `processMessage` pushes the originating `threadId` before the connector runs and pops in `finally`. MCP tool handlers `peek` it to find the originating thread for outbound `ask_peer`/`send_to_peer`. Concurrent turns on one bot race (last push wins) — acceptable for the typical single-user-per-bot case. |
@@ -96,6 +97,42 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
   `pause_reason`. The chat header renders an "Auto-respond: ON / PAUSED"
   pill on peer threads (click to toggle); paused peer threads in the
   sidebar render with a ⏸ icon and muted styling.
+
+## Spec-driven dev loop — `delegate_task` (Phase 2)
+
+`delegate_task` is `send_to_peer` plus structured run tracking. Used to hand a
+workplan/spec/e2e to a build/test/orchestrate peer and record the handoff against
+the originating research thread's `dev_run` (see `src/db/dev-runs.ts`,
+`mimir/plans/muninn-spec-driven-dev-loop.md`).
+
+- **Signature:** `{ to, message, role, issueKey? }`. `role ∈ build|test|orchestrate|review`.
+- **Run resolution is by ORIGIN THREAD, never the LLM-supplied `issueKey`.** It
+  reads `peekActiveTurn(botName)` (the same thread `bindOutboundToOriginThread`
+  peeks) and `getDevRunByThreadId`. Chat-started research has a synthetic
+  `research-<8hex>` issue_key the model can't reproduce, so joining on `issueKey`
+  would fork a second run. `issueKey` is a non-authoritative display stamp; `role`
+  is persisted on the handoff.
+- **In-marker `run:<id>` is the authoritative join, not the broker token.**
+  `runMarkerInstruction` appends an instruction telling the peer to end its reply
+  with `<!-- status: done|failed run:<id> -->` (build/test/review) or
+  `<!-- e2e: green|red run:<id> -->` (orchestrate). The id is the **first 8 hex**
+  of the run uuid (`shortRunId`) — autonomous peers truncate long uuids
+  (Phase 1.5), so keep it short; **Phase 4's inbound parser resolves it back to a
+  `dev_run` by prefix match**, then `(run_id, peer_name)` picks the role's handoff.
+  This rides in the message body the agent controls, so it survives even when the
+  broker correlation token isn't echoed (raw peers, multi-in-flight). **Phase 4
+  caveat:** 8 hex is 32 bits, so the prefix is NOT collision-proof — the inbound
+  resolver must handle >1 matching `dev_run` (fall back to the correlation token,
+  or pick the most-recently-updated open run), not assume a unique match. Don't
+  lengthen the id without re-checking peers still echo it verbatim.
+- **`peer_name` = cwd-basename via the shared `peer-name.ts`.** Derived from the
+  `list_peers` cwd cache, identical to the router's inbound naming, so the handoff
+  row and the peer's reply agree on the name.
+- **Still mints the correlation token + writes the `(bot,peer)` fallback** (same
+  as `send_to_peer`) so the legacy reply path keeps working alongside the marker.
+- **No dev_run for the thread → sends plain, records nothing** (delegating outside
+  a research run is allowed, just untracked). A handoff-insert failure does not
+  fail the send. Core logic is the exported `runDelegateTask` (DB-tested).
 
 ## Bot setup
 

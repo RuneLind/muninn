@@ -1,5 +1,5 @@
-import { basename } from "node:path";
 import { getLog } from "../logging.ts";
+import { peerNameFor } from "./peer-name.ts";
 import type { ChatState, ChatMessage } from "../chat/state.ts";
 import type { Platform } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
@@ -35,21 +35,11 @@ export interface InboundPeerMessage {
   correlationId?: string;
 }
 
-/**
- * Stable across peer reconnects — the broker's `from_id` UUID rotates per
- * session, but cwd basename does not.
- */
-export function peerNameFor(msg: { fromCwd: string; fromSummary: string; fromId: string }): string {
-  const cwdBase = basename(msg.fromCwd).trim();
-  if (cwdBase) return cwdBase;
-  const summarySlug = msg.fromSummary
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32);
-  if (summarySlug) return summarySlug;
-  return `peer-${msg.fromId.slice(0, 8)}`;
-}
+// `peerNameFor` now lives in `peer-name.ts` (shared with delegate_task's handoff
+// recording, so both sides of the (run_id, peer_name) join derive it identically).
+// Imported above for internal use; re-exported here so existing importers
+// (router.test.ts, config docs) keep working unchanged.
+export { peerNameFor };
 
 /**
  * Wires a full bot turn (prompt build + connector + DB save + chat broadcast)

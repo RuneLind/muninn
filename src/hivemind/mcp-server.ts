@@ -8,6 +8,8 @@ import { DEFAULT_ASK_PEER_TIMEOUT_SEC } from "./config.ts";
 import { peekActiveTurn } from "./active-turn.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "./correlation-tokens.ts";
+import { peerNameFor } from "./peer-name.ts";
+import { getDevRunByThreadId, insertHandoff } from "../db/dev-runs.ts";
 
 /** Tie any inbound reply from `to` back to the thread this outbound came from,
  *  so peer responses route into the originating chat thread instead of the
@@ -21,7 +23,18 @@ import { mintCorrelationToken, setCorrelationToken } from "./correlation-tokens.
  *  there's no active turn to bind to — the reply then falls back to the default
  *  bucket, same as before. */
 async function bindOutboundToOriginThread(botName: string, to: string): Promise<string | undefined> {
-  const originThread = peekActiveTurn(botName);
+  return bindOutboundToThread(botName, to, peekActiveTurn(botName));
+}
+
+/** Like `bindOutboundToOriginThread` but for callers that have already resolved
+ *  the origin thread (e.g. `delegate_task`, which peeks once to resolve the run
+ *  AND bind the token to the *same* thread — peeking twice across an await could
+ *  pick a different thread if a concurrent turn on the bot races). */
+async function bindOutboundToThread(
+  botName: string,
+  to: string,
+  originThread: string | null,
+): Promise<string | undefined> {
   if (!originThread) return undefined;
   const correlationId = mintCorrelationToken();
   await Promise.all([
@@ -50,6 +63,10 @@ export class BotClientRegistry {
   private clients = new Map<Namespace, HivemindBotClient>();
   /** peer_id → namespace owning that peer. Updated on every list_peers response. */
   private peerNamespace = new Map<string, Namespace>();
+  /** peer_id → { cwd, summary } from the last list_peers, for deriving a stable
+   *  peer_name (cwd-basename) when recording a delegate_task handoff. Rebuilt on
+   *  every unfiltered list_peers, same lifecycle as peerNamespace. */
+  private peerInfo = new Map<string, { cwd: string; summary: string }>();
 
   add(namespace: Namespace, client: HivemindBotClient): void {
     this.clients.set(namespace, client);
@@ -71,7 +88,10 @@ export class BotClientRegistry {
     if (targets.length === 0) return [];
 
     const results = await Promise.allSettled(targets.map((c) => c.listPeers(scope)));
-    if (!filter) this.peerNamespace.clear();
+    if (!filter) {
+      this.peerNamespace.clear();
+      this.peerInfo.clear();
+    }
 
     const merged: Peer[] = [];
     const seen = new Set<string>();
@@ -87,6 +107,7 @@ export class BotClientRegistry {
       }
       for (const p of r.value) {
         this.peerNamespace.set(p.id, c.namespace);
+        this.peerInfo.set(p.id, { cwd: p.cwd, summary: p.summary });
         if (seen.has(p.id)) continue;
         seen.add(p.id);
         merged.push(p);
@@ -115,6 +136,19 @@ export class BotClientRegistry {
       );
     }
     return fallback;
+  }
+
+  /**
+   * Stable peer_name (cwd-basename) for a peer id, from the list_peers cache.
+   * Uses the same `peerNameFor` the router uses for inbound naming, so a
+   * delegate_task handoff and the peer's later reply agree on the name (the
+   * (run_id, peer_name) join in Phase 4). Returns undefined on cache miss —
+   * the bot should have called list_peers first to get the peer id anyway.
+   */
+  peerNameFor(peerId: string): string | undefined {
+    const info = this.peerInfo.get(peerId);
+    if (!info) return undefined;
+    return peerNameFor({ fromCwd: info.cwd, fromSummary: info.summary, fromId: peerId });
   }
 }
 
@@ -350,7 +384,143 @@ function createMcpServerForBot(botName: string, registry: BotClientRegistry): Mc
     },
   );
 
+  server.tool(
+    "delegate_task",
+    "Delegate a task to another AI coding agent AND record it as a tracked handoff in the current dev run (spec-driven dev loop). " +
+      "Fire-and-forget like send_to_peer, but additionally ties the handoff to this research thread's dev_run and asks the peer to echo a run marker so its reply routes back precisely. " +
+      "Call list_peers first to get the peer id. Use this (instead of send_to_peer) when handing a workplan to a build agent, a spec to a test agent, or an e2e run to an orchestrate agent. " +
+      "The peer's reply arrives asynchronously and may not be visible in this turn.",
+    {
+      to: z.string().describe("Peer ID from list_peers"),
+      message: z
+        .string()
+        .describe("The task to delegate — e.g. the workplan/spec path plus what to do and to report back"),
+      role: z
+        .enum(["build", "test", "orchestrate", "review"])
+        .describe(
+          "This peer's role in the run: build (implement the workplan), test (write the e2e spec + test), orchestrate (run the cross-repo e2e), or review",
+        ),
+      issueKey: z
+        .string()
+        .optional()
+        .describe(
+          "Optional Jira/issue key, for display only. The run is resolved by the originating thread, so a wrong or missing value will not misroute the handoff.",
+        ),
+    },
+    async ({ to, message, role, issueKey }) => {
+      const r = await runDelegateTask(botName, registry, { to, message, role, issueKey });
+      return textResult(r.text, r.isError);
+    },
+  );
+
   return server;
+}
+
+/** Short, echo-friendly form of a run id for the reply marker. Autonomous peers
+ *  truncate or paraphrase long uuids (Phase 1.5 finding), so the marker carries
+ *  the first 8 hex chars of the run id; Phase 4 resolves it back by prefix match. */
+export function shortRunId(runId: string): string {
+  return runId.slice(0, 8);
+}
+
+/** Instruction appended to a delegated task telling the peer how to close the
+ *  loop: end its reply with a status marker that echoes the run id. The in-marker
+ *  `run:<id>` — not the broker correlation token — is the authoritative join for
+ *  handoff replies, because it rides in the message body the agent fully controls.
+ *  Build/test/review report done|failed; orchestrate reports e2e green|red. */
+export function runMarkerInstruction(runId: string, role: string): string {
+  const id = shortRunId(runId);
+  const marker =
+    role === "orchestrate"
+      ? `<!-- e2e: green run:${id} --> on success, or <!-- e2e: red run:${id} --> if it failed`
+      : `<!-- status: done run:${id} --> on success, or <!-- status: failed run:${id} --> if it failed`;
+  return `When you finish, end your reply with this status marker on its own line so the run is tracked: ${marker}. Echo the id "${id}" exactly.`;
+}
+
+/**
+ * Core of the `delegate_task` tool — sends a tracked handoff to a peer and
+ * records it against the originating thread's dev_run. Exported for tests.
+ *
+ * Routing decision (locked — see mimir plan / handover): the run is resolved by
+ * the ORIGIN thread (`peekActiveTurn`), NOT the LLM-supplied issueKey. Chat-started
+ * research has a synthetic issue_key the model can't reproduce, and the run was
+ * born keyed to the thread, so joining on issueKey would fork a second run for
+ * exactly that case. issueKey is a non-authoritative stamp; role is persisted on
+ * the handoff. When there's no dev_run for the thread the message is still sent
+ * (plain delegation), just untracked.
+ */
+export async function runDelegateTask(
+  botName: string,
+  registry: BotClientRegistry,
+  args: { to: string; message: string; role: string; issueKey?: string },
+): Promise<{ text: string; isError: boolean }> {
+  const { to, message, role } = args;
+  const client = registry.pickClientFor(to);
+  if (!client) return { text: "No hivemind client registered for this bot", isError: true };
+
+  // Peek the origin thread ONCE and reuse it for both run resolution and the
+  // token binding — peeking again inside the bind could pick a different thread
+  // if a concurrent turn on this bot races during the awaited DB read.
+  const originThread = peekActiveTurn(botName);
+  const run = originThread ? await getDevRunByThreadId(originThread) : null;
+
+  // Mint the broker correlation token + write the (bot,peer) fallback — exactly
+  // what send_to_peer does, so the legacy reply path keeps working alongside the
+  // in-marker run id.
+  const correlationId = await bindOutboundToThread(botName, to, originThread);
+
+  // Append the run marker so the peer echoes run:<id> back.
+  const outgoing = run ? `${message}\n\n${runMarkerInstruction(run.id, role)}` : message;
+
+  const ok = client.sendMessage(to, outgoing, correlationId);
+  if (!ok) return { text: "Failed to send — not connected to broker", isError: true };
+
+  if (!run) {
+    log.warn(
+      "delegate_task sent to {to} but no dev_run for origin thread {thread} — handoff not recorded",
+      { botName, to, role, thread: originThread ?? "(no active turn)" },
+    );
+    return {
+      text: `Message sent to peer ${to}. No active dev run for this thread, so it was sent as a plain delegation (no run tracking). Start the task from a research thread to get run tracking.`,
+      isError: false,
+    };
+  }
+
+  // The handoff's peer_name MUST match what the inbound router derives for the
+  // peer's reply (cwd-basename) — that's the (run_id, peer_name) join. On a cold
+  // cwd cache (no recent unfiltered list_peers) refresh it once; only if the peer
+  // is genuinely unknown do we fall back to the id and warn, since a UUID
+  // peer_name will never match the reply and the handoff would stick at 'sent'.
+  let peerName = registry.peerNameFor(to);
+  if (!peerName) {
+    await registry.listPeers("machine");
+    peerName = registry.peerNameFor(to);
+  }
+  if (!peerName) {
+    log.warn(
+      "delegate_task: no cwd cache for peer {to} after refresh — handoff peer_name falls back to the id, which won't match the inbound reply name (the run won't auto-roll-up)",
+      { botName, to, run: run.id },
+    );
+    peerName = to;
+  }
+  try {
+    await insertHandoff({ runId: run.id, peerName, role, peerId: to, correlationToken: correlationId });
+  } catch (err) {
+    log.warn("delegate_task: failed to record handoff for run {run}: {error}", {
+      botName,
+      run: run.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      text: `Task delegated to ${peerName} (${to}) as ${role}, but recording the handoff failed (see logs). The peer was still messaged.`,
+      isError: false,
+    };
+  }
+
+  return {
+    text: `Task delegated to ${peerName} (${to}) as ${role}. Tracked under dev run ${run.id}; the peer will echo run:${shortRunId(run.id)} in its reply.`,
+    isError: false,
+  };
 }
 
 function textResult(text: string, isError = false) {
