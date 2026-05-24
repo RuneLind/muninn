@@ -43,6 +43,10 @@ bots/*
 # Generated research reports/workplans
 bots/*/reports/
 
+# Domain test-specs (staging/review copy; the canonical version-controlled
+# spec lives in the e2e-tests repo). Same per-developer treatment as reports/.
+bots/*/specs/
+
 # Benchmark data (manifests, golds, calibration, plan docs)
 # Sensitive — references real Jira issues. Source code lives in src/benchmarks/.
 # Root-anchored so this only matches top-level benchmarks/, not src/benchmarks/.

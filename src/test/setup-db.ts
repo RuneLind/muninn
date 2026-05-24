@@ -20,6 +20,8 @@ const ALL_TABLES = [
   "bot_default_user",
   "peer_thread_correlation",
   "peer_correlation_tokens",
+  "dev_run_handoffs",
+  "dev_runs",
 ];
 
 let dbInitialized = false;

@@ -477,33 +477,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const body = await c.req.json<{ content: string }>();
     if (!body.content) return c.json({ error: "content is required" }, 400);
 
-    // Enrich the report's YAML frontmatter with `analysis_trace_id` so the
-    // benchmark judge can later link the scored report back to the original
-    // muninn analysis trace. Pulls the most recent assistant message for
-    // this user+bot from the messages table and uses its trace_id.
-    //
-    // Best-effort: if no recent message has a trace_id, the report is saved
-    // unchanged (no frontmatter modification).
-    let enrichedContent = body.content;
-    try {
-      const recentMessages = await getSimMessages(userId, botName, "web", 20, undefined, true);
-      // getSimMessages returns oldest-first, so reverse to get newest-first
-      const newestFirst = [...recentMessages].reverse();
-      const mostRecentBotTrace = newestFirst.find((m) => m.role === "assistant" && m.traceId)?.traceId;
-      if (mostRecentBotTrace && /^---\n[\s\S]*?\n---/.test(body.content)) {
-        enrichedContent = body.content.replace(
-          /^---\n([\s\S]*?)\n---/,
-          `---\n$1\nanalysis_trace_id: ${mostRecentBotTrace}\n---`,
-        );
-        log.info("Enriched report with analysis_trace_id {traceId}", { botName, userId, traceId: mostRecentBotTrace });
-      }
-    } catch (err) {
-      log.warn("Failed to enrich report with analysis_trace_id: {error}", {
-        botName,
-        userId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    // Best-effort: stamp analysis_trace_id into the frontmatter (shared helper).
+    const enrichedContent = await enrichWithAnalysisTraceId(body.content, userId, botName, "report");
 
     const reportPath = resolve(bot.dir, "reports", userId, `${issueKey}.md`);
     await mkdir(dirname(reportPath), { recursive: true });
@@ -542,7 +517,98 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.body(null, (await file.exists()) ? 200 : 404);
   });
 
+  // --- Domain test-specs (Phase 0) ---------------------------------------
+  // Persist the domain layer of a spec as a first-class artifact, mirroring
+  // the report endpoints. This is the staging/review copy (gitignored,
+  // per-developer); the canonical version-controlled spec lives in the
+  // e2e-tests repo where the test agent lands the full file with binding.
+
+  // Save a domain spec to bots/<botName>/specs/<userId>/<issueKey>.md
+  app.post("/specs/:botName/:userId/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+
+    const body = await c.req.json<{ content: string }>();
+    if (!body.content) return c.json({ error: "content is required" }, 400);
+
+    const enrichedContent = await enrichWithAnalysisTraceId(body.content, userId, botName, "spec");
+    const specPath = resolve(bot.dir, "specs", userId, `${issueKey}.md`);
+    await mkdir(dirname(specPath), { recursive: true });
+    await Bun.write(specPath, enrichedContent);
+    log.info("Saved domain spec {path}", { botName, userId, path: specPath });
+    return c.json({ ok: true, path: `specs/${userId}/${issueKey}.md` }, 201);
+  });
+
+  // Get a domain spec
+  app.get("/specs/:botName/:userId/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
+
+    const file = Bun.file(resolve(bot.dir, "specs", userId, `${issueKey}.md`));
+    if (!(await file.exists())) return c.json({ error: "Spec not found" }, 404);
+    const content = await file.text();
+    return c.json({ content });
+  });
+
+  // Check if a domain spec exists (lightweight — gates downstream buttons)
+  app.on("HEAD", "/specs/:botName/:userId/:issueKey", async (c) => {
+    const botName = c.req.param("botName");
+    const userId = c.req.param("userId");
+    const issueKey = c.req.param("issueKey");
+    if (!VALID_USER_ID.test(userId)) return c.body(null, 400);
+    if (!VALID_ISSUE_KEY.test(issueKey)) return c.body(null, 400);
+    const bot = botConfigs.find((b) => b.name === botName);
+    if (!bot) return c.body(null, 404);
+
+    const file = Bun.file(resolve(bot.dir, "specs", userId, `${issueKey}.md`));
+    return c.body(null, (await file.exists()) ? 200 : 404);
+  });
+
   return app;
+}
+
+/**
+ * Best-effort: stamp `analysis_trace_id` into a research artifact's YAML
+ * frontmatter so the saved file can later be linked back to the muninn
+ * analysis trace (e.g. for the benchmark judge). Pulls the most recent
+ * assistant message with a trace for this user+bot. Returns the content
+ * unchanged if there's no recent trace or no leading frontmatter block.
+ * Shared by the /reports and /specs save endpoints.
+ */
+async function enrichWithAnalysisTraceId(
+  content: string,
+  userId: string,
+  botName: string,
+  kind: "report" | "spec",
+): Promise<string> {
+  try {
+    const recentMessages = await getSimMessages(userId, botName, "web", 20, undefined, true);
+    // getSimMessages returns oldest-first, so reverse to get newest-first
+    const newestFirst = [...recentMessages].reverse();
+    const mostRecentBotTrace = newestFirst.find((m) => m.role === "assistant" && m.traceId)?.traceId;
+    if (mostRecentBotTrace && /^---\n[\s\S]*?\n---/.test(content)) {
+      log.info("Enriched {kind} with analysis_trace_id {traceId}", { botName, userId, kind, traceId: mostRecentBotTrace });
+      return content.replace(/^---\n([\s\S]*?)\n---/, `---\n$1\nanalysis_trace_id: ${mostRecentBotTrace}\n---`);
+    }
+  } catch (err) {
+    log.warn("Failed to enrich {kind} with analysis_trace_id: {error}", {
+      botName,
+      userId,
+      kind,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return content;
 }
 
 /** Map ConversationType to the platform string used in the DB */
