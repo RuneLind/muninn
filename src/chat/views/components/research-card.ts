@@ -5,8 +5,8 @@
 // activeThreadId, chatMessages, chatInput, bots, threads, connectors,
 // escapeHtml, sanitizeHtml, formatWebHtml, scrollToBottom, sendMessage,
 // pendingConnector, getBotInfo, isResearchThread, researchBotReplies,
-// researchIssueKey, reportExists, awaitingHandoffConfirm, awaitingSpecReview,
-// specGenerated.
+// researchIssueKey, reportExists, pendingHandoffRoles, awaitingSpecReview,
+// specGenerated, specApproved.
 // Defines: RESEARCH_MARKER (used by appendMessage in page.ts).
 
 /** Returns all research card functions as a browser-compatible JS string. */
@@ -67,6 +67,36 @@ export function researchCardScript(): string {
         }
       })
       .catch(function() { reportExists = false; });
+  }
+
+  // Derive the spec's approval state for the active research thread by reading
+  // the saved spec's frontmatter status (approved | draft). Mirrors
+  // checkReportExists so a page reload re-establishes whether Start Building's
+  // spec gate is satisfied. No-ops for bots without a specDomain prompt (they
+  // don't take part in the spec-first loop, so the gate never applies).
+  function checkSpecStatus(botName, issueKey) {
+    if (!botName || !issueKey || !selectedUserId) return;
+    var bot = bots.find(function(b) { return b.name === botName; });
+    if (!(bot && bot.prompts && bot.prompts.specDomain)) return;
+    fetch('/chat/specs/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey))
+      .then(function(res) { return res.ok ? res.json() : null; })
+      .then(function(data) {
+        if (!data || !data.content) { specApproved = false; return; }
+        specGenerated = true;
+        // Read status only out of the leading YAML frontmatter block so a
+        // 'status:' line in the spec body can't be mistaken for it.
+        var fm = data.content.match(/^---\\n([\\s\\S]*?)\\n---/);
+        var statusMatch = fm ? fm[1].match(/(?:^|\\n)status:\\s*(\\w+)/) : null;
+        specApproved = !!(statusMatch && statusMatch[1] === 'approved');
+        // Refresh the action row if it's showing, so the Start Building gate
+        // reflects the resolved approval state.
+        var existing = chatMessages.querySelector('.research-actions');
+        if (existing) {
+          var phase = researchBotReplies >= 3 ? 'deepAnalysis' : researchBotReplies >= 2 ? 'investigation' : 'analysis';
+          showResearchActions(phase);
+        }
+      })
+      .catch(function() { specApproved = false; });
   }
 
   function showResearchActions(phase) {
@@ -138,22 +168,27 @@ export function researchCardScript(): string {
       }
     }
 
-    // Start Building hands the saved work plan to an online coding agent via
-    // hivemind. Disabled until a work plan exists (Create Workplan re-renders
-    // this row on save, which flips reportExists → button enabled).
+    // Start Building fans the work out to a build agent — and, for bots that take
+    // part in the spec-first loop (a specDomain prompt), a test agent in parallel.
+    // Disabled until a work plan exists; spec-loop bots additionally require an
+    // approved domain spec so the test agent gets a real contract (the Phase 3
+    // approval gate). Create Workplan / the approval gate re-render this row,
+    // flipping reportExists / specApproved → button enabled.
+    var hbot = getBotInfo();
+    var hasSpecDomain = !!(hbot && hbot.prompts && hbot.prompts.specDomain);
     var buildBtn = document.createElement('button');
     buildBtn.innerHTML = '<span class="btn-icon">&#x1F680;</span> Start Building';
-    buildBtn.disabled = !reportExists;
+    buildBtn.disabled = !reportExists || (hasSpecDomain && !specApproved);
     if (!reportExists) buildBtn.title = 'Create a work plan first';
+    else if (hasSpecDomain && !specApproved) buildBtn.title = 'Approve the domain spec first';
     buildBtn.onclick = function() {
-      if (!reportExists || !researchIssueKey) return;
+      if (buildBtn.disabled || !researchIssueKey) return;
       actions.classList.add('used');
-      var bot = getBotInfo();
-      var planPath = (bot && bot.dir && selectedUserId)
-        ? bot.dir + '/reports/' + selectedUserId + '/' + researchIssueKey + '.md'
-        : '';
-      awaitingHandoffConfirm = true;
-      chatInput.value = '<!-- prompt:startBuilding -->' + buildStartBuildingPrompt(planPath);
+      var paths = handoffPaths();
+      // Fan out to a test agent only when an approved domain spec exists to bind.
+      var roles = specApproved ? ['build', 'test'] : ['build'];
+      pendingHandoffRoles = roles;
+      chatInput.value = '<!-- prompt:startBuilding -->' + buildStartBuildingPrompt(paths.planPath, paths.specPath, roles);
       sendMessage();
     };
     actions.appendChild(buildBtn);
@@ -190,37 +225,82 @@ export function researchCardScript(): string {
     scrollToBottom();
   }
 
-  // What the receiving coding agent is told to do with the plan: read it, verify
-  // it against the ACTUAL code, and use the knowledge base for domain facts —
-  // not just rubber-stamp the plan. Shared by the initial and confirm prompts.
+  // Absolute paths to the two handoff artifacts for the active research thread.
+  // Deterministic from the bot dir + user + issue key, so both Start Building and
+  // the confirm step derive them identically without stashing extra state.
+  function handoffPaths() {
+    var bot = getBotInfo();
+    var base = (bot && bot.dir && selectedUserId && researchIssueKey) ? bot.dir : '';
+    return {
+      planPath: base ? base + '/reports/' + selectedUserId + '/' + researchIssueKey + '.md' : '',
+      specPath: base ? base + '/specs/' + selectedUserId + '/' + researchIssueKey + '.md' : '',
+    };
+  }
+
+  // What the BUILD agent is told to do with the plan: read it, verify it against
+  // the ACTUAL code, confirm it satisfies the acceptance criteria, then implement.
+  // Reframed in Phase 3 from "review the plan" to "verify the plan satisfies the
+  // acceptance criteria against real code." Shared by the initial + confirm prompts.
   function handoffReviewInstruction() {
     return 'REVIEW the plan before any implementation: read it in full, verify every claim against the ACTUAL code in the repository (open the referenced files and functions — do not trust the plan\\'s summary), and use the knowledge base (search_knowledge) to verify domain / subject-matter ("faglige") facts. ' +
-      'Then write a reviewed plan into /Users/rune/source/nav/melosys-kode-wiki (follow that wiki\\'s CLAUDE.md conventions for placement and naming), noting any corrections, gaps, or risks found.';
+      'Verify the plan actually satisfies the acceptance criteria against the real code before you implement. ' +
+      'Then write a reviewed plan into /Users/rune/source/nav/melosys-kode-wiki (follow that wiki\\'s CLAUDE.md conventions for placement and naming), noting any corrections, gaps, or risks found, and implement it.';
+  }
+
+  // What the TEST agent is told to do with the approved domain spec: bind it to
+  // the e2e-tests repo via spec-from-analysis and report back the e2e_spec_path.
+  // The binding hints (files/functions/constants surfaced during code
+  // investigation) are passed by pointing at the workplan's Code Analysis section
+  // rather than copied inline — robust, and keeps the domain spec binding-free.
+  function testHandoffInstruction(specPath, planPath) {
+    return 'Use the approved domain spec at ' + specPath + ' as the contract. ' +
+      'Run the spec-from-analysis skill to bind it to the melosys-e2e-tests repo: produce specs/<flow>.md (the domain section from the spec plus the technical binding) and the matching .spec.ts, then run the round-trip self-check. ' +
+      'For technical binding hints (relevant files, functions, constants surfaced during code investigation) consult the Code Analysis section of the workplan at ' + planPath + '. ' +
+      'Report back the e2e_spec_path — the path of the spec file you land in the e2e-tests repo.';
   }
 
   // Instruction sent when Start Building is clicked. Asks the (hivemind-enabled)
-  // bot to find online coding agents and RECOMMEND one — but wait for
-  // the user to confirm before sending anything. The full handoff intent is
-  // stated up front so the bot has it in context when the user confirms.
-  function buildStartBuildingPrompt(planPath) {
-    var pathLine = planPath
-      ? 'The work plan for this task is saved at:\\n' + planPath + '\\n\\n'
-      : 'The work plan for this task is saved as the research report for ' + (researchIssueKey || 'this issue') + ' in your reports/ folder.\\n\\n';
-    return pathLine +
+  // bot to find online coding agents and RECOMMEND a build agent (and, when a
+  // test role is in play, a test agent) — but wait for the user to confirm before
+  // sending anything. The full fan-out intent is stated up front so the bot has it
+  // in context when the user confirms. roles ∈ subsets of ['build','test'].
+  function buildStartBuildingPrompt(planPath, specPath, roles) {
+    roles = roles || ['build'];
+    var wantTest = roles.indexOf('test') !== -1;
+    var pathLines = planPath
+      ? 'Work plan (for the build agent) is saved at:\\n' + planPath + '\\n'
+      : 'Work plan (for the build agent) is the saved research report for ' + (researchIssueKey || 'this issue') + ' in your reports/ folder.\\n';
+    if (wantTest) pathLines += 'Domain spec (for the test agent) is saved at:\\n' + specPath + '\\n';
+    pathLines += '\\n';
+
+    var goal = wantTest
+      ? 'Hand this off to TWO agents to work in parallel: a BUILD agent that implements the work plan, and a TEST agent that writes the e2e spec + test.\\n\\n'
+      : 'Hand this off to ONE BUILD agent that implements the work plan.\\n\\n';
+
+    return pathLines + goal +
       'Use the hivemind list_peers tool (scope: "machine") to see which agents are online. ' +
-      'Identify the candidate coding agents: peers whose working directory is a code repository (e.g. in the "nav" namespace under /Users/rune/source/nav/ — melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
+      'Candidate BUILD agents are peers whose working directory is a code repository under /Users/rune/source/nav/ (e.g. melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
+      (wantTest ? 'The candidate TEST agent is the peer working in the melosys-e2e-tests repo. ' : '') +
       'Ignore peers that are muninn bots (cwd under .../muninn/bots/) and other non-implementer infra peers.\\n\\n' +
-      'Read the work plan to understand which repo/area it touches. Then recommend the SINGLE best agent to implement it, weighing each candidate\\'s repo, current branch, and summary. Present:\\n' +
-      '- Your recommended agent (peer id) with its repo + branch and a one-line reason\\n' +
+      'Read the work plan to understand which repo/area it touches. Then recommend the SINGLE best BUILD agent' + (wantTest ? ' AND the TEST agent' : '') + ', weighing each candidate\\'s repo, current branch, and summary. Present:\\n' +
+      '- Recommended BUILD agent (peer id) with its repo + branch and a one-line reason\\n' +
+      (wantTest ? '- Recommended TEST agent (peer id) with its repo + branch\\n' : '') +
       '- The other online coding-agent candidates as alternatives\\n\\n' +
-      'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation and wait — I will confirm or name a different agent. ' +
-      'When I confirm, send the chosen agent a hivemind message pointing it at the work plan (absolute path above) and instructing it to ' +
-      handoffReviewInstruction() + ' Then have it report back here what it produced.';
+      'AVAILABILITY GUARD: if no online peer qualifies for a required role' + (wantTest ? ' (e.g. no agent in melosys-e2e-tests for the test role)' : '') + ', do NOT proceed — tell me exactly which role has no candidate online so I can start that agent first.\\n\\n' +
+      'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation and wait — I will confirm or name different agents. ' +
+      'When I confirm, use the delegate_task tool (NOT send_to_peer) once per role so each handoff is tracked under this dev run. Each call takes the params to (the peer id), role, and a message carrying the instructions: ' +
+      'delegate_task(to: <build peer>, role: "build", message: <point it at the work plan and instruct it to ' + handoffReviewInstruction() + '>)' +
+      (wantTest ? ' Then delegate_task(to: <test peer>, role: "test", message: <point it at the domain spec and instruct it to ' + testHandoffInstruction(specPath, planPath) + '>)' : '') +
+      ' Then report back here what you sent and to whom.';
   }
 
-  // Confirm row shown after the bot returns its coding-agent recommendation.
-  // Clicking sends the go-ahead; the bot then performs the hivemind send_message.
-  function showHandoffConfirm() {
+  // Confirm row shown after the bot returns its agent recommendation(s). Clicking
+  // sends the go-ahead; the bot then performs the delegate_task fan-out. roles is
+  // the set captured at Start Building time, so the copy + the confirm prompt name
+  // exactly the roles that are pending.
+  function showHandoffConfirm(roles) {
+    roles = roles || ['build'];
+    var wantTest = roles.indexOf('test') !== -1;
     var existing = chatMessages.querySelector('.research-actions');
     if (existing) existing.remove();
 
@@ -228,23 +308,37 @@ export function researchCardScript(): string {
     actions.className = 'research-actions';
 
     var confirmBtn = document.createElement('button');
-    confirmBtn.innerHTML = '<span class="btn-icon">&#x1F91D;</span> Confirm Handoff';
+    confirmBtn.innerHTML = '<span class="btn-icon">&#x1F91D;</span> Confirm Handoff (' + (wantTest ? 'build + test' : 'build') + ')';
     confirmBtn.onclick = function() {
       actions.classList.add('used');
-      chatInput.value = '<!-- prompt:confirmHandoff -->Confirmed — proceed with the handoff to your recommended coding agent now. ' +
-        'Send it the work plan via hivemind and instruct it to ' + handoffReviewInstruction() + ' ' +
-        'Then report back here what you sent and to whom.';
+      var paths = handoffPaths();
+      chatInput.value = '<!-- prompt:confirmHandoff -->' + confirmHandoffPrompt(roles, paths.planPath, paths.specPath);
       sendMessage();
     };
     actions.appendChild(confirmBtn);
 
     var hint = document.createElement('span');
     hint.className = 'research-actions-hint';
-    hint.textContent = 'or reply with a different agent to hand off to';
+    hint.textContent = wantTest
+      ? 'or reply to name different build / test agents'
+      : 'or reply with a different agent to hand off to';
     actions.appendChild(hint);
 
     chatMessages.appendChild(actions);
     scrollToBottom();
+  }
+
+  // The go-ahead prompt sent on Confirm Handoff: tells the bot to fan out via
+  // delegate_task (NOT send_to_peer) once per pending role, with the per-role
+  // instructions. delegate_task records each handoff against this thread's dev_run
+  // and asks the peer to echo a run marker so its reply routes back precisely.
+  function confirmHandoffPrompt(roles, planPath, specPath) {
+    roles = roles || ['build'];
+    var wantTest = roles.indexOf('test') !== -1;
+    return 'Confirmed — proceed with the handoff now using the delegate_task tool (NOT send_to_peer), once per role (each call takes the params to, role, and a message) so each handoff is tracked under this dev run:\\n' +
+      '- delegate_task(to: <recommended build agent>, role: "build", message: ...): the message points it at the work plan' + (planPath ? ' (' + planPath + ')' : '') + ' and instructs it to ' + handoffReviewInstruction() + '\\n' +
+      (wantTest ? '- delegate_task(to: <recommended test agent>, role: "test", message: ...): the message points it at the domain spec' + (specPath ? ' (' + specPath + ')' : '') + ' and instructs it to ' + testHandoffInstruction(specPath, planPath) + '\\n' : '') +
+      'Then report back here what you sent and to whom.';
   }
 
   // Fagperson review gate — shown after the Generate Spec reply (the domain spec
@@ -335,9 +429,15 @@ export function researchCardScript(): string {
       });
       if (saveRes.ok) {
         specGenerated = true;
+        // Approve flips the in-memory gate so the build+test fan-out unlocks in
+        // THIS session (checkSpecStatus only re-derives it on reload). A plain
+        // draft save never downgrades an approval — mirrors the server's
+        // linkSpecToDevRun no-downgrade guard — so don't clear it here.
+        if (approved) specApproved = true;
         if (!researchIssueKey) researchIssueKey = issueKey;
-        // Return to the analysis action row (now with Save Spec available), with
-        // a short-lived confirmation of what just happened.
+        // Return to the analysis action row (now with Save Spec available, and —
+        // after approval — Start Building enabled), with a short-lived
+        // confirmation of what just happened.
         showResearchActions('analysis');
         var row = chatMessages.querySelector('.research-actions');
         if (row) {

@@ -38,30 +38,64 @@ describe("researchCardScript", () => {
     expect(script).toContain("function saveResearchReport()");
   });
 
-  test("contains the hivemind handoff functions", () => {
+  test("contains the role-aware hivemind handoff functions", () => {
     const script = researchCardScript();
-    expect(script).toContain("function buildStartBuildingPrompt(planPath)");
-    expect(script).toContain("function showHandoffConfirm()");
+    expect(script).toContain("function buildStartBuildingPrompt(planPath, specPath, roles)");
+    expect(script).toContain("function showHandoffConfirm(roles)");
+    expect(script).toContain("function testHandoffInstruction(specPath, planPath)");
+    expect(script).toContain("function confirmHandoffPrompt(roles, planPath, specPath)");
+    expect(script).toContain("function handoffPaths()");
+    expect(script).toContain("function checkSpecStatus(botName, issueKey)");
   });
 
-  test("Start Building is disabled until a work plan exists", () => {
+  test("Start Building is disabled until a work plan exists, and gated on spec approval for spec-loop bots", () => {
     const script = researchCardScript();
     expect(script).toContain("buildBtn.disabled = !reportExists");
+    // The Phase-3 approval gate: spec-loop bots (a specDomain prompt) also need an approved spec.
+    expect(script).toContain("hasSpecDomain && !specApproved");
+    expect(script).toContain("Approve the domain spec first");
   });
 
-  test("buildStartBuildingPrompt embeds the plan path, peer discovery, wait gate, and wiki target", () => {
+  test("buildStartBuildingPrompt (build-only) embeds the plan path, peer discovery, wait gate, delegate_task, and wiki target", () => {
     const script = researchCardScript();
     const fn = new Function(
       script + "\nreturn buildStartBuildingPrompt;",
     )();
-    const out: string = fn("/abs/reports/u1/MELOSYS-7546.md");
+    const out: string = fn("/abs/reports/u1/MELOSYS-7546.md", "", ["build"]);
     expect(out).toContain("/abs/reports/u1/MELOSYS-7546.md");
     expect(out).toContain("list_peers");
     expect(out).toContain("Do NOT message any agent yet");
     expect(out).toContain("/Users/rune/source/nav/melosys-kode-wiki");
+    // Phase 3: uses the tracked delegate_task tool, not prose send_to_peer.
+    expect(out).toContain("delegate_task");
+    expect(out).toContain('role: "build"');
+    // Build-only fan-out must not mention the test agent.
+    expect(out).not.toContain("TEST agent");
+    expect(out).not.toContain("melosys-e2e-tests");
   });
 
-  test("the handoff review instruction requires verifying code + knowledge", () => {
+  test("buildStartBuildingPrompt (build+test) recommends both peers, guards availability, and delegates each role", () => {
+    const script = researchCardScript();
+    const fn = new Function(
+      script + "\nreturn buildStartBuildingPrompt;",
+    )();
+    const out: string = fn(
+      "/abs/reports/u1/MELOSYS-7546.md",
+      "/abs/specs/u1/MELOSYS-7546.md",
+      ["build", "test"],
+    );
+    expect(out).toContain("/abs/reports/u1/MELOSYS-7546.md");
+    expect(out).toContain("/abs/specs/u1/MELOSYS-7546.md");
+    expect(out).toContain("BUILD agent");
+    expect(out).toContain("TEST agent");
+    expect(out).toContain("melosys-e2e-tests");
+    expect(out).toContain("AVAILABILITY GUARD");
+    expect(out).toContain('role: "build"');
+    expect(out).toContain('role: "test"');
+    expect(out).toContain("delegate_task");
+  });
+
+  test("the handoff review instruction verifies code + knowledge + acceptance criteria", () => {
     const script = researchCardScript();
     const fn = new Function(
       script + "\nreturn handoffReviewInstruction;",
@@ -70,6 +104,48 @@ describe("researchCardScript", () => {
     expect(out).toContain("verify every claim against the ACTUAL code");
     expect(out).toContain("search_knowledge");
     expect(out).toContain("faglige");
+    // Phase 3 reframe: verify against the acceptance criteria, then implement.
+    expect(out).toContain("acceptance criteria");
+  });
+
+  test("the test handoff instruction runs spec-from-analysis and reports e2e_spec_path", () => {
+    const script = researchCardScript();
+    const fn = new Function(
+      script + "\nreturn testHandoffInstruction;",
+    )();
+    const out: string = fn("/abs/specs/u1/MELOSYS-7546.md", "/abs/reports/u1/MELOSYS-7546.md");
+    expect(out).toContain("/abs/specs/u1/MELOSYS-7546.md");
+    expect(out).toContain("spec-from-analysis");
+    expect(out).toContain("e2e_spec_path");
+    // Binding hints are passed by pointing at the workplan's Code Analysis section.
+    expect(out).toContain("Code Analysis");
+    expect(out).toContain("/abs/reports/u1/MELOSYS-7546.md");
+  });
+
+  test("confirmHandoffPrompt fans out via delegate_task per role, not send_to_peer", () => {
+    const script = researchCardScript();
+    const fn = new Function(
+      script + "\nreturn confirmHandoffPrompt;",
+    )();
+    const out: string = fn(["build", "test"], "/abs/reports/u1/X-1.md", "/abs/specs/u1/X-1.md");
+    expect(out).toContain("delegate_task");
+    expect(out).toContain("NOT send_to_peer");
+    expect(out).toContain('role: "build"');
+    expect(out).toContain('role: "test"');
+    expect(out).toContain("/abs/reports/u1/X-1.md");
+    expect(out).toContain("/abs/specs/u1/X-1.md");
+
+    // Build-only confirm omits the test handoff line.
+    const buildOnly: string = fn(["build"], "/abs/reports/u1/X-1.md", "");
+    expect(buildOnly).toContain('role: "build"');
+    expect(buildOnly).not.toContain('role: "test"');
+  });
+
+  test("saveDomainSpec flips the in-session specApproved gate on approval", () => {
+    // Regression guard: clicking Approve Spec must set specApproved in-memory so
+    // the build+test fan-out unlocks without a page reload (the re-render reads it).
+    const script = researchCardScript();
+    expect(script).toContain("if (approved) specApproved = true;");
   });
 
   test("parseResearchContent handles title + prompt + body", () => {
