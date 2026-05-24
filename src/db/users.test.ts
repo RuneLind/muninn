@@ -97,6 +97,35 @@ describe("users", () => {
       expect(user!.username).toBe("rune-tester-4");
     });
 
+    test("lockUsername prevents a passive turn from renaming an established user", async () => {
+      await ensureUser({ id: "web-lock-1", username: "Vy KI-fagdag", platform: "web" });
+      // A web message turn whose conversation.username leaked a peer name must not
+      // overwrite the established real name.
+      await ensureUser({ id: "web-lock-1", username: "claude-hivemind", platform: "web", lockUsername: true });
+
+      const user = await getUser("web-lock-1");
+      expect(user!.username).toBe("Vy KI-fagdag");
+    });
+
+    test("lockUsername still fills a placeholder username", async () => {
+      // First seen with the placeholder, then a real name arrives — a lock must
+      // still allow filling a placeholder (only established real names are frozen).
+      await ensureUser({ id: "web-lock-2", username: "chat-user", platform: "web" });
+      await ensureUser({ id: "web-lock-2", username: "Real Name", platform: "web", lockUsername: true });
+
+      const user = await getUser("web-lock-2");
+      expect(user!.username).toBe("Real Name");
+    });
+
+    test("without lockUsername an explicit rename still works", async () => {
+      // addChatUser path: a deliberate rename leaves lockUsername off.
+      await ensureUser({ id: "web-lock-3", username: "old name", platform: "web" });
+      await ensureUser({ id: "web-lock-3", username: "new name", platform: "web" });
+
+      const user = await getUser("web-lock-3");
+      expect(user!.username).toBe("new name");
+    });
+
     test("updates lastSeenAt on subsequent calls", async () => {
       await ensureUser({ id: "tg-303", username: "alice", platform: "telegram" });
       const first = await getUser("tg-303");

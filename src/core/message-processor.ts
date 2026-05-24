@@ -125,7 +125,11 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   // owner's real username with the peer's name.
   const displayName = typeof userIdentity === "object" ? userIdentity.displayName : undefined;
   if (!params.skipUserSave) {
-    ensureUser({ id: userId, username: username || userId, displayName, platform }).catch((err) => {
+    // lockUsername on web: a web turn's `username` is `conversation.username`, a
+    // label set explicitly via addChatUser — a passive turn must never rename an
+    // established user (defends the hivemind-peer-name clobber). Telegram/Slack
+    // leave it off so the authoritative platform display name keeps syncing.
+    ensureUser({ id: userId, username: username || userId, displayName, platform, lockUsername: platform === "web" }).catch((err) => {
       log.warn("Failed to ensure user: {error}", { ...props, error: err instanceof Error ? err.message : String(err) });
     });
   }
