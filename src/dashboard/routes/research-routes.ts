@@ -8,6 +8,7 @@ import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
+import { birthDevRun } from "../../db/dev-runs.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
 import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
@@ -223,6 +224,21 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
 
     // Create a dedicated thread for this research
     const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
+
+    // Birth the dev_run that spans the whole research → build → verify arc
+    // (spec-driven dev loop, Phase 0). issue_key = the Jira key (from the title)
+    // or the synthetic research-<threadId8> the report/spec paths also use —
+    // never NULL, server-authoritative. Best-effort: a failure here must never
+    // block starting the research.
+    try {
+      const issueKey = rawTitle.match(/^([A-Z]+-\d+)/)?.[1] ?? `research-${thread.id.slice(0, 8)}`;
+      await birthDevRun({ botName: botConfig.name, userId: chatUser.id, issueKey, threadId: thread.id });
+    } catch (err) {
+      log.warn("Failed to birth dev_run for research thread {threadId}: {error}", {
+        threadId: thread.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // Resolve which Jira analysis prompt to use (default vs named variant)
     const variantId = body.promptVariant && body.promptVariant !== DEFAULT_VARIANT_ID ? body.promptVariant : null;
