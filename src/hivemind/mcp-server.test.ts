@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach } from "bun:test";
-import { BotClientRegistry, runDelegateTask, runMarkerInstruction, shortRunId } from "./mcp-server.ts";
+import { BotClientRegistry, runDelegateTask, runMarkerInstruction, progressNoteInstruction, shortRunId } from "./mcp-server.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Peer } from "./types.ts";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -171,6 +171,17 @@ describe("runMarkerInstruction", () => {
   });
 });
 
+describe("progressNoteInstruction", () => {
+  test("asks for a non-terminal note marker echoing the short run id", () => {
+    const msg = progressNoteInstruction("abcdef0123456789-0000");
+    expect(msg).toContain("note: <kind> run:abcdef01");
+    expect(msg).toContain("discovery|decision|blocker|milestone");
+    // It is NOT a terminal marker — that's runMarkerInstruction's job.
+    expect(msg).not.toContain("status: done");
+    expect(msg).not.toContain("e2e:");
+  });
+});
+
 /**
  * Build a stub client that records every sendMessage call, so the delegate
  * tests can assert the run marker was appended to the outgoing message.
@@ -222,10 +233,12 @@ describe("runDelegateTask", () => {
     expect(res.isError).toBe(false);
     expect(res.text).toContain(run.id);
 
-    // The outgoing message carries the original text plus the run marker.
+    // The outgoing message carries the original text, the terminal run marker,
+    // AND the progress-note instruction (the single delegation seam).
     expect(sends).toHaveLength(1);
     expect(sends[0]!.text).toContain("Implement the workplan");
     expect(sends[0]!.text).toContain(`run:${shortRunId(run.id)}`);
+    expect(sends[0]!.text).toContain("note: <kind>");
 
     // A handoff row exists, keyed to the run, with the resolved peer_name.
     const handoffs = await listHandoffs(run.id);

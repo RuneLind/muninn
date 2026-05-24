@@ -438,6 +438,25 @@ export function runMarkerInstruction(runId: string, role: string): string {
 }
 
 /**
+ * Instruction asking the peer to report progress AS IT WORKS — short hivemind
+ * messages ending with a NON-terminal note marker (Phase A "live discoveries").
+ * Distinct from `runMarkerInstruction`'s terminal status/e2e marker: a note is
+ * for a mid-flight discovery / decision / blocker / milestone and never closes
+ * the handoff. Appended in `runDelegateTask` alongside `runMarkerInstruction`, so
+ * manual + 6a auto-orchestrate + 6b re-engage all ask for notes identically (the
+ * single delegation seam).
+ */
+export function progressNoteInstruction(runId: string): string {
+  const id = shortRunId(runId);
+  return (
+    "While you work, when you discover something that changes the plan, hit a blocker, make a notable " +
+    "decision, or reach a milestone, send a SHORT hivemind message back to me ending with " +
+    `\`<!-- note: <kind> run:${id} -->\` (kind = discovery|decision|blocker|milestone). ` +
+    "Keep them brief; send the terminal status marker only when truly done."
+  );
+}
+
+/**
  * Core of the `delegate_task` tool — sends a tracked handoff to a peer and
  * records it against the originating thread's dev_run. Exported for tests.
  *
@@ -469,8 +488,11 @@ export async function runDelegateTask(
   // in-marker run id.
   const correlationId = await bindOutboundToThread(botName, to, originThread);
 
-  // Append the run marker so the peer echoes run:<id> back.
-  const outgoing = run ? `${message}\n\n${runMarkerInstruction(run.id, role)}` : message;
+  // Append the run marker (so the peer echoes run:<id> back on completion) plus
+  // the progress-note instruction (so it streams non-terminal updates as it works).
+  const outgoing = run
+    ? `${message}\n\n${runMarkerInstruction(run.id, role)}\n\n${progressNoteInstruction(run.id)}`
+    : message;
 
   const ok = client.sendMessage(to, outgoing, correlationId);
   if (!ok) return { text: "Failed to send — not connected to broker", isError: true };

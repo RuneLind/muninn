@@ -510,6 +510,22 @@ CREATE TABLE dev_run_handoffs (
 );
 CREATE INDEX dev_run_handoffs_lookup_idx ON dev_run_handoffs (run_id, peer_name);
 
+-- Phase A (progress tracking): append-only timeline of NON-TERMINAL progress
+-- notes a peer emits while it works (discovery|decision|blocker|milestone). A
+-- note never recomputes status / touches the green gate / reopens a terminal run
+-- — its only handoff side-effect is a guarded sent → working bump. See
+-- db/migrations/043-dev-run-events.sql for the full rationale.
+CREATE TABLE dev_run_events (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id      UUID NOT NULL REFERENCES dev_runs(id) ON DELETE CASCADE,
+  peer_name   TEXT NOT NULL,
+  role        TEXT,
+  kind        TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_dev_run_events_run ON dev_run_events (run_id, created_at);
+
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================

@@ -2,12 +2,17 @@ import { resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import {
   type DevRun,
+  type DevRunEvent,
+  type DevRunEventKind,
   getDevRunByThreadId,
   getDevRunsByIdPrefix,
   listHandoffs,
   updateHandoffStatus,
   persistRunStatus,
   computeRunStatus,
+  markHandoffWorking,
+  insertDevRunEvent,
+  DEV_RUN_EVENT_TEXT_CAP,
   TERMINAL_RUN_STATUSES,
 } from "../db/dev-runs.ts";
 import {
@@ -69,6 +74,38 @@ export function verdictToHandoffStatus(v: HandoffVerdict): "done" | "failed" {
   return v === "done" || v === "green" ? "done" : "failed";
 }
 
+export interface ParsedNote {
+  kind: DevRunEventKind;
+  /** The 8-hex (give or take) run-id prefix the peer echoed from delegate_task. */
+  runIdPrefix: string;
+}
+
+// `<!-- note: discovery run:ab12cd34 -->` — a NON-terminal progress note a peer
+// emits while it works (kind = discovery|decision|blocker|milestone). Same id
+// tolerance as the terminal marker. Distinct grammar from status:/e2e: so the
+// terminal-first parse can never confuse the two.
+const NOTE_MARKER_RE =
+  /<!--\s*note:\s*(discovery|decision|blocker|milestone)\s+run:([0-9a-f]{4,32})\s*-->/gi;
+
+/**
+ * Parse the LAST note marker in a reply (mirrors parseHandoffMarker — a peer may
+ * quote an earlier one). Returns null when there's no note marker (the common
+ * case — only checked AFTER a reply is confirmed to carry no terminal marker).
+ */
+export function parseNoteMarker(text: string): ParsedNote | null {
+  let last: RegExpExecArray | null = null;
+  NOTE_MARKER_RE.lastIndex = 0;
+  for (let m = NOTE_MARKER_RE.exec(text); m; m = NOTE_MARKER_RE.exec(text)) last = m;
+  if (!last) return null;
+  return { kind: last[1]!.toLowerCase() as DevRunEventKind, runIdPrefix: last[2]!.toLowerCase() };
+}
+
+/** The reply body with the note marker(s) stripped — the human text that becomes
+ *  the event's `text` (metadata rides in the marker, same split as terminal). */
+export function stripNoteMarker(text: string): string {
+  return text.replace(NOTE_MARKER_RE, "").trim();
+}
+
 /**
  * Resolve the dev_run a marker refers to. The 8-hex prefix is only 32 bits, so
  * it can collide; the routed thread (which the router already resolved via the
@@ -123,6 +160,9 @@ export interface InterpretResult {
   verified?: boolean;
   /** The CI conclusion fetched when a green verdict arrived (null if unfetchable). */
   ci?: CiConclusion | null;
+  /** A non-terminal progress note was recorded (Phase A). Present ONLY on the note
+   *  path — the terminal path never sets it. The router broadcasts it to the chat. */
+  event?: DevRunEvent;
   note?: string;
 }
 
@@ -149,8 +189,10 @@ export async function interpretHandoffReply(args: {
   routedThreadId?: string;
   deps?: InterpretDeps;
 }): Promise<InterpretResult> {
+  // Terminal-first parse — the verified path ALWAYS wins. Only a reply with no
+  // terminal status/e2e marker is checked for a non-terminal progress note.
   const marker = parseHandoffMarker(args.text);
-  if (!marker) return { matched: false };
+  if (!marker) return interpretNoteReply(args);
 
   const run = await resolveRun({ runIdPrefix: marker.runIdPrefix, routedThreadId: args.routedThreadId });
   if (!run) {
@@ -245,6 +287,71 @@ export async function interpretHandoffReply(args: {
   });
 
   return { matched: true, runId: run.id, rolesUpdated, runStatus, verified, ci };
+}
+
+/**
+ * Interpret a reply that carries a NON-terminal progress note (Phase A). Reached
+ * only when the reply has no terminal status/e2e marker — the verified path is
+ * never touched here. Strictly additive: a note NEVER runs computeRunStatus, the
+ * green/CI gate, or reopens a terminal run. Its only state change is the guarded
+ * sent → working handoff bump (markHandoffWorking) plus the append-only event.
+ */
+async function interpretNoteReply(args: {
+  botName: string;
+  peerName: string;
+  text: string;
+  routedThreadId?: string;
+}): Promise<InterpretResult> {
+  const note = parseNoteMarker(args.text);
+  if (!note) return { matched: false };
+
+  const run = await resolveRun({ runIdPrefix: note.runIdPrefix, routedThreadId: args.routedThreadId });
+  if (!run) {
+    log.warn("Note marker run:{prefix} from {peer} resolved no dev_run — ignoring", {
+      botName: args.botName, peer: args.peerName, prefix: note.runIdPrefix,
+    });
+    return { matched: true, note: "no dev_run for note marker" };
+  }
+
+  // A note on a finished run is dropped — never record against, and certainly
+  // never reopen, a terminal green/red. The terminal guard is load-bearing.
+  if (TERMINAL_RUN_STATUSES.has(run.status)) {
+    log.debug("Progress note for already-terminal run {run} ({status}) — ignoring", {
+      botName: args.botName, run: run.id, status: run.status,
+    });
+    return { matched: true, runId: run.id, runStatus: run.status, note: "run already terminal" };
+  }
+
+  // First note flips the handoff sent → working (guarded — never downgrades a
+  // done/failed row, no-op once working or on a (run, peer_name) join miss).
+  await markHandoffWorking(run.id, args.peerName);
+
+  // Best-effort role from the matching handoff. A note whose peer_name matches no
+  // handoff row still records the event (timeline value) — with a warn.
+  const handoffs = await listHandoffs(run.id);
+  const matching = handoffs.find((h) => h.peerName === args.peerName);
+  if (!matching) {
+    log.warn(
+      "Note from peer_name '{peer}' on run {run} matched no handoff row — recording the event anyway (peer_name drift?)",
+      { botName: args.botName, run: run.id, peer: args.peerName },
+    );
+  }
+
+  const text = stripNoteMarker(args.text).slice(0, DEV_RUN_EVENT_TEXT_CAP);
+  const event = await insertDevRunEvent({
+    runId: run.id,
+    peerName: args.peerName,
+    kind: note.kind,
+    text,
+    role: matching?.role,
+  });
+
+  log.info("Progress note from {peer}: run {run} {kind} ({role})", {
+    botName: args.botName, peer: args.peerName, run: run.id,
+    kind: note.kind, role: matching?.role ?? "?",
+  });
+
+  return { matched: true, runId: run.id, event };
 }
 
 /** Flip the run's domain spec frontmatter to `status: verified`, resolving the
