@@ -129,12 +129,13 @@ export function ytRecentlyAddedScript(): string {
       return d.toLocaleDateString('en-US', opts);
     }
 
-    async function loadRecentlyAdded() {
+    // force=true refetches the archive (used after an ingest completes); the
+    // shared getYoutubeDocuments (yt-article-library) otherwise memoizes the
+    // listing so the page fetches it once across both consumers.
+    async function loadRecentlyAdded(force) {
       var list = document.getElementById('recentlyAddedList');
       try {
-        var res = await fetch('/api/youtube/documents');
-        var data = await res.json();
-        var docs = (data.documents || []).filter(function(d) {
+        var docs = (await getYoutubeDocuments(force)).filter(function(d) {
           return d.id && d.id.includes('/') && d.id.endsWith('.md');
         });
 

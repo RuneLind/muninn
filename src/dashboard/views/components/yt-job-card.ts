@@ -340,7 +340,7 @@ export function ytJobCardScript(): string {
         updateStatusBadge('complete');
         eventSource.close();
         eventSource = null;
-        loadRecentlyAdded();
+        loadRecentlyAdded(true);  // force-refresh so the just-ingested doc appears
       });
 
       eventSource.addEventListener('error', function(e) {

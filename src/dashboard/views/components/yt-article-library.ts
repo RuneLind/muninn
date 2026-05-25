@@ -157,6 +157,28 @@ export function ytArticleLibraryScript(): string {
     var docsByCategory = {};
     var activeCategory = null;
 
+    // Single shared fetch of the document archive, used by both this library and
+    // the Recently Added list. Memoized so one page load doesn't pull the
+    // (now date-enriched, read-every-file) listing twice; throws on an upstream
+    // error so callers show a failure instead of a misleading empty state.
+    // Pass force=true to refresh after an ingest completes.
+    var _ytDocsPromise = null;
+    function getYoutubeDocuments(force) {
+      if (force || !_ytDocsPromise) {
+        _ytDocsPromise = fetch('/api/youtube/documents').then(function(res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function(data) {
+          if (data && data.error) throw new Error(data.error);
+          return (data && data.documents) || [];
+        }).catch(function(err) {
+          _ytDocsPromise = null;  // don't cache a failure — allow retry
+          throw err;
+        });
+      }
+      return _ytDocsPromise;
+    }
+
     function docTitle(docId) {
       // "ai/claude-code/Some Title.md" -> "Some Title"
       var parts = docId.split('/');
@@ -175,11 +197,10 @@ export function ytArticleLibraryScript(): string {
       try {
         var catRes = await fetch('/api/youtube/categories');
         var catData = await catRes.json();
-        var docRes = await fetch('/api/youtube/documents');
-        var docData = await docRes.json();
+        var allDocs = await getYoutubeDocuments();
 
         var categories = catData.categories || [];
-        allDocuments = (docData.documents || []).filter(function(d) {
+        allDocuments = allDocs.filter(function(d) {
           // Skip non-summary files (chrome-extension etc)
           return d.id.includes('/') && d.id.endsWith('.md');
         });
