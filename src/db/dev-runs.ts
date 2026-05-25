@@ -39,6 +39,35 @@ export interface DevRunHandoff {
   updatedAt: number;
 }
 
+/**
+ * One interim progress note a peer emitted WHILE working (Phase A). Append-only,
+ * strictly non-terminal — recording an event NEVER recomputes run status, touches
+ * the green gate, or reopens a terminal run. Drives the inspector Agents tab's
+ * live discoveries timeline (and the guarded sent → working handoff bump).
+ */
+export interface DevRunEvent {
+  id: string;
+  runId: string;
+  /** cwd-basename, same derivation as the handoff's peer_name. */
+  peerName: string;
+  /** build|test|orchestrate|review — best-effort from the matching handoff (may be undefined). */
+  role?: string;
+  /** discovery|decision|blocker|milestone. */
+  kind: string;
+  text: string;
+  createdAt: number;
+}
+
+export type DevRunEventKind = "discovery" | "decision" | "blocker" | "milestone";
+
+/** Per-run display cap on dev_run_events — the timeline keeps the last 100 to
+ *  bound a chatty peer. Inserts stay append-only; only the read is capped. */
+export const DEV_RUN_EVENTS_DISPLAY_CAP = 100;
+
+/** Max length of a note's text (reply body minus marker). Metadata rides in the
+ *  marker; the body is human text, same shape as the terminal markers. */
+export const DEV_RUN_EVENT_TEXT_CAP = 500;
+
 function rowToDevRun(r: Record<string, unknown>): DevRun {
   return {
     id: r.id as string,
@@ -70,6 +99,18 @@ function rowToHandoff(r: Record<string, unknown>): DevRunHandoff {
     lastMessage: (r.last_message as string) ?? undefined,
     createdAt: new Date(r.created_at as string).getTime(),
     updatedAt: new Date(r.updated_at as string).getTime(),
+  };
+}
+
+function rowToDevRunEvent(r: Record<string, unknown>): DevRunEvent {
+  return {
+    id: r.id as string,
+    runId: r.run_id as string,
+    peerName: r.peer_name as string,
+    role: (r.role as string) ?? undefined,
+    kind: r.kind as string,
+    text: r.text as string,
+    createdAt: new Date(r.created_at as string).getTime(),
   };
 }
 
@@ -373,6 +414,71 @@ export async function listHandoffs(runId: string): Promise<DevRunHandoff[]> {
   const sql = getDb();
   const rows = await sql`SELECT * FROM dev_run_handoffs WHERE run_id = ${runId} ORDER BY created_at`;
   return rows.map(rowToHandoff);
+}
+
+/**
+ * Append a non-terminal progress note to a run's timeline (Phase A). Append-only:
+ * this NEVER recomputes run status, touches the green gate, or reopens a terminal
+ * run — the interpreter's terminal-first parse + terminal-run bail decide whether
+ * to even call this. text is capped defensively to DEV_RUN_EVENT_TEXT_CAP (the
+ * interpreter caps it too). role is best-effort from the matching handoff.
+ */
+export async function insertDevRunEvent(input: {
+  runId: string;
+  peerName: string;
+  kind: string;
+  text: string;
+  role?: string;
+}): Promise<DevRunEvent> {
+  const sql = getDb();
+  const text = input.text.slice(0, DEV_RUN_EVENT_TEXT_CAP);
+  const [row] = await sql`
+    INSERT INTO dev_run_events (run_id, peer_name, role, kind, text)
+    VALUES (${input.runId}, ${input.peerName}, ${input.role ?? null}, ${input.kind}, ${text})
+    RETURNING *
+  `;
+  return rowToDevRunEvent(row!);
+}
+
+/**
+ * The run's progress notes, chronological (oldest first) so the client can append
+ * live events to the tail and reverse for a newest-first timeline. Bounded to the
+ * last `limit` (default DEV_RUN_EVENTS_DISPLAY_CAP) — newest kept, then re-ordered
+ * ascending — so a chatty peer can't blow up the hydration payload. The `id`
+ * tiebreak only matters for two notes in the same created_at microsecond (notes are
+ * inbound-message-paced, so effectively never); it gives a STABLE order rather than
+ * a strictly-chronological one in that corner — acceptable for an interim feed.
+ */
+export async function listDevRunEvents(
+  runId: string,
+  limit: number = DEV_RUN_EVENTS_DISPLAY_CAP,
+): Promise<DevRunEvent[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM (
+      SELECT * FROM dev_run_events WHERE run_id = ${runId}
+      ORDER BY created_at DESC, id DESC LIMIT ${limit}
+    ) sub ORDER BY created_at ASC, id ASC
+  `;
+  return rows.map(rowToDevRunEvent);
+}
+
+/**
+ * Guarded sent → working bump for a handoff (Phase A). The verified loop never set
+ * `working` — handoffs went sent → done/failed directly. The FIRST progress note
+ * from a peer flips its handoff to `working` so the agent reads as live. Strictly
+ * `status = 'sent'` only: it NEVER downgrades a done/failed handoff, and is a
+ * no-op once already working (or on a (run, peer_name) join miss). Returns the
+ * number of rows updated (0 = nothing to bump, the common steady-state case).
+ */
+export async function markHandoffWorking(runId: string, peerName: string): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE dev_run_handoffs SET status = 'working', updated_at = now()
+    WHERE run_id = ${runId} AND peer_name = ${peerName} AND status = 'sent'
+    RETURNING id
+  `;
+  return rows.length;
 }
 
 /** Handoff statuses that are still awaiting a terminal marker from the peer. */

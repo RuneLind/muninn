@@ -19,6 +19,10 @@ import {
   listStaleHandoffs,
   setResearchStageByThread,
   computeRunStatus,
+  insertDevRunEvent,
+  listDevRunEvents,
+  markHandoffWorking,
+  DEV_RUN_EVENT_TEXT_CAP,
 } from "./dev-runs.ts";
 
 setupTestDb();
@@ -375,6 +379,77 @@ describe("dev-runs", () => {
       await updateHandoffStatus({ runId: run.id, peerName: "api", status: "done" });
       // build∧test done, no orchestrate → ready to re-verify (a fresh e2e re-runs).
       expect(await computeRunStatus(run.id)).toBe("ready_to_verify");
+    });
+  });
+
+  describe("dev_run_events (Phase A progress notes)", () => {
+    test("insertDevRunEvent appends; listDevRunEvents returns chronological", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "EV-1" });
+      const e1 = await insertDevRunEvent({ runId: run.id, peerName: "api", kind: "discovery", text: "found it", role: "build" });
+      const e2 = await insertDevRunEvent({ runId: run.id, peerName: "e2e", kind: "blocker", text: "mock missing field", role: "test" });
+      const events = await listDevRunEvents(run.id);
+      expect(events.map((e) => e.id)).toEqual([e1.id, e2.id]); // oldest first
+      expect(events[0]!.kind).toBe("discovery");
+      expect(events[0]!.role).toBe("build");
+      expect(events[1]!.peerName).toBe("e2e");
+    });
+
+    test("insertDevRunEvent caps text at DEV_RUN_EVENT_TEXT_CAP", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "EV-2" });
+      const e = await insertDevRunEvent({
+        runId: run.id, peerName: "api", kind: "decision", text: "x".repeat(DEV_RUN_EVENT_TEXT_CAP + 200),
+      });
+      expect(e.text.length).toBe(DEV_RUN_EVENT_TEXT_CAP);
+    });
+
+    test("listDevRunEvents keeps only the last `limit` (newest), re-ordered oldest-first", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "EV-3" });
+      for (let i = 0; i < 5; i++) {
+        await insertDevRunEvent({ runId: run.id, peerName: "api", kind: "milestone", text: `note ${i}` });
+      }
+      const events = await listDevRunEvents(run.id, 3);
+      expect(events.map((e) => e.text)).toEqual(["note 2", "note 3", "note 4"]);
+    });
+
+    test("role is optional (a note with no matching handoff)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "EV-4" });
+      const e = await insertDevRunEvent({ runId: run.id, peerName: "unknown", kind: "discovery", text: "x" });
+      expect(e.role).toBeUndefined();
+    });
+
+    test("FK CASCADE: deleting a run removes its events", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "EV-5" });
+      await insertDevRunEvent({ runId: run.id, peerName: "api", kind: "discovery", text: "x" });
+      await getDb()`DELETE FROM dev_runs WHERE id = ${run.id}`;
+      expect(await listDevRunEvents(run.id)).toHaveLength(0);
+    });
+  });
+
+  describe("markHandoffWorking (Phase A — guarded sent → working)", () => {
+    test("flips sent → working for the matching (run, peer_name)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "MW-1" });
+      await insertHandoff({ runId: run.id, peerName: "api", role: "build" }); // sent
+      expect(await markHandoffWorking(run.id, "api")).toBe(1);
+      expect((await listHandoffs(run.id))[0]!.status).toBe("working");
+    });
+
+    test("never downgrades done/failed; no-op once already working", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "MW-2" });
+      await insertHandoff({ runId: run.id, peerName: "done-peer", role: "build", status: "done" });
+      await insertHandoff({ runId: run.id, peerName: "fail-peer", role: "test", status: "failed" });
+      await insertHandoff({ runId: run.id, peerName: "live", role: "review" });
+      expect(await markHandoffWorking(run.id, "done-peer")).toBe(0);
+      expect(await markHandoffWorking(run.id, "fail-peer")).toBe(0);
+      expect(await markHandoffWorking(run.id, "live")).toBe(1);
+      expect(await markHandoffWorking(run.id, "live")).toBe(0); // already working
+      const statuses = (await listHandoffs(run.id)).map((h) => `${h.peerName}:${h.status}`).sort();
+      expect(statuses).toEqual(["done-peer:done", "fail-peer:failed", "live:working"]);
+    });
+
+    test("0 rows on a (run, peer_name) join miss", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "MW-3" });
+      await insertHandoff({ runId: run.id, peerName: "api", role: "build" });
+      expect(await markHandoffWorking(run.id, "WRONG")).toBe(0);
     });
   });
 });

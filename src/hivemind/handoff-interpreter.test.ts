@@ -9,10 +9,13 @@ import {
   getDevRunById,
   insertHandoff,
   listHandoffs,
+  listDevRunEvents,
   updateDevRun,
 } from "../db/dev-runs.ts";
 import {
   parseHandoffMarker,
+  parseNoteMarker,
+  stripNoteMarker,
   verdictToHandoffStatus,
   resolveRun,
   setFrontmatterStatus,
@@ -50,6 +53,41 @@ describe("parseHandoffMarker", () => {
   test("returns null for ordinary chatter", () => {
     expect(parseHandoffMarker("just a normal reply, no marker")).toBeNull();
     expect(parseHandoffMarker("<!-- prompt:specDomain -->")).toBeNull();
+  });
+
+  test("a note marker is NOT a terminal marker (terminal-first parse depends on this)", () => {
+    expect(parseHandoffMarker("<!-- note: discovery run:ab12cd34 -->")).toBeNull();
+  });
+});
+
+describe("parseNoteMarker", () => {
+  test("parses each note kind, tolerant of whitespace/case", () => {
+    expect(parseNoteMarker("found it <!-- note: discovery run:ab12cd34 -->")).toEqual({
+      kind: "discovery", runIdPrefix: "ab12cd34",
+    });
+    expect(parseNoteMarker("<!--note:blocker   run:DEADBEEF-->")).toEqual({
+      kind: "blocker", runIdPrefix: "deadbeef",
+    });
+  });
+
+  test("takes the LAST note when several appear", () => {
+    const t = "<!-- note: discovery run:11111111 --> ... <!-- note: milestone run:22222222 -->";
+    expect(parseNoteMarker(t)).toEqual({ kind: "milestone", runIdPrefix: "22222222" });
+  });
+
+  test("returns null for a terminal marker, an unknown kind, or ordinary chatter", () => {
+    expect(parseNoteMarker("<!-- status: done run:ab12cd34 -->")).toBeNull();
+    expect(parseNoteMarker("<!-- note: bogus run:ab12cd34 -->")).toBeNull();
+    expect(parseNoteMarker("just chatter")).toBeNull();
+  });
+});
+
+describe("stripNoteMarker", () => {
+  test("removes the marker and trims the surrounding body", () => {
+    expect(stripNoteMarker("the discovery text\n<!-- note: discovery run:ab12cd34 -->")).toBe(
+      "the discovery text",
+    );
+    expect(stripNoteMarker("<!-- note: milestone run:ab12cd34 -->")).toBe("");
   });
 });
 
@@ -213,6 +251,87 @@ describe("interpretHandoffReply", () => {
     expect(r.runId).toBe(run.id);
     expect(r.note).toContain("no handoff row");
     expect((await listHandoffs(run.id))[0]!.status).toBe("sent");
+  });
+
+  describe("non-terminal progress notes (Phase A)", () => {
+    test("a note records an event, flips the handoff sent → working, never recomputes status", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "NOTE-1" });
+      await insertHandoff({ runId: run.id, peerName: "melosys-api", role: "build" }); // sent
+      await updateDevRun(run.id, { status: "building" });
+      const id = shortRunId(run.id);
+
+      const r = await interpretHandoffReply({
+        botName: "b", peerName: "melosys-api",
+        text: `field already on the DTO — smaller change\n<!-- note: discovery run:${id} -->`,
+      });
+
+      expect(r.matched).toBe(true);
+      expect(r.event).toBeDefined();
+      expect(r.event!.kind).toBe("discovery");
+      expect(r.event!.role).toBe("build");
+      expect(r.event!.text).toBe("field already on the DTO — smaller change");
+      // The note path never sets terminal-result fields.
+      expect(r.runStatus).toBeUndefined();
+      expect(r.verified).toBeUndefined();
+      // Handoff flipped sent → working; run status untouched (no recompute).
+      expect((await listHandoffs(run.id))[0]!.status).toBe("working");
+      expect((await getDevRunById(run.id))!.status).toBe("building");
+      // Recorded in the timeline.
+      const events = await listDevRunEvents(run.id);
+      expect(events).toHaveLength(1);
+      expect(events[0]!.id).toBe(r.event!.id);
+    });
+
+    test("a terminal marker in the same reply ALWAYS wins (no event recorded)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "NOTE-2" });
+      await insertHandoff({ runId: run.id, peerName: "melosys-api", role: "build" });
+      const id = shortRunId(run.id);
+      // A reply carrying BOTH a note and a terminal marker → terminal path.
+      const r = await interpretHandoffReply({
+        botName: "b", peerName: "melosys-api",
+        text: `interim\n<!-- note: milestone run:${id} -->\nall done\n<!-- status: done run:${id} -->`,
+      });
+      expect(r.event).toBeUndefined();
+      expect(r.rolesUpdated).toEqual(["build"]);
+      expect((await listHandoffs(run.id))[0]!.status).toBe("done"); // terminal, not working
+      expect(await listDevRunEvents(run.id)).toHaveLength(0);
+    });
+
+    test("a note on an already-terminal run is ignored (no event, no reopen)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "NOTE-3" });
+      await insertHandoff({ runId: run.id, peerName: "melosys-api", role: "build", status: "done" });
+      await updateDevRun(run.id, { status: "green" });
+      const r = await interpretHandoffReply({
+        botName: "b", peerName: "melosys-api",
+        text: `late thought\n<!-- note: discovery run:${shortRunId(run.id)} -->`,
+      });
+      expect(r.note).toContain("already terminal");
+      expect(r.event).toBeUndefined();
+      expect(await listDevRunEvents(run.id)).toHaveLength(0);
+      expect((await getDevRunById(run.id))!.status).toBe("green");
+    });
+
+    test("a note whose peer_name matches no handoff still records the event (role undefined)", async () => {
+      const run = await birthDevRun({ botName: "b", userId: "u", issueKey: "NOTE-4" });
+      await insertHandoff({ runId: run.id, peerName: "melosys-api", role: "build" });
+      const r = await interpretHandoffReply({
+        botName: "b", peerName: "DRIFTED-NAME",
+        text: `from a peer with no handoff\n<!-- note: blocker run:${shortRunId(run.id)} -->`,
+      });
+      expect(r.event).toBeDefined();
+      expect(r.event!.role).toBeUndefined();
+      expect(await listDevRunEvents(run.id)).toHaveLength(1);
+      // The known handoff is untouched (the join missed).
+      expect((await listHandoffs(run.id))[0]!.status).toBe("sent");
+    });
+
+    test("a note for an unknown run is matched but records nothing", async () => {
+      const r = await interpretHandoffReply({
+        botName: "b", peerName: "p", text: "<!-- note: discovery run:00000000 -->",
+      });
+      expect(r.matched).toBe(true);
+      expect(r.event).toBeUndefined();
+    });
   });
 
   describe("green gate (CI-confirmed)", () => {
