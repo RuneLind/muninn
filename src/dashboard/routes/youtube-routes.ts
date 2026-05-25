@@ -191,9 +191,13 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
   });
 
   app.get("/api/youtube/document/*", async (c) => {
-    const docId = c.req.path.replace("/api/youtube/document/", "");
-    if (!docId) return c.json({ error: "Missing document ID" }, 400);
-    const encodedDocId = docId.split("/").map(encodeURIComponent).join("/");
+    // Read the still-encoded path from the raw URL. c.req.path decodes lossily
+    // (decodeURI-style: %20→space but reserved chars like %2C, %24 stay
+    // encoded), so re-encoding it double-encodes the reserved ones and the
+    // upstream 404s (surfaced here as 502). The client already
+    // encodeURIComponent'd each segment, so forward that encoding verbatim.
+    const encodedDocId = new URL(c.req.url).pathname.replace("/api/youtube/document/", "");
+    if (!encodedDocId) return c.json({ error: "Missing document ID" }, 400);
     return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/document/${YT_COLLECTION}/${encodedDocId}`);
   });
 

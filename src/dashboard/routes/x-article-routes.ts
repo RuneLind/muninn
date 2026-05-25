@@ -144,9 +144,12 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
   });
 
   app.get("/api/x-articles/document/*", async (c) => {
-    const docId = c.req.path.replace("/api/x-articles/document/", "");
-    if (!docId) return c.json({ error: "Missing document ID" }, 400);
-    const encodedDocId = docId.split("/").map(encodeURIComponent).join("/");
+    // Read the still-encoded path from the raw URL — c.req.path decodes lossily
+    // (decodeURI-style) and re-encoding it would double-encode reserved chars
+    // like %2C/%24, 404ing upstream (surfaced as 502). The client already
+    // encodeURIComponent'd each segment, so forward that encoding verbatim.
+    const encodedDocId = new URL(c.req.url).pathname.replace("/api/x-articles/document/", "");
+    if (!encodedDocId) return c.json({ error: "Missing document ID" }, 400);
     return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/document/${XA_COLLECTION}/${encodedDocId}`);
   });
 
