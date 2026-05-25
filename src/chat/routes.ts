@@ -15,7 +15,7 @@ import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
-import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs } from "../db/dev-runs.ts";
+import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs, listDevRunEvents } from "../db/dev-runs.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -642,7 +642,17 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const run = await getDevRunByThreadId(threadId);
     if (!run) return c.json({ error: "No dev_run for thread" }, 404);
     const handoffs = await listHandoffs(run.id);
-    return c.json({ run, handoffs });
+    // events (Phase B) hydrate the inspector Agents tab's discoveries timeline on a
+    // reload / thread-open; live appends arrive via the dev_run_event WS broadcast.
+    // Best-effort: the additive timeline must never take down the load-bearing
+    // run + handoffs payload (e.g. on a DB that runs this code without migration 043).
+    const events = await listDevRunEvents(run.id).catch((err) => {
+      log.warn("Failed to load dev_run_events for {run}: {error}", {
+        run: run.id, error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    });
+    return c.json({ run, handoffs, events });
   });
 
   return app;

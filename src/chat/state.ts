@@ -1,7 +1,7 @@
 import { getSimConversations, getSimMessages } from "../db/messages.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import type { McpServerStatus } from "../ai/mcp-status.ts";
-import type { DevRun, DevRunHandoff } from "../db/dev-runs.ts";
+import type { DevRun, DevRunHandoff, DevRunEvent } from "../db/dev-runs.ts";
 
 export type ConversationType = "telegram_dm" | "slack_dm" | "slack_channel" | "slack_assistant" | "web";
 
@@ -46,7 +46,8 @@ export type ChatEvent =
   | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
   | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] }
-  | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] };
+  | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] }
+  | { type: "dev_run_event"; conversationId: string; runId: string; threadId?: string; event: DevRunEvent };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -224,6 +225,14 @@ export class ChatState {
    *  client filters by conversationId + the run's threadId. */
   publishDevRun(conversationId: string, run: DevRun, handoffs: DevRunHandoff[]): void {
     this.publish({ type: "dev_run", conversationId, run, handoffs });
+  }
+
+  /** Broadcast a single non-terminal progress note (Phase B) so the inspector
+   *  Agents tab's live discoveries timeline appends it without a refresh. Mirrors
+   *  `publishDevRun`; the client filters by conversationId + the run's threadId,
+   *  and keys the event into its per-run `devRunEvents` list by runId. */
+  publishDevRunEvent(conversationId: string, runId: string, event: DevRunEvent, threadId?: string): void {
+    this.publish({ type: "dev_run_event", conversationId, runId, threadId, event });
   }
 
   /** Broadcast response metadata (tokens, timing) after a response completes */
