@@ -444,7 +444,10 @@ export async function insertDevRunEvent(input: {
  * The run's progress notes, chronological (oldest first) so the client can append
  * live events to the tail and reverse for a newest-first timeline. Bounded to the
  * last `limit` (default DEV_RUN_EVENTS_DISPLAY_CAP) — newest kept, then re-ordered
- * ascending — so a chatty peer can't blow up the hydration payload.
+ * ascending — so a chatty peer can't blow up the hydration payload. The `id`
+ * tiebreak only matters for two notes in the same created_at microsecond (notes are
+ * inbound-message-paced, so effectively never); it gives a STABLE order rather than
+ * a strictly-chronological one in that corner — acceptable for an interim feed.
  */
 export async function listDevRunEvents(
   runId: string,

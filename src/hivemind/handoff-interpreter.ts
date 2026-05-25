@@ -161,7 +161,8 @@ export interface InterpretResult {
   /** The CI conclusion fetched when a green verdict arrived (null if unfetchable). */
   ci?: CiConclusion | null;
   /** A non-terminal progress note was recorded (Phase A). Present ONLY on the note
-   *  path — the terminal path never sets it. The router broadcasts it to the chat. */
+   *  path — the terminal path never sets it. Phase A only records it; the router
+   *  seam that broadcasts it live to the chat (broadcastDevRunEvent) lands in Phase B. */
   event?: DevRunEvent;
   note?: string;
 }
