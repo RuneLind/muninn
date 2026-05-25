@@ -185,7 +185,9 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
   });
 
   app.get("/api/youtube/documents", (c) => {
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${YT_COLLECTION}/documents`, 10000);
+    // include_dates lets the page group articles by recency; it reads every doc
+    // file upstream, so the duplicate-check path (findExistingByVideoId) omits it.
+    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${YT_COLLECTION}/documents?include_dates=1`, 10000);
   });
 
   app.get("/api/youtube/document/*", async (c) => {
