@@ -95,16 +95,84 @@ export function ytArticleLibraryStyles(): string {
 
     ${docPanelStyles("ytSlideIn")}
 
-    .doc-similar {
-      border-top: 1px solid var(--border-primary);
-      padding: 16px 0 0;
-      margin-top: 20px;
+    /* --- Article view: 3-column layout (categories | text | similar) ---
+       Scoped to this page only; overrides the shared single-column doc panel
+       above. Wider panel so all three columns fit comfortably. */
+    .doc-panel { width: 100vw; }
+    .doc-panel-body {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr) 300px;
+      gap: 24px;
+      align-items: start;
     }
-    .doc-similar h4 {
-      font-size: 13px;
+    /* min-width:0 lets code blocks shrink; cap + center the reading column so
+       full-page width doesn't stretch lines uncomfortably wide */
+    .yt-col-main { min-width: 0; max-width: 1000px; justify-self: center; }
+    .yt-col-left, .yt-col-right {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      max-height: calc(100vh - 96px);
+      overflow-y: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .yt-side-title {
+      font-size: 12px;
       font-weight: 600;
-      color: var(--text-primary);
-      margin: 0 0 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin: 0 0 10px;
+    }
+    .yt-cat-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .yt-cat-row:hover { background: var(--bg-surface); color: var(--text-primary); }
+    .yt-cat-row.active { color: var(--accent-light); }
+    .yt-cat-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .yt-cat-count { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+    .yt-cat-articles { padding: 2px 0 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+    /* the [hidden] attribute's UA "display:none" loses to the rule above, so
+       restate it with higher specificity — this is what actually collapses
+       a category list (and makes the row-click toggle work) */
+    .yt-cat-articles[hidden] { display: none; }
+    .yt-cat-article {
+      font-size: 12px;
+      color: var(--text-dim);
+      text-decoration: none;
+      padding: 3px 6px;
+      border-radius: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .yt-cat-article:hover { color: var(--text-primary); background: var(--bg-surface); }
+    .yt-cat-article.current { color: var(--accent-light); font-weight: 600; }
+
+    /* Collapse to a single column on narrow viewports */
+    @media (max-width: 1000px) {
+      .doc-panel-body { grid-template-columns: 1fr; }
+      .yt-col-left, .yt-col-right { position: static; max-height: none; }
+    }
+
+    .doc-similar { padding: 0; margin: 0; }
+    .doc-similar h4 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin: 0 0 10px;
     }
     .doc-similar-item {
       padding: 6px 0;
@@ -283,14 +351,29 @@ export function ytArticleLibraryScript(): string {
       var linksEl = document.getElementById('docPanelLinks');
       var bodyEl = document.getElementById('docPanelBody');
       var title = docTitle(docId);
+      var cat = docCategory(docId);
 
       titleEl.textContent = title;
       linksEl.innerHTML = url
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">YouTube &rarr;</a>'
         : '';
-      bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
+
+      // 3-column article view: categories (left) | text (middle) | similar (right)
+      bodyEl.innerHTML =
+        '<div class="yt-col-left" id="ytCatPanel"></div>' +
+        '<div class="yt-col-main" id="ytArticleMain">' +
+          '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>' +
+        '</div>' +
+        '<div class="yt-col-right doc-similar" id="docSimilarPanel">' +
+          '<h4>Similar Articles</h4>' +
+          '<div style="color:var(--text-dim);font-size:12px;">Searching...</div>' +
+        '</div>';
       overlay.classList.add('visible');
       document.body.style.overflow = 'hidden';
+      bodyEl.scrollTop = 0;
+
+      // Left panel: browse categories without leaving the article
+      renderArticleCategories(cat, docId);
 
       try {
         var encodedId = docId.split('/').map(encodeURIComponent).join('/');
@@ -299,18 +382,75 @@ export function ytArticleLibraryScript(): string {
         var doc = await res.json();
 
         var text = doc.text || '';
-        // Strip breadcrumb prefix [collection > path]
-        var cleaned = text.replace(/^\\[.*?\\]\\n*/, '');
-        // Strip tags line
-        cleaned = cleaned.replace(/^tags:.*\\n*/m, '');
-        bodyEl.innerHTML = renderMarkdown(cleaned) +
-          '<div class="doc-similar" id="docSimilarPanel"><h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Searching...</div></div>';
+        // Strip breadcrumb prefix [collection > path] and tags line
+        var cleaned = text.replace(/^\\[.*?\\]\\n*/, '').replace(/^tags:.*\\n*/m, '');
+        var mainEl = document.getElementById('ytArticleMain');
+        if (mainEl) mainEl.innerHTML = renderMarkdown(cleaned);
 
-        // Fetch similar articles
+        // Right panel: other articles matching in relevance
         loadDocSimilar(title, docId);
       } catch (err) {
-        bodyEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
+        var failEl = document.getElementById('ytArticleMain');
+        if (failEl) failEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
       }
+    }
+
+    // Left sidebar: every category with its count, collapsed by default — the
+    // current article's category is highlighted; click any header to expand its
+    // articles and jump to a sibling without closing the panel. Reuses
+    // docsByCategory built by loadLibrary() — if the page deep-linked straight
+    // into an article before the library loaded, fetch it first.
+    async function renderArticleCategories(activeCat, currentDocId) {
+      var panel = document.getElementById('ytCatPanel');
+      if (!panel) return;
+      if (Object.keys(docsByCategory).length === 0) {
+        panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
+          '<div style="color:var(--text-dim);font-size:12px;">Loading…</div>';
+        try { await loadLibrary(); } catch {}
+        panel = document.getElementById('ytCatPanel');
+        if (!panel) return;  // user already navigated elsewhere
+      }
+      var cats = Object.keys(docsByCategory).sort(function(a, b) {
+        return (docsByCategory[b] || []).length - (docsByCategory[a] || []).length;
+      });
+      if (cats.length === 0) {
+        panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
+          '<div style="color:var(--text-dim);font-size:12px;">No categories</div>';
+        return;
+      }
+      panel.innerHTML = '<div class="yt-side-title">Categories</div>' + cats.map(function(cat) {
+        var docs = docsByCategory[cat] || [];
+        var isActive = cat === activeCat;
+        return '<div class="yt-cat">' +
+          '<div class="yt-cat-row' + (isActive ? ' active' : '') + '">' +
+            '<span class="yt-cat-name">' + esc(cat) + '</span>' +
+            '<span class="yt-cat-count">' + docs.length + '</span>' +
+          '</div>' +
+          '<div class="yt-cat-articles" hidden>' +
+            docs.map(function(d) {
+              var cur = d.id === currentDocId;
+              return '<a href="#" class="yt-cat-article' + (cur ? ' current' : '') + '" ' +
+                'data-doc-id="' + esc(d.id) + '" data-doc-url="' + esc(d.url || '') + '">' +
+                esc(docTitle(d.id)) + '</a>';
+            }).join('') +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // Toggle a category's article list
+      panel.querySelectorAll('.yt-cat-row').forEach(function(row) {
+        row.addEventListener('click', function() {
+          var list = row.parentElement.querySelector('.yt-cat-articles');
+          if (list) list.hidden = !list.hidden;
+        });
+      });
+      // Open another article in place
+      panel.querySelectorAll('.yt-cat-article').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+          e.preventDefault();
+          openYouTubeDoc(a.getAttribute('data-doc-id'), a.getAttribute('data-doc-url'));
+        });
+      });
     }
 
     async function loadDocSimilar(title, currentDocId) {
