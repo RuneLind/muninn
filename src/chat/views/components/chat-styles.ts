@@ -55,6 +55,9 @@ export function chatStyles(): string {
       --status-warning: #d97706;
       --status-info: #2563eb;
       --status-tool: #c2620a;
+      /* Agents-tab discovery accent (latest-note text, discovery chip, "new" dot).
+         The dark-theme #22d3ee is too light on white — darken for contrast. */
+      --status-cyan: #0891b2;
       --chat-assistant-text: #4b4f5a;
     }
     body {
@@ -542,6 +545,31 @@ export function chatStyles(): string {
       color: var(--bg-primary);
       border-color: var(--accent);
     }
+    /* Compact handle from the inline run card → inspector Agents tab (Phase C) */
+    .dev-run-open {
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-soft);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      padding: 7px 10px;
+      cursor: pointer;
+      transition: border-color 0.12s;
+    }
+    .dev-run-open:hover { border-color: var(--accent); }
+    .dev-run-open-arrow { margin-left: auto; color: var(--accent-light); }
+    .dev-run-open-pip {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--status-warning);
+      animation: agt-pulse 1.4s infinite;
+      flex-shrink: 0;
+    }
     .msg-bot {
       color: var(--chat-assistant-text);
     }
@@ -713,9 +741,62 @@ export function chatStyles(): string {
     .sim-inspector {
       background: var(--bg-panel);
       border-left: 1px solid var(--border-primary);
-      padding: 16px;
       overflow-y: auto;
     }
+    /* Inspector tab strip (Details / Agents) — sticky so it stays put while the
+       body scrolls. The body keeps the 16px padding the Details content assumes. */
+    .ins-tabs {
+      display: flex;
+      gap: 2px;
+      padding: 10px 12px 0;
+      border-bottom: 1px solid var(--border-primary);
+      position: sticky;
+      top: 0;
+      background: var(--bg-panel);
+      z-index: 2;
+    }
+    .ins-tabs:empty { display: none; }
+    .ins-tab {
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 8px 12px 9px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .ins-tab:hover { color: var(--text-secondary); }
+    .ins-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+    .ins-tab-count {
+      font-family: var(--mono);
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: var(--bg-surface);
+      color: var(--text-muted);
+    }
+    .ins-tab.active .ins-tab-count {
+      background: color-mix(in srgb, var(--accent) 22%, transparent);
+      color: var(--accent-light);
+    }
+    .ins-tab-new {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--status-cyan);
+      animation: agt-pulse-cyan 1.4s infinite;
+    }
+    @keyframes agt-pulse-cyan {
+      0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-cyan) 60%, transparent); }
+      50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-cyan) 0%, transparent); }
+    }
+    .ins-body { padding: 16px; }
     .ins-heading {
       font-size: 14px;
       color: var(--text-muted);
@@ -849,6 +930,99 @@ export function chatStyles(): string {
       0% { background-position: 200% 0; }
       100% { background-position: -200% 0; }
     }
+    /* ── Inspector Agents tab (Phase C) — palette proven in the prototype ── */
+    .agt-run-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .agt-run-key { font-family: var(--mono); font-size: 13px; color: var(--text-primary); font-weight: 700; }
+    .agt-run-head .agt-badge { margin-left: auto; }
+    .agt-run-title { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; line-height: 1.4; }
+    .agt-badge {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    /* Tints via color-mix over the status color (like .ins-tag) so they adapt to
+       both themes — fixed --tint-* vars are dark-only and break on light theme. */
+    .agt-b-neutral { background: color-mix(in srgb, var(--text-muted) 16%, transparent); color: var(--text-muted); }
+    .agt-b-info { background: color-mix(in srgb, var(--status-info) 16%, transparent); color: var(--status-info); }
+    .agt-b-warn { background: color-mix(in srgb, var(--status-warning) 16%, transparent); color: var(--status-warning); }
+    .agt-b-green { background: color-mix(in srgb, var(--status-success) 16%, transparent); color: var(--status-success); }
+    .agt-b-red { background: color-mix(in srgb, var(--status-error) 16%, transparent); color: var(--status-error); }
+    .agt-row {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 9px;
+      padding: 9px 11px;
+      margin-bottom: 7px;
+    }
+    .agt-row-top { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .agt-role { font-family: var(--mono); font-weight: 600; color: var(--text-secondary); text-transform: capitalize; }
+    .agt-peer {
+      font-family: var(--mono);
+      color: var(--text-dim);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .agt-latest { font-size: 11.5px; color: var(--status-cyan); margin-top: 6px; line-height: 1.4; }
+    .agt-latest.muted { color: var(--text-dim); font-style: italic; }
+    .agt-pip {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--status-warning);
+      animation: agt-pulse 1.4s infinite;
+      flex-shrink: 0;
+    }
+    @keyframes agt-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-warning) 50%, transparent); }
+      50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--status-warning) 0%, transparent); }
+    }
+    .timeline { margin-top: 4px; }
+    .tl-item {
+      display: grid;
+      grid-template-columns: 22px 1fr;
+      gap: 9px;
+      padding: 7px 0;
+      animation: agt-slidein 0.3s ease;
+    }
+    @keyframes agt-slidein {
+      from { opacity: 0; transform: translateX(-6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .tl-icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      display: grid;
+      place-items: center;
+      font-size: 11px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+    }
+    .tl-icon.tl-discovery { background: color-mix(in srgb, var(--status-cyan) 16%, transparent); border-color: color-mix(in srgb, var(--status-cyan) 40%, transparent); }
+    .tl-icon.tl-decision { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+    .tl-icon.tl-blocker { background: color-mix(in srgb, var(--status-warning) 16%, transparent); border-color: color-mix(in srgb, var(--status-warning) 40%, transparent); }
+    .tl-icon.tl-milestone { background: color-mix(in srgb, var(--status-success) 16%, transparent); border-color: color-mix(in srgb, var(--status-success) 40%, transparent); }
+    .tl-body { font-size: 12px; color: var(--text-tertiary); line-height: 1.45; }
+    .tl-kind {
+      font-family: var(--mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 1px 5px;
+      border-radius: 4px;
+      margin-right: 5px;
+    }
+    .tl-kind.tl-discovery { color: var(--status-cyan); background: color-mix(in srgb, var(--status-cyan) 16%, transparent); }
+    .tl-kind.tl-decision { color: var(--accent-light); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+    .tl-kind.tl-blocker { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 16%, transparent); }
+    .tl-kind.tl-milestone { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 16%, transparent); }
+    .tl-meta { font-family: var(--mono); font-size: 9.5px; color: var(--text-dim); margin-top: 2px; }
+    .tl-empty { color: var(--text-faint); font-size: 12px; font-style: italic; padding: 6px 0; }
 
     .ins-tool-item {
       display: flex;

@@ -80,14 +80,20 @@ export async function renderChatPage(): Promise<string> {
       </div>
     </div>
 
-    <!-- Right: Inspector -->
+    <!-- Right: Inspector (Details / Agents tabs) -->
     <div class="sim-inspector">
-      <div id="inspectorContent">
-        <div class="empty-state">Select a thread</div>
+      <div class="ins-tabs" id="inspectorTabs"></div>
+      <div class="ins-body">
+        <div id="inspectorDetailsTab">
+          <div id="inspectorContent">
+            <div class="empty-state">Select a thread</div>
+          </div>
+          <div id="inspectorMcpStatus"></div>
+          <div id="inspectorToolUsage"></div>
+          <div id="inspectorContext"></div>
+        </div>
+        <div id="inspectorAgents" style="display:none"></div>
       </div>
-      <div id="inspectorMcpStatus"></div>
-      <div id="inspectorToolUsage"></div>
-      <div id="inspectorContext"></div>
     </div>
   </div>
 
@@ -224,6 +230,11 @@ const CHAT_SCRIPT = `
   var researchIssueKey = null;  // Extracted issue key (e.g. "MELOSYS-7546")
   var reportExists = false;     // Whether a saved report file exists for current issue
   var devRun = null;            // Last-fetched dev_run state ({ run, handoffs }) — drives the live run card + phase affordances (replaces the positional reply counter)
+  var devRunEvents = {};        // Phase C: per-run discovery notes, keyed by runId → [event] (deduped by id). KEPT SEPARATE from devRun — a dev_run roll-up replaces devRun with {run,handoffs} and would drop a merged events field.
+  var inspectorTab = 'details'; // Active inspector tab: 'details' | 'agents'
+  var inspectorUserPickedTab = false;    // True once the user clicks a tab / the View agents handle (suppresses auto-focus)
+  var inspectorAgentsAutoFocused = false; // Latch: the Agents tab auto-focuses once, the first time it appears on a thread
+  var inspectorAgentsHasNew = false;      // True when a note arrived while the Agents tab was inactive (drives the "new" dot)
   var pendingHandoffRoles = []; // Roles (['build'] or ['build','test']) awaiting the bot's agent recommendation after Start Building; empty = none pending
   var pendingOrchestrate = false; // True between Run-e2e (verify) click and the bot's reply (suppresses a duplicate orchestrate confirm)
   var awaitingSpecReview = false; // True between Generate Spec click and the bot's domain-spec reply (shows the review gate)
@@ -672,6 +683,15 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    if (event.type === 'dev_run_event') {
+      // Phase C: a non-terminal progress note from a working peer. Append it to
+      // the inspector Agents tab's live discoveries timeline. Strictly additive —
+      // notes never recompute run status or touch the verified terminal/green
+      // pipeline. onDevRunEventLine filters to the active research thread + run.
+      onDevRunEventLine(event);
+      return;
+    }
+
     if (event.type === 'status') {
       var conv = conversations[event.conversationId];
       if (conv) {
@@ -772,6 +792,11 @@ const CHAT_SCRIPT = `
     researchIssueKey = null;
     reportExists = false;
     devRun = null;
+    devRunEvents = {};
+    inspectorTab = 'details';
+    inspectorUserPickedTab = false;
+    inspectorAgentsAutoFocused = false;
+    inspectorAgentsHasNew = false;
     pendingHandoffRoles = [];
     pendingOrchestrate = false;
     awaitingSpecReview = false;

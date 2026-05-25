@@ -154,6 +154,70 @@ export function computeLastResponseRows(meta: ResponseMetaInput | null): LastRes
   return rows;
 }
 
+// ── Dev-run Agents tab (Phase C) ────────────────────────────────────────
+// Pure helpers backing the inspector's Agents tab — the live discoveries
+// timeline + per-agent latest note. Exported for tests and mirrored verbatim in
+// the browser JS string below.
+
+/**
+ * Merge two dev_run_event lists, deduping by `id`, sorted oldest→newest
+ * (tie-break by id for determinism). A note can land in BOTH the by-thread
+ * hydrate payload and the live WS stream during the fetch window — id dedup
+ * keeps it single. Already-stored events win over incoming duplicates.
+ */
+export function mergeDevRunEventsById<T extends { id: string; createdAt: number }>(
+  existing: T[],
+  incoming: T[],
+): T[] {
+  const byId = new Map<string, T>();
+  for (const e of existing || []) byId.set(e.id, e);
+  for (const e of incoming || []) if (!byId.has(e.id)) byId.set(e.id, e);
+  return Array.from(byId.values()).sort(
+    (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
+
+/**
+ * The most recent note attributed to a handoff — joined on `peerName`, the same
+ * `(run_id, peer_name)` derivation the interpreter uses. Returns null when no
+ * event matches (a note whose peer matches no handoff still shows in the
+ * timeline, just not as a per-agent latest line).
+ */
+export function latestNoteForHandoff<T extends { peerName?: string; createdAt: number }>(
+  events: T[],
+  handoff: { peerName?: string } | null,
+): T | null {
+  if (!events || !handoff || !handoff.peerName) return null;
+  let best: T | null = null;
+  for (const e of events) {
+    if (e.peerName && e.peerName === handoff.peerName && (!best || e.createdAt > best.createdAt)) {
+      best = e;
+    }
+  }
+  return best;
+}
+
+/** Normalize an event kind to a known timeline class (unknown → 'discovery'). */
+export function devRunEventKindClass(kind: string): string {
+  return kind === "discovery" || kind === "decision" || kind === "blocker" || kind === "milestone"
+    ? kind
+    : "discovery";
+}
+
+/** Emoji icon for an event kind (normalized via devRunEventKindClass). */
+export function devRunEventIcon(kind: string): string {
+  switch (devRunEventKindClass(kind)) {
+    case "decision":
+      return "🧭";
+    case "blocker":
+      return "⛔";
+    case "milestone":
+      return "✓";
+    default:
+      return "🔍";
+  }
+}
+
 // ── Browser-injectable JS string ───────────────────────────────────────
 
 /** Returns all inspector panel functions as a browser-compatible JS string.
@@ -237,6 +301,59 @@ export function inspectorPanelScript(): string {
     if (meta.costUsd && meta.costUsd > 0) rows.push({ label: 'Cost', value: '$' + meta.costUsd.toFixed(4), emphasis: 'cost' });
     if (meta.numTurns && meta.numTurns > 1) rows.push({ label: 'Turns', value: String(meta.numTurns) });
     return rows;
+  }
+
+  // ── Dev-run Agents tab helpers (mirror of the TS exports above) ────────
+
+  function mergeDevRunEventsById(existing, incoming) {
+    var byId = {};
+    var order = [];
+    function add(e) { if (!Object.prototype.hasOwnProperty.call(byId, e.id)) { byId[e.id] = e; order.push(e.id); } }
+    (existing || []).forEach(add);
+    (incoming || []).forEach(add);
+    return order.map(function(id) { return byId[id]; }).sort(function(a, b) {
+      return a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    });
+  }
+
+  function latestNoteForHandoff(events, handoff) {
+    if (!events || !handoff || !handoff.peerName) return null;
+    var best = null;
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if (e.peerName && e.peerName === handoff.peerName && (!best || e.createdAt > best.createdAt)) best = e;
+    }
+    return best;
+  }
+
+  function devRunEventKindClass(kind) {
+    return (kind === 'discovery' || kind === 'decision' || kind === 'blocker' || kind === 'milestone') ? kind : 'discovery';
+  }
+
+  function devRunEventIcon(kind) {
+    switch (devRunEventKindClass(kind)) {
+      case 'decision': return '🧭';
+      case 'blocker': return '⛔';
+      case 'milestone': return '✓';
+      default: return '🔍';
+    }
+  }
+
+  // Per-run display cap on the live timeline — mirrors DEV_RUN_EVENTS_DISPLAY_CAP
+  // in src/db/dev-runs.ts (the server read cap) so a chatty peer can't grow the
+  // in-memory list (and the re-rendered innerHTML) unbounded in a long-lived tab.
+  var DEV_RUN_EVENTS_DISPLAY_CAP = 100;
+
+  // Merge a run's hydrated/live events into the per-run client list (keyed by
+  // runId, kept SEPARATE from devRun — a dev_run roll-up replaces devRun with
+  // {run,handoffs} and would drop a merged events field). Deduped by event.id,
+  // trimmed to the newest CAP (merged is oldest→newest).
+  function ingestDevRunEvents(runId, incoming) {
+    if (!runId) return [];
+    var merged = mergeDevRunEventsById(devRunEvents[runId] || [], incoming || []);
+    if (merged.length > DEV_RUN_EVENTS_DISPLAY_CAP) merged = merged.slice(merged.length - DEV_RUN_EVENTS_DISPLAY_CAP);
+    devRunEvents[runId] = merged;
+    return merged;
   }
 
   function renderLastResponseCard(meta) {
@@ -647,6 +764,127 @@ export function inspectorPanelScript(): string {
       });
   }
 
+  // ── Inspector tabs: Details / Agents (Phase C) ────────────────────────
+  // The Agents tab appears only on a multi-agent thread (devRun has ≥1 handoff).
+  // Default tab = Details; Agents auto-focuses the FIRST time it appears, unless
+  // the user already picked a tab. Reads the IIFE-scoped devRun + devRunEvents +
+  // the inspectorTab/inspectorUserPickedTab/inspectorAgentsAutoFocused/
+  // inspectorAgentsHasNew flags (declared + reset on thread switch in page.ts).
+
+  function switchInspectorTab(tab) {
+    inspectorUserPickedTab = true;
+    inspectorTab = tab;
+    if (tab === 'agents') inspectorAgentsHasNew = false;
+    renderInspectorTabs();
+  }
+
+  function renderInspectorTabs() {
+    var tabsEl = document.getElementById('inspectorTabs');
+    var detailsEl = document.getElementById('inspectorDetailsTab');
+    var agentsEl = document.getElementById('inspectorAgents');
+    if (!tabsEl || !detailsEl || !agentsEl) return;
+
+    var handoffs = (devRun && devRun.handoffs) || [];
+    var hasAgents = handoffs.length > 0;
+
+    // No multi-agent run on this thread → no tab strip at all (the .ins-tabs:empty
+    // rule hides it), so plain chats look exactly as before. Reset the auto-focus
+    // latch so a LATER run on the same thread can auto-focus again.
+    if (!hasAgents) {
+      inspectorTab = 'details';
+      inspectorAgentsAutoFocused = false;
+      tabsEl.innerHTML = '';
+      detailsEl.style.display = '';
+      agentsEl.style.display = 'none';
+      return;
+    }
+
+    // Agents tab auto-focuses the FIRST time it appears, unless the user picked one.
+    if (!inspectorUserPickedTab && !inspectorAgentsAutoFocused) {
+      inspectorTab = 'agents';
+      inspectorAgentsAutoFocused = true;
+    }
+    if (inspectorTab === 'agents') inspectorAgentsHasNew = false;
+
+    var newDot = (inspectorAgentsHasNew && inspectorTab !== 'agents') ? '<span class="ins-tab-new"></span>' : '';
+    tabsEl.innerHTML =
+      '<button type="button" class="ins-tab' + (inspectorTab === 'details' ? ' active' : '') + '" data-ins-tab="details">Details</button>'
+      + '<button type="button" class="ins-tab' + (inspectorTab === 'agents' ? ' active' : '') + '" data-ins-tab="agents">'
+      + 'Agents <span class="ins-tab-count">' + handoffs.length + '</span>' + newDot + '</button>';
+    var btns = tabsEl.querySelectorAll('[data-ins-tab]');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function() { switchInspectorTab(this.getAttribute('data-ins-tab')); });
+    }
+
+    var showAgents = inspectorTab === 'agents';
+    detailsEl.style.display = showAgents ? 'none' : '';
+    agentsEl.style.display = showAgents ? '' : 'none';
+    if (showAgents) renderAgentsTab();
+  }
+
+  // Render the Agents tab body: run header + one row per handoff (role · peer ·
+  // status · latest note) + the discoveries timeline (newest first). Reuses
+  // runStatusMeta/specStatusLabel/handoffStatusMeta from research-card.ts (same
+  // IIFE scope, hoisted). Reads devRun + devRunEvents[run.id].
+  function renderAgentsTab() {
+    var el = document.getElementById('inspectorAgents');
+    if (!el) return;
+    var run = devRun && devRun.run;
+    var handoffs = (devRun && devRun.handoffs) || [];
+    if (!run) { el.innerHTML = '<div class="ins-empty-hint">No active dev run.</div>'; return; }
+
+    var events = devRunEvents[run.id] || [];
+
+    var meta = runStatusMeta(run.status);
+    var html = '<div class="agt-run-head">'
+      + '<span class="agt-run-key">' + escapeHtml(run.issueKey || 'Dev Run') + '</span>'
+      + '<span class="agt-badge agt-b-' + meta.cls + '">' + escapeHtml(meta.label) + '</span>'
+      + '</div>';
+    var specLabel = specStatusLabel(run);
+    if (specLabel) {
+      var specCls = specLabel === 'verified' ? 'green' : specLabel === 'approved' ? 'info' : 'neutral';
+      html += '<p class="agt-run-title">Spec: <span class="agt-badge agt-b-' + specCls + '">' + escapeHtml(specLabel) + '</span></p>';
+    }
+
+    html += '<div class="ins-section-title">Agents</div>';
+    for (var i = 0; i < handoffs.length; i++) {
+      var h = handoffs[i];
+      var hmeta = handoffStatusMeta(h.status);
+      var working = h.status === 'working';
+      var latest = latestNoteForHandoff(events, h);
+      html += '<div class="agt-row">'
+        + '<div class="agt-row-top">'
+        + (working ? '<span class="agt-pip"></span>' : '')
+        + '<span class="agt-role">' + escapeHtml(h.role || '?') + '</span>'
+        + '<span class="agt-peer">' + escapeHtml(h.peerName || '?') + '</span>'
+        + '<span class="agt-badge agt-b-' + hmeta.cls + '">' + escapeHtml(hmeta.label) + '</span>'
+        + '</div>'
+        + (latest
+            ? '<div class="agt-latest">↳ ' + escapeHtml(latest.text) + '</div>'
+            : (working ? '<div class="agt-latest muted">working…</div>' : ''))
+        + '</div>';
+    }
+
+    html += '<div class="ins-section-title" style="margin-top:14px">Activity · ' + events.length + '</div>';
+    html += '<div class="timeline">';
+    if (!events.length) {
+      html += '<div class="tl-empty">No updates yet.</div>';
+    } else {
+      var ordered = events.slice().sort(function(a, b) { return b.createdAt - a.createdAt; });
+      for (var j = 0; j < ordered.length; j++) {
+        var e = ordered[j];
+        var kc = devRunEventKindClass(e.kind);
+        html += '<div class="tl-item">'
+          + '<div class="tl-icon tl-' + kc + '">' + devRunEventIcon(e.kind) + '</div>'
+          + '<div><div class="tl-body"><span class="tl-kind tl-' + kc + '">' + escapeHtml(e.kind) + '</span>' + escapeHtml(e.text) + '</div>'
+          + '<div class="tl-meta">' + escapeHtml(e.peerName || '?') + (e.role ? ' · ' + escapeHtml(e.role) : '') + '</div>'
+          + '</div></div>';
+      }
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  }
+
   function updateInspector() {
     if (!selectedUserId || !selectedBot) return;
 
@@ -708,6 +946,10 @@ export function inspectorPanelScript(): string {
     loadToolUsageStats();
     loadContextUsage();
     loadMcpStatus();
+
+    // Keep the Details/Agents tab strip in sync with the current run state (the
+    // strip lives outside inspectorContent, so the rebuild above doesn't touch it).
+    renderInspectorTabs();
   }
   `;
 }

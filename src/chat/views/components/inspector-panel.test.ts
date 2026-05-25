@@ -6,6 +6,10 @@ import {
   fmtDuration,
   computeContextUsage,
   computeLastResponseRows,
+  mergeDevRunEventsById,
+  latestNoteForHandoff,
+  devRunEventKindClass,
+  devRunEventIcon,
 } from "./inspector-panel.ts";
 
 // ── aggregateToolCalls ─────────────────────────────────────────────────
@@ -379,5 +383,85 @@ describe("computeLastResponseRows", () => {
 
     const multi = computeLastResponseRows({ inputTokens: 100, numTurns: 4 });
     expect(multi.find((r) => r.label === "Turns")?.value).toBe("4");
+  });
+});
+
+// ── mergeDevRunEventsById (Phase C — hydrate-vs-live dedup) ─────────────
+
+describe("mergeDevRunEventsById", () => {
+  const ev = (id: string, createdAt: number, text = id) => ({ id, createdAt, text });
+
+  test("empty inputs return empty array", () => {
+    expect(mergeDevRunEventsById([], [])).toEqual([]);
+    // tolerates null/undefined args
+    expect(mergeDevRunEventsById(null as never, undefined as never)).toEqual([]);
+  });
+
+  test("dedupes by id — a note in both hydrate and live appears once", () => {
+    const existing = [ev("a", 1), ev("b", 2)];
+    const incoming = [ev("b", 2), ev("c", 3)];
+    const merged = mergeDevRunEventsById(existing, incoming);
+    expect(merged.map((e) => e.id)).toEqual(["a", "b", "c"]);
+  });
+
+  test("already-stored event wins over an incoming duplicate id", () => {
+    const existing = [ev("a", 1, "stored")];
+    const incoming = [ev("a", 1, "incoming")];
+    const merged = mergeDevRunEventsById(existing, incoming);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.text).toBe("stored");
+  });
+
+  test("sorts oldest→newest, tie-breaking by id", () => {
+    const merged = mergeDevRunEventsById(
+      [ev("z", 5), ev("m", 5)],
+      [ev("a", 1)],
+    );
+    expect(merged.map((e) => e.id)).toEqual(["a", "m", "z"]);
+  });
+});
+
+// ── latestNoteForHandoff ───────────────────────────────────────────────
+
+describe("latestNoteForHandoff", () => {
+  const note = (peerName: string, createdAt: number, text: string) => ({ peerName, createdAt, text });
+
+  test("returns null when no event matches the handoff peer", () => {
+    expect(latestNoteForHandoff([note("p1", 1, "x")], { peerName: "p2" })).toBeNull();
+  });
+
+  test("returns null for a null handoff or a handoff without a peer", () => {
+    expect(latestNoteForHandoff([note("p1", 1, "x")], null)).toBeNull();
+    expect(latestNoteForHandoff([note("p1", 1, "x")], {})).toBeNull();
+  });
+
+  test("returns the most recent matching note (by createdAt)", () => {
+    const events = [note("p1", 1, "old"), note("p1", 3, "newest"), note("p1", 2, "mid"), note("p2", 9, "other")];
+    expect(latestNoteForHandoff(events, { peerName: "p1" })?.text).toBe("newest");
+  });
+});
+
+// ── devRunEventKindClass / devRunEventIcon ─────────────────────────────
+
+describe("devRunEventKindClass", () => {
+  test("known kinds pass through", () => {
+    for (const k of ["discovery", "decision", "blocker", "milestone"]) {
+      expect(devRunEventKindClass(k)).toBe(k);
+    }
+  });
+
+  test("unknown kind falls back to discovery", () => {
+    expect(devRunEventKindClass("question")).toBe("discovery");
+    expect(devRunEventKindClass("")).toBe("discovery");
+  });
+});
+
+describe("devRunEventIcon", () => {
+  test("maps each kind to its emoji, unknown → discovery", () => {
+    expect(devRunEventIcon("decision")).toBe("🧭");
+    expect(devRunEventIcon("blocker")).toBe("⛔");
+    expect(devRunEventIcon("milestone")).toBe("✓");
+    expect(devRunEventIcon("discovery")).toBe("🔍");
+    expect(devRunEventIcon("nonsense")).toBe("🔍");
   });
 });
