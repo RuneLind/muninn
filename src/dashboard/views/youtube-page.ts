@@ -3,7 +3,7 @@ import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { ytSubmitFormStyles, ytSubmitFormHtml, ytSubmitFormScript } from "./components/yt-submit-form.ts";
 import { ytJobCardStyles, ytJobCardHtml, ytJobCardScript } from "./components/yt-job-card.ts";
-import { ytRecentJobsStyles, ytRecentJobsHtml, ytRecentJobsScript } from "./components/yt-recent-jobs.ts";
+import { ytRecentlyAddedStyles, ytRecentlyAddedHtml, ytRecentlyAddedScript } from "./components/yt-recently-added.ts";
 import { ytArticleLibraryStyles, ytArticleLibraryHtml, ytArticleLibraryScript } from "./components/yt-article-library.ts";
 
 export async function renderYouTubePage(): Promise<string> {
@@ -25,7 +25,7 @@ export async function renderYouTubePage(): Promise<string> {
 
     ${ytSubmitFormStyles()}
     ${ytJobCardStyles()}
-    ${ytRecentJobsStyles()}
+    ${ytRecentlyAddedStyles()}
     ${ytArticleLibraryStyles()}
 
     .duplicate-banner {
@@ -61,8 +61,8 @@ export async function renderYouTubePage(): Promise<string> {
     <!-- Active job card (hidden until a job is active) -->
     ${ytJobCardHtml()}
 
-    <!-- Recent jobs -->
-    ${ytRecentJobsHtml()}
+    <!-- Recently added (persistent, date-grouped) -->
+    ${ytRecentlyAddedHtml()}
 
     <!-- Article Library -->
     ${ytArticleLibraryHtml()}
@@ -74,7 +74,7 @@ export async function renderYouTubePage(): Promise<string> {
   <script>
     ${helpers}
     ${ytJobCardScript()}
-    ${ytRecentJobsScript()}
+    ${ytRecentlyAddedScript()}
     ${ytArticleLibraryScript()}
     ${ytSubmitFormScript()}
 
@@ -93,7 +93,7 @@ export async function renderYouTubePage(): Promise<string> {
         document.getElementById('knowledgeBanner').classList.add('visible');
       }
 
-      loadRecentJobs();
+      loadRecentlyAdded();
       loadLibrary();
 
       var params = new URLSearchParams(window.location.search);

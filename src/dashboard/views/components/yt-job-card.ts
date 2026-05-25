@@ -340,7 +340,7 @@ export function ytJobCardScript(): string {
         updateStatusBadge('complete');
         eventSource.close();
         eventSource = null;
-        loadRecentJobs();
+        loadRecentlyAdded();
       });
 
       eventSource.addEventListener('error', function(e) {
