@@ -122,7 +122,17 @@ export function researchCardScript(): string {
       .then(function(res) { return res.ok ? res.json() : null; })
       .then(function(data) {
         if (tid !== activeThreadId) { if (cb) cb(devRun); return; }
-        devRun = data;
+        // Normalize to { run, handoffs } so devRun never carries events — the live
+        // events ride a SEPARATE per-run list (a dev_run roll-up overwrites devRun
+        // and would drop a merged events field). data.events (Phase B) is
+        // best-effort and may be absent on a pre-043 DB.
+        if (data && data.run) {
+          devRun = { run: data.run, handoffs: data.handoffs || [] };
+          ingestDevRunEvents(data.run.id, data.events || []);
+        } else {
+          devRun = null;
+        }
+        renderInspectorTabs();
         if (cb) cb(data);
       })
       .catch(function() { if (cb) cb(devRun); });
@@ -162,6 +172,35 @@ export function researchCardScript(): string {
     devRun = { run: event.run, handoffs: event.handoffs || [] };
     var cardShowing = !!chatMessages.querySelector('.dev-run-card');
     if (devRun.handoffs.length > 0 || cardShowing) renderRunAffordance();
+    // The handoff set may have just changed (e.g. first handoff → Agents tab
+    // becomes visible / its count updates), so refresh the inspector tab strip.
+    renderInspectorTabs();
+  }
+
+  // A single non-terminal progress note pushed over the WebSocket (Phase C). It
+  // appends to the per-run discoveries list (kept SEPARATE from devRun) and
+  // refreshes the inspector Agents tab. Strictly additive — never touches run
+  // status, handoffs, or the research affordances. Filters to the active research
+  // thread + the active run.
+  function onDevRunEventLine(wsEvent) {
+    if (!wsEvent || !wsEvent.event || !isResearchThread) return;
+    if (wsEvent.conversationId !== activeConvId) return;
+    if (wsEvent.threadId) {
+      // Thread-scoped note (research runs always carry threadId): must name THIS
+      // thread. This also makes it race-safe before devRun loads — a note that
+      // beats the by-thread fetch is still attributed to the right thread.
+      if (wsEvent.threadId !== activeThreadId) return;
+    } else if (!(devRun && devRun.run && wsEvent.runId === devRun.run.id)) {
+      // No threadId to attribute by — only accept it for the run already shown
+      // here. (Storing a thread-less note before the run loads could place it on
+      // the wrong thread + leak an orphaned per-run key that never renders.)
+      return;
+    }
+    // Defensive: if a run is shown, the note must be for it.
+    if (devRun && devRun.run && wsEvent.runId !== devRun.run.id) return;
+    ingestDevRunEvents(wsEvent.runId, [wsEvent.event]);
+    if (inspectorTab !== 'agents') inspectorAgentsHasNew = true;
+    renderInspectorTabs();
   }
 
   // Human label + palette class for the derived run status (computeRunStatus).
@@ -276,6 +315,21 @@ export function researchCardScript(): string {
         ' attempt' + (run.reengageCount === 1 ? '' : 's') + ' \\u2014 needs you.';
       card.appendChild(exhausted);
     }
+
+    // Compact handle to the inspector Agents tab — the per-agent latest notes +
+    // discoveries timeline live there, keeping this inline card compact. The tab
+    // itself is shown by renderInspectorTabs whenever handoffs exist.
+    var working = 0;
+    for (var w = 0; w < handoffs.length; w++) if (handoffs[w].status === 'working') working++;
+    var evCount = (devRunEvents[run.id] || []).length;
+    var open = document.createElement('div');
+    open.className = 'dev-run-open';
+    open.innerHTML = (working ? '<span class="dev-run-open-pip"></span>' : '') +
+      '<span>' + handoffs.length + ' agent' + (handoffs.length === 1 ? '' : 's') +
+      (evCount ? ' \\u00b7 ' + evCount + ' update' + (evCount === 1 ? '' : 's') : '') + '</span>' +
+      '<span class="dev-run-open-arrow">View agents \\u2192</span>';
+    open.onclick = function() { switchInspectorTab('agents'); };
+    card.appendChild(open);
 
     chatMessages.appendChild(card);
 
