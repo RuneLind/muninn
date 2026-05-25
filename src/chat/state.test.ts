@@ -361,6 +361,28 @@ describe("ChatState", () => {
     });
   });
 
+  describe("publishDevRunEvent", () => {
+    test("broadcasts a dev_run_event with the note + run/thread keys", () => {
+      const events: ChatEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      const note = {
+        id: "ev-1", runId: "run-1", peerName: "melosys-api", role: "build",
+        kind: "discovery", text: "found it", createdAt: 7,
+      } as any;
+      state.publishDevRunEvent("conv-1", "run-1", note, "t1");
+
+      expect(events).toHaveLength(1);
+      const ev = events[0] as Extract<ChatEvent, { type: "dev_run_event" }>;
+      expect(ev.type).toBe("dev_run_event");
+      expect(ev.conversationId).toBe("conv-1");
+      expect(ev.runId).toBe("run-1");
+      expect(ev.threadId).toBe("t1");
+      expect(ev.event.kind).toBe("discovery");
+      expect(ev.event.text).toBe("found it");
+    });
+  });
+
   describe("botConversationId", () => {
     test("is deterministic and matches findOrCreateBotConversation's id", async () => {
       const a = await state.botConversationId("Rune-4", "melosys");

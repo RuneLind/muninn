@@ -1,6 +1,6 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
-import { ChatState } from "../chat/state.ts";
+import { ChatState, type ChatEvent } from "../chat/state.ts";
 import { setBotDefaultUser } from "../db/chat-preferences.ts";
 import { getDb } from "../db/client.ts";
 import { listThreads, getOrCreatePeerThread, setThreadAutoRespondPaused, createThread } from "../db/threads.ts";
@@ -12,7 +12,7 @@ import type { HivemindBotClient } from "./client.ts";
 import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { setCorrelationToken } from "./correlation-tokens.ts";
-import { birthDevRun, insertHandoff, listHandoffs, getDevRunById, updateDevRun, MAX_REENGAGE_ATTEMPTS } from "../db/dev-runs.ts";
+import { birthDevRun, insertHandoff, listHandoffs, listDevRunEvents, getDevRunById, updateDevRun, MAX_REENGAGE_ATTEMPTS } from "../db/dev-runs.ts";
 import { shortRunId } from "./mcp-server.ts";
 
 setupTestDb();
@@ -354,6 +354,37 @@ describe("HivemindRouter handoff interpret (Phase 4)", () => {
     await router.pendingHandoffInterpret;
 
     expect((await listHandoffs(run.id))[0]!.status).toBe("sent");
+  });
+
+  test("a non-terminal note records an event, bumps the handoff working, and broadcasts dev_run_event (Phase B)", async () => {
+    await setBotDefaultUser(HI_BOT, HI_OWNER);
+    const thread = await createThread(HI_OWNER, HI_BOT, "research-handoff-note");
+    const run = await birthDevRun({ botName: HI_BOT, userId: HI_OWNER, issueKey: "research-cccc3333", threadId: thread.id });
+    await updateDevRun(run.id, { status: "building" });
+    await insertHandoff({ runId: run.id, peerName: "huginn", role: "build" });
+    await setPendingPeer(HI_BOT, "peer-uuid-aaa", thread.id);
+
+    const chat = new ChatState();
+    const events: ChatEvent[] = [];
+    chat.subscribe((e) => events.push(e));
+    const router = new HivemindRouter(chat);
+    await router.route(HI_BOT, makeMsg({
+      text: `field already on the DTO\n<!-- note: discovery run:${shortRunId(run.id)} -->`,
+    }));
+    await router.pendingHandoffInterpret;
+
+    // Handoff bumped sent → working; run status unchanged (a note never recomputes).
+    expect((await listHandoffs(run.id))[0]!.status).toBe("working");
+    expect((await getDevRunById(run.id))!.status).toBe("building");
+    // Event persisted + broadcast as a dev_run_event carrying the run's thread.
+    const dbEvents = await listDevRunEvents(run.id);
+    expect(dbEvents).toHaveLength(1);
+    expect(dbEvents[0]!.kind).toBe("discovery");
+    const ev = events.find((e) => e.type === "dev_run_event") as Extract<ChatEvent, { type: "dev_run_event" }>;
+    expect(ev).toBeDefined();
+    expect(ev.runId).toBe(run.id);
+    expect(ev.threadId).toBe(thread.id);
+    expect(ev.event.text).toBe("field already on the DTO");
   });
 });
 

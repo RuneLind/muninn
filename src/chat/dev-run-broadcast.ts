@@ -5,6 +5,7 @@ import {
   listHandoffs,
   type DevRun,
   type DevRunHandoff,
+  type DevRunEvent,
 } from "../db/dev-runs.ts";
 import { getLog } from "../logging.ts";
 
@@ -49,6 +50,36 @@ export async function broadcastDevRun(
     return true;
   } catch (err) {
     log.warn("Failed to broadcast dev_run: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/**
+ * Push a single non-terminal progress note (Phase B) to the run's web conversation
+ * so the inspector Agents tab streams it live. The event is already persisted by
+ * the interpreter; this only resolves the run (for the conversationId + threadId)
+ * and publishes. Paired with `broadcastDevRun` in the router seam — that re-pushes
+ * the run + handoffs (so the `sent → working` bump shows), this carries the note.
+ *
+ * Best-effort: returns false (never throws) when the run can't be resolved, so a
+ * broadcast failure never breaks inbound delivery.
+ */
+export async function broadcastDevRunEvent(
+  state: ChatState,
+  opts: { runId: string; event: DevRunEvent },
+  deps: DevRunBroadcastDeps = {},
+): Promise<boolean> {
+  const getById = deps.getRunById ?? getDevRunById;
+  try {
+    const run = await getById(opts.runId);
+    if (!run) return false;
+    const conversationId = await state.botConversationId(run.userId, run.botName);
+    state.publishDevRunEvent(conversationId, run.id, opts.event, run.threadId);
+    return true;
+  } catch (err) {
+    log.warn("Failed to broadcast dev_run_event: {error}", {
       error: err instanceof Error ? err.message : String(err),
     });
     return false;

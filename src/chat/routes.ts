@@ -15,7 +15,7 @@ import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
-import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs } from "../db/dev-runs.ts";
+import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs, listDevRunEvents } from "../db/dev-runs.ts";
 import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
@@ -641,8 +641,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     if (!isValidUuid(threadId)) return c.json({ error: "Invalid thread ID" }, 400);
     const run = await getDevRunByThreadId(threadId);
     if (!run) return c.json({ error: "No dev_run for thread" }, 404);
-    const handoffs = await listHandoffs(run.id);
-    return c.json({ run, handoffs });
+    const [handoffs, events] = await Promise.all([listHandoffs(run.id), listDevRunEvents(run.id)]);
+    // events (Phase B) hydrate the inspector Agents tab's discoveries timeline on a
+    // reload / thread-open; live appends arrive via the dev_run_event WS broadcast.
+    return c.json({ run, handoffs, events });
   });
 
   return app;

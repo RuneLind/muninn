@@ -37,7 +37,7 @@ import {
   type ReengageContext,
 } from "./devloop-prompts.ts";
 import { classifyReengageRole, type ReengageRole } from "./devloop-classifier.ts";
-import { broadcastDevRun } from "../chat/dev-run-broadcast.ts";
+import { broadcastDevRun, broadcastDevRunEvent } from "../chat/dev-run-broadcast.ts";
 import type { HivemindBotClient } from "./client.ts";
 import type { Namespace } from "./types.ts";
 
@@ -278,6 +278,13 @@ export class HivemindRouter {
         // or `building` if we just claimed it). Best-effort — a broadcast failure
         // must not surface to inbound delivery.
         if (result.runId) await broadcastDevRun(this.chatState, { runId: result.runId });
+        // Phase B: a non-terminal progress note also streams as its own event so the
+        // inspector Agents tab appends it live. The broadcastDevRun above re-pushed
+        // run + handoffs (so the sent → working bump shows); this carries the note.
+        // A note never sets runStatus, so the claims above already no-opped.
+        if (result.event && result.runId) {
+          await broadcastDevRunEvent(this.chatState, { runId: result.runId, event: result.event });
+        }
         // The (slow) bot turn runs as its own fire-and-forget seam so it doesn't
         // hold the interpret chain.
         if (claimedOrch) {
