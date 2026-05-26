@@ -98,7 +98,8 @@ export function buildReengagePrompt(ctx: ReengageContext): string {
     'Re-engage the BUILD agent' + (ctx.buildPeer ? ' (' + ctx.buildPeer + ')' : '') +
     ' to fix it: use the delegate_task tool (NOT send_to_peer), role: "build". Hand it the failure context above plus the workplan/spec, and ask it to diagnose the e2e failure, implement the fix, and report back done. ' +
     'PREFER the same build peer that did the original implementation so the fix lands on the same branch. ' +
-    'AVAILABILITY GUARD: if it is offline, pick another online build agent (or tell me which to start). ' +
+    'If the original work spanned multiple repos (multiple build handoffs), target the peer whose REPO owns the failing code — or re-engage more than one if the fix legitimately spans repos. Each delegate_task call must target ONE repo; never delegate work in repo X to a peer in repo Y. ' +
+    'AVAILABILITY GUARD: if that build peer is offline, tell me to start it back up — do NOT substitute a peer from a different repo as a workaround. ' +
     'Then report back here what you sent and to whom.';
 }
 
