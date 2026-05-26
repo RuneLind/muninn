@@ -210,7 +210,15 @@ export function ytArticleLibraryHtml(): string {
 export function ytArticleLibraryScript(): string {
   return `
     // --- Doc panel close/escape ---
+    // Doc-panel request id. Bumped on every openYouTubeDoc and on close; every
+    // async continuation captures the id at entry and bails if it no longer
+    // matches the current value. Stops a slow A response from overwriting a
+    // newer B panel via the stable #ytArticleMain / #docSimilarPanel / #ytCatPanel
+    // ids the scaffold reuses.
+    var _docRequestId = 0;
+
     function closeDocPanel() {
+      _docRequestId++;  // invalidate any in-flight openYouTubeDoc/loadDocSimilar
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
     }
@@ -346,6 +354,12 @@ export function ytArticleLibraryScript(): string {
     }
 
     async function openYouTubeDoc(docId, url) {
+      // Take a new request id at the top so any earlier in-flight fetch (slow
+      // article A while user clicks B) is invalidated — its post-await
+      // continuations will see _docRequestId !== myRequest and bail before
+      // overwriting the new panel's #ytArticleMain / #docSimilarPanel.
+      var myRequest = ++_docRequestId;
+
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
       var linksEl = document.getElementById('docPanelLinks');
@@ -373,13 +387,15 @@ export function ytArticleLibraryScript(): string {
       bodyEl.scrollTop = 0;
 
       // Left panel: browse categories without leaving the article
-      renderArticleCategories(cat, docId);
+      renderArticleCategories(cat, docId, myRequest);
 
       try {
         var encodedId = docId.split('/').map(encodeURIComponent).join('/');
         var res = await fetch('/api/youtube/document/' + encodedId);
+        if (myRequest !== _docRequestId) return;  // superseded
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var doc = await res.json();
+        if (myRequest !== _docRequestId) return;  // superseded
 
         var text = doc.text || '';
         // Strip breadcrumb prefix [collection > path] and tags line
@@ -388,8 +404,9 @@ export function ytArticleLibraryScript(): string {
         if (mainEl) mainEl.innerHTML = renderMarkdown(cleaned);
 
         // Right panel: other articles matching in relevance
-        loadDocSimilar(title, docId);
+        loadDocSimilar(title, docId, myRequest);
       } catch (err) {
+        if (myRequest !== _docRequestId) return;  // superseded
         var failEl = document.getElementById('ytArticleMain');
         if (failEl) failEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
       }
@@ -402,13 +419,14 @@ export function ytArticleLibraryScript(): string {
     // category. Reuses docsByCategory built by loadLibrary() — if the page
     // deep-linked straight into an article before the library loaded, fetch it
     // first.
-    async function renderArticleCategories(activeCat, currentDocId) {
+    async function renderArticleCategories(activeCat, currentDocId, requestId) {
       var panel = document.getElementById('ytCatPanel');
       if (!panel) return;
       if (Object.keys(docsByCategory).length === 0) {
         panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
           '<div style="color:var(--text-dim);font-size:12px;">Loading…</div>';
         try { await loadLibrary(); } catch {}
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // panel now belongs to a newer openYouTubeDoc
         panel = document.getElementById('ytCatPanel');
         if (!panel) return;  // user already navigated elsewhere
       }
@@ -487,13 +505,21 @@ export function ytArticleLibraryScript(): string {
       });
     }
 
-    async function loadDocSimilar(title, currentDocId) {
+    async function loadDocSimilar(title, currentDocId, requestId) {
       var panel = document.getElementById('docSimilarPanel');
       if (!panel) return;
       try {
         var res = await fetch('/api/youtube/similar?q=' + encodeURIComponent(title));
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        // The panel reference captured before the await may now be detached
+        // (a newer openYouTubeDoc rewrote bodyEl). Re-query by id to land on
+        // the currently-mounted panel — guarded above so we only ever write
+        // when we're still the active request.
+        panel = document.getElementById('docSimilarPanel');
+        if (!panel) return;
         var results = (data.results || []).filter(function(r) { return r.id !== currentDocId; }).slice(0, 5);
         if (results.length === 0) {
           panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">No similar articles found</div>';
@@ -508,18 +534,21 @@ export function ytArticleLibraryScript(): string {
             '<span class="doc-similar-relevance">' + pct + '%</span>' +
           '</div>';
         }).join('');
-        // Wire up click handlers for similar items
+        // Wire up click handlers for similar items. With the 3-col layout the
+        // panel re-renders in place, so we call openYouTubeDoc directly —
+        // dropping the old closeDocPanel + setTimeout(200) dance that was a
+        // leftover from the slide-in animation and created a race window where
+        // a second click could desync the body overflow toggle.
         panel.querySelectorAll('.doc-similar-item').forEach(function(item) {
           item.querySelector('a').addEventListener('click', function(e) {
             e.preventDefault();
-            var id = item.getAttribute('data-doc-id');
-            var url = item.getAttribute('data-doc-url');
-            closeDocPanel();
-            setTimeout(function() { openYouTubeDoc(id, url); }, 200);
+            openYouTubeDoc(item.getAttribute('data-doc-id'), item.getAttribute('data-doc-url'));
           });
         });
       } catch {
-        panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Failed to load similar</div>';
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        panel = document.getElementById('docSimilarPanel');
+        if (panel) panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Failed to load similar</div>';
       }
     }
   `;
