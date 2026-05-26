@@ -395,11 +395,13 @@ export function ytArticleLibraryScript(): string {
       }
     }
 
-    // Left sidebar: every category with its count, collapsed by default — the
-    // current article's category is highlighted; click any header to expand its
-    // articles and jump to a sibling without closing the panel. Reuses
-    // docsByCategory built by loadLibrary() — if the page deep-linked straight
-    // into an article before the library loaded, fetch it first.
+    // Left sidebar: every category sorted by recency (most-recent article first),
+    // with the active category auto-expanded. Clicking a row selects it and is
+    // single-expand — opens this category's article list and collapses every
+    // other — so you can keep picking sibling articles under the selected
+    // category. Reuses docsByCategory built by loadLibrary() — if the page
+    // deep-linked straight into an article before the library loaded, fetch it
+    // first.
     async function renderArticleCategories(activeCat, currentDocId) {
       var panel = document.getElementById('ytCatPanel');
       if (!panel) return;
@@ -410,8 +412,18 @@ export function ytArticleLibraryScript(): string {
         panel = document.getElementById('ytCatPanel');
         if (!panel) return;  // user already navigated elsewhere
       }
+      // Per-category newest date for sorting. The doc date is "YYYY-MM-DD" (or
+      // an ISO timestamp with the same prefix), so lexical max == chronological
+      // max. Undated cats reduce to '' and sink to the bottom.
+      var catMaxDate = {};
+      Object.keys(docsByCategory).forEach(function(c) {
+        catMaxDate[c] = (docsByCategory[c] || []).reduce(function(m, d) {
+          var k = (d && d.date) || '';
+          return k > m ? k : m;
+        }, '');
+      });
       var cats = Object.keys(docsByCategory).sort(function(a, b) {
-        return (docsByCategory[b] || []).length - (docsByCategory[a] || []).length;
+        return catMaxDate[b].localeCompare(catMaxDate[a]);
       });
       if (cats.length === 0) {
         panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
@@ -419,14 +431,20 @@ export function ytArticleLibraryScript(): string {
         return;
       }
       panel.innerHTML = '<div class="yt-side-title">Categories</div>' + cats.map(function(cat) {
-        var docs = docsByCategory[cat] || [];
+        // Copy before sorting — docsByCategory is shared with the chip view
+        // (sorted by title in loadLibrary); mutating it would break that.
+        var docs = (docsByCategory[cat] || []).slice().sort(function(a, b) {
+          return ((b && b.date) || '').localeCompare((a && a.date) || '');
+        });
         var isActive = cat === activeCat;
         return '<div class="yt-cat">' +
           '<div class="yt-cat-row' + (isActive ? ' active' : '') + '">' +
             '<span class="yt-cat-name">' + esc(cat) + '</span>' +
             '<span class="yt-cat-count">' + docs.length + '</span>' +
           '</div>' +
-          '<div class="yt-cat-articles" hidden>' +
+          // Active category opens by default so the user can pick a sibling
+          // straight away; the others stay collapsed until clicked.
+          '<div class="yt-cat-articles"' + (isActive ? '' : ' hidden') + '>' +
             docs.map(function(d) {
               var cur = d.id === currentDocId;
               return '<a href="#" class="yt-cat-article' + (cur ? ' current' : '') + '" ' +
@@ -437,11 +455,21 @@ export function ytArticleLibraryScript(): string {
         '</div>';
       }).join('');
 
-      // Toggle a category's article list
+      // Select + single-expand: clicking a category collapses every other
+      // article list and clears their .active state, then opens this one. The
+      // user can then click an article under the selected category. Clicking
+      // the already-active row is a no-op (it stays selected and open).
       panel.querySelectorAll('.yt-cat-row').forEach(function(row) {
         row.addEventListener('click', function() {
+          panel.querySelectorAll('.yt-cat-row.active').forEach(function(r) {
+            if (r !== row) r.classList.remove('active');
+          });
+          panel.querySelectorAll('.yt-cat-articles').forEach(function(l) {
+            l.hidden = true;
+          });
+          row.classList.add('active');
           var list = row.parentElement.querySelector('.yt-cat-articles');
-          if (list) list.hidden = !list.hidden;
+          if (list) list.hidden = false;
         });
       });
       // Open another article in place
