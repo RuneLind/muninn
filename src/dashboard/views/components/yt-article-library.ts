@@ -95,16 +95,84 @@ export function ytArticleLibraryStyles(): string {
 
     ${docPanelStyles("ytSlideIn")}
 
-    .doc-similar {
-      border-top: 1px solid var(--border-primary);
-      padding: 16px 0 0;
-      margin-top: 20px;
+    /* --- Article view: 3-column layout (categories | text | similar) ---
+       Scoped to this page only; overrides the shared single-column doc panel
+       above. Wider panel so all three columns fit comfortably. */
+    .doc-panel { width: 100vw; }
+    .doc-panel-body {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr) 300px;
+      gap: 24px;
+      align-items: start;
     }
-    .doc-similar h4 {
-      font-size: 13px;
+    /* min-width:0 lets code blocks shrink; cap + center the reading column so
+       full-page width doesn't stretch lines uncomfortably wide */
+    .yt-col-main { min-width: 0; max-width: 1000px; justify-self: center; }
+    .yt-col-left, .yt-col-right {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      max-height: calc(100vh - 96px);
+      overflow-y: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .yt-side-title {
+      font-size: 12px;
       font-weight: 600;
-      color: var(--text-primary);
-      margin: 0 0 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin: 0 0 10px;
+    }
+    .yt-cat-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+    .yt-cat-row:hover { background: var(--bg-surface); color: var(--text-primary); }
+    .yt-cat-row.active { color: var(--accent-light); }
+    .yt-cat-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .yt-cat-count { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+    .yt-cat-articles { padding: 2px 0 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+    /* the [hidden] attribute's UA "display:none" loses to the rule above, so
+       restate it with higher specificity — this is what actually collapses
+       a category list (and makes the row-click toggle work) */
+    .yt-cat-articles[hidden] { display: none; }
+    .yt-cat-article {
+      font-size: 12px;
+      color: var(--text-dim);
+      text-decoration: none;
+      padding: 3px 6px;
+      border-radius: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .yt-cat-article:hover { color: var(--text-primary); background: var(--bg-surface); }
+    .yt-cat-article.current { color: var(--accent-light); font-weight: 600; }
+
+    /* Collapse to a single column on narrow viewports */
+    @media (max-width: 1000px) {
+      .doc-panel-body { grid-template-columns: 1fr; }
+      .yt-col-left, .yt-col-right { position: static; max-height: none; }
+    }
+
+    .doc-similar { padding: 0; margin: 0; }
+    .doc-similar h4 {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin: 0 0 10px;
     }
     .doc-similar-item {
       padding: 6px 0;
@@ -142,7 +210,15 @@ export function ytArticleLibraryHtml(): string {
 export function ytArticleLibraryScript(): string {
   return `
     // --- Doc panel close/escape ---
+    // Doc-panel request id. Bumped on every openYouTubeDoc and on close; every
+    // async continuation captures the id at entry and bails if it no longer
+    // matches the current value. Stops a slow A response from overwriting a
+    // newer B panel via the stable #ytArticleMain / #docSimilarPanel / #ytCatPanel
+    // ids the scaffold reuses.
+    var _docRequestId = 0;
+
     function closeDocPanel() {
+      _docRequestId++;  // invalidate any in-flight openYouTubeDoc/loadDocSimilar
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
     }
@@ -278,48 +354,172 @@ export function ytArticleLibraryScript(): string {
     }
 
     async function openYouTubeDoc(docId, url) {
+      // Take a new request id at the top so any earlier in-flight fetch (slow
+      // article A while user clicks B) is invalidated — its post-await
+      // continuations will see _docRequestId !== myRequest and bail before
+      // overwriting the new panel's #ytArticleMain / #docSimilarPanel.
+      var myRequest = ++_docRequestId;
+
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
       var linksEl = document.getElementById('docPanelLinks');
       var bodyEl = document.getElementById('docPanelBody');
       var title = docTitle(docId);
+      var cat = docCategory(docId);
 
       titleEl.textContent = title;
       linksEl.innerHTML = url
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">YouTube &rarr;</a>'
         : '';
-      bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>';
+
+      // 3-column article view: categories (left) | text (middle) | similar (right)
+      bodyEl.innerHTML =
+        '<div class="yt-col-left" id="ytCatPanel"></div>' +
+        '<div class="yt-col-main" id="ytArticleMain">' +
+          '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading...</div>' +
+        '</div>' +
+        '<div class="yt-col-right doc-similar" id="docSimilarPanel">' +
+          '<h4>Similar Articles</h4>' +
+          '<div style="color:var(--text-dim);font-size:12px;">Searching...</div>' +
+        '</div>';
       overlay.classList.add('visible');
       document.body.style.overflow = 'hidden';
+      bodyEl.scrollTop = 0;
+
+      // Left panel: browse categories without leaving the article
+      renderArticleCategories(cat, docId, myRequest);
 
       try {
         var encodedId = docId.split('/').map(encodeURIComponent).join('/');
         var res = await fetch('/api/youtube/document/' + encodedId);
+        if (myRequest !== _docRequestId) return;  // superseded
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var doc = await res.json();
+        if (myRequest !== _docRequestId) return;  // superseded
 
         var text = doc.text || '';
-        // Strip breadcrumb prefix [collection > path]
-        var cleaned = text.replace(/^\\[.*?\\]\\n*/, '');
-        // Strip tags line
-        cleaned = cleaned.replace(/^tags:.*\\n*/m, '');
-        bodyEl.innerHTML = renderMarkdown(cleaned) +
-          '<div class="doc-similar" id="docSimilarPanel"><h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Searching...</div></div>';
+        // Strip breadcrumb prefix [collection > path] and tags line
+        var cleaned = text.replace(/^\\[.*?\\]\\n*/, '').replace(/^tags:.*\\n*/m, '');
+        var mainEl = document.getElementById('ytArticleMain');
+        if (mainEl) mainEl.innerHTML = renderMarkdown(cleaned);
 
-        // Fetch similar articles
-        loadDocSimilar(title, docId);
+        // Right panel: other articles matching in relevance
+        loadDocSimilar(title, docId, myRequest);
       } catch (err) {
-        bodyEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
+        if (myRequest !== _docRequestId) return;  // superseded
+        var failEl = document.getElementById('ytArticleMain');
+        if (failEl) failEl.innerHTML = '<div style="color:var(--status-error);padding:40px;text-align:center">Failed to load: ' + esc(err.message) + '</div>';
       }
     }
 
-    async function loadDocSimilar(title, currentDocId) {
+    // Left sidebar: every category sorted by recency (most-recent article first),
+    // with the active category auto-expanded. Clicking a row selects it and is
+    // single-expand — opens this category's article list and collapses every
+    // other — so you can keep picking sibling articles under the selected
+    // category. Reuses docsByCategory built by loadLibrary() — if the page
+    // deep-linked straight into an article before the library loaded, fetch it
+    // first.
+    async function renderArticleCategories(activeCat, currentDocId, requestId) {
+      var panel = document.getElementById('ytCatPanel');
+      if (!panel) return;
+      if (Object.keys(docsByCategory).length === 0) {
+        panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
+          '<div style="color:var(--text-dim);font-size:12px;">Loading…</div>';
+        try { await loadLibrary(); } catch {}
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // panel now belongs to a newer openYouTubeDoc
+        panel = document.getElementById('ytCatPanel');
+        if (!panel) return;  // user already navigated elsewhere
+      }
+      // Per-category newest date for sorting. The doc date is "YYYY-MM-DD" (or
+      // an ISO timestamp with the same prefix), so lexical max == chronological
+      // max. Undated cats reduce to '' and sink to the bottom.
+      var catMaxDate = {};
+      Object.keys(docsByCategory).forEach(function(c) {
+        catMaxDate[c] = (docsByCategory[c] || []).reduce(function(m, d) {
+          var k = (d && d.date) || '';
+          return k > m ? k : m;
+        }, '');
+      });
+      var cats = Object.keys(docsByCategory).sort(function(a, b) {
+        return catMaxDate[b].localeCompare(catMaxDate[a]);
+      });
+      if (cats.length === 0) {
+        panel.innerHTML = '<div class="yt-side-title">Categories</div>' +
+          '<div style="color:var(--text-dim);font-size:12px;">No categories</div>';
+        return;
+      }
+      panel.innerHTML = '<div class="yt-side-title">Categories</div>' + cats.map(function(cat) {
+        // Copy before sorting — docsByCategory is shared with the chip view
+        // (sorted by title in loadLibrary); mutating it would break that.
+        var docs = (docsByCategory[cat] || []).slice().sort(function(a, b) {
+          return ((b && b.date) || '').localeCompare((a && a.date) || '');
+        });
+        var isActive = cat === activeCat;
+        return '<div class="yt-cat">' +
+          '<div class="yt-cat-row' + (isActive ? ' active' : '') + '">' +
+            '<span class="yt-cat-name">' + esc(cat) + '</span>' +
+            '<span class="yt-cat-count">' + docs.length + '</span>' +
+          '</div>' +
+          // Active category opens by default so the user can pick a sibling
+          // straight away; the others stay collapsed until clicked.
+          '<div class="yt-cat-articles"' + (isActive ? '' : ' hidden') + '>' +
+            docs.map(function(d) {
+              var cur = d.id === currentDocId;
+              return '<a href="#" class="yt-cat-article' + (cur ? ' current' : '') + '" ' +
+                'data-doc-id="' + esc(d.id) + '" data-doc-url="' + esc(d.url || '') + '">' +
+                esc(docTitle(d.id)) + '</a>';
+            }).join('') +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // Select + single-expand with toggle-on-same-click: clicking a different
+      // row clears every other .active + collapses their article lists, then
+      // selects + opens this one. Clicking the already-active row collapses
+      // it and deselects — so you can dismiss the open list and pick another
+      // category cleanly.
+      panel.querySelectorAll('.yt-cat-row').forEach(function(row) {
+        row.addEventListener('click', function() {
+          var list = row.parentElement.querySelector('.yt-cat-articles');
+          if (row.classList.contains('active')) {
+            row.classList.remove('active');
+            if (list) list.hidden = true;
+            return;
+          }
+          panel.querySelectorAll('.yt-cat-row.active').forEach(function(r) {
+            r.classList.remove('active');
+          });
+          panel.querySelectorAll('.yt-cat-articles').forEach(function(l) {
+            l.hidden = true;
+          });
+          row.classList.add('active');
+          if (list) list.hidden = false;
+        });
+      });
+      // Open another article in place
+      panel.querySelectorAll('.yt-cat-article').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+          e.preventDefault();
+          openYouTubeDoc(a.getAttribute('data-doc-id'), a.getAttribute('data-doc-url'));
+        });
+      });
+    }
+
+    async function loadDocSimilar(title, currentDocId, requestId) {
       var panel = document.getElementById('docSimilarPanel');
       if (!panel) return;
       try {
         var res = await fetch('/api/youtube/similar?q=' + encodeURIComponent(title));
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        // The panel reference captured before the await may now be detached
+        // (a newer openYouTubeDoc rewrote bodyEl). Re-query by id to land on
+        // the currently-mounted panel — guarded above so we only ever write
+        // when we're still the active request.
+        panel = document.getElementById('docSimilarPanel');
+        if (!panel) return;
         var results = (data.results || []).filter(function(r) { return r.id !== currentDocId; }).slice(0, 5);
         if (results.length === 0) {
           panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">No similar articles found</div>';
@@ -334,18 +534,21 @@ export function ytArticleLibraryScript(): string {
             '<span class="doc-similar-relevance">' + pct + '%</span>' +
           '</div>';
         }).join('');
-        // Wire up click handlers for similar items
+        // Wire up click handlers for similar items. With the 3-col layout the
+        // panel re-renders in place, so we call openYouTubeDoc directly —
+        // dropping the old closeDocPanel + setTimeout(200) dance that was a
+        // leftover from the slide-in animation and created a race window where
+        // a second click could desync the body overflow toggle.
         panel.querySelectorAll('.doc-similar-item').forEach(function(item) {
           item.querySelector('a').addEventListener('click', function(e) {
             e.preventDefault();
-            var id = item.getAttribute('data-doc-id');
-            var url = item.getAttribute('data-doc-url');
-            closeDocPanel();
-            setTimeout(function() { openYouTubeDoc(id, url); }, 200);
+            openYouTubeDoc(item.getAttribute('data-doc-id'), item.getAttribute('data-doc-url'));
           });
         });
       } catch {
-        panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Failed to load similar</div>';
+        if (requestId !== undefined && requestId !== _docRequestId) return;  // superseded by a newer open
+        panel = document.getElementById('docSimilarPanel');
+        if (panel) panel.innerHTML = '<h4>Similar Articles</h4><div style="color:var(--text-dim);font-size:12px;">Failed to load similar</div>';
       }
     }
   `;
