@@ -455,20 +455,26 @@ export function ytArticleLibraryScript(): string {
         '</div>';
       }).join('');
 
-      // Select + single-expand: clicking a category collapses every other
-      // article list and clears their .active state, then opens this one. The
-      // user can then click an article under the selected category. Clicking
-      // the already-active row is a no-op (it stays selected and open).
+      // Select + single-expand with toggle-on-same-click: clicking a different
+      // row clears every other .active + collapses their article lists, then
+      // selects + opens this one. Clicking the already-active row collapses
+      // it and deselects — so you can dismiss the open list and pick another
+      // category cleanly.
       panel.querySelectorAll('.yt-cat-row').forEach(function(row) {
         row.addEventListener('click', function() {
+          var list = row.parentElement.querySelector('.yt-cat-articles');
+          if (row.classList.contains('active')) {
+            row.classList.remove('active');
+            if (list) list.hidden = true;
+            return;
+          }
           panel.querySelectorAll('.yt-cat-row.active').forEach(function(r) {
-            if (r !== row) r.classList.remove('active');
+            r.classList.remove('active');
           });
           panel.querySelectorAll('.yt-cat-articles').forEach(function(l) {
             l.hidden = true;
           });
           row.classList.add('active');
-          var list = row.parentElement.querySelector('.yt-cat-articles');
           if (list) list.hidden = false;
         });
       });
