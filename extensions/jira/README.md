@@ -11,6 +11,16 @@ Chrome extension that sends Jira issues to Muninn for AI-powered analysis.
 
 The bot analyzes the issue using its knowledge base and MCP tools, then you can continue chatting for follow-ups.
 
+### Test mode (no Jira issue)
+
+Open the popup **off** a Jira issue page and instead of a dead end you get an editable
+**testoppgave** textarea (pre-filled with a default task) plus the same user/variant/model
+selectors. Click "Send testanalyse" to drive the whole loop (analyse → spec → bygg → e2e)
+manually against a fake task. The default text states up front that there is no Jira issue,
+so the agent builds from the description rather than trying to look it up. The synthetic
+`TEST: …` thread name never matches the `[A-Z]+-\d+` issue-key pattern, so the run gets a
+unique `research-<id>` key and skips the (would-be fake) Jira knowledge-base ingest.
+
 ## Install
 
 1. Open `chrome://extensions/`

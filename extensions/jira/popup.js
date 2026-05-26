@@ -4,24 +4,39 @@ let issueData = null;
 let allUsers = [];
 let allConnectors = [];
 let muninnUrl = 'http://localhost:3010';
+let testMode = false;
 const BOT_NAME = 'melosys';
 
+// Default task shown when the popup is opened off a Jira page — an editable
+// starting point for a manual end-to-end test of the whole dev loop. Phrased to
+// tell the agent up front that this is a test with no backing Jira issue, so it
+// builds straight from the description instead of trying to look the issue up.
+const DEFAULT_TEST_TASK = `[TEST – ingen Jira-sak]
+
+Lag en enkel backend-tjeneste i melosys-api som returnerer antall fagsaker i systemet, f.eks. GET /api/fagsaker/antall → { "antall": <n> }. Lag deretter en enkel webside i melosys-web som henter og viser dette tallet.
+
+Dette er en testoppgave for å kjøre gjennom hele løkka (analyse → spec → bygg → e2e) manuelt. Det finnes ingen Jira-sak for dette – all kontekst står her.`;
+
 document.addEventListener('DOMContentLoaded', async () => {
+  // Options link works in every mode (Jira issue, reload, and test).
+  $('#open-options').addEventListener('click', (e) => {
+    e.preventDefault();
+    chrome.runtime.openOptionsPage();
+  });
+
+  const settings = await chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '', lastUserId: '' });
+  muninnUrl = settings.muninnUrl;
+
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
 
+  // Off a Jira issue → offer a manual test task instead of a dead end.
   if (!tab?.url?.match(/jira.*\/browse\/[A-Z]/)) {
-    $('#not-jira').classList.remove('hidden');
+    await setupTestMode(settings);
     return;
   }
 
-  // Load settings and users in parallel with issue info
-  const settingsPromise = chrome.storage.sync.get({ muninnUrl: 'http://localhost:3010', userId: '', lastUserId: '' });
-  const issuePromise = sendToTab(tab.id, { type: 'GET_JIRA_INFO' }).catch(() => null);
-
-  const [settings, info] = await Promise.all([settingsPromise, issuePromise]);
-  muninnUrl = settings.muninnUrl;
-
+  const info = await sendToTab(tab.id, { type: 'GET_JIRA_INFO' }).catch(() => null);
   if (info?.issueKey) {
     issueData = info;
     showIssue(info);
@@ -33,13 +48,28 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Load users first (needed for connector preferences), then connectors and variants
   await loadUsers(settings);
   await Promise.all([loadConnectors(), loadVariants()]);
+  $('#selectors').classList.remove('hidden');
 
   $('#btn-index').addEventListener('click', () => handleAnalyze());
-  $('#open-options').addEventListener('click', (e) => {
-    e.preventDefault();
-    chrome.runtime.openOptionsPage();
-  });
 });
+
+// Off-Jira mode: show an editable default task + the same user/variant/model
+// selectors, and send it through the normal research pipeline as a test run.
+async function setupTestMode(settings) {
+  testMode = true;
+  $('#not-jira').classList.remove('hidden');
+  $('#not-jira-msg').textContent = 'Ingen Jira-sak åpen.';
+  $('#test-task').classList.remove('hidden');
+  $('#test-text').value = DEFAULT_TEST_TASK;
+
+  await loadUsers(settings);
+  await Promise.all([loadConnectors(), loadVariants()]);
+
+  const btn = $('#btn-index');
+  btn.textContent = 'Send testanalyse';
+  $('#selectors').classList.remove('hidden');
+  btn.addEventListener('click', () => handleAnalyze());
+}
 
 function sendToTab(tabId, message) {
   return new Promise((resolve, reject) => {
@@ -259,7 +289,8 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   btnRow.appendChild(reuseBtn);
   btnRow.appendChild(newBtn);
   dialog.appendChild(btnRow);
-  $('#issue-info').appendChild(dialog);
+  // #selectors is visible in both Jira and test mode (#issue-info is hidden in test mode).
+  $('#selectors').appendChild(dialog);
 }
 
 async function handleAnalyze(forceNew) {
@@ -272,18 +303,33 @@ async function handleAnalyze(forceNew) {
   status.innerHTML = '<span class="spinner"></span>Sender til analyse...';
 
   try {
-    // Re-fetch fresh content from DOM
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tabs[0]) {
-      try {
-        const freshData = await sendToTab(tabs[0].id, { type: 'GET_JIRA_INFO' });
-        if (freshData?.issueKey) issueData = freshData;
-      } catch (e) { /* use cached */ }
+    let title, text, description;
+    if (testMode) {
+      // Manual test run — the textarea is the whole task.
+      text = $('#test-text').value.trim();
+      if (!text) throw new Error('Skriv inn en testoppgave først.');
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      // First real content line (skip a leading "[TEST ...]" tag) → human-readable
+      // thread name. The "TEST: " prefix never matches the server's [A-Z]+-\d+
+      // issue-key regex, so the run gets a unique research-<id> key and skips the
+      // (fake) Jira knowledge-base ingest — exactly what a test should do.
+      const firstContent = lines.find((l) => !l.startsWith('[')) || lines[0] || 'Testoppgave';
+      title = 'TEST: ' + firstContent.slice(0, 60);
+      description = firstContent.slice(0, 120);
+    } else {
+      // Re-fetch fresh content from DOM
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs[0]) {
+        try {
+          const freshData = await sendToTab(tabs[0].id, { type: 'GET_JIRA_INFO' });
+          if (freshData?.issueKey) issueData = freshData;
+        } catch (e) { /* use cached */ }
+      }
+      title = issueData.issueKey;
+      text = formatIssueAsText(issueData);
+      description = issueData.summary || issueData.title || '';
     }
 
-    const title = issueData.issueKey;
-    const text = formatIssueAsText(issueData);
-    const description = issueData.summary || issueData.title || '';
     const payload = { bot: BOT_NAME, title, text, description };
 
     // Use the user from the dropdown and sync to DB as the default
