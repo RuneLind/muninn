@@ -390,7 +390,11 @@ export async function insertHandoff(input: {
 /**
  * Update a handoff's status from a peer reply. Joins on (run_id, peer_name) —
  * the in-marker run:<id> gives run_id exactly, peer_name picks the role's row.
- * Returns the number of rows updated.
+ * Only NON-TERMINAL rows are flipped: after a re-engage the same peer can have
+ * multiple handoff rows (an older `done`/`failed` from round 1 plus a fresh
+ * `sent` from the re-engage), and we must not retroactively flip the
+ * historically-correct terminal row on the new reply. Returns the number of
+ * rows updated.
  */
 export async function updateHandoffStatus(input: {
   runId: string;
@@ -404,7 +408,9 @@ export async function updateHandoffStatus(input: {
     SET status = ${input.status},
         last_message = COALESCE(${input.lastMessage ?? null}, last_message),
         updated_at = now()
-    WHERE run_id = ${input.runId} AND peer_name = ${input.peerName}
+    WHERE run_id = ${input.runId}
+      AND peer_name = ${input.peerName}
+      AND status NOT IN ('done', 'failed')
     RETURNING id
   `;
   return rows.length;

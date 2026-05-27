@@ -45,30 +45,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
+  // Reveal the button + wire the click handler BEFORE awaiting the loaders so a
+  // slow muninn / network blip doesn't leave the popup with an issue title and
+  // no Send affordance. The button is disabled while loaders run and re-enabled
+  // when the selectors are populated.
+  const btn = $('#btn-index');
+  btn.disabled = true;
+  btn.addEventListener('click', () => handleAnalyze());
+  $('#selectors').classList.remove('hidden');
+
   // Load users first (needed for connector preferences), then connectors and variants
   await loadUsers(settings);
   await Promise.all([loadConnectors(), loadVariants()]);
-  $('#selectors').classList.remove('hidden');
-
-  $('#btn-index').addEventListener('click', () => handleAnalyze());
+  btn.disabled = false;
 });
 
 // Off-Jira mode: show an editable default task + the same user/variant/model
 // selectors, and send it through the normal research pipeline as a test run.
 async function setupTestMode(settings) {
   testMode = true;
-  $('#not-jira').classList.remove('hidden');
-  $('#not-jira-msg').textContent = 'Ingen Jira-sak åpen.';
+  // Only show #test-task — its own note already carries the "Ingen Jira-sak åpen"
+  // messaging, so unhiding #not-jira too would just duplicate it above the textarea.
   $('#test-task').classList.remove('hidden');
   $('#test-text').value = DEFAULT_TEST_TASK;
 
-  await loadUsers(settings);
-  await Promise.all([loadConnectors(), loadVariants()]);
-
+  // Same pattern as the Jira path: reveal + wire the button BEFORE loaders so
+  // the textarea isn't shown alone for the duration of the user/connector fetches.
   const btn = $('#btn-index');
   btn.textContent = 'Send testanalyse';
-  $('#selectors').classList.remove('hidden');
+  btn.disabled = true;
   btn.addEventListener('click', () => handleAnalyze());
+  $('#selectors').classList.remove('hidden');
+
+  await loadUsers(settings);
+  await Promise.all([loadConnectors(), loadVariants()]);
+  btn.disabled = false;
 }
 
 function sendToTab(tabId, message) {
@@ -82,7 +93,9 @@ function sendToTab(tabId, message) {
 
 function showReloadMessage() {
   $('#not-jira').classList.remove('hidden');
-  $('#not-jira').querySelector('p').textContent =
+  // Target the id directly — querySelector('p') would silently pick the wrong
+  // paragraph if a future HTML edit adds a second <p> inside #not-jira.
+  $('#not-jira-msg').textContent =
     'Kunne ikke lese Jira-saken. Last siden på nytt (F5) og prøv igjen.';
 }
 
@@ -289,8 +302,13 @@ function showThreadExistsDialog(threadName, onReuse, onCreateNew) {
   btnRow.appendChild(reuseBtn);
   btnRow.appendChild(newBtn);
   dialog.appendChild(btnRow);
-  // #selectors is visible in both Jira and test mode (#issue-info is hidden in test mode).
-  $('#selectors').appendChild(dialog);
+  // Insert the dialog ABOVE the controls row (not at the end of #selectors) so
+  // the Reuse/Create-new choice sits where the user is already looking — putting
+  // it after the button + status would push it to the bottom of the popup and
+  // make it easy to miss. #selectors is visible in both Jira and test mode.
+  const selectors = $('#selectors');
+  const controls = selectors.querySelector('.controls');
+  selectors.insertBefore(dialog, controls);
 }
 
 async function handleAnalyze(forceNew) {
@@ -308,14 +326,25 @@ async function handleAnalyze(forceNew) {
       // Manual test run — the textarea is the whole task.
       text = $('#test-text').value.trim();
       if (!text) throw new Error('Skriv inn en testoppgave først.');
-      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-      // First real content line (skip a leading "[TEST ...]" tag) → human-readable
-      // thread name. The "TEST: " prefix never matches the server's [A-Z]+-\d+
-      // issue-key regex, so the run gets a unique research-<id> key and skips the
-      // (fake) Jira knowledge-base ingest — exactly what a test should do.
-      const firstContent = lines.find((l) => !l.startsWith('[')) || lines[0] || 'Testoppgave';
-      title = 'TEST: ' + firstContent.slice(0, 60);
+      const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      // Skip ONLY lines that are entirely a bracket-tag (e.g. the leading
+      // "[TEST – ingen Jira-sak]" of DEFAULT_TEST_TASK). A line like
+      // "[Backend] Verify foo" has content after the closing bracket and is
+      // kept as legitimate title material.
+      const isPureTag = (l) => /^\[[^\]]*\]\s*$/.test(l);
+      const firstContent = lines.find((l) => !isPureTag(l)) || lines[0];
+      // Server truncates titles >50 chars (research-routes.ts) — keep the
+      // "TEST: " prefix + 44 chars of content within budget so the carefully-
+      // chosen slice isn't clipped server-side.
+      title = 'TEST: ' + firstContent.slice(0, 44);
       description = firstContent.slice(0, 120);
+      // The "TEST: " prefix never matches the server's anchored [A-Z]+-\d+
+      // issue-key regex (TEST is followed by a space + colon, not a dash), so
+      // the run gets a unique research-<id> key and skips the (would-be fake)
+      // Jira knowledge-base ingest. forceNew avoids the threadExists dialog
+      // friction on repeat test runs — each Send testanalyse spawns a fresh
+      // thread with a timestamp suffix instead of nagging the user to confirm.
+      forceNew = true;
     } else {
       // Re-fetch fresh content from DOM
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
