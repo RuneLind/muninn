@@ -592,17 +592,18 @@ export function researchCardScript(): string {
 
     return pathLines + goal +
       'Use the hivemind list_peers tool (scope: "machine") to see which agents are online. ' +
-      'Candidate BUILD agents are peers whose working directory is a code repository under /Users/rune/source/nav/ (e.g. melosys-api-claude, melosys-web, melosys-trygdeavgift-beregning). ' +
-      (wantTest ? 'The candidate TEST agent is the peer working in the melosys-e2e-tests repo. ' : '') +
-      'Ignore peers that are muninn bots (cwd under .../muninn/bots/) and other non-implementer infra peers.\\n\\n' +
-      'Read the work plan to understand which repo/area it touches. Then recommend the SINGLE best BUILD agent' + (wantTest ? ' AND the TEST agent' : '') + ', weighing each candidate\\'s repo, current branch, and summary. Present:\\n' +
-      '- Recommended BUILD agent (peer id) with its repo + branch and a one-line reason\\n' +
-      (wantTest ? '- Recommended TEST agent (peer id) with its repo + branch\\n' : '') +
-      '- The other online coding-agent candidates as alternatives\\n\\n' +
-      'AVAILABILITY GUARD: if no online peer qualifies for a required role' + (wantTest ? ' (e.g. no agent in melosys-e2e-tests for the test role)' : '') + ', do NOT proceed — tell me exactly which role has no candidate online so I can start that agent first.\\n\\n' +
-      'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation and wait — I will confirm or name different agents. ' +
-      'When I confirm, use the delegate_task tool (NOT send_to_peer) once per role so each handoff is tracked under this dev run. Each call takes the params to (the peer id), role, and a message carrying the instructions: ' +
-      'delegate_task(to: <build peer>, role: "build", message: <point it at the work plan and instruct it to ' + handoffReviewInstruction() + '>)' +
+      'Candidate BUILD agents are peers whose cwd-basename is the name of an actual code repository (the common melosys repos are melosys-api, melosys-web, melosys-eessi, melosys-trygdeavgift-beregning, faktureringskomponenten — but any peer whose cwd is a real repo under /Users/rune/source/nav/ qualifies; the list above is examples, not exhaustive). ' +
+      (wantTest ? 'The candidate TEST agent is the peer whose cwd-basename is melosys-e2e-tests. ' : '') +
+      'Ignore generic / multi-repo / non-repo peers whose cwd-basename does NOT name a real repo (e.g. a "melosys-claude-code" or "claude" peer that sits above the repo level), muninn bots (cwd under .../muninn/bots/), and other infra peers — they do NOT qualify.\\n\\n' +
+      'Read the work plan to identify EVERY repo it touches (look in the Code Analysis / file-list section if present). ONE BUILD AGENT PER REPO: for each repo the plan touches, recommend the online peer whose cwd-basename equals that repo name — backend work goes to the melosys-api peer, frontend work goes to the melosys-web peer, never one peer doing work across repos. If MULTIPLE online peers share the same matching repo (e.g. two melosys-api sessions on different branches), pick the one whose current branch + summary is closest to this work plan; mention the others as alternatives. If the plan touches two repos, that is TWO build recommendations (and on Confirm, TWO delegate_task calls), not one. ' + (wantTest ? 'Also recommend ONE TEST agent in melosys-e2e-tests. ' : '') +
+      'Present, grouped by repo:\\n' +
+      '- For EACH touched repo: Recommended BUILD agent (peer id) — repo + branch + one-line reason (which slice of the plan it owns) + the files/changes from the plan that belong to THIS repo\\n' +
+      (wantTest ? '- Recommended TEST agent (peer id) — repo + branch\\n' : '') +
+      '- Other online coding-agent candidates as alternatives\\n\\n' +
+      'AVAILABILITY GUARD: if a repo the plan touches has NO matching peer online' + (wantTest ? ' — or no agent in melosys-e2e-tests for the test role' : '') + ', do NOT proceed and do NOT substitute a peer from a different repo. Tell me EXACTLY which repo has no agent online so I can start the right one.\\n\\n' +
+      'IMPORTANT: Do NOT message any agent yet. Stop after presenting your recommendation(s) and wait — I will confirm or name different agents. ' +
+      'When I confirm, use the delegate_task tool (NOT send_to_peer) ONCE PER recommended build agent (one per repo touched)' + (wantTest ? ' plus once for the test agent' : '') + ' so each handoff is tracked under this dev run. Each call takes the params to (the peer id), role, and a message SCOPED to that peer\\'s repo (use the per-repo file list you identified above; if the workplan does NOT cleanly split by repo, say so HERE before fanning out rather than guessing): ' +
+      'delegate_task(to: <build peer for repo X>, role: "build", message: <point it at the work plan, list ONLY the files/changes in repo X, and instruct it to ' + handoffReviewInstruction() + '>)' +
       (wantTest ? ' Then delegate_task(to: <test peer>, role: "test", message: <point it at the domain spec and instruct it to ' + testHandoffInstruction(specPath, planPath) + '>)' : '') +
       ' Then report back here what you sent and to whom.';
   }
@@ -648,8 +649,8 @@ export function researchCardScript(): string {
   function confirmHandoffPrompt(roles, planPath, specPath) {
     roles = roles || ['build'];
     var wantTest = roles.indexOf('test') !== -1;
-    return 'Confirmed — proceed with the handoff now using the delegate_task tool (NOT send_to_peer), once per role (each call takes the params to, role, and a message) so each handoff is tracked under this dev run:\\n' +
-      '- delegate_task(to: <recommended build agent>, role: "build", message: ...): the message points it at the work plan' + (planPath ? ' (' + planPath + ')' : '') + ' and instructs it to ' + handoffReviewInstruction() + '\\n' +
+    return 'Confirmed — proceed with the handoff now using the delegate_task tool (NOT send_to_peer) so each handoff is tracked under this dev run. ONE call per recommended BUILD agent (one per repo touched)' + (wantTest ? ' plus one call for the test agent' : '') + ', NEVER one peer doing work across repos. Use the per-repo file lists you produced in the recommendation step; if the workplan is ambiguous about which files belong to which repo, STOP and ask me before fanning out rather than guessing:\\n' +
+      '- For EACH recommended build agent: delegate_task(to: <that build peer>, role: "build", message: ...) — the message points it at the work plan' + (planPath ? ' (' + planPath + ')' : '') + ', lists ONLY the files/changes that belong to THAT peer\\'s repo, and instructs it to ' + handoffReviewInstruction() + '\\n' +
       (wantTest ? '- delegate_task(to: <recommended test agent>, role: "test", message: ...): the message points it at the domain spec' + (specPath ? ' (' + specPath + ')' : '') + ' and instructs it to ' + testHandoffInstruction(specPath, planPath) + '\\n' : '') +
       'Then report back here what you sent and to whom.';
   }

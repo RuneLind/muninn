@@ -95,10 +95,11 @@ export function buildReengagePrompt(ctx: ReengageContext): string {
   return 'The cross-repo e2e for this dev run came back RED — the acceptance criteria are NOT yet met, so the work needs another pass.\n\n' +
     (ctx.ciUrl ? 'Failed CI run: ' + ctx.ciUrl + '\n' : '') +
     (ctx.orchestrateMessage ? 'What the e2e agent reported:\n' + ctx.orchestrateMessage + '\n\n' : '\n') +
-    'Re-engage the BUILD agent' + (ctx.buildPeer ? ' (' + ctx.buildPeer + ')' : '') +
-    ' to fix it: use the delegate_task tool (NOT send_to_peer), role: "build". Hand it the failure context above plus the workplan/spec, and ask it to diagnose the e2e failure, implement the fix, and report back done. ' +
-    'PREFER the same build peer that did the original implementation so the fix lands on the same branch. ' +
-    'AVAILABILITY GUARD: if it is offline, pick another online build agent (or tell me which to start). ' +
+    'FIRST: read the failure above and decide WHICH REPO owns the failing code. The original run had this build peer: ' + (ctx.buildPeer ? ctx.buildPeer + ' (its cwd-basename is its repo).' : 'unknown (look at the prior handoff rows).') + ' If the original work spanned multiple repos, pick the peer whose repo matches the failure — DO NOT assume it is the most-recent peer. ' +
+    'Then re-engage that BUILD agent: use the delegate_task tool (NOT send_to_peer), role: "build". Hand it the failure context above plus the workplan/spec, and ask it to diagnose the e2e failure, implement the fix, and report back done. ' +
+    'PREFER the same build peer that did the original implementation for that repo so the fix lands on the same branch. ' +
+    'Delegate to ONE peer per turn. If the fix legitimately spans repos, delegate to the most-likely-owner first — the loop will catch the next red and re-engage the next repo if needed. Do NOT fan out to multiple peers in one turn (a non-replying peer wedges the rollup until the 6h stale-handoff sweep). Each delegate_task call must target ONE repo; never delegate work in repo X to a peer in repo Y. ' +
+    'AVAILABILITY GUARD: if NO peer in the matching repo is online, reply here with the missing repo name so I know which agent to start — do NOT substitute a peer from a different repo as a workaround. (The run will park building; that is the intended trade-off.) ' +
     'Then report back here what you sent and to whom.';
 }
 

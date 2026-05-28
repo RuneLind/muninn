@@ -11,13 +11,25 @@
     </header>
 
     <div id="not-jira" class="message hidden">
-      <p>Naviger til en Jira-sak for å sende til analyse.</p>
+      <p id="not-jira-msg">Naviger til en Jira-sak for å sende til analyse.</p>
+    </div>
+
+    <div id="test-task" class="hidden">
+      <p class="test-note">
+        Ingen Jira-sak åpen — send en <b>testoppgave</b> for å kjøre gjennom
+        hele løkka (analyse → spec → bygg → e2e) manuelt.
+        <b>Det finnes ingen Jira-sak for dette</b>; all kontekst står i teksten under.
+      </p>
+      <textarea id="test-text" rows="8" spellcheck="false"></textarea>
     </div>
 
     <div id="issue-info" class="hidden">
       <div class="issue-key" id="issue-key"></div>
       <div class="issue-title" id="issue-title"></div>
       <div class="issue-meta" id="issue-meta"></div>
+    </div>
+
+    <div id="selectors" class="hidden">
       <div class="user-selector" id="user-selector-row" style="display:none">
         <label for="user-select">Bruker:</label>
         <select id="user-select"></select>
