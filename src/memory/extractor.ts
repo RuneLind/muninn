@@ -6,6 +6,7 @@ import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { getLog } from "../logging.ts";
+import { fillTemplate } from "../utils/fill-template.ts";
 
 const log = getLog("memory");
 
@@ -50,9 +51,10 @@ Assistant replied: """
 """`;
 
 export function extractMemoryAsync(input: ExtractionInput, _config: Config, traceContext?: TraceContext): void {
-  const prompt = EXTRACTION_PROMPT
-    .replace("{USER_MESSAGE}", input.userMessage)
-    .replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
+  const prompt = fillTemplate(EXTRACTION_PROMPT, {
+    USER_MESSAGE: input.userMessage,
+    ASSISTANT_RESPONSE: input.assistantResponse,
+  });
 
   runHaikuExtraction<ExtractionResult>({
     spanName: "memory_extraction",

@@ -50,9 +50,15 @@ export function extractChannelPosts(text: string): { cleanText: string; posts: C
       return "";
     },
   );
-  // Second pass: incomplete tags (no closing tag — use rest of text as message)
+  // Second pass: incomplete tags (no closing tag — use rest of text as message).
+  // Anchor the opening tag to the start of a line, allowing leading whitespace
+  // (/m + ^\s*) so a prose mention of "<slack-post …>" mid-sentence isn't
+  // swallowed as a directive, while an indented tag — or one left with a leading
+  // space after pass 1 stripped a complete tag before it — is still rescued.
+  // No /g: the greedy [\s\S]* already runs to end-of-string, so there's only
+  // one match.
   cleanText = cleanText.replace(
-    /<slack-post\s+channel="([^"]+)">([\s\S]*)$/g,
+    /^\s*<slack-post\s+channel="([^"]+)">([\s\S]*)$/m,
     (_match, channel: string, message: string) => {
       const trimmed = message.trim();
       if (trimmed) {

@@ -6,6 +6,7 @@ import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { getLog } from "../logging.ts";
+import { fillTemplate } from "../utils/fill-template.ts";
 
 const log = getLog("scheduler", "detector");
 
@@ -66,10 +67,10 @@ export function extractScheduleAsync(
   _config: Config,
   traceContext?: TraceContext,
 ): void {
-  const prompt = DETECTION_PROMPT.replace(
-    "{USER_MESSAGE}",
-    input.userMessage,
-  ).replace("{ASSISTANT_RESPONSE}", input.assistantResponse);
+  const prompt = fillTemplate(DETECTION_PROMPT, {
+    USER_MESSAGE: input.userMessage,
+    ASSISTANT_RESPONSE: input.assistantResponse,
+  });
 
   runHaikuExtraction<DetectionResult>({
     spanName: "schedule_detection",

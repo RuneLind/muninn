@@ -3,6 +3,7 @@ import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { ReengageContext } from "./devloop-prompts.ts";
+import { fillTemplate } from "../utils/fill-template.ts";
 
 const log = getLog("hivemind", "devloop-classifier");
 
@@ -61,12 +62,12 @@ export async function classifyReengageRole(
     log.debug("reengage classifier: no e2e report for {bot}, defaulting to build", { botName: opts.botName });
     return "build";
   }
-  // Function replacements — the report is raw e2e text that can contain `$&`,
-  // `$\``, `${...}` etc., which a STRING replacement would interpret as special
-  // patterns and mangle (leaking scaffolding / dropping the placeholder).
-  const prompt = CLASSIFY_PROMPT
-    .replace("{CI}", () => ctx.ciUrl ?? "(not reported)")
-    .replace("{REPORT}", () => report);
+  // fillTemplate uses function replacers so `$`-patterns in the raw e2e report
+  // ($&, $`, $$ …) are inserted literally instead of mangling the prompt.
+  const prompt = fillTemplate(CLASSIFY_PROMPT, {
+    CI: ctx.ciUrl ?? "(not reported)",
+    REPORT: report,
+  });
   try {
     const haiku = await callHaiku(prompt, {
       source: "devloop-reengage-classify",
