@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { optionalEnvInt } from "../config.ts";
 
@@ -14,6 +14,23 @@ const STARTUP_MAX_WAIT_MS = 6_000;
 
 function brokerScript(): string {
   return process.env.HIVEMIND_BROKER_SCRIPT ?? DEFAULT_BROKER_SCRIPT;
+}
+
+/** Append-mode fd for the broker log, or undefined if file logging is disabled
+ *  (LOG_DIR=none) or the directory can't be created. */
+function openBrokerLogFd(): number | undefined {
+  const logDir = process.env.LOG_DIR ?? "./logs";
+  if (logDir === "none") return undefined;
+  try {
+    mkdirSync(logDir, { recursive: true });
+    return openSync(join(logDir, "hivemind-broker.log"), "a");
+  } catch (e) {
+    log.warn("Could not open broker log file in {logDir}: {error}", {
+      logDir,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return undefined;
+  }
 }
 
 export function brokerPort(): number {
@@ -57,8 +74,21 @@ export async function ensureBrokerRunning(): Promise<boolean> {
 
   log.info("Spawning broker daemon: bun {script}", { script });
   try {
-    const proc = Bun.spawn(["bun", script], { stdio: ["ignore", "ignore", "ignore"] });
+    // Redirect the detached broker's stdout/stderr to a log file so a crash
+    // after the /health window is diagnosable (the process outlives muninn, so
+    // the file — not proc.exited — is the durable record).
+    const logFd = openBrokerLogFd();
+    const proc = Bun.spawn(["bun", script], {
+      stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
+    });
     proc.unref();
+    // Best-effort: if the broker dies while muninn is still up, log it. (For a
+    // daemon that outlives muninn this never fires — the log file covers that.)
+    proc.exited
+      .then((code) => log.warn("Broker process exited with code {code}", { code }))
+      .catch(() => {});
+    // The child has its own dup of the fd; close our copy.
+    if (logFd !== undefined) closeSync(logFd);
   } catch (e) {
     log.warn("Failed to spawn broker: {error}", { error: e instanceof Error ? e.message : String(e) });
     return false;

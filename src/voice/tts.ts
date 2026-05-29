@@ -51,10 +51,14 @@ export async function synthesizeVoice(text: string): Promise<Uint8Array> {
       ["say", "-o", aiffPath, "-f", textPath],
       { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
     );
-    const sayExit = await say.exited;
+    // Drain stderr concurrently with exit — awaiting `exited` first can deadlock
+    // if the process fills the stderr pipe buffer before exiting.
+    const [sayStderr, sayExit] = await Promise.all([
+      new Response(say.stderr).text(),
+      say.exited,
+    ]);
     if (sayExit !== 0) {
-      const stderr = await new Response(say.stderr).text();
-      throw new Error(`say failed (exit ${sayExit}): ${stderr}`);
+      throw new Error(`say failed (exit ${sayExit}): ${sayStderr}`);
     }
 
     // Convert AIFF → OGG/Opus for Telegram
@@ -66,10 +70,12 @@ export async function synthesizeVoice(text: string): Promise<Uint8Array> {
       ],
       { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
     );
-    const ffmpegExit = await ffmpeg.exited;
+    const [ffmpegStderr, ffmpegExit] = await Promise.all([
+      new Response(ffmpeg.stderr).text(),
+      ffmpeg.exited,
+    ]);
     if (ffmpegExit !== 0) {
-      const stderr = await new Response(ffmpeg.stderr).text();
-      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${stderr}`);
+      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${ffmpegStderr}`);
     }
 
     // Read the OGG buffer

@@ -194,13 +194,19 @@ class SerenaManager {
       // Store so stopAll() can kill it
       instance.proc = indexProc;
 
-      const exitCode = await indexProc.exited;
+      // Drain stdout + stderr concurrently with exit — `serena project index` is
+      // chatty over a 300s run, and awaiting `exited` first deadlocks once either
+      // pipe buffer fills.
+      const [, indexStderr, exitCode] = await Promise.all([
+        new Response(indexProc.stdout).text(),
+        new Response(indexProc.stderr).text(),
+        indexProc.exited,
+      ]);
       instance.proc = undefined;
       instance.status = "stopped";
 
       if (exitCode !== 0) {
-        const stderr = await new Response(indexProc.stderr).text();
-        instance.error = `Index exited with code ${exitCode}: ${stderr.slice(0, 500)}`;
+        instance.error = `Index exited with code ${exitCode}: ${indexStderr.slice(0, 500)}`;
         log.error("Serena index {name} failed: {error}", { name, error: instance.error });
       } else {
         log.info("Serena {name} indexed successfully", { name });

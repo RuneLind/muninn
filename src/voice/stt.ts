@@ -20,10 +20,15 @@ export async function transcribeVoice(
       ["ffmpeg", "-i", oggPath, "-ar", "16000", "-ac", "1", "-y", wavPath],
       { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
     );
-    const ffmpegExit = await ffmpeg.exited;
+    // Drain stderr concurrently with exit — awaiting `exited` first can deadlock
+    // if ffmpeg fills the stderr pipe buffer before exiting (same as the whisper
+    // call below).
+    const [ffmpegStderr, ffmpegExit] = await Promise.all([
+      new Response(ffmpeg.stderr).text(),
+      ffmpeg.exited,
+    ]);
     if (ffmpegExit !== 0) {
-      const stderr = await new Response(ffmpeg.stderr).text();
-      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${stderr}`);
+      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${ffmpegStderr}`);
     }
 
     // Transcribe WAV → text
