@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildCustomAgents } from "./copilot-sdk.ts";
+import { buildCustomAgents, accumulateInputTokens } from "./copilot-sdk.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -110,5 +110,27 @@ describe("buildCustomAgents", () => {
     } finally {
       rmSync(botsDir, { recursive: true });
     }
+  });
+});
+
+describe("accumulateInputTokens", () => {
+  test("tracks the peak across turns, not the sum (cumulative context)", () => {
+    // A real agent loop: each turn's inputTokens is the full context resent that
+    // turn, so it monotonically grows. The total must be the last/biggest turn.
+    const turns = [1200, 1850, 2600]; // grows as tool results accumulate
+    let total = 0;
+    for (const t of turns) total = accumulateInputTokens(total, t);
+    expect(total).toBe(2600); // NOT 5650 (the old `+=` over-count)
+  });
+
+  test("is robust to an out-of-order smaller late event", () => {
+    let total = 0;
+    total = accumulateInputTokens(total, 3000);
+    total = accumulateInputTokens(total, 500); // smaller — must not lower the peak
+    expect(total).toBe(3000);
+  });
+
+  test("single turn returns that turn's tokens", () => {
+    expect(accumulateInputTokens(0, 900)).toBe(900);
   });
 });

@@ -8,6 +8,32 @@ type Subscriber = (event: ActivityEvent) => void;
 
 const MAX_EVENTS = 500;
 
+export interface ActivityStats {
+  messagesToday: number;
+  avgResponseTime: number;
+  totalCost: number;
+  totalEvents: number;
+}
+
+/** Pure stats reducer over an event buffer. `totalCost` is scoped to today's
+ *  events (not all-time) so the dashboard "cost today" figure doesn't grow
+ *  unbounded with the in-memory ring buffer. Extracted for testability. */
+export function computeStats(events: ActivityEvent[], todayStart: number): ActivityStats {
+  const todayEvents = events.filter((e) => e.timestamp >= todayStart);
+
+  const messagesToday = todayEvents.filter((e) => e.type === "message_in").length;
+
+  const responses = events.filter((e) => e.type === "message_out" && e.durationMs);
+  const avgResponseTime =
+    responses.length > 0
+      ? responses.reduce((sum, e) => sum + (e.durationMs || 0), 0) / responses.length
+      : 0;
+
+  const totalCost = todayEvents.reduce((sum, e) => sum + (e.costUsd || 0), 0);
+
+  return { messagesToday, avgResponseTime, totalCost, totalEvents: events.length };
+}
+
 class ActivityLog {
   private events: ActivityEvent[] = [];
   private subscribers = new Set<Subscriber>();
@@ -75,30 +101,8 @@ class ActivityLog {
     return () => this.subscribers.delete(fn);
   }
 
-  get stats() {
-    const now = Date.now();
-    const todayStart = new Date().setHours(0, 0, 0, 0);
-    const todayEvents = this.events.filter((e) => e.timestamp >= todayStart);
-
-    const messagesToday = todayEvents.filter(
-      (e) => e.type === "message_in",
-    ).length;
-
-    const responses = this.events.filter(
-      (e) => e.type === "message_out" && e.durationMs,
-    );
-    const avgResponseTime =
-      responses.length > 0
-        ? responses.reduce((sum, e) => sum + (e.durationMs || 0), 0) /
-          responses.length
-        : 0;
-
-    const totalCost = this.events.reduce(
-      (sum, e) => sum + (e.costUsd || 0),
-      0,
-    );
-
-    return { messagesToday, avgResponseTime, totalCost, totalEvents: this.events.length };
+  get stats(): ActivityStats {
+    return computeStats(this.events, new Date().setHours(0, 0, 0, 0));
   }
 }
 

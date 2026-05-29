@@ -120,7 +120,10 @@ export async function executeClaudePrompt(
 
     if (parsed) {
       const wallClockMs = performance.now() - wallStart;
-      const startupMs = wallClockMs - parsed.durationMs;
+      // Both terms are monotonic (performance.now), but durationMs comes from the
+      // child's clock and wallClockMs from ours, so a tiny cross-process measurement
+      // window can make the subtraction go slightly negative. Clamp to 0 — cosmetic.
+      const startupMs = Math.max(0, wallClockMs - parsed.durationMs);
       return { ...parsed, wallClockMs, startupMs };
     }
 
@@ -129,7 +132,7 @@ export async function executeClaudePrompt(
     log.warn("Falling back to legacy JSON parser ({lineCount} lines)", { botName: botConfig.name, lineCount: rawLines.length });
     const fallback = parseClaudeOutput(fullOutput);
     const wallClockMs = performance.now() - wallStart;
-    const startupMs = wallClockMs - fallback.durationMs;
+    const startupMs = Math.max(0, wallClockMs - fallback.durationMs);
     return { ...fallback, wallClockMs, startupMs };
   })();
 

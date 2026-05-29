@@ -59,6 +59,47 @@ describe("ChatState", () => {
     });
   });
 
+  describe("LRU eviction", () => {
+    test("a recently-accessed conversation survives eviction over an idle one", () => {
+      // Fill exactly to capacity.
+      const ids: string[] = [];
+      for (let i = 0; i < MAX_CONVERSATIONS; i++) {
+        ids.push(state.createConversation({
+          type: "telegram_dm", botName: "jarvis", userId: String(i), username: `user${i}`,
+        }).id);
+      }
+      const first = ids[0]!;
+      const second = ids[1]!;
+
+      // Touch `first` so it becomes most-recently-used; `second` stays idle.
+      expect(state.getConversation(first)).toBeDefined();
+
+      // One more creation forces a single eviction of the LRU entry.
+      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+
+      // `first` was touched → survives; `second` (now LRU) → evicted.
+      expect(state.getConversation(first)).toBeDefined();
+      expect(state.getConversation(second)).toBeUndefined();
+    });
+
+    test("addMessage touches the conversation so it is not evicted", () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MAX_CONVERSATIONS; i++) {
+        ids.push(state.createConversation({
+          type: "telegram_dm", botName: "jarvis", userId: String(i), username: `user${i}`,
+        }).id);
+      }
+      const oldest = ids[0]!;
+      state.addMessage(oldest, { id: "m1", timestamp: Date.now(), sender: "user", text: "hi" });
+
+      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+
+      // oldest was touched by addMessage → survives; ids[1] (now LRU) → evicted.
+      expect(state.getConversation(oldest)).toBeDefined();
+      expect(state.getConversation(ids[1]!)).toBeUndefined();
+    });
+  });
+
   describe("findOrCreateBotConversation", () => {
     test("refreshes a placeholder username on an existing conversation", async () => {
       const a = await state.findOrCreateBotConversation({ botName: "melosys", userId: "Rune-4" });

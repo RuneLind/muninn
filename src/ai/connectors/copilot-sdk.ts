@@ -15,6 +15,19 @@ import { discoverSerenaConfigs } from "../../serena/config.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
+/**
+ * Fold one turn's reported input-token count into the running total.
+ *
+ * Copilot's `assistant.usage.inputTokens` is the *cumulative* context for that
+ * turn (system prompt + conversation history + prior tool results), which grows
+ * each turn of the agent loop. Summing it across turns double-counts the resent
+ * context, so we track the peak instead — the largest turn IS the real total
+ * input. Mirrors claude-sdk.ts, which assigns (not accumulates) totalInputTokens.
+ */
+export function accumulateInputTokens(prevTotal: number, turnTokens: number): number {
+  return Math.max(prevTotal, turnTokens);
+}
+
 // Shared client — started once, stopped on process exit
 let client: CopilotClient | null = null;
 let clientStarting: Promise<void> | null = null;
@@ -177,7 +190,7 @@ export async function executePrompt(
 
       case "assistant.usage":
         lastTurnInputTokens = event.data.inputTokens ?? 0;
-        totalInputTokens += lastTurnInputTokens;
+        totalInputTokens = accumulateInputTokens(totalInputTokens, lastTurnInputTokens);
         totalOutputTokens += event.data.outputTokens ?? 0;
         totalCacheReadTokens += event.data.cacheReadTokens ?? 0;
         totalCacheCreationTokens += event.data.cacheWriteTokens ?? 0;

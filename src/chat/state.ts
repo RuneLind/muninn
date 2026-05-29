@@ -85,6 +85,26 @@ export class ChatState {
     }
   }
 
+  /** Evict the least-recently-used conversations until under MAX_CONVERSATIONS.
+   *  Map preserves insertion order and `touch()` re-inserts on access, so the
+   *  first key is always the LRU entry. */
+  private pruneOldest(): void {
+    while (this.conversations.size >= MAX_CONVERSATIONS) {
+      const oldest = this.conversations.keys().next().value;
+      if (!oldest) break;
+      this.conversations.delete(oldest);
+    }
+  }
+
+  /** Mark a conversation as most-recently-used by re-inserting it at the tail
+   *  of the Map (LRU ordering). No-op if the id is unknown. */
+  private touch(id: string): void {
+    const conv = this.conversations.get(id);
+    if (!conv) return;
+    this.conversations.delete(id);
+    this.conversations.set(id, conv);
+  }
+
   createConversation(params: {
     type: ConversationType;
     botName: string;
@@ -92,11 +112,7 @@ export class ChatState {
     username: string;
     channelName?: string;
   }): ChatConversation {
-    // Prune oldest conversations when limit exceeded
-    while (this.conversations.size >= MAX_CONVERSATIONS) {
-      const oldest = this.conversations.keys().next().value;
-      if (oldest) this.conversations.delete(oldest);
-    }
+    this.pruneOldest();
 
     const id = crypto.randomUUID();
     const conversation: ChatConversation = {
@@ -123,7 +139,9 @@ export class ChatState {
   }
 
   getConversation(id: string): ChatConversation | undefined {
-    return this.conversations.get(id);
+    const conv = this.conversations.get(id);
+    if (conv) this.touch(id);
+    return conv;
   }
 
   getConversations(): ChatConversation[] {
@@ -134,6 +152,7 @@ export class ChatState {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) return;
     conversation.messages.push(message);
+    this.touch(conversationId); // most-recently-active → last to be evicted
     this.publish({ type: "message", conversationId, message });
   }
 
@@ -358,13 +377,11 @@ export class ChatState {
       if (params.username && params.username !== "chat-user" && existing.username !== params.username) {
         existing.username = params.username;
       }
+      this.touch(id); // active conversation → last to be evicted
       return existing;
     }
 
-    while (this.conversations.size >= MAX_CONVERSATIONS) {
-      const oldest = this.conversations.keys().next().value;
-      if (oldest) this.conversations.delete(oldest);
-    }
+    this.pruneOldest();
     const conversation: ChatConversation = {
       id,
       type: "web",

@@ -6,7 +6,7 @@ import {
   getGoalsNeedingCheckin,
 } from "../db/goals.ts";
 import { getTasksDueNow } from "../db/scheduled-tasks.ts";
-import { runWatchers } from "../watchers/runner.ts";
+import { runWatchers, getDueWatchers } from "../watchers/runner.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
@@ -91,13 +91,18 @@ export async function waitForPendingTicks(timeoutMs: number): Promise<void> {
 async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig): Promise<void> {
   const botName = botConfig.name;
 
-  // Check if there's anything to do before creating a trace
+  // Check if there's anything to do before creating a trace. Watchers are the
+  // most failure-prone component, so fold due-watcher presence into hasWork too —
+  // a watcher-only tick still gets a trace (its primary debug surface). The
+  // resolved list is handed to runWatchers below to avoid a second DB round-trip.
   const dueTasks = await getTasksDueNow(botName);
   const goalReminders = await getGoalsNeedingReminder(24, botName);
   const staleGoals = await getGoalsNeedingCheckin(3, botName);
-  const hasWork = dueTasks.length > 0 || goalReminders.length > 0 || staleGoals.length > 0;
+  const dueWatchers = await getDueWatchers(botName);
+  const hasWork =
+    dueTasks.length > 0 || goalReminders.length > 0 || staleGoals.length > 0 || dueWatchers.length > 0;
 
-  // Only create a trace if something will actually run (watchers always checked)
+  // Only create a trace if something will actually run
   let t: Tracer | undefined;
   if (hasWork) {
     t = new Tracer("scheduler_tick", { botName, platform: "scheduler" });
@@ -125,8 +130,8 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
       t?.end("goal_checkins", { count: Math.min(staleGoals.length, 1) });
     }
 
-    // 4. Watchers (email, calendar, etc.)
-    await runWatchers(api, botConfig, t?.context);
+    // 4. Watchers (email, calendar, etc.) — reuse the already-resolved due list
+    await runWatchers(api, botConfig, t?.context, dueWatchers);
 
     t?.finish("ok");
   } catch (err) {
