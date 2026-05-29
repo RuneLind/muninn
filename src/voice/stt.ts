@@ -20,10 +20,15 @@ export async function transcribeVoice(
       ["ffmpeg", "-i", oggPath, "-ar", "16000", "-ac", "1", "-y", wavPath],
       { stdout: "ignore", stderr: "pipe", stdin: "ignore" },
     );
-    const ffmpegExit = await ffmpeg.exited;
+    // Drain stderr concurrently with exit — awaiting `exited` first can deadlock
+    // if ffmpeg fills the stderr pipe buffer before exiting (same as the whisper
+    // call below).
+    const [ffmpegStderr, ffmpegExit] = await Promise.all([
+      new Response(ffmpeg.stderr).text(),
+      ffmpeg.exited,
+    ]);
     if (ffmpegExit !== 0) {
-      const stderr = await new Response(ffmpeg.stderr).text();
-      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${stderr}`);
+      throw new Error(`ffmpeg failed (exit ${ffmpegExit}): ${ffmpegStderr}`);
     }
 
     // Transcribe WAV → text
@@ -36,13 +41,16 @@ export async function transcribeVoice(
       ],
       { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
     );
-    const [whisperStdout, whisperExit] = await Promise.all([
+    // Drain stdout AND stderr concurrently with exit — whisper-cli is verbose on
+    // stderr (ggml init, BLAS info, progress dots) and can fill the stderr pipe
+    // buffer before exiting, deadlocking the same way ffmpeg above would have.
+    const [whisperStdout, whisperStderr, whisperExit] = await Promise.all([
       new Response(whisper.stdout).text(),
+      new Response(whisper.stderr).text(),
       whisper.exited,
     ]);
     if (whisperExit !== 0) {
-      const stderr = await new Response(whisper.stderr).text();
-      throw new Error(`whisper-cli failed (exit ${whisperExit}): ${stderr}`);
+      throw new Error(`whisper-cli failed (exit ${whisperExit}): ${whisperStderr}`);
     }
 
     // Clean up whisper artifacts and whitespace

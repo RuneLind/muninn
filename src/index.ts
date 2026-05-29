@@ -137,6 +137,14 @@ app.all("/simulator", (c) => c.redirect("/chat", 301));
 // Start server — with WebSocket support for chat
 const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   port: config.dashboardPort,
+  // Bind loopback-only by default — the dashboard + chat expose MCP tools, logs,
+  // traces and full CRUD with no auth, so they must not be reachable from the LAN.
+  // Set DASHBOARD_HOST=0.0.0.0 to deliberately expose it (e.g. trusted home net).
+  // `||` (not `??`) so a blank `DASHBOARD_HOST=` in .env or docker-compose
+  // shorthand also falls through to the safe loopback default — empty-string
+  // hostname is undocumented in Bun and a future release could treat it as
+  // "bind everywhere", silently re-opening the very hole this default closes.
+  hostname: process.env.DASHBOARD_HOST || "127.0.0.1",
   idleTimeout: 255, // max value, needed for SSE connections
   fetch(req, server) {
     const url = new URL(req.url);
