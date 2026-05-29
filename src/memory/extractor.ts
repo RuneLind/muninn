@@ -69,10 +69,14 @@ export function extractMemoryAsync(input: ExtractionInput, _config: Config, trac
     log,
     traceContext,
     onResult: async (result, tracer) => {
-      if (!result.worth_remembering || !result.summary || !result.tags) {
+      // A memory worth keeping must have a summary, but tags are optional —
+      // gating on `!result.tags` silently dropped keepable memories whenever
+      // Haiku omitted the field. Default to [] instead. (mirrors goals/detector.ts)
+      if (!result.worth_remembering || !result.summary) {
         tracer?.finish("ok", { worthRemembering: false });
         return;
       }
+      const tags = result.tags ?? [];
 
       const embedding = await generateEmbedding(result.summary);
       if (!embedding) {
@@ -84,7 +88,7 @@ export function extractMemoryAsync(input: ExtractionInput, _config: Config, trac
         botName: input.botName,
         content: `User: ${input.userMessage}\nAssistant: ${input.assistantResponse}`,
         summary: result.summary,
-        tags: result.tags,
+        tags,
         sourceMessageId: input.sourceMessageId,
         embedding,
         scope: result.scope === 'shared' ? 'shared' : 'personal',
@@ -93,7 +97,7 @@ export function extractMemoryAsync(input: ExtractionInput, _config: Config, trac
       tracer?.finish("ok", {
         worthRemembering: true,
         summary: result.summary,
-        tags: result.tags,
+        tags,
         scope: result.scope ?? "personal",
       });
     },

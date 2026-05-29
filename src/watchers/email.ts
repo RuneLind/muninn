@@ -5,6 +5,15 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "email");
 
+// Gmail's `after:` filter is date-only — compute the date in Oslo (where the
+// user lives) so a run just after UTC-midnight doesn't query the wrong day.
+const OSLO_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Oslo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
 export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user. Important emails:
 - From real people (not automated marketing/newsletters)
 - Urgent or time-sensitive
@@ -42,15 +51,13 @@ If nothing worth notifying, return: []`;
   }
 }
 
-function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
+export function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
   const parts: string[] = ["is:unread"];
   if (filter) parts.push(filter);
   if (lastRunAt) {
-    const date = new Date(lastRunAt);
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, "0");
-    const dd = String(date.getDate()).padStart(2, "0");
-    parts.push(`after:${yyyy}/${mm}/${dd}`);
+    // en-CA → "YYYY-MM-DD" in Oslo TZ; Gmail's `after:` wants slashes.
+    const oslo = OSLO_DATE_FMT.format(new Date(lastRunAt)).replace(/-/g, "/");
+    parts.push(`after:${oslo}`);
   }
   return parts.join(" ");
 }

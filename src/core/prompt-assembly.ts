@@ -66,7 +66,9 @@ export async function assemblePrompt(params: AssemblePromptParams): Promise<Asse
     fullSystemPrompt += `\n\n## Channel Context\nRecent messages in the channel/thread (for context):\n${recentChannelMessages.join("\n")}`;
   }
 
-  savePromptSnapshot({ traceId: tracer.traceId, systemPrompt: fullSystemPrompt, userPrompt }).catch(() => {});
+  savePromptSnapshot({ traceId: tracer.traceId, systemPrompt: fullSystemPrompt, userPrompt }).catch((e) =>
+    log.debug("Failed to save prompt snapshot: {error}", { traceId: tracer.traceId, error: String(e) }),
+  );
   log.info("Prompt built in {ms}ms ({msgCount} msgs, {memCount} memories)", {
     ...logProps,
     ms: Math.round(tracer.summary().prompt_build ?? 0),

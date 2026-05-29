@@ -48,8 +48,12 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
         .map((g) => `- "${g.title}" (id: ${g.id})`)
         .join("\n");
     }
-  } catch {
-    // Non-critical
+  } catch (err) {
+    // Non-critical — detector still runs, just without completion matching.
+    log.debug("Failed to load active goals for completion matching: {error}", {
+      botName: input.botName,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   const prompt = buildPrompt(

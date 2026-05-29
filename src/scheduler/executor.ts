@@ -30,6 +30,8 @@ export interface SpawnHaikuOptions {
   botName?: string;
   timeoutMs?: number;
   model?: string;
+  /** Max output tokens for direct-SDK backends (anthropic). Ignored by the CLI spawn. */
+  maxTokens?: number;
 }
 
 export async function spawnHaiku(

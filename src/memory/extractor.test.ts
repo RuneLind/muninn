@@ -98,6 +98,59 @@ describe("extractMemoryAsync", () => {
     expect(saveCall.sourceMessageId).toBe("msg-1");
   });
 
+  test("saves a keepable memory even when tags are missing (defaults to [])", async () => {
+    mockCallHaiku.mockResolvedValueOnce({
+      result: JSON.stringify({
+        worth_remembering: true,
+        summary: "User lives in Oslo",
+        scope: "personal",
+        // no tags field
+      }),
+      inputTokens: 50,
+      outputTokens: 20,
+      model: "haiku",
+    });
+
+    extractMemoryAsync({
+      userId: "u1",
+      botName: "testbot",
+      userMessage: "I live in Oslo",
+      assistantResponse: "Got it!",
+    }, config);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockSaveMemory).toHaveBeenCalledTimes(1);
+    const saveCall = (mockSaveMemory.mock.calls[0] as any[])[0];
+    expect(saveCall.summary).toBe("User lives in Oslo");
+    expect(saveCall.tags).toEqual([]);
+  });
+
+  test("does not save when summary is missing even if worth_remembering", async () => {
+    mockCallHaiku.mockResolvedValueOnce({
+      result: JSON.stringify({
+        worth_remembering: true,
+        tags: ["x"],
+        scope: "personal",
+        // no summary
+      }),
+      inputTokens: 50,
+      outputTokens: 20,
+      model: "haiku",
+    });
+
+    extractMemoryAsync({
+      userId: "u1",
+      botName: "testbot",
+      userMessage: "test",
+      assistantResponse: "test",
+    }, config);
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockSaveMemory).not.toHaveBeenCalled();
+  });
+
   test("does not save when not worth remembering", async () => {
     mockCallHaiku.mockResolvedValueOnce({
       result: '{"worth_remembering": false}',
