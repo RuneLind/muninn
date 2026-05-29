@@ -27,6 +27,7 @@ interface DetectionResult {
   description?: string;
   deadline?: string; // ISO 8601 or null
   tags?: string[];
+  completed_goal_id?: string;
   completed_goal_title?: string;
 }
 
@@ -70,8 +71,12 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
     log,
     traceContext,
     onResult: async (result, tracer) => {
-      if (result.action === "completed" && result.completed_goal_title) {
-        await handleCompletion(input.userId, result.completed_goal_title, input.botName);
+      if (result.action === "completed" && (result.completed_goal_id || result.completed_goal_title)) {
+        await handleCompletion(
+          input.userId,
+          { id: result.completed_goal_id, title: result.completed_goal_title },
+          input.botName,
+        );
         tracer?.finish("ok", { action: "completed", title: result.completed_goal_title });
         return;
       }
@@ -100,6 +105,24 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
   });
 }
 
+/**
+ * Pick the active goal a completion refers to. Prefers an exact id match — the
+ * detector copies the id straight from the active-goals list in the prompt, so
+ * this closes exactly the right goal even when titles overlap. Falls back to a
+ * fuzzy title match for responses that omit the id.
+ */
+export function selectCompletedGoal<T extends { id: string; title: string }>(
+  goals: T[],
+  completed: { id?: string; title?: string },
+): T | undefined {
+  return (
+    goals.find((g) => completed.id != null && completed.id !== "" && g.id === completed.id) ??
+    (completed.title
+      ? goals.find((g) => fuzzyMatchGoalTitle(completed.title!, [g.title]) !== null)
+      : undefined)
+  );
+}
+
 /** Fuzzy match: find the goal whose title best matches (substring in either direction) */
 export function fuzzyMatchGoalTitle(
   completedTitle: string,
@@ -115,21 +138,17 @@ export function fuzzyMatchGoalTitle(
 
 async function handleCompletion(
   userId: string,
-  completedTitle: string,
+  completed: { id?: string; title?: string },
   botName: string,
 ): Promise<void> {
   const goals = await getActiveGoals(userId, botName);
-
-  // Fuzzy match: find the goal whose title best matches
-  const match = goals.find(
-    (g) => fuzzyMatchGoalTitle(completedTitle, [g.title]) !== null,
-  );
+  const match = selectCompletedGoal(goals, completed);
 
   if (match) {
     await updateGoalStatus(match.id, "completed");
     log.info("Goal completed: \"{title}\" (id: {goalId})", { botName, title: match.title, goalId: match.id });
   } else {
-    log.info("Goal completion detected for \"{title}\" but no matching active goal found", { botName, title: completedTitle });
+    log.info("Goal completion detected for \"{title}\" (id: {goalId}) but no matching active goal found", { botName, title: completed.title ?? "", goalId: completed.id ?? "" });
   }
 }
 
@@ -152,7 +171,7 @@ Respond with ONLY valid JSON (no markdown fences):
 or
 {"action": "new", "title": "Short goal title", "description": "Brief context", "deadline": "2025-03-15T00:00:00Z", "tags": ["work"]}
 or
-{"action": "completed", "completed_goal_title": "matching goal title"}
+{"action": "completed", "completed_goal_id": "<exact id copied from the active goals list above>", "completed_goal_title": "matching goal title"}
 
 If there's a deadline, use ISO 8601. If no clear deadline, omit it.
 

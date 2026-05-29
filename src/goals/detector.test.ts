@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildPrompt, fuzzyMatchGoalTitle } from "./detector.ts";
+import { buildPrompt, fuzzyMatchGoalTitle, selectCompletedGoal } from "./detector.ts";
 
 // ── fuzzyMatchGoalTitle ──────────────────────────────────────────────
 
@@ -69,6 +69,47 @@ describe("fuzzyMatchGoalTitle", () => {
   });
 });
 
+// ── selectCompletedGoal ──────────────────────────────────────────────
+
+describe("selectCompletedGoal", () => {
+  const goals = [
+    { id: "g-1", title: "Finish report" },
+    { id: "g-2", title: "Finish report draft" },
+    { id: "g-3", title: "Deploy API" },
+  ];
+
+  test("exact id match wins over an ambiguous title substring", () => {
+    // "Finish report" is a substring of both g-1 and g-2; the id disambiguates.
+    const match = selectCompletedGoal(goals, { id: "g-2", title: "Finish report" });
+    expect(match?.id).toBe("g-2");
+  });
+
+  test("falls back to fuzzy title when id is absent", () => {
+    const match = selectCompletedGoal(goals, { title: "Deploy API" });
+    expect(match?.id).toBe("g-3");
+  });
+
+  test("falls back to fuzzy title when id is unknown", () => {
+    const match = selectCompletedGoal(goals, { id: "does-not-exist", title: "Deploy API" });
+    expect(match?.id).toBe("g-3");
+  });
+
+  test("ignores empty-string id and uses title", () => {
+    const match = selectCompletedGoal(goals, { id: "", title: "Deploy API" });
+    expect(match?.id).toBe("g-3");
+  });
+
+  test("returns undefined when nothing matches", () => {
+    const match = selectCompletedGoal(goals, { id: "nope", title: "unrelated thing" });
+    expect(match).toBeUndefined();
+  });
+
+  test("returns undefined when both id and title are absent", () => {
+    const match = selectCompletedGoal(goals, {});
+    expect(match).toBeUndefined();
+  });
+});
+
 // ── buildPrompt ──────────────────────────────────────────────────────
 
 describe("buildPrompt", () => {
@@ -107,6 +148,11 @@ describe("buildPrompt", () => {
     expect(prompt).toContain('"action": "none"');
     expect(prompt).toContain('"action": "new"');
     expect(prompt).toContain('"action": "completed"');
+  });
+
+  test("completed action asks for the exact goal id", () => {
+    const prompt = buildPrompt("Hello", "Sure!", "");
+    expect(prompt).toContain("completed_goal_id");
   });
 
   test("mentions ISO 8601 for deadlines", () => {

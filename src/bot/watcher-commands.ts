@@ -7,6 +7,7 @@ import {
   toggleWatcher,
 } from "../db/watchers.ts";
 import { upsertUserSettings, getUserSettings } from "../db/user-settings.ts";
+import { escapeHtml } from "../format/markdown-core.ts";
 import type { WatcherType } from "../types.ts";
 
 const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal", "x"];
@@ -31,7 +32,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
         ? new Date(w.lastRunAt).toLocaleTimeString("en-GB", { timeZone: "Europe/Oslo" })
         : "never";
       const filter = (w.config as { filter?: string }).filter;
-      return `${status} <b>${w.name}</b> (${w.type}, every ${interval}min)\n    Last run: ${lastRun}${filter ? `\n    Filter: <code>${filter}</code>` : ""}\n    ID: <code>${w.id.slice(0, 8)}</code>`;
+      return `${status} <b>${escapeHtml(w.name)}</b> (${w.type}, every ${interval}min)\n    Last run: ${lastRun}${filter ? `\n    Filter: <code>${escapeHtml(filter)}</code>` : ""}\n    ID: <code>${w.id.slice(0, 8)}</code>`;
     });
 
     await ctx.reply(lines.join("\n\n"), { parse_mode: "HTML" });
@@ -56,7 +57,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     if (!VALID_TYPES.includes(normalizedType)) {
       await ctx.reply(
-        `Unknown watcher type: <code>${type}</code>\n\nValid types: ${VALID_TYPES.join(", ")}`,
+        `Unknown watcher type: <code>${escapeHtml(type)}</code>\n\nValid types: ${VALID_TYPES.join(", ")}`,
         { parse_mode: "HTML" },
       );
       return;
@@ -90,7 +91,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     };
     const interval = INTERVAL_LABELS[normalizedType] ?? "5 minutes";
     await ctx.reply(
-      `\u{2705} Watcher created: <b>${name}</b>\nRuns ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
+      `\u{2705} Watcher created: <b>${escapeHtml(name)}</b>\nRuns ${interval}.\nID: <code>${id.slice(0, 8)}</code>`,
       { parse_mode: "HTML" },
     );
   });
@@ -115,14 +116,14 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     );
 
     if (!match) {
-      await ctx.reply(`No watcher found matching: <code>${arg}</code>`, {
+      await ctx.reply(`No watcher found matching: <code>${escapeHtml(arg)}</code>`, {
         parse_mode: "HTML",
       });
       return;
     }
 
     await deleteWatcher(match.id);
-    await ctx.reply(`\u{1F5D1} Watcher removed: <b>${match.name}</b>`, {
+    await ctx.reply(`\u{1F5D1} Watcher removed: <b>${escapeHtml(match.name)}</b>`, {
       parse_mode: "HTML",
     });
   });

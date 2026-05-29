@@ -2,6 +2,7 @@ import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { getLog } from "../logging.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import { fillTemplate } from "../utils/fill-template.ts";
 
 const log = getLog("ai", "knowledge-decomposer");
 
@@ -60,7 +61,7 @@ interface RawResult {
 
 export async function decomposeQuestion(opts: DecomposeOptions): Promise<DecomposeResult> {
   const { question, botName, botDir, connector, haikuBackend } = opts;
-  const prompt = DECOMPOSE_PROMPT.replace("{QUESTION}", question);
+  const prompt = fillTemplate(DECOMPOSE_PROMPT, { QUESTION: question });
 
   const t0 = performance.now();
   let raw: string;
