@@ -19,16 +19,20 @@ describe("fillTemplate", () => {
     expect(fillTemplate("msg: {X}", { X: tricky })).toBe(`msg: ${tricky}`);
   });
 
-  test("a value containing the next slot is not re-substituted", () => {
-    // If {A}'s value contains the literal "{B}", it must survive verbatim.
-    expect(fillTemplate("{A}", { A: "look: {B}" })).toBe("look: {B}");
+  test("a value containing another key's slot is not re-substituted", () => {
+    // Cross-key safety: {A}'s value contains the literal "{B}", and B IS a key.
+    // Single-pass substitution must leave the injected {B} verbatim rather than
+    // letting the later key consume it.
+    expect(
+      fillTemplate("{A} | {B}", { A: "user typed {B}", B: "REAL_B" }),
+    ).toBe("user typed {B} | REAL_B");
   });
 
   test("leaves unknown slots untouched", () => {
     expect(fillTemplate("Hello {NAME}", {})).toBe("Hello {NAME}");
   });
 
-  test("only replaces the first occurrence of a slot", () => {
-    expect(fillTemplate("{X} and {X}", { X: "one" })).toBe("one and {X}");
+  test("replaces every occurrence of a slot in one pass", () => {
+    expect(fillTemplate("{X} and {X}", { X: "one" })).toBe("one and one");
   });
 });

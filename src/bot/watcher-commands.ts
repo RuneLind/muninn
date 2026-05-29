@@ -123,7 +123,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     }
 
     await deleteWatcher(match.id);
-    await ctx.reply(`\u{1F5D1} Watcher removed: <b>${match.name}</b>`, {
+    await ctx.reply(`\u{1F5D1} Watcher removed: <b>${escapeHtml(match.name)}</b>`, {
       parse_mode: "HTML",
     });
   });
