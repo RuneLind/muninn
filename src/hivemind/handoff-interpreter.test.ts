@@ -21,7 +21,10 @@ import {
   setFrontmatterStatus,
   flipSpecToVerified,
   interpretHandoffReply,
+  truncateHandoffMessage,
+  HANDOFF_LAST_MESSAGE_CAP,
 } from "./handoff-interpreter.ts";
+import { parseGithubRunUrl } from "./ci-conclusion.ts";
 import { shortRunId } from "./mcp-server.ts";
 
 setupTestDb();
@@ -57,6 +60,42 @@ describe("parseHandoffMarker", () => {
 
   test("a note marker is NOT a terminal marker (terminal-first parse depends on this)", () => {
     expect(parseHandoffMarker("<!-- note: discovery run:ab12cd34 -->")).toBeNull();
+  });
+});
+
+describe("truncateHandoffMessage", () => {
+  const CI_URL = "https://github.com/navikt/melosys-api/actions/runs/123456789";
+
+  test("short messages pass through unchanged", () => {
+    expect(truncateHandoffMessage("all done " + CI_URL)).toBe("all done " + CI_URL);
+  });
+
+  test("a CI URL within the cap survives plain truncation", () => {
+    const text = CI_URL + " ".repeat(HANDOFF_LAST_MESSAGE_CAP * 2);
+    const out = truncateHandoffMessage(text);
+    expect(out.length).toBe(HANDOFF_LAST_MESSAGE_CAP);
+    expect(parseGithubRunUrl(out)).not.toBeNull();
+  });
+
+  test("a CI URL PAST the cap is preserved (the green-gate stuck-at-verifying bug)", () => {
+    // The URL sits beyond char 2000 in a long handoff; naive slice(0,2000) would
+    // drop it and the green gate would never find it → run stuck at 'verifying'.
+    const text = "x".repeat(HANDOFF_LAST_MESSAGE_CAP + 500) + "\nCI run: " + CI_URL;
+    const naive = text.slice(0, HANDOFF_LAST_MESSAGE_CAP);
+    expect(parseGithubRunUrl(naive)).toBeNull(); // confirms the bug premise
+
+    const out = truncateHandoffMessage(text);
+    const parsed = parseGithubRunUrl(out);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.repo).toBe("navikt/melosys-api");
+    expect(parsed!.runId).toBe("123456789");
+  });
+
+  test("no URL anywhere → plain truncation to the cap", () => {
+    const text = "y".repeat(HANDOFF_LAST_MESSAGE_CAP + 100);
+    const out = truncateHandoffMessage(text);
+    expect(out.length).toBe(HANDOFF_LAST_MESSAGE_CAP);
+    expect(parseGithubRunUrl(out)).toBeNull();
   });
 });
 

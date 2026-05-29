@@ -135,6 +135,39 @@ test("listPeers returns broker response", async () => {
   await c.stop();
 });
 
+test("concurrent same-scope listPeers calls coalesce onto one in-flight request", async () => {
+  received.length = 0;
+  stub.setListPeersResponse([{
+    id: "peer-A", pid: 1, cwd: "/repo", git_root: "/repo", git_branch: "main", tty: null,
+    summary: "huginn", namespace: "private", agent_type: "claude-code",
+    registered_at: "2026-04-28T00:00:00Z", last_seen: "2026-04-28T00:00:00Z", connected: 1,
+  }]);
+
+  const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });
+  c.start();
+  await waitFor(() => c.isConnected ? true : null);
+
+  // Two calls fired back-to-back (no await between) must share one promise and one
+  // wire request — the second no longer rejects with "already in flight".
+  const a = c.listPeers("machine");
+  const b = c.listPeers("machine");
+  expect(b).toBe(a); // same in-flight promise object returned
+
+  const [ra, rb] = await Promise.all([a, b]);
+  expect(ra).toHaveLength(1);
+  expect(rb).toBe(ra);
+
+  const listReqs = received.filter((m) => m.type === "list_peers");
+  expect(listReqs).toHaveLength(1); // coalesced — only one request hit the broker
+
+  // After settling, a fresh call starts a new request (the slot is freed).
+  received.length = 0;
+  await c.listPeers("machine");
+  expect(received.filter((m) => m.type === "list_peers")).toHaveLength(1);
+
+  await c.stop();
+});
+
 test("sendMessage dispatches send_message to broker", async () => {
   received.length = 0;
   const c = new HivemindBotClient({ botName: "test-bot", namespace: "private", cwd: "/tmp", brokerPort: stub.port });

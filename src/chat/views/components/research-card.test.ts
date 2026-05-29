@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { researchCardScript } from "./research-card.ts";
+import { buildOrchestratePrompt as serverBuildOrchestratePrompt } from "../../../hivemind/devloop-prompts.ts";
 
 // research-card.ts only exports researchCardScript() — a browser-injectable JS string.
 // parseResearchContent is defined inside that string, NOT as a TS export.
@@ -190,6 +191,26 @@ describe("researchCardScript", () => {
     // The green gate keys on the CI conclusion — the reply must carry the run URL.
     expect(out).toContain("GitHub Actions run URL");
     expect(out).toContain("/abs/specs/u1/X-1.md");
+  });
+
+  test("buildOrchestratePrompt stays in SYNC with the server mirror (devloop-prompts.ts)", () => {
+    // The client copy (this JS-string builder) and the server copy
+    // (devloop-prompts.ts, used by the 6a auto-orchestrate turn) are flagged
+    // "KEEP IN SYNC" — an auto-fired verify must behave identically to the
+    // user-clicked one. This pins them so a drift in either fails loudly.
+    const script = researchCardScript();
+    const clientFn = new Function(script + "\nreturn buildOrchestratePrompt;")() as (
+      specPath: string,
+      planPath: string,
+    ) => string;
+
+    for (const specPath of ["/abs/specs/u1/X-1.md", ""]) {
+      // The server builder ignores planPath (only the spec path is referenced),
+      // so the client output for any planPath must equal the server output.
+      const client = clientFn(specPath, "/abs/reports/u1/X-1.md");
+      const server = serverBuildOrchestratePrompt(specPath);
+      expect(client).toBe(server);
+    }
   });
 
   test("the orchestrate confirm renders only when parked at ready_to_verify with no orchestrate handoff yet", () => {

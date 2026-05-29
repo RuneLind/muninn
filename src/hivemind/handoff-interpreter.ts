@@ -74,6 +74,30 @@ export function verdictToHandoffStatus(v: HandoffVerdict): "done" | "failed" {
   return v === "done" || v === "green" ? "done" : "failed";
 }
 
+/** How much of a peer reply we persist as the handoff's `last_message`. The green
+ *  gate reads the CI run URL back out of this stored text (`parseGithubRunUrl`),
+ *  so the truncation must NOT drop a URL that sits past the cap — see
+ *  `truncateHandoffMessage`. */
+export const HANDOFF_LAST_MESSAGE_CAP = 2000;
+
+/**
+ * Truncate a peer reply to `cap` chars for storage as `last_message`, but PRESERVE
+ * a GitHub CI run URL that sits past the cap. A long orchestrate handoff whose run
+ * URL is beyond char 2000 would otherwise lose it on truncation; the green gate
+ * later reads `last_message` back, finds no URL, and parks the run at `verifying`
+ * forever. We parse the URL out of the FULL text first and append it to the slice
+ * when the slice itself doesn't already contain one. Pure — for tests.
+ */
+export function truncateHandoffMessage(text: string, cap = HANDOFF_LAST_MESSAGE_CAP): string {
+  if (text.length <= cap) return text;
+  const slice = text.slice(0, cap);
+  if (parseGithubRunUrl(slice)) return slice; // URL survived the cut — nothing to do.
+  const parsed = parseGithubRunUrl(text);
+  if (!parsed) return slice; // no URL anywhere — plain truncation is fine.
+  const url = `https://github.com/${parsed.repo}/actions/runs/${parsed.runId}`;
+  return `${slice}\n${url}`;
+}
+
 export interface ParsedNote {
   kind: DevRunEventKind;
   /** The 8-hex (give or take) run-id prefix the peer echoed from delegate_task. */
@@ -218,7 +242,7 @@ export async function interpretHandoffReply(args: {
     runId: run.id,
     peerName: args.peerName,
     status: handoffStatus,
-    lastMessage: args.text.slice(0, 2000),
+    lastMessage: truncateHandoffMessage(args.text),
   });
   if (updated === 0) {
     log.warn(

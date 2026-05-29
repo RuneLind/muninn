@@ -153,6 +153,12 @@ export class HivemindRouter {
     // radius of that race from "default-user only" to any user. Rare for the
     // single-primary-user bots we run today; the real fix is per-turn
     // correlation tokens (bind threadId per MCP session) — see CLAUDE.md.
+    // TODO(multi-user-per-bot): this last-write-wins gap is a real cross-user
+    // routing/confidentiality issue ONLY when one bot serves multiple distinct
+    // users who talk to the same peer concurrently. It does NOT bite the deployed
+    // single-primary-user bots. Close it via the per-turn correlation tokens
+    // above before onboarding any multi-user-per-bot deployment. (Doc-only; no
+    // behavior change here.)
     let thread: Awaited<ReturnType<typeof getThreadById>> = null;
 
     // Precise path first: if the reply echoed a token, resolve it against the

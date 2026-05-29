@@ -518,12 +518,14 @@ export async function runDelegateTask(
     await registry.listPeers("machine");
     peerName = registry.peerNameFor(to);
   }
+  let peerNameUnresolved = false;
   if (!peerName) {
     log.warn(
       "delegate_task: no cwd cache for peer {to} after refresh — handoff peer_name falls back to the id, which won't match the inbound reply name (the run won't auto-roll-up)",
       { botName, to, run: run.id },
     );
     peerName = to;
+    peerNameUnresolved = true;
   }
   try {
     await insertHandoff({ runId: run.id, peerName, role, peerId: to, correlationToken: correlationId });
@@ -536,6 +538,17 @@ export async function runDelegateTask(
     return {
       text: `Task delegated to ${peerName} (${to}) as ${role}, but recording the handoff failed (see logs). The peer was still messaged.`,
       isError: false,
+    };
+  }
+
+  if (peerNameUnresolved) {
+    // The handoff was recorded against the peer's raw UUID, which the inbound
+    // reply (named by cwd-basename) will NEVER match — the (run_id, peer_name)
+    // join will miss and the run will stick at this role forever. Don't report
+    // optimistic success: tell the bot to warm the cwd cache and re-delegate.
+    return {
+      text: `Message sent to ${to} as ${role}, BUT the peer's stable name (cwd-basename) is not yet known, so the handoff was recorded under the raw id and the dev run ${run.id} will NOT auto-roll-up when the peer replies. Run the list_peers tool (scope: "machine") to warm the peer cache, then call delegate_task again so the handoff records under the correct peer_name.`,
+      isError: true,
     };
   }
 
