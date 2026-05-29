@@ -73,6 +73,12 @@ describe("messages", () => {
     expect(messages[0]!.text).toBe("bot1 msg");
   });
 
+  test("getRecentMessages throws when threadId given but botName missing", async () => {
+    await expect(getRecentMessages("u1", 10, undefined, "some-thread-id")).rejects.toThrow(
+      /botName is required when threadId is provided/,
+    );
+  });
+
   test("getRecentMessages returns all bots when botName not specified", async () => {
     await saveMessage(makeMessage({ userId: "u1", botName: "bot1", content: "bot1 msg" }));
     await saveMessage(makeMessage({ userId: "u1", botName: "bot2", content: "bot2 msg" }));

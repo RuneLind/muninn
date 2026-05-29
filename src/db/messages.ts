@@ -47,12 +47,15 @@ export async function getRecentMessages(
 
   let rows;
   if (threadId) {
+    if (!botName) {
+      throw new Error("getRecentMessages: botName is required when threadId is provided");
+    }
     // Thread-scoped: only include pre-migration messages (thread_id IS NULL) for the "main"
     // thread — other threads should only see their own messages.
     rows = await sql`
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
-      WHERE user_id = ${userId} AND bot_name = ${botName!}
+      WHERE user_id = ${userId} AND bot_name = ${botName}
         AND (
           thread_id = ${threadId}
           OR (thread_id IS NULL AND EXISTS (

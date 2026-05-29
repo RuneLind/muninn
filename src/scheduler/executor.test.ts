@@ -9,7 +9,32 @@ mock.module("../db/client.ts", () => ({
   },
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS } = await import("./executor.ts");
+const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson } = await import("./executor.ts");
+
+describe("parseHaikuJson", () => {
+  test("parses valid JSON", () => {
+    expect(parseHaikuJson('{"result":"ok"}')).toEqual({ result: "ok" });
+  });
+
+  test("throws descriptive error with stdout preview on invalid JSON", () => {
+    expect(() => parseHaikuJson("not json at all")).toThrow(
+      /Failed to parse Haiku JSON output:.*not json at all/,
+    );
+  });
+
+  test("truncates the stdout preview to 300 chars", () => {
+    const long = "x".repeat(1000);
+    try {
+      parseHaikuJson(long);
+      throw new Error("expected parseHaikuJson to throw");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // The preview slice must not contain the full 1000-char payload.
+      expect(msg).not.toContain("x".repeat(301));
+      expect(msg).toContain("x".repeat(300));
+    }
+  });
+});
 
 describe("spawnHaiku timeout", () => {
   test("HAIKU_TIMEOUT_MS defaults to 60s", () => {

@@ -23,6 +23,21 @@ export const HAIKU_TIMEOUT_MS = 60_000;
 
 export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
+/**
+ * Parse Haiku stdout as JSON, throwing a descriptive error (including a stdout
+ * preview) on failure. Mirrors the X watcher's wrap so an unparseable Haiku
+ * response surfaces a useful message instead of a bare "Watcher failed".
+ */
+export function parseHaikuJson(stdout: string): any {
+  try {
+    return JSON.parse(stdout);
+  } catch (err) {
+    throw new Error(
+      `Failed to parse Haiku JSON output: ${err instanceof Error ? err.message : String(err)} — stdout: ${stdout.slice(0, 300)}`,
+    );
+  }
+}
+
 export interface SpawnHaikuOptions {
   source: string;
   entrypoint?: string;
@@ -87,7 +102,7 @@ export async function spawnHaiku(
     }
 
     const stdout = await stdoutPromise;
-    const parsed = JSON.parse(stdout);
+    const parsed = parseHaikuJson(stdout);
 
     const inputTokens = parsed.usage
       ? (parsed.usage.input_tokens ?? 0)
