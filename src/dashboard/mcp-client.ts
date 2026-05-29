@@ -200,7 +200,3 @@ export async function disconnectAll(): Promise<void> {
     connections.delete(key);
   }
 }
-
-export function getActiveConnections(): string[] {
-  return Array.from(connections.keys());
-}

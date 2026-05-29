@@ -6,9 +6,13 @@
 
 | File | Role |
 |---|---|
-| `index.ts` | Bolt app setup, all event handlers, thread tracking, `makePostToChannel`, context fetching |
+| `index.ts` | Bolt app setup, all four event handlers, thread tracking wiring, context fetching |
 | `handler.ts` | Central message pipeline: auth → prompt → Claude → extract posts → format → send |
 | `slack-format.ts` | Converts Claude markdown to Slack mrkdwn (different syntax!) |
+| `cache.ts` | User-identity + channel-ID caches; `resolveSlackUser`, `resolveChannelId`, `makePostToChannel` |
+| `message-fetcher.ts` | `fetchChannelMessages` / `fetchThreadMessages` — recent context for @mentions and threads |
+| `registry.ts` | Global bot-name → Bolt `App` registry, used by the watcher runner for proactive posting |
+| `thread-tracker.ts` | In-memory tracker of threads the bot has replied in (24h TTL) for re-tag-free follow-ups |
 
 ## Four Handler Paths
 

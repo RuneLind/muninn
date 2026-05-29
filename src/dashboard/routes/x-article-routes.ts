@@ -5,12 +5,34 @@ import { getLog } from "../../logging.ts";
 import { renderXArticlePage } from "../views/x-article-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeJob } from "../../x-article/state.ts";
 import { summarizeArticle } from "../../x-article/summarizer.ts";
-import { discoverAllBots } from "../../bots/config.ts";
-import { knowledgeApiHandler } from "./knowledge-api-client.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 
 const XA_COLLECTION = "x-articles";
+
+interface XaDocumentMeta { id: string; url?: string }
+
+async function findExistingByUrl(
+  baseUrl: string,
+  url: string,
+): Promise<XaDocumentMeta | null> {
+  try {
+    const data = await fetchKnowledgeApi(
+      baseUrl,
+      `/api/collection/${XA_COLLECTION}/documents`,
+      { timeoutMs: 10000 },
+    );
+    const docs = (data?.documents ?? []) as XaDocumentMeta[];
+    return docs.find((d) => d.url === url) ?? null;
+  } catch (err) {
+    log.warn("X article duplicate check failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 export function registerXArticleRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
@@ -47,15 +69,29 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       return c.json({ error: "Missing required fields: url, article_id, article_text" }, 400);
     }
 
+    const existing = await findExistingByUrl(KNOWLEDGE_API_URL, url);
+    if (existing) {
+      log.info("X article duplicate detected for {url}: {docId}", {
+        url,
+        docId: existing.id,
+      });
+      return c.json({
+        duplicate: true,
+        document_id: existing.id,
+        existing_url: existing.url,
+        dashboard_url: `/x-articles?doc=${encodeURIComponent(existing.id)}&duplicate=1`,
+      });
+    }
+
     const jobId = createJob(article_id, title || url, url, author || "unknown");
 
-    const bots = discoverAllBots();
-    if (bots.length === 0) {
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
 
     // Fire and forget — background summarization
-    summarizeArticle(jobId, article_id, title || url, url, author || "unknown", article_text, config, bots[0]!).catch((err) => {
+    summarizeArticle(jobId, article_id, title || url, url, author || "unknown", article_text, config, summarizerBot).catch((err) => {
       log.error("X article summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 

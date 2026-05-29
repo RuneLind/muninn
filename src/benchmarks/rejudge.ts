@@ -24,7 +24,6 @@ import {
   getBenchmarkRun,
   saveBenchmarkRun,
   completeBenchmarkRun,
-  listRejudgeChildren,
   type BenchmarkRunRow,
 } from "../db/benchmark-runs.ts";
 
@@ -317,37 +316,5 @@ export async function rejudgeCandidate(
     meanHitRate: doneHits.length > 0 ? mean : null,
     stddevHitRate: doneHits.length > 0 ? stddev : null,
     totalCostUsd,
-  };
-}
-
-/**
- * Aggregate a parent row + its re-judge children into a single hit-rate
- * summary (mean ± stddev). Used by the detail page to show "what does
- * this cell actually score after averaging?".
- */
-export async function summariseRun(parentRunId: string): Promise<{
-  parent: BenchmarkRunRow;
-  children: BenchmarkRunRow[];
-  /** All successful hit rates including the parent. */
-  allHitRates: number[];
-  meanHitRate: number | null;
-  stddevHitRate: number | null;
-}> {
-  const parent = await getBenchmarkRun(parentRunId);
-  if (!parent) throw new Error(`Run not found: ${parentRunId}`);
-  const children = await listRejudgeChildren(parentRunId);
-
-  const hits: number[] = [];
-  if (parent.status === "done" && parent.hitRate !== null) hits.push(parent.hitRate);
-  for (const c of children) {
-    if (c.status === "done" && c.hitRate !== null) hits.push(c.hitRate);
-  }
-  const { mean, stddev } = meanStddev(hits);
-  return {
-    parent,
-    children,
-    allHitRates: hits,
-    meanHitRate: hits.length > 0 ? mean : null,
-    stddevHitRate: hits.length > 0 ? stddev : null,
   };
 }

@@ -5,7 +5,7 @@ import { getLog } from "../../logging.ts";
 import { renderYouTubePage } from "../views/youtube-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
 
 const log = getLog("dashboard");
@@ -90,13 +90,13 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
 
     const jobId = createJob(video_id, title || url, url);
 
-    const bots = discoverAllBots();
-    if (bots.length === 0) {
+    const summarizerBot = resolveSummarizerBot(discoverAllBots());
+    if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
 
     // Fire and forget — background summarization
-    summarizeVideo(jobId, video_id, title || url, url, config, bots[0]!).catch((err) => {
+    summarizeVideo(jobId, video_id, title || url, url, config, summarizerBot).catch((err) => {
       log.error("YouTube summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 

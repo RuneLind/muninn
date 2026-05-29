@@ -339,6 +339,35 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
   }));
 }
 
+/** Cascade-delete a thread's memories → messages → thread row within a tx, then
+ *  re-activate the "main" thread if the deleted one was active. The FK from
+ *  memories → messages has no ON DELETE cascade, so the order matters. */
+async function cascadeDeleteThread(
+  tx: Sql,
+  threadId: string,
+  userId: string,
+  botName: string,
+  wasActive: boolean,
+): Promise<void> {
+  // Cascade: memories → messages → thread
+  await tx`
+    DELETE FROM memories
+    WHERE source_message_id IN (SELECT id FROM messages WHERE thread_id = ${threadId})
+  `;
+  await tx`DELETE FROM messages WHERE thread_id = ${threadId}`;
+  await tx`DELETE FROM threads WHERE id = ${threadId}`;
+
+  // If deleted thread was active, activate main thread within the same transaction
+  if (wasActive) {
+    await tx`
+      INSERT INTO threads (user_id, bot_name, name, is_active)
+      VALUES (${userId}, ${botName}, 'main', true)
+      ON CONFLICT (user_id, bot_name, name) DO UPDATE
+        SET is_active = true
+    `;
+  }
+}
+
 /** Delete a thread by name, including its messages and associated memories.
  *  Cannot delete the "main" thread. If the deleted thread was active, switches to main. */
 export async function deleteThread(userId: string, botName: string, name: string): Promise<boolean> {
@@ -360,24 +389,7 @@ export async function deleteThread(userId: string, botName: string, name: string
 
     if (!target) return false;
 
-    // Cascade: memories → messages → thread
-    await tx`
-      DELETE FROM memories
-      WHERE source_message_id IN (SELECT id FROM messages WHERE thread_id = ${target.id})
-    `;
-    await tx`DELETE FROM messages WHERE thread_id = ${target.id}`;
-    await tx`DELETE FROM threads WHERE id = ${target.id}`;
-
-    // If deleted thread was active, activate main thread within the same transaction
-    if (target.is_active) {
-      await tx`
-        INSERT INTO threads (user_id, bot_name, name, is_active)
-        VALUES (${userId}, ${botName}, 'main', true)
-        ON CONFLICT (user_id, bot_name, name) DO UPDATE
-          SET is_active = true
-        RETURNING id
-      `;
-    }
+    await cascadeDeleteThread(tx, target.id as string, userId, botName, target.is_active as boolean);
 
     return true;
   });
@@ -400,27 +412,7 @@ export async function deleteThreadById(threadId: string): Promise<Thread | null>
 
     const thread = rowToThread(target);
 
-    // Delete memories linked to messages in this thread (FK has no ON DELETE cascade)
-    await tx`
-      DELETE FROM memories
-      WHERE source_message_id IN (SELECT id FROM messages WHERE thread_id = ${threadId})
-    `;
-
-    // Delete messages in the thread
-    await tx`DELETE FROM messages WHERE thread_id = ${threadId}`;
-
-    // Delete the thread itself
-    await tx`DELETE FROM threads WHERE id = ${threadId}`;
-
-    // If deleted thread was active, activate main thread
-    if (target.is_active) {
-      await tx`
-        INSERT INTO threads (user_id, bot_name, name, is_active)
-        VALUES (${thread.userId}, ${thread.botName}, 'main', true)
-        ON CONFLICT (user_id, bot_name, name) DO UPDATE
-          SET is_active = true
-      `;
-    }
+    await cascadeDeleteThread(tx, threadId, thread.userId, thread.botName, target.is_active as boolean);
 
     return thread;
   });

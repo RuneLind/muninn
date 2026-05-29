@@ -228,6 +228,27 @@ export function discoverAllBots(): BotConfig[] {
 }
 
 /**
+ * Picks the bot used for backend summarization jobs (YouTube / X article).
+ * Honors the `SUMMARIZER_BOT` env var (matched by name, case-insensitive);
+ * falls back to the first discovered bot when unset or unmatched. The chosen
+ * bot's config decides the model + timeout for these CLI-only jobs, so without
+ * this knob the model silently depends on bot-folder directory order.
+ */
+export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
+  if (bots.length === 0) return undefined;
+  const wanted = process.env.SUMMARIZER_BOT?.trim().toLowerCase();
+  if (wanted) {
+    const match = bots.find((b) => b.name.toLowerCase() === wanted);
+    if (match) return match;
+    log.warn("SUMMARIZER_BOT=\"{wanted}\" not found among discovered bots — using {fallback}", {
+      wanted,
+      fallback: bots[0]!.name,
+    });
+  }
+  return bots[0];
+}
+
+/**
  * Discovers bots that have both a CLAUDE.md and at least one platform token
  * (Telegram or Slack). Used for starting actual bot instances.
  */
