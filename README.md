@@ -86,6 +86,7 @@ graph LR
 |---|---|---|---|
 | `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
+| `DASHBOARD_HOST` | No | `127.0.0.1` | Dashboard/chat bind address. Defaults to loopback because the dashboard exposes MCP tools, logs, traces, and full CRUD with **no authentication**. Set `0.0.0.0` to deliberately expose on the LAN (trusted home network) — required when running under Docker, where the container's network is the trust boundary (docker-compose sets it). |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout in ms |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | Path to whisper-cpp model file |

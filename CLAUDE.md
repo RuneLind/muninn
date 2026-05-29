@@ -167,6 +167,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `TELEGRAM_ALLOWED_USER_IDS_<NAME>` | Yes (per bot) | — | Comma-separated Telegram user IDs (e.g. `TELEGRAM_ALLOWED_USER_IDS_JARVIS`) |
 | `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
+| `DASHBOARD_HOST` | No | `127.0.0.1` | Dashboard/chat bind address. Defaults to loopback (the dashboard has no auth and exposes MCP tools + logs + traces + full CRUD). Set `0.0.0.0` to expose on the LAN; docker-compose already sets it inside the container. |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout (ms) |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
 | `WHISPER_MODEL_PATH` | No | `./models/ggml-base.en.bin` | whisper-cpp model file |

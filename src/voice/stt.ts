@@ -41,13 +41,16 @@ export async function transcribeVoice(
       ],
       { stdout: "pipe", stderr: "pipe", stdin: "ignore" },
     );
-    const [whisperStdout, whisperExit] = await Promise.all([
+    // Drain stdout AND stderr concurrently with exit — whisper-cli is verbose on
+    // stderr (ggml init, BLAS info, progress dots) and can fill the stderr pipe
+    // buffer before exiting, deadlocking the same way ffmpeg above would have.
+    const [whisperStdout, whisperStderr, whisperExit] = await Promise.all([
       new Response(whisper.stdout).text(),
+      new Response(whisper.stderr).text(),
       whisper.exited,
     ]);
     if (whisperExit !== 0) {
-      const stderr = await new Response(whisper.stderr).text();
-      throw new Error(`whisper-cli failed (exit ${whisperExit}): ${stderr}`);
+      throw new Error(`whisper-cli failed (exit ${whisperExit}): ${whisperStderr}`);
     }
 
     // Clean up whisper artifacts and whitespace

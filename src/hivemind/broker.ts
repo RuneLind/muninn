@@ -17,9 +17,11 @@ function brokerScript(): string {
 }
 
 /** Append-mode fd for the broker log, or undefined if file logging is disabled
- *  (LOG_DIR=none) or the directory can't be created. */
+ *  (LOG_DIR=none) or the directory can't be created. `||` (not `??`) so a blank
+ *  `LOG_DIR=` falls through to the default — otherwise `join("", "hivemind-
+ *  broker.log")` would land the log in the muninn process cwd. */
 function openBrokerLogFd(): number | undefined {
-  const logDir = process.env.LOG_DIR ?? "./logs";
+  const logDir = process.env.LOG_DIR || "./logs";
   if (logDir === "none") return undefined;
   try {
     mkdirSync(logDir, { recursive: true });
@@ -73,11 +75,15 @@ export async function ensureBrokerRunning(): Promise<boolean> {
   }
 
   log.info("Spawning broker daemon: bun {script}", { script });
+  // Redirect the detached broker's stdout/stderr to a log file so a crash after
+  // the /health window is diagnosable (the process outlives muninn, so the file
+  // — not proc.exited — is the durable record). logFd is declared outside the
+  // try so the `finally` can close it whether spawn succeeds or throws (a
+  // spawn failure mid-try would otherwise leak the fd, and repeated retries
+  // would compound the leak).
+  let logFd: number | undefined;
   try {
-    // Redirect the detached broker's stdout/stderr to a log file so a crash
-    // after the /health window is diagnosable (the process outlives muninn, so
-    // the file — not proc.exited — is the durable record).
-    const logFd = openBrokerLogFd();
+    logFd = openBrokerLogFd();
     const proc = Bun.spawn(["bun", script], {
       stdio: ["ignore", logFd ?? "ignore", logFd ?? "ignore"],
     });
@@ -87,11 +93,16 @@ export async function ensureBrokerRunning(): Promise<boolean> {
     proc.exited
       .then((code) => log.warn("Broker process exited with code {code}", { code }))
       .catch(() => {});
-    // The child has its own dup of the fd; close our copy.
-    if (logFd !== undefined) closeSync(logFd);
   } catch (e) {
     log.warn("Failed to spawn broker: {error}", { error: e instanceof Error ? e.message : String(e) });
     return false;
+  } finally {
+    // The child has its own dup of the fd; close our copy. Wrapped in a
+    // best-effort try because a closeSync failure (e.g. EIO on a network FS)
+    // shouldn't fail the whole startup after the broker is already running.
+    if (logFd !== undefined) {
+      try { closeSync(logFd); } catch { /* best-effort */ }
+    }
   }
 
   const deadline = Date.now() + STARTUP_MAX_WAIT_MS;

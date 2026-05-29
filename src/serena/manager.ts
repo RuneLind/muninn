@@ -202,14 +202,24 @@ class SerenaManager {
         new Response(indexProc.stderr).text(),
         indexProc.exited,
       ]);
-      instance.proc = undefined;
-      instance.status = "stopped";
+      // Guard the post-drain writes against a concurrent stopAll() / stop()
+      // that already moved the instance to 'stopped' (or 'error') and may have
+      // cleared `instance.error` intentionally. If we're no longer the active
+      // indexer, leave the stop's state alone — otherwise the resolving
+      // Promise.all would stomp a cleared error with a `killed by signal`
+      // message and the next run would display a spurious error.
+      if (instance.proc === indexProc) {
+        instance.proc = undefined;
+        instance.status = "stopped";
 
-      if (exitCode !== 0) {
-        instance.error = `Index exited with code ${exitCode}: ${indexStderr.slice(0, 500)}`;
-        log.error("Serena index {name} failed: {error}", { name, error: instance.error });
+        if (exitCode !== 0) {
+          instance.error = `Index exited with code ${exitCode}: ${indexStderr.slice(0, 500)}`;
+          log.error("Serena index {name} failed: {error}", { name, error: instance.error });
+        } else {
+          log.info("Serena {name} indexed successfully", { name });
+        }
       } else {
-        log.info("Serena {name} indexed successfully", { name });
+        log.info("Serena index {name} resolved after concurrent stop — leaving stop's state in place", { name });
       }
     } catch (e) {
       instance.proc = undefined;
