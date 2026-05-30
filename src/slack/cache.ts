@@ -27,7 +27,11 @@ function pruneToSize<K, V>(cache: Map<K, V>, max: number): void {
 
 export async function resolveSlackUser(app: App, userId: string): Promise<UserIdentity> {
   const cached = userInfoCache.get(userId);
-  if (cached && Date.now() - cached.cachedAt < USER_CACHE_TTL_MS) return cached.identity;
+  if (cached && Date.now() - cached.cachedAt < USER_CACHE_TTL_MS) {
+    userInfoCache.delete(userId);
+    userInfoCache.set(userId, cached); // LRU touch — keep hot entries at the tail
+    return cached.identity;
+  }
   try {
     const result = await app.client.users.info({ user: userId });
     const profile = result.user?.profile;

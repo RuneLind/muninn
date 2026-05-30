@@ -192,6 +192,12 @@ export async function executePrompt(
         lastTurnInputTokens = event.data.inputTokens ?? 0;
         totalInputTokens = accumulateInputTokens(totalInputTokens, lastTurnInputTokens);
         totalOutputTokens += event.data.outputTokens ?? 0;
+        // NB asymmetry: inputTokens is the cumulative context (peak — see
+        // accumulateInputTokens), but cacheRead/Write are summed on the
+        // assumption they are per-turn deltas. If a real trace shows they are
+        // also cumulative (each turn re-reading the cached prefix), these should
+        // switch to peak too — they'd over-count today. Left additive pending a
+        // trace to confirm.
         totalCacheReadTokens += event.data.cacheReadTokens ?? 0;
         totalCacheCreationTokens += event.data.cacheWriteTokens ?? 0;
         if (event.data.model) reportedModel = event.data.model;
