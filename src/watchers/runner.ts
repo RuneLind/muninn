@@ -107,12 +107,22 @@ function isScheduledTimeDue(watcher: Watcher, now: TimeParts): boolean {
   return true;
 }
 
-export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext): Promise<void> {
-  const tag = botConfig.name;
+/**
+ * Resolve the watchers that should fire this tick: interval-due (DB) AND either
+ * forced or past their time-of-day gate. Extracted so the scheduler can check
+ * for due watchers up front (to decide whether to open a trace) and hand the
+ * already-resolved list to `runWatchers`, avoiding a second DB round-trip.
+ */
+export async function getDueWatchers(botName: string): Promise<Watcher[]> {
   const now = getNowParts();
-  const candidates = await getWatchersDueNow(tag);
+  const candidates = await getWatchersDueNow(botName);
   // Forced watchers skip time-of-day checks; regular ones must pass
-  const dueWatchers = candidates.filter((w) => w.forceNextRun || isScheduledTimeDue(w, now));
+  return candidates.filter((w) => w.forceNextRun || isScheduledTimeDue(w, now));
+}
+
+export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext, prefetchedDue?: Watcher[]): Promise<void> {
+  const tag = botConfig.name;
+  const dueWatchers = prefetchedDue ?? (await getDueWatchers(tag));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }

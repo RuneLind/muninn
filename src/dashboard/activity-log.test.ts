@@ -18,7 +18,17 @@ mock.module("../logging.ts", () => ({
 }));
 
 // Re-import to get a fresh module with mocks applied
-const { activityLog } = await import("./activity-log.ts");
+const { activityLog, computeStats } = await import("./activity-log.ts");
+
+function ev(extra: Partial<ActivityEvent>): ActivityEvent {
+  return {
+    id: crypto.randomUUID(),
+    type: "message_out",
+    timestamp: Date.now(),
+    text: "x",
+    ...extra,
+  };
+}
 
 // Note: ActivityLog is a singleton with no reset method. Tests are written
 // to be order-independent by measuring existing state before asserting.
@@ -181,6 +191,46 @@ describe("ActivityLog", () => {
 
       const stats = activityLog.stats;
       expect(stats.totalCost).toBeGreaterThanOrEqual(0.05);
+    });
+  });
+
+  describe("computeStats (pure)", () => {
+    const todayStart = new Date().setHours(0, 0, 0, 0);
+    const yesterday = todayStart - 12 * 60 * 60 * 1000; // before todayStart
+
+    test("totalCost only sums today's events, not all-time", () => {
+      const events = [
+        ev({ timestamp: yesterday, costUsd: 1.0 }),
+        ev({ timestamp: todayStart + 1000, costUsd: 0.25 }),
+        ev({ timestamp: todayStart + 2000, costUsd: 0.75 }),
+      ];
+      const stats = computeStats(events, todayStart);
+      // Yesterday's $1.00 must be excluded.
+      expect(stats.totalCost).toBeCloseTo(1.0, 6);
+      expect(stats.totalEvents).toBe(3); // totalEvents still all-time
+    });
+
+    test("totalCost is 0 when no events fall on today", () => {
+      const events = [ev({ timestamp: yesterday, costUsd: 5.0 })];
+      const stats = computeStats(events, todayStart);
+      expect(stats.totalCost).toBe(0);
+    });
+
+    test("messagesToday counts only today's message_in events", () => {
+      const events = [
+        ev({ type: "message_in", timestamp: yesterday }),
+        ev({ type: "message_in", timestamp: todayStart + 1000 }),
+        ev({ type: "message_in", timestamp: todayStart + 2000 }),
+      ];
+      expect(computeStats(events, todayStart).messagesToday).toBe(2);
+    });
+
+    test("avgResponseTime averages durationMs across all message_out events", () => {
+      const events = [
+        ev({ type: "message_out", durationMs: 100 }),
+        ev({ type: "message_out", durationMs: 300 }),
+      ];
+      expect(computeStats(events, todayStart).avgResponseTime).toBe(200);
     });
   });
 });
