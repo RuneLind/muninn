@@ -324,4 +324,35 @@ describe("runDelegateTask", () => {
     const res = await runDelegateTask(BOT, reg, { to: "ghost", message: "x", role: "build" });
     expect(res.isError).toBe(true);
   });
+
+  test("peer_name unresolved after refresh → WARNS (isError) and prompts a list_peers re-run", async () => {
+    const threadId = crypto.randomUUID();
+    const run = await birthDevRun({ botName: BOT, userId: "u", issueKey: "MELOSYS-53", threadId });
+    pushActiveTurn(BOT, threadId);
+
+    // The registry has a client, but its peer list NEVER includes the delegate
+    // target id — so the cwd cache stays cold for it even after the lazy refresh,
+    // and peerNameFor() falls back to the raw id (a UUID that won't match the
+    // inbound reply name). The bot must be told to warm the cache, not reported success.
+    const known = peer("some-other-peer", "nav", { cwd: "/Users/x/source/nav/melosys-api-claude" });
+    const { client } = recordingStubClient({ botName: BOT, namespace: "nav", peers: [known] });
+    const reg = new BotClientRegistry();
+    reg.add("nav", client);
+
+    const res = await runDelegateTask(BOT, reg, {
+      to: "5f3a9c1e-uuid-only-peer",
+      message: "build it",
+      role: "build",
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("list_peers");
+    expect(res.text).toContain("will NOT auto-roll-up");
+
+    // The handoff is still recorded (under the raw id) — the warning is about the
+    // join not matching, not about a failed insert.
+    const handoffs = await listHandoffs(run.id);
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]!.peerName).toBe("5f3a9c1e-uuid-only-peer");
+  });
 });

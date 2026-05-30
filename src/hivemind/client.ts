@@ -54,6 +54,12 @@ export class HivemindBotClient {
   // oldest pending ask_peer(X) call. Hivemind has no correlation IDs.
   private pendingAsks = new Map<PeerId, PendingAsk[]>();
   private pendingListPeers: { resolve: (peers: Peer[]) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  // Concurrent list_peers calls (e.g. delegate_task warming the cwd cache while a
+  // separate flow lists peers) are COALESCED per scope onto one in-flight request
+  // — the broker's `peers` reply isn't scope-tagged and there's a single response
+  // slot, so a second caller shares the first's promise instead of being rejected
+  // ("a list_peers request is already in flight") or clobbering the slot.
+  private inFlightListPeers = new Map<"namespace" | "machine", Promise<Peer[]>>();
 
   /**
    * Inbound peer message that didn't match a pending ask_peer call. The
@@ -184,15 +190,23 @@ export class HivemindBotClient {
     });
   }
 
-  /** Request the peer list scoped to namespace or machine. */
+  /** Request the peer list scoped to namespace or machine. Concurrent calls for
+   *  the same scope share one in-flight request (coalesced) rather than being
+   *  rejected — see `inFlightListPeers`. */
   listPeers(scope: "namespace" | "machine"): Promise<Peer[]> {
     if (!this.isConnected) {
       return Promise.reject(new Error("not connected to broker"));
     }
+    const existing = this.inFlightListPeers.get(scope);
+    if (existing) return existing;
+    // The broker has a single (untagged) response slot, so a different-scope
+    // request already in flight can't be coalesced — keep the original reject so
+    // its slot isn't clobbered. Same-scope concurrency is the case worth sharing.
     if (this.pendingListPeers) {
       return Promise.reject(new Error("a list_peers request is already in flight"));
     }
-    return new Promise((resolve, reject) => {
+
+    const p = new Promise<Peer[]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingListPeers = null;
         reject(new Error("list_peers timed out"));
@@ -204,7 +218,11 @@ export class HivemindBotClient {
         this.pendingListPeers = null;
         reject(new Error("WebSocket write failed"));
       }
+    }).finally(() => {
+      this.inFlightListPeers.delete(scope);
     });
+    this.inFlightListPeers.set(scope, p);
+    return p;
   }
 
   // ── internals ────────────────────────────────────────────────
