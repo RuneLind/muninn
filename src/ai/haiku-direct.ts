@@ -96,10 +96,15 @@ function getAnthropic(): Anthropic {
   return client;
 }
 
-export function _resetClientForTests(): void {
+/** Drop the cached Anthropic client so the next call rebuilds it from current
+ *  env. Used both by the production 401 recovery path and by tests. */
+export function resetAnthropicClient(): void {
   cachedAnthropic = null;
   cachedAuthSource = null;
 }
+
+/** @deprecated test-facing alias for {@link resetAnthropicClient}. */
+export const _resetClientForTests = resetAnthropicClient;
 
 export function _getAuthSourceForTests(): "api-key" | "oauth" | null {
   return cachedAuthSource;
@@ -132,7 +137,7 @@ export async function callHaikuDirect(
       log.warn("haiku-router anthropic auth rejected (401), clearing cached client", {
         botName: botName ?? "haiku",
       });
-      _resetClientForTests();
+      resetAnthropicClient();
     }
     throw err;
   }

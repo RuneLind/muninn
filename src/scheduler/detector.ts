@@ -100,6 +100,22 @@ export function diffScheduleFields(
   if (result.interval_ms != null && result.interval_ms !== existing.scheduleIntervalMs) {
     change.scheduleIntervalMs = result.interval_ms;
   }
+  // Mode switch (interval → cron). computeNextRun checks scheduleIntervalMs
+  // FIRST, so a stale interval keeps an interval task firing on its old cadence
+  // even after the user restates it as a fixed-time schedule. The detector
+  // always emits `hour`, so an ABSENT interval_ms *combined with an actual
+  // cron-field change* is a positive signal of cron intent → clear the interval.
+  // We require a cron field to have moved so a prompt-only restatement (which
+  // may omit interval_ms) never silently drops a still-wanted interval. (The
+  // reverse, cron → interval, is already covered above: a present interval_ms
+  // sets the mode and computeNextRun then ignores the dormant cron fields.)
+  const cronFieldChanged =
+    change.scheduleHour !== undefined ||
+    change.scheduleMinute !== undefined ||
+    change.scheduleDays !== undefined;
+  if (result.interval_ms == null && cronFieldChanged && existing.scheduleIntervalMs != null) {
+    change.scheduleIntervalMs = null;
+  }
   return change;
 }
 

@@ -144,6 +144,35 @@ describe("diffScheduleFields", () => {
       ),
     ).toEqual({});
   });
+
+  test("interval → cron: clears a stale interval when a cron field changes and interval_ms is absent", () => {
+    expect(
+      diffScheduleFields(
+        { scheduleHour: 9, scheduleMinute: 0, scheduleDays: null, scheduleIntervalMs: 7200000 },
+        { hour: 8, minute: 0 },
+      ),
+    ).toEqual({ scheduleHour: 8, scheduleIntervalMs: null });
+  });
+
+  test("interval restatement with no cron change does NOT drop the interval", () => {
+    // Prompt-only / unchanged-schedule restatement that omits interval_ms must
+    // not silently switch the task to cron mode.
+    expect(
+      diffScheduleFields(
+        { scheduleHour: 9, scheduleMinute: 0, scheduleDays: null, scheduleIntervalMs: 7200000 },
+        { hour: 9, minute: 0 },
+      ),
+    ).toEqual({});
+  });
+
+  test("cron → interval: a present interval_ms sets the mode", () => {
+    expect(
+      diffScheduleFields(
+        { scheduleHour: 8, scheduleMinute: 0, scheduleDays: [1, 2, 3, 4, 5], scheduleIntervalMs: null },
+        { hour: 8, interval_ms: 3600000 },
+      ),
+    ).toEqual({ scheduleIntervalMs: 3600000 });
+  });
 });
 
 describe("extractScheduleAsync", () => {
