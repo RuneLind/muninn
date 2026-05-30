@@ -91,11 +91,20 @@ export const HANDOFF_LAST_MESSAGE_CAP = 2000;
 export function truncateHandoffMessage(text: string, cap = HANDOFF_LAST_MESSAGE_CAP): string {
   if (text.length <= cap) return text;
   const slice = text.slice(0, cap);
-  if (parseGithubRunUrl(slice)) return slice; // URL survived the cut — nothing to do.
-  const parsed = parseGithubRunUrl(text);
-  if (!parsed) return slice; // no URL anywhere — plain truncation is fine.
+  const m = /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+/.exec(text);
+  const parsed = parseGithubRunUrl(text); // authoritative — parse the FULL text.
+  if (!m || !parsed) return slice; // no URL anywhere — plain truncation is fine.
+  // The full runId already survived in the slice → nothing to do.
+  if (slice.includes(`/actions/runs/${parsed.runId}`)) return slice;
+  // Otherwise the slice may carry a URL whose runId was cut at the cap boundary.
+  // parseGithubRunUrl is FIRST-match (no /g), so a leftover truncated fragment
+  // would resolve to a SHORTER, wrong run — the green gate would then `gh run
+  // view` a nonexistent id and park the run at `verifying` forever. Chop the
+  // slice at the URL's start (when it began within the cap) so no partial
+  // fragment precedes the canonical URL we append.
+  const base = m.index < cap ? text.slice(0, m.index).trimEnd() : slice;
   const url = `https://github.com/${parsed.repo}/actions/runs/${parsed.runId}`;
-  return `${slice}\n${url}`;
+  return `${base}\n${url}`;
 }
 
 export interface ParsedNote {

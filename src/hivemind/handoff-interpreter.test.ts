@@ -97,6 +97,25 @@ describe("truncateHandoffMessage", () => {
     expect(out.length).toBe(HANDOFF_LAST_MESSAGE_CAP);
     expect(parseGithubRunUrl(out)).toBeNull();
   });
+
+  test("a runId STRADDLING the cap boundary recovers the full URL, not the truncated one", () => {
+    // Pad so the cut lands in the middle of the runId digits: the slice carries
+    // ".../runs/1234" (a parseable but WRONG short id). The fix must not trust the
+    // slice-local parse — it appends the full canonical URL with runId 123456789.
+    const prefix = "z".repeat(HANDOFF_LAST_MESSAGE_CAP - (CI_URL.length - 4));
+    const text = prefix + CI_URL;
+    const naive = text.slice(0, HANDOFF_LAST_MESSAGE_CAP);
+    // Premise: the naive slice parses to a TRUNCATED (wrong) runId.
+    const naiveParsed = parseGithubRunUrl(naive);
+    expect(naiveParsed).not.toBeNull();
+    expect(naiveParsed!.runId).not.toBe("123456789");
+
+    const out = truncateHandoffMessage(text);
+    const parsed = parseGithubRunUrl(out);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.repo).toBe("navikt/melosys-api");
+    expect(parsed!.runId).toBe("123456789");
+  });
 });
 
 describe("parseNoteMarker", () => {
