@@ -114,7 +114,7 @@ export async function searchMemoriesHybrid(
       FROM memories
       WHERE ${scopeFilter}
         AND search_vector @@ plainto_tsquery('english', $2)
-      LIMIT 20
+      LIMIT 30
     ),
     vec AS (
       SELECT id, user_id, content, summary, tags, scope, created_at,
@@ -122,7 +122,7 @@ export async function searchMemoriesHybrid(
       FROM memories
       WHERE ${scopeFilter}
         AND embedding IS NOT NULL
-      LIMIT 20
+      LIMIT 30
     )
     SELECT
       COALESCE(f.id, v.id) AS id,
@@ -208,7 +208,10 @@ export async function getMemoriesByUser(botName?: string): Promise<MemoryUserSum
     ? await sql`
       SELECT
         m.user_id,
-        (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS username,
+        COALESCE(
+          NULLIF((SELECT u.username FROM users u WHERE u.id = m.user_id), ''),
+          (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1)
+        ) AS username,
         COUNT(*) FILTER (WHERE m.scope = 'personal')::int AS personal_count,
         COUNT(*) FILTER (WHERE m.scope = 'shared')::int AS shared_count,
         COUNT(*)::int AS total_count,
@@ -227,7 +230,10 @@ export async function getMemoriesByUser(botName?: string): Promise<MemoryUserSum
     : await sql`
       SELECT
         m.user_id,
-        (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS username,
+        COALESCE(
+          NULLIF((SELECT u.username FROM users u WHERE u.id = m.user_id), ''),
+          (SELECT username FROM messages WHERE user_id = m.user_id AND username IS NOT NULL ORDER BY created_at DESC LIMIT 1)
+        ) AS username,
         COUNT(*) FILTER (WHERE m.scope = 'personal')::int AS personal_count,
         COUNT(*) FILTER (WHERE m.scope = 'shared')::int AS shared_count,
         COUNT(*)::int AS total_count,
@@ -382,7 +388,10 @@ async function dashboardSearchText(
   const rows = await sql.unsafe(
     `SELECT m.id, m.user_id, m.bot_name, m.content, m.summary, m.tags, m.scope, m.created_at,
             ts_rank(m.search_vector, plainto_tsquery('english', $1)) AS similarity,
-            (SELECT msg.username FROM messages msg WHERE msg.user_id = m.user_id AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1) AS username
+            COALESCE(
+              NULLIF((SELECT u.username FROM users u WHERE u.id = m.user_id), ''),
+              (SELECT msg.username FROM messages msg WHERE msg.user_id = m.user_id AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1)
+            ) AS username
      FROM memories m
      WHERE ${where}
      ORDER BY similarity DESC
@@ -410,7 +419,10 @@ async function dashboardSearchSemantic(
   const rows = await sql.unsafe(
     `SELECT m.id, m.user_id, m.bot_name, m.content, m.summary, m.tags, m.scope, m.created_at,
             1 - (m.embedding <=> $1::vector) AS similarity,
-            (SELECT msg.username FROM messages msg WHERE msg.user_id = m.user_id AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1) AS username
+            COALESCE(
+              NULLIF((SELECT u.username FROM users u WHERE u.id = m.user_id), ''),
+              (SELECT msg.username FROM messages msg WHERE msg.user_id = m.user_id AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1)
+            ) AS username
      FROM memories m
      WHERE ${where}
      ORDER BY m.embedding <=> $1::vector
@@ -462,7 +474,10 @@ async function dashboardSearchHybrid(
       COALESCE(f.scope, v.scope) AS scope,
       COALESCE(f.created_at, v.created_at) AS created_at,
       COALESCE(1.0 / (60 + f.rank), 0) + COALESCE(1.0 / (60 + v.rank), 0) AS rrf_score,
-      (SELECT msg.username FROM messages msg WHERE msg.user_id = COALESCE(f.user_id, v.user_id) AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1) AS username
+      COALESCE(
+        NULLIF((SELECT u.username FROM users u WHERE u.id = COALESCE(f.user_id, v.user_id)), ''),
+        (SELECT msg.username FROM messages msg WHERE msg.user_id = COALESCE(f.user_id, v.user_id) AND msg.username IS NOT NULL ORDER BY msg.created_at DESC LIMIT 1)
+      ) AS username
     FROM fts f
     FULL OUTER JOIN vec v ON f.id = v.id
     ORDER BY rrf_score DESC

@@ -140,6 +140,9 @@ export function registerGraphRoutes(app: Hono, config: Config): void {
         { timeoutMs: 15000 },
       );
 
+      if (!Array.isArray(graphData.edges)) graphData.edges = [];
+      if (!Array.isArray(graphData.nodes)) graphData.nodes = [];
+
       for (const edge of graphData.edges) {
         edge.type = "similarity";
       }

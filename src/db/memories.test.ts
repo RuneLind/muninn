@@ -10,7 +10,11 @@ import {
   getMemoriesWithoutEmbeddings,
   getMemoriesByUser,
   getMemoriesForUser,
+  dashboardSearchMemories,
 } from "./memories.ts";
+import { ensureUser } from "./users.ts";
+import { saveMessage } from "./messages.ts";
+import { makeMessage } from "../test/fixtures.ts";
 
 setupTestDb();
 
@@ -210,6 +214,48 @@ describe("memories", () => {
       expect(u1).toBeDefined();
       expect(u1!.recentTags).toContain("work");
       expect(u1!.recentTags).toContain("kotlin");
+    });
+
+    test("resolves canonical users.username, not a clobbering peer label", async () => {
+      // Owner's canonical name in the users table.
+      await ensureUser({ id: "mu-owner", username: "Owner Name", platform: "web" });
+      await saveMemory(makeMemory({ userId: "mu-owner", botName: "testbot", summary: "owner mem" }));
+      // A more-recent message stamped with a hivemind peer name — this is what
+      // the old latest-message subselect surfaced as the username.
+      await saveMessage(makeMessage({ userId: "mu-owner", botName: "testbot", username: "claude-hivemind", content: "peer turn" }));
+
+      const users = await getMemoriesByUser("testbot");
+      const owner = users.find((u) => u.userId === "mu-owner");
+      expect(owner).toBeDefined();
+      expect(owner!.username).toBe("Owner Name");
+    });
+
+    test("falls back to the message label when no users row exists", async () => {
+      await saveMemory(makeMemory({ userId: "mu-orphan", botName: "testbot", summary: "orphan mem" }));
+      await saveMessage(makeMessage({ userId: "mu-orphan", botName: "testbot", username: "drifter", content: "hi" }));
+
+      const users = await getMemoriesByUser("testbot");
+      const orphan = users.find((u) => u.userId === "mu-orphan");
+      expect(orphan).toBeDefined();
+      expect(orphan!.username).toBe("drifter");
+    });
+  });
+
+  describe("dashboardSearchMemories username resolution", () => {
+    test("text mode resolves canonical users.username over a peer label", async () => {
+      await ensureUser({ id: "ds-owner", username: "Dash Owner", platform: "web" });
+      await saveMemory(makeMemory({ userId: "ds-owner", botName: "testbot", summary: "kotlin coroutines deadlock" }));
+      await saveMessage(makeMessage({ userId: "ds-owner", botName: "testbot", username: "claude-hivemind", content: "peer turn" }));
+
+      const results = await dashboardSearchMemories({
+        query: "coroutines",
+        embedding: null,
+        mode: "text",
+        botName: "testbot",
+      });
+      const hit = results.find((r) => r.userId === "ds-owner");
+      expect(hit).toBeDefined();
+      expect(hit!.username).toBe("Dash Owner");
     });
   });
 
