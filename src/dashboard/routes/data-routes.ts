@@ -247,6 +247,12 @@ export function registerDataRoutes(app: Hono): void {
     const limit = parseIntParam(c.req.query("limit"), 50, 200);
     const botName = c.req.query("bot") || undefined;
     const threadId = c.req.query("thread") || undefined;
+    // getRecentMessages requires a bot when a thread is given (a NULL bot_name
+    // filter would silently cross threads). Surface a clean 400 here rather than
+    // letting the guard throw out of this un-try/catch'd handler as a bare 500.
+    if (threadId && !botName) {
+      return c.json({ error: "bot is required when thread is provided" }, 400);
+    }
     const messages = await getRecentMessages(userId, limit, botName, threadId);
     return c.json({ messages });
   });

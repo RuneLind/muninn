@@ -25,8 +25,9 @@ export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 /**
  * Parse Haiku stdout as JSON, throwing a descriptive error (including a stdout
- * preview) on failure. Mirrors the X watcher's wrap so an unparseable Haiku
- * response surfaces a useful message instead of a bare "Watcher failed".
+ * preview) on failure. Mirrors the email watcher's slice(0,300) preview so an
+ * unparseable Haiku response surfaces a useful message instead of a bare
+ * "Watcher failed" (the X watcher at watchers/x.ts still uses a bare JSON.parse).
  */
 export function parseHaikuJson(stdout: string): any {
   try {
