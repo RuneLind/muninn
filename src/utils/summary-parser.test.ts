@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { parseSummaryResponse } from "./summarizer.ts";
+import { parseSummaryResponse } from "./summary-parser.ts";
 
 test("parses CATEGORY and SUMMARY correctly", () => {
   const text = `CATEGORY: ai/claude-code

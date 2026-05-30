@@ -51,7 +51,17 @@ function cleanTestBots() {
   createdDirs.length = 0;
 }
 
-import { discoverAllBots, discoverActiveBots, type ConnectorType } from "./config.ts";
+import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, type BotConfig, type ConnectorType } from "./config.ts";
+
+function stubBot(name: string): BotConfig {
+  return {
+    name,
+    dir: `/tmp/${name}`,
+    persona: "",
+    telegramAllowedUserIds: [],
+    slackAllowedUserIds: [],
+  };
+}
 
 describe("bot discovery", () => {
   beforeEach(() => {
@@ -383,5 +393,36 @@ describe("bot discovery", () => {
       expect(found).toBeDefined();
       expect(found!.dir).toBe(botDir);
     });
+  });
+});
+
+describe("resolveSummarizerBot", () => {
+  const prev = process.env.SUMMARIZER_BOT;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SUMMARIZER_BOT;
+    else process.env.SUMMARIZER_BOT = prev;
+  });
+
+  test("returns undefined for an empty bot list", () => {
+    delete process.env.SUMMARIZER_BOT;
+    expect(resolveSummarizerBot([])).toBeUndefined();
+  });
+
+  test("falls back to the first bot when SUMMARIZER_BOT is unset", () => {
+    delete process.env.SUMMARIZER_BOT;
+    const bots = [stubBot("alpha"), stubBot("beta")];
+    expect(resolveSummarizerBot(bots)?.name).toBe("alpha");
+  });
+
+  test("selects the named bot regardless of directory order (case-insensitive)", () => {
+    process.env.SUMMARIZER_BOT = "BETA";
+    const bots = [stubBot("alpha"), stubBot("beta")];
+    expect(resolveSummarizerBot(bots)?.name).toBe("beta");
+  });
+
+  test("falls back to the first bot when SUMMARIZER_BOT names a missing bot", () => {
+    process.env.SUMMARIZER_BOT = "gamma";
+    const bots = [stubBot("alpha"), stubBot("beta")];
+    expect(resolveSummarizerBot(bots)?.name).toBe("alpha");
   });
 });

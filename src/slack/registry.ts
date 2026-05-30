@@ -15,10 +15,6 @@ export function getSlackApp(botName: string): App | undefined {
   return slackApps.get(botName);
 }
 
-export function unregisterSlackApp(botName: string): void {
-  slackApps.delete(botName);
-}
-
 export function getAllSlackApps(): App[] {
   return [...slackApps.values()];
 }

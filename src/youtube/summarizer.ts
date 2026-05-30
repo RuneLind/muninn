@@ -3,6 +3,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { getLog } from "../logging.ts";
+import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import {
   updateStatus,
   appendText,
@@ -13,11 +14,6 @@ import {
 } from "./state.ts";
 
 const log = getLog("youtube", "summarizer");
-
-const VALID_CATEGORIES = [
-  "ai/claude-code", "ai/claude", "ai/openclaw", "ai/general", "ai/rag",
-  "health", "tech", "career", "parenting", "entertainment", "coding",
-];
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following YouTube video transcript.
 
@@ -30,40 +26,6 @@ Instructions:
    - Bullet points with emoji prefixes
    - **Bold** for key terms and takeaways
    - Keep it concise but comprehensive`;
-
-/** Exported for testing */
-export function parseSummaryResponse(text: string): { category: string; summary: string } {
-  const lines = text.split("\n");
-  let category = "ai/general";
-  let summaryStartIndex = 0;
-
-  // Find CATEGORY line (scan first 5 lines in case of preamble)
-  for (let i = 0; i < Math.min(lines.length, 5); i++) {
-    const match = lines[i]!.match(/^CATEGORY:\s*(.+)$/i);
-    if (match) {
-      category = match[1]!.trim().toLowerCase();
-      summaryStartIndex = i + 1;
-      break;
-    }
-  }
-
-  // Find SUMMARY: marker
-  for (let i = summaryStartIndex; i < lines.length; i++) {
-    if (/^SUMMARY:$/i.test(lines[i]!.trim())) {
-      summaryStartIndex = i + 1;
-      break;
-    }
-  }
-
-  const summary = lines.slice(summaryStartIndex).join("\n").trim();
-
-  // Validate category
-  if (!VALID_CATEGORIES.includes(category)) {
-    category = "ai/general";
-  }
-
-  return { category, summary };
-}
 
 export async function summarizeVideo(
   jobId: string,

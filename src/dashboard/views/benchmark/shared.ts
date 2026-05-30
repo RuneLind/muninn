@@ -1,4 +1,5 @@
 import { SHARED_STYLES } from "../shared-styles.ts";
+import { escHtml } from "../components/escape.ts";
 
 export const BENCHMARK_STYLES = `
   ${SHARED_STYLES}
@@ -791,15 +792,8 @@ export const BENCHMARK_STYLES = `
   .live-logs pre .stderr { color: var(--status-error); }
 `;
 
-export function esc(str: unknown): string {
-  if (str === null || str === undefined) return "";
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+/** Benchmark pages alias the shared HTML escaper as `esc`. */
+export const esc = (str: unknown): string => escHtml(str == null ? "" : String(str));
 
 export function rateClass(rate: number | null): string {
   if (rate === null) return "";

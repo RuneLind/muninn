@@ -182,6 +182,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
+| `SUMMARIZER_BOT` | No | first discovered bot | Bot whose config (model + timeout) drives the dashboard YouTube / X-article summarization jobs. Matched by name (case-insensitive); falls back to the first discovered bot when unset or unmatched. These jobs are CLI-only, so without this knob the model silently depends on bot-folder directory order. |
 | `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for prompt-level corrective retrieval (per-bot `correctiveRetrieval.enabled` overrides). |
 | `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config. |
 | `HAIKU_BACKEND` | No | — | Process-wide debug knob — forces all bots to one Haiku backend. Values: `cli` (Claude CLI subprocess), `anthropic` (`@anthropic-ai/sdk`), `copilot` (`@github/copilot-sdk`). Resolution order: explicit `opts.backend` > `HAIKU_BACKEND` > per-bot `haikuBackend` (config.json) > legacy `HAIKU_DIRECT_ENABLED=1` (alias for `anthropic`) > connector default (`copilot-sdk` → `copilot`, otherwise `cli`). Falls back to CLI on any error. Affects the `research_knowledge` decomposer plus the memory / goal / schedule extractors. Watchers (email, calendar) stay on the CLI because they need Gmail MCP. |
