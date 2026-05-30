@@ -134,7 +134,9 @@ class SerenaManager {
       log.info("Serena {name} started on port {port}", { name, port });
 
       // Refresh tool proxy catalog (fire-and-forget)
-      this.refreshToolProxy().catch(() => {});
+      this.refreshToolProxy().catch((e) =>
+        log.debug("Tool proxy refresh after start failed: {error}", { error: String(e) }),
+      );
     } catch (e) {
       instance.status = "error";
       instance.error = String(e);
@@ -160,7 +162,9 @@ class SerenaManager {
     instance.dashboardUrl = undefined;
 
     // Refresh tool proxy catalog (fire-and-forget)
-    this.refreshToolProxy().catch(() => {});
+    this.refreshToolProxy().catch((e) =>
+      log.debug("Tool proxy refresh after stop failed: {error}", { error: String(e) }),
+    );
   }
 
   async index(name: string): Promise<void> {

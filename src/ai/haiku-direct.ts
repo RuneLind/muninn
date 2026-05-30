@@ -96,10 +96,15 @@ function getAnthropic(): Anthropic {
   return client;
 }
 
-export function _resetClientForTests(): void {
+/** Drop the cached Anthropic client so the next call rebuilds it from current
+ *  env. Used both by the production 401 recovery path and by tests. */
+export function resetAnthropicClient(): void {
   cachedAnthropic = null;
   cachedAuthSource = null;
 }
+
+/** @deprecated test-facing alias for {@link resetAnthropicClient}. */
+export const _resetClientForTests = resetAnthropicClient;
 
 export function _getAuthSourceForTests(): "api-key" | "oauth" | null {
   return cachedAuthSource;
@@ -109,19 +114,40 @@ export async function callHaikuDirect(
   prompt: string,
   opts: SpawnHaikuOptions,
 ): Promise<HaikuResult> {
-  const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model } = opts;
+  const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model, maxTokens } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
+  const effectiveMaxTokens = maxTokens && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
 
   const client = getAnthropic();
 
-  const response = await client.messages.create(
-    {
-      model: effectiveModel,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      messages: [{ role: "user", content: prompt }],
-    },
-    { timeout: timeoutMs },
-  );
+  let response;
+  try {
+    response = await client.messages.create(
+      {
+        model: effectiveModel,
+        max_tokens: effectiveMaxTokens,
+        messages: [{ role: "user", content: prompt }],
+      },
+      { timeout: timeoutMs },
+    );
+  } catch (err) {
+    // A rotated/revoked key authenticates the cached client forever otherwise —
+    // drop the cache on a 401 so the next call rebuilds from current env.
+    if (err instanceof Anthropic.APIError && err.status === 401) {
+      log.warn("haiku-router anthropic auth rejected (401), clearing cached client", {
+        botName: botName ?? "haiku",
+      });
+      resetAnthropicClient();
+    }
+    throw err;
+  }
+
+  if (response.stop_reason === "max_tokens") {
+    log.warn("haiku-router anthropic response truncated at max_tokens ({maxTokens}) — JSON parse may fail", {
+      botName: botName ?? "haiku",
+      maxTokens: effectiveMaxTokens,
+    });
+  }
 
   const inputTokens = (response.usage.input_tokens ?? 0)
     + (response.usage.cache_creation_input_tokens ?? 0)
@@ -182,6 +208,15 @@ export async function callHaikuViaCopilot(
   try {
     const response = await session.sendAndWait({ prompt }, timeoutMs);
     const resultText = response?.data?.content ?? "";
+    // The hardcoded COPILOT_HAIKU_MODEL id is what we requested; if Copilot's
+    // registry renames it the request silently downgrades to Sonnet. The usage
+    // event reports the model actually served — flag a mismatch loudly.
+    if (!/haiku/i.test(reportedModel)) {
+      log.warn(
+        "haiku-router copilot served a non-Haiku model ({model}) — registry id may have changed, extraction is running on the wrong model",
+        { botName: opts.botName ?? "haiku", model: reportedModel },
+      );
+    }
     trackUsage(opts.source, reportedModel, inputTokens, outputTokens, opts.botName);
     return {
       result: resultText,

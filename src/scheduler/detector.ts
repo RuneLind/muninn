@@ -1,6 +1,6 @@
 import type { Config } from "../config.ts";
-import { saveScheduledTask, findSimilarTask, updateTaskPrompt } from "../db/scheduled-tasks.ts";
-import type { TaskType, Platform } from "../types.ts";
+import { saveScheduledTask, findSimilarTask, updateTaskPrompt, updateScheduledTask } from "../db/scheduled-tasks.ts";
+import type { TaskType, Platform, ScheduledTask } from "../types.ts";
 import { runHaikuExtraction } from "../ai/haiku-extraction.ts";
 import type { TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";
@@ -62,6 +62,63 @@ Assistant replied: """
 {ASSISTANT_RESPONSE}
 """`;
 
+type ScheduleUpdate = {
+  scheduleHour?: number;
+  scheduleMinute?: number;
+  scheduleDays?: number[] | null;
+  scheduleIntervalMs?: number | null;
+};
+
+function daysEqual(a: number[] | null, b: number[] | null): boolean {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
+/**
+ * Compute which schedule fields the detector wants to change on an existing
+ * task. Only fields the detector actually restated are compared — an omitted
+ * field means "no opinion", not "clear it", so we never clobber an existing
+ * days/interval just because the re-detected JSON left it out. Returns only the
+ * fields that actually differ, so an unchanged schedule yields an empty object.
+ */
+export function diffScheduleFields(
+  existing: Pick<ScheduledTask, "scheduleHour" | "scheduleMinute" | "scheduleDays" | "scheduleIntervalMs">,
+  result: Pick<DetectionResult, "hour" | "minute" | "days" | "interval_ms">,
+): ScheduleUpdate {
+  const change: ScheduleUpdate = {};
+  if (result.hour != null && result.hour !== existing.scheduleHour) {
+    change.scheduleHour = result.hour;
+  }
+  if (result.minute != null && result.minute !== existing.scheduleMinute) {
+    change.scheduleMinute = result.minute;
+  }
+  if (result.days != null && !daysEqual(result.days, existing.scheduleDays)) {
+    change.scheduleDays = result.days;
+  }
+  if (result.interval_ms != null && result.interval_ms !== existing.scheduleIntervalMs) {
+    change.scheduleIntervalMs = result.interval_ms;
+  }
+  // Mode switch (interval → cron). computeNextRun checks scheduleIntervalMs
+  // FIRST, so a stale interval keeps an interval task firing on its old cadence
+  // even after the user restates it as a fixed-time schedule. The detector
+  // always emits `hour`, so an ABSENT interval_ms *combined with an actual
+  // cron-field change* is a positive signal of cron intent → clear the interval.
+  // We require a cron field to have moved so a prompt-only restatement (which
+  // may omit interval_ms) never silently drops a still-wanted interval. (The
+  // reverse, cron → interval, is already covered above: a present interval_ms
+  // sets the mode and computeNextRun then ignores the dormant cron fields.)
+  const cronFieldChanged =
+    change.scheduleHour !== undefined ||
+    change.scheduleMinute !== undefined ||
+    change.scheduleDays !== undefined;
+  if (result.interval_ms == null && cronFieldChanged && existing.scheduleIntervalMs != null) {
+    change.scheduleIntervalMs = null;
+  }
+  return change;
+}
+
 export function extractScheduleAsync(
   input: DetectionInput,
   _config: Config,
@@ -101,9 +158,21 @@ export function extractScheduleAsync(
       );
 
       if (existing) {
-        // Update prompt if it changed, otherwise skip
+        // Diff schedule + prompt fields. If only the prompt changed, a cheap
+        // updateTaskPrompt suffices; if any schedule field moved, route through
+        // updateScheduledTask so next_run_at is recomputed (updateTaskPrompt
+        // alone leaves the task firing on the old cadence).
+        const scheduleChange = diffScheduleFields(existing, result);
         const newPrompt = result.prompt ?? null;
-        if (newPrompt !== existing.prompt) {
+        const promptChanged = newPrompt !== existing.prompt;
+
+        if (Object.keys(scheduleChange).length > 0) {
+          await updateScheduledTask(existing.id, {
+            ...scheduleChange,
+            ...(promptChanged ? { prompt: newPrompt } : {}),
+          });
+          log.info("Scheduled task rescheduled (duplicate detected): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
+        } else if (promptChanged) {
           await updateTaskPrompt(existing.id, newPrompt);
           log.info("Scheduled task updated (duplicate detected): \"{title}\" ({taskType}, id: {taskId})", { botName: input.botName, title: result.title, taskType, taskId: existing.id });
         } else {

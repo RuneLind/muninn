@@ -32,9 +32,19 @@ class FakeAnthropic {
   }
 }
 
-mock.module("@anthropic-ai/sdk", () => ({
-  default: FakeAnthropic,
-}));
+class FakeAPIError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+mock.module("@anthropic-ai/sdk", () => {
+  const ctor = FakeAnthropic as unknown as { APIError: typeof FakeAPIError };
+  ctor.APIError = FakeAPIError;
+  return { default: ctor };
+});
 
 // Mock spawnHaiku — fallback path. We only check it's called with the same
 // shape, not that the CLI actually runs.
@@ -335,6 +345,47 @@ describe("callHaikuDirect response handling", () => {
     expect((call.params as { messages: { content: string }[] }).messages[0]!.content).toBe("prompt-text");
     expect((call.options as { timeout: number }).timeout).toBe(12_345);
   });
+
+  test("honors caller-supplied maxTokens", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("prompt-text", { source: "test", maxTokens: 256 });
+    expect((sdkCalls[0]!.params as { max_tokens: number }).max_tokens).toBe(256);
+  });
+
+  test("ignores non-positive maxTokens and uses the default", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("prompt-text", { source: "test", maxTokens: 0 });
+    expect((sdkCalls[0]!.params as { max_tokens: number }).max_tokens).toBeGreaterThan(0);
+  });
+});
+
+describe("callHaikuDirect 401 handling", () => {
+  test("clears cached client on a 401 so a rotated key recovers", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-rotated-out";
+    sdkThrow = new FakeAPIError(401, "invalid x-api-key");
+    await expect(callHaikuDirect("hi", { source: "test" })).rejects.toThrow("invalid x-api-key");
+    // Cache was cleared — auth source is null until the next build.
+    expect(_getAuthSourceForTests()).toBeNull();
+
+    // Next call (key "rotated in") should rebuild the client from current env.
+    sdkThrow = null;
+    process.env.ANTHROPIC_API_KEY = "sk-rotated-in";
+    await callHaikuDirect("hi", { source: "test" });
+    expect((constructorOpts as { apiKey?: string }).apiKey).toBe("sk-rotated-in");
+  });
+
+  test("does not clear cache on non-401 errors", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    // Prime the cache with a successful call.
+    sdkThrow = null;
+    await callHaikuDirect("hi", { source: "test" });
+    expect(_getAuthSourceForTests()).toBe("api-key");
+
+    sdkThrow = new FakeAPIError(429, "rate limited");
+    await expect(callHaikuDirect("hi", { source: "test" })).rejects.toThrow("rate limited");
+    // Cache survives — auth source still set.
+    expect(_getAuthSourceForTests()).toBe("api-key");
+  });
 });
 
 describe("callHaikuViaCopilot", () => {
@@ -367,6 +418,15 @@ describe("callHaikuViaCopilot", () => {
     const call = copilotCalls[0]!;
     expect((call.sessionConfig as { model: string }).model).toBe("custom-model");
     expect(call.timeout).toBe(9999);
+  });
+
+  test("still returns the result when the served model is not Haiku (warn-only guard)", async () => {
+    // A registry rename downgrades to Sonnet — the guard logs but must not throw
+    // or alter the returned result.
+    copilotUsageEvents = [{ inputTokens: 1, outputTokens: 1, model: "claude-sonnet-4-6" }];
+    const result = await callHaikuViaCopilot("hi", { source: "test" });
+    expect(result.result).toBe("copilot-result");
+    expect(result.model).toBe("claude-sonnet-4-6");
   });
 });
 
