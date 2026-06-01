@@ -337,6 +337,67 @@ describe("bot discovery", () => {
     });
   });
 
+  // ── config.json scalar field type validation ─────────────────────────
+
+  describe("config.json scalar field types", () => {
+    test("drops wrong-typed scalar fields and falls back to defaults", () => {
+      setupTestBot("_test_badtypes", {
+        config: {
+          model: 123, // should be string
+          baseUrl: false, // should be string
+          thinkingMaxTokens: "16000", // should be number
+          timeoutMs: true, // should be number
+          contextWindow: "32768", // should be number
+          showWaterfall: "yes", // should be boolean
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_badtypes");
+      expect(found).toBeDefined();
+      expect(found!.model).toBeUndefined();
+      expect(found!.baseUrl).toBeUndefined();
+      expect(found!.thinkingMaxTokens).toBeUndefined();
+      expect(found!.timeoutMs).toBeUndefined();
+      expect(found!.contextWindow).toBeUndefined();
+      expect(found!.showWaterfall).toBeUndefined();
+    });
+
+    test("keeps correctly-typed scalars, including falsy-but-valid 0 and false", () => {
+      setupTestBot("_test_goodtypes", {
+        config: {
+          model: "sonnet",
+          thinkingMaxTokens: 0, // 0 disables thinking — must NOT be dropped as falsy
+          showWaterfall: false, // false must NOT be dropped as falsy
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_goodtypes");
+      expect(found).toBeDefined();
+      expect(found!.model).toBe("sonnet");
+      expect(found!.thinkingMaxTokens).toBe(0);
+      expect(found!.showWaterfall).toBe(false);
+    });
+
+    test("drops only the mistyped field, keeps valid siblings", () => {
+      setupTestBot("_test_mixedtypes", {
+        config: {
+          connector: "copilot-sdk",
+          model: "claude-sonnet-4-6",
+          timeoutMs: "nope", // invalid → dropped
+        },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_mixedtypes");
+      expect(found).toBeDefined();
+      expect(found!.connector).toBe("copilot-sdk");
+      expect(found!.model).toBe("claude-sonnet-4-6");
+      expect(found!.timeoutMs).toBeUndefined();
+    });
+  });
+
   // ── environment variable parsing ─────────────────────────────────────
 
   describe("environment variable parsing", () => {
