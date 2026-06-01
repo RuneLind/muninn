@@ -1,52 +1,42 @@
-import { type Block, parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
+import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to rich HTML for the web chat.
  *
- * Walks the shared block AST from `parseBlocks`; each block emits its own
- * HTML and inline content runs through `renderInline`. The chat-page client
- * picks this up automatically via `web-format-browser.ts`'s bundle.
+ * Walks the shared block AST from `parseBlocks` via the shared `renderBlocks`
+ * dispatcher; each block emits its own HTML and inline content runs through
+ * `renderInline`. The chat-page client picks this up automatically via
+ * `web-format-browser.ts`'s bundle.
  */
 export function formatWebHtml(text: string): string {
-  const blocks = parseBlocks(text);
-  const rendered = blocks.map(renderBlock).join("\n");
+  const rendered = renderBlocks(parseBlocks(text), webRenderer);
   return collapseBlockSpacing(rendered).trim();
 }
 
-function renderBlock(block: Block): string {
-  switch (block.type) {
-    case "code_block": {
-      const langClass = block.lang ? ` class="language-${escapeHtml(block.lang)}"` : "";
-      return `<pre><code${langClass}>${escapeHtml(block.code)}</code></pre>`;
-    }
-    case "hr":
-      return "<hr>";
-    case "heading": {
-      const tag = `h${Math.min(block.level + 1, 6)}`;
-      return `<${tag}>${renderInline(block.content)}</${tag}>`;
-    }
-    case "blockquote":
-      return `<blockquote>${block.lines.map(renderInline).join("<br>")}</blockquote>`;
-    case "ul":
-      return `<ul>${block.items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ul>`;
-    case "ol":
-      return `<ol>${block.items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`;
-    case "table": {
-      const thead = "<thead><tr>" + block.headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
-      const tbody = "<tbody>" + block.rows.map((row) =>
-        "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
-      ).join("") + "</tbody>";
-      return `<table>${thead}${tbody}</table>`;
-    }
-    case "text":
-      return block.lines.map(renderInline).join("\n");
-    default: {
-      const _exhaustive: never = block;
-      return _exhaustive;
-    }
-  }
-}
+const webRenderer: BlockRenderer = {
+  code_block(block) {
+    const langClass = block.lang ? ` class="language-${escapeHtml(block.lang)}"` : "";
+    return `<pre><code${langClass}>${escapeHtml(block.code)}</code></pre>`;
+  },
+  hr: () => "<hr>",
+  heading(block) {
+    const tag = `h${Math.min(block.level + 1, 6)}`;
+    return `<${tag}>${renderInline(block.content)}</${tag}>`;
+  },
+  blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
+  ul: (items) => `<ul>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ul>`,
+  ol: (items) => `<ol>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`,
+  table(headers, rows) {
+    const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
+    const tbody = "<tbody>" + rows.map((row) =>
+      "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
+    ).join("") + "</tbody>";
+    return `<table>${thead}${tbody}</table>`;
+  },
+  text: (lines) => lines.map(renderInline).join("\n"),
+};
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
