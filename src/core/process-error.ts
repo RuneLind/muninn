@@ -19,6 +19,9 @@ export interface ProcessErrorParams {
   username: string;
   botName: string;
   logProps: LogProps;
+  /** The failed request's id, so only its progress is cleared (not any
+   *  concurrent in-flight requests). Omit to clear nothing request-scoped. */
+  requestId?: string;
 }
 
 /**
@@ -28,9 +31,9 @@ export interface ProcessErrorParams {
  * activity feed, and sends a platform-appropriate error message via `say`.
  */
 export async function handleProcessError(params: ProcessErrorParams): Promise<void> {
-  const { error, tracer, externalTracer, platform, say, userId, username, botName, logProps } = params;
+  const { error, tracer, externalTracer, platform, say, userId, username, botName, logProps, requestId } = params;
 
-  agentStatus.clearRequest();
+  agentStatus.clearRequest(requestId);
   agentStatus.set("idle");
   if (!externalTracer) {
     tracer.error(error instanceof Error ? error : String(error));

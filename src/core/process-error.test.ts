@@ -66,6 +66,11 @@ describe("handleProcessError", () => {
     expect(setSpy).toHaveBeenCalledWith("idle");
   });
 
+  test("clears only the failed request when a requestId is given", async () => {
+    await handleProcessError(callParams({ requestId: "req_42" }));
+    expect(clearSpy).toHaveBeenCalledWith("req_42");
+  });
+
   test("calls tracer.error with the original Error when externalTracer is false", async () => {
     const { tracer, errored } = recordingTracer();
     const err = new Error("boom");

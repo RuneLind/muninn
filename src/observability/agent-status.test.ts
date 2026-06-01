@@ -102,9 +102,9 @@ describe("AgentStatusTracker", () => {
   describe("toolStart() and toolEnd()", () => {
     test("tracks tool with start and end times", () => {
       resetTracker();
-      agentStatus.startRequest("jarvis", "calling_claude");
+      const id = agentStatus.startRequest("jarvis", "calling_claude");
 
-      agentStatus.toolStart("read_file", "Read File", "/src/index.ts");
+      agentStatus.toolStart(id, "read_file", "Read File", "/src/index.ts");
       const progress1 = agentStatus.getProgress();
       expect(progress1!.tools).toHaveLength(1);
       expect(progress1!.tools[0]!.name).toBe("read_file");
@@ -113,31 +113,31 @@ describe("AgentStatusTracker", () => {
       expect(progress1!.tools[0]!.startedAt).toBeNumber();
       expect(progress1!.tools[0]!.endedAt).toBeUndefined();
 
-      agentStatus.toolEnd("read_file", "Read File");
+      agentStatus.toolEnd(id, "read_file", "Read File");
       const progress2 = agentStatus.getProgress();
       expect(progress2!.tools[0]!.endedAt).toBeNumber();
       expect(progress2!.tools[0]!.durationMs).toBeNumber();
       expect(progress2!.tools[0]!.durationMs).toBeGreaterThanOrEqual(0);
     });
 
-    test("does nothing when no active request", () => {
+    test("does nothing for an unknown request id", () => {
       resetTracker();
       // Should not throw
-      agentStatus.toolStart("read_file", "Read File");
-      agentStatus.toolEnd("read_file", "Read File");
+      agentStatus.toolStart("req_missing", "read_file", "Read File");
+      agentStatus.toolEnd("req_missing", "read_file", "Read File");
       expect(agentStatus.getProgress()).toBeNull();
     });
 
     test("ends the last matching unfinished tool", () => {
       resetTracker();
-      agentStatus.startRequest("jarvis", "calling_claude");
+      const id = agentStatus.startRequest("jarvis", "calling_claude");
 
       // Start same tool twice
-      agentStatus.toolStart("bash", "Bash");
-      agentStatus.toolStart("bash", "Bash");
+      agentStatus.toolStart(id, "bash", "Bash");
+      agentStatus.toolStart(id, "bash", "Bash");
 
       // End should close the second (last unfinished) one
-      agentStatus.toolEnd("bash", "Bash");
+      agentStatus.toolEnd(id, "bash", "Bash");
       const progress = agentStatus.getProgress();
       expect(progress!.tools).toHaveLength(2);
       expect(progress!.tools[0]!.endedAt).toBeUndefined();
@@ -196,15 +196,15 @@ describe("AgentStatusTracker", () => {
       const received: (RequestProgress | null)[] = [];
       const unsub = agentStatus.subscribeProgress((p) => received.push(p ? { ...p } : null));
 
-      agentStatus.startRequest("jarvis", "calling_claude", "alice");
-      agentStatus.toolStart("read_file", "Read File");
+      const id = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      agentStatus.toolStart(id, "read_file", "Read File");
 
       expect(received.length).toBeGreaterThanOrEqual(2);
       expect(received[0]!.botName).toBe("jarvis");
 
       unsub();
       const countBefore = received.length;
-      agentStatus.toolEnd("read_file", "Read File");
+      agentStatus.toolEnd(id, "read_file", "Read File");
       expect(received.length).toBe(countBefore);
     });
 
@@ -222,17 +222,77 @@ describe("AgentStatusTracker", () => {
   describe("updatePhase()", () => {
     test("updates phase on active request", () => {
       resetTracker();
-      agentStatus.startRequest("jarvis", "calling_claude");
-      agentStatus.updatePhase("saving_response");
+      const id = agentStatus.startRequest("jarvis", "calling_claude");
+      agentStatus.updatePhase(id, "saving_response");
 
       const progress = agentStatus.getProgress();
       expect(progress!.phase).toBe("saving_response");
     });
 
-    test("does nothing when no active request", () => {
+    test("does nothing for an unknown request id", () => {
       resetTracker();
       // Should not throw
-      agentStatus.updatePhase("saving_response");
+      agentStatus.updatePhase("req_missing", "saving_response");
+      expect(agentStatus.getProgress()).toBeNull();
+    });
+  });
+
+  describe("concurrent requests (Map isolation)", () => {
+    test("getProgress() surfaces the most-recently-started request", () => {
+      resetTracker();
+      const a = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      const b = agentStatus.startRequest("jarvis", "running_watcher", "bob");
+
+      expect(agentStatus.getProgress()!.requestId).toBe(b);
+
+      // Removing the primary falls back to the previous request, not null
+      agentStatus.clearRequest(b);
+      expect(agentStatus.getProgress()!.requestId).toBe(a);
+    });
+
+    test("tools accumulate per-request without clobbering", () => {
+      resetTracker();
+      const a = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      const b = agentStatus.startRequest("jarvis", "running_watcher", "bob");
+
+      // Interleave tool activity across both requests
+      agentStatus.toolStart(a, "read_file", "Read File");
+      agentStatus.toolStart(b, "web_search", "Web Search");
+      agentStatus.toolStart(a, "bash", "Bash");
+
+      // Primary is b — it must only carry its own single tool
+      const primary = agentStatus.getProgress()!;
+      expect(primary.requestId).toBe(b);
+      expect(primary.tools).toHaveLength(1);
+      expect(primary.tools[0]!.name).toBe("web_search");
+
+      // Drop b → a becomes primary and still holds exactly its own two tools
+      agentStatus.clearRequest(b);
+      const remaining = agentStatus.getProgress()!;
+      expect(remaining.requestId).toBe(a);
+      expect(remaining.tools.map((t) => t.name)).toEqual(["read_file", "bash"]);
+    });
+
+    test("updatePhase targets only the named request", () => {
+      resetTracker();
+      const a = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      const b = agentStatus.startRequest("jarvis", "running_watcher", "bob");
+
+      agentStatus.updatePhase(a, "saving_response");
+
+      // b (primary) is untouched
+      expect(agentStatus.getProgress()!.phase).toBe("running_watcher");
+      // a carries the new phase
+      agentStatus.clearRequest(b);
+      expect(agentStatus.getProgress()!.phase).toBe("saving_response");
+    });
+
+    test("clearRequest() with no id clears every tracked request", () => {
+      resetTracker();
+      agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      agentStatus.startRequest("jarvis", "running_watcher", "bob");
+
+      agentStatus.clearRequest();
       expect(agentStatus.getProgress()).toBeNull();
     });
   });

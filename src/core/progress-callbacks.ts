@@ -44,8 +44,9 @@ export interface StreamCallbacks {
 export function buildProgressCallback(
   callbacks: StreamCallbacks,
   username: string,
+  requestId: string,
 ): (event: StreamProgressEvent) => void {
-  const baseProgress = createProgressCallback("calling_claude", username);
+  const baseProgress = createProgressCallback(requestId, "calling_claude", username);
   const { onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress, setStatus } = callbacks;
   const hasStreamCallbacks =
     onTextDelta || onIntent || onToolStatus || onToolEnd || onUsageProgress || setStatus;

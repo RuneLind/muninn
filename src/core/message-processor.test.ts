@@ -226,6 +226,47 @@ describe("processMessage", () => {
     expect(errorMsg).toContain("Claude timed out");
   });
 
+  // Regression: prompt assembly / user-save run AFTER startRequest. They must
+  // be inside the try so a failure routes through handleProcessError (which
+  // clears the request) rather than propagating and orphaning the request's
+  // entry in the agent-status Map.
+  test("returns undefined (not throws) when prompt assembly fails", async () => {
+    mockBuildPrompt.mockRejectedValueOnce(new Error("prompt build blew up"));
+
+    const result = await processMessage({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "slack_dm",
+      botConfig,
+      config,
+      say: sayMock,
+    });
+
+    expect(result).toBeUndefined();
+    expect(mockExecuteClaudePrompt).not.toHaveBeenCalled();
+    expect(sayMock).toHaveBeenCalledTimes(1);
+    expect((sayMock.mock.calls[0] as any[])[0] as string).toContain("Something went wrong");
+  });
+
+  test("returns undefined (not throws) when the user-message save fails", async () => {
+    mockSaveMessage.mockRejectedValueOnce(new Error("db down"));
+
+    const result = await processMessage({
+      text: "hello",
+      userId: "U123",
+      username: "testuser",
+      platform: "slack_dm",
+      botConfig,
+      config,
+      say: sayMock,
+    });
+
+    expect(result).toBeUndefined();
+    expect(sayMock).toHaveBeenCalledTimes(1);
+    expect((sayMock.mock.calls[0] as any[])[0] as string).toContain("Something went wrong");
+  });
+
   test("calls setStatus when provided", async () => {
     const setStatusMock = mock(() => Promise.resolve());
 
