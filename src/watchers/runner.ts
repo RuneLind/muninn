@@ -167,7 +167,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
   }
 
-  for (const watcher of dueWatchers) {
+  // Run all due watchers concurrently. Each carries its own requestId
+  // (agent-status is per-request since #168) and its own Tracer, so parallel
+  // runs no longer clobber each other's progress; the per-watcher timeout +
+  // catch keep one slow or failing watcher from blocking the rest. allSettled
+  // because each iteration is self-contained error-wise — one rejection must
+  // never skip the others.
+  await Promise.allSettled(dueWatchers.map(async (watcher) => {
     const forced = watcher.forceNextRun;
     let wt: Tracer | undefined;
     if (traceContext) {
@@ -187,7 +193,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         if (quiet) {
           await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
           wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
-          continue;
+          return;
         }
       }
 
@@ -282,11 +288,9 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       await updateWatcherLastRun(watcher.id, updatedIds);
       agentStatus.completeRequest(requestId, {});
-      agentStatus.set("idle");
       wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
-      agentStatus.set("idle");
       wt?.error(err instanceof Error ? err : String(err));
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });
 
@@ -297,7 +301,12 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         log.error("Failed to update watcher last_run_at after error: {error}", { botName: tag, watcherId: watcher.id, error: updateErr instanceof Error ? updateErr.message : String(updateErr) });
       }
     }
-  }
+  }));
+  // The per-watcher phase dial (`set("running_watcher")`/`set("sending_telegram")`)
+  // races under parallelism (it's a coarse global indicator), so reset to idle
+  // once after the whole batch settles rather than per-watcher — otherwise an
+  // early finisher would flip the dial to idle while siblings still run.
+  if (dueWatchers.length > 0) agentStatus.set("idle");
 }
 
 async function sendToSlackChannels(botName: string, markdown: string, channels: string[]): Promise<void> {
