@@ -1,5 +1,6 @@
 import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
+import { runTrackedExtraction } from "./extraction-tracker.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import type { Logger } from "@logtape/logtape";
 import type { ConnectorType } from "../bots/config.ts";
@@ -35,14 +36,20 @@ interface HaikuExtractionOptions<T> {
  * Shared fire-and-forget Haiku extraction pattern.
  * Handles: async wrapper with error logging, tracer setup,
  * callHaikuWithFallback + extractJson parsing, and error/parse-failure handling.
+ *
+ * Runs through {@link runTrackedExtraction} so the work is concurrency-bounded
+ * and drained on shutdown. The per-extraction `.catch` here preserves the
+ * span-specific error log; the tracker's own catch is a final safety net.
  */
 export function runHaikuExtraction<T>(opts: HaikuExtractionOptions<T>): void {
-  doExtract(opts).catch((err) => {
-    opts.log.error(`${opts.spanName} failed: {error}`, {
-      botName: opts.botName,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
+  runTrackedExtraction(() =>
+    doExtract(opts).catch((err) => {
+      opts.log.error(`${opts.spanName} failed: {error}`, {
+        botName: opts.botName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }),
+  );
 }
 
 async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {

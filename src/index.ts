@@ -8,6 +8,7 @@ import { registerSlackApp, getAllSlackApps } from "./slack/registry.ts";
 import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
+import { waitForPendingExtractions } from "./ai/extraction-tracker.ts";
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
@@ -20,6 +21,17 @@ import type { Bot } from "grammy";
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
+
+// Backstop for promise rejections that escape a fire-and-forget path (e.g. a
+// throw inside an extraction `onResult` callback). Bun would otherwise log and
+// continue with the process in an indeterminate state; we log it explicitly at
+// error level with a stable category so it is searchable, and keep running —
+// a single background failure must never take down the bot.
+process.on("unhandledRejection", (reason) => {
+  log.error("Unhandled promise rejection: {reason}", {
+    reason: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
+  });
+});
 
 // Surface any MCP adapter processes that survived `predev: cleanup:kill`. Stale
 // adapters captured a different HUGINN_TRACE_* env at module-load and silently
@@ -220,6 +232,9 @@ async function shutdown() {
   stopScheduler();
   stopStaleHandoffSweep();
   await waitForPendingTicks(10_000);
+  // Let in-flight memory/goal/schedule extractions finish their DB writes
+  // before the pool closes below — otherwise their writes race closeDb().
+  await waitForPendingExtractions(10_000);
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();
