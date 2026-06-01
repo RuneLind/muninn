@@ -111,7 +111,7 @@ Watchers with `config.hour`/`config.minute` only run once per day at/after that 
 
 Each watcher's `runChecker` call is wrapped in `withWatcherTimeout` so a hung checker (stuck MCP connection, wedged subprocess) can't block the scheduler tick or starve the watchers behind it. `computeWatcherTimeoutMs(watcher)` returns `max(120_000, config.timeoutMs + 30_000)` — a 2-min floor for watchers with no configured timeout, otherwise 30s of headroom ABOVE the checker's own `config.timeoutMs` so a legitimately slow Sonnet/X digest is never cut off prematurely (the net only fires when the inner model timeout is itself stuck). On timeout the existing per-watcher catch advances `last_run_at` (retry-storm prevention), and the orphaned checker promise is swallowed so it doesn't surface as an unhandledRejection.
 
-The loop is still **serial** — fully parallelizing watchers (`Promise.allSettled`) is deferred until the `agentStatus` singleton becomes per-request (`Map<requestId, RequestProgress>`); parallel watchers would otherwise clobber each other's progress in the single active-request slot.
+The loop is still **serial**, but the blocker is now cleared: `agentStatus` tracks progress per-`requestId` (`Map<requestId, RequestProgress>`), so parallel watchers no longer clobber each other's progress. Fully parallelizing watchers (`Promise.allSettled` over the due list, keeping the per-watcher timeout + per-watcher catch) is now a safe additive follow-up — see roadmap #8 in `mimir/plans/muninn-architecture-review-2026-06.md`.
 
 ## Email Watcher (email.ts)
 

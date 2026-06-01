@@ -139,30 +139,35 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   const requestId = agentStatus.startRequest(botConfig.name, "receiving", username);
   log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
-  // Save user message to DB (skipped for autorespond — caller has already saved as role='peer')
-  if (!params.skipUserSave) {
-    t.start("db_save_user");
-    await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform, threadId });
-    t.end("db_save_user");
-  }
-
-  agentStatus.set("building_prompt", username);
-  agentStatus.updatePhase("building_prompt");
-  const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
-    text, userId, username, userIdentity, threadId, botConfig,
-    slackEnabled: !!postToChannel, channelContext, recentChannelMessages,
-    tracer: t, logProps: props,
-  });
-
+  // The request is now tracked in agent-status. Everything from here — DB save,
+  // prompt assembly, connector call — runs inside the try so any failure routes
+  // through handleProcessError, which clears the request. Without this, a throw
+  // before the connector call would orphan the request's entry in the
+  // agent-status Map (it is only removed on completeRequest/clearRequest).
   try {
+    // Save user message to DB (skipped for autorespond — caller has already saved as role='peer')
+    if (!params.skipUserSave) {
+      t.start("db_save_user");
+      await saveMessage({ userId, botName: botConfig.name, username, role: "user", content: text, platform, threadId });
+      t.end("db_save_user");
+    }
+
+    agentStatus.set("building_prompt", username);
+    agentStatus.updatePhase(requestId, "building_prompt");
+    const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
+      text, userId, username, userIdentity, threadId, botConfig,
+      slackEnabled: !!postToChannel, channelContext, recentChannelMessages,
+      tracer: t, logProps: props,
+    });
+
     // Expose the originating thread to the hivemind MCP tool handlers for the
     // duration of the connector call so peer replies route back here, not into
     // `peer:<ns>/<name>`. See src/hivemind/active-turn.ts + correlation.ts.
     if (threadId) pushActiveTurn(botConfig.name, threadId);
     if (setStatus) await setStatus("Thinking...").catch(() => {});
     agentStatus.set("calling_claude", username);
-    agentStatus.updatePhase("calling_claude");
-    setConnectorInfo(botConfig, config.claudeModel);
+    agentStatus.updatePhase(requestId, "calling_claude");
+    setConnectorInfo(requestId, botConfig, config.claudeModel);
     const connectorType = botConfig.connector ?? "claude-cli";
     const connectorLabel = getConnectorLabel(connectorType);
     const effectiveModel = botConfig.model ?? config.claudeModel;
@@ -172,6 +177,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     const progressCallback = buildProgressCallback(
       { onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress, setStatus },
       username,
+      requestId,
     );
     const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
     const toolCount = result.toolCalls?.length ?? 0;
@@ -193,7 +199,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     // Save assistant response to DB
     agentStatus.set("saving_response", username);
-    agentStatus.updatePhase("saving_response");
+    agentStatus.updatePhase(requestId, "saving_response");
     t.start("db_save_response");
     const messageId = await saveMessage({
       userId,
@@ -246,7 +252,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // Format and send based on platform
     const sendPhase = isTelegram ? "sending_telegram" : "sending_slack";
     agentStatus.set(sendPhase, username);
-    agentStatus.updatePhase(sendPhase);
+    agentStatus.updatePhase(requestId, sendPhase);
     t.start("send");
 
     await formatAndSend({
@@ -330,6 +336,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       username,
       botName: botConfig.name,
       logProps: props,
+      requestId,
     });
     return undefined;
   } finally {

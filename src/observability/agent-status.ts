@@ -53,12 +53,31 @@ type ProgressSubscriber = (progress: RequestProgress | null) => void;
 
 let nextRequestId = 1;
 
+/**
+ * Tracks the live progress of in-flight requests.
+ *
+ * Requests are keyed by `requestId` in a `Map`, so concurrent work (multiple
+ * users on one bot, parallel watchers) no longer clobbers a single shared slot
+ * — each request accumulates its own tools/phase independently. Every mutating
+ * method takes the `requestId` returned by `startRequest()`; an unknown id is a
+ * silent no-op (defensive against callbacks that arrive after auto-clear).
+ *
+ * The read side (`getProgress()` / `subscribeProgress()`) still surfaces a
+ * single `RequestProgress | null` — the "primary" (most-recently-started) live
+ * request — because the dashboard/chat waterfall is a single-pane view. This
+ * keeps the SSE contract and UI untouched while the data layer stays correct
+ * under concurrency.
+ *
+ * The phase-only singleton (`set`/`get`/`subscribe`) is intentionally left
+ * global: it's a coarse "what is the bot doing right now" indicator, not
+ * per-request waterfall data.
+ */
 class AgentStatusTracker {
   private current: AgentStatus = { phase: "idle" };
   private subscribers = new Set<StatusSubscriber>();
-  private activeRequest: RequestProgress | null = null;
+  private requests = new Map<string, RequestProgress>();
   private progressSubscribers = new Set<ProgressSubscriber>();
-  private completionTimer: ReturnType<typeof setTimeout> | null = null;
+  private completionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   set(phase: AgentPhase, username?: string, detail?: string) {
     this.current = {
@@ -84,48 +103,44 @@ class AgentStatusTracker {
   // --- Request Progress ---
 
   startRequest(botName: string, phase: AgentPhase, username?: string): string {
-    // Clear any pending completion timer
-    if (this.completionTimer) {
-      clearTimeout(this.completionTimer);
-      this.completionTimer = null;
-    }
     const requestId = `req_${nextRequestId++}`;
-    this.activeRequest = {
+    this.requests.set(requestId, {
       requestId,
       botName,
       username,
       phase,
       startedAt: Date.now(),
       tools: [],
-    };
+    });
     this.notifyProgress();
     return requestId;
   }
 
-  updatePhase(phase: AgentPhase) {
-    if (this.activeRequest) {
-      this.activeRequest.phase = phase;
-      this.notifyProgress();
-    }
+  updatePhase(requestId: string, phase: AgentPhase) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.phase = phase;
+    this.notifyProgress();
   }
 
-  setConnectorLabel(label: string) {
-    if (this.activeRequest) {
-      this.activeRequest.connectorLabel = label;
-      this.notifyProgress();
-    }
+  setConnectorLabel(requestId: string, label: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.connectorLabel = label;
+    this.notifyProgress();
   }
 
-  setModel(model: string) {
-    if (this.activeRequest) {
-      this.activeRequest.model = model;
-      this.notifyProgress();
-    }
+  setModel(requestId: string, model: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.model = model;
+    this.notifyProgress();
   }
 
-  toolStart(name: string, displayName: string, input?: string) {
-    if (!this.activeRequest) return;
-    this.activeRequest.tools.push({
+  toolStart(requestId: string, name: string, displayName: string, input?: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.tools.push({
       name,
       displayName,
       startedAt: Date.now(),
@@ -134,11 +149,12 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
-  toolEnd(name: string, displayName: string) {
-    if (!this.activeRequest) return;
+  toolEnd(requestId: string, name: string, displayName: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
     // Find the last matching tool that hasn't ended yet
-    for (let i = this.activeRequest.tools.length - 1; i >= 0; i--) {
-      const tool = this.activeRequest.tools[i]!;
+    for (let i = req.tools.length - 1; i >= 0; i--) {
+      const tool = req.tools[i]!;
       if (tool.name === name && !tool.endedAt) {
         tool.endedAt = Date.now();
         tool.durationMs = tool.endedAt - tool.startedAt;
@@ -155,35 +171,48 @@ class AgentStatusTracker {
     numTurns?: number;
     toolCount?: number;
   }) {
-    if (!this.activeRequest || this.activeRequest.requestId !== requestId) return;
-    this.activeRequest.completed = true;
-    this.activeRequest.completedAt = Date.now();
-    this.activeRequest.traceId = meta.traceId;
-    this.activeRequest.inputTokens = meta.inputTokens;
-    this.activeRequest.outputTokens = meta.outputTokens;
-    this.activeRequest.numTurns = meta.numTurns;
-    this.activeRequest.toolCount = meta.toolCount;
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.completed = true;
+    req.completedAt = Date.now();
+    req.traceId = meta.traceId;
+    req.inputTokens = meta.inputTokens;
+    req.outputTokens = meta.outputTokens;
+    req.numTurns = meta.numTurns;
+    req.toolCount = meta.toolCount;
     this.notifyProgress();
 
-    // Auto-clear after 30 seconds (user can dismiss earlier via × button)
-    this.completionTimer = setTimeout(() => {
-      this.activeRequest = null;
-      this.completionTimer = null;
+    // Auto-clear this request after 30 seconds (user can dismiss earlier via × button)
+    const existing = this.completionTimers.get(requestId);
+    if (existing) clearTimeout(existing);
+    this.completionTimers.set(requestId, setTimeout(() => {
+      this.requests.delete(requestId);
+      this.completionTimers.delete(requestId);
       this.notifyProgress();
-    }, 30_000);
+    }, 30_000));
   }
 
-  clearRequest() {
-    if (this.completionTimer) {
-      clearTimeout(this.completionTimer);
-      this.completionTimer = null;
+  /** Clear one request (by id) or, with no id, every request — used for reset
+   *  and the no-active-request error path. */
+  clearRequest(requestId?: string) {
+    if (requestId === undefined) {
+      for (const timer of this.completionTimers.values()) clearTimeout(timer);
+      this.completionTimers.clear();
+      this.requests.clear();
+      this.notifyProgress();
+      return;
     }
-    this.activeRequest = null;
+    const timer = this.completionTimers.get(requestId);
+    if (timer) {
+      clearTimeout(timer);
+      this.completionTimers.delete(requestId);
+    }
+    this.requests.delete(requestId);
     this.notifyProgress();
   }
 
   getProgress(): RequestProgress | null {
-    return this.activeRequest;
+    return this.primaryRequest();
   }
 
   subscribeProgress(fn: ProgressSubscriber): () => void {
@@ -191,8 +220,17 @@ class AgentStatusTracker {
     return () => this.progressSubscribers.delete(fn);
   }
 
+  /** The request the single-pane waterfall should display: the most recently
+   *  started request still being tracked (Map preserves insertion order, so the
+   *  last entry is the newest). Null when nothing is in flight. */
+  private primaryRequest(): RequestProgress | null {
+    let primary: RequestProgress | null = null;
+    for (const req of this.requests.values()) primary = req;
+    return primary;
+  }
+
   private notifyProgress() {
-    const snapshot = this.activeRequest;
+    const snapshot = this.primaryRequest();
     for (const sub of this.progressSubscribers) {
       sub(snapshot);
     }
@@ -211,23 +249,23 @@ export function getConnectorLabel(connectorType: string): string {
   }
 }
 
-/** Set connector label + model on the active request from bot config */
-export function setConnectorInfo(botConfig: { connector?: string; model?: string }, fallbackModel?: string) {
+/** Set connector label + model on the given request from bot config */
+export function setConnectorInfo(requestId: string, botConfig: { connector?: string; model?: string }, fallbackModel?: string) {
   const label = getConnectorLabel(botConfig.connector ?? "claude-cli");
-  agentStatus.setConnectorLabel(label);
+  agentStatus.setConnectorLabel(requestId, label);
   const model = botConfig.model ?? fallbackModel;
-  if (model) agentStatus.setModel(model);
+  if (model) agentStatus.setModel(requestId, model);
 }
 
-/** Create a progress callback that updates agent status with tool details */
-export function createProgressCallback(phase: AgentPhase, username?: string): StreamProgressCallback {
+/** Create a progress callback that updates the given request with tool details */
+export function createProgressCallback(requestId: string, phase: AgentPhase, username?: string): StreamProgressCallback {
   return (event) => {
     if (event.type === "tool_start") {
       agentStatus.set(phase, username, event.displayName);
-      agentStatus.toolStart(event.name, event.displayName, event.input);
+      agentStatus.toolStart(requestId, event.name, event.displayName, event.input);
     } else if (event.type === "tool_end") {
       agentStatus.set(phase, username);
-      agentStatus.toolEnd(event.name, event.displayName);
+      agentStatus.toolEnd(requestId, event.name, event.displayName);
     }
   };
 }

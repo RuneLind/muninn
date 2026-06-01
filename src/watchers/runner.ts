@@ -179,6 +179,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       });
     }
 
+    let requestId: string | undefined;
     try {
       // Check quiet hours — skip notifications but still mark as run (forced runs bypass)
       if (!forced) {
@@ -192,8 +193,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       if (forced) log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
       agentStatus.set("running_watcher", watcher.name);
-      const requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
-      setConnectorInfo(botConfig);
+      requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
+      setConnectorInfo(requestId, botConfig);
 
       const alerts = await withWatcherTimeout(
         runChecker(watcher, botConfig.dir, tag),
@@ -284,7 +285,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       agentStatus.set("idle");
       wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...(forced && { manualTrigger: true }) });
     } catch (err) {
-      agentStatus.clearRequest();
+      if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       wt?.error(err instanceof Error ? err : String(err));
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });

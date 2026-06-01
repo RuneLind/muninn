@@ -18,13 +18,14 @@ const log = getLog("scheduler", "task-executor");
 export async function runScheduledTasksFromList(api: Api, config: Config, botConfig: BotConfig, dueTasks: ScheduledTask[]): Promise<void> {
   const tag = botConfig.name;
   for (const task of dueTasks) {
+    let requestId: string | undefined;
     try {
       agentStatus.set("running_task", task.title);
-      const requestId = agentStatus.startRequest(botConfig.name, "running_task");
-      setConnectorInfo(botConfig, config.claudeModel);
-      const markdown = await executeTask(task, config, botConfig);
+      requestId = agentStatus.startRequest(botConfig.name, "running_task");
+      setConnectorInfo(requestId, botConfig, config.claudeModel);
+      const markdown = await executeTask(task, config, botConfig, requestId);
       agentStatus.set("sending_telegram", task.title);
-      agentStatus.updatePhase("sending_telegram");
+      agentStatus.updatePhase(requestId, "sending_telegram");
       await api.sendMessage(task.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const threadId = await getActiveThreadId(task.userId, tag);
       await saveMessage({
@@ -41,7 +42,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
       );
       log.info("Scheduled task fired: \"{title}\" ({taskType}) to user {userId}", { botName: tag, title: task.title, taskType: task.taskType, userId: task.userId });
     } catch (err) {
-      agentStatus.clearRequest();
+      if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       log.error("Failed to execute scheduled task {taskId}: {error}", { botName: tag, taskId: task.id, error: err instanceof Error ? err.message : String(err) });
 
@@ -55,7 +56,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
   }
 }
 
-async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig): Promise<string> {
+async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<string> {
   const cwd = botConfig.dir;
   switch (task.taskType) {
     case "reminder":
@@ -68,7 +69,7 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
       );
 
     case "briefing":
-      return await generateBriefing(task, config, botConfig);
+      return await generateBriefing(task, config, botConfig, requestId);
 
     case "custom":
       if (!task.prompt) return `**${task.title}**`;
@@ -82,7 +83,7 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
   }
 }
 
-async function generateBriefing(task: ScheduledTask, config: Config, botConfig: BotConfig): Promise<string> {
+async function generateBriefing(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<string> {
   const t0 = performance.now();
 
   try {
@@ -97,7 +98,7 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
       goalsCount: meta.goalsCount, tasksCount: meta.scheduledTasksCount, alertsCount: meta.alertsCount,
     });
 
-    const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, systemPrompt, createProgressCallback("running_task"));
+    const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, systemPrompt, createProgressCallback(requestId, "running_task"));
 
     const totalMs = Math.round(performance.now() - t0);
     log.info("Briefing generated in {ms}ms (model: {model}, input: {input}, output: {output}, turns: {turns})", {

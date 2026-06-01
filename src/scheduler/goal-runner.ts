@@ -19,13 +19,14 @@ const log = getLog("scheduler", "goal-runner");
 export async function runGoalRemindersFromList(api: Api, config: Config, botConfig: BotConfig, reminders: Goal[]): Promise<void> {
   const tag = botConfig.name;
   for (const goal of reminders) {
+    let requestId: string | undefined;
     try {
       agentStatus.set("checking_goals", goal.title);
-      const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
-      setConnectorInfo(botConfig, config.claudeModel);
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      setConnectorInfo(requestId, botConfig, config.claudeModel);
       const markdown = await generateReminderMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
-      agentStatus.updatePhase("sending_telegram");
+      agentStatus.updatePhase(requestId, "sending_telegram");
       await api.sendMessage(goal.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const threadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
@@ -42,7 +43,7 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
       );
       log.info("Deadline reminder sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
-      agentStatus.clearRequest();
+      if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       log.error("Failed to send reminder for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }
@@ -53,13 +54,14 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
   const tag = botConfig.name;
   if (staleGoals.length > 0) {
     const goal = staleGoals[0]!;
+    let requestId: string | undefined;
     try {
       agentStatus.set("checking_goals", goal.title);
-      const requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
-      setConnectorInfo(botConfig, config.claudeModel);
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      setConnectorInfo(requestId, botConfig, config.claudeModel);
       const markdown = await generateCheckinMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
-      agentStatus.updatePhase("sending_telegram");
+      agentStatus.updatePhase(requestId, "sending_telegram");
       await api.sendMessage(goal.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
       const ciThreadId = await getActiveThreadId(goal.userId, tag);
       await saveMessage({
@@ -76,7 +78,7 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
       );
       log.info("Check-in sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
     } catch (err) {
-      agentStatus.clearRequest();
+      if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
       log.error("Failed to send check-in for goal {goalId}: {error}", { botName: tag, goalId: goal.id, error: err instanceof Error ? err.message : String(err) });
     }

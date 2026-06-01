@@ -62,11 +62,11 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 
 ### Agent Status (`src/observability/agent-status.ts`)
 
-Tracks the lifecycle of a single active request:
+Tracks in-flight requests in a `Map<requestId, RequestProgress>` (concurrent requests no longer clobber a shared slot). The read side still surfaces a single primary request, so the SSE `/request-progress` contract and the waterfall UI are unchanged. See `src/observability/CLAUDE.md` for the full method list and the request-scoped-mutator rule.
 
-1. `startRequest()` — creates RequestProgress with requestId
-2. `toolStart()`/`toolEnd()` — records tool calls with timing
-3. `completeRequest()` — marks done, auto-clears after 30s
+1. `startRequest()` — creates RequestProgress keyed by a fresh requestId
+2. `toolStart(requestId, …)`/`toolEnd(requestId, …)` — records tool calls with timing
+3. `completeRequest(requestId, …)` — marks done, auto-clears that request after 30s
 4. Phases: `idle`, `receiving`, `transcribing`, `building_prompt`, `calling_claude`, `saving_response`, `sending_telegram`, `sending_slack`, `synthesizing_voice`, `running_task`, `checking_goals`, `running_watcher`
 
 ### Activity Log (`src/observability/activity-log.ts`)
@@ -85,6 +85,6 @@ Tracks the lifecycle of a single active request:
 ## Common Pitfalls
 
 1. **SSE format**: Events must be `data: JSON\n\n` — missing double newline breaks the stream.
-2. **Agent status is global**: Only one active request tracked at a time — concurrent requests overwrite.
+2. **Agent status waterfall is single-pane**: the data layer tracks all concurrent requests (per-`requestId` Map), but `/request-progress` emits only the primary (most-recently-started) request, so the overlay shows one at a time.
 3. **Component pattern**: Always export all three (*Styles, *Html, *Script) even if empty — pages expect them.
 4. **MCP connection cleanup**: Always call `disconnectServer()` or `disconnectAll()` — leaked stdio processes stay alive.

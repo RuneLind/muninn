@@ -19,18 +19,23 @@ Cross-cutting runtime observability singletons. These are imported by **core, sc
 
 ## Agent Status (`agent-status.ts`)
 
-Tracks the lifecycle of a single active request (the waterfall/progress overlay source):
+Tracks the lifecycle of in-flight requests (the waterfall/progress overlay source). Requests are stored in a `Map<requestId, RequestProgress>`, so concurrent work (multiple users on one bot, parallel watchers) accumulates each request's tools/phase independently instead of clobbering a shared slot.
 
-1. `startRequest()` — creates `RequestProgress` with a `requestId`
-2. `toolStart()` / `toolEnd()` — records tool calls with timing
-3. `completeRequest()` — marks done, auto-clears after 30s
-4. Phases: `idle`, `receiving`, `transcribing`, `building_prompt`, `calling_claude`, `saving_response`, `sending_telegram`, `sending_slack`, `synthesizing_voice`, `running_task`, `checking_goals`, `running_watcher`
-5. `setConnectorInfo()` / `getConnectorLabel()` — connector display label (mirrored verbatim by `dashboard/views/components/traces-list.ts`)
-6. `createProgressCallback()` — adapts a `StreamProgressCallback` into status updates (used by core + scheduler)
+1. `startRequest()` — creates `RequestProgress` keyed by a fresh `requestId` (returned to the caller)
+2. `updatePhase(requestId, …)` / `toolStart(requestId, …)` / `toolEnd(requestId, …)` / `setConnectorLabel(requestId, …)` / `setModel(requestId, …)` — **every mutator takes the `requestId`**; an unknown id is a silent no-op (defensive against callbacks arriving after auto-clear)
+3. `completeRequest(requestId, …)` — marks done, auto-clears *that request* after 30s (per-request timer)
+4. `clearRequest(requestId?)` — clears one request, or (no arg) every tracked request (reset / no-active-request error path)
+5. Phases: `idle`, `receiving`, `transcribing`, `building_prompt`, `calling_claude`, `saving_response`, `sending_telegram`, `sending_slack`, `synthesizing_voice`, `running_task`, `checking_goals`, `running_watcher`
+6. `setConnectorInfo(requestId, …)` / `getConnectorLabel()` — connector display label (mirrored verbatim by `dashboard/views/components/traces-list.ts`)
+7. `createProgressCallback(requestId, …)` — adapts a `StreamProgressCallback` into status updates for that request (used by core + scheduler)
+
+**Read side is unchanged:** `getProgress()` / `subscribeProgress()` still surface a single `RequestProgress | null` — the *primary* (most-recently-started) live request — because the dashboard/chat waterfall is a single-pane view. This keeps the SSE contract (`sse-routes.ts`) and the UI untouched while the data layer stays correct under concurrency.
 
 The dashboard renders this via SSE `/agent-status` (phase) and `/request-progress` (full waterfall); the UI component itself stays in `dashboard/views/components/agent-status-ui.ts`.
 
 ## Common Pitfalls
 
-1. **Agent status is global**: only one active request is tracked at a time — concurrent requests overwrite. (Known limitation; a `Map<requestId, RequestProgress>` is the documented future fix.)
-2. **Keep these layer-neutral**: depend only on `db/`, `types.ts`, `logging.ts`, and `ai/` types — never import from `dashboard/`, `core/`, or platform handlers, or the upward-import smell returns.
+1. **Mutators are request-scoped**: `updatePhase`/`toolStart`/`toolEnd`/`setConnectorLabel`/`setModel`/`completeRequest`/`clearRequest` all take the `requestId` from `startRequest()` — passing the wrong id (or one already auto-cleared) is a silent no-op, so progress updates just vanish. Thread the id through; don't reach for a "current request".
+2. **The phase-only singleton (`set`/`get`/`subscribe`) is still global**: it's a coarse "what is the bot doing right now" indicator, not per-request waterfall data, so concurrent requests *do* overwrite the phase text. That's intentional — the per-request `Map` carries the real progress.
+3. **The waterfall UI is single-pane**: `getProgress()`/`subscribeProgress()` emit only the primary (most-recently-started) request. The data layer tracks all concurrent requests correctly, but the dashboard/chat overlay shows one at a time. A true multi-pane UI is a future, additive change — the data is already there.
+4. **Keep these layer-neutral**: depend only on `db/`, `types.ts`, `logging.ts`, and `ai/` types — never import from `dashboard/`, `core/`, or platform handlers, or the upward-import smell returns.
