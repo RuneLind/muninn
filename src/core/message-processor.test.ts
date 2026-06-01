@@ -66,11 +66,11 @@ mock.module("../db/users.ts", () => ({
   ensureUser: mock(() => Promise.resolve()),
 }));
 
-mock.module("../dashboard/activity-log.ts", () => ({
+mock.module("../observability/activity-log.ts", () => ({
   activityLog: { push: mockActivityPush },
 }));
 
-mock.module("../dashboard/agent-status.ts", () => ({
+mock.module("../observability/agent-status.ts", () => ({
   agentStatus: {
     set: mock(),
     startRequest: mock(() => "req_1"),

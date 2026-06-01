@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import { getLog } from "../../logging.ts";
 import { renderMcpDebugPage } from "../views/mcp-debug-page.ts";
 import { renderSerenaPage } from "../views/serena-page.ts";
-import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "../mcp-client.ts";
+import { loadMcpConfig, connectToServer, callTool, disconnectServer } from "../../ai/mcp-tool-caller.ts";
 import { serenaManager } from "../../serena/manager.ts";
 import { discoverAllBots } from "../../bots/config.ts";
 

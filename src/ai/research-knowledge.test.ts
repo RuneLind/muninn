@@ -27,7 +27,7 @@ mock.module("../scheduler/executor.ts", () => ({
   trackUsage: () => {},
 }));
 
-mock.module("../dashboard/routes/knowledge-api-client.ts", () => ({
+mock.module("./knowledge-api-client.ts", () => ({
   fetchKnowledgeApi: mockFetch,
   KnowledgeApiError: class KnowledgeApiError extends Error {
     statusCode: number;

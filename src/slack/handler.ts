@@ -2,7 +2,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { HandleSlackMessageParams } from "./handlers/types.ts";
 import { processMessage } from "../core/message-processor.ts";
-import { activityLog } from "../dashboard/activity-log.ts";
+import { activityLog } from "../observability/activity-log.ts";
 import { getRestrictedToolsForUser } from "../ai/tool-restrictions.ts";
 import {
   handleTopicCommand,

@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { activityLog } from "../activity-log.ts";
-import { agentStatus } from "../agent-status.ts";
+import { activityLog } from "../../observability/activity-log.ts";
+import { agentStatus } from "../../observability/agent-status.ts";
 
 export function registerSSERoutes(app: Hono): void {
   app.get("/api/events", (c) => {

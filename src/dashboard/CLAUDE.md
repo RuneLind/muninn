@@ -5,11 +5,10 @@
 | File | Role |
 |---|---|
 | `routes.ts` | Creates Hono sub-router, registers all route modules |
-| `activity-log.ts` | `ActivityLog` singleton — in-memory event buffer with DB write-through and pub/sub |
-| `agent-status.ts` | `AgentStatusTracker` singleton — tracks active request progress (phase, tools, tokens) |
-| `mcp-client.ts` | MCP debug client — connect to MCP servers (stdio or HTTP), list tools, call tools |
 | `openapi-spec.ts` | OpenAPI 3.1.0 spec covering all JSON API endpoints |
-| `index.ts` | Barrel export: `createDashboardRoutes`, `activityLog` |
+| `index.ts` | Barrel export: `createDashboardRoutes` |
+
+> **Moved out (2026-06, layering cleanup):** the `activity-log` and `agent-status` singletons now live in `src/observability/` (they are imported by core/scheduler/watchers, not just the dashboard — see `src/observability/CLAUDE.md`). The MCP debug client moved to `src/ai/mcp-tool-caller.ts` (the openai-compat connector consumes it, so it belongs in the lower `ai/` layer). The dashboard still consumes all three; only the source-of-truth directory changed.
 
 ## Route Organization
 
@@ -61,7 +60,7 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 - `/agent-status` — phase changes (idle, calling_claude, transcribing, etc.)
 - `/request-progress` — full waterfall data (tools with timing, tokens, model)
 
-### Agent Status (agent-status.ts)
+### Agent Status (`src/observability/agent-status.ts`)
 
 Tracks the lifecycle of a single active request:
 
@@ -70,18 +69,18 @@ Tracks the lifecycle of a single active request:
 3. `completeRequest()` — marks done, auto-clears after 30s
 4. Phases: `idle`, `receiving`, `transcribing`, `building_prompt`, `calling_claude`, `saving_response`, `sending_telegram`, `sending_slack`, `synthesizing_voice`, `running_task`, `checking_goals`, `running_watcher`
 
-### Activity Log (activity-log.ts)
+### Activity Log (`src/observability/activity-log.ts`)
 
 - In-memory ring buffer (max 500 events) + fire-and-forget DB persistence
 - `loadFromDb()` called after DB init to hydrate on startup
 - `stats` getter: messages today, avg response time, total cost
 
-## MCP Debug Client (mcp-client.ts)
+## MCP Debug Client (`src/ai/mcp-tool-caller.ts`)
 
 - Supports both stdio (spawn process) and HTTP (StreamableHTTP) transports
 - Connection pool keyed by `bot:server` — reuses existing connections
 - Timeouts: 30s connect, 120s tool call
-- Used by both the MCP debug page and Serena management
+- Used by the MCP debug page (`tools-routes.ts`), Serena management, and the `openai-compat` connector
 
 ## Common Pitfalls
 

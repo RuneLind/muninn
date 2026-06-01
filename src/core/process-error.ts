@@ -1,7 +1,7 @@
 import type { Tracer } from "../tracing/index.ts";
 import type { Platform } from "../types.ts";
-import { activityLog } from "../dashboard/activity-log.ts";
-import { agentStatus } from "../dashboard/agent-status.ts";
+import { activityLog } from "../observability/activity-log.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { getLog } from "../logging.ts";
 import type { LogProps } from "./message-processor.ts";

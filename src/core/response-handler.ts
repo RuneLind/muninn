@@ -4,7 +4,7 @@ import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { splitMessage } from "../utils/split-message.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatWebHtml } from "../web/web-format.ts";
-import { activityLog } from "../dashboard/activity-log.ts";
+import { activityLog } from "../observability/activity-log.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("core", "response-handler");

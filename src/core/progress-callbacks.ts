@@ -1,5 +1,5 @@
 import type { StreamProgressEvent } from "../ai/stream-parser.ts";
-import { createProgressCallback } from "../dashboard/agent-status.ts";
+import { createProgressCallback } from "../observability/agent-status.ts";
 import { getToolStatus } from "../ai/tool-status.ts";
 import { formatToolDisplayName } from "../ai/stream-parser.ts";
 

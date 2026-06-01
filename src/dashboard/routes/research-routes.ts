@@ -3,14 +3,14 @@ import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
 import { discoverAllBots, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
-import { loadMcpConfig } from "../mcp-client.ts";
+import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
 import { createThread, findThreadByName } from "../../db/threads.ts";
 import { birthDevRun } from "../../db/dev-runs.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
-import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
 import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
 

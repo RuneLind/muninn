@@ -5,7 +5,7 @@ import {
   connectToServer,
   callTool,
   disconnectServer,
-} from "../dashboard/mcp-client.ts";
+} from "../ai/mcp-tool-caller.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("serena", "tool-proxy");

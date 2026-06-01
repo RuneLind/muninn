@@ -66,7 +66,7 @@ message-processor.ts: progressCallback
 | `src/ai/stream-parser.ts` | Parses connector output into `StreamProgressEvent` (tool_start, tool_end, text_delta, intent) |
 | `src/ai/tool-status.ts` | `getToolStatus()` — maps tool names to human-friendly text (e.g., "Code analysis: find symbol MaksimalAvgift") |
 | `src/core/message-processor.ts` | Routes stream events to both WS callbacks (chat display) and agentStatus (waterfall) |
-| `src/dashboard/agent-status.ts` | `agentStatus` singleton — tracks `RequestProgress` with tool timing, notifies SSE subscribers |
+| `src/observability/agent-status.ts` | `agentStatus` singleton — tracks `RequestProgress` with tool timing, notifies SSE subscribers |
 | `src/dashboard/routes/sse-routes.ts` | `/api/events` endpoint — sends initial state + live `request_progress` updates |
 | `src/chat/state.ts` | `publishIntent()`, `publishToolStatus()`, `publishTextDelta()` — WS event emitters |
 | `src/chat/views/page.ts` | Browser-side: waterfall rendering, WS event handlers, inline tool display |

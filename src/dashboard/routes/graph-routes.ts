@@ -3,7 +3,7 @@ import type { Config } from "../../config.ts";
 import {
   fetchKnowledgeApi,
   knowledgeApiHandler,
-} from "./knowledge-api-client.ts";
+} from "../../ai/knowledge-api-client.ts";
 import { renderGraphPage } from "../views/graph-page.ts";
 import { getLog } from "../../logging.ts";
 

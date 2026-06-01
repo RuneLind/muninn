@@ -3,7 +3,7 @@ import {
   loadMcpConfig,
   connectToServer,
   type ToolInfo,
-} from "../../dashboard/mcp-client.ts";
+} from "../mcp-tool-caller.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("ai", "openai-compat");

@@ -110,7 +110,7 @@ export function tracesListScript(): string {
     }
 
     function connectorLabel(type) {
-      // Mirrors getConnectorLabel() in src/dashboard/agent-status.ts so the
+      // Mirrors getConnectorLabel() in src/observability/agent-status.ts so the
       // traces list reads the same as the live status header / progress overlay.
       if (type === 'copilot-sdk') return 'Copilot SDK';
       if (type === 'openai-compat') return 'OpenAI';

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { connectToServer, disconnectAll, loadMcpConfig } from "../src/dashboard/mcp-client.ts";
+import { connectToServer, disconnectAll, loadMcpConfig } from "../src/ai/mcp-tool-caller.ts";
 
 const BOT = "melosys";
 const SERVER = "knowledge";

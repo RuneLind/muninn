@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderSearchPage } from "../views/search-page.ts";
 import { renderSearchDocumentPage } from "../views/search-document-page.ts";
-import { knowledgeApiHandler } from "./knowledge-api-client.ts";
+import { knowledgeApiHandler } from "../../ai/knowledge-api-client.ts";
 
 export function registerSearchRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;

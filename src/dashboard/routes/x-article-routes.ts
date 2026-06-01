@@ -6,7 +6,7 @@ import { renderXArticlePage } from "../views/x-article-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeJob } from "../../x-article/state.ts";
 import { summarizeArticle } from "../../x-article/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 

@@ -6,7 +6,7 @@ import { renderYouTubePage } from "../views/youtube-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { knowledgeApiHandler, fetchKnowledgeApi } from "./knowledge-api-client.ts";
+import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 
 const log = getLog("dashboard");
 

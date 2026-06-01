@@ -3,10 +3,10 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
 import { resolveConnector } from "../ai/connector.ts";
 import type { UserIdentity } from "../types.ts";
-import { activityLog } from "../dashboard/activity-log.ts";
+import { activityLog } from "../observability/activity-log.ts";
 import { saveMessage } from "../db/messages.ts";
 import { Tracer } from "../tracing/index.ts";
-import { agentStatus, setConnectorInfo, getConnectorLabel } from "../dashboard/agent-status.ts";
+import { agentStatus, setConnectorInfo, getConnectorLabel } from "../observability/agent-status.ts";
 import { ensureUser } from "../db/users.ts";
 import { getLog } from "../logging.ts";
 
