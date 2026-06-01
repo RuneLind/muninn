@@ -272,6 +272,30 @@ function validateEnumField<T extends string>(
   }
 }
 
+/**
+ * Guards a scalar config.json field against the wrong JSON type. The fields are
+ * read back with blind `as number`/`as boolean`/`as string` casts, so an entry
+ * like `"timeoutMs": "180000"` (string) would otherwise flow through untyped and
+ * misbehave downstream (NaN math, wrong spawn args). On a type mismatch we warn
+ * and drop the key so the field falls back to its default — same graceful
+ * posture as {@link validateEnumField}.
+ */
+function validateScalarField(
+  settings: Record<string, unknown>,
+  key: string,
+  expected: "string" | "number" | "boolean",
+  botName: string,
+): void {
+  const value = settings[key];
+  if (value !== undefined && typeof value !== expected) {
+    log.warn(
+      `Bot "{name}" config.json field "${key}" should be a ${expected} but is {type} ({value}) — ignoring it (using default)`,
+      { name: botName, type: typeof value, value: String(value) },
+    );
+    delete settings[key];
+  }
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
@@ -342,6 +366,12 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         }
         validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const, name);
         validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
+        validateScalarField(botSettings, "model", "string", name);
+        validateScalarField(botSettings, "baseUrl", "string", name);
+        validateScalarField(botSettings, "thinkingMaxTokens", "number", name);
+        validateScalarField(botSettings, "timeoutMs", "number", name);
+        validateScalarField(botSettings, "contextWindow", "number", name);
+        validateScalarField(botSettings, "showWaterfall", "boolean", name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }
