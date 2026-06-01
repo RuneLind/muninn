@@ -9,6 +9,7 @@ import { createDashboardRoutes, activityLog } from "./dashboard/index.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
 import { waitForPendingExtractions } from "./ai/extraction-tracker.ts";
+import { logResolvedHaikuBackends } from "./ai/haiku-direct.ts";
 import { disconnectAll as disconnectAllMcp } from "./dashboard/mcp-client.ts";
 import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
@@ -50,6 +51,10 @@ if (allBotConfigs.length === 0) {
 if (botConfigs.length === 0) {
   log.warn("No bots have platform tokens — only dashboard + /chat will be available. Set TELEGRAM_BOT_TOKEN_<NAME> or SLACK_BOT_TOKEN_<NAME> + SLACK_APP_TOKEN_<NAME> for live bots.");
 }
+
+// Surface the effective Haiku backend (+ the precedence rule that chose it) per
+// bot, so a mis-resolved backend is visible at boot rather than via the trace.
+logResolvedHaikuBackends(allBotConfigs);
 
 // Module-level references for shutdown handler
 const telegramBotMap = new Map<string, Bot>();

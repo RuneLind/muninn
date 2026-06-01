@@ -119,6 +119,7 @@ const {
   callHaikuViaCopilot,
   callHaikuWithFallback,
   resolveBackend,
+  resolveBackendWithReason,
   isHaikuDirectEnabled,
   hasHaikuDirectAuth,
   _resetClientForTests,
@@ -256,6 +257,55 @@ describe("resolveBackend", () => {
 
   test("explicit opts.backend trumps per-bot haikuBackend", () => {
     expect(resolveBackend({ backend: "cli", haikuBackend: "anthropic" })).toBe("cli");
+  });
+});
+
+describe("resolveBackendWithReason", () => {
+  test("default → cli with reason 'default'", () => {
+    expect(resolveBackendWithReason({})).toEqual({ backend: "cli", reason: "default" });
+  });
+
+  test("explicit opts.backend → reason 'explicit override'", () => {
+    expect(resolveBackendWithReason({ backend: "cli", connector: "copilot-sdk" })).toEqual({
+      backend: "cli",
+      reason: "explicit override",
+    });
+  });
+
+  test("HAIKU_BACKEND env → reason 'HAIKU_BACKEND env'", () => {
+    process.env.HAIKU_BACKEND = "anthropic";
+    expect(resolveBackendWithReason({ connector: "copilot-sdk" })).toEqual({
+      backend: "anthropic",
+      reason: "HAIKU_BACKEND env",
+    });
+  });
+
+  test("per-bot haikuBackend → reason 'bot config haikuBackend'", () => {
+    expect(resolveBackendWithReason({ connector: "claude-cli", haikuBackend: "copilot" })).toEqual({
+      backend: "copilot",
+      reason: "bot config haikuBackend",
+    });
+  });
+
+  test("legacy flag → reason 'legacy HAIKU_DIRECT_ENABLED'", () => {
+    process.env.HAIKU_DIRECT_ENABLED = "1";
+    expect(resolveBackendWithReason({})).toEqual({
+      backend: "anthropic",
+      reason: "legacy HAIKU_DIRECT_ENABLED",
+    });
+  });
+
+  test("connector copilot-sdk → reason 'connector default (copilot-sdk)'", () => {
+    expect(resolveBackendWithReason({ connector: "copilot-sdk" })).toEqual({
+      backend: "copilot",
+      reason: "connector default (copilot-sdk)",
+    });
+  });
+
+  test("resolveBackend stays in lockstep with resolveBackendWithReason", () => {
+    process.env.HAIKU_BACKEND = "copilot";
+    const opts = { connector: "claude-cli" as const };
+    expect(resolveBackend(opts)).toBe(resolveBackendWithReason(opts).backend);
   });
 });
 
