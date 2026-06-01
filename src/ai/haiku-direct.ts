@@ -51,8 +51,22 @@ function parseHaikuBackendEnv(): HaikuBackend | null {
   return null;
 }
 
+export interface BackendResolutionInput {
+  backend?: HaikuBackend;
+  haikuBackend?: HaikuBackend;
+  connector?: ConnectorType;
+}
+
+export interface BackendResolution {
+  backend: HaikuBackend;
+  /** Which precedence rule won — surfaced by the startup diagnostic. */
+  reason: string;
+}
+
 /**
- * Resolution order (top wins):
+ * Single source of truth for backend precedence (top wins). Returns the chosen
+ * backend plus a human-readable reason. `resolveBackend` and the startup
+ * diagnostic both delegate here, so the order lives in exactly one place:
  *   1. explicit opts.backend
  *   2. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
  *   3. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
@@ -60,18 +74,37 @@ function parseHaikuBackendEnv(): HaikuBackend | null {
  *   5. opts.connector === "copilot-sdk" → copilot
  *   6. floor → cli
  */
-export function resolveBackend(opts: {
-  backend?: HaikuBackend;
-  haikuBackend?: HaikuBackend;
-  connector?: ConnectorType;
-}): HaikuBackend {
-  if (opts.backend) return opts.backend;
+export function resolveBackendWithReason(opts: BackendResolutionInput): BackendResolution {
+  if (opts.backend) return { backend: opts.backend, reason: "explicit override" };
   const fromEnv = parseHaikuBackendEnv();
-  if (fromEnv) return fromEnv;
-  if (opts.haikuBackend) return opts.haikuBackend;
-  if (isHaikuDirectEnabled()) return "anthropic";
-  if (opts.connector === "copilot-sdk") return "copilot";
-  return "cli";
+  if (fromEnv) return { backend: fromEnv, reason: "HAIKU_BACKEND env" };
+  if (opts.haikuBackend) return { backend: opts.haikuBackend, reason: "bot config haikuBackend" };
+  if (isHaikuDirectEnabled()) return { backend: "anthropic", reason: "legacy HAIKU_DIRECT_ENABLED" };
+  if (opts.connector === "copilot-sdk") return { backend: "copilot", reason: "connector default (copilot-sdk)" };
+  return { backend: "cli", reason: "default" };
+}
+
+/** Resolve the effective Haiku backend. See {@link resolveBackendWithReason}. */
+export function resolveBackend(opts: BackendResolutionInput): HaikuBackend {
+  return resolveBackendWithReason(opts).backend;
+}
+
+/**
+ * Log the effective Haiku backend for each bot at startup. The 6-level
+ * precedence is a recurring "why is my bot on the wrong backend?" puzzle —
+ * naming the winning rule per bot makes it answerable from the boot log instead
+ * of by reverse-engineering the chain.
+ */
+export function logResolvedHaikuBackends(
+  bots: Array<{ name: string; connector?: ConnectorType; haikuBackend?: HaikuBackend }>,
+): void {
+  for (const bot of bots) {
+    const { backend, reason } = resolveBackendWithReason({
+      connector: bot.connector,
+      haikuBackend: bot.haikuBackend,
+    });
+    log.info("{botName} Haiku backend: {backend} ({reason})", { botName: bot.name, backend, reason });
+  }
 }
 
 function buildAnthropic(): { client: Anthropic; authSource: "api-key" | "oauth" } {
@@ -232,6 +265,17 @@ export async function callHaikuViaCopilot(
   }
 }
 
+type HaikuBackendHandler = (prompt: string, opts: HaikuRouterOptions) => Promise<HaikuResult>;
+
+// resolveBackend() picks the key; this maps the two non-CLI keys to their
+// handler — mirroring resolveConnector()'s registry, so adding a backend is
+// additive. The CLI is the universal fallback (not a registry entry) and is
+// handled separately below.
+const NON_CLI_BACKENDS: Record<"anthropic" | "copilot", HaikuBackendHandler> = {
+  anthropic: callHaikuDirect,
+  copilot: callHaikuViaCopilot,
+};
+
 /**
  * Drop-in replacement for `spawnHaiku` that routes through a backend picked
  * by `resolveBackend()`. Falls back to the CLI subprocess on any error.
@@ -241,33 +285,17 @@ export async function callHaikuWithFallback(
   opts: HaikuRouterOptions,
 ): Promise<HaikuResult> {
   const backend = resolveBackend(opts);
+  const botName = opts.botName ?? "haiku";
 
-  if (backend === "anthropic") {
-    if (!hasHaikuDirectAuth()) {
-      log.warn(
-        "haiku-router anthropic backend requested but no auth, falling back to CLI",
-        { botName: opts.botName ?? "haiku" },
-      );
-    } else {
-      try {
-        return await callHaikuDirect(prompt, opts);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.warn(
-          "haiku-router anthropic failed, falling back to CLI: {error}",
-          { botName: opts.botName ?? "haiku", error: message },
-        );
-      }
-    }
-  } else if (backend === "copilot") {
+  if (backend === "anthropic" && !hasHaikuDirectAuth()) {
+    // No auth → skip the attempt entirely rather than failing one call first.
+    log.warn("haiku-router anthropic backend requested but no auth, falling back to CLI", { botName });
+  } else if (backend !== "cli") {
     try {
-      return await callHaikuViaCopilot(prompt, opts);
+      return await NON_CLI_BACKENDS[backend](prompt, opts);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log.warn(
-        "haiku-router copilot failed, falling back to CLI: {error}",
-        { botName: opts.botName ?? "haiku", error: message },
-      );
+      log.warn("haiku-router {backend} failed, falling back to CLI: {error}", { botName, backend, error: message });
     }
   }
   return spawnHaiku(prompt, opts);
