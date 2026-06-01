@@ -1,45 +1,31 @@
-import { type Block, parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
+import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
- * Walks the shared block AST; tables become labeled bullet lists and inline
- * content runs through `renderInline` (which also accepts a few HTML tags
- * Claude occasionally emits and converts them to mrkdwn).
+ * Walks the shared block AST via `renderBlocks`; tables become labeled bullet
+ * lists and inline content runs through `renderInline` (which also accepts a
+ * few HTML tags Claude occasionally emits and converts them to mrkdwn).
  */
 export function formatSlackMrkdwn(text: string): string {
-  const blocks = parseBlocks(text);
-  const rendered = blocks.map(renderBlock).join("\n");
+  const rendered = renderBlocks(parseBlocks(text), slackRenderer);
   return rendered
     .replace(/^[•\-\*]\s*$/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-function renderBlock(block: Block): string {
-  switch (block.type) {
-    case "code_block":
-      return "```\n" + block.code + "\n```";
-    case "hr":
-      return "";
-    case "heading":
-      return `*${renderInline(block.content)}*`;
-    case "blockquote":
-      return block.lines.map((l) => `> ${renderInline(l)}`).join("\n");
-    case "ul":
-      return block.items.map((i) => `- ${renderInline(i)}`).join("\n");
-    case "ol":
-      return block.items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n");
-    case "table":
-      return renderTable(block.headers, block.rows);
-    case "text":
-      return block.lines.map(renderInline).join("\n");
-    default: {
-      const _exhaustive: never = block;
-      return _exhaustive;
-    }
-  }
-}
+const slackRenderer: BlockRenderer = {
+  code_block: (block) => "```\n" + block.code + "\n```",
+  hr: () => "",
+  heading: (block) => `*${renderInline(block.content)}*`,
+  blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
+  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
+  ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
+  table: (headers, rows) => renderTable(headers, rows),
+  text: (lines) => lines.map(renderInline).join("\n"),
+};
 
 /**
  * Tables become labeled bullet lists for Slack.

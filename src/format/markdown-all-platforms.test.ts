@@ -1,0 +1,59 @@
+import { test, expect, describe } from "bun:test";
+import { formatWebHtml } from "../web/web-format.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
+import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+
+// Early-warning system for divergence: the three platform formatters share one
+// block AST + dispatcher, so the same markdown must keep producing each
+// platform's expected shape. A drift in one formatter trips exactly one column.
+
+describe("heading (## Hello)", () => {
+  test("web → h3", () => expect(formatWebHtml("## Hello")).toBe("<h3>Hello</h3>"));
+  test("telegram → bold", () => expect(formatTelegramHtml("## Hello")).toBe("<b>Hello</b>"));
+  test("slack → *bold*", () => expect(formatSlackMrkdwn("## Hello")).toBe("*Hello*"));
+});
+
+describe("bold (**x**)", () => {
+  test("web", () => expect(formatWebHtml("**x**")).toBe("<strong>x</strong>"));
+  test("telegram", () => expect(formatTelegramHtml("**x**")).toBe("<b>x</b>"));
+  test("slack", () => expect(formatSlackMrkdwn("**x**")).toBe("*x*"));
+});
+
+describe("inline code (`x`)", () => {
+  test("web", () => expect(formatWebHtml("`x`")).toBe("<code>x</code>"));
+  test("telegram", () => expect(formatTelegramHtml("`x`")).toBe("<code>x</code>"));
+  test("slack", () => expect(formatSlackMrkdwn("`x`")).toBe("`x`"));
+});
+
+describe("link [label](https://example.com)", () => {
+  const md = "[label](https://example.com)";
+  test("web → anchor with target/rel", () =>
+    expect(formatWebHtml(md)).toBe('<a href="https://example.com" target="_blank" rel="noopener">label</a>'));
+  test("telegram → bare anchor", () =>
+    expect(formatTelegramHtml(md)).toBe('<a href="https://example.com">label</a>'));
+  test("slack → mrkdwn link", () => expect(formatSlackMrkdwn(md)).toBe("<https://example.com|label>"));
+});
+
+describe("fenced code block", () => {
+  const md = "```ts\nconst x = 1;\n```";
+  test("web → pre/code with language class", () =>
+    expect(formatWebHtml(md)).toBe('<pre><code class="language-ts">const x = 1;</code></pre>'));
+  test("telegram → pre/code with language class", () =>
+    expect(formatTelegramHtml(md)).toBe('<pre><code class="language-ts">const x = 1;</code></pre>'));
+  test("slack → triple-backtick block (no language, no escaping)", () =>
+    expect(formatSlackMrkdwn(md)).toBe("```\nconst x = 1;\n```"));
+});
+
+describe("unordered list", () => {
+  const md = "- a\n- b";
+  test("web → <ul>", () => expect(formatWebHtml(md)).toBe("<ul><li>a</li><li>b</li></ul>"));
+  test("telegram → dash lines", () => expect(formatTelegramHtml(md)).toBe("- a\n- b"));
+  test("slack → dash lines", () => expect(formatSlackMrkdwn(md)).toBe("- a\n- b"));
+});
+
+describe("table renders without throwing and matches each platform's shape", () => {
+  const md = "| H1 | H2 |\n| --- | --- |\n| a | b |";
+  test("web → <table>", () => expect(formatWebHtml(md)).toContain("<table>"));
+  test("telegram → pipe table preserved", () => expect(formatTelegramHtml(md)).toContain("| H1 | H2 |"));
+  test("slack → labeled bullets", () => expect(formatSlackMrkdwn(md)).toBe("• *H1:* a  *H2:* b"));
+});

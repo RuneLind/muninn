@@ -1,49 +1,37 @@
-import { type Block, parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks } from "../format/markdown-ast.ts";
+import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
- * Walks the shared block AST; each block emits Telegram's HTML subset and
- * inline content runs through `renderInline`.
+ * Walks the shared block AST via `renderBlocks`; each block emits Telegram's
+ * HTML subset and inline content runs through `renderInline`.
  */
 export function formatTelegramHtml(text: string): string {
-  const blocks = parseBlocks(text);
-  const rendered = blocks.map(renderBlock).join("\n");
+  const rendered = renderBlocks(parseBlocks(text), telegramRenderer);
   return rendered.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 const TG_ALLOWED_TAG = /^\/?(b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)(\s|>|$)/i;
 
-function renderBlock(block: Block): string {
-  switch (block.type) {
-    case "code_block": {
-      const openTag = block.lang ? `<code class="language-${block.lang}">` : "<code>";
-      return `<pre>${openTag}${escapeHtml(block.code)}</code></pre>`;
-    }
-    case "hr":
-      return "";
-    case "heading":
-      return `<b>${renderInline(block.content)}</b>`;
-    case "blockquote":
-      return block.lines.map((l) => `> ${renderInline(l)}`).join("\n");
-    case "ul":
-      return block.items.map((i) => `- ${renderInline(i)}`).join("\n");
-    case "ol":
-      return block.items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n");
-    case "table": {
-      const headerRow = `| ${block.headers.map(renderInline).join(" | ")} |`;
-      const sepRow = "|" + block.headers.map(() => "---").join("|") + "|";
-      const dataRows = block.rows.map((row) => `| ${row.map(renderInline).join(" | ")} |`);
-      return [headerRow, sepRow, ...dataRows].join("\n");
-    }
-    case "text":
-      return block.lines.map(renderInline).join("\n");
-    default: {
-      const _exhaustive: never = block;
-      return _exhaustive;
-    }
-  }
-}
+const telegramRenderer: BlockRenderer = {
+  code_block(block) {
+    const openTag = block.lang ? `<code class="language-${block.lang}">` : "<code>";
+    return `<pre>${openTag}${escapeHtml(block.code)}</code></pre>`;
+  },
+  hr: () => "",
+  heading: (block) => `<b>${renderInline(block.content)}</b>`,
+  blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
+  ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
+  ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
+  table(headers, rows) {
+    const headerRow = `| ${headers.map(renderInline).join(" | ")} |`;
+    const sepRow = "|" + headers.map(() => "---").join("|") + "|";
+    const dataRows = rows.map((row) => `| ${row.map(renderInline).join(" | ")} |`);
+    return [headerRow, sepRow, ...dataRows].join("\n");
+  },
+  text: (lines) => lines.map(renderInline).join("\n"),
+};
 
 function renderInline(text: string): string {
   // Selective ampersand escape — preserve existing entities verbatim.
