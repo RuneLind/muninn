@@ -1,7 +1,7 @@
 import type { Context } from "hono";
-import { getLog } from "../../logging.ts";
+import { getLog } from "../logging.ts";
 
-const log = getLog("dashboard", "knowledge-api");
+const log = getLog("ai", "knowledge-api");
 
 const DEFAULT_TIMEOUT_MS = 5000;
 

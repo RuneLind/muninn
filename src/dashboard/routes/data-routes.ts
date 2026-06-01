@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { getLog } from "../../logging.ts";
 import { spec } from "../openapi-spec.ts";
 import { Scalar } from "@scalar/hono-api-reference";
-import { activityLog } from "../activity-log.ts";
+import { activityLog } from "../../observability/activity-log.ts";
 import { discoverAllBots } from "../../bots/config.ts";
 import { addChatUser } from "../../chat/chat-config.ts";
 import { getRecentMessages } from "../../db/messages.ts";

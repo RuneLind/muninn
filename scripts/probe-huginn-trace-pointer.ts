@@ -19,7 +19,7 @@
  *   bun run scripts/probe-huginn-trace-pointer.ts
  *   bun run scripts/probe-huginn-trace-pointer.ts --api http://localhost:8321
  */
-import { connectToServer, callTool, disconnectAll } from "../src/dashboard/mcp-client.ts";
+import { connectToServer, callTool, disconnectAll } from "../src/ai/mcp-tool-caller.ts";
 import { parseHuginnTracePointer } from "../src/ai/huginn-trace-pointer.ts";
 import { extractMcpResultText } from "../src/ai/huginn-trace.ts";
 

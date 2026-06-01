@@ -1,6 +1,6 @@
 import { getLog } from "../logging.ts";
 import { decomposeQuestion } from "./knowledge-decomposer.ts";
-import { fetchKnowledgeApi, KnowledgeApiError } from "../dashboard/routes/knowledge-api-client.ts";
+import { fetchKnowledgeApi, KnowledgeApiError } from "./knowledge-api-client.ts";
 import { fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import type { ConnectorType } from "../bots/config.ts";

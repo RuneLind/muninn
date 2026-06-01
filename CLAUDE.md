@@ -317,7 +317,7 @@ uvx --from "git+https://github.com/oraios/serena" serena project index /path/to/
 | `src/serena/manager.ts` | SerenaManager singleton — start/stop/index lifecycle |
 | `src/serena/config.ts` | Config types + discovery from bot config.json |
 | `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
-| `src/dashboard/mcp-client.ts` | MCP Debug client — supports both stdio and HTTP servers |
+| `src/ai/mcp-tool-caller.ts` | MCP Debug client — supports both stdio and HTTP servers |
 
 ## Corrective Retrieval (Path D primary, Path C dormant fallback)
 

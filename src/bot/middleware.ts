@@ -1,5 +1,5 @@
 import type { Context, NextFunction } from "grammy";
-import { activityLog } from "../dashboard/activity-log.ts";
+import { activityLog } from "../observability/activity-log.ts";
 
 export function createAuthMiddleware(allowedUserIds: string[]) {
   return async (ctx: Context, next: NextFunction) => {

@@ -6,7 +6,7 @@ import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "..
 import { truncateOutput } from "../truncate-output.ts";
 import { processMcpToolResult } from "../huginn-trace-pointer.ts";
 import type { ToolCall } from "../../types.ts";
-import { callTool } from "../../dashboard/mcp-client.ts";
+import { callTool } from "../mcp-tool-caller.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";

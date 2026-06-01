@@ -6,8 +6,8 @@ import {
   updateGoalReminderSentAt,
   updateGoalCheckedAt,
 } from "../db/goals.ts";
-import { activityLog } from "../dashboard/activity-log.ts";
-import { agentStatus, setConnectorInfo } from "../dashboard/agent-status.ts";
+import { activityLog } from "../observability/activity-log.ts";
+import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { callHaiku } from "./executor.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";

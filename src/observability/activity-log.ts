@@ -2,7 +2,7 @@ import type { ActivityEvent, ActivityEventType } from "../types.ts";
 import { saveActivity, getRecentActivity } from "../db/activity.ts";
 import { getLog } from "../logging.ts";
 
-const log = getLog("dashboard", "activity");
+const log = getLog("observability", "activity");
 
 type Subscriber = (event: ActivityEvent) => void;
 

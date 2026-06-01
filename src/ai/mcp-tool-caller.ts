@@ -3,10 +3,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { join } from "node:path";
-import { resolveBotCwd } from "../ai/mcp-config-utils.ts";
+import { resolveBotCwd } from "./mcp-config-utils.ts";
 import { getLog } from "../logging.ts";
 
-const log = getLog("dashboard", "mcp");
+const log = getLog("ai", "mcp");
 
 interface McpServerConfig {
   type?: string;
