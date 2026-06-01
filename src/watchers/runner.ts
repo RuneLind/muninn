@@ -22,6 +22,46 @@ const log = getLog("watchers");
 const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
 
 /**
+ * Per-watcher safety-net timeout. Each checker already applies its own model
+ * timeout (X: `config.timeoutMs`, default 5 min; email: `spawnHaiku`, default
+ * 60s), but a stuck MCP connection or a hung subprocess can outlive that and
+ * wedge the scheduler tick (which has only a tick-level overlap guard) or
+ * starve the watchers queued behind it. This outer net bounds a single
+ * watcher's checker run. It sits ABOVE the checker's configured timeout —
+ * `max(floor, config.timeoutMs + margin)` — so a legitimately slow Sonnet
+ * digest is never cut off prematurely; the net only fires when the inner
+ * timeout itself is stuck.
+ */
+const WATCHER_TIMEOUT_FLOOR_MS = 120_000; // 2 min for watchers with no configured timeout
+const WATCHER_TIMEOUT_MARGIN_MS = 30_000; // headroom above the checker's own timeout
+
+export function computeWatcherTimeoutMs(watcher: Watcher): number {
+  const configured = (watcher.config as { timeoutMs?: number })?.timeoutMs;
+  const base =
+    typeof configured === "number" && configured > 0 ? configured + WATCHER_TIMEOUT_MARGIN_MS : 0;
+  return Math.max(WATCHER_TIMEOUT_FLOOR_MS, base);
+}
+
+/**
+ * Races `work` against a timeout, clearing the timer when either settles. After
+ * a timeout the orphaned `work` keeps running (a checker subprocess can't be
+ * cancelled), but its late rejection is still observed by this `Promise.race`
+ * subscription, so it won't surface as an unhandledRejection.
+ */
+export function withWatcherTimeout<T>(work: Promise<T>, watcherName: string, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Watcher "${watcherName}" timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * Content-based dedup hash, extracted from the summary text itself.
  * Extracts sender name (from "Fra/From: X —" pattern) + proper nouns.
  * These survive Haiku's translation between runs.
@@ -155,7 +195,11 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       const requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
       setConnectorInfo(botConfig);
 
-      const alerts = await runChecker(watcher, botConfig.dir, tag);
+      const alerts = await withWatcherTimeout(
+        runChecker(watcher, botConfig.dir, tag),
+        watcher.name,
+        computeWatcherTimeoutMs(watcher),
+      );
 
       // Filter out already-notified: by message ID and by content hash
       const known = new Set(watcher.lastNotifiedIds);

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { contentHash, extractProperNouns, formatAlerts } from "./runner.ts";
+import { contentHash, extractProperNouns, formatAlerts, computeWatcherTimeoutMs, withWatcherTimeout } from "./runner.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
@@ -241,6 +241,68 @@ describe("formatAlerts", () => {
     // Header + two alerts joined by \n\n
     const lines = result.split("\n\n");
     expect(lines.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── computeWatcherTimeoutMs ──────────────────────────────────────────
+
+describe("computeWatcherTimeoutMs", () => {
+  const watcherWith = (config: Record<string, unknown>): Watcher => ({
+    id: "w-1",
+    userId: "u-1",
+    botName: "jarvis",
+    name: "W",
+    type: "email" as any,
+    config,
+    intervalMs: 300000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+
+  test("uses the 2-min floor when no timeout is configured", () => {
+    expect(computeWatcherTimeoutMs(watcherWith({}))).toBe(120_000);
+  });
+
+  test("adds margin above a configured timeout that exceeds the floor", () => {
+    // X watcher default 5 min → 5 min + 30s margin, never cut off below its own timeout
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 300_000 }))).toBe(330_000);
+  });
+
+  test("keeps the floor when configured + margin is still below it", () => {
+    // 60s + 30s margin = 90s, which is under the 120s floor
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 60_000 }))).toBe(120_000);
+  });
+
+  test("ignores a non-numeric configured timeout", () => {
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: "300000" }))).toBe(120_000);
+  });
+
+  test("ignores a zero or negative configured timeout", () => {
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 0 }))).toBe(120_000);
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: -5 }))).toBe(120_000);
+  });
+});
+
+// ── withWatcherTimeout ───────────────────────────────────────────────
+
+describe("withWatcherTimeout", () => {
+  test("rejects with a timeout error when the work never settles in time", async () => {
+    const neverSettles = new Promise<string>(() => {}); // deterministic: only the timeout can win
+    await expect(withWatcherTimeout(neverSettles, "Stuck", 10)).rejects.toThrow(/timed out after 10ms/);
+  });
+
+  test("resolves with the work's value when it settles before the timeout", async () => {
+    const fast = Promise.resolve("done");
+    await expect(withWatcherTimeout(fast, "Fast", 10_000)).resolves.toBe("done");
+  });
+
+  test("propagates the work's rejection (not a timeout) when it fails first", async () => {
+    const fails = Promise.reject(new Error("checker blew up"));
+    await expect(withWatcherTimeout(fails, "Failing", 10_000)).rejects.toThrow("checker blew up");
   });
 });
 
