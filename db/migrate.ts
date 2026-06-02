@@ -91,7 +91,13 @@ async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
   }
 }
 
-export async function runMigrations(databaseUrl: string, opts?: { baseline?: boolean }) {
+export async function runMigrations(
+  databaseUrl: string,
+  opts?: { baseline?: boolean; quiet?: boolean },
+) {
+  // `quiet` silences progress chatter for programmatic callers (e.g. the drift
+  // test); the CLI path below leaves it off. Errors throw regardless.
+  const say: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
   try {
     await ensureMigrationsTable(sql);
@@ -101,35 +107,47 @@ export async function runMigrations(databaseUrl: string, opts?: { baseline?: boo
 
     if (opts?.baseline) {
       if (pending.length === 0) {
-        console.log("All migrations already recorded — nothing to baseline.");
+        say("All migrations already recorded — nothing to baseline.");
         return;
       }
-      console.log(`Baselining ${pending.length} migration(s):\n`);
+      say(`Baselining ${pending.length} migration(s):\n`);
       for (const m of pending) {
         await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
-        console.log(`  ✓ ${m.filename} (recorded)`);
+        say(`  ✓ ${m.filename} (recorded)`);
       }
-      console.log("\nDone. All migrations marked as applied.");
+      say("\nDone. All migrations marked as applied.");
       return;
     }
 
     if (pending.length === 0) {
-      console.log("No pending migrations.");
+      say("No pending migrations.");
       return;
     }
 
-    console.log(`${pending.length} pending migration(s):\n`);
+    say(`${pending.length} pending migration(s):\n`);
     for (const m of pending) {
-      console.log(`  → ${m.filename}`);
-      // Wrap in transaction so partial failures don't leave the DB in a broken state
-      await sql.begin(async (tx) => {
-        const txSql = tx as unknown as postgres.Sql;
-        await runMigration(txSql, m);
-        await txSql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
-      });
-      console.log(`    applied`);
+      say(`  → ${m.filename}`);
+      // CREATE INDEX CONCURRENTLY can't run inside a transaction block, so a
+      // migration that uses it runs bare; every other migration is wrapped so a
+      // partial failure can't leave the DB half-migrated. (016 is the only such
+      // migration today — it predates the wrapper, so without this a fresh full
+      // replay, like the drift test, would fail on it.)
+      const concurrent =
+        m.ext === "sql" &&
+        /\bCONCURRENTLY\b/i.test(await Bun.file(join(MIGRATIONS_DIR, m.filename)).text());
+      if (concurrent) {
+        await runMigration(sql, m);
+        await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
+      } else {
+        await sql.begin(async (tx) => {
+          const txSql = tx as unknown as postgres.Sql;
+          await runMigration(txSql, m);
+          await txSql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
+        });
+      }
+      say(`    applied`);
     }
-    console.log(`\nDone. Applied ${pending.length} migration(s).`);
+    say(`\nDone. Applied ${pending.length} migration(s).`);
   } finally {
     await sql.end();
   }

@@ -63,6 +63,29 @@ Each file exports functions for one table. Functions accept typed parameters and
 - Full consolidated schema: `db/init.sql` (applied by Docker on first start)
 - Run: `bun run db:migrate` / Status: `bun run db:migrate:status`
 
+### init.sql drift guard
+
+Two deploy paths must agree: a **fresh** deploy applies `init.sql` then baselines
+migrations (marks them applied without running), so `init.sql` is the whole truth;
+an **upgraded** deploy runs `db/migrations/` incrementally. They only converge if
+**every schema change lands in BOTH `init.sql` and a migration**.
+
+`src/db/schema-drift.test.ts` enforces this: it builds the schema both ways into
+throwaway DBs and diffs them structurally (columns + indexes + constraints +
+extensions, order-independent). It skips cleanly when Postgres is unreachable.
+
+- Migrations 006+ ALTER pre-existing tables (the supabase 001-005 base was
+  consolidated into `init.sql` and deleted), so they can't replay from empty.
+  `db/migration-replay-base.sql` is a **frozen** snapshot of `init.sql` just before
+  migration 006 — the replay applies on top of it. It is history; never edit it.
+- Excluded from the diff: `schema_migrations` (bookkeeping; only rows differ) and
+  `benchmark_*` (created by migrations 030-034 but intentionally absent from
+  `init.sql` — experimental tooling fresh deploys don't carry).
+- The replay calls `runMigrations(url, { perMigrationTransaction: false })` because
+  migration 016 uses `CREATE INDEX CONCURRENTLY`, which can't run in a transaction.
+- **When the guard fails**, add the missing object to whichever side lacks it (a new
+  migration for an upgraded-only column, an `init.sql` line for a fresh-only index).
+
 ## Testing
 
 DB integration tests require:
@@ -70,7 +93,7 @@ DB integration tests require:
 2. Test database created: `bun run db:setup:test` (creates `muninn_test`, applies schema)
 3. Run: `bun run test:db`
 
-Test files are co-located: `messages.test.ts`, `memories.test.ts`, `threads.test.ts`, `goals.test.ts`, `scheduled-tasks.test.ts`, `watchers.test.ts`, `traces.test.ts`, `activity.test.ts`, `user-settings.test.ts`, `stats.test.ts`.
+Test files are co-located: `messages.test.ts`, `memories.test.ts`, `threads.test.ts`, `goals.test.ts`, `scheduled-tasks.test.ts`, `watchers.test.ts`, `traces.test.ts`, `activity.test.ts`, `user-settings.test.ts`, `stats.test.ts`, `schema-drift.test.ts` (init.sql ↔ migrations drift guard; creates its own throwaway DBs, no `db:setup:test` needed).
 
 ## Key Tables
 

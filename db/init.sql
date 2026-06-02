@@ -136,6 +136,9 @@ CREATE INDEX idx_messages_user_created ON messages(user_id, created_at DESC);
 CREATE INDEX idx_messages_bot_user_created ON messages(bot_name, user_id, created_at DESC);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at DESC);
 CREATE INDEX idx_messages_trace_id ON messages (trace_id) WHERE trace_id IS NOT NULL;
+-- Platform analytics indexes (from migration 009-platform-index.sql)
+CREATE INDEX idx_messages_platform ON messages (platform);
+CREATE INDEX idx_messages_platform_created ON messages (platform, created_at);
 
 -- ============================================================================
 -- Activity log: persisted version of the in-memory ring buffer
