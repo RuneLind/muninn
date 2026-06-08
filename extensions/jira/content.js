@@ -1,16 +1,37 @@
 /**
- * Content script for Jira issue pages.
- * Extracts full issue content from DOM — no Jira API needed since user is already authenticated.
+ * Content script for Jira Cloud issue pages (nav.atlassian.net).
+ *
+ * Pulls full issue content from the Jira Cloud REST API v3 using the user's
+ * authenticated browser session (credentials: 'include') — no API token needed.
+ * This mirrors huginn's Playwright fetcher, which obtains a logged-in browser
+ * context purely to call the same /rest/api/3 endpoints; here the content script
+ * already runs inside that authenticated session, so it calls REST directly.
+ *
+ * We ask for expand=renderedFields so the API returns description/comment bodies
+ * as HTML, which the existing htmlToMarkdown() walker converts — richer than
+ * flattening ADF to plain text. The Epic comes from the issue's `parent` (Cloud),
+ * not the Server-only customfield_13510 Epic Link.
  */
 
-const issueKey = getIssueKey();
-if (issueKey) {
-  notifyIssuePage(issueKey);
-}
+const FIELDS = [
+  'summary', 'status', 'issuetype', 'priority', 'assignee', 'reporter',
+  'labels', 'created', 'updated', 'parent', 'description', 'comment',
+].join(',');
+
+notifyIssuePage();
 
 function getIssueKey() {
-  const match = window.location.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/);
-  return match ? match[1] : null;
+  const KEY = /[A-Z][A-Z0-9]+-\d+/;
+  // Classic deep link — Cloud still supports /browse/<KEY>.
+  let m = window.location.pathname.match(/\/browse\/([A-Z][A-Z0-9]+-\d+)/);
+  if (m) return m[1];
+  // Board / backlog views carry the open issue in ?selectedIssue=<KEY>.
+  const sel = new URLSearchParams(window.location.search).get('selectedIssue');
+  if (sel && KEY.test(sel)) return sel.match(KEY)[0];
+  // New issue-view route: /jira/.../issues/<KEY>.
+  m = window.location.pathname.match(/\/issues\/([A-Z][A-Z0-9]+-\d+)/);
+  if (m) return m[1];
+  return null;
 }
 
 /**
@@ -92,53 +113,79 @@ function htmlToMarkdown(el) {
   return md.trim();
 }
 
-function extractIssueContent() {
+/** Parse an HTML string (from renderedFields) into a detached element to walk. */
+function htmlStringToMarkdown(html) {
+  if (!html) return '';
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  return htmlToMarkdown(doc.body);
+}
+
+/** Build a minimal payload from the page title when the REST call fails. */
+function minimalFromTitle(key) {
+  const titleFallback = document.title.match(/\[.*?\]\s*(.+?)(?:\s*-\s*(?:JIRA|Jira))?$/);
+  const title = titleFallback ? titleFallback[1].trim() : document.title;
+  return {
+    issueKey: key, url: window.location.href, title, summary: '',
+    status: '', type: '', priority: '', assignee: '', reporter: '',
+    labels: [], description: '', comments: [], created: '', updated: '', epicLink: '',
+  };
+}
+
+async function extractIssueContent() {
   const key = getIssueKey();
   if (!key) return null;
 
-  // Summary/title
-  const summary = document.querySelector('#summary-val')?.textContent?.trim() || '';
+  let data;
+  try {
+    const url = `${window.location.origin}/rest/api/3/issue/${encodeURIComponent(key)}`
+      + `?fields=${FIELDS}&expand=renderedFields`;
+    const resp = await fetch(url, {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    });
+    if (!resp.ok) {
+      console.warn(`[jira-ext] REST ${resp.status} for ${key}; sending minimal payload`);
+      return minimalFromTitle(key);
+    }
+    data = await resp.json();
+  } catch (e) {
+    console.warn(`[jira-ext] REST fetch failed for ${key}:`, e);
+    return minimalFromTitle(key);
+  }
 
-  // Status
-  const status = document.querySelector('.jira-issue-status-lozenge')?.textContent?.trim()
-    || document.querySelector('#opsbar-transitions_more')?.textContent?.trim() || '';
+  const f = data.fields || {};
+  const rf = data.renderedFields || {};
 
-  // Metadata fields
-  const type = document.querySelector('#type-val')?.textContent?.trim() || '';
-  const priority = document.querySelector('#priority-val')?.textContent?.trim() || '';
-  const assignee = document.querySelector('#assignee-val')?.textContent?.trim() || '';
-  const reporter = document.querySelector('#reporter-val')?.textContent?.trim() || '';
+  const summary = f.summary || '';
+  const status = f.status?.name || '';
+  const type = f.issuetype?.name || '';
+  const priority = f.priority?.name || '';
+  const assignee = f.assignee?.displayName || '';
+  const reporter = f.reporter?.displayName || '';
+  const labels = Array.isArray(f.labels) ? f.labels : [];
+  const created = f.created || '';
+  const updated = f.updated || '';
 
-  // Labels
-  const labelEls = document.querySelectorAll('.labels-wrap .lozenge');
-  const labels = Array.from(labelEls).map(el => el.textContent.trim()).filter(Boolean);
+  // Description — prefer rendered HTML (richer); ADF is not rendered to markdown here.
+  const description = htmlStringToMarkdown(rf.description || '');
 
-  // Description — convert HTML to markdown to preserve structure
-  const descEl = document.querySelector('#description-val .user-content-block')
-    || document.querySelector('#description-val');
-  const description = htmlToMarkdown(descEl);
+  // Comments — authors/dates from fields, bodies from renderedFields (parallel arrays).
+  const rawComments = f.comment?.comments || [];
+  const renderedComments = rf.comment?.comments || [];
+  const comments = rawComments.map((c, i) => ({
+    author: c.author?.displayName || 'Unknown',
+    date: c.created || '',
+    body: htmlStringToMarkdown(renderedComments[i]?.body || ''),
+  }));
 
-  // Comments — also convert HTML to markdown
-  const commentEls = document.querySelectorAll('.activity-comment');
-  const comments = Array.from(commentEls).map(el => {
-    const author = el.querySelector('.action-head .user-hover')?.textContent?.trim() || 'Unknown';
-    const date = el.querySelector('.action-head .date')?.textContent?.trim()
-      || el.querySelector('.action-head time')?.getAttribute('datetime') || '';
-    const bodyEl = el.querySelector('.action-body');
-    const body = htmlToMarkdown(bodyEl);
-    return { author, date, body };
-  });
+  // Epic = parent, when the parent is itself an Epic (Cloud convention).
+  const parent = f.parent || {};
+  const parentType = parent.fields?.issuetype?.name || '';
+  const epicLink = (parent.key && parentType.toLowerCase() === 'epic')
+    ? `${parent.key} - ${parent.fields?.summary || ''}`.trim().replace(/ -\s*$/, '')
+    : '';
 
-  // Dates
-  const created = document.querySelector('#created-val time')?.getAttribute('datetime') || '';
-  const updated = document.querySelector('#updated-val time')?.getAttribute('datetime') || '';
-
-  // Epic link
-  const epicLink = document.querySelector('#customfield_13510-val')?.textContent?.trim() || '';
-
-  // Title fallback from document.title
-  const titleFallback = document.title.match(/\[.*?\]\s*(.+?)(?:\s*-\s*(?:JIRA|Jira))?$/);
-  const title = summary || (titleFallback ? titleFallback[1].trim() : document.title);
+  const title = summary || minimalFromTitle(key).title;
 
   return {
     issueKey: key,
@@ -159,8 +206,10 @@ function extractIssueContent() {
   };
 }
 
-function notifyIssuePage(issueKey) {
-  const data = extractIssueContent();
+async function notifyIssuePage() {
+  const key = getIssueKey();
+  if (!key) return;
+  const data = await extractIssueContent();
   if (data) {
     chrome.runtime.sendMessage({ type: 'JIRA_ISSUE_PAGE', ...data }, () => {
       // Suppress "message port closed" warning
@@ -171,6 +220,9 @@ function notifyIssuePage(issueKey) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'GET_JIRA_INFO') {
-    sendResponse(extractIssueContent());
+    // extractIssueContent is async (REST call) — return true to keep the port
+    // open and respond once the fetch resolves.
+    extractIssueContent().then(sendResponse).catch(() => sendResponse(null));
+    return true;
   }
 });

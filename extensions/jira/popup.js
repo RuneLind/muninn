@@ -17,6 +17,14 @@ Lag en enkel backend-tjeneste i melosys-api som returnerer antall fagsaker i sys
 
 Dette er en testoppgave for å kjøre gjennom hele løkka (analyse → spec → bygg → e2e) manuelt. Det finnes ingen Jira-sak for dette – all kontekst står her.`;
 
+// True when the tab URL points at a Jira Cloud issue. Mirrors content.js
+// getIssueKey(): the open issue lives in /browse/<KEY>, ?selectedIssue=<KEY>
+// (boards/backlog), or /issues/<KEY> (new issue view).
+function isJiraIssueUrl(url) {
+  if (!url) return false;
+  return /\/browse\/[A-Z][A-Z0-9]+-\d+|[?&]selectedIssue=[A-Z][A-Z0-9]+-\d+|\/issues\/[A-Z][A-Z0-9]+-\d+/.test(url);
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   // Options link works in every mode (Jira issue, reload, and test).
   $('#open-options').addEventListener('click', (e) => {
@@ -31,7 +39,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const tab = tabs[0];
 
   // Off a Jira issue → offer a manual test task instead of a dead end.
-  if (!tab?.url?.match(/jira.*\/browse\/[A-Z]/)) {
+  // Cloud (nav.atlassian.net) has no "jira" in the host, so match the issue-key
+  // routes directly: /browse/<KEY>, board ?selectedIssue=<KEY>, /issues/<KEY>.
+  if (!isJiraIssueUrl(tab?.url)) {
     await setupTestMode(settings);
     return;
   }
