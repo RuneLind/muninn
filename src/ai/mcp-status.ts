@@ -435,12 +435,6 @@ export function getCachedMcpStatus(botName: string): McpServerStatus[] | null {
   return cache.get(botName)?.servers ?? null;
 }
 
-/** True if the cached entry is missing or past its TTL. */
-export function isMcpStatusStale(botName: string): boolean {
-  const entry = cache.get(botName);
-  return !entry || entry.expiresAtMs <= Date.now();
-}
-
 /** Drop the cache entry for a bot — next `getMcpStatus` will re-probe. */
 export function invalidateMcpStatus(botName: string): void {
   cache.delete(botName);

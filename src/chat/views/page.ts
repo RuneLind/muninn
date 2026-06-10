@@ -297,6 +297,7 @@ const CHAT_SCRIPT = `
   var inspectorContext = document.getElementById('inspectorContext');
   var inspectorMcpStatus = document.getElementById('inspectorMcpStatus');
   var mcpStatusByBot = {};
+  var mcpStatusFetchedAt = {}; // bot name → epoch ms of last fetch/WS update
   var mcpStatusRefreshing = false;
   var mcpExpandState = {}; // key: "<bot>::<server>" → boolean (user toggle); absent = use default
 
@@ -671,6 +672,7 @@ const CHAT_SCRIPT = `
     if (event.type === 'mcp_status') {
       // Cache by bot name; only render if it matches the selected bot
       mcpStatusByBot[event.botName] = event.servers;
+      mcpStatusFetchedAt[event.botName] = Date.now();
       if (event.botName === selectedBot) renderMcpStatus(event.servers, false);
       return;
     }

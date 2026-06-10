@@ -643,47 +643,58 @@ export function inspectorPanelScript(): string {
     return s;
   }
 
+  // Skip endpoint revalidation while the last fetch/WS update is younger than
+  // this — updateInspector() runs on every message event, and each hit on a
+  // TTL-expired server cache triggers a full MCP probe.
+  var MCP_STATUS_REVALIDATE_MS = 30000;
+
   function loadMcpStatus() {
-    if (!selectedBot) return;
-    var cached = mcpStatusByBot[selectedBot];
+    var bot = selectedBot;
+    if (!bot) return;
+    var cached = mcpStatusByBot[bot];
     if (cached) {
-      // Render the cached snapshot immediately, but still hit the endpoint:
-      // a stale server cache triggers a background re-probe whose result
-      // arrives via the mcp_status WebSocket event.
+      // Render the cached snapshot immediately, then revalidate against the
+      // endpoint (throttled): a stale server cache triggers a background
+      // re-probe whose result arrives via the mcp_status WebSocket event.
       renderMcpStatus(cached, false);
+      var fetchedAt = mcpStatusFetchedAt[bot] || 0;
+      if (Date.now() - fetchedAt < MCP_STATUS_REVALIDATE_MS) return;
     } else {
       renderMcpStatus([{
         name: '__loading', displayName: 'Probing...', status: 'unknown', critical: false,
       }], true);
     }
-    fetch('/chat/mcp-status/' + encodeURIComponent(selectedBot))
+    mcpStatusFetchedAt[bot] = Date.now();
+    fetch('/chat/mcp-status/' + encodeURIComponent(bot))
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var servers = data.servers || [];
-        mcpStatusByBot[selectedBot] = servers;
-        renderMcpStatus(servers, false);
+        mcpStatusByBot[bot] = servers;
+        if (bot === selectedBot) renderMcpStatus(servers, false);
       })
       .catch(function() {
-        renderMcpStatus([], false);
+        if (bot === selectedBot && !cached) renderMcpStatus([], false);
       });
   }
 
   function refreshMcpStatus() {
-    if (!selectedBot || mcpStatusRefreshing) return;
+    var bot = selectedBot;
+    if (!bot || mcpStatusRefreshing) return;
     mcpStatusRefreshing = true;
-    var existing = mcpStatusByBot[selectedBot] || [];
+    var existing = mcpStatusByBot[bot] || [];
     renderMcpStatus(existing, true);
-    fetch('/chat/mcp-status/' + encodeURIComponent(selectedBot) + '/refresh', {
+    fetch('/chat/mcp-status/' + encodeURIComponent(bot) + '/refresh', {
       method: 'POST',
     })
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var servers = data.servers || [];
-        mcpStatusByBot[selectedBot] = servers;
-        renderMcpStatus(servers, false);
+        mcpStatusByBot[bot] = servers;
+        mcpStatusFetchedAt[bot] = Date.now();
+        if (bot === selectedBot) renderMcpStatus(servers, false);
       })
       .catch(function() {
-        renderMcpStatus(existing, false);
+        if (bot === selectedBot) renderMcpStatus(existing, false);
       })
       .finally(function() { mcpStatusRefreshing = false; });
   }

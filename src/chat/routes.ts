@@ -16,7 +16,7 @@ import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs, listDevRunEvents } from "../db/dev-runs.ts";
-import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, isMcpStatusStale, onMcpStatusChange } from "../ai/mcp-status.ts";
+import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
@@ -464,8 +464,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   });
 
   // MCP server status for a bot. Serves the cached snapshot immediately when
-  // one exists; if it is past its TTL, kicks off a background re-probe whose
-  // result reaches the panel via the onMcpStatusChange → WebSocket bridge
+  // one exists and revalidates in the background — getMcpStatus() is a cheap
+  // cache hit while the TTL is fresh, and once expired it re-probes and pushes
+  // the result to the panel via the onMcpStatusChange → WebSocket bridge
   // (stale-while-revalidate). Only blocks on a probe when nothing is cached.
   app.get("/mcp-status/:botName", async (c) => {
     const botName = c.req.param("botName");
@@ -474,11 +475,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     try {
       const cached = getCachedMcpStatus(botName);
       if (cached) {
-        if (isMcpStatusStale(botName)) {
-          getMcpStatus(bot).catch((err) => {
-            log.warn("Background MCP re-probe failed for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
-          });
-        }
+        getMcpStatus(bot).catch((err) => {
+          log.warn("Background MCP re-probe failed for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
+        });
         return c.json({ servers: cached, cached: true });
       }
       const servers = await getMcpStatus(bot);

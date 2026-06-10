@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import {
   getMcpStatus,
   getCachedMcpStatus,
-  isMcpStatusStale,
   invalidateMcpStatus,
   findCriticalDown,
   preflightMcpForRequest,
@@ -189,26 +188,22 @@ describe("mcp-status", () => {
     });
   });
 
-  describe("isMcpStatusStale", () => {
-    test("is stale before any probe runs", () => {
-      expect(isMcpStatusStale("never-probed")).toBe(true);
-    });
-
-    test("is fresh right after a probe, stale once the TTL passes", async () => {
+  describe("getMcpStatus TTL", () => {
+    test("re-probes after the TTL passes, serving the cache until then", async () => {
       const dir = makeBotDir({
         mcpServers: { dead: { type: "http", url: "http://127.0.0.1:1/mcp" } },
       });
       try {
         const bot = makeBot(dir, {
-          name: "stale-bot",
-          mcpStatus: { cacheTtlMs: 30 },
+          name: "ttl-bot",
+          mcpStatus: { cacheTtlMs: 50 },
         });
-        await getMcpStatus(bot);
-        expect(isMcpStatusStale("stale-bot")).toBe(false);
-        await new Promise((r) => setTimeout(r, 40));
-        expect(isMcpStatusStale("stale-bot")).toBe(true);
-        // The cached snapshot is still served — staleness only signals re-probe.
-        expect(getCachedMcpStatus("stale-bot")).not.toBeNull();
+        const first = await getMcpStatus(bot);
+        // Fresh cache → same array instance returned, no re-probe.
+        expect(await getMcpStatus(bot)).toBe(first);
+        await new Promise((r) => setTimeout(r, 70));
+        // Expired → a new probe produces a new result array.
+        expect(await getMcpStatus(bot)).not.toBe(first);
       } finally {
         rmSync(dir, { recursive: true });
       }
