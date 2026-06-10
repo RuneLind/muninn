@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildCustomAgents, accumulateInputTokens } from "./copilot-sdk.ts";
+import { buildCustomAgents, accumulateInputTokens, resolveCopilotModelId } from "./copilot-sdk.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -110,6 +110,57 @@ describe("buildCustomAgents", () => {
     } finally {
       rmSync(botsDir, { recursive: true });
     }
+  });
+});
+
+describe("resolveCopilotModelId", () => {
+  const catalog = ["claude-sonnet-4.6", "claude-haiku-4.5", "claude-opus-4.6", "gpt-5-mini"];
+
+  test("exact match passes through unchanged", () => {
+    expect(resolveCopilotModelId("claude-opus-4.6", catalog)).toEqual({
+      id: "claude-opus-4.6",
+      mapped: false,
+      known: true,
+    });
+  });
+
+  test("maps dash version suffix to Copilot's dotted id", () => {
+    // The bug this guards against: connectors-table rows store Anthropic-style
+    // ids (claude-opus-4-6), which Copilot silently swaps for its default model.
+    expect(resolveCopilotModelId("claude-opus-4-6", catalog)).toEqual({
+      id: "claude-opus-4.6",
+      mapped: true,
+      known: true,
+    });
+    expect(resolveCopilotModelId("claude-haiku-4-5", catalog)).toEqual({
+      id: "claude-haiku-4.5",
+      mapped: true,
+      known: true,
+    });
+  });
+
+  test("unknown id is returned as-is and flagged unknown", () => {
+    expect(resolveCopilotModelId("sonnet", catalog)).toEqual({
+      id: "sonnet",
+      mapped: false,
+      known: false,
+    });
+  });
+
+  test("dash id with no dotted counterpart in the catalog stays unknown", () => {
+    expect(resolveCopilotModelId("claude-opus-9-9", catalog)).toEqual({
+      id: "claude-opus-9-9",
+      mapped: false,
+      known: false,
+    });
+  });
+
+  test("does not rewrite ids whose dashes are not a version suffix", () => {
+    expect(resolveCopilotModelId("gpt-5-mini", catalog)).toEqual({
+      id: "gpt-5-mini",
+      mapped: false,
+      known: true,
+    });
   });
 });
 
