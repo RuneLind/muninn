@@ -28,6 +28,64 @@ export function accumulateInputTokens(prevTotal: number, turnTokens: number): nu
   return Math.max(prevTotal, turnTokens);
 }
 
+/**
+ * Resolve a configured model id against Copilot's model catalog.
+ *
+ * Anthropic/CLI configs use dash version suffixes (claude-opus-4-6) while
+ * Copilot's catalog uses dots (claude-opus-4.6). An unknown id is NOT an
+ * error in Copilot — the service silently falls back to its default model —
+ * so map what we can and flag what we can't.
+ */
+export function resolveCopilotModelId(
+  requested: string,
+  available: string[],
+): { id: string; mapped: boolean; known: boolean } {
+  if (available.includes(requested)) return { id: requested, mapped: false, known: true };
+  // Full Anthropic ids carry a date suffix (claude-haiku-4-5-20251001) that
+  // Copilot's catalog never has — strip it before the dash→dot rewrite.
+  const undated = requested.replace(/-\d{8}$/, "");
+  const dotted = undated.replace(/-(\d+)-(\d+)$/, "-$1.$2");
+  if (dotted !== requested && available.includes(dotted)) {
+    return { id: dotted, mapped: true, known: true };
+  }
+  return { id: requested, mapped: false, known: false };
+}
+
+// bot:model pairs already warned about — avoids repeating the warning every turn.
+const warnedModelIds = new Set<string>();
+
+async function resolveModelForRequest(cl: CopilotClient, configured: string, botName: string): Promise<string> {
+  let available: string[];
+  try {
+    available = (await cl.listModels()).map((m) => m.id);
+  } catch (e) {
+    log.warn("Could not list Copilot models — using configured id {model} as-is: {error}", {
+      botName,
+      model: configured,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return configured;
+  }
+  const resolved = resolveCopilotModelId(configured, available);
+  const warnKey = `${botName}:${configured}`;
+  if (resolved.mapped && !warnedModelIds.has(warnKey)) {
+    warnedModelIds.add(warnKey);
+    log.warn("Model {configured} is not a Copilot model id — mapped to {mapped}. Update the config to the dotted id.", {
+      botName,
+      configured,
+      mapped: resolved.id,
+    });
+  } else if (!resolved.known && !warnedModelIds.has(warnKey)) {
+    warnedModelIds.add(warnKey);
+    log.error("Model {configured} is not in the Copilot catalog ({available}) — Copilot will silently fall back to its default model", {
+      botName,
+      configured,
+      available: available.join(", "),
+    });
+  }
+  return resolved.id;
+}
+
 // Shared client — started once, stopped on process exit
 let client: CopilotClient | null = null;
 let clientStarting: Promise<void> | null = null;
@@ -76,7 +134,7 @@ export async function executePrompt(
   const wallStart = performance.now();
   const cl = await getCopilotClient();
 
-  const model = botConfig.model ?? config.claudeModel;
+  const model = await resolveModelForRequest(cl, botConfig.model ?? config.claudeModel, botConfig.name);
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
   // Parse .mcp.json for this bot
