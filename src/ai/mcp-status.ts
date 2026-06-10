@@ -373,7 +373,7 @@ async function runProbe(bot: BotConfig): Promise<McpServerStatus[]> {
             }),
       };
       if (status.status === "down") {
-        log.warn("MCP {name} probe failed for {bot}: {error}", {
+        log.warn("MCP {name} probe failed for {botName}: {error}", {
           botName: bot.name,
           name,
           error: status.errorMessage,
@@ -433,6 +433,12 @@ export async function getMcpStatus(
 /** Return cached status without probing. Null if never probed. */
 export function getCachedMcpStatus(botName: string): McpServerStatus[] | null {
   return cache.get(botName)?.servers ?? null;
+}
+
+/** True if the cached entry is missing or past its TTL. */
+export function isMcpStatusStale(botName: string): boolean {
+  const entry = cache.get(botName);
+  return !entry || entry.expiresAtMs <= Date.now();
 }
 
 /** Drop the cache entry for a bot — next `getMcpStatus` will re-probe. */
@@ -518,7 +524,7 @@ export async function preflightMcpForRequest(
     const criticalDown = findCriticalDown(servers);
     for (const s of criticalDown) {
       const msg = `⚠️ ${s.displayName} er ikke tilgjengelig — svar kan være ufullstendig`;
-      log.warn("Critical MCP {name} is down for bot {bot}: {error}", {
+      log.warn("Critical MCP {name} is down for bot {botName}: {error}", {
         botName: bot.name,
         name: s.name,
         error: s.errorMessage,
@@ -527,7 +533,7 @@ export async function preflightMcpForRequest(
     }
     return criticalDown;
   } catch (e) {
-    log.warn("MCP preflight failed for bot {bot}: {error}", {
+    log.warn("MCP preflight failed for bot {botName}: {error}", {
       botName: bot.name,
       error: e instanceof Error ? e.message : String(e),
     });

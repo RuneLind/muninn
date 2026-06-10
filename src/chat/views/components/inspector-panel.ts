@@ -647,12 +647,15 @@ export function inspectorPanelScript(): string {
     if (!selectedBot) return;
     var cached = mcpStatusByBot[selectedBot];
     if (cached) {
+      // Render the cached snapshot immediately, but still hit the endpoint:
+      // a stale server cache triggers a background re-probe whose result
+      // arrives via the mcp_status WebSocket event.
       renderMcpStatus(cached, false);
-      return;
+    } else {
+      renderMcpStatus([{
+        name: '__loading', displayName: 'Probing...', status: 'unknown', critical: false,
+      }], true);
     }
-    renderMcpStatus([{
-      name: '__loading', displayName: 'Probing...', status: 'unknown', critical: false,
-    }], true);
     fetch('/chat/mcp-status/' + encodeURIComponent(selectedBot))
       .then(function(r) { return r.json(); })
       .then(function(data) {

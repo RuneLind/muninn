@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import {
   getMcpStatus,
   getCachedMcpStatus,
+  isMcpStatusStale,
   invalidateMcpStatus,
   findCriticalDown,
   preflightMcpForRequest,
@@ -182,6 +183,32 @@ describe("mcp-status", () => {
         const cached = getCachedMcpStatus("cached-bot");
         expect(cached).not.toBeNull();
         expect(cached!).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+  });
+
+  describe("isMcpStatusStale", () => {
+    test("is stale before any probe runs", () => {
+      expect(isMcpStatusStale("never-probed")).toBe(true);
+    });
+
+    test("is fresh right after a probe, stale once the TTL passes", async () => {
+      const dir = makeBotDir({
+        mcpServers: { dead: { type: "http", url: "http://127.0.0.1:1/mcp" } },
+      });
+      try {
+        const bot = makeBot(dir, {
+          name: "stale-bot",
+          mcpStatus: { cacheTtlMs: 30 },
+        });
+        await getMcpStatus(bot);
+        expect(isMcpStatusStale("stale-bot")).toBe(false);
+        await new Promise((r) => setTimeout(r, 40));
+        expect(isMcpStatusStale("stale-bot")).toBe(true);
+        // The cached snapshot is still served — staleness only signals re-probe.
+        expect(getCachedMcpStatus("stale-bot")).not.toBeNull();
       } finally {
         rmSync(dir, { recursive: true });
       }

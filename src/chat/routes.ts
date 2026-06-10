@@ -16,7 +16,7 @@ import { setPendingPeer } from "../hivemind/correlation.ts";
 import { mintCorrelationToken, setCorrelationToken } from "../hivemind/correlation-tokens.ts";
 import { getToolUsageStats } from "../db/traces.ts";
 import { linkSpecToDevRun, setResearchStageByThread, getDevRunByThreadId, listHandoffs, listDevRunEvents } from "../db/dev-runs.ts";
-import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChange } from "../ai/mcp-status.ts";
+import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, isMcpStatusStale, onMcpStatusChange } from "../ai/mcp-status.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
@@ -463,15 +463,26 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
   });
 
-  // MCP server status for a bot (uses cache if fresh, probes otherwise)
+  // MCP server status for a bot. Serves the cached snapshot immediately when
+  // one exists; if it is past its TTL, kicks off a background re-probe whose
+  // result reaches the panel via the onMcpStatusChange → WebSocket bridge
+  // (stale-while-revalidate). Only blocks on a probe when nothing is cached.
   app.get("/mcp-status/:botName", async (c) => {
     const botName = c.req.param("botName");
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
     try {
       const cached = getCachedMcpStatus(botName);
-      const servers = cached ?? (await getMcpStatus(bot));
-      return c.json({ servers, cached: cached !== null });
+      if (cached) {
+        if (isMcpStatusStale(botName)) {
+          getMcpStatus(bot).catch((err) => {
+            log.warn("Background MCP re-probe failed for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
+          });
+        }
+        return c.json({ servers: cached, cached: true });
+      }
+      const servers = await getMcpStatus(bot);
+      return c.json({ servers, cached: false });
     } catch (err) {
       log.warn("Failed to load MCP status for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
       return c.json({ servers: [], cached: false });
