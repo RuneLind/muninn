@@ -18,7 +18,14 @@ const FIELDS = [
   'labels', 'created', 'updated', 'parent', 'description', 'comment',
 ].join(',');
 
-notifyIssuePage();
+// Abort the REST call if Jira stalls, so the popup's GET_JIRA_INFO round-trip
+// can't hang forever on a dead connection — it falls back to a title-only payload.
+const FETCH_TIMEOUT_MS = 8000;
+
+// Extraction is lazy: it runs only when the popup asks (GET_JIRA_INFO below).
+// We deliberately do NOT fetch on page load — the result had no consumer (it was
+// posted to a background worker that discards it), so it was a wasted authenticated
+// API call on every issue view.
 
 function getIssueKey() {
   const KEY = /[A-Z][A-Z0-9]+-\d+/;
@@ -136,12 +143,15 @@ async function extractIssueContent() {
   if (!key) return null;
 
   let data;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
     const url = `${window.location.origin}/rest/api/3/issue/${encodeURIComponent(key)}`
       + `?fields=${FIELDS}&expand=renderedFields`;
     const resp = await fetch(url, {
       credentials: 'include',
       headers: { Accept: 'application/json' },
+      signal: controller.signal,
     });
     if (!resp.ok) {
       console.warn(`[jira-ext] REST ${resp.status} for ${key}; sending minimal payload`);
@@ -149,8 +159,11 @@ async function extractIssueContent() {
     }
     data = await resp.json();
   } catch (e) {
+    // AbortError (timeout) or a network failure — degrade to a title-only payload.
     console.warn(`[jira-ext] REST fetch failed for ${key}:`, e);
     return minimalFromTitle(key);
+  } finally {
+    clearTimeout(timeout);
   }
 
   const f = data.fields || {};
@@ -204,18 +217,6 @@ async function extractIssueContent() {
     updated,
     epicLink,
   };
-}
-
-async function notifyIssuePage() {
-  const key = getIssueKey();
-  if (!key) return;
-  const data = await extractIssueContent();
-  if (data) {
-    chrome.runtime.sendMessage({ type: 'JIRA_ISSUE_PAGE', ...data }, () => {
-      // Suppress "message port closed" warning
-      void chrome.runtime.lastError;
-    });
-  }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
