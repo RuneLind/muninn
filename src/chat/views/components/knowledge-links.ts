@@ -97,7 +97,7 @@ export function knowledgeLinksScript(): string {
   // clickable links to the Jira browse URL. Generic — runs on every bot message,
   // not just research cards. The \\d{3,} floor avoids false positives like
   // "COVID-19" / "UTF-8" / "GPT-4". Base URL matches the Jira Chrome extension.
-  var JIRA_BASE = 'https://jira.adeo.no/browse/';
+  var JIRA_BASE = 'https://nav.atlassian.net/browse/';
   var ISSUE_TEST = /[A-Z][A-Z]+-\\d{3,}/;
   var ISSUE_RE = /\\b[A-Z][A-Z]+-\\d{3,}\\b/g;
 

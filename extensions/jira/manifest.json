@@ -8,7 +8,7 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://jira.adeo.no/*",
+    "https://nav.atlassian.net/*",
     "http://localhost:3010/*"
   ],
   "background": {
@@ -16,7 +16,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://jira.adeo.no/*"],
+      "matches": ["https://nav.atlassian.net/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

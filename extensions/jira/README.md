@@ -41,10 +41,20 @@ Click "Settings" in the extension popup, or go to the extension's options page.
 
 ### Content script (`content.js`)
 
-Runs on Jira pages. Extracts issue data directly from the DOM (no API needed — uses the authenticated session):
+Runs on Jira Cloud pages (`nav.atlassian.net`). Reads the issue from the Jira
+Cloud REST API v3 (`/rest/api/3/issue/<KEY>?expand=renderedFields`) using the
+user's authenticated browser session (`credentials: 'include'` — no API token).
+This mirrors huginn's Playwright fetcher, which uses a logged-in browser context
+solely to call the same `/rest/api/3` endpoints; the content script already runs
+inside that authenticated session, so it calls REST directly.
+
 - Issue key, summary, status, type, priority, assignee, reporter
-- Description and comments (converted from HTML to markdown)
-- Epic link, labels, dates
+- Description and comments (`renderedFields` HTML → markdown via `htmlToMarkdown`)
+- Epic (from the issue's `parent`, the Cloud convention), labels, dates
+
+The issue key is read from `/browse/<KEY>`, board `?selectedIssue=<KEY>`, or the
+`/issues/<KEY>` route. If the REST call fails, a minimal payload (key + page
+title) is sent so the flow degrades gracefully instead of dead-ending.
 
 ### Popup (`popup.js`)
 
@@ -84,4 +94,12 @@ Responses:
 
 ## Supported Jira instances
 
-The `manifest.json` `host_permissions` controls which Jira domains the extension works on. Currently set to `https://jira.adeo.no/*`. Update this for other Jira instances.
+Built for **Jira Cloud** (`nav.atlassian.net`). The `manifest.json`
+`host_permissions` and the content-script `matches` are both set to
+`https://nav.atlassian.net/*`, and `content.js` uses the Cloud REST API v3.
+
+NAV migrated off `jira.adeo.no` (Server/Data Center, now decommissioned) to
+`nav.atlassian.net` (Cloud), so the old Server DOM-scraping path was removed
+entirely. To point at another Cloud site, change the host in `manifest.json`
+(both `host_permissions` and `matches`) — the REST v3 path is the same on every
+`*.atlassian.net` tenant.
