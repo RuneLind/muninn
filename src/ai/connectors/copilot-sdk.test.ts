@@ -139,6 +139,14 @@ describe("resolveCopilotModelId", () => {
     });
   });
 
+  test("maps full Anthropic date-suffixed ids to Copilot's dotted id", () => {
+    expect(resolveCopilotModelId("claude-haiku-4-5-20251001", catalog)).toEqual({
+      id: "claude-haiku-4.5",
+      mapped: true,
+      known: true,
+    });
+  });
+
   test("unknown id is returned as-is and flagged unknown", () => {
     expect(resolveCopilotModelId("sonnet", catalog)).toEqual({
       id: "sonnet",
