@@ -373,7 +373,7 @@ async function runProbe(bot: BotConfig): Promise<McpServerStatus[]> {
             }),
       };
       if (status.status === "down") {
-        log.warn("MCP {name} probe failed for {bot}: {error}", {
+        log.warn("MCP {name} probe failed for {botName}: {error}", {
           botName: bot.name,
           name,
           error: status.errorMessage,
@@ -518,7 +518,7 @@ export async function preflightMcpForRequest(
     const criticalDown = findCriticalDown(servers);
     for (const s of criticalDown) {
       const msg = `⚠️ ${s.displayName} er ikke tilgjengelig — svar kan være ufullstendig`;
-      log.warn("Critical MCP {name} is down for bot {bot}: {error}", {
+      log.warn("Critical MCP {name} is down for bot {botName}: {error}", {
         botName: bot.name,
         name: s.name,
         error: s.errorMessage,
@@ -527,7 +527,7 @@ export async function preflightMcpForRequest(
     }
     return criticalDown;
   } catch (e) {
-    log.warn("MCP preflight failed for bot {bot}: {error}", {
+    log.warn("MCP preflight failed for bot {botName}: {error}", {
       botName: bot.name,
       error: e instanceof Error ? e.message : String(e),
     });

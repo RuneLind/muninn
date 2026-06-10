@@ -188,6 +188,28 @@ describe("mcp-status", () => {
     });
   });
 
+  describe("getMcpStatus TTL", () => {
+    test("re-probes after the TTL passes, serving the cache until then", async () => {
+      const dir = makeBotDir({
+        mcpServers: { dead: { type: "http", url: "http://127.0.0.1:1/mcp" } },
+      });
+      try {
+        const bot = makeBot(dir, {
+          name: "ttl-bot",
+          mcpStatus: { cacheTtlMs: 50 },
+        });
+        const first = await getMcpStatus(bot);
+        // Fresh cache → same array instance returned, no re-probe.
+        expect(await getMcpStatus(bot)).toBe(first);
+        await new Promise((r) => setTimeout(r, 70));
+        // Expired → a new probe produces a new result array.
+        expect(await getMcpStatus(bot)).not.toBe(first);
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+  });
+
   describe("invalidateMcpStatus", () => {
     test("clears the cache so next getMcpStatus re-probes", async () => {
       const dir = makeBotDir({

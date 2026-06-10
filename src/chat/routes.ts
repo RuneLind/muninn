@@ -463,15 +463,25 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
   });
 
-  // MCP server status for a bot (uses cache if fresh, probes otherwise)
+  // MCP server status for a bot. Serves the cached snapshot immediately when
+  // one exists and revalidates in the background — getMcpStatus() is a cheap
+  // cache hit while the TTL is fresh, and once expired it re-probes and pushes
+  // the result to the panel via the onMcpStatusChange → WebSocket bridge
+  // (stale-while-revalidate). Only blocks on a probe when nothing is cached.
   app.get("/mcp-status/:botName", async (c) => {
     const botName = c.req.param("botName");
     const bot = botConfigs.find((b) => b.name === botName);
     if (!bot) return c.json({ error: `Bot "${botName}" not found` }, 404);
     try {
       const cached = getCachedMcpStatus(botName);
-      const servers = cached ?? (await getMcpStatus(bot));
-      return c.json({ servers, cached: cached !== null });
+      if (cached) {
+        getMcpStatus(bot).catch((err) => {
+          log.warn("Background MCP re-probe failed for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
+        });
+        return c.json({ servers: cached, cached: true });
+      }
+      const servers = await getMcpStatus(bot);
+      return c.json({ servers, cached: false });
     } catch (err) {
       log.warn("Failed to load MCP status for {bot}: {error}", { bot: botName, error: err instanceof Error ? err.message : String(err) });
       return c.json({ servers: [], cached: false });
