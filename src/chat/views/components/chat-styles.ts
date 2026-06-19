@@ -1,11 +1,7 @@
-/** Chat page styles — layout, sidebar, messages, inspector, modals */
-export function chatStyles(): string {
-  return `
-    /* ── Chat-page-scoped refined palette (dark). chatStyles() is served only on
-       /chat, so these :root overrides do NOT affect the dashboard. --bg-elevated
-       and --bg-chat are NEW tokens (not in shared-styles); the rest override
-       shared values. Promote to shared-styles.ts in a later dashboard pass. ── */
-    :root {
+/* ── Chat-page-scoped palette overrides (dark). chatStyles() is served only on
+   /chat, so these do NOT affect the dashboard. --bg-elevated and --bg-chat are
+   NEW tokens (not in shared-styles); the rest refine shared values. ── */
+const CHAT_DARK = `
       --bg-page: #0b0b0f;
       --bg-panel: #101016;
       --bg-chat: #0c0c11;
@@ -16,17 +12,13 @@ export function chatStyles(): string {
       --border-secondary: #353544;
       --border-subtle: #232330;
       --chat-assistant-text: #b4b4bf;
-      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-    }
+`;
 
-    /* ── Light theme (chat-only). Set via [data-theme="light"] on <html> by the
-       theme toggle. Same attribute selector specificity as :root, declared later,
-       so it wins when active. The dashboard never sets data-theme (and never loads
-       chatStyles), so it stays dark — honoring "dashboard unchanged, dark default".
-       The app uses color-mix(... var(--accent) ...) inline throughout, so accent
-       tints adapt automatically; we only override base tokens here.
-       Status colors are darkened vs the dark ramp so they stay legible on light. ── */
-    [data-theme="light"] {
+/* ── Light theme (chat). Applied under prefers-color-scheme: light (system follow)
+   and forced under html[data-theme="light"]. The app uses color-mix(... var(--accent) ...)
+   inline throughout, so accent tints adapt automatically; we only override base
+   tokens here. Status colors are darkened vs the dark ramp so they stay legible. ── */
+const CHAT_LIGHT = `
       --bg-page: #f3f4f7;
       --bg-panel: #ffffff;
       --bg-chat: #fafbfc;
@@ -59,7 +51,20 @@ export function chatStyles(): string {
          The dark-theme #22d3ee is too light on white — darken for contrast. */
       --status-cyan: #0891b2;
       --chat-assistant-text: #4b4f5a;
+`;
+
+/** Chat page styles — layout, sidebar, messages, inspector, modals */
+export function chatStyles(): string {
+  return `
+    :root {
+      ${CHAT_DARK}
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
+    @media (prefers-color-scheme: light) {
+      :root {${CHAT_LIGHT}      }
+    }
+    html[data-theme="dark"] {${CHAT_DARK}    }
+    html[data-theme="light"] {${CHAT_LIGHT}    }
     body {
       display: flex;
       flex-direction: column;
@@ -67,23 +72,6 @@ export function chatStyles(): string {
       overflow: hidden;
     }
 
-    /* Theme toggle (chat header, right side) — light/dark switch */
-    .theme-toggle {
-      width: 30px;
-      height: 30px;
-      display: grid;
-      place-items: center;
-      cursor: pointer;
-      background: var(--bg-surface);
-      border: 1px solid var(--border-primary);
-      border-radius: 6px;
-      color: var(--text-muted);
-      font-size: 14px;
-      line-height: 1;
-      font-family: inherit;
-      transition: color 0.15s, border-color 0.15s, background 0.15s;
-    }
-    .theme-toggle:hover { color: var(--text-primary); border-color: var(--border-secondary); }
     .sim-layout {
       display: grid;
       grid-template-columns: 280px 1fr 320px;
