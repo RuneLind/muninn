@@ -1,6 +1,7 @@
-/** Shared CSS for all dashboard pages — base reset, header, and nav */
-export const SHARED_STYLES = `
-    :root {
+import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
+
+/** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
+const DARK_TOKENS = `
       /* Backgrounds */
       --bg-page: #0a0a0f;
       --bg-panel: #12121a;
@@ -57,7 +58,105 @@ export const SHARED_STYLES = `
       --chat-user-text: #c8ddf5;
       --chat-assistant-bg: #1a1d25;
       --chat-assistant-text: #d8d8dc;
+`;
+
+/**
+ * Light palette — applied under `@media (prefers-color-scheme: light)` (system
+ * follow) and forced under `html[data-theme="light"]`. Status colors are darkened
+ * vs the dark ramp so they stay legible on light backgrounds; tints flip to pale
+ * fills. Mirrors the chat page's light theme so the two surfaces match.
+ */
+const LIGHT_TOKENS = `
+      /* Backgrounds */
+      --bg-page: #f3f4f7;
+      --bg-panel: #ffffff;
+      --bg-surface: #f1f2f6;
+      --bg-deep: #eceef3;
+      --bg-inset: #eceef3;
+      --bg-gradient-end: #e8eaf2;
+
+      /* Borders */
+      --border-primary: #e2e4ea;
+      --border-secondary: #d2d5de;
+      --border-subtle: #edeef2;
+      --scrollbar-thumb: #cfd2db;
+
+      /* Text */
+      --text-primary: #14151a;
+      --text-secondary: #3a3d47;
+      --text-tertiary: #4a4d57;
+      --text-soft: #5a5e68;
+      --text-muted: #6c707d;
+      --text-dim: #80848f;
+      --text-faint: #9aa0ad;
+      --text-disabled: #b8bcc6;
+
+      /* Accent (brand purple) */
+      --accent: #6357f0;
+      --accent-hover: #5247d8;
+      --accent-light: #5247d8;
+
+      /* Status colors */
+      --status-success: #16a34a;
+      --status-error: #dc2626;
+      --status-warning: #d97706;
+      --status-info: #2563eb;
+      --status-tool: #c2620a;
+      --status-cyan: #0891b2;
+      --status-magenta: #9333ea;
+
+      /* Tinted backgrounds (for badges, events) */
+      --tint-success: #dcfce7;
+      --tint-error: #fee2e2;
+      --tint-warning: #fef3c7;
+      --tint-info: #dbeafe;
+      --tint-purple: #e7e7fb;
+      --tint-magenta: #f3e8ff;
+      --tint-cyan: #cffafe;
+      --tint-neutral: #eceef3;
+
+      /* Accent text variants */
+      --accent-muted: #6b6f9a;
+
+      /* Chat bubbles */
+      --chat-user-bg: #dbeafe;
+      --chat-user-text: #1e3a5f;
+      --chat-assistant-bg: #f1f2f6;
+      --chat-assistant-text: #3a3d47;
+`;
+
+/** Shared CSS for all dashboard pages — base reset, header, and nav */
+export const SHARED_STYLES = `
+    :root {${DARK_TOKENS}    }
+
+    /* System follow: honor the OS preference when no explicit override is set. */
+    @media (prefers-color-scheme: light) {
+      :root {${LIGHT_TOKENS}      }
     }
+
+    /* Explicit overrides (set by the theme toggle). html[data-theme] has higher
+       specificity than the media-query :root, so it wins regardless of OS setting. */
+    html[data-theme="dark"] {${DARK_TOKENS}    }
+    html[data-theme="light"] {${LIGHT_TOKENS}    }
+
+    /* Theme toggle button (right of the nav, on every page) */
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .theme-toggle {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1;
+      font-family: inherit;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .theme-toggle:hover { color: var(--text-primary); border-color: var(--border-secondary); }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -103,6 +202,7 @@ export function renderNav(
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
   return `
+  <script>${themeInitScript()}</script>
   <script>
     if (!window.__fullscreenNav) {
       window.__fullscreenNav = true;
@@ -152,6 +252,10 @@ export function renderNav(
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>
+    <div class="header-right">
 ${options?.headerRight ?? ""}
-  </header>`;
+      ${themeToggleHtml()}
+    </div>
+  </header>
+  <script>${themeToggleScript()}</script>`;
 }
