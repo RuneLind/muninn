@@ -2,7 +2,6 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { renderYouTubePage } from "../views/youtube-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } from "../../youtube/state.ts";
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
@@ -48,8 +47,13 @@ async function findExistingByVideoId(
 export function registerYouTubeRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/youtube", async (c) => {
-    return c.html(await renderYouTubePage());
+  // The YouTube page merged into the unified /summaries view. Keep this route as
+  // a redirect so old bookmarks and the Chrome extension's hardcoded fallback
+  // (/youtube?job=…) still land on the right place, carrying the source tag.
+  app.get("/youtube", (c) => {
+    const qs = new URL(c.req.url).searchParams;
+    qs.set("source", "youtube");
+    return c.redirect(`/summaries?${qs.toString()}`, 301);
   });
 
   // CORS preflight for Chrome extension
@@ -84,7 +88,7 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
         duplicate: true,
         document_id: existing.id,
         existing_url: existing.url,
-        dashboard_url: `/youtube?doc=${encodeURIComponent(existing.id)}&duplicate=1`,
+        dashboard_url: `/summaries?source=youtube&doc=${encodeURIComponent(existing.id)}&duplicate=1`,
       });
     }
 
@@ -100,7 +104,7 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
       log.error("YouTube summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 
-    return c.json({ job_id: jobId, dashboard_url: `/youtube?job=${jobId}` });
+    return c.json({ job_id: jobId, dashboard_url: `/summaries?source=youtube&job=${jobId}` });
   });
 
   app.get("/api/youtube/stream/:jobId", (c) => {

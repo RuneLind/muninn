@@ -1,6 +1,11 @@
-/** YouTube page — URL submission form */
+/** Summaries page — URL submission form.
+ *
+ * Only YouTube can be summarized straight from a pasted URL; X articles are
+ * client-rendered so their text must come from the Chrome extension (the page
+ * can't fetch it). The form detects an X/Twitter link and points the user at
+ * the extension rather than failing opaquely. */
 
-export function ytSubmitFormStyles(): string {
+export function sumSubmitFormStyles(): string {
   return `
     .submit-form {
       display: flex;
@@ -34,7 +39,7 @@ export function ytSubmitFormStyles(): string {
   `;
 }
 
-export function ytSubmitFormHtml(): string {
+export function sumSubmitFormHtml(): string {
   return `
     <div class="submit-form">
       <input type="text" id="urlInput" placeholder="Paste a YouTube URL to summarize..." />
@@ -42,7 +47,7 @@ export function ytSubmitFormHtml(): string {
     </div>`;
 }
 
-export function ytSubmitFormScript(): string {
+export function sumSubmitFormScript(): string {
   return `
     function extractVideoId(url) {
       try {
@@ -53,14 +58,26 @@ export function ytSubmitFormScript(): string {
       return null;
     }
 
+    function isXUrl(url) {
+      try {
+        var h = new URL(url).hostname.replace(/^www\\./, '');
+        return h === 'x.com' || h === 'twitter.com';
+      } catch { return false; }
+    }
+
     async function submitUrl() {
       var input = document.getElementById('urlInput');
       var url = input.value.trim();
       if (!url) return;
 
+      if (isXUrl(url)) {
+        alert('X articles must be added with the Muninn Chrome extension — open the article on x.com and click the extension. The page can\\'t fetch X article text directly.');
+        return;
+      }
+
       var videoId = extractVideoId(url);
       if (!videoId) {
-        alert('Invalid YouTube URL');
+        alert('Paste a YouTube URL (youtube.com/watch?v=… or youtu.be/…).');
         return;
       }
 
@@ -79,10 +96,17 @@ export function ytSubmitFormScript(): string {
           alert(data.error || 'Failed to start');
           return;
         }
+        if (data.duplicate) {
+          // Already summarized — jump to the existing doc.
+          showDuplicateBanner();
+          openSummaryDoc(data.document_id, data.existing_url || '', 'youtube');
+          input.value = '';
+          return;
+        }
         // Update URL without reload
-        history.replaceState(null, '', '/youtube?job=' + data.job_id);
-        showJob(data.job_id, url, url);
-        connectSSE(data.job_id);
+        history.replaceState(null, '', '/summaries?source=youtube&job=' + data.job_id);
+        showJob(data.job_id, url, url, 'youtube');
+        connectSSE(data.job_id, 'youtube');
         input.value = '';
       } catch (err) {
         alert('Request failed: ' + err.message);

@@ -1,19 +1,20 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
-import { ytSubmitFormStyles, ytSubmitFormHtml, ytSubmitFormScript } from "./components/yt-submit-form.ts";
-import { ytJobCardStyles, ytJobCardHtml, ytJobCardScript } from "./components/yt-job-card.ts";
-import { ytRecentlyAddedStyles, ytRecentlyAddedHtml, ytRecentlyAddedScript } from "./components/yt-recently-added.ts";
-import { ytArticleLibraryStyles, ytArticleLibraryHtml, ytArticleLibraryScript } from "./components/yt-article-library.ts";
+import { clientSourcesJson } from "../../summaries/sources.ts";
+import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
+import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
+import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
+import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 
-export async function renderYouTubePage(): Promise<string> {
+export async function renderSummariesPage(): Promise<string> {
   const helpers = await helpersClientScript();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Muninn - YouTube Summarizer</title>
+  <title>Muninn - Summaries</title>
   <style>
     ${SHARED_STYLES}
 
@@ -23,10 +24,10 @@ export async function renderYouTubePage(): Promise<string> {
       padding: 24px;
     }
 
-    ${ytSubmitFormStyles()}
-    ${ytJobCardStyles()}
-    ${ytRecentlyAddedStyles()}
-    ${ytArticleLibraryStyles()}
+    ${sumSubmitFormStyles()}
+    ${sumJobCardStyles()}
+    ${sumRecentlyAddedStyles()}
+    ${sumArticleLibraryStyles()}
 
     .duplicate-banner {
       display: none;
@@ -43,7 +44,7 @@ export async function renderYouTubePage(): Promise<string> {
   </style>
 </head>
 <body>
-  ${renderNav("youtube")}
+  ${renderNav("summaries")}
 
   <div class="error-banner" id="knowledgeBanner">
     Knowledge API is not available. Summarization requires an external knowledge/vector search server.
@@ -51,32 +52,36 @@ export async function renderYouTubePage(): Promise<string> {
   </div>
 
   <div class="duplicate-banner" id="duplicateBanner">
-    This video has already been summarized — showing the existing summary.
+    This item has already been summarized — showing the existing summary.
   </div>
 
   <div class="page-content">
-    <!-- Manual submit form -->
-    ${ytSubmitFormHtml()}
+    <!-- Manual submit form (YouTube; X comes from the Chrome extension) -->
+    ${sumSubmitFormHtml()}
 
     <!-- Active job card (hidden until a job is active) -->
-    ${ytJobCardHtml()}
+    ${sumJobCardHtml()}
 
-    <!-- Recently added (persistent, date-grouped) -->
-    ${ytRecentlyAddedHtml()}
+    <!-- Recently added (persistent, date-grouped, source-filterable) -->
+    ${sumRecentlyAddedHtml()}
 
     <!-- Article Library -->
-    ${ytArticleLibraryHtml()}
+    ${sumArticleLibraryHtml()}
   </div>
 
   ${docPanelHtml()}
 
   ${MARKED_CDN_SCRIPT}
   <script>
+    // Summary-source registry projection (from src/summaries/sources.ts).
+    const SOURCES = ${clientSourcesJson()};
+  </script>
+  <script>
     ${helpers}
-    ${ytJobCardScript()}
-    ${ytRecentlyAddedScript()}
-    ${ytArticleLibraryScript()}
-    ${ytSubmitFormScript()}
+    ${sumJobCardScript()}
+    ${sumRecentlyAddedScript()}
+    ${sumArticleLibraryScript()}
+    ${sumSubmitFormScript()}
 
     function showDuplicateBanner() {
       var el = document.getElementById('duplicateBanner');
@@ -97,24 +102,27 @@ export async function renderYouTubePage(): Promise<string> {
       loadLibrary();
 
       var params = new URLSearchParams(window.location.search);
+      // Legacy deep links (/youtube?…, /x-articles?…) redirect here with ?source=.
+      // Fall back to youtube so an old bookmark without a source still resolves.
+      var source = params.get('source') || 'youtube';
 
       var deepLinkDoc = params.get('doc');
       if (deepLinkDoc) {
         if (params.get('duplicate') === '1') showDuplicateBanner();
-        openYouTubeDoc(deepLinkDoc, '');
+        openSummaryDoc(deepLinkDoc, '', source);
       }
 
       var jobId = params.get('job');
       if (!jobId) return;
 
-      // Fetch current job state
+      // Fetch current job state from the source's job store
       try {
-        var res = await fetch('/api/youtube/jobs');
+        var res = await fetch((SOURCES[source] ? SOURCES[source].apiBase : '/api/youtube') + '/jobs');
         var data = await res.json();
         var job = (data.jobs || []).find(function(j) { return j.id === jobId; });
         if (!job) return;
 
-        showJob(jobId, job.title || job.url, job.url);
+        showJob(jobId, job.title || job.url, job.url, source);
 
         // Replay existing state
         if (job.text) {
@@ -128,7 +136,7 @@ export async function renderYouTubePage(): Promise<string> {
 
         // Connect SSE for live updates (unless terminal)
         if (!TERMINAL_STATES.includes(job.status)) {
-          connectSSE(jobId);
+          connectSSE(jobId, source);
         } else {
           finalizeSummary();
           // Fetch scored similar results for completed jobs

@@ -951,6 +951,21 @@ export const spec = {
       },
     },
 
+    // ===================== Summaries (merged view) =====================
+
+    "/api/summaries/documents": {
+      get: {
+        tags: ["Summaries"],
+        summary: "Merged summary archive",
+        description:
+          "All stored summaries across every source collection (youtube-summaries, x-articles, …), each document tagged with its `source`. Backs the unified /summaries page.",
+        operationId: "getSummariesDocuments",
+        responses: {
+          "200": { description: "Merged, source-tagged documents list" },
+        },
+      },
+    },
+
     // ===================== YouTube =====================
 
     "/api/youtube/summarize": {
