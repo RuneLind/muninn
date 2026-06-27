@@ -211,12 +211,19 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Filter out already-notified: by message ID and by content hash
       const known = new Set(watcher.lastNotifiedIds);
+      // Content-hash dedup (below) exists to catch LLM-resummarized items
+      // (email/news/x) whose wording — and thus their alert id/text — drifts
+      // between runs. The anthropic watcher's ids are stable canonical GitHub
+      // URLs, so id-dedup is already complete; running content-hash on it only
+      // causes false drops (two distinct commits like "Update README" fingerprint
+      // identically) and doubles slot use in the 400-cap window. Skip it here.
+      const skipContentHash = watcher.type === "anthropic";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
           return false;
         }
-        const hash = contentHash(a);
+        const hash = skipContentHash ? null : contentHash(a);
         if (hash && known.has(hash)) {
           log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
           return false;
@@ -278,7 +285,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
       const newEntries = newAlerts.flatMap((a) => {
-        const hash = contentHash(a);
+        const hash = skipContentHash ? null : contentHash(a);
         const extras = a.trackingIds ?? [];
         return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
       });

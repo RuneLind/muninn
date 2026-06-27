@@ -43,7 +43,12 @@ async function main() {
     process.exit(1);
   }
 
-  const watcherConfig = { feeds: [...DEFAULT_ANTHROPIC_FEEDS] };
+  // Seed an empty config so the watcher always tracks the canonical
+  // DEFAULT_ANTHROPIC_FEEDS in code (checkAnthropic falls back to it when
+  // config.feeds is absent). Materializing the list into JSONB here would freeze
+  // it in the DB and silently drift when the code list changes; set config.feeds
+  // only to customize a specific watcher.
+  const watcherConfig: Record<string, unknown> = {};
 
   const existing = await sql<{ id: string }[]>`
     SELECT id FROM watchers
@@ -52,7 +57,7 @@ async function main() {
   `;
 
   console.log("Owner:", `${userId}/${botName}`);
-  console.log("Feeds:", watcherConfig.feeds.length);
+  console.log("Feeds (from code default):", DEFAULT_ANTHROPIC_FEEDS.length);
   console.log();
 
   if (existing.length) {

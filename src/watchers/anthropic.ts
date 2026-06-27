@@ -4,15 +4,21 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "anthropic");
 
-/** Cap entries considered per feed per run (mirrors news.ts MAX_RESULTS). */
-const MAX_PER_FEED = 10;
+/**
+ * Cap entries considered per feed per run. Above news.ts's 10 because a busy feed
+ * (claude-code/commits) can land >10 entries in one 2h interval; the feed is
+ * append-only, so anything past the cap that scrolls out of the next run's window
+ * is missed permanently. 20 covers typical bursts while keeping the cold-start
+ * baseline (≤feeds×cap ids) well under the runner's 400-id cap.
+ */
+const MAX_PER_FEED = 20;
 /**
  * How far back to consider entries — a bound on the candidate SET, not the dedup
  * key. Dedup rides `last_notified_ids` (by entry id) in the runner; this only
  * limits how much of each feed's window we read so a long-idle watcher doesn't
  * resurface ancient entries.
  */
-const DEFAULT_LOOKBACK_DAYS = 14;
+const DEFAULT_LOOKBACK_DAYS = 7;
 
 /**
  * Verified Tier-1 Atom feeds (CONTEXT.md §11c). For the content repos
