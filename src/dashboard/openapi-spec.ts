@@ -1011,34 +1011,6 @@ export const spec = {
       },
     },
 
-    "/api/youtube/categories": {
-      get: {
-        tags: ["YouTube"],
-        summary: "Video categories",
-        description: "Categories from the YouTube summaries knowledge collection.",
-        operationId: "getYoutubeCategories",
-        responses: {
-          "200": { description: "Categories list" },
-          "502": errorResponse,
-          "503": errorResponse,
-        },
-      },
-    },
-
-    "/api/youtube/documents": {
-      get: {
-        tags: ["YouTube"],
-        summary: "Stored video summaries",
-        description: "All documents in the youtube-summaries collection.",
-        operationId: "getYoutubeDocuments",
-        responses: {
-          "200": { description: "Documents list" },
-          "502": errorResponse,
-          "503": errorResponse,
-        },
-      },
-    },
-
     "/api/youtube/document/{docPath}": {
       get: {
         tags: ["YouTube"],

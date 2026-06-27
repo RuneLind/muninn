@@ -37,17 +37,25 @@ export function registerSummariesRoutes(app: Hono, config: Config): void {
             { timeoutMs: 10000 },
           );
           const docs = (data?.documents ?? []) as SummaryDocumentMeta[];
-          return docs.map((d) => ({ ...d, source: source.id }));
+          return { ok: true, docs: docs.map((d) => ({ ...d, source: source.id })) };
         } catch (err) {
           log.warn("Summaries documents fetch failed for {source}: {error}", {
             source: source.id,
             error: err instanceof Error ? err.message : String(err),
           });
-          return [] as SummaryDocumentMeta[];
+          return { ok: false, docs: [] as SummaryDocumentMeta[] };
         }
       }),
     );
 
-    return c.json({ documents: results.flat() });
+    // A partial failure still returns the sources that loaded (and is logged
+    // above). But if *every* source failed, surface it as an error so the
+    // client shows "Failed to load" instead of a misleading "no summaries yet"
+    // empty state — the old per-source pages did this via knowledgeApiHandler.
+    if (!results.some((r) => r.ok)) {
+      return c.json({ error: "Knowledge API unreachable" }, 503);
+    }
+
+    return c.json({ documents: results.flatMap((r) => r.docs) });
   });
 }

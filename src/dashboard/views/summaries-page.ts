@@ -117,7 +117,7 @@ export async function renderSummariesPage(): Promise<string> {
 
       // Fetch current job state from the source's job store
       try {
-        var res = await fetch((SOURCES[source] ? SOURCES[source].apiBase : '/api/youtube') + '/jobs');
+        var res = await fetch(docApiBase(source) + '/jobs');
         var data = await res.json();
         var job = (data.jobs || []).find(function(j) { return j.id === jobId; });
         if (!job) return;

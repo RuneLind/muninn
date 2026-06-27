@@ -6,10 +6,12 @@ import { createJob, getJob, getRecentJobs, subscribe as subscribeYouTubeJob } fr
 import { summarizeVideo } from "../../youtube/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { getSummarySource } from "../../summaries/sources.ts";
 
 const log = getLog("dashboard");
 
-const YT_COLLECTION = "youtube-summaries";
+// Single source of truth for the collection name lives in the registry.
+const YT_COLLECTION = getSummarySource("youtube")!.collection;
 
 interface YtDocumentMeta { id: string; url?: string }
 
@@ -53,7 +55,9 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
   app.get("/youtube", (c) => {
     const qs = new URL(c.req.url).searchParams;
     qs.set("source", "youtube");
-    return c.redirect(`/summaries?${qs.toString()}`, 301);
+    // 302 (not 301): the target is computed from transient query params, so we
+    // don't want browsers permanently caching the bare-path redirect.
+    return c.redirect(`/summaries?${qs.toString()}`, 302);
   });
 
   // CORS preflight for Chrome extension
@@ -183,16 +187,10 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
   });
 
   // --- YouTube browse (proxy to knowledge API) ---
-
-  app.get("/api/youtube/categories", (c) => {
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, "/api/youtube/categories");
-  });
-
-  app.get("/api/youtube/documents", (c) => {
-    // include_dates lets the page group articles by recency; it reads every doc
-    // file upstream, so the duplicate-check path (findExistingByVideoId) omits it.
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${YT_COLLECTION}/documents?include_dates=1`, 10000);
-  });
+  // The merged /summaries view reads /api/summaries/documents for the listing;
+  // the old per-source /documents + /categories endpoints were retired with the
+  // standalone YouTube page. The /document/* + /similar endpoints stay — the
+  // unified client still calls them per-source via SOURCES[].apiBase.
 
   app.get("/api/youtube/document/*", async (c) => {
     // Read the still-encoded path from the raw URL. c.req.path decodes lossily

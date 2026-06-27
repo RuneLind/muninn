@@ -133,6 +133,8 @@ export function sumRecentlyAddedStyles(): string {
       background: color-mix(in srgb, var(--accent) 15%, transparent);
       color: var(--accent-light);
     }
+    .source-chip .chip-count { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+    .source-chip.active .chip-count { color: var(--accent-light); }
   `;
 }
 

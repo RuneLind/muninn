@@ -60,8 +60,10 @@ export function sumSubmitFormScript(): string {
 
     function isXUrl(url) {
       try {
-        var h = new URL(url).hostname.replace(/^www\\./, '');
-        return h === 'x.com' || h === 'twitter.com';
+        var h = new URL(url).hostname;
+        // Match x.com / twitter.com and their subdomains (www., mobile., m., …).
+        return h === 'x.com' || h === 'twitter.com' ||
+          h.endsWith('.x.com') || h.endsWith('.twitter.com');
       } catch { return false; }
     }
 
