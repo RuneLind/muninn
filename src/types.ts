@@ -144,7 +144,7 @@ export interface ScheduledTask {
   updatedAt: number;
 }
 
-export type WatcherType = "email" | "calendar" | "github" | "news" | "goal" | "x";
+export type WatcherType = "email" | "calendar" | "github" | "news" | "goal" | "x" | "anthropic";
 
 export interface Watcher {
   id: string;

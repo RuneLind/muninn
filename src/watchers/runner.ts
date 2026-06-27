@@ -6,6 +6,7 @@ import { isQuietHours } from "./quiet-hours.ts";
 import { checkEmail } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
+import { checkAnthropic } from "./anthropic.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -210,12 +211,19 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Filter out already-notified: by message ID and by content hash
       const known = new Set(watcher.lastNotifiedIds);
+      // Content-hash dedup (below) exists to catch LLM-resummarized items
+      // (email/news/x) whose wording — and thus their alert id/text — drifts
+      // between runs. The anthropic watcher's ids are stable canonical GitHub
+      // URLs, so id-dedup is already complete; running content-hash on it only
+      // causes false drops (two distinct commits like "Update README" fingerprint
+      // identically) and doubles slot use in the 400-cap window. Skip it here.
+      const skipContentHash = watcher.type === "anthropic";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
           return false;
         }
-        const hash = contentHash(a);
+        const hash = skipContentHash ? null : contentHash(a);
         if (hash && known.has(hash)) {
           log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
           return false;
@@ -277,7 +285,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
       const newEntries = newAlerts.flatMap((a) => {
-        const hash = contentHash(a);
+        const hash = skipContentHash ? null : contentHash(a);
         const extras = a.trackingIds ?? [];
         return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
       });
@@ -334,6 +342,8 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
       return await checkNews(watcher);
     case "x":
       return await checkX(watcher, cwd, botName);
+    case "anthropic":
+      return await checkAnthropic(watcher);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -342,7 +352,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

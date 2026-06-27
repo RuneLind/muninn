@@ -10,7 +10,7 @@ import { upsertUserSettings, getUserSettings } from "../db/user-settings.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import type { WatcherType } from "../types.ts";
 
-const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal", "x"];
+const VALID_TYPES: WatcherType[] = ["email", "calendar", "github", "news", "goal", "x", "anthropic"];
 
 export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
   bot.command("watchers", async (ctx) => {
@@ -44,7 +44,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
 
     if (!args) {
       await ctx.reply(
-        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal, x\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>\n<code>/watch x</code> (daily X/Twitter digest)",
+        "Usage: <code>/watch &lt;type&gt; [filter]</code>\n\nTypes: email, calendar, github, news, goal, x, anthropic\n\nExamples:\n<code>/watch email from:github.com</code>\n<code>/watch news typescript bun</code>\n<code>/watch x</code> (daily X/Twitter digest)\n<code>/watch anthropic</code> (Anthropic release/docs feed alerts)",
         { parse_mode: "HTML" },
       );
       return;
@@ -88,6 +88,7 @@ export function registerWatcherCommands(bot: Bot, botConfig: BotConfig): void {
     const INTERVAL_LABELS: Partial<Record<WatcherType, string>> = {
       x: `daily at ${String(config.hour ?? 8).padStart(2, "0")}:${String(config.minute ?? 0).padStart(2, "0")}`,
       news: "60 minutes",
+      anthropic: "120 minutes",
     };
     const interval = INTERVAL_LABELS[normalizedType] ?? "5 minutes";
     await ctx.reply(

@@ -75,7 +75,7 @@ function parseRssItems(xml: string): RssItem[] {
   return items;
 }
 
-function extractTag(xml: string, tag: string): string | null {
+export function extractTag(xml: string, tag: string): string | null {
   const match = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
   if (match) return decodeEntities(match[1]!.trim());
 
@@ -93,7 +93,7 @@ function extractSourceName(block: string): string | null {
   return match ? decodeEntities(match[1]!.trim()) : null;
 }
 
-function decodeEntities(text: string): string {
+export function decodeEntities(text: string): string {
   return text
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
