@@ -2,15 +2,16 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { renderXArticlePage } from "../views/x-article-page.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeJob } from "../../x-article/state.ts";
 import { summarizeArticle } from "../../x-article/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { getSummarySource } from "../../summaries/sources.ts";
 
 const log = getLog("dashboard");
 
-const XA_COLLECTION = "x-articles";
+// Single source of truth for the collection name lives in the registry.
+const XA_COLLECTION = getSummarySource("x-article")!.collection;
 
 interface XaDocumentMeta { id: string; url?: string }
 
@@ -37,8 +38,15 @@ async function findExistingByUrl(
 export function registerXArticleRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  app.get("/x-articles", async (c) => {
-    return c.html(await renderXArticlePage());
+  // The X-article page merged into the unified /summaries view. Keep this route
+  // as a redirect so old bookmarks and the Chrome extension's hardcoded fallback
+  // (/x-articles?job=…) still resolve, carrying the source tag.
+  app.get("/x-articles", (c) => {
+    const qs = new URL(c.req.url).searchParams;
+    qs.set("source", "x-article");
+    // 302 (not 301): the target is computed from transient query params, so we
+    // don't want browsers permanently caching the bare-path redirect.
+    return c.redirect(`/summaries?${qs.toString()}`, 302);
   });
 
   // CORS preflight for Chrome extension
@@ -79,7 +87,7 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
         duplicate: true,
         document_id: existing.id,
         existing_url: existing.url,
-        dashboard_url: `/x-articles?doc=${encodeURIComponent(existing.id)}&duplicate=1`,
+        dashboard_url: `/summaries?source=x-article&doc=${encodeURIComponent(existing.id)}&duplicate=1`,
       });
     }
 
@@ -95,7 +103,7 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
       log.error("X article summarization failed: {error}", { error: err instanceof Error ? err.message : String(err) });
     });
 
-    return c.json({ job_id: jobId, dashboard_url: `/x-articles?job=${jobId}` });
+    return c.json({ job_id: jobId, dashboard_url: `/summaries?source=x-article&job=${jobId}` });
   });
 
   app.get("/api/x-articles/stream/:jobId", (c) => {
@@ -174,10 +182,10 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
   });
 
   // --- X articles browse (proxy to knowledge API) ---
-
-  app.get("/api/x-articles/documents", (c) => {
-    return knowledgeApiHandler(c, KNOWLEDGE_API_URL, `/api/collection/${XA_COLLECTION}/documents`, 10000);
-  });
+  // The merged /summaries view reads /api/summaries/documents for the listing;
+  // the old per-source /documents endpoint was retired with the standalone X
+  // page. The /document/* + /similar endpoints stay — the unified client still
+  // calls them per-source via SOURCES[].apiBase.
 
   app.get("/api/x-articles/document/*", async (c) => {
     // Read the still-encoded path from the raw URL — c.req.path decodes lossily

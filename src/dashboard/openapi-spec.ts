@@ -951,6 +951,21 @@ export const spec = {
       },
     },
 
+    // ===================== Summaries (merged view) =====================
+
+    "/api/summaries/documents": {
+      get: {
+        tags: ["Summaries"],
+        summary: "Merged summary archive",
+        description:
+          "All stored summaries across every source collection (youtube-summaries, x-articles, …), each document tagged with its `source`. Backs the unified /summaries page.",
+        operationId: "getSummariesDocuments",
+        responses: {
+          "200": { description: "Merged, source-tagged documents list" },
+        },
+      },
+    },
+
     // ===================== YouTube =====================
 
     "/api/youtube/summarize": {
@@ -992,34 +1007,6 @@ export const spec = {
         parameters: [limitQuery(20, 100)],
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { jobs: { type: "array", items: { type: "object" } } } } } } },
-        },
-      },
-    },
-
-    "/api/youtube/categories": {
-      get: {
-        tags: ["YouTube"],
-        summary: "Video categories",
-        description: "Categories from the YouTube summaries knowledge collection.",
-        operationId: "getYoutubeCategories",
-        responses: {
-          "200": { description: "Categories list" },
-          "502": errorResponse,
-          "503": errorResponse,
-        },
-      },
-    },
-
-    "/api/youtube/documents": {
-      get: {
-        tags: ["YouTube"],
-        summary: "Stored video summaries",
-        description: "All documents in the youtube-summaries collection.",
-        operationId: "getYoutubeDocuments",
-        responses: {
-          "200": { description: "Documents list" },
-          "502": errorResponse,
-          "503": errorResponse,
         },
       },
     },

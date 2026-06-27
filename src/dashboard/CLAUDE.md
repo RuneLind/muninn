@@ -25,8 +25,9 @@ Routes are split by domain in `routes/`:
 | `graph-routes.ts` | Knowledge graph page + wikilink edge extraction across knowledge collections |
 | `logs-routes.ts` | Log file viewer (JSONL files from LogTape) |
 | `tools-routes.ts` | MCP tool debug: connect, list, call, disconnect |
-| `youtube-routes.ts` | YouTube transcript fetch and summarization |
-| `x-article-routes.ts` | X/Twitter article summarization (Chrome extension backend) |
+| `summaries-routes.ts` | Unified `/summaries` page + `/api/summaries/documents` (merged, source-tagged archive across every summary source — see `src/summaries/sources.ts`) |
+| `youtube-routes.ts` | YouTube transcript fetch + summarization API. `/youtube` now 301-redirects to `/summaries?source=youtube`; the page lives in the merged view |
+| `x-article-routes.ts` | X/Twitter article summarization API (Chrome extension backend). `/x-articles` now 301-redirects to `/summaries?source=x-article` |
 | `route-utils.ts` | Shared helpers: UUID validation, pagination parsing |
 
 ## View System
@@ -50,7 +51,7 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 
 ### Pages
 
-`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `youtube-page.ts`.
+`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `summaries-page.ts` (unified YouTube + X-article summaries; composes the `sum-*` components, injects the `SOURCES` registry).
 
 ## Real-Time Updates
 

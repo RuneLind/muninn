@@ -1,13 +1,14 @@
-/** YouTube page — persistent "Recently Added" list, grouped by date buckets.
+/** Summaries page — persistent "Recently Added" list, grouped by date buckets.
  *
- * Replaces the old ephemeral in-memory "Recent Summaries" list. Reads the full
- * archive from /api/youtube/documents (which now carries each doc's added date)
- * and groups newest-first under Today / Yesterday / This week / This month /
- * then per-month headers. Reuses openYouTubeDoc/docTitle/docCategory from
- * yt-article-library (all component scripts share one page scope).
- */
+ * Reads the merged archive from /api/summaries/documents (every source's
+ * collection, each doc tagged with its `source` and carrying an added date) and
+ * groups newest-first under Today / Yesterday / This week / This month / then
+ * per-month headers. Each row shows a source badge so you can tell a YouTube
+ * summary from an X article at a glance. Reuses openSummaryDoc / docTitle /
+ * docCategory / sourceBadge / getSummaryDocuments from sum-article-library (all
+ * component scripts share one page scope). */
 
-export function ytRecentlyAddedStyles(): string {
+export function sumRecentlyAddedStyles(): string {
   return `
     .recent-section {
       margin-top: 32px;
@@ -82,21 +83,77 @@ export function ytRecentlyAddedStyles(): string {
       min-width: 64px;
       text-align: right;
     }
+
+    /* --- Source badge (shared by Recently Added + Article Library rows) --- */
+    .source-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      flex-shrink: 0;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-soft);
+      background: var(--bg-surface);
+    }
+    .source-badge[data-source="youtube"] {
+      color: var(--status-error);
+      border-color: color-mix(in srgb, var(--status-error) 40%, transparent);
+      background: color-mix(in srgb, var(--status-error) 12%, transparent);
+    }
+    .source-badge[data-source="x-article"] {
+      color: var(--status-info);
+      border-color: color-mix(in srgb, var(--status-info) 40%, transparent);
+      background: color-mix(in srgb, var(--status-info) 12%, transparent);
+    }
+
+    /* --- Source filter chips --- */
+    .source-filter {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .source-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .source-chip:hover { border-color: var(--accent); color: var(--text-primary); }
+    .source-chip.active {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
+    }
+    .source-chip .chip-count { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+    .source-chip.active .chip-count { color: var(--accent-light); }
   `;
 }
 
-export function ytRecentlyAddedHtml(): string {
+export function sumRecentlyAddedHtml(): string {
   return `
     <div class="recent-section" id="recentlyAddedSection">
       <h2>Recently Added <span class="count" id="recentlyAddedCount"></span></h2>
+      <div class="source-filter" id="sourceFilter"></div>
       <div id="recentlyAddedList">
         <div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">Loading...</div>
       </div>
     </div>`;
 }
 
-export function ytRecentlyAddedScript(): string {
+export function sumRecentlyAddedScript(): string {
   return `
+    // Active source filter (null = all sources). Shared with the rendered list.
+    var activeSource = null;
+
     // Parse a doc date ("2026-01-09" or full ISO) to a local-midnight Date.
     // Day-only strings are parsed component-wise to avoid UTC timezone drift.
     function parseDocDate(s) {
@@ -129,18 +186,50 @@ export function ytRecentlyAddedScript(): string {
       return d.toLocaleDateString('en-US', opts);
     }
 
+    // Render the source-filter chips from whichever sources actually appear in
+    // the archive. "All" plus one chip per present source.
+    function renderSourceFilter(docs) {
+      var el = document.getElementById('sourceFilter');
+      if (!el) return;
+      var counts = {};
+      docs.forEach(function(d) { counts[d.source] = (counts[d.source] || 0) + 1; });
+      var present = Object.keys(counts);
+      if (present.length <= 1) { el.innerHTML = ''; return; }  // nothing to filter
+      var chips = ['<span class="source-chip' + (activeSource === null ? ' active' : '') +
+        '" data-source="">All <span class="chip-count">' + docs.length + '</span></span>'];
+      present.forEach(function(id) {
+        var s = SOURCES[id];
+        var label = s ? s.label : id;
+        chips.push('<span class="source-chip' + (activeSource === id ? ' active' : '') +
+          '" data-source="' + esc(id) + '">' + esc(label) +
+          ' <span class="chip-count">' + counts[id] + '</span></span>');
+      });
+      el.innerHTML = chips.join('');
+      el.querySelectorAll('.source-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+          var s = chip.getAttribute('data-source');
+          activeSource = s || null;
+          loadRecentlyAdded();  // re-render from cache (no force)
+        });
+      });
+    }
+
     // force=true refetches the archive (used after an ingest completes); the
-    // shared getYoutubeDocuments (yt-article-library) otherwise memoizes the
+    // shared getSummaryDocuments (sum-article-library) otherwise memoizes the
     // listing so the page fetches it once across both consumers.
     async function loadRecentlyAdded(force) {
       var list = document.getElementById('recentlyAddedList');
       try {
-        var docs = (await getYoutubeDocuments(force)).filter(function(d) {
+        var all = (await getSummaryDocuments(force)).filter(function(d) {
           return d.id && d.id.includes('/') && d.id.endsWith('.md');
         });
 
+        renderSourceFilter(all);
+        var docs = activeSource ? all.filter(function(d) { return d.source === activeSource; }) : all.slice();
+
         if (docs.length === 0) {
-          list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste a YouTube URL above to get started.</div>';
+          list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste a YouTube URL above or use the Chrome extension to get started.</div>';
+          document.getElementById('recentlyAddedCount').textContent = '';
           return;
         }
 
@@ -171,11 +260,11 @@ export function ytRecentlyAddedScript(): string {
           var rows = bucket.docs.map(function(doc) {
             var title = docTitle(doc.id);
             var cat = docCategory(doc.id);
-            var isYouTube = doc.url && doc.url.indexOf('youtube.com') !== -1;
-            return '<div class="recent-item" data-doc-id="' + esc(doc.id) + '" data-doc-url="' + esc(doc.url || '') + '">' +
+            return '<div class="recent-item" data-doc-id="' + esc(doc.id) + '" data-doc-url="' + esc(doc.url || '') + '" data-source="' + esc(doc.source) + '">' +
+              sourceBadge(doc.source) +
               '<span class="recent-item-title">' + esc(title) + '</span>' +
               '<span class="category-badge">' + esc(cat) + '</span>' +
-              (isYouTube ? '<a class="recent-item-link" href="' + esc(doc.url) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">YouTube &rarr;</a>' : '') +
+              sourceLink(doc) +
               '<span class="recent-item-time">' + esc(formatDocDate(doc._date, now)) + '</span>' +
             '</div>';
           }).join('');
@@ -187,7 +276,7 @@ export function ytRecentlyAddedScript(): string {
         // Delegate row clicks to the shared doc panel opener.
         list.querySelectorAll('.recent-item').forEach(function(row) {
           row.addEventListener('click', function() {
-            openYouTubeDoc(row.getAttribute('data-doc-id'), row.getAttribute('data-doc-url'));
+            openSummaryDoc(row.getAttribute('data-doc-id'), row.getAttribute('data-doc-url'), row.getAttribute('data-source'));
           });
         });
       } catch (err) {

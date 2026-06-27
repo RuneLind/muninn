@@ -1,8 +1,10 @@
-/** YouTube page — Active job card with status badge, summary area, SSE streaming, similar videos */
+/** Summaries page — active job card with status badge, summary area, SSE
+ * streaming, and similar articles. Source-aware: streaming + similar calls are
+ * routed to the active job's source (SOURCES[source].apiBase). */
 
 import { markdownContentStyles } from "./doc-panel.ts";
 
-export function ytJobCardStyles(): string {
+export function sumJobCardStyles(): string {
   return `
     /* --- Job card --- */
     .job-card {
@@ -166,7 +168,7 @@ export function ytJobCardStyles(): string {
   `;
 }
 
-export function ytJobCardHtml(): string {
+export function sumJobCardHtml(): string {
   return `
     <div class="job-card" id="jobCard" style="display:none">
       <div class="job-header">
@@ -182,17 +184,18 @@ export function ytJobCardHtml(): string {
       </div>
       <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
       <div class="similar-panel" id="similarPanel">
-        <h3>Similar Videos</h3>
+        <h3>Similar</h3>
         <div class="similar-list" id="similarList"></div>
       </div>
     </div>`;
 }
 
-export function ytJobCardScript(): string {
+export function sumJobCardScript(): string {
   return `
     var accumulatedText = '';
     var currentJobId = null;
     var currentJobTitle = null;
+    var currentSource = 'youtube';
     var eventSource = null;
 
     var STATUS_LABELS = {
@@ -205,6 +208,12 @@ export function ytJobCardScript(): string {
     };
 
     var TERMINAL_STATES = ['complete', 'error'];
+
+    // Per-source API prefix (from the SOURCES registry injected by the page).
+    function sourceApiBase(source) {
+      var s = SOURCES[source || currentSource];
+      return s ? s.apiBase : '/api/youtube';
+    }
 
     function renderMarkdown(text) {
       if (typeof marked === 'undefined') return '<pre>' + esc(text) + '</pre>';
@@ -239,6 +248,7 @@ export function ytJobCardScript(): string {
       if (!articles || articles.length === 0) return;
       var panel = document.getElementById('similarPanel');
       var list = document.getElementById('similarList');
+      var source = currentSource;
       list.innerHTML = articles.map(function(a) {
         // Search API returns matchedChunks, ingest returns snippet
         var rawSnippet = a.snippet || (a.matchedChunks && a.matchedChunks[0] ? a.matchedChunks[0].content : '');
@@ -256,11 +266,11 @@ export function ytJobCardScript(): string {
         '</div>';
       }).join('');
       panel.classList.add('visible');
-      // Wire up view-md links
+      // Wire up view-md links — similar results live in the job's own source collection.
       list.querySelectorAll('.similar-view-md').forEach(function(link) {
         link.addEventListener('click', function(e) {
           e.preventDefault();
-          openYouTubeDoc(link.getAttribute('data-doc-id'), link.getAttribute('data-doc-url'));
+          openSummaryDoc(link.getAttribute('data-doc-id'), link.getAttribute('data-doc-url'), source);
         });
       });
     }
@@ -268,7 +278,7 @@ export function ytJobCardScript(): string {
     async function loadJobSimilar(title) {
       if (!title) return;
       try {
-        var res = await fetch('/api/youtube/similar?q=' + encodeURIComponent(title));
+        var res = await fetch(sourceApiBase() + '/similar?q=' + encodeURIComponent(title));
         if (!res.ok) return;
         var data = await res.json();
         var normalizedTitle = title.toLowerCase().trim();
@@ -306,11 +316,12 @@ export function ytJobCardScript(): string {
       }
     }
 
-    function connectSSE(jobId) {
+    function connectSSE(jobId, source) {
       if (eventSource) eventSource.close();
       currentJobId = jobId;
+      if (source) currentSource = source;
 
-      eventSource = new EventSource('/api/youtube/stream/' + jobId);
+      eventSource = new EventSource(sourceApiBase() + '/stream/' + jobId);
 
       eventSource.addEventListener('status', function(e) {
         var data = JSON.parse(e.data);
@@ -354,8 +365,9 @@ export function ytJobCardScript(): string {
       });
     }
 
-    function showJob(jobId, title, url) {
+    function showJob(jobId, title, url, source) {
       currentJobTitle = title;
+      if (source) currentSource = source;
       var card = document.getElementById('jobCard');
       card.style.display = '';
       var titleEl = document.getElementById('jobTitle');
