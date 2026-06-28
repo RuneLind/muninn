@@ -120,6 +120,15 @@ export function sumCandidatesStyles(): string {
       color: var(--text-soft);
       line-height: 1.45;
     }
+    .candidate-ask {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-light);
+      text-decoration: none;
+    }
+    .candidate-ask:hover { text-decoration: underline; }
 
     .candidate-actions {
       flex-shrink: 0;
@@ -259,6 +268,9 @@ export function sumCandidatesScript(): string {
       var titleInner = c.url
         ? '<a href="' + esc(c.url) + '" target="_blank" rel="noopener">' + esc(c.title) + '</a>'
         : esc(c.title);
+      // Cross-link into the Research layer: a discovery becomes a question. Lands
+      // on /research?q=<title>, which auto-asks the cited-Q&A box over the corpus.
+      var askHref = '/research?q=' + encodeURIComponent(c.title || '');
       return '<div class="candidate-item" data-id="' + esc(c.id) + '"' +
           ' data-url="' + esc(c.url || '') + '" data-title="' + esc(c.title || '') + '"' +
           ' data-status="' + esc(c.status) + '" data-doc-id="' + esc(c.docId || '') + '">' +
@@ -267,6 +279,7 @@ export function sumCandidatesScript(): string {
           (c.candidateSrc ? '<div class="candidate-meta">' + esc(c.candidateSrc) + '</div>' : '') +
           '<div class="candidate-title">' + titleInner + '</div>' +
           (c.why ? '<div class="candidate-why">' + esc(c.why) + '</div>' : '') +
+          '<a class="candidate-ask" href="' + askHref + '">Ask in Research &rarr;</a>' +
         '</div>' +
         '<div class="candidate-actions">' + candidateActionsHtml(c) + '</div>' +
       '</div>';

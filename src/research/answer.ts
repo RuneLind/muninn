@@ -23,6 +23,54 @@ export const NO_HITS_MESSAGE =
   "The Research corpus spans the Anthropic firehose, the curated Claude/YouTube/X summaries, " +
   "and the wiki — try rephrasing, or this topic may simply not be indexed yet.";
 
+/**
+ * Shown when retrieval returned *some* documents but every sub-search came back
+ * weak (Huginn's raw-score `lowConfidence` flag). Semantic search almost always
+ * surfaces a nearest neighbour, so we'd rather decline than synthesize a
+ * confident-looking answer from loosely-related material. The weak sources are
+ * still shown so the reader can judge them.
+ */
+export const LOW_CONFIDENCE_MESSAGE =
+  "The closest matches on the shelf don't confidently cover this, so I'd rather not " +
+  "synthesize an answer that isn't well-grounded. The nearest documents are listed below — " +
+  "open them to judge for yourself, or try rephrasing toward what's actually indexed.";
+
+/**
+ * Coverage verdict for a retrieval pass:
+ * - `answer`         — at least one sub-search confidently retrieved → synthesize.
+ * - `no_hits`        — nothing survived Huginn's noise filter → canned no-coverage.
+ * - `low_confidence` — documents came back but every sub-search was flagged weak.
+ *
+ * The honest relevance floor lives here. The exposed `relevance` field is NOT a
+ * usable threshold: Huginn skips the cross-encoder reranker for English queries
+ * (cross-lingual score collapse), so `relevance` is rank-based (top hit ≈ 0.75
+ * regardless of the query) and a numeric floor would never fire. The real
+ * raw-score signal is Huginn's per-search `lowConfidence` (computed from
+ * `LOW_CONFIDENCE_THRESHOLD` before rank-normalization), which is what we gate on.
+ */
+export type Coverage = "answer" | "no_hits" | "low_confidence";
+
+export interface CoverageInput {
+  /** Merged unique-document count, after Huginn's noise filter. */
+  hitCount: number;
+  /** Per-sub-question diagnostics — `lowConfidence` is the raw-score signal. */
+  subSearches: Array<{ resultCount: number; lowConfidence?: boolean }>;
+}
+
+export function assessCoverage(input: CoverageInput): Coverage {
+  if (input.hitCount === 0) return "no_hits";
+  const withResults = input.subSearches.filter((s) => s.resultCount > 0);
+  if (withResults.length === 0) return "no_hits";
+  // Confident if any sub-search that returned documents was NOT flagged weak.
+  const anyConfident = withResults.some((s) => !s.lowConfidence);
+  return anyConfident ? "answer" : "low_confidence";
+}
+
+/** The canned reply for a non-answer verdict (used by the no-synthesis paths). */
+export function coverageMessage(coverage: Exclude<Coverage, "answer">): string {
+  return coverage === "low_confidence" ? LOW_CONFIDENCE_MESSAGE : NO_HITS_MESSAGE;
+}
+
 export interface Citation {
   /** 1-based index used in the prompt and the inline `[n]` markers. */
   n: number;
