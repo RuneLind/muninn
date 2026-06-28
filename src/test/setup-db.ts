@@ -6,6 +6,7 @@ const TEST_DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn_test
 const ALL_TABLES = [
   "traces",
   "haiku_usage",
+  "summary_candidates",
   "watchers",
   "scheduled_tasks",
   "goals",

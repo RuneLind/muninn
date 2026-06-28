@@ -349,6 +349,35 @@ CREATE TABLE watcher_snapshots (
 );
 
 -- ============================================================================
+-- Summary candidates: the Candidates → Summaries inbox (Claude Learning Center).
+-- The anthropic watcher (config.captureCandidates) persists each gated candidate
+-- here — a ranked, pre-annotated reading queue surfaced on /summaries. status walks
+-- new → summarizing → summarized | dismissed | error; doc_id links the resulting
+-- anthropic-summaries doc once summarized. watcher_id is ON DELETE SET NULL
+-- (provenance, not ownership). ⚠️ Mirror of db/migrations/047-summary-candidates.sql:
+-- identical column order + constraints + index or schema-drift.test.ts reds.
+-- ============================================================================
+CREATE TABLE summary_candidates (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source        TEXT NOT NULL,
+  url           TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  candidate_src TEXT,
+  score         REAL NOT NULL,
+  why           TEXT,
+  status        TEXT NOT NULL DEFAULT 'new'
+    CHECK (status IN ('new', 'summarizing', 'summarized', 'dismissed', 'error')),
+  doc_id        TEXT,
+  watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
+  bot_name      TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (source, url)
+);
+
+CREATE INDEX idx_summary_candidates_status ON summary_candidates (status, score DESC);
+
+-- ============================================================================
 -- User settings: quiet hours, timezone preferences
 -- ============================================================================
 CREATE TABLE user_settings (

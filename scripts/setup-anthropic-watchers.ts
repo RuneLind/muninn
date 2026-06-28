@@ -31,7 +31,7 @@
 import postgres from "postgres";
 import { loadConfig } from "../src/config.ts";
 import {
-  DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT,
+  DEFAULT_ANTHROPIC_GATE_PROMPT,
   DEFAULT_ANTHROPIC_DAILY_PROMPT,
   DEFAULT_ANTHROPIC_WEEKLY_PROMPT,
 } from "../src/watchers/anthropic.ts";
@@ -49,14 +49,22 @@ const TIMEOUT_MS = 300000; // clears the runner's 120s watcher-timeout floor (ne
 const config = loadConfig();
 const sql = postgres(config.databaseUrl, { max: 1 });
 
-/** Highlights: real-time, quiet. Keeps the base row's warm ids/snapshots. No `feeds` key
- *  (tracks the code-default DEFAULT_ANTHROPIC_FEEDS); no `hour` (daytime via quiet-hours). */
+/** Highlights: real-time, quiet, AND the capture source for the Candidates → Summaries
+ *  inbox (Phase B). Keeps the base row's warm ids/snapshots. No `feeds` key (tracks the
+ *  code-default DEFAULT_ANTHROPIC_FEEDS); no `hour` (daytime via quiet-hours).
+ *
+ *  Uses the STANDARD gate prompt (scores 0.5–1.0), not the strict Highlights prompt: the
+ *  alert threshold (minScore 0.8) still keeps Telegram to the exceptional, while the lower
+ *  capture floor (candidateMinScore 0.5) routes the relevant-but-not-urgent middle into the
+ *  inbox instead of dropping it silently. One Haiku call, two cuts on the one score. */
 const highlightsConfig = {
   tier2: true,
   gate: true,
   minScore: 0.8,
+  captureCandidates: true,
+  candidateMinScore: 0.5,
   timeoutMs: TIMEOUT_MS,
-  prompt: DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT,
+  prompt: DEFAULT_ANTHROPIC_GATE_PROMPT,
 };
 
 /** Daily digest: once/day at 12:00, one message. quietMode so an all-churn day can SKIP. */
