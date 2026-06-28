@@ -355,7 +355,11 @@ export function sumCandidatesScript(): string {
         es.close();
         var docId = '';
         try {
-          var r = await fetch('/api/anthropic/jobs');
+          // limit=100 (the endpoint's cap): the jobs list is newest-first, and an
+          // auto-promote burst can create several jobs in the window between this
+          // job's kick and its completion — the default 20 could evict it and lose
+          // its docId (→ a non-functional "On the shelf" link).
+          var r = await fetch('/api/anthropic/jobs?limit=100');
           var d = await r.json();
           var job = (d.jobs || []).find(function(j) { return j.id === jobId; });
           if (job && job.docId) docId = job.docId;
