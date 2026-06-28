@@ -284,8 +284,22 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // Digest mode (Phase 4): roll this window's candidates into ONE digest message
   // (Daily/Weekly rows) instead of per-item gated alerts. Reached only with ≥1
   // candidate, so cold-start digest rows already returned the silent baseline above.
+  // Mirror the gate path's error discipline: runDigest throws on a model error OR
+  // empty output, so persistTier2 runs ONLY after a clean digest/SKIP — a failed run
+  // leaves the Tier-2 snapshots unadvanced and the whole window re-surfaces next run.
   if (config.digest) {
-    return [...baselineAlerts, ...(await runDigest(tier1Cands, tier2Cands, config, watcher, persistTier2))];
+    try {
+      const digestAlerts = await runDigest(tier1Cands, tier2Cands, config, watcher);
+      await persistTier2();
+      return [...baselineAlerts, ...digestAlerts];
+    } catch (err) {
+      log.error("Watcher \"{name}\": digest failed, suppressing {count} item(s) this run: {error}", {
+        name: watcher.name,
+        count: tier1Cands.length + tier2Cands.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return baselineAlerts;
+    }
   }
 
   // No gate → Phase-1 behavior: one alert per new candidate.
@@ -325,7 +339,12 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // so the per-candidate calibration log below can also show below-threshold scores.
   const byN = new Map<number, GateScore>();
   for (const s of scored) {
-    if (s.n >= 1 && s.n <= candidates.length) byN.set(s.n, s);
+    if (s.n < 1 || s.n > candidates.length) continue;
+    // If the model emits more than one object for the same candidate number
+    // (off-contract — the prompt asks for one each), keep the HIGHEST score so a
+    // passing score is never masked by a later failing duplicate.
+    const prev = byN.get(s.n);
+    if (!prev || s.score > prev.score) byN.set(s.n, s);
   }
 
   const visible: WatcherAlert[] = [];
@@ -569,6 +588,28 @@ function prettifySlug(slug: string): string {
 
 // --- Haiku quality gate ---
 
+/** Numbered candidate list shared by the gate and digest prompts (keeps the two in sync). */
+function formatCandidateList(cands: Candidate[]): string {
+  return cands.map((c, i) => `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`).join("\n");
+}
+
+/** One Anthropic model call with the shared watcher attribution. Throws on a model error. */
+async function callAnthropicModel(
+  prompt: string,
+  model: string,
+  timeoutMs: number,
+  watcher: Watcher,
+): Promise<string> {
+  const { result } = await spawnHaiku(prompt, {
+    source: "watcher-anthropic",
+    entrypoint: `${watcher.botName ?? "jarvis"}-watcher`,
+    botName: watcher.botName,
+    model,
+    timeoutMs,
+  });
+  return result;
+}
+
 /**
  * Score the candidate batch with one Haiku call. Returns the parsed
  * `{n, score, why}` array (model omits routine churn), or "SKIP_ALL" when
@@ -580,11 +621,8 @@ async function runGate(
   config: AnthropicConfig,
   watcher: Watcher,
 ): Promise<GateScore[] | "SKIP_ALL"> {
-  const list = candidates
-    .map((c, i) => `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`)
-    .join("\n");
   const criteria = config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT;
-  const prompt = `${criteria}\n\nCandidates:\n\n${list}`;
+  const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates)}`;
 
   const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
@@ -595,13 +633,7 @@ async function runGate(
     t: Math.round(timeoutMs / 1000),
   });
 
-  const { result } = await spawnHaiku(prompt, {
-    source: "watcher-anthropic",
-    entrypoint: `${watcher.botName ?? "jarvis"}-watcher`,
-    botName: watcher.botName,
-    model,
-    timeoutMs,
-  });
+  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher);
 
   if (config.quietMode && isSkipResult(result)) return "SKIP_ALL";
 
@@ -626,17 +658,17 @@ async function runGate(
  * `trackingIds` are the digested set's ids only (all Tier-2 + the capped Tier-1), so the
  * dropped Tier-1 tail isn't marked seen.
  *
- * On an LLM error: returns [] WITHOUT calling persistTier2 → the whole window re-surfaces
- * and retries the next *scheduled* run (the digest rows' widened lookbackDays keeps a
- * failed run's oldest Tier-1 inside the fetch cutoff until then). On success/quiet-SKIP:
- * snapshots are advanced (forward progress).
+ * THROWS on a model error or empty output (the caller then skips persistTier2, so the
+ * whole window re-surfaces and retries the next *scheduled* run — the digest rows' widened
+ * lookbackDays keeps a failed run's oldest Tier-1 inside the fetch cutoff until then).
+ * Returns a single alert on success, or a silent alert on a quiet-mode SKIP; the caller
+ * advances the Tier-2 snapshots only after a clean return (forward progress).
  */
 async function runDigest(
   tier1Cands: Candidate[],
   tier2Cands: Candidate[],
   config: AnthropicConfig,
   watcher: Watcher,
-  persistTier2: () => Promise<void>,
 ): Promise<WatcherAlert[]> {
   const cappedTier1 = tier1Cands.slice(0, DIGEST_MAX_TIER1);
   const dropped = tier1Cands.length - cappedTier1.length;
@@ -651,11 +683,8 @@ async function runDigest(
   const digestList: Candidate[] = [...tier2Cands, ...cappedTier1];
   const ids = digestList.map((c) => c.id);
 
-  const list = digestList
-    .map((c, i) => `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`)
-    .join("\n");
   const criteria = config.prompt || DEFAULT_ANTHROPIC_DAILY_PROMPT;
-  const prompt = `${criteria}\n\nItems:\n\n${list}`;
+  const prompt = `${criteria}\n\nItems:\n\n${formatCandidateList(digestList)}`;
 
   const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
@@ -668,29 +697,11 @@ async function runDigest(
     t: Math.round(timeoutMs / 1000),
   });
 
-  let result: string;
-  try {
-    ({ result } = await spawnHaiku(prompt, {
-      source: "watcher-anthropic",
-      entrypoint: `${watcher.botName ?? "jarvis"}-watcher`,
-      botName: watcher.botName,
-      model,
-      timeoutMs,
-    }));
-  } catch (err) {
-    log.error("Watcher \"{name}\": digest failed, suppressing {count} item(s) this run: {error}", {
-      name: watcher.name,
-      count: digestList.length,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    // Don't persist Tier-2 snapshots → the window re-surfaces and retries next run.
-    return [];
-  }
-
-  await persistTier2();
+  // Let a model error propagate — the caller catches it and skips persistTier2 (retry).
+  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher);
 
   // quietMode: an all-churn day suppresses the digest (the Daily prompt invites "SKIP").
-  // ids are still tracked so the same items aren't re-considered next run.
+  // ids are still tracked (silent) so the same items aren't re-considered next run.
   if (config.quietMode && isSkipResult(result)) {
     log.info("Watcher \"{name}\": digest returned SKIP, silencing {count} item(s)", {
       name: watcher.name,
@@ -698,6 +709,12 @@ async function runDigest(
     });
     return [silentAlert(ids)];
   }
+
+  // An empty/blank model result (exit 0 but no content) would otherwise send a
+  // header-only Telegram message AND advance the Tier-2 snapshots past these additions
+  // (losing them forever). Treat it as a failure so the caller skips persist and retries
+  // — mirrors runGate, which throws when extractJson finds no array.
+  if (!result.trim()) throw new Error("digest model returned empty output");
 
   return [{
     id: `anthropic:digest:${Date.now()}`,

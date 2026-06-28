@@ -517,6 +517,29 @@ describe("checkAnthropic", () => {
     expect(snapStore.get("tier2:llms") as string[]).toEqual([D1]);
   });
 
+  test("digest with an empty/blank model result is treated as failure (no message, snapshot unadvanced)", async () => {
+    tier2Stub();
+    snapStore.set("tier2:llms", [D1]); // D2 pending
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    setCalls.length = 0;
+    gateResult = "   \n  "; // exit 0 but no content — must NOT send a header-only digest
+    const alerts = await checkAnthropic(
+      digestWatcher({
+        lastNotifiedIds: ["seen", C1, C2],
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, tier2: true, digest: true },
+      }),
+    );
+    expect(alerts).toEqual([]);
+    // empty result is a failure → snapshot NOT advanced → D2 re-surfaces next run
+    expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
+    expect(snapStore.get("tier2:llms") as string[]).toEqual([D1]);
+  });
+
   test("digest caps Tier-1 at DIGEST_MAX_TIER1 but NEVER truncates Tier-2 additions", async () => {
     // 11 feeds × MAX_PER_FEED(20) = 220 Tier-1 entries > the 200 cap; the 11th feed's
     // entries are dropped from trackingIds, while the Tier-2 doc addition is always kept.
