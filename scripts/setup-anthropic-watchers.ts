@@ -43,12 +43,23 @@ async function main() {
     process.exit(1);
   }
 
-  // Seed an empty config so the watcher always tracks the canonical
-  // DEFAULT_ANTHROPIC_FEEDS in code (checkAnthropic falls back to it when
-  // config.feeds is absent). Materializing the list into JSONB here would freeze
-  // it in the DB and silently drift when the code list changes; set config.feeds
-  // only to customize a specific watcher.
-  const watcherConfig: Record<string, unknown> = {};
+  // Seed the Phase-3 config: Tier-2 snapshot-and-diff + Haiku quality gate ON.
+  // No `feeds` key, so the watcher tracks the canonical DEFAULT_ANTHROPIC_FEEDS in
+  // code (checkAnthropic falls back to it when config.feeds is absent) —
+  // materializing the list into JSONB would freeze it and silently drift from the
+  // code list; set config.feeds only to customize a specific watcher.
+  //   tier2     — diff llms.txt + anthropic.com/{news,engineering,research}
+  //   gate      — score new candidates with Haiku; only those ≥ minScore alert
+  //   minScore  — 0.5 floor (Phase 4 calibrates against a week of real output)
+  //   timeoutMs — gate model-call timeout; ≥150s clears the runner's 120s floor
+  // A fresh row is cold on run 1: Tier-1 baseline + Tier-2 snapshots record
+  // silently (no burst across ~1753 docs), and only later additions alert.
+  const watcherConfig: Record<string, unknown> = {
+    tier2: true,
+    gate: true,
+    minScore: 0.5,
+    timeoutMs: 300000,
+  };
 
   const existing = await sql<{ id: string }[]>`
     SELECT id FROM watchers
