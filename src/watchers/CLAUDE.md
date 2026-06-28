@@ -20,7 +20,7 @@ Scheduler tick (every 60s)
 | `email` | `email.ts` | Haiku with Gmail MCP tools | Configurable via `config.model` |
 | `news` | `news.ts` | Google News RSS (no AI) | — |
 | `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
-| `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (opt-in `config.gate`) |
+| `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (Highlights) / Sonnet digest (Daily/Weekly) |
 
 ## X/Twitter Watcher — Key Lessons
 
@@ -132,6 +132,22 @@ Two tiers over the Anthropic firehose, alert-only. The companion *indexing* half
 
 **Cold start** (empty `lastNotifiedIds`): the Tier-1 baseline is recorded as a single silent alert and every Tier-2 snapshot is baselined — run 1 fires nothing despite ~1753 docs. Steady-state runs filter candidates against `lastNotifiedIds` **before** the gate, so the gate only ever sees the delta since the last run.
 
+### 3-row digest cadence (Phase 4)
+
+Like the X watcher, the single Anthropic row is split into three rows that share the same sources (the GitHub feeds + Tier-2 surfaces) but differ in cadence and gate behavior. `scripts/setup-anthropic-watchers.ts` reconfigures the existing row → **Anthropic Highlights** and creates the two digest rows (idempotent — skips by name, never re-clobbers a hand-tuned Highlights config).
+
+| Name | Schedule | mode | gate / `minScore` | `quietMode` | `model` | `lookbackDays` | Prompt |
+|---|---|---|---|---|---|---|---|
+| **Anthropic Highlights** | every 2h | per-item gate | `gate:true`, `minScore 0.8` | — | Haiku | 7 | `DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT` (stricter — surfaces only the exceptional) |
+| **Anthropic Daily Digest** | 24h + `hour:12` | `digest:true` | — | `true` (prompt invites `SKIP`) | Sonnet | 3 | `DEFAULT_ANTHROPIC_DAILY_PROMPT` |
+| **Anthropic Weekly Digest** | 7d + `hour:18` | `digest:true` | — | `false` | Sonnet | 16 | `DEFAULT_ANTHROPIC_WEEKLY_PROMPT` |
+
+- **Per-row snapshot windows.** `watcher_snapshots` is keyed by `(watcher_id, key)`, so each row keeps an **independent** Tier-2 baseline. A row's snapshot, advanced at the row's own cadence, *is* its window: Highlights→last-2h delta, Daily→today's additions, Weekly→the week's. (Cost: each row fetches `llms.txt` and holds its own ~1753-URL baseline when it runs — trivial; it's the mechanism, not waste. Rows rarely run in the same tick.)
+- **Digest mode** (`config.digest`) rolls a window's candidates into ONE message via a single LLM call instead of per-item alerts. It **caps the Tier-1 portion at 200** (`DIGEST_MAX_TIER1` = 10 feeds × `MAX_PER_FEED` 20 — a safety rail) but **never truncates Tier-2 additions**: Tier-2 dedup is the snapshot, which `persistTier2` advances to the full set unconditionally, so an un-surfaced Tier-2 addition would be lost forever, whereas a dropped Tier-1 item re-surfaces next run via `lastNotifiedIds`. `trackingIds` = the digested set only. On an LLM error the digest returns `[]` without advancing snapshots (the window retries the next *scheduled* run — hence the widened `lookbackDays` as a retry cushion). `quietMode` lets an all-churn day reply `SKIP`.
+- **Daytime window for Highlights** is the runner's quiet-hours, NOT `config.hour` — `isScheduledTimeDue` only supports a single once-per-day hour (incompatible with "every 2h"), so Highlights omits `hour` and night-suppression rides `isQuietHours` (same as X Highlights). Absent a configured quiet-hours window the row fires 24/7 every 2h (the `minScore 0.8` gate keeps that rare).
+- **Gate-score calibration logging.** The gate path logs one `gate-score n=… score=… min=… surfaced=… …` line per candidate (greppable prefix `gate-score`; `score=omitted` = the model dropped it as churn). Mine the log history after a week of real output to set the final `minScore`.
+- **Known structural limit:** Tier-1 is capped at `MAX_PER_FEED` (20) most-recent entries *per fetch* regardless of window, so the Weekly digest only ever sees each busy feed's last ~20 commits — older commits in the week are invisible. Acceptable because the digest is thematic ("themes + top picks"), not exhaustive.
+
 ### Config fields (JSONB)
 
 | Field | Default | Description |
@@ -141,14 +157,16 @@ Two tiers over the Anthropic firehose, alert-only. The companion *indexing* half
 | `tier2` | `false` | Enable the llms.txt + blog slug-set diff |
 | `llmsTxtUrl` | `platform.claude.com/llms.txt` | Override the doc index URL |
 | `blogSections` | news/engineering/research | anthropic.com listings to diff |
-| `gate` | `false` | Score new candidates with Haiku |
-| `minScore` | 0.5 | Drop scored candidates below this 0–1 threshold |
-| `model` | Haiku (`DEFAULT_MODEL`) | Gate model |
-| `timeoutMs` | 90000 (code) | Gate model-call timeout. Set ≥150000 so it clears the runner's 120s watcher-timeout floor (the runner widens its net to `timeoutMs + 30s`). |
-| `quietMode` | `false` | Allow literal `SKIP` to suppress the batch |
-| `prompt` | `DEFAULT_ANTHROPIC_GATE_PROMPT` | Override the gate criteria |
+| `gate` | `false` | Score new candidates with Haiku (Highlights/per-item path) |
+| `digest` | `false` | Roll the window's candidates into ONE digest message (Daily/Weekly path; mutually exclusive with `gate`) |
+| `minScore` | 0.5 | Drop scored candidates below this 0–1 threshold (gate path) |
+| `model` | Haiku (`DEFAULT_MODEL`) | Gate/digest model (digest rows use Sonnet) |
+| `timeoutMs` | 90000 (code) | Model-call timeout. Set ≥150000 so it clears the runner's 120s watcher-timeout floor (the runner widens its net to `timeoutMs + 30s`). |
+| `quietMode` | `false` | Allow literal `SKIP` to suppress the batch/digest |
+| `hour` / `minute` | — | Time-of-day gate (Europe/Oslo) for digest rows, read by the runner's `isScheduledTimeDue` |
+| `prompt` | gate/daily default | Override the gate or digest criteria |
 
-State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — keys `tier2:llms` and `tier2:blog:<section>`. Added in migration `046` and mirrored in `db/init.sql` (the `schema-drift.test.ts` guard requires both, identical). `seed`: `scripts/setup-anthropic-watchers.ts` seeds `{tier2, gate, minScore, timeoutMs}` on for fresh deploys.
+State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — keys `tier2:llms` and `tier2:blog:<section>`. Added in migration `046` and mirrored in `db/init.sql` (the `schema-drift.test.ts` guard requires both, identical). `seed`: `scripts/setup-anthropic-watchers.ts` reconfigures the base row → Highlights (`{tier2, gate, minScore:0.8}`) and creates the Daily/Weekly digest rows (`{tier2, digest, hour, minute, model:sonnet}`).
 
 ## Configurable prompts
 

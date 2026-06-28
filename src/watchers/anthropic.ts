@@ -62,6 +62,18 @@ const DEFAULT_MIN_SCORE = 0.5;
 const DEFAULT_GATE_TIMEOUT_MS = 90_000;
 
 /**
+ * Digest-mode (Phase 4) Tier-1 cap. The digest rows roll a whole window's candidates
+ * into ONE message; this bounds the Tier-1 (feed) portion fed to the LLM. It equals the
+ * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED = 10 × 20), so it is a safety
+ * rail that does not bite in normal operation — per-feed capping already balances feeds.
+ * Tier-2 additions are NEVER capped (see runDigest): their dedup is the snapshot, which
+ * persistTier2 advances to the full set unconditionally, so an un-surfaced Tier-2
+ * addition would be lost forever; a truncated Tier-1 item instead re-surfaces next run
+ * via last_notified_ids (within lookbackDays).
+ */
+const DIGEST_MAX_TIER1 = 200;
+
+/**
  * Quality-gate prompt: score each new candidate 0–1 for whether it's worth
  * interrupting a senior AI engineer who lives in Claude Code. Mirrors the `x`
  * watcher's quiet-mode "surface only the exceptional, else suppress" shape, but
@@ -77,6 +89,55 @@ Below is a numbered list of new candidates (GitHub commits/releases, new docs, a
 Use ~1.0 for must-see, ~0.7 for clearly relevant, ~0.5 for borderline. OMIT candidates that are routine churn — do not output them at all.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing clears the bar, return [].`;
+
+/**
+ * Highlights gate prompt (Phase 4). A STRICTER variant of the gate prompt for the
+ * real-time "Highlights" row: it must stay silent unless something is genuinely
+ * exceptional, because a daily and a weekly digest follow. Same JSON-array
+ * `{n,score,why}` output contract as the gate prompt, so `runGate` is unchanged.
+ * Pair with `minScore: 0.8`.
+ */
+export const DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT = `You are a STRICT real-time quality gate for interrupt alerts sent to a senior AI engineer who lives in Claude Code and builds agents, tools, and retrieval systems. This is the HIGHLIGHTS channel: it must stay silent unless something is genuinely exceptional, because a full daily digest and a weekly digest follow later. Err heavily toward omitting.
+
+Weight HIGHEST: major Claude Code features/releases; significant agents, tool-use, and MCP capabilities; notable retrieval/RAG/evals work; new models or model updates; breaking or high-impact API/SDK changes.
+Weight LOW (omit): routine commits, dependency bumps, CI/internal chores, doc reformatting, minor wording tweaks, version housekeeping, translated/duplicate doc pages, and anything merely incremental.
+
+Below is a numbered list of new candidates (GitHub commits/releases, new docs, and new blog/research posts). Output an object ONLY for a candidate that is must-see RIGHT NOW:
+  {"n": <the candidate number>, "score": <0.0-1.0>, "why": "<one short line on why it can't wait>"}
+Reserve ~1.0 for unmistakable headline news, ~0.85 for clearly exceptional. Do NOT output anything you would score below 0.8 — leave it for the digests. OMIT routine items entirely.
+
+Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is exceptional, return [].`;
+
+/**
+ * Daily-digest prompt (Phase 4). Rolls the day's gated candidates into ONE message.
+ * Used by `runDigest` on the "Anthropic Daily Digest" row (with `quietMode: true`, so
+ * the trailing SKIP clause can suppress an all-churn day).
+ */
+export const DEFAULT_ANTHROPIC_DAILY_PROMPT = `Write a concise daily digest of what Anthropic shipped today for a senior AI engineer who lives in Claude Code and builds agents, tools, and retrieval systems.
+
+Weight HIGHEST: Claude Code features/releases; agents, tool use, and MCP; retrieval, RAG, and evals; new models or model updates; meaningful API/SDK changes. Downweight or omit routine churn: dependency bumps, CI/internal chores, doc reformatting, minor wording, version housekeeping, translated/duplicate pages.
+
+Structure (markdown, no preamble, do NOT start with a heading):
+**Top** (up to 5) — the items most worth knowing, each a bold one-liner with a markdown link and a short "why it matters".
+**Also notable** (up to 8) — one-line bullets with markdown links, no commentary.
+
+Cluster related items; don't just relist commits. Keep it scannable.
+If nothing today clears the bar (only routine churn), respond with exactly: SKIP`;
+
+/**
+ * Weekly-digest prompt (Phase 4). Clusters the week's gated candidates into themes +
+ * top picks. Used by `runDigest` on the "Anthropic Weekly Digest" row.
+ */
+export const DEFAULT_ANTHROPIC_WEEKLY_PROMPT = `Write a weekly digest of what Anthropic shipped this week for a senior AI engineer who lives in Claude Code and builds agents, tools, and retrieval systems.
+
+Weight HIGHEST: Claude Code features/releases; agents, tool use, and MCP; retrieval, RAG, and evals; new models or model updates; meaningful API/SDK changes. Omit routine churn.
+
+Structure (markdown, no preamble, do NOT start with a heading):
+**Themes of the week** (3-5 bullets) — cluster by topic, one sentence each; what moved this week.
+**Top picks** (5-7) — the most valuable individual items, each a bold one-liner with a markdown link and a short "why".
+**Also notable** (up to 10) — one-line bullets with markdown links.
+
+Cluster by theme, not by repo. Keep it scannable.`;
 
 export interface AtomEntry {
   /** Canonical id = the entry's alternate `<link href>`. */
@@ -109,8 +170,17 @@ interface AnthropicConfig {
   timeoutMs?: number;
   /** Allow the model to return the literal "SKIP" to suppress the whole batch silently. */
   quietMode?: boolean;
-  /** Override the gate criteria prompt. */
+  /** Override the gate/digest criteria prompt. */
   prompt?: string;
+  // --- Digest cadence (Phase 4) ---
+  /**
+   * Roll the window's candidates into ONE digest message (Daily/Weekly rows) instead of
+   * per-item gated alerts (Highlights). Mutually exclusive with the per-item gate path.
+   */
+  digest?: boolean;
+  /** Time-of-day gate (Europe/Oslo) read by the runner's isScheduledTimeDue — digest rows only. */
+  hour?: number;
+  minute?: number;
 }
 
 /** A new item to potentially alert on — a Tier-1 feed entry or a Tier-2 doc/blog addition. */
@@ -197,15 +267,25 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // last_notified_ids here (not just in the runner) keeps the gate batch small —
   // it sees the delta since last run, not the whole window. Tier-1 entries are
   // skipped on cold start (baselined above, not gated); Tier-2 additions are not.
-  const candidates: Candidate[] = [
-    ...(coldTier1 ? [] : tier1Entries.filter((e) => !known.has(e.id)).map(toFeedCandidate)),
-    ...tier2.candidates.filter((c) => !known.has(c.id)),
-  ];
+  // Keep the two tiers separate so digest mode can cap Tier-1 without ever truncating
+  // Tier-2 (whose dedup is the snapshot, not last_notified_ids — see runDigest).
+  const tier1Cands: Candidate[] = coldTier1
+    ? []
+    : tier1Entries.filter((e) => !known.has(e.id)).map(toFeedCandidate);
+  const tier2Cands: Candidate[] = tier2.candidates.filter((c) => !known.has(c.id));
+  const candidates: Candidate[] = [...tier1Cands, ...tier2Cands];
 
   if (candidates.length === 0) {
     await persistTier2();
     if (!coldTier1) log.info("Watcher \"{name}\": no new candidates this run", { name: watcher.name });
     return baselineAlerts;
+  }
+
+  // Digest mode (Phase 4): roll this window's candidates into ONE digest message
+  // (Daily/Weekly rows) instead of per-item gated alerts. Reached only with ≥1
+  // candidate, so cold-start digest rows already returned the silent baseline above.
+  if (config.digest) {
+    return [...baselineAlerts, ...(await runDigest(tier1Cands, tier2Cands, config, watcher, persistTier2))];
   }
 
   // No gate → Phase-1 behavior: one alert per new candidate.
@@ -241,16 +321,36 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   }
 
   const minScore = config.minScore ?? DEFAULT_MIN_SCORE;
-  const selected = new Map<number, GateScore>();
+  // Index ALL model-returned scores by candidate number (not just the surfaced ones),
+  // so the per-candidate calibration log below can also show below-threshold scores.
+  const byN = new Map<number, GateScore>();
   for (const s of scored) {
-    if (s.score >= minScore && s.n >= 1 && s.n <= candidates.length) selected.set(s.n, s);
+    if (s.n >= 1 && s.n <= candidates.length) byN.set(s.n, s);
   }
 
   const visible: WatcherAlert[] = [];
   const silentIds: string[] = [];
   candidates.forEach((c, i) => {
-    const hit = selected.get(i + 1);
-    if (hit) visible.push(toGatedAlert(c, hit));
+    const score = byN.get(i + 1);
+    const surfaced = score != null && score.score >= minScore;
+    // Per-candidate calibration log (Phase 4). Greppable prefix `gate-score`: mine the
+    // log history (e.g. after a week of real output) to set the final minScore — the
+    // distribution of surfaced vs below-min vs omitted scores. `omitted` = the model
+    // dropped the candidate as routine churn (no score returned).
+    log.info(
+      "Watcher \"{name}\": gate-score n={n} score={score} min={min} surfaced={surfaced} src=\"{src}\" label=\"{label}\" url={url}",
+      {
+        name: watcher.name,
+        n: i + 1,
+        score: score ? score.score.toFixed(2) : "omitted",
+        min: minScore,
+        surfaced,
+        src: c.sourceLabel,
+        label: c.label,
+        url: c.url,
+      },
+    );
+    if (surfaced && score) visible.push(toGatedAlert(c, score));
     else silentIds.push(c.id);
   });
 
@@ -513,6 +613,99 @@ async function runGate(
       return { n: Number(o.n), score: Number(o.score), why: String(o.why ?? "") };
     })
     .filter((p) => Number.isFinite(p.n) && Number.isFinite(p.score));
+}
+
+// --- Digest mode (Phase 4) ---
+
+/**
+ * Roll a window's candidates into ONE digest message (the Daily/Weekly rows). Caps the
+ * Tier-1 (feed) portion at DIGEST_MAX_TIER1 but NEVER truncates Tier-2 additions: their
+ * dedup is the per-source snapshot, which `persistTier2` advances to the full fresh set
+ * unconditionally, so an un-surfaced Tier-2 addition would be lost forever — whereas a
+ * truncated Tier-1 item re-surfaces next run via last_notified_ids (within lookbackDays).
+ * `trackingIds` are the digested set's ids only (all Tier-2 + the capped Tier-1), so the
+ * dropped Tier-1 tail isn't marked seen.
+ *
+ * On an LLM error: returns [] WITHOUT calling persistTier2 → the whole window re-surfaces
+ * and retries the next *scheduled* run (the digest rows' widened lookbackDays keeps a
+ * failed run's oldest Tier-1 inside the fetch cutoff until then). On success/quiet-SKIP:
+ * snapshots are advanced (forward progress).
+ */
+async function runDigest(
+  tier1Cands: Candidate[],
+  tier2Cands: Candidate[],
+  config: AnthropicConfig,
+  watcher: Watcher,
+  persistTier2: () => Promise<void>,
+): Promise<WatcherAlert[]> {
+  const cappedTier1 = tier1Cands.slice(0, DIGEST_MAX_TIER1);
+  const dropped = tier1Cands.length - cappedTier1.length;
+  if (dropped > 0) {
+    log.warn("Watcher \"{name}\": digest capped Tier-1 at {cap} (dropped {dropped}; they re-surface next run)", {
+      name: watcher.name,
+      cap: DIGEST_MAX_TIER1,
+      dropped,
+    });
+  }
+  // Tier-2 first so new docs/posts are never crowded out by the (capped) Tier-1 commits.
+  const digestList: Candidate[] = [...tier2Cands, ...cappedTier1];
+  const ids = digestList.map((c) => c.id);
+
+  const list = digestList
+    .map((c, i) => `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`)
+    .join("\n");
+  const criteria = config.prompt || DEFAULT_ANTHROPIC_DAILY_PROMPT;
+  const prompt = `${criteria}\n\nItems:\n\n${list}`;
+
+  const model = config.model || DEFAULT_MODEL;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+  log.info("Watcher \"{name}\": digesting {total} item(s) ({t2} tier-2 + {t1} tier-1) with {model} (timeout {t}s)", {
+    name: watcher.name,
+    total: digestList.length,
+    t2: tier2Cands.length,
+    t1: cappedTier1.length,
+    model,
+    t: Math.round(timeoutMs / 1000),
+  });
+
+  let result: string;
+  try {
+    ({ result } = await spawnHaiku(prompt, {
+      source: "watcher-anthropic",
+      entrypoint: `${watcher.botName ?? "jarvis"}-watcher`,
+      botName: watcher.botName,
+      model,
+      timeoutMs,
+    }));
+  } catch (err) {
+    log.error("Watcher \"{name}\": digest failed, suppressing {count} item(s) this run: {error}", {
+      name: watcher.name,
+      count: digestList.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Don't persist Tier-2 snapshots → the window re-surfaces and retries next run.
+    return [];
+  }
+
+  await persistTier2();
+
+  // quietMode: an all-churn day suppresses the digest (the Daily prompt invites "SKIP").
+  // ids are still tracked so the same items aren't re-considered next run.
+  if (config.quietMode && isSkipResult(result)) {
+    log.info("Watcher \"{name}\": digest returned SKIP, silencing {count} item(s)", {
+      name: watcher.name,
+      count: digestList.length,
+    });
+    return [silentAlert(ids)];
+  }
+
+  return [{
+    id: `anthropic:digest:${Date.now()}`,
+    source: "anthropic",
+    summary: result,
+    urgency: "low",
+    trackingIds: ids,
+  }];
 }
 
 // --- Alert builders ---

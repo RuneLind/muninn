@@ -441,4 +441,131 @@ describe("checkAnthropic", () => {
     expect(visible[0]!.id).toBe(`an:${D2}`);
     expect(visible[0]!.summary).toContain("new guide");
   });
+
+  // --- Phase 4: digest mode (Daily/Weekly rows) ---
+
+  const digestWatcher = (over: Partial<Watcher>): Watcher =>
+    baseWatcher({
+      config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, digest: true },
+      ...over,
+    });
+
+  test("digest mode rolls steady-state candidates into ONE digest alert (trackingIds = all)", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = "**Top**\n- claude-code shipped a thing";
+    const alerts = await checkAnthropic(digestWatcher({ lastNotifiedIds: ["already-seen"] }));
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.silent).toBeFalsy();
+    expect(alerts[0]!.id).toMatch(/^anthropic:digest:/);
+    expect(alerts[0]!.summary).toBe("**Top**\n- claude-code shipped a thing");
+    // Both feed entries are tracked so they aren't re-digested next run.
+    expect(alerts[0]!.trackingIds?.sort()).toEqual([C1, C2].sort());
+  });
+
+  test("digest cold start records a silent baseline and emits NO digest", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = "must-not-be-used";
+    const alerts = await checkAnthropic(digestWatcher({ lastNotifiedIds: [] }));
+    // Only the silent Tier-1 baseline — the digest branch is never reached (0 candidates).
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.silent).toBe(true);
+    expect(alerts[0]!.trackingIds?.length).toBe(2);
+    expect(alerts.some((a) => a.id.startsWith("anthropic:digest:"))).toBe(false);
+  });
+
+  test("digest with no new candidates sends nothing", async () => {
+    stub(COMMITS_ATOM);
+    const alerts = await checkAnthropic(digestWatcher({ lastNotifiedIds: ["seen", C1, C2] }));
+    expect(alerts).toEqual([]);
+  });
+
+  test("digest quietMode SKIP suppresses the message but tracks the ids", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = "SKIP";
+    const alerts = await checkAnthropic(
+      digestWatcher({
+        lastNotifiedIds: ["already-seen"],
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, digest: true, quietMode: true },
+      }),
+    );
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]!.silent).toBe(true);
+    expect(alerts[0]!.trackingIds?.sort()).toEqual([C1, C2].sort());
+  });
+
+  test("digest LLM error returns [] and leaves the Tier-2 snapshot unadvanced (retry)", async () => {
+    tier2Stub();
+    snapStore.set("tier2:llms", [D1]); // D2 is a pending addition
+    // Pre-seed the blog snapshots so they don't produce candidates.
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    setCalls.length = 0;
+    gateThrow = true;
+    const alerts = await checkAnthropic(
+      digestWatcher({
+        lastNotifiedIds: ["seen", C1, C2], // 0 Tier-1 candidates → isolates the Tier-2 addition
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, tier2: true, digest: true },
+      }),
+    );
+    expect(alerts).toEqual([]);
+    // snapshot NOT advanced → D2 re-surfaces next run
+    expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
+    expect(snapStore.get("tier2:llms") as string[]).toEqual([D1]);
+  });
+
+  test("digest caps Tier-1 at DIGEST_MAX_TIER1 but NEVER truncates Tier-2 additions", async () => {
+    // 11 feeds × MAX_PER_FEED(20) = 220 Tier-1 entries > the 200 cap; the 11th feed's
+    // entries are dropped from trackingIds, while the Tier-2 doc addition is always kept.
+    const FEEDS = Array.from({ length: 11 }, (_, f) => `https://feed.test/f${f}.atom`);
+    const atomFor = (f: number) => {
+      const entries = Array.from({ length: 20 }, (_, i) => {
+        const url = `https://github.com/anthropics/f${f}/commit/c${i}`;
+        return `<entry><id>tag:f${f}-c${i}</id>` +
+          `<link rel="alternate" type="text/html" href="${url}"/>` +
+          `<title>commit f${f}-c${i}</title><updated>2026-06-26T21:29:36Z</updated></entry>`;
+      }).join("");
+      return `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Feed f${f}</title>${entries}</feed>`;
+    };
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      const m = url.match(/\/f(\d+)\.atom$/);
+      let text = "";
+      if (m) text = atomFor(Number(m[1]));
+      else if (url.includes("llms.txt")) text = LLMS_SAMPLE; // D1, D2
+      else if (url.includes("/news")) text = NEWS_HTML;
+      else if (url.includes("/engineering")) text = `<a href="/engineering/eng-post">e</a>`;
+      else if (url.includes("/research")) text = `<a href="/research/res-paper">r</a>`;
+      return { ok: true, status: 200, text: async () => text } as unknown as Response;
+    }) as typeof fetch;
+
+    snapStore.set("tier2:llms", [D1]); // D2 is a Tier-2 addition
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    gateResult = "weekly digest md";
+
+    const alerts = await checkAnthropic(
+      digestWatcher({
+        lastNotifiedIds: ["seen"], // not cold; matches no feed url → all 220 Tier-1 are new
+        config: { feeds: FEEDS, lookbackDays: 100000, tier2: true, digest: true },
+      }),
+    );
+    expect(alerts.length).toBe(1);
+    const ids = alerts[0]!.trackingIds!;
+    // 200 capped Tier-1 + 1 Tier-2 = 201
+    expect(ids.length).toBe(201);
+    // Tier-2 addition is ALWAYS retained
+    expect(ids).toContain(`an:${D2}`);
+    // The 11th feed (f10) was dropped by the cap
+    expect(ids).not.toContain("https://github.com/anthropics/f10/commit/c0");
+    // The first feed survived
+    expect(ids).toContain("https://github.com/anthropics/f0/commit/c0");
+  });
 });
