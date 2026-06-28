@@ -28,9 +28,13 @@ Gi en oppsummering av:
 - Koblinger til eksisterende arbeid
 - Eventuelle mangler eller uklarheter`;
 
-/** Per-turn caps for replayed follow-up history (defence-in-depth vs. the client's own truncation). */
-const HISTORY_QUESTION_CHARS = 500;
-const HISTORY_ANSWER_CHARS = 1200;
+// Loose upper bounds for the replayed `history` param — these only cap untrusted
+// input size, they are NOT the synthesis budget (that is the binding cap in
+// renderHistoryBlock, answer.ts). Kept generous (≥ that budget) so bumping the
+// answer.ts budget actually takes effect rather than silently clamping here.
+const HISTORY_PARAM_MAX_CHARS = 20_000; // whole param; rejected before JSON.parse
+const HISTORY_QUESTION_CHARS = 1_000;
+const HISTORY_ANSWER_CHARS = 4_000;
 
 /**
  * Parse the compact `history` query param the Research page replays on a
@@ -40,7 +44,7 @@ const HISTORY_ANSWER_CHARS = 1200;
  * rather than erroring — a follow-up that loses context still answers standalone.
  */
 function parseResearchHistory(raw: string | undefined): ResearchTurn[] {
-  if (!raw) return [];
+  if (!raw || raw.length > HISTORY_PARAM_MAX_CHARS) return [];
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];

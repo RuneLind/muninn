@@ -435,9 +435,10 @@ export async function renderResearchPage(): Promise<string> {
       document.getElementById('askInput').focus();
     }
 
-    // Create a turn card and stream the answer into it. Returns the refs the
-    // EventSource handlers write to, so a superseded stream can't write to a
-    // newer turn's card.
+    // Create a turn card and stream the answer into it. Each SSE handler is bound
+    // to the returned per-turn refs (not shared globals), so a superseded stream
+    // can't write to a newer turn's card. The 'active' var holds these refs while
+    // the turn is in flight so a new ask can drop the orphaned card (askQuestion).
     function startTurnCard(question) {
       var card = document.createElement('div');
       card.className = 'turn-card';
@@ -453,6 +454,7 @@ export async function renderResearchPage(): Promise<string> {
         question: question,
         citations: [],
         buffer: '',
+        card: card,
         statusWrap: card.querySelector('.answer-status'),
         statusEl: card.querySelector('.answer-status .st'),
         bodyEl: card.querySelector('.answer-body'),
@@ -470,7 +472,14 @@ export async function renderResearchPage(): Promise<string> {
       var q = input.value.trim();
       if (!q) return;
 
+      // Supersede any in-flight turn. A new ask (reachable via Enter / an example
+      // even while the Ask button is disabled) closes the prior stream — which
+      // then fires no 'done', so its turn never commits. Drop its orphaned card
+      // so it doesn't spin forever; it was never committed, so history is intact.
       if (currentSource) { currentSource.close(); currentSource = null; }
+      if (active && active.card) { active.card.remove(); }
+      active = null;
+
       document.getElementById('emptyHint').style.display = 'none';
       input.value = '';
 
@@ -520,10 +529,11 @@ export async function renderResearchPage(): Promise<string> {
         else if (d.noHits) statusText = 'No matching sources';
         else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
         setCardStatus(a, statusText, 'done');
-        // Commit the turn so the next ask carries it as context. We keep even a
-        // declined (no-coverage) turn in history — the follow-up still benefits
-        // from knowing what was asked.
-        turns.push({ question: a.question, answer: a.buffer, citations: a.citations, cited: d.cited || [] });
+        // Commit the turn so the next ask carries it as context (only question +
+        // answer are replayed — see compactHistory). We keep even a declined
+        // (no-coverage) turn — the follow-up still benefits from knowing what was
+        // asked. The rendered card already holds this turn's citations.
+        turns.push({ question: a.question, answer: a.buffer });
         active = null;
         btn.disabled = false;
         updateComposer();
@@ -547,13 +557,19 @@ export async function renderResearchPage(): Promise<string> {
       });
 
       // Network-level failure (not an app 'error' event) — EventSource.onerror.
+      // Terminal: close so EventSource does NOT silently auto-reconnect on a
+      // transient mid-stream drop (readyState CONNECTING) and re-run the whole
+      // — expensive — synthesis, appending a duplicate answer onto the buffer.
+      // Normal completion goes through the 'end' sentinel, which nulls
+      // currentSource first, so this guard returns early for a finished stream.
       es.onerror = function() {
         if (currentSource !== es) return; // stale stream from a superseded ask
-        if (es.readyState === EventSource.CLOSED) {
-          btn.disabled = false;
-          if (!a.buffer && !a.statusWrap.classList.contains('done')) {
-            setCardStatus(a, 'Connection lost', 'error');
-          }
+        es.close();
+        currentSource = null;
+        active = null;
+        btn.disabled = false;
+        if (!a.statusWrap.classList.contains('done')) {
+          setCardStatus(a, 'Connection lost', 'error');
         }
       };
     }
