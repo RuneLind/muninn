@@ -74,7 +74,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumArticleLibraryHtml()}
   </div>
 
-  ${docPanelHtml()}
+  ${docPanelHtml({ askFollowUp: true })}
 
   ${MARKED_CDN_SCRIPT}
   <script>

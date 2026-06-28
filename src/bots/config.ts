@@ -249,6 +249,53 @@ export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
 }
 
 /**
+ * A bot that answers a Research follow-up in seconds rather than minutes —
+ * *and* whose model id actually works on the synthesis path. Research synthesis
+ * runs through `executeClaudePrompt`, which always spawns the Claude CLI and
+ * passes `botConfig.model` straight to `--model`, ignoring the bot's connector.
+ * So two constraints, not one:
+ *   - **CLI-native model id.** `copilot-sdk` bots carry Copilot-format ids (e.g.
+ *     `"claude-sonnet-4.6"`) and `openai-compat` bots carry local-model ids (e.g.
+ *     `"qwen3.5:35b"`); neither is a valid Claude CLI `--model`, and the
+ *     connector that would make them work is bypassed here. Require a CLI-native
+ *     connector (`claude-cli` / `claude-sdk` / unset).
+ *   - **Fast tier.** Opus is the slow, expensive default (capra, the
+ *     first-discovered bot). Skip it; an unset `model` falls back to the
+ *     sonnet-class global `CLAUDE_MODEL`, so unset counts as fast.
+ */
+function isFastResearchBot(bot: BotConfig): boolean {
+  const connector = bot.connector ?? "claude-cli";
+  if (connector === "copilot-sdk" || connector === "openai-compat") return false;
+  if ((bot.model ?? "").toLowerCase().includes("opus")) return false;
+  return true;
+}
+
+/**
+ * Picks the bot used to synthesize Research (Claude Learning Center) answers.
+ * Unlike the batch summarizer, Research is interactive — and now spends a Claude
+ * call per follow-up turn — so the default must be fast. Resolution order:
+ *   1. `RESEARCH_BOT` env (matched by name, case-insensitive) — explicit override.
+ *   2. The first discovered bot fast enough for interactive Q&A (see
+ *      `isFastResearchBot`) — skips opus and bots whose model id isn't valid for
+ *      the CLI synthesis path (capra/opus, melosys/copilot, local-model bots).
+ *   3. `resolveSummarizerBot` (which itself honors `SUMMARIZER_BOT`, then
+ *      first-discovered) — so the behavior never regresses below the old default.
+ * The `?bot=` query param on `/api/research/ask` still overrides all of this.
+ */
+export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
+  if (bots.length === 0) return undefined;
+  const wanted = process.env.RESEARCH_BOT?.trim().toLowerCase();
+  if (wanted) {
+    const match = bots.find((b) => b.name.toLowerCase() === wanted);
+    if (match) return match;
+    log.warn("RESEARCH_BOT=\"{wanted}\" not found among discovered bots — falling back to a fast bot", {
+      wanted,
+    });
+  }
+  return bots.find(isFastResearchBot) ?? resolveSummarizerBot(bots);
+}
+
+/**
  * Discovers bots that have both a CLAUDE.md and at least one platform token
  * (Telegram or Slack). Used for starting actual bot instances.
  */

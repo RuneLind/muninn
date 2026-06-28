@@ -399,6 +399,10 @@ export function sumArticleLibraryScript(): string {
       var linkLabel = src ? src.linkLabel : 'Open ↗';
 
       titleEl.textContent = title;
+      // Opt-in "Ask a follow-up" header action (Summaries shelf only — see
+      // docPanelHtml({askFollowUp:true})). No-op if the button isn't rendered.
+      var followEl = document.getElementById('docPanelFollowUp');
+      if (followEl) followEl.href = '/research?q=' + encodeURIComponent(title);
       linksEl.innerHTML = url
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';

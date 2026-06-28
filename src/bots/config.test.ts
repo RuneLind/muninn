@@ -51,15 +51,16 @@ function cleanTestBots() {
   createdDirs.length = 0;
 }
 
-import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, type BotConfig, type ConnectorType } from "./config.ts";
+import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, resolveResearchBot, type BotConfig, type ConnectorType } from "./config.ts";
 
-function stubBot(name: string): BotConfig {
+function stubBot(name: string, overrides: Partial<BotConfig> = {}): BotConfig {
   return {
     name,
     dir: `/tmp/${name}`,
     persona: "",
     telegramAllowedUserIds: [],
     slackAllowedUserIds: [],
+    ...overrides,
   };
 }
 
@@ -485,5 +486,67 @@ describe("resolveSummarizerBot", () => {
     process.env.SUMMARIZER_BOT = "gamma";
     const bots = [stubBot("alpha"), stubBot("beta")];
     expect(resolveSummarizerBot(bots)?.name).toBe("alpha");
+  });
+});
+
+describe("resolveResearchBot", () => {
+  const prevResearch = process.env.RESEARCH_BOT;
+  const prevSummarizer = process.env.SUMMARIZER_BOT;
+  beforeEach(() => {
+    delete process.env.RESEARCH_BOT;
+    delete process.env.SUMMARIZER_BOT;
+  });
+  afterEach(() => {
+    if (prevResearch === undefined) delete process.env.RESEARCH_BOT;
+    else process.env.RESEARCH_BOT = prevResearch;
+    if (prevSummarizer === undefined) delete process.env.SUMMARIZER_BOT;
+    else process.env.SUMMARIZER_BOT = prevSummarizer;
+  });
+
+  test("returns undefined for an empty bot list", () => {
+    expect(resolveResearchBot([])).toBeUndefined();
+  });
+
+  test("RESEARCH_BOT pins a bot by name (case-insensitive), even an opus one", () => {
+    process.env.RESEARCH_BOT = "CAPRA";
+    const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("jarvis", { model: "claude-sonnet-4-6" })];
+    expect(resolveResearchBot(bots)?.name).toBe("capra");
+  });
+
+  test("prefers the first fast (non-opus) bot over a slow first-discovered opus bot", () => {
+    // Mirrors prod discovery order: capra (opus) is first, jarvis (sonnet) second.
+    const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("jarvis", { model: "claude-sonnet-4-6" })];
+    expect(resolveResearchBot(bots)?.name).toBe("jarvis");
+  });
+
+  test("treats a bot with no model override as fast (global model is sonnet-class)", () => {
+    const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("plain")];
+    expect(resolveResearchBot(bots)?.name).toBe("plain");
+  });
+
+  test("skips bots whose model id isn't CLI-native (copilot / openai-compat)", () => {
+    // Synthesis always runs through the Claude CLI, so a Copilot/local model id
+    // (e.g. melosys "claude-sonnet-4.6", qwen) would break --model. Prefer jarvis.
+    const bots = [
+      stubBot("melosys", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }),
+      stubBot("local", { connector: "openai-compat", model: "qwen3.5:35b" }),
+      stubBot("jarvis", { model: "claude-sonnet-4-6" }),
+    ];
+    expect(resolveResearchBot(bots)?.name).toBe("jarvis");
+  });
+
+  test("falls back to resolveSummarizerBot when every bot is slow/unsuitable", () => {
+    process.env.SUMMARIZER_BOT = "capra"; // summarizer fallback still honored
+    const bots = [
+      stubBot("local", { connector: "openai-compat", model: "qwen3.5:35b" }),
+      stubBot("capra", { model: "claude-opus-4-6" }),
+    ];
+    expect(resolveResearchBot(bots)?.name).toBe("capra");
+  });
+
+  test("RESEARCH_BOT naming a missing bot falls through to the fast-bot heuristic", () => {
+    process.env.RESEARCH_BOT = "ghost";
+    const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("jarvis", { model: "claude-sonnet-4-6" })];
+    expect(resolveResearchBot(bots)?.name).toBe("jarvis");
   });
 });

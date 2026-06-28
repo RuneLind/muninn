@@ -3,7 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots, resolveSummarizerBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
+import { discoverAllBots, resolveResearchBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { streamResearchAnswer } from "../../research/ask.ts";
 import { MAX_HISTORY_TURNS, type ResearchTurn } from "../../research/answer.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
@@ -80,7 +80,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
   // shelf corpus via researchKnowledge, then synthesize one cited answer.
   // SSE over GET so the browser drives it with a plain EventSource; the question
   // rides in the `q` query param and the synthesizing bot in `bot` (defaults to
-  // the summarizer bot — pass an explicit bot to pin a faster one).
+  // a fast Research bot — see resolveResearchBot; pass an explicit bot to pin one).
   app.get("/api/research/ask", (c) => {
     const question = (c.req.query("q") ?? "").trim();
     const botName = c.req.query("bot")?.trim();
@@ -90,7 +90,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
 
     const allBots = discoverAllBots();
     const botConfig =
-      (botName && allBots.find((b) => b.name === botName)) || resolveSummarizerBot(allBots);
+      (botName && allBots.find((b) => b.name === botName)) || resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
     log.info("Research ask: bot={bot} turn={turn} q={q}", {

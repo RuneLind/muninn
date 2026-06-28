@@ -107,6 +107,17 @@ export function docPanelStyles(animationName = "slideIn"): string {
       text-decoration: none;
     }
     .doc-panel-links a:hover { text-decoration: underline; }
+    .doc-panel-followup {
+      flex-shrink: 0;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 12px;
+      border: 1px solid var(--border-secondary);
+      padding: 4px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+    }
+    .doc-panel-followup:hover { border-color: var(--accent); text-decoration: none; }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;
@@ -119,14 +130,25 @@ export function docPanelStyles(animationName = "slideIn"): string {
   `;
 }
 
-/** HTML markup for the slide-in doc panel overlay */
-export function docPanelHtml(): string {
+/**
+ * HTML markup for the slide-in doc panel overlay.
+ *
+ * `askFollowUp` (opt-in, default off) adds an "Ask a follow-up →" action to the
+ * header that deep-links into `/research?q=<doc title>`. Only the page that wants
+ * it passes the flag (the Summaries shelf) — the panel is shared by Research and
+ * Search, where the action makes no sense (circular on Research, off-topic on
+ * Search), so they call `docPanelHtml()` with no args and get byte-identical
+ * markup. The opener JS (`openDocPanel` / `openSummaryDoc`) sets the href from the
+ * current doc title, guarded by `if (el)` so it's a no-op when the flag is off.
+ */
+export function docPanelHtml({ askFollowUp = false }: { askFollowUp?: boolean } = {}): string {
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>
+        <span class="doc-panel-title" id="docPanelTitle"></span>${askFollowUp ? `
+        <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
         <div class="doc-panel-links" id="docPanelLinks"></div>
       </div>
       <div class="doc-panel-body" id="docPanelBody"></div>
@@ -147,6 +169,13 @@ export function docPanelScript(): string {
       return marked.parse(text);
     }
 
+    // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
+    // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).
+    function setFollowUpHref(title) {
+      var el = document.getElementById('docPanelFollowUp');
+      if (el && title) el.href = '/research?q=' + encodeURIComponent(title);
+    }
+
     function openDocPanel(collection, docId, webUrl) {
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -154,6 +183,7 @@ export function docPanelScript(): string {
       var bodyEl = document.getElementById('docPanelBody');
 
       titleEl.textContent = docId.replace(/\\.md$/, '').split('/').pop();
+      setFollowUpHref(titleEl.textContent);
       linksEl.innerHTML = webUrl
         ? '<a href="' + esc(webUrl) + '" target="_blank" rel="noopener">Open source &rarr;</a>'
         : '';
@@ -169,6 +199,7 @@ export function docPanelScript(): string {
         })
         .then(function(doc) {
           titleEl.textContent = (doc.id || docId).replace(/\\.md$/, '').split('/').pop();
+          setFollowUpHref(titleEl.textContent);
           if (doc.url) {
             linksEl.innerHTML = '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener">Open source &rarr;</a>';
           }
