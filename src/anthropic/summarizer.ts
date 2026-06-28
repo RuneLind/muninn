@@ -1,0 +1,340 @@
+import type { Config } from "../config.ts";
+import type { BotConfig } from "../bots/config.ts";
+import type { StreamProgressCallback } from "../ai/stream-parser.ts";
+import { executeClaudePrompt } from "../ai/executor.ts";
+import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
+import { getLog } from "../logging.ts";
+import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
+import { setCandidateStatus } from "../db/summary-candidates.ts";
+import {
+  updateStatus,
+  appendText,
+  setCategory,
+  setSimilar,
+  setDocId,
+  completeJob,
+  failJob,
+} from "./state.ts";
+
+const log = getLog("anthropic", "summarizer");
+
+const KNOWLEDGE_COLLECTION = "anthropic-knowledge";
+const SUMMARIES_COLLECTION = "anthropic-summaries";
+
+// Cap resolved content before summarizing. Real docs/blogs/commits are small
+// (hundreds to a few thousand chars), but the direct-fetch fallback can pull a
+// ~1MB GitHub HTML page (~250k tokens) — without this clamp that overflows the
+// model context and the whole job dies with "Prompt is too long".
+const MAX_CONTENT_CHARS = 100_000;
+
+function capContent(text: string): string {
+  if (text.length <= MAX_CONTENT_CHARS) return text;
+  return `${text.slice(0, MAX_CONTENT_CHARS)}\n\n…[content truncated for length]`;
+}
+
+/**
+ * The anthropic-summaries doc id is the saved file's path *relative to the
+ * collection root* — category-prefixed, e.g. `ai/claude/Foo.md` — which is the
+ * exact identity `/api/document/<collection>/<id>` and the shelf listing use (a
+ * bare basename 404s). The ingest route returns an absolute `file_path`, so take
+ * everything after the collection dir; fall back to the basename if the marker
+ * isn't present.
+ */
+function collectionRelativeId(filePath: string): string {
+  const marker = `/${SUMMARIES_COLLECTION}/`;
+  const idx = filePath.indexOf(marker);
+  if (idx !== -1) return filePath.slice(idx + marker.length);
+  return filePath.split("/").pop() ?? filePath;
+}
+
+const SUMMARIZE_SYSTEM_PROMPT = `You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.
+
+Instructions:
+1. Start your response with EXACTLY this line: CATEGORY: <category>
+   Choose from: ${AI_CATEGORIES.join(", ")}
+2. Then add a blank line, then SUMMARY: on its own line
+3. Then write a structured summary with:
+   - ### Section headers for key topics
+   - Bullet points with emoji prefixes
+   - **Bold** for key terms and takeaways
+   - Lead with what changed and why it matters; keep it concise but comprehensive`;
+
+interface ResolvedContent {
+  text: string;
+  /** Original publish/commit date from the source doc's metadata, if available. */
+  date?: string;
+}
+
+interface DocMeta {
+  id: string;
+  url?: string;
+}
+
+/**
+ * Resolve the candidate URL to its `anthropic-knowledge` doc id (§8.2).
+ *
+ * The fetcher writes slug+hash filenames, so the doc id ≠ url and can't be
+ * derived. Primary path is an exact-url lookup against the collection's document
+ * listing — the same reliable identity path youtube/x-article use for dedup.
+ * Title-search is only a fallback: ranking is fragile for near-duplicate commit
+ * titles (the exact-url hit can fall out of the top window), and URL-as-query
+ * tokenizes badly, so we filter the title hits by exact url.
+ */
+async function resolveDocId(baseUrl: string, url: string, title: string): Promise<string | null> {
+  // 1. Exact-url match against the full document listing (id + url pairs).
+  try {
+    const data = await fetchKnowledgeApi(
+      baseUrl,
+      `/api/collection/${KNOWLEDGE_COLLECTION}/documents`,
+      { timeoutMs: 15000 },
+    );
+    const docs = (data?.documents ?? []) as DocMeta[];
+    const hit = docs.find((d) => d.url === url);
+    if (hit?.id) return hit.id;
+  } catch (err) {
+    log.warn("anthropic-knowledge documents listing failed for {url}: {error}", {
+      url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // 2. Fallback: search by title, keep the exact-url hit (wide window).
+  try {
+    const params = new URLSearchParams({ q: title, collection: KNOWLEDGE_COLLECTION, limit: "25" });
+    const data = await fetchKnowledgeApi(baseUrl, `/api/search?${params}`, { timeoutMs: 12000 });
+    const hits = (data?.results ?? []) as DocMeta[];
+    const hit = hits.find((h) => h.url === url);
+    if (hit?.id) return hit.id;
+  } catch (err) {
+    log.warn("anthropic-knowledge title search failed for {url}: {error}", {
+      url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return null;
+}
+
+/**
+ * Resolve a candidate's full content for summarizing (L7 + §8.2). Pull the
+ * already-extracted doc from `anthropic-knowledge` when its id resolves; else
+ * fall back to a direct fetch of the candidate URL. Content is always capped
+ * (see {@link MAX_CONTENT_CHARS}) so an oversized source can't blow the prompt.
+ */
+async function resolveContent(
+  config: Config,
+  url: string,
+  title: string,
+): Promise<ResolvedContent | null> {
+  const baseUrl = config.knowledgeApiUrl;
+
+  // 1. Preferred — the doc Huginn already fetched + extracted.
+  const docId = await resolveDocId(baseUrl, url, title);
+  if (docId) {
+    try {
+      const doc = await fetchKnowledgeApi(
+        baseUrl,
+        `/api/document/${KNOWLEDGE_COLLECTION}/${encodeURIComponent(docId)}`,
+        { timeoutMs: 12000 },
+      );
+      const text = typeof doc?.text === "string" ? doc.text : "";
+      const date = typeof doc?.metadata?.date === "string" ? doc.metadata.date : undefined;
+      if (text.trim()) {
+        log.info("Resolved {url} from {collection} doc {docId} ({len} chars)", {
+          url,
+          collection: KNOWLEDGE_COLLECTION,
+          docId,
+          len: text.length,
+        });
+        return { text: capContent(text), date };
+      }
+    } catch (err) {
+      log.warn("anthropic-knowledge document fetch failed for {docId}: {error}", {
+        docId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } else {
+    log.info("No exact-url doc in {collection} for {url} — falling back to direct fetch", {
+      collection: KNOWLEDGE_COLLECTION,
+      url,
+    });
+  }
+
+  // 2. Fallback — fetch the candidate URL directly. Clean `.md` for doc URLs;
+  //    raw HTML otherwise (the summarizer prompt copes with either, and the cap
+  //    keeps a heavy HTML page from overflowing the model context).
+  try {
+    const fetchUrl = directFetchUrl(url);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    const res = await fetch(fetchUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      log.warn("Direct fetch of {url} returned {status}", { url: fetchUrl, status: res.status });
+      return null;
+    }
+    const text = await res.text();
+    if (!text.trim()) return null;
+    log.info("Resolved {url} via direct fetch ({len} chars)", { url: fetchUrl, len: text.length });
+    return { text: capContent(text) };
+  } catch (err) {
+    log.warn("Direct fetch of {url} failed: {error}", {
+      url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** Anthropic/Claude doc URLs serve clean markdown at `<path>.md`. */
+function directFetchUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const isDocHost = u.hostname === "docs.anthropic.com" || u.hostname === "platform.claude.com";
+    if (isDocHost && u.pathname.includes("/docs/") && !u.pathname.endsWith(".md")) {
+      u.pathname = `${u.pathname.replace(/\/$/, "")}.md`;
+      return u.toString();
+    }
+  } catch {
+    // not a parseable URL — fetch verbatim
+  }
+  return url;
+}
+
+/**
+ * Background pipeline for one candidate: resolve content → summarize → ingest
+ * into `anthropic-summaries` → flip the candidate to `summarized` (+ doc_id) or
+ * `error`. The route/auto-promote caller is responsible for setting the
+ * candidate to `summarizing` before kicking this; here we only write terminal
+ * candidate states so the pipeline is reusable from both call sites.
+ */
+export async function summarizeCandidate(
+  jobId: string,
+  candidateId: string,
+  title: string,
+  url: string,
+  config: Config,
+  botConfig: BotConfig,
+): Promise<void> {
+  try {
+    // 1. Resolve full content (still `pending` — no separate UI step, per plan).
+    const content = await resolveContent(config, url, title);
+    if (!content) {
+      failJob(jobId, "Could not resolve candidate content from anthropic-knowledge or its URL");
+      await setCandidateStatus(candidateId, "error");
+      return;
+    }
+
+    // 2. Summarize with Claude.
+    updateStatus(jobId, "summarizing");
+
+    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
+
+Title: ${title}
+URL: ${url}`;
+
+    const onProgress: StreamProgressCallback = (event) => {
+      if (event.type === "text_delta") {
+        appendText(jobId, event.text);
+      }
+    };
+
+    const result = await executeClaudePrompt(
+      content.text,
+      config,
+      botConfig,
+      systemPrompt,
+      onProgress,
+    );
+
+    // 3. Parse response. Clamp to ai/* — the anthropic-summaries collection only
+    //    accepts those (Huginn allowlist); a stray valid-but-non-ai category
+    //    (e.g. "tech") would be rejected at ingest.
+    const parsed = parseSummaryResponse(result.result);
+    const category = AI_CATEGORIES.includes(parsed.category) ? parsed.category : "ai/general";
+    const summary = parsed.summary;
+    setCategory(jobId, category);
+
+    log.info("Summarized {url}: category={category}, {tokens} output tokens", {
+      url,
+      category,
+      tokens: result.outputTokens,
+    });
+
+    // 4. Ingest into the curated collection.
+    updateStatus(jobId, "ingesting");
+
+    const ingestUrl = `${config.knowledgeApiUrl}/api/anthropic-summaries/ingest`;
+    const ingestController = new AbortController();
+    const ingestTimeout = setTimeout(() => ingestController.abort(), 15_000);
+
+    let docId: string | null = null;
+    try {
+      const ingestRes = await fetch(ingestUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          url,
+          summary,
+          category,
+          date: content.date ?? new Date().toISOString().split("T")[0],
+        }),
+        signal: ingestController.signal,
+      });
+      clearTimeout(ingestTimeout);
+
+      if (!ingestRes.ok) {
+        const body = await ingestRes.text().catch(() => "");
+        failJob(jobId, `Ingest returned ${ingestRes.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+        await setCandidateStatus(candidateId, "error");
+        return;
+      }
+
+      const ingestData = (await ingestRes.json()) as {
+        file_path?: string;
+        similar?: Array<{ title: string; url: string; snippet?: string }>;
+      };
+      // Record the collection-relative doc id so the candidate links straight
+      // to its summary doc (and the D-button doc panel resolves it).
+      if (ingestData.file_path) {
+        docId = collectionRelativeId(ingestData.file_path);
+        if (docId) setDocId(jobId, docId);
+      }
+      if (ingestData.similar && ingestData.similar.length > 0) {
+        setSimilar(jobId, ingestData.similar);
+      }
+    } catch (err) {
+      clearTimeout(ingestTimeout);
+      const msg = err instanceof Error ? err.message : String(err);
+      failJob(jobId, `Ingest failed: ${msg}`);
+      await setCandidateStatus(candidateId, "error");
+      return;
+    }
+
+    // 5. Complete — flip the candidate onto the shelf, linking its summary doc.
+    //    The summary is already ingested, so a failure to persist the candidate
+    //    bookkeeping must NOT bubble to the outer catch and flip this completed
+    //    job to `error`; log it and leave the job `complete`.
+    completeJob(jobId, summary, category);
+    try {
+      await setCandidateStatus(candidateId, "summarized", docId);
+      log.info("Candidate {candidateId} summarized → {collection} doc {docId}", {
+        candidateId,
+        collection: SUMMARIES_COLLECTION,
+        docId,
+      });
+    } catch (err) {
+      log.error("Candidate {candidateId} ingested but status update failed: {error}", {
+        candidateId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error("Anthropic summarization failed for job {jobId}: {error}", { jobId, error: msg });
+    failJob(jobId, msg);
+    await setCandidateStatus(candidateId, "error").catch(() => {});
+  }
+}

@@ -11,6 +11,16 @@ export const VALID_CATEGORIES = [
 ] as const;
 
 /**
+ * The `ai/*` subset of {@link VALID_CATEGORIES}. The `anthropic-summaries`
+ * collection only accepts these (Huginn's ingest allowlist is `ai/*`), so the
+ * Anthropic summarizer offers Claude this narrower list and clamps anything
+ * outside it back to `ai/general`.
+ */
+export const AI_CATEGORIES = VALID_CATEGORIES.filter((c) =>
+  c.startsWith("ai/"),
+) as readonly string[];
+
+/**
  * Parse a summarizer response of the form:
  *
  *   CATEGORY: <category>
