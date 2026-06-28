@@ -169,53 +169,54 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
     }
   };
 
-  // Cold start: a fresh watcher has empty last_notified_ids. Record the Tier-1
-  // baseline as a single silent alert (its ids persist without notifying), and
-  // baseline every Tier-2 snapshot — so run 1 fires nothing despite ~1753 docs.
-  if (watcher.lastNotifiedIds.length === 0) {
-    await persistTier2();
-    if (tier1Entries.length === 0) {
-      log.warn("Watcher \"{name}\": cold start with no Tier-1 entries", { name: watcher.name });
-      return [];
-    }
+  // Tier-1 cold start: a fresh watcher (empty last_notified_ids) hasn't seen its
+  // Tier-1 entries — record them as a single silent baseline (ids persist without
+  // notifying) so run 1 doesn't burst. Tier-2 is INDEPENDENT (its dedup is the
+  // per-source snapshot, not last_notified_ids), so Tier-2 additions still flow
+  // through the gate below even on a cold-start run.
+  const coldTier1 = watcher.lastNotifiedIds.length === 0;
+  const known = new Set(watcher.lastNotifiedIds);
+
+  const baselineAlerts: WatcherAlert[] = [];
+  if (coldTier1 && tier1Entries.length > 0) {
     log.info("Watcher \"{name}\": cold-start baseline of {n} Tier-1 entries (silent)", {
       name: watcher.name,
       n: tier1Entries.length,
     });
-    return [
-      {
-        id: `anthropic:baseline:${watcher.id}`,
-        source: "anthropic",
-        summary: `Baseline recorded (${tier1Entries.length} entries) — future updates will alert.`,
-        urgency: "low",
-        silent: true,
-        trackingIds: tier1Entries.map((e) => e.id),
-      },
-    ];
+    baselineAlerts.push({
+      id: `anthropic:baseline:${watcher.id}`,
+      source: "anthropic",
+      summary: `Baseline recorded (${tier1Entries.length} entries) — future updates will alert.`,
+      urgency: "low",
+      silent: true,
+      trackingIds: tier1Entries.map((e) => e.id),
+    });
   }
 
-  // Steady state: only genuinely-new items become candidates. Filtering Tier-1
-  // entries against last_notified_ids here (not just in the runner) keeps the gate
-  // batch small — it sees the delta since last run, not the whole 7-day window.
-  const known = new Set(watcher.lastNotifiedIds);
+  // Steady state: only genuinely-new items become candidates. Filtering against
+  // last_notified_ids here (not just in the runner) keeps the gate batch small —
+  // it sees the delta since last run, not the whole window. Tier-1 entries are
+  // skipped on cold start (baselined above, not gated); Tier-2 additions are not.
   const candidates: Candidate[] = [
-    ...tier1Entries.filter((e) => !known.has(e.id)).map(toFeedCandidate),
+    ...(coldTier1 ? [] : tier1Entries.filter((e) => !known.has(e.id)).map(toFeedCandidate)),
     ...tier2.candidates.filter((c) => !known.has(c.id)),
   ];
 
   if (candidates.length === 0) {
     await persistTier2();
-    return [];
+    if (!coldTier1) log.info("Watcher \"{name}\": no new candidates this run", { name: watcher.name });
+    return baselineAlerts;
   }
 
   // No gate → Phase-1 behavior: one alert per new candidate.
   if (!config.gate) {
     await persistTier2();
-    return candidates.map(toPlainAlert);
+    return [...baselineAlerts, ...candidates.map(toPlainAlert)];
   }
 
-  // Gate the candidates. On failure return [] WITHOUT advancing snapshots so the
-  // additions re-surface and retry next run (mirrors the x watcher's no-fallback).
+  // Gate the candidates. On failure DON'T advance snapshots, so the additions
+  // re-surface and retry next run (mirrors the x watcher's no-fallback); still
+  // return the Tier-1 baseline so a cold-start run makes forward progress.
   let scored: GateScore[] | "SKIP_ALL";
   try {
     scored = await runGate(candidates, config, watcher);
@@ -225,7 +226,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
       count: candidates.length,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return baselineAlerts;
   }
 
   await persistTier2();
@@ -236,7 +237,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
       name: watcher.name,
       count: candidates.length,
     });
-    return [silentAlert(candidates.map((c) => c.id))];
+    return [...baselineAlerts, silentAlert(candidates.map((c) => c.id))];
   }
 
   const minScore = config.minScore ?? DEFAULT_MIN_SCORE;
@@ -259,7 +260,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
     total: candidates.length,
   });
 
-  const alerts: WatcherAlert[] = [...visible];
+  const alerts: WatcherAlert[] = [...baselineAlerts, ...visible];
   if (silentIds.length > 0) alerts.push(silentAlert(silentIds));
   return alerts;
 }
@@ -355,22 +356,39 @@ async function fetchTier2(
       const freshMap = await src.fetch();
       const freshUrls = [...freshMap.keys()];
 
+      // `prior`: the stored baseline as an array, or null when there's no row yet
+      // (or a corrupt non-array — re-baseline rather than treat it as empty).
       const snap = await getWatcherSnapshot(watcherId, src.key);
-      if (snap == null) {
-        // Cold start for this source: baseline silently, no candidates.
-        log.info("Tier-2 {key}: cold-start baseline of {n} url(s) (silent)", {
+      const prior = Array.isArray(snap) ? (snap as string[]) : null;
+
+      // Guard against a poisoned baseline. A 200 with an empty/garbage body (JS
+      // challenge, truncated transfer) parses to 0 — or far fewer — URLs. If we
+      // baselined/advanced to that, the next healthy fetch would diff against it
+      // and flood the gate with the entire set as "new" (a ~1753-item burst for
+      // llms.txt). Skip the source instead — don't diff, don't persist — so it
+      // retries next run against the real set. A legitimate large removal also
+      // gets skipped, which only delays recording it (removals never alert).
+      if (freshUrls.length === 0 || (prior && prior.length > 0 && freshUrls.length < prior.length / 2)) {
+        log.warn("Tier-2 {key}: suspicious fetch ({n} urls vs baseline {b}) — skipping, snapshot left as-is", {
           key: src.key,
           n: freshUrls.length,
+          b: prior?.length ?? 0,
         });
+        continue;
+      }
+
+      if (prior == null) {
+        // Cold start for this source: baseline silently, no candidates.
+        log.info("Tier-2 {key}: cold-start baseline of {n} url(s) (silent)", { key: src.key, n: freshUrls.length });
       } else {
-        const seen = new Set(Array.isArray(snap) ? (snap as string[]) : []);
+        const seen = new Set(prior);
         for (const [url, label] of freshMap) {
           if (!seen.has(url)) {
             candidates.push({ id: `an:${url}`, sourceLabel: src.sourceLabel, label, url });
           }
         }
       }
-      // Mark for persistence regardless: baseline on cold start, advance otherwise.
+      // Advance the snapshot: baseline on cold start, otherwise the new full set.
       fresh.push({ key: src.key, urls: freshUrls });
     } catch (err) {
       log.error("Tier-2 fetch/parse failed for {key}: {error}", {
@@ -428,7 +446,9 @@ export function parseLlmsTxtDocs(text: string): Map<string, string> {
  */
 export function parseBlogSlugs(html: string, section: string): Map<string, string> {
   const map = new Map<string, string>();
-  const re = new RegExp(`href="(?:https?://www\\.anthropic\\.com)?/${section}/([^"#?]+)"`, "gi");
+  // Escape the section in case it ever carries regex metacharacters from config.
+  const esc = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`href="(?:https?://www\\.anthropic\\.com)?/${esc}/([^"#?]+)"`, "gi");
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
     const slug = m[1]!.replace(/\/+$/, "");

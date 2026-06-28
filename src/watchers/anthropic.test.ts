@@ -324,7 +324,9 @@ describe("checkAnthropic", () => {
       if (url.includes("feed.test")) return COMMITS_ATOM;
       if (url.includes("llms.txt")) return LLMS_SAMPLE;
       if (url.includes("/news")) return NEWS_HTML;
-      return ""; // engineering/research → no slugs
+      if (url.includes("/engineering")) return `<a href="/engineering/eng-post">e</a>`;
+      if (url.includes("/research")) return `<a href="/research/res-paper">r</a>`;
+      return "";
     });
   }
 
@@ -373,7 +375,70 @@ describe("checkAnthropic", () => {
     const alerts = await checkAnthropic(tier2Watcher());
     expect(alerts).toEqual([]);
     // snapshot left untouched → D2 still missing → it re-surfaces next run
-    expect(setCalls.length).toBe(0);
+    expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
     expect((snapStore.get("tier2:llms") as string[])).toEqual([D1]);
+  });
+
+  test("an empty/garbage 200 body is NOT baselined (guards against a recovery burst)", async () => {
+    // All blog sections return empty bodies; only llms yields docs.
+    stub((url) => {
+      if (url.includes("feed.test")) return COMMITS_ATOM;
+      if (url.includes("llms.txt")) return LLMS_SAMPLE;
+      return ""; // every blog section → 0 slugs
+    });
+    const alerts = await checkAnthropic(tier2Watcher());
+    expect(alerts).toEqual([]);
+    expect(snapStore.has("tier2:llms")).toBe(true);
+    // empty fetches are skipped, not baselined → a later healthy fetch is a cold
+    // start (silent baseline) rather than a flood of "new" slugs
+    expect(snapStore.has("tier2:blog:news")).toBe(false);
+    expect(snapStore.has("tier2:blog:engineering")).toBe(false);
+  });
+
+  test("a drastically shrunken doc set does not advance the snapshot", async () => {
+    tier2Stub(); // llms fetch yields D1, D2 (2 docs)
+    snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]); // baseline of 5
+    // pre-seed blog snapshots so they don't produce candidates/persist noise
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    setCalls.length = 0;
+
+    const alerts = await checkAnthropic(tier2Watcher());
+    // 2 fresh < 5/2 → suspicious shrink → skipped; no llms candidates, snapshot kept
+    expect(alerts.filter((a) => !a.silent).length).toBe(0);
+    expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
+    expect((snapStore.get("tier2:llms") as string[]).length).toBe(5);
+  });
+
+  test("Tier-2 additions still flow through the gate during a Tier-1 cold start", async () => {
+    // Fresh watcher (empty last_notified_ids) but Tier-2 snapshots already exist
+    // (e.g. an earlier run baselined them while Tier-1 was failing). A new doc must
+    // not be swallowed by the cold-start path.
+    tier2Stub();
+    snapStore.set("tier2:llms", [D1]); // D2 is a pending addition
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "new guide" }]);
+
+    const alerts = await checkAnthropic(
+      baseWatcher({
+        lastNotifiedIds: [], // cold Tier-1
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, tier2: true, gate: true },
+      }),
+    );
+    // Tier-1 baseline recorded silently, AND the Tier-2 addition is gated + surfaced
+    expect(alerts.some((a) => a.silent && (a.trackingIds?.length ?? 0) >= 2)).toBe(true); // tier1 baseline
+    const visible = alerts.filter((a) => !a.silent);
+    expect(visible.length).toBe(1);
+    expect(visible[0]!.id).toBe(`an:${D2}`);
+    expect(visible[0]!.summary).toContain("new guide");
   });
 });
