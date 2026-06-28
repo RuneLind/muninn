@@ -17,6 +17,23 @@ export const DEFAULT_MAX_SOURCES = 8;
 /** Chars of a hit's best chunk to include as the source snippet in the prompt. */
 const SNIPPET_CHARS = 1200;
 
+/**
+ * One prior Q&A turn carried into a follow-up for context. The Research layer is
+ * multi-turn but **stateless on the server** — the page holds the running turns
+ * in memory and replays a compact, bounded history with each follow-up, so no DB
+ * thread or persistence is involved (see ask.ts / research-routes.ts).
+ */
+export interface ResearchTurn {
+  question: string;
+  answer: string;
+}
+
+/** Cap on prior turns folded into a follow-up (keeps the prompt + the GET URL bounded). */
+export const MAX_HISTORY_TURNS = 4;
+
+/** Chars of each prior answer kept as follow-up context in the synthesis prompt. */
+const HISTORY_ANSWER_CHARS = 700;
+
 /** Shown verbatim when retrieval finds nothing — we never synthesize on no hits. */
 export const NO_HITS_MESSAGE =
   "I couldn't find anything in the knowledge base that covers this. " +
@@ -139,7 +156,34 @@ Rules:
 - Ground every claim in the sources. After each claim, cite the source(s) you used with bracketed numbers like [1] or [2][3]. Cite the specific source, not a range.
 - Do NOT use any tools or outside knowledge — answer solely from the provided sources.
 - If the sources do not actually answer the question, say so plainly in one sentence instead of guessing. Never invent details, URLs, or version numbers.
+- This may be a follow-up in an ongoing conversation. When a "Conversation so far" block is present, use it ONLY to resolve what the new question refers to (pronouns, "that", "it") — still ground every claim in the numbered sources, never cite or treat the prior turns as fact.
 - Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.`;
+
+/**
+ * Retrieval query for a turn. With no history it's the question verbatim, so the
+ * single-shot retrieval path is byte-for-byte unchanged. On a follow-up we prepend
+ * the most recent prior question(s) so the decomposer can resolve references
+ * ("does it support MCP?") into a query that actually retrieves — retrieval is the
+ * part that suffers most from a context-free follow-up. Prior *answers* are left
+ * out here to keep the retrieval query lean; they ride into the synthesis prompt.
+ */
+export function buildRetrievalQuestion(question: string, history: ResearchTurn[] = []): string {
+  const priorQuestions = history
+    .slice(-2)
+    .map((t) => t.question.trim())
+    .filter(Boolean);
+  if (priorQuestions.length === 0) return question;
+  const context = priorQuestions.map((q) => `"${q}"`).join(" then ");
+  return `Earlier in this conversation the user asked ${context}. Now answer this follow-up, resolving any references to that earlier context: ${question}`;
+}
+
+/** Render prior turns as a compact "conversation so far" block for synthesis context. */
+export function renderHistoryBlock(history: ResearchTurn[]): string {
+  return history
+    .slice(-MAX_HISTORY_TURNS)
+    .map((t, i) => `Q${i + 1}: ${t.question.trim()}\nA${i + 1}: ${truncate(t.answer.trim(), HISTORY_ANSWER_CHARS)}`)
+    .join("\n\n");
+}
 
 /** Render the numbered sources block fed to the model alongside the question. */
 export function renderSourcesBlock(citations: Citation[]): string {
@@ -151,13 +195,35 @@ export function renderSourcesBlock(citations: Citation[]): string {
     .join("\n\n");
 }
 
-/** Build the user prompt: the question, then the numbered sources to cite. */
-export function buildSynthesisUserPrompt(question: string, citations: Citation[]): string {
-  return `Question: ${question}
+/**
+ * Build the user prompt: the question, then the numbered sources to cite. On a
+ * follow-up (non-empty `history`) a compact "Conversation so far" block is
+ * prepended so the model can resolve references — but the answer is still grounded
+ * only in the numbered sources (see {@link SYNTHESIS_SYSTEM_PROMPT}). With empty
+ * history the output is identical to the single-shot prompt.
+ */
+export function buildSynthesisUserPrompt(
+  question: string,
+  citations: Citation[],
+  history: ResearchTurn[] = [],
+): string {
+  const sources = renderSourcesBlock(citations);
+  if (history.length === 0) {
+    return `Question: ${question}
 
 Answer the question using only these numbered sources. Cite with [n].
 
-${renderSourcesBlock(citations)}`;
+${sources}`;
+  }
+  return `Conversation so far (for context only — do NOT cite these prior turns; answer solely from the numbered sources below):
+
+${renderHistoryBlock(history)}
+
+Follow-up question: ${question}
+
+Answer the follow-up using only these numbered sources. Cite with [n]. Use the conversation above only to understand what the follow-up refers to.
+
+${sources}`;
 }
 
 /** Extract the distinct citation indices actually referenced in an answer. */

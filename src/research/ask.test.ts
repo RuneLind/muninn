@@ -64,9 +64,12 @@ const { streamResearchAnswer } = await import("./ask.ts");
 const config = { knowledgeApiUrl: "http://kb.test" } as unknown as Config;
 const bot = { name: "jarvis", dir: "/tmp/jarvis", connector: "claude-cli" } as unknown as BotConfig;
 
-async function collect(question: string): Promise<AnswerEvent[]> {
+async function collect(
+  question: string,
+  history?: Array<{ question: string; answer: string }>,
+): Promise<AnswerEvent[]> {
   const events: AnswerEvent[] = [];
-  await streamResearchAnswer({ question, config, botConfig: bot }, (e) => {
+  await streamResearchAnswer({ question, config, botConfig: bot, history }, (e) => {
     events.push(e);
   });
   return events;
@@ -124,6 +127,27 @@ test("synthesis prompt carries the question and numbered sources, with the groun
   expect(lastUserPrompt).toContain("[1] (Claude)");
   expect(lastUserPrompt).toContain("[2] (Wiki)");
   expect(lastSystemPrompt).toContain("ONLY the numbered sources");
+});
+
+test("empty history: retrieval uses the raw question and the prompt has no conversation block", async () => {
+  await collect("What is Claude Code?");
+  expect(lastResearchOpts!.question).toBe("What is Claude Code?");
+  expect(lastUserPrompt).toContain("Question: What is Claude Code?");
+  expect(lastUserPrompt).not.toContain("Conversation so far");
+});
+
+test("follow-up: prior turns fold into the retrieval query AND the synthesis prompt", async () => {
+  await collect("Does it support MCP?", [
+    { question: "What is Claude Code?", answer: "An agentic CLI tool." },
+  ]);
+  // Retrieval query is contextualized so the decomposer can resolve "it".
+  const retrievalQ = lastResearchOpts!.question as string;
+  expect(retrievalQ).toContain("What is Claude Code?");
+  expect(retrievalQ).toContain("Does it support MCP?");
+  // Synthesis prompt carries the conversation block + the follow-up.
+  expect(lastUserPrompt).toContain("Conversation so far");
+  expect(lastUserPrompt).toContain("A1: An agentic CLI tool.");
+  expect(lastUserPrompt).toContain("Follow-up question: Does it support MCP?");
 });
 
 test("no hits: skips the Claude call and answers with the honest fallback", async () => {

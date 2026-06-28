@@ -65,9 +65,26 @@ export async function renderResearchPage(): Promise<string> {
     }
     .corpus-line strong { color: var(--text-secondary); font-weight: 500; }
 
+    /* --- Conversation turns --- */
+    /* The corpus Q&A is multi-turn: each ask appends a turn card; the running
+       history stays visible above the composer (which sits at the bottom). */
+    #turnsWrap { display: flex; flex-direction: column; gap: 4px; }
+    .turn-card {
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--border-primary);
+    }
+    .turn-card:last-child { border-bottom: none; }
+    .turn-question {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .turn-question::before { content: '› '; color: var(--accent); font-weight: 700; }
+
     /* --- Answer --- */
-    .answer-panel { display: none; margin-bottom: 28px; }
-    .answer-panel.visible { display: block; }
     .answer-status {
       display: flex;
       align-items: center;
@@ -170,6 +187,25 @@ export async function renderResearchPage(): Promise<string> {
       background: color-mix(in srgb, var(--status-success) 12%, transparent);
     }
 
+    /* --- Composer (pinned under the conversation) --- */
+    .composer-meta {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 8px;
+      min-height: 20px;
+    }
+    .newconv-btn {
+      background: none;
+      border: 1px solid var(--border-primary);
+      color: var(--text-dim);
+      padding: 5px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    .newconv-btn:hover { border-color: var(--accent); color: var(--text-secondary); }
+
     .empty-hint {
       color: var(--text-dim);
       font-size: 14px;
@@ -253,25 +289,26 @@ export async function renderResearchPage(): Promise<string> {
   </div>
 
   <div class="page-content">
-    <div class="ask-box">
-      <textarea class="ask-input" id="askInput" rows="1" placeholder="Ask about Claude, Anthropic, or anything on the shelf…"></textarea>
-      <button class="ask-btn" id="askBtn" onclick="askQuestion()">Ask</button>
-    </div>
     <div class="corpus-line">Searches across <strong>${corpusLabels}</strong></div>
-
-    <div class="answer-panel" id="answerPanel">
-      <div class="answer-status" id="answerStatus"><span class="spinner"></span><span id="answerStatusText">Searching the shelf…</span></div>
-      <div class="answer-body" id="answerBody"></div>
-      <div id="sourcesWrap"></div>
-    </div>
 
     <div class="empty-hint" id="emptyHint">
       Ask a question and Muninn answers from the shelf — with citations you can open.
+      Follow-ups carry the conversation, so you can drill down.
       <div class="examples">
         <span class="ex" onclick="askExample(this)">What changed in Claude Code's MCP support recently?</span>
         <span class="ex" onclick="askExample(this)">What is prompt caching and when should I use it?</span>
         <span class="ex" onclick="askExample(this)">Summarize recent Anthropic agent-building guidance.</span>
       </div>
+    </div>
+
+    <div id="turnsWrap"></div>
+
+    <div class="ask-box">
+      <textarea class="ask-input" id="askInput" rows="1" placeholder="Ask about Claude, Anthropic, or anything on the shelf…"></textarea>
+      <button class="ask-btn" id="askBtn" onclick="askQuestion()">Ask</button>
+    </div>
+    <div class="composer-meta">
+      <button class="newconv-btn" id="newConvBtn" onclick="newConversation()" style="display:none">＋ New conversation</button>
     </div>
 
     <details class="browse-details" id="browseDetails">
@@ -300,11 +337,16 @@ export async function renderResearchPage(): Promise<string> {
     var activeTag = null;
     var selectedBot = '';
 
-    // Q&A state
-    var citations = [];
-    var answerBuffer = '';
+    // Q&A state — the conversation is multi-turn but stateless on the server: we
+    // keep the committed turns here and replay a compact slice of them as context
+    // on each follow-up (see compactHistory).
+    var turns = [];           // committed turns: { question, answer, citations, cited }
+    var active = null;        // refs for the in-flight turn card (or null)
     var currentSource = null; // active EventSource
     var browseLoaded = false; // the folded browse list loads lazily on first open
+
+    var MAX_HISTORY_TURNS = 4;     // mirrors the server cap; keeps the GET URL bounded
+    var HISTORY_ANSWER_CHARS = 700;
 
     // === Bot selector ===
 
@@ -359,11 +401,68 @@ export async function renderResearchPage(): Promise<string> {
       askQuestion();
     }
 
-    function setStatus(text, state) {
-      var status = document.getElementById('answerStatus');
-      var txt = document.getElementById('answerStatusText');
-      status.className = 'answer-status' + (state ? ' ' + state : '');
-      txt.textContent = text;
+    // Compact, bounded replay of the committed turns sent with each follow-up so
+    // the server can answer in context without holding any conversation state.
+    function compactHistory() {
+      if (!turns.length) return '';
+      var recent = turns.slice(-MAX_HISTORY_TURNS).map(function(t) {
+        return { q: (t.question || '').slice(0, 500), a: (t.answer || '').slice(0, HISTORY_ANSWER_CHARS) };
+      });
+      return JSON.stringify(recent);
+    }
+
+    // Reflect conversation state in the composer: follow-up affordance + reset.
+    function updateComposer() {
+      var input = document.getElementById('askInput');
+      var newBtn = document.getElementById('newConvBtn');
+      if (turns.length > 0) {
+        input.placeholder = 'Ask a follow-up…';
+        newBtn.style.display = '';
+      } else {
+        input.placeholder = 'Ask about Claude, Anthropic, or anything on the shelf…';
+        newBtn.style.display = 'none';
+      }
+    }
+
+    function newConversation() {
+      if (currentSource) { currentSource.close(); currentSource = null; }
+      turns = [];
+      active = null;
+      document.getElementById('turnsWrap').innerHTML = '';
+      document.getElementById('emptyHint').style.display = '';
+      document.getElementById('askBtn').disabled = false;
+      updateComposer();
+      document.getElementById('askInput').focus();
+    }
+
+    // Create a turn card and stream the answer into it. Returns the refs the
+    // EventSource handlers write to, so a superseded stream can't write to a
+    // newer turn's card.
+    function startTurnCard(question) {
+      var card = document.createElement('div');
+      card.className = 'turn-card';
+      card.innerHTML =
+        '<div class="turn-question"></div>' +
+        '<div class="answer-status"><span class="spinner"></span><span class="st">Searching the shelf…</span></div>' +
+        '<div class="answer-body streaming"></div>' +
+        '<div class="turn-sources"></div>';
+      card.querySelector('.turn-question').textContent = question;
+      document.getElementById('turnsWrap').appendChild(card);
+      card.scrollIntoView({ block: 'start' });
+      return {
+        question: question,
+        citations: [],
+        buffer: '',
+        statusWrap: card.querySelector('.answer-status'),
+        statusEl: card.querySelector('.answer-status .st'),
+        bodyEl: card.querySelector('.answer-body'),
+        sourcesEl: card.querySelector('.turn-sources'),
+      };
+    }
+
+    function setCardStatus(a, text, state) {
+      a.statusWrap.className = 'answer-status' + (state ? ' ' + state : '');
+      a.statusEl.textContent = text;
     }
 
     function askQuestion() {
@@ -372,65 +471,70 @@ export async function renderResearchPage(): Promise<string> {
       if (!q) return;
 
       if (currentSource) { currentSource.close(); currentSource = null; }
-      citations = [];
-      answerBuffer = '';
-
       document.getElementById('emptyHint').style.display = 'none';
-      document.getElementById('answerPanel').classList.add('visible');
-      document.getElementById('sourcesWrap').innerHTML = '';
-      var body = document.getElementById('answerBody');
-      body.className = 'answer-body streaming';
-      body.textContent = '';
-      setStatus('Searching the shelf…', '');
+      input.value = '';
+
+      var a = startTurnCard(q);
+      active = a;
       var btn = document.getElementById('askBtn');
       btn.disabled = true;
 
       var url = '/api/research/ask?q=' + encodeURIComponent(q);
       if (selectedBot) url += '&bot=' + encodeURIComponent(selectedBot);
+      var hist = compactHistory();
+      if (hist) url += '&history=' + encodeURIComponent(hist);
+
       var es = new EventSource(url);
       currentSource = es;
 
       es.addEventListener('phase', function(e) {
         var d = JSON.parse(e.data);
-        if (d.phase === 'searching') setStatus('Searching the shelf…', '');
-        else if (d.phase === 'synthesizing') setStatus('Synthesizing answer…', '');
+        if (d.phase === 'searching') setCardStatus(a, 'Searching the shelf…', '');
+        else if (d.phase === 'synthesizing') setCardStatus(a, 'Synthesizing answer…', '');
       });
 
       es.addEventListener('sources', function(e) {
         var d = JSON.parse(e.data);
-        citations = d.citations || [];
-        renderSources([]);
+        a.citations = d.citations || [];
+        a.sourcesEl.innerHTML = sourcesHtml(a.citations, []);
+        bindSources(a.sourcesEl, a.citations);
       });
 
       es.addEventListener('delta', function(e) {
         var d = JSON.parse(e.data);
-        answerBuffer += d.text || '';
-        var b = document.getElementById('answerBody');
-        b.textContent = answerBuffer;
-        b.scrollIntoView({ block: 'nearest' });
+        a.buffer += d.text || '';
+        a.bodyEl.textContent = a.buffer;
+        a.bodyEl.scrollIntoView({ block: 'nearest' });
       });
 
       es.addEventListener('done', function(e) {
         var d = JSON.parse(e.data);
-        var b = document.getElementById('answerBody');
-        b.className = 'answer-body';
-        b.innerHTML = renderMarkdown(d.answer || answerBuffer || '');
-        linkifyCitations(b);
-        renderSources(d.cited || []);
+        a.buffer = d.answer || a.buffer || '';
+        a.bodyEl.className = 'answer-body';
+        a.bodyEl.innerHTML = renderMarkdown(a.buffer);
+        linkifyCitations(a.bodyEl, a.citations);
+        a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
+        bindSources(a.sourcesEl, a.citations);
         var statusText;
         if (d.lowConfidence) statusText = 'No strong match — showing the closest sources';
         else if (d.noHits) statusText = 'No matching sources';
-        else statusText = 'Answered from ' + citations.length + ' source' + (citations.length === 1 ? '' : 's');
-        setStatus(statusText, 'done');
+        else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
+        setCardStatus(a, statusText, 'done');
+        // Commit the turn so the next ask carries it as context. We keep even a
+        // declined (no-coverage) turn in history — the follow-up still benefits
+        // from knowing what was asked.
+        turns.push({ question: a.question, answer: a.buffer, citations: a.citations, cited: d.cited || [] });
+        active = null;
         btn.disabled = false;
+        updateComposer();
       });
 
       es.addEventListener('error', function(e) {
         var msg = 'Something went wrong.';
         try { msg = JSON.parse(e.data).message || msg; } catch {}
-        setStatus(msg, 'error');
-        var b = document.getElementById('answerBody');
-        if (!answerBuffer) { b.className = 'answer-body'; b.innerHTML = ''; }
+        setCardStatus(a, msg, 'error');
+        if (!a.buffer) { a.bodyEl.className = 'answer-body'; a.bodyEl.innerHTML = ''; }
+        active = null;
         btn.disabled = false;
       });
 
@@ -447,16 +551,17 @@ export async function renderResearchPage(): Promise<string> {
         if (currentSource !== es) return; // stale stream from a superseded ask
         if (es.readyState === EventSource.CLOSED) {
           btn.disabled = false;
-          if (!answerBuffer && !document.getElementById('answerStatus').classList.contains('done')) {
-            setStatus('Connection lost', 'error');
+          if (!a.buffer && !a.statusWrap.classList.contains('done')) {
+            setCardStatus(a, 'Connection lost', 'error');
           }
         }
       };
     }
 
-    // Walk text nodes and turn [n] markers into clickable citation chips. Done on
-    // the rendered markdown DOM so we never inject HTML into untrusted text.
-    function linkifyCitations(root) {
+    // Walk text nodes and turn [n] markers into clickable citation chips, bound to
+    // THIS turn's citations. Done on the rendered markdown DOM so we never inject
+    // HTML into untrusted text.
+    function linkifyCitations(root, citations) {
       var maxN = citations.length;
       if (maxN === 0) return;
       var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
@@ -478,8 +583,9 @@ export async function renderResearchPage(): Promise<string> {
           var sup = document.createElement('sup');
           sup.className = 'cite';
           sup.textContent = '[' + n + ']';
-          sup.title = citations[n - 1] ? citations[n - 1].title : '';
-          sup.onclick = (function(idx) { return function() { openCitation(idx); }; })(n);
+          var c = citations[n - 1];
+          sup.title = c ? c.title : '';
+          sup.onclick = (function(cit) { return function() { if (cit) openDocPanel(cit.collection, cit.docId, cit.url || ''); }; })(c);
           frag.appendChild(sup);
           last = m.index + m[0].length;
         }
@@ -489,15 +595,8 @@ export async function renderResearchPage(): Promise<string> {
       });
     }
 
-    function openCitation(n) {
-      var c = citations[n - 1];
-      if (!c) return;
-      openDocPanel(c.collection, c.docId, c.url || '');
-    }
-
-    function renderSources(cited) {
-      var wrap = document.getElementById('sourcesWrap');
-      if (!citations.length) { wrap.innerHTML = ''; return; }
+    function sourcesHtml(citations, cited) {
+      if (!citations.length) return '';
       var citedSet = {};
       (cited || []).forEach(function(n) { citedSet[n] = true; });
       var anyCited = (cited || []).length > 0;
@@ -509,7 +608,7 @@ export async function renderResearchPage(): Promise<string> {
         var shelf = c.sourceId === 'anthropic'
           ? '<span class="source-shelf" title="A summary you curated onto your shelf">★ your shelf</span>'
           : '';
-        return '<div class="source-row' + uncited + '" onclick="openCitation(' + c.n + ')">' +
+        return '<div class="source-row' + uncited + '" data-n="' + c.n + '">' +
           '<span class="source-num">' + c.n + '</span>' +
           '<span class="source-badge">' + esc(c.badge || '') + '</span>' +
           '<span class="source-title">' + esc(c.title || c.docId) + '</span>' +
@@ -517,7 +616,19 @@ export async function renderResearchPage(): Promise<string> {
           (rel ? '<span class="source-rel">' + rel + '</span>' : '') +
         '</div>';
       }).join('');
-      wrap.innerHTML = '<div class="sources-head">Sources</div><div class="sources-list">' + rows + '</div>';
+      return '<div class="sources-head">Sources</div><div class="sources-list">' + rows + '</div>';
+    }
+
+    // Bind each rendered source row to its citation (by data-n) so clicks open the
+    // right doc — the rows belong to a specific turn's citation list.
+    function bindSources(container, citations) {
+      container.querySelectorAll('.source-row').forEach(function(row) {
+        var n = parseInt(row.getAttribute('data-n'), 10);
+        row.onclick = function() {
+          var c = citations[n - 1];
+          if (c) openDocPanel(c.collection, c.docId, c.url || '');
+        };
+      });
     }
 
     // === Browse (folded, lazy) ===
