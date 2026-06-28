@@ -4,7 +4,8 @@ import { isSkipResult } from "./x.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
-import { upsertCandidate } from "../db/summary-candidates.ts";
+import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
+import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "anthropic");
@@ -189,6 +190,15 @@ interface AnthropicConfig {
   captureCandidates?: boolean;
   /** Inbox capture floor — candidates scored ≥ this are queued (default 0.5), independent of `minScore`. */
   candidateMinScore?: number;
+  /**
+   * Auto-promote floor (Claude Learning Center, Phase B.3 / D-button). A captured
+   * candidate scored ≥ this is summarized IN-PROCESS immediately — no manual click —
+   * landing on the `anthropic-summaries` shelf. **Opt-in**: leave unset and nothing
+   * auto-promotes (only the inbox fills). Start HIGH (~0.9–0.95) so only true
+   * headliners auto-spend a Claude call; the rest wait for a manual pick. Requires
+   * `captureCandidates` (the candidate row must exist first).
+   */
+  autoPromoteScore?: number;
   // --- Digest cadence (Phase 4) ---
   /**
    * Roll the window's candidates into ONE digest message (Daily/Weekly rows) instead of
@@ -399,7 +409,12 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // Capture the scored candidates into the inbox (Candidates → Summaries). Best-effort
   // and independent of the alert threshold: every candidate the gate scored ≥
   // candidateMinScore is queued, so the silent middle band lands in the inbox too.
-  if (config.captureCandidates) await captureGatedCandidates(candidates, byN, config, watcher);
+  // Then hybrid curation: auto-summarize the clear headliners (≥ autoPromoteScore)
+  // in-process, leaving the middle band for a manual pick on /summaries.
+  if (config.captureCandidates) {
+    await captureGatedCandidates(candidates, byN, config, watcher);
+    await maybeAutoPromote(candidates, byN, config, watcher);
+  }
 
   const alerts: WatcherAlert[] = [...baselineAlerts, ...visible];
   if (silentIds.length > 0) alerts.push(silentAlert(silentIds));
@@ -716,6 +731,65 @@ async function captureGatedCandidates(
     log.info("Watcher \"{name}\": captured {n} candidate(s) to the inbox", {
       name: watcher.name,
       n: captured,
+    });
+  }
+}
+
+/**
+ * Auto-promote the clear headliners (Claude Learning Center, Phase B.3 / D-button).
+ * For every gated candidate scored ≥ `config.autoPromoteScore`, summarize it
+ * IN-PROCESS immediately — no manual click — so true must-see items land on the
+ * `anthropic-summaries` shelf on their own; everything below waits in the inbox.
+ *
+ * Opt-in: with `autoPromoteScore` unset this is a no-op (the inbox just fills).
+ * Deduped: only rows still in status `new` are kicked, so an item already
+ * summarizing/summarized/dismissed from a prior run is never re-summarized (and a
+ * captured candidate whose upsert was a no-op against a non-`new` row is skipped).
+ * The summarize itself is fire-and-forget inside {@link autoPromoteCandidate}, so a
+ * slow Claude call never blocks the watcher run. Best-effort: a per-candidate error
+ * is logged and never breaks the alert path.
+ */
+async function maybeAutoPromote(
+  candidates: Candidate[],
+  byN: Map<number, GateScore>,
+  config: AnthropicConfig,
+  watcher: Watcher,
+): Promise<void> {
+  const threshold = config.autoPromoteScore;
+  if (threshold == null) return;
+
+  let promoted = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const score = byN.get(i + 1);
+    if (!score || score.score < threshold) continue;
+    const c = candidates[i]!;
+    try {
+      // Resolve the persisted row (captureGatedCandidates ran first, so a ≥ floor
+      // candidate exists) to read its current status — the dedup gate.
+      const row = await getCandidateBySourceUrl("anthropic", c.url);
+      if (!row || row.status !== "new") continue;
+
+      const jobId = await autoPromoteCandidate({ id: row.id, title: row.title, url: row.url });
+      if (jobId) {
+        promoted++;
+        log.info(
+          "Watcher \"{name}\": auto-promoted candidate (score {score}) → job {jobId} — {url}",
+          { name: watcher.name, score: score.score.toFixed(2), jobId, url: c.url },
+        );
+      }
+    } catch (err) {
+      log.error("Watcher \"{name}\": auto-promote failed for {url}: {error}", {
+        name: watcher.name,
+        url: c.url,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (promoted > 0) {
+    log.info("Watcher \"{name}\": auto-promoted {n} headliner(s) (score ≥ {threshold})", {
+      name: watcher.name,
+      n: promoted,
+      threshold,
     });
   }
 }

@@ -127,6 +127,24 @@ test("happy path: resolves via documents listing, summarizes, ingests, flips can
   expect(statusCalls[0]).toEqual({ id: "cand-1", status: "summarized", docId: SUMMARY_DOC_ID });
 });
 
+test("derives a collection-relative doc_id from Huginn's already-relative file_path", async () => {
+  // The REAL Huginn ingest returns file_path relative to the collection root
+  // (write_categorized_markdown → "ai/general/Foo.md"), NOT an absolute path — so
+  // the category prefix must survive (a bare basename 502s from the doc panel).
+  ingestBody = { status: "ok", file_path: "ai/general/Add SDK disclosure process.md" };
+  const jobId = createJob("cand-rel", "Add SDK disclosure process", CAND_URL);
+  await summarizeCandidate(jobId, "cand-rel", "Add SDK disclosure process", CAND_URL, config, bot);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(job.docId).toBe("ai/general/Add SDK disclosure process.md");
+  expect(statusCalls[0]).toEqual({
+    id: "cand-rel",
+    status: "summarized",
+    docId: "ai/general/Add SDK disclosure process.md",
+  });
+});
+
 test("resolves via title-search when the documents listing misses", async () => {
   docListing = []; // listing has no match…
   // …but title-search returns the exact-url hit.

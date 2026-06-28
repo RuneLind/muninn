@@ -27,6 +27,28 @@ mock.module("../db/watchers.ts", () => ({
   },
 }));
 
+// Candidate inbox: capture is a no-op recorder; getCandidateBySourceUrl serves rows
+// from a controllable map so the auto-promote dedup gate (status === 'new') can be
+// exercised without a live DB.
+const upsertCalls: { url: string; score: number }[] = [];
+const candidateRows = new Map<string, { id: string; title: string; url: string; status: string }>();
+mock.module("../db/summary-candidates.ts", () => ({
+  upsertCandidate: async (p: { url: string; score: number }) => {
+    upsertCalls.push({ url: p.url, score: p.score });
+  },
+  getCandidateBySourceUrl: async (_source: string, url: string) => candidateRows.get(url) ?? null,
+}));
+
+// Auto-promote kick: record the candidate refs, return a fake job id (the real
+// summarizer + Claude spawn are out of scope for the watcher unit test).
+const autoPromoted: Array<{ id: string; title: string; url: string }> = [];
+mock.module("../anthropic/summarizer.ts", () => ({
+  autoPromoteCandidate: async (c: { id: string; title: string; url: string }) => {
+    autoPromoted.push(c);
+    return "job-" + c.id;
+  },
+}));
+
 const { parseAtomEntries, parseLlmsTxtDocs, parseBlogSlugs, checkAnthropic, DEFAULT_ANTHROPIC_FEEDS } =
   await import("./anthropic.ts");
 
@@ -167,6 +189,9 @@ describe("checkAnthropic", () => {
     gateThrow = false;
     snapStore.clear();
     setCalls.length = 0;
+    upsertCalls.length = 0;
+    autoPromoted.length = 0;
+    candidateRows.clear();
   });
 
   function stub(body: string | ((url: string) => string)) {
@@ -590,5 +615,90 @@ describe("checkAnthropic", () => {
     expect(ids).not.toContain("https://github.com/anthropics/f10/commit/c0");
     // The first feed survived
     expect(ids).toContain("https://github.com/anthropics/f0/commit/c0");
+  });
+
+  // --- Phase B.3 / D-button: candidate capture + auto-promote ---
+
+  const captureWatcher = (over: Partial<Watcher>): Watcher =>
+    baseWatcher({
+      lastNotifiedIds: ["already-seen"], // steady state — both C1/C2 are new candidates
+      config: {
+        feeds: ["https://feed.test/commits.atom"],
+        lookbackDays: 100000,
+        gate: true,
+        captureCandidates: true,
+        candidateMinScore: 0.5,
+      },
+      ...over,
+    });
+
+  test("captureCandidates upserts every gated candidate at/above the capture floor", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.95, why: "headliner" },
+      { n: 2, score: 0.6, why: "mid-band" },
+    ]);
+    await checkAnthropic(captureWatcher({}));
+    expect(upsertCalls.map((u) => u.url).sort()).toEqual([C1, C2].sort());
+  });
+
+  test("auto-promote summarizes a ≥ autoPromoteScore candidate in-process, leaving the mid-band", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.95, why: "must-see Claude Code feature" }, // ≥ 0.9 → auto-promote
+      { n: 2, score: 0.6, why: "relevant but not urgent" }, // < 0.9 → stays in inbox
+    ]);
+    // The persisted C1 row is still `new`, so it's eligible.
+    candidateRows.set(C1, { id: "cand-c1", title: "C1 title", url: C1, status: "new" });
+
+    await checkAnthropic(
+      captureWatcher({
+        config: {
+          feeds: ["https://feed.test/commits.atom"],
+          lookbackDays: 100000,
+          gate: true,
+          captureCandidates: true,
+          candidateMinScore: 0.5,
+          autoPromoteScore: 0.9,
+        },
+      }),
+    );
+
+    expect(autoPromoted).toHaveLength(1);
+    expect(autoPromoted[0]).toEqual({ id: "cand-c1", title: "C1 title", url: C1 });
+  });
+
+  test("auto-promote dedup: a candidate whose row is already summarizing is NOT re-kicked", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = JSON.stringify([{ n: 1, score: 0.95, why: "headliner" }]);
+    // Row exists but is already in flight (a prior run kicked it) → skip.
+    candidateRows.set(C1, { id: "cand-c1", title: "C1 title", url: C1, status: "summarizing" });
+
+    await checkAnthropic(
+      captureWatcher({
+        config: {
+          feeds: ["https://feed.test/commits.atom"],
+          lookbackDays: 100000,
+          gate: true,
+          captureCandidates: true,
+          candidateMinScore: 0.5,
+          autoPromoteScore: 0.9,
+        },
+      }),
+    );
+
+    expect(autoPromoted).toHaveLength(0);
+  });
+
+  test("auto-promote is a no-op when autoPromoteScore is unset (inbox just fills)", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = JSON.stringify([{ n: 1, score: 0.99, why: "headliner" }]);
+    candidateRows.set(C1, { id: "cand-c1", title: "C1 title", url: C1, status: "new" });
+
+    await checkAnthropic(captureWatcher({})); // config has no autoPromoteScore
+
+    expect(autoPromoted).toHaveLength(0);
+    // …but it was still captured into the inbox.
+    expect(upsertCalls.map((u) => u.url)).toContain(C1);
   });
 });
