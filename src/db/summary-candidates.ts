@@ -107,6 +107,22 @@ export async function getCandidateById(id: string): Promise<SummaryCandidate | n
 }
 
 /**
+ * Look a candidate up by its identity `(source, url)` — the table's UNIQUE key, so
+ * at most one row. Used by the watcher's auto-promote path to resolve a freshly
+ * captured candidate to its persisted id + current status (the upsert returns void).
+ */
+export async function getCandidateBySourceUrl(
+  source: string,
+  url: string,
+): Promise<SummaryCandidate | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT * FROM summary_candidates WHERE source = ${source} AND url = ${url}
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/**
  * Advance a candidate's status. `docId` is recorded when summarization completes;
  * pass null (the default) to leave any existing doc_id untouched.
  */

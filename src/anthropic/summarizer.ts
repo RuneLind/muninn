@@ -1,5 +1,5 @@
-import type { Config } from "../config.ts";
-import type { BotConfig } from "../bots/config.ts";
+import { loadConfig, type Config } from "../config.ts";
+import { discoverAllBots, resolveSummarizerBot, type BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
@@ -7,6 +7,7 @@ import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { setCandidateStatus } from "../db/summary-candidates.ts";
 import {
+  createJob,
   updateStatus,
   appendText,
   setCategory,
@@ -36,15 +37,21 @@ function capContent(text: string): string {
  * The anthropic-summaries doc id is the saved file's path *relative to the
  * collection root* — category-prefixed, e.g. `ai/claude/Foo.md` — which is the
  * exact identity `/api/document/<collection>/<id>` and the shelf listing use (a
- * bare basename 404s). The ingest route returns an absolute `file_path`, so take
- * everything after the collection dir; fall back to the basename if the marker
- * isn't present.
+ * bare basename 404s).
+ *
+ * Huginn's ingest returns `file_path` ALREADY relative to the collection root
+ * (`write_categorized_markdown` returns `os.path.join(category, filename)`, e.g.
+ * `ai/general/Foo.md`), so the common path is to use it as-is. Only if a deploy
+ * ever hands back an absolute path do we slice everything after the collection
+ * dir. The earlier basename-only fallback dropped the category prefix and made the
+ * candidate's `doc_id` 502 from the doc panel + "On the shelf" link.
  */
 function collectionRelativeId(filePath: string): string {
   const marker = `/${SUMMARIES_COLLECTION}/`;
   const idx = filePath.indexOf(marker);
   if (idx !== -1) return filePath.slice(idx + marker.length);
-  return filePath.split("/").pop() ?? filePath;
+  // Already collection-relative (the real Huginn response) — trim a leading "./" or "/".
+  return filePath.replace(/^\.?\//, "");
 }
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.
@@ -337,4 +344,60 @@ URL: ${url}`;
     failJob(jobId, msg);
     await setCandidateStatus(candidateId, "error").catch(() => {});
   }
+}
+
+/** The candidate fields needed to kick a summarize job. */
+export interface CandidateRef {
+  id: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * Start a summarize job for a candidate: create the in-memory job, flip the
+ * candidate to `summarizing` (so a concurrent inbox refresh / second kick stops
+ * showing it as actionable), then fire {@link summarizeCandidate} in the
+ * background. Returns the new job id. Shared by the dashboard route (the
+ * `[Summarize]` button) and the watcher's auto-promote path so the
+ * createJob → mark-summarizing → fire sequence lives in exactly one place.
+ *
+ * The caller is responsible for the duplicate/in-flight pre-checks it needs (the
+ * route returns 409/duplicate before calling this; the watcher only kicks rows
+ * still in status `new`).
+ */
+export async function kickCandidateSummarize(
+  candidate: CandidateRef,
+  config: Config,
+  botConfig: BotConfig,
+): Promise<string> {
+  const jobId = createJob(candidate.id, candidate.title, candidate.url);
+  await setCandidateStatus(candidate.id, "summarizing");
+  // Fire and forget — background summarization.
+  summarizeCandidate(jobId, candidate.id, candidate.title, candidate.url, config, botConfig).catch(
+    (err) => {
+      log.error("Anthropic summarization failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    },
+  );
+  return jobId;
+}
+
+/**
+ * Auto-promote entry point for the watcher (Claude Learning Center, Phase B.3 /
+ * D-button). The watcher runs with no muninn {@link Config} or bot in scope, so
+ * resolve both here — the summarizer bot via the same `resolveSummarizerBot`
+ * the route uses, the config via `loadConfig()` — then kick the same shared
+ * pipeline. Returns the job id, or `null` if no summarizer bot is configured.
+ * Fire-and-forget friendly: the actual (slow) Claude call inside
+ * {@link kickCandidateSummarize} is detached.
+ */
+export async function autoPromoteCandidate(candidate: CandidateRef): Promise<string | null> {
+  const botConfig = resolveSummarizerBot(discoverAllBots());
+  if (!botConfig) {
+    log.warn("Auto-promote: no summarizer bot configured — skipping {url}", { url: candidate.url });
+    return null;
+  }
+  const config = loadConfig();
+  return kickCandidateSummarize(candidate, config, botConfig);
 }

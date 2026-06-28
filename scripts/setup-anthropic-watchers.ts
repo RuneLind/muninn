@@ -56,13 +56,21 @@ const sql = postgres(config.databaseUrl, { max: 1 });
  *  Uses the STANDARD gate prompt (scores 0.5–1.0), not the strict Highlights prompt: the
  *  alert threshold (minScore 0.8) still keeps Telegram to the exceptional, while the lower
  *  capture floor (candidateMinScore 0.5) routes the relevant-but-not-urgent middle into the
- *  inbox instead of dropping it silently. One Haiku call, two cuts on the one score. */
+ *  inbox instead of dropping it silently. One Haiku call, three cuts on the one score:
+ *  minScore 0.8 → Telegram alert, candidateMinScore 0.5 → inbox, autoPromoteScore 0.9 →
+ *  summarize in-process onto the shelf (true headliners skip the manual pick). The 0.9
+ *  auto-promote floor starts high so only must-see items auto-spend a Claude call (§8 risk 5).
+ *
+ *  NB: this seed only applies on a FRESH box — the script SKIPS reconfigure when a
+ *  Highlights row already exists (never re-clobber a hand-tuned config). To add/adjust
+ *  autoPromoteScore on a live row, update its config JSONB directly. */
 const highlightsConfig = {
   tier2: true,
   gate: true,
   minScore: 0.8,
   captureCandidates: true,
   candidateMinScore: 0.5,
+  autoPromoteScore: 0.9,
   timeoutMs: TIMEOUT_MS,
   prompt: DEFAULT_ANTHROPIC_GATE_PROMPT,
 };

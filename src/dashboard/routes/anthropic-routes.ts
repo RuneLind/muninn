@@ -8,12 +8,11 @@ import {
   setCandidateStatus,
 } from "../../db/summary-candidates.ts";
 import {
-  createJob,
   getJob,
   getRecentJobs,
   subscribe as subscribeAnthropicJob,
 } from "../../anthropic/state.ts";
-import { summarizeCandidate } from "../../anthropic/summarizer.ts";
+import { kickCandidateSummarize } from "../../anthropic/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { knowledgeApiHandler } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
@@ -39,11 +38,17 @@ const ANTHROPIC_COLLECTION = getSummarySource("anthropic")!.collection;
 export function registerAnthropicRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 
-  // The ranked, pre-annotated candidate inbox. Defaults to the unworked queue
-  // (status `new`); the watcher captures these on its 2h Highlights cadence.
+  // The ranked, pre-annotated candidate inbox. Returns the actionable + in-flight +
+  // on-the-shelf set so the client can render each row by status: `new` (active
+  // Summarize), `summarizing` (in progress, e.g. an auto-promoted ≥0.9 item mid-run),
+  // `summarized` (read-only "On the shelf", links to its doc), and `error` (retryable).
+  // `dismissed` rows stay hidden.
   app.get("/api/anthropic/candidates", async (c) => {
     try {
-      const candidates = await listCandidates({ source: "anthropic", status: "new" });
+      const candidates = await listCandidates({
+        source: "anthropic",
+        status: ["new", "summarizing", "summarized", "error"],
+      });
       return c.json({ candidates });
     } catch (err) {
       log.error("Listing anthropic candidates failed: {error}", {
@@ -89,25 +94,10 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
         return c.json({ error: "No bots configured" }, 500);
       }
 
-      const jobId = createJob(candidate.id, candidate.title, candidate.url);
-      // Leave the `new` queue immediately so a concurrent inbox refresh stops
-      // showing it; the summarizer owns the terminal status from here.
-      await setCandidateStatus(candidate.id, "summarizing");
-
-      // Fire and forget — background summarization.
-      summarizeCandidate(
-        jobId,
-        candidate.id,
-        candidate.title,
-        candidate.url,
-        config,
-        summarizerBot,
-      ).catch((err) => {
-        log.error("Anthropic summarization failed: {error}", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-
+      // createJob → mark the candidate `summarizing` (leaves the `new` queue so a
+      // concurrent inbox refresh stops offering it) → fire the background summarize.
+      // Shared with the watcher's auto-promote path (kickCandidateSummarize).
+      const jobId = await kickCandidateSummarize(candidate, config, summarizerBot);
       return c.json({ job_id: jobId, dashboard_url: `/summaries?source=anthropic&job=${jobId}` });
     } catch (err) {
       log.error("Summarizing anthropic candidate {id} failed: {error}", {

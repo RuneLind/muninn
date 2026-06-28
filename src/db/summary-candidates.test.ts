@@ -4,6 +4,7 @@ import {
   upsertCandidate,
   listCandidates,
   getCandidateById,
+  getCandidateBySourceUrl,
   setCandidateStatus,
 } from "./summary-candidates.ts";
 
@@ -82,6 +83,20 @@ describe("summary-candidates", () => {
     await upsertCandidate({ ...base, url: "https://a/m", botName: "melosys", score: 0.6 });
     expect(await listCandidates({ botName: "jarvis" })).toHaveLength(1);
     expect(await listCandidates({ status: ["new", "summarizing"] })).toHaveLength(2);
+  });
+
+  test("getCandidateBySourceUrl resolves a row by its (source,url) identity, with current status", async () => {
+    expect(await getCandidateBySourceUrl("anthropic", base.url)).toBeNull();
+    await upsertCandidate(base);
+    const row = await getCandidateBySourceUrl("anthropic", base.url);
+    expect(row).not.toBeNull();
+    expect(row!.url).toBe(base.url);
+    expect(row!.status).toBe("new");
+    // Reflects the live status (the auto-promote dedup gate reads this).
+    await setCandidateStatus(row!.id, "summarizing");
+    expect((await getCandidateBySourceUrl("anthropic", base.url))!.status).toBe("summarizing");
+    // Scoped by source — a different source with the same url path doesn't collide.
+    expect(await getCandidateBySourceUrl("youtube", base.url)).toBeNull();
   });
 
   test("setCandidateStatus with null docId leaves an existing doc_id untouched", async () => {
