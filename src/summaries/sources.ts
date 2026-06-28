@@ -50,6 +50,14 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     apiBase: "/api/x-articles",
     linkLabel: "View on X ↗",
   },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    badge: "Claude",
+    collection: "anthropic-summaries",
+    apiBase: "/api/anthropic",
+    linkLabel: "Read on docs ↗",
+  },
 ];
 
 export function getSummarySource(id: string): SummarySource | undefined {
