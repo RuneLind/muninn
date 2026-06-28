@@ -138,7 +138,7 @@ Like the X watcher, the single Anthropic row is split into three rows that share
 
 | Name | Schedule | mode | gate / `minScore` | `quietMode` | `model` | `lookbackDays` | Prompt |
 |---|---|---|---|---|---|---|---|
-| **Anthropic Highlights** | every 2h | per-item gate | `gate:true`, `minScore 0.8` | — | Haiku | 7 | `DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT` (stricter — surfaces only the exceptional) |
+| **Anthropic Highlights** | every 2h | per-item gate + capture | `gate:true`, `minScore 0.8`, `captureCandidates`, `candidateMinScore 0.5` | — | Haiku | 7 | `DEFAULT_ANTHROPIC_GATE_PROMPT` (standard 0.5–1.0 scoring — so the inbox gets the middle band; alert still gates 0.8) |
 | **Anthropic Daily Digest** | 24h + `hour:12` | `digest:true` | — | `true` (prompt invites `SKIP`) | Sonnet | 3 | `DEFAULT_ANTHROPIC_DAILY_PROMPT` |
 | **Anthropic Weekly Digest** | 7d + `hour:18` | `digest:true` | — | `false` | Sonnet | 16 | `DEFAULT_ANTHROPIC_WEEKLY_PROMPT` |
 
@@ -173,6 +173,8 @@ State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — k
 ### Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B)
 
 The Highlights row's gate already scores + writes a "why" for every new item. With `captureCandidates: true` it also persists each candidate scored ≥ `candidateMinScore` into **`summary_candidates`** (`src/db/summary-candidates.ts`) — a ranked, pre-annotated reading queue surfaced on `/summaries`. Two cuts on the one score: `minScore` (0.8) → Telegram alert, `candidateMinScore` (0.5) → inbox. So the relevant middle lands in the inbox instead of being dropped silently. Capture is best-effort (a DB error never breaks the alert path) and deduped by the table's `UNIQUE(source,url)` plus the upstream `lastNotifiedIds` filter (each item captured once; re-captures keep the max score, never resurrect a dismissed/summarized row). `status` walks new → summarizing → summarized | dismissed | error; `doc_id` links the resulting `anthropic-summaries` doc (Phase C/D). Table added in migration `047`, mirrored in `db/init.sql`.
+
+The stricter `DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT` (≥0.8-only) remains exported as a config option for anyone who wants the original quiet-alerting calibration back — but it leaves the inbox to the alerted items only (no middle band), so it's not paired with `captureCandidates`.
 
 ## Configurable prompts
 

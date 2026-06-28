@@ -66,9 +66,13 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
     )
     ON CONFLICT (source, url) DO UPDATE
       SET score = GREATEST(summary_candidates.score, EXCLUDED.score),
-          why = EXCLUDED.why,
-          title = EXCLUDED.title,
-          candidate_src = EXCLUDED.candidate_src,
+          -- Keep why/title/candidate_src paired with the WINNING (higher) score, so a
+          -- later lower-score capture (an item that rolled out of last_notified_ids and
+          -- re-surfaced, or a Tier-1/Tier-2 URL collision in one run) can't leave a high
+          -- score wearing a low-score rationale.
+          why = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.why ELSE summary_candidates.why END,
+          title = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.title ELSE summary_candidates.title END,
+          candidate_src = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.candidate_src ELSE summary_candidates.candidate_src END,
           updated_at = now()
       WHERE summary_candidates.status = 'new'
   `;

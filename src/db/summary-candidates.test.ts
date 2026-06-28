@@ -40,11 +40,14 @@ describe("summary-candidates", () => {
     expect(rows[0]!.why).toBe("now a headliner");
   });
 
-  test("upsert keeps the existing higher score when a lower one arrives", async () => {
-    await upsertCandidate({ ...base, score: 0.9 });
-    await upsertCandidate({ ...base, score: 0.5 });
+  test("upsert keeps the existing higher score AND its paired why/title", async () => {
+    await upsertCandidate({ ...base, score: 0.9, why: "headliner", title: "Big" });
+    await upsertCandidate({ ...base, score: 0.5, why: "minor churn", title: "Small" });
     const [row] = await listCandidates({ source: "anthropic" });
     expect(row!.score).toBeCloseTo(0.9, 5);
+    // why/title must stay paired with the winning (higher) score, not adopt the lower capture's.
+    expect(row!.why).toBe("headliner");
+    expect(row!.title).toBe("Big");
   });
 
   test("upsert does NOT resurrect a dismissed candidate", async () => {
