@@ -20,6 +20,7 @@ Scheduler tick (every 60s)
 | `email` | `email.ts` | Haiku with Gmail MCP tools | Configurable via `config.model` |
 | `news` | `news.ts` | Google News RSS (no AI) | — |
 | `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
+| `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (opt-in `config.gate`) |
 
 ## X/Twitter Watcher — Key Lessons
 
@@ -120,6 +121,34 @@ Caveats of the parallel model:
 ## Email Watcher (email.ts)
 
 Spawns Haiku with the bot's Gmail MCP tools. The prompt has structural parts (Gmail search, JSON format) that are hardcoded, plus a configurable evaluation criteria section (`config.prompt`). Returns individual `WatcherAlert[]` per email with Gmail message IDs for dedup.
+
+## Anthropic Watcher (anthropic.ts)
+
+Two tiers over the Anthropic firehose, alert-only. The companion *indexing* half (Huginn `anthropic-knowledge`) already content-hash-diffs the same surfaces, so this watcher is Muninn-only.
+
+- **Tier-1** polls the verified GitHub Atom feeds (`DEFAULT_ANTHROPIC_FEEDS`) via a small Atom parser (`parseRssItems` is RSS-2.0-only and returns 0 on Atom). Dedup by entry id (the GitHub URL) against `lastNotifiedIds`; the runner **skips content-hash dedup for `type='anthropic'`** (ids are stable canonical URLs).
+- **Tier-2** (opt-in `config.tier2`) snapshot-and-diffs the feed-less surfaces — the `llms.txt` doc-URL set (~1753) + `anthropic.com/{news,engineering,research}` slug sets — against the `watcher_snapshots` table (one row per source). NOT `lastNotifiedIds` (400-capped, shared with Tier-1) and NOT `config` (the dashboard's `updateWatcher` overwrites the whole blob). URLs absent from the snapshot are candidates; each source's first run records the baseline silently.
+- **Haiku gate** (opt-in `config.gate`): the new candidates (Tier-1 entries + Tier-2 additions) are scored 0–1 in **one** Haiku call (`DEFAULT_ANTHROPIC_GATE_PROMPT` — weights Claude Code, agents/tools/MCP, retrieval/evals, and new models highest). Only candidates ≥ `minScore` alert, each carrying a one-line "why it matters"; the rest are tracked silently (one `silent: true` alert), so they aren't re-scored next run. The gate is what makes the high-churn commit feeds safe to enable. `config.quietMode` lets the model reply with literal `SKIP` to suppress the whole batch. On a gate error the run returns `[]` and Tier-2 snapshots are **not** advanced, so the additions re-surface and retry.
+
+**Cold start** (empty `lastNotifiedIds`): the Tier-1 baseline is recorded as a single silent alert and every Tier-2 snapshot is baselined — run 1 fires nothing despite ~1753 docs. Steady-state runs filter candidates against `lastNotifiedIds` **before** the gate, so the gate only ever sees the delta since the last run.
+
+### Config fields (JSONB)
+
+| Field | Default | Description |
+|---|---|---|
+| `feeds` | `DEFAULT_ANTHROPIC_FEEDS` | Tier-1 Atom feed list (omit to track the code default) |
+| `lookbackDays` | 7 | How far back to read each feed (a candidate-set bound, not the dedup key) |
+| `tier2` | `false` | Enable the llms.txt + blog slug-set diff |
+| `llmsTxtUrl` | `platform.claude.com/llms.txt` | Override the doc index URL |
+| `blogSections` | news/engineering/research | anthropic.com listings to diff |
+| `gate` | `false` | Score new candidates with Haiku |
+| `minScore` | 0.5 | Drop scored candidates below this 0–1 threshold |
+| `model` | Haiku (`DEFAULT_MODEL`) | Gate model |
+| `timeoutMs` | 90000 (code) | Gate model-call timeout. Set ≥150000 so it clears the runner's 120s watcher-timeout floor (the runner widens its net to `timeoutMs + 30s`). |
+| `quietMode` | `false` | Allow literal `SKIP` to suppress the batch |
+| `prompt` | `DEFAULT_ANTHROPIC_GATE_PROMPT` | Override the gate criteria |
+
+State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — keys `tier2:llms` and `tier2:blog:<section>`. Added in migration `046` and mirrored in `db/init.sql` (the `schema-drift.test.ts` guard requires both, identical). `seed`: `scripts/setup-anthropic-watchers.ts` seeds `{tier2, gate, minScore, timeoutMs}` on for fresh deploys.
 
 ## Configurable prompts
 

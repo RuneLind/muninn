@@ -333,6 +333,22 @@ CREATE INDEX idx_watchers_bot_due ON watchers (bot_name, enabled, last_run_at)
 CREATE INDEX idx_watchers_user ON watchers (user_id, enabled);
 
 -- ============================================================================
+-- Watcher snapshots: large per-watcher baseline SETs (anthropic Tier-2 diff).
+-- Stores the ~1753-URL llms.txt doc set + blog slug sets the Tier-2 diff
+-- compares against each run — NOT in last_notified_ids (400-cap, shared with
+-- Tier-1 dedup) and NOT in config (updateWatcher overwrites the whole blob).
+-- ⚠️ Mirror of db/migrations/046-watcher-snapshots.sql: identical column order +
+-- PK + FK or schema-drift.test.ts reds.
+-- ============================================================================
+CREATE TABLE watcher_snapshots (
+  watcher_id UUID NOT NULL REFERENCES watchers(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
+  value      JSONB NOT NULL DEFAULT '[]',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (watcher_id, key)
+);
+
+-- ============================================================================
 -- User settings: quiet hours, timezone preferences
 -- ============================================================================
 CREATE TABLE user_settings (

@@ -172,6 +172,32 @@ export async function updateWatcher(
   return row ? mapRow(row) : null;
 }
 
+/**
+ * Tier-2 snapshot accessors (Phase 3). The anthropic watcher stores its large
+ * baseline SETs — the ~1753-URL llms.txt doc set + per-section blog slug sets —
+ * here, one row per (watcher_id, key), so the per-run diff has something stable
+ * to compare against. Kept out of last_notified_ids (400-cap, shared with
+ * Tier-1 dedup) and config (updateWatcher overwrites the whole blob). JSONB is
+ * returned already parsed by postgres.js, so callers get the array/object back.
+ */
+export async function getWatcherSnapshot(watcherId: string, key: string): Promise<unknown | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT value FROM watcher_snapshots WHERE watcher_id = ${watcherId} AND key = ${key}
+  `;
+  return row ? row.value : null;
+}
+
+export async function setWatcherSnapshot(watcherId: string, key: string, value: unknown): Promise<void> {
+  const sql = getDb();
+  await sql`
+    INSERT INTO watcher_snapshots (watcher_id, key, value, updated_at)
+    VALUES (${watcherId}, ${key}, ${sql.json(value as any)}, now())
+    ON CONFLICT (watcher_id, key) DO UPDATE
+      SET value = EXCLUDED.value, updated_at = now()
+  `;
+}
+
 function mapRow(r: Record<string, any>): Watcher {
   return {
     id: r.id,
