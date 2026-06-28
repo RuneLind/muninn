@@ -58,11 +58,27 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     log.info("Research ask: bot={bot} q={q}", { bot: botConfig.name, q: question.slice(0, 120) });
 
     return streamSSE(c, async (stream) => {
-      await streamResearchAnswer({ question, config, botConfig }, async (event) => {
-        await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
-      });
-      // Final sentinel so the client can close the EventSource deterministically.
-      await stream.writeSSE({ event: "end", data: "{}" });
+      // Retrieval (≤30s) and a slow first synthesis token can leave a long gap
+      // with no events; a heartbeat keeps the connection alive through any proxy
+      // with a shorter idle window than the dashboard's own 255s (matches the
+      // youtube/anthropic SSE streams). The client has no 'heartbeat' listener,
+      // so these are silently ignored.
+      let alive = true;
+      const heartbeat = setInterval(() => {
+        if (!alive) return;
+        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
+      }, 30_000);
+      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
+      try {
+        await streamResearchAnswer({ question, config, botConfig }, async (event) => {
+          await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
+        });
+        // Final sentinel so the client can close the EventSource deterministically.
+        await stream.writeSSE({ event: "end", data: "{}" });
+      } finally {
+        alive = false;
+        clearInterval(heartbeat);
+      }
     });
   });
 

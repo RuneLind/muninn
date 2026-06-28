@@ -293,6 +293,7 @@ export async function renderResearchPage(): Promise<string> {
     var citations = [];
     var answerBuffer = '';
     var currentSource = null; // active EventSource
+    var browseLoaded = false; // the folded browse list loads lazily on first open
 
     // === Bot selector ===
 
@@ -330,7 +331,14 @@ export async function renderResearchPage(): Promise<string> {
       document.querySelectorAll('#botSelector .bot-pill').forEach(function(p) {
         p.classList.toggle('active', p.dataset.bot === name);
       });
-      if (document.getElementById('browseDetails').open) loadBotCollections();
+      // The browse list is bot-scoped — refresh it now if open, else let it
+      // reload on the next open (don't leave the previous bot's collections).
+      if (document.getElementById('browseDetails').open) {
+        browseLoaded = true;
+        loadBotCollections();
+      } else {
+        browseLoaded = false;
+      }
     }
 
     // === Q&A ===
@@ -413,15 +421,18 @@ export async function renderResearchPage(): Promise<string> {
 
       // Server sends an explicit 'end' sentinel after the stream is done.
       es.addEventListener('end', function() {
-        if (currentSource) { currentSource.close(); currentSource = null; }
+        if (currentSource !== es) return; // a newer ask superseded this stream
+        currentSource.close();
+        currentSource = null;
         btn.disabled = false;
       });
 
       // Network-level failure (not an app 'error' event) — EventSource.onerror.
       es.onerror = function() {
+        if (currentSource !== es) return; // stale stream from a superseded ask
         if (es.readyState === EventSource.CLOSED) {
           btn.disabled = false;
-          if (!answerBuffer && document.getElementById('answerStatus').className.indexOf('done') === -1) {
+          if (!answerBuffer && !document.getElementById('answerStatus').classList.contains('done')) {
             setStatus('Connection lost', 'error');
           }
         }
@@ -612,7 +623,6 @@ export async function renderResearchPage(): Promise<string> {
     });
 
     // Load the browse collections only when the section is first opened.
-    var browseLoaded = false;
     document.getElementById('browseDetails').addEventListener('toggle', function() {
       if (this.open && !browseLoaded) { browseLoaded = true; loadBotCollections(); }
     });
