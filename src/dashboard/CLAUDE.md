@@ -20,7 +20,7 @@ Routes are split by domain in `routes/`:
 | `sse-routes.ts` | SSE streams: `/events` (activity), `/agent-status` (phase), `/request-progress` (waterfall) |
 | `traces-routes.ts` | Trace spans: list, detail, waterfall data, cleanup |
 | `search-routes.ts` | Knowledge base document search and management |
-| `research-routes.ts` | Jira research: trigger analysis, post to chat |
+| `research-routes.ts` | `/research` page: cited Q&A over the shelf corpus (`GET /api/research/ask` SSE — retrieve via `researchKnowledge`, synthesize one cited answer; see `src/research/{corpus,answer,ask}.ts`) + the browse `/api/research/*` endpoints. Also the Jira research flow (`/api/research/chat`: trigger analysis, post to chat). |
 | `memsearch-routes.ts` | Memory semantic search (hybrid FTS + vector) |
 | `graph-routes.ts` | Knowledge graph page + wikilink edge extraction across knowledge collections |
 | `logs-routes.ts` | Log file viewer (JSONL files from LogTape) |
