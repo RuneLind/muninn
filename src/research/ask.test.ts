@@ -10,6 +10,7 @@ import type { AnswerEvent } from "./ask.ts";
 // vars below, reset to a happy-path default in beforeEach.
 
 let mockResults: ResearchHit[] = [];
+let mockLowConfidence = false;
 let researchThrows: string | null = null;
 let lastResearchOpts: Record<string, unknown> | null = null;
 
@@ -37,7 +38,7 @@ mock.module("../ai/research-knowledge.ts", () => ({
     return {
       results: mockResults,
       decomposition: { subQuestions: ["q"], rationale: "passthrough", passthrough: true, haikuMs: 5 },
-      subSearches: [{ subQuestion: "q", durationMs: 10, resultCount: mockResults.length }],
+      subSearches: [{ subQuestion: "q", durationMs: 10, resultCount: mockResults.length, lowConfidence: mockLowConfidence }],
       traceId: "trace-123",
     };
   },
@@ -73,6 +74,7 @@ async function collect(question: string): Promise<AnswerEvent[]> {
 
 beforeEach(() => {
   mockResults = [makeHit(), makeHit({ collection: "wiki", id: "concepts/mcp.md", title: "MCP", url: undefined, relevance: 0.6 })];
+  mockLowConfidence = false;
   researchThrows = null;
   lastResearchOpts = null;
   claudeAnswer = "Claude Code is an agentic CLI [1]. It supports MCP servers [2].";
@@ -96,6 +98,7 @@ test("happy path: emits phase → sources → deltas → done with cited indices
 
   const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
   expect(done.noHits).toBe(false);
+  expect(done.lowConfidence).toBe(false);
   expect(done.answer).toContain("agentic CLI");
   expect(done.cited).toEqual([1, 2]);
 });
@@ -129,7 +132,26 @@ test("no hits: skips the Claude call and answers with the honest fallback", asyn
   expect(lastUserPrompt).toBe(""); // executeClaudePrompt never called
   const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
   expect(done.noHits).toBe(true);
+  expect(done.lowConfidence).toBe(false);
   expect(done.answer.toLowerCase()).toContain("couldn't find");
+  expect(done.cited).toEqual([]);
+});
+
+test("low confidence: weak-but-nonzero retrieval declines synthesis but still shows the sources", async () => {
+  // Documents came back, but Huginn flagged every sub-search lowConfidence —
+  // the honest relevance floor declines rather than grounding on weak neighbours.
+  mockLowConfidence = true;
+  const events = await collect("a loosely-related off-topic question");
+
+  // Sources still ride out so the reader can open and judge the weak matches.
+  const sources = events.find((e) => e.type === "sources") as Extract<AnswerEvent, { type: "sources" }>;
+  expect(sources.citations).toHaveLength(2);
+
+  expect(lastUserPrompt).toBe(""); // no Claude synthesis call spent
+  const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
+  expect(done.noHits).toBe(true);
+  expect(done.lowConfidence).toBe(true);
+  expect(done.answer.toLowerCase()).toContain("don't confidently cover");
   expect(done.cited).toEqual([]);
 });
 

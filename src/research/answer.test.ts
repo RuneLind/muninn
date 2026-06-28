@@ -1,10 +1,13 @@
 import { test, expect } from "bun:test";
 import type { ResearchHit } from "../ai/research-knowledge.ts";
 import {
+  assessCoverage,
   buildCitations,
   buildSynthesisUserPrompt,
   citedIndices,
+  coverageMessage,
   renderSourcesBlock,
+  LOW_CONFIDENCE_MESSAGE,
   NO_HITS_MESSAGE,
   DEFAULT_MAX_SOURCES,
 } from "./answer.ts";
@@ -78,4 +81,59 @@ test("citedIndices extracts distinct, sorted, in-text references", () => {
 test("NO_HITS_MESSAGE is a non-empty honest fallback", () => {
   expect(NO_HITS_MESSAGE.length).toBeGreaterThan(20);
   expect(NO_HITS_MESSAGE.toLowerCase()).toContain("couldn't find");
+});
+
+// --- assessCoverage: the honest relevance floor (gates on Huginn's raw-score
+// `lowConfidence` signal, not the rank-based `relevance` value) ---
+
+test("assessCoverage: zero merged hits → no_hits", () => {
+  expect(assessCoverage({ hitCount: 0, subSearches: [] })).toBe("no_hits");
+  expect(assessCoverage({ hitCount: 0, subSearches: [{ resultCount: 0 }] })).toBe("no_hits");
+});
+
+test("assessCoverage: a confident sub-search with results → answer", () => {
+  expect(
+    assessCoverage({ hitCount: 3, subSearches: [{ resultCount: 3, lowConfidence: false }] }),
+  ).toBe("answer");
+  // lowConfidence absent is treated as confident.
+  expect(assessCoverage({ hitCount: 2, subSearches: [{ resultCount: 2 }] })).toBe("answer");
+});
+
+test("assessCoverage: results exist but every result-bearing sub-search is weak → low_confidence", () => {
+  expect(
+    assessCoverage({
+      hitCount: 2,
+      subSearches: [
+        { resultCount: 2, lowConfidence: true },
+        { resultCount: 0, lowConfidence: false }, // empty sub-search doesn't count as confident
+      ],
+    }),
+  ).toBe("low_confidence");
+});
+
+test("assessCoverage: one confident angle among weak ones is enough to answer", () => {
+  expect(
+    assessCoverage({
+      hitCount: 4,
+      subSearches: [
+        { resultCount: 1, lowConfidence: true },
+        { resultCount: 3, lowConfidence: false },
+      ],
+    }),
+  ).toBe("answer");
+});
+
+test("assessCoverage: hits present but all sub-searches returned nothing → no_hits", () => {
+  // Defensive: merged count and per-search counts disagree (shouldn't happen, but
+  // we never want to claim coverage with no result-bearing sub-search to judge).
+  expect(
+    assessCoverage({ hitCount: 2, subSearches: [{ resultCount: 0, lowConfidence: true }] }),
+  ).toBe("no_hits");
+});
+
+test("coverageMessage maps the non-answer verdicts to distinct canned replies", () => {
+  expect(coverageMessage("no_hits")).toBe(NO_HITS_MESSAGE);
+  expect(coverageMessage("low_confidence")).toBe(LOW_CONFIDENCE_MESSAGE);
+  expect(LOW_CONFIDENCE_MESSAGE.length).toBeGreaterThan(20);
+  expect(LOW_CONFIDENCE_MESSAGE.toLowerCase()).toContain("don't confidently cover");
 });

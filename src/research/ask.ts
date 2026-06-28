@@ -17,11 +17,12 @@ import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } 
 import { getLog } from "../logging.ts";
 import { RESEARCH_COLLECTIONS } from "./corpus.ts";
 import {
+  assessCoverage,
   buildCitations,
   buildSynthesisUserPrompt,
   citedIndices,
+  coverageMessage,
   DEFAULT_MAX_SOURCES,
-  NO_HITS_MESSAGE,
   SYNTHESIS_SYSTEM_PROMPT,
   type Citation,
 } from "./answer.ts";
@@ -41,7 +42,7 @@ export type AnswerEvent =
       traceId: string;
     }
   | { type: "delta"; text: string }
-  | { type: "done"; answer: string; noHits: boolean; cited: number[] }
+  | { type: "done"; answer: string; noHits: boolean; lowConfidence: boolean; cited: number[] }
   | { type: "error"; message: string };
 
 export interface ResearchAnswerOptions {
@@ -90,10 +91,30 @@ export async function streamResearchAnswer(
       traceId: result.traceId,
     });
 
-    // No usable hits → answer honestly instead of hallucinating, no Claude call.
-    if (citations.length === 0) {
-      await emit({ type: "delta", text: NO_HITS_MESSAGE });
-      await emit({ type: "done", answer: NO_HITS_MESSAGE, noHits: true, cited: [] });
+    // Honest relevance floor: gate synthesis on Huginn's raw-score `lowConfidence`
+    // signal, not the rank-based `relevance` value (see assessCoverage). On a
+    // no-coverage / low-confidence verdict we decline rather than spend a Claude
+    // call grounding an answer in weak nearest-neighbours. Weak sources still rode
+    // out on the `sources` event above, so the reader can open and judge them.
+    const coverage = assessCoverage({
+      hitCount: result.results.length,
+      subSearches: result.subSearches,
+    });
+    if (coverage !== "answer") {
+      const message = coverageMessage(coverage);
+      log.info("Research declined coverage={coverage} botName={botName} hits={hits}", {
+        coverage,
+        botName: botConfig.name,
+        hits: result.results.length,
+      });
+      await emit({ type: "delta", text: message });
+      await emit({
+        type: "done",
+        answer: message,
+        noHits: true,
+        lowConfidence: coverage === "low_confidence",
+        cited: [],
+      });
       return;
     }
 
@@ -125,6 +146,7 @@ export async function streamResearchAnswer(
       type: "done",
       answer,
       noHits: false,
+      lowConfidence: false,
       cited: citedIndices(answer),
     });
   } catch (err) {

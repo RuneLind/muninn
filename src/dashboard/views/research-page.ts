@@ -158,6 +158,17 @@ export async function renderResearchPage(): Promise<string> {
       white-space: nowrap;
     }
     .source-rel { flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+    .source-shelf {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+      padding: 2px 7px;
+      border-radius: 5px;
+      border: 1px solid color-mix(in srgb, var(--status-success) 40%, transparent);
+      color: var(--status-success);
+      background: color-mix(in srgb, var(--status-success) 12%, transparent);
+    }
 
     .empty-hint {
       color: var(--text-dim);
@@ -406,7 +417,11 @@ export async function renderResearchPage(): Promise<string> {
         b.innerHTML = renderMarkdown(d.answer || answerBuffer || '');
         linkifyCitations(b);
         renderSources(d.cited || []);
-        setStatus(d.noHits ? 'No matching sources' : 'Answered from ' + citations.length + ' source' + (citations.length === 1 ? '' : 's'), 'done');
+        var statusText;
+        if (d.lowConfidence) statusText = 'No strong match — showing the closest sources';
+        else if (d.noHits) statusText = 'No matching sources';
+        else statusText = 'Answered from ' + citations.length + ' source' + (citations.length === 1 ? '' : 's');
+        setStatus(statusText, 'done');
         btn.disabled = false;
       });
 
@@ -489,10 +504,16 @@ export async function renderResearchPage(): Promise<string> {
       var rows = citations.map(function(c) {
         var uncited = anyCited && !citedSet[c.n] ? ' uncited' : '';
         var rel = (typeof c.relevance === 'number') ? (c.relevance.toFixed(2)) : '';
+        // anthropic-summaries citations are docs you curated onto the Learning
+        // Center shelf (Curate layer), so flag them apart from the raw firehose.
+        var shelf = c.sourceId === 'anthropic'
+          ? '<span class="source-shelf" title="A summary you curated onto your shelf">★ your shelf</span>'
+          : '';
         return '<div class="source-row' + uncited + '" onclick="openCitation(' + c.n + ')">' +
           '<span class="source-num">' + c.n + '</span>' +
           '<span class="source-badge">' + esc(c.badge || '') + '</span>' +
           '<span class="source-title">' + esc(c.title || c.docId) + '</span>' +
+          shelf +
           (rel ? '<span class="source-rel">' + rel + '</span>' : '') +
         '</div>';
       }).join('');
