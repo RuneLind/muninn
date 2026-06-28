@@ -166,12 +166,15 @@ export function sumCandidatesScript(): string {
     }
 
     function renderCandidateRow(c) {
-      var band = candidateScoreBand(c.score);
+      // Band off the rounded value the user actually sees, so the pill text and
+      // its color never disagree on a boundary score (e.g. 0.895 → "0.90").
+      var shown = c.score.toFixed(2);
+      var band = candidateScoreBand(parseFloat(shown));
       var titleInner = c.url
         ? '<a href="' + esc(c.url) + '" target="_blank" rel="noopener">' + esc(c.title) + '</a>'
         : esc(c.title);
       return '<div class="candidate-item" data-id="' + esc(c.id) + '">' +
-        '<div class="candidate-score" data-band="' + band + '">' + c.score.toFixed(2) + '</div>' +
+        '<div class="candidate-score" data-band="' + band + '">' + shown + '</div>' +
         '<div class="candidate-body">' +
           (c.candidateSrc ? '<div class="candidate-meta">' + esc(c.candidateSrc) + '</div>' : '') +
           '<div class="candidate-title">' + titleInner + '</div>' +
@@ -200,7 +203,7 @@ export function sumCandidatesScript(): string {
       try {
         var res = await fetch('/api/anthropic/candidates/' + encodeURIComponent(id) + '/dismiss', { method: 'POST' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        var row = document.querySelector('.candidate-item[data-id="' + id.replace(/"/g, '\\\\"') + '"]');
+        var row = btn.closest('.candidate-item');
         if (row) {
           row.classList.add('removing');
           setTimeout(function() { row.remove(); updateCandidateCount(); }, 200);
