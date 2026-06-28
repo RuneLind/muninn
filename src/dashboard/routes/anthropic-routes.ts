@@ -76,6 +76,13 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
             : `/summaries?source=anthropic`,
         });
       }
+      // Already in flight — a double-click (or the auto-promote path racing the
+      // button) must not spawn a second Claude job for the same candidate. The
+      // candidate stays `summarizing` for the whole pipeline, so this one check
+      // covers the entire in-progress window.
+      if (candidate.status === "summarizing") {
+        return c.json({ error: "Already summarizing", status: "summarizing" }, 409);
+      }
 
       const summarizerBot = resolveSummarizerBot(discoverAllBots());
       if (!summarizerBot) {

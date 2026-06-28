@@ -35,8 +35,9 @@ let ingestBody: Record<string, unknown> = {
   file_path: `/abs/data/sources/anthropic-summaries/${SUMMARY_DOC_ID}`,
 };
 
-// Recorded candidate status writes.
+// Recorded candidate status writes; optionally make one status write throw.
 let statusCalls: Array<{ id: string; status: string; docId: string | null }> = [];
+let throwOnStatus: string | null = null;
 
 mock.module("../ai/executor.ts", () => ({
   executeClaudePrompt: async (prompt: string, _c: unknown, _b: unknown, _sys?: string, onProgress?: (e: { type: string; text: string }) => void) => {
@@ -58,6 +59,7 @@ mock.module("../ai/knowledge-api-client.ts", () => ({
 mock.module("../db/summary-candidates.ts", () => ({
   setCandidateStatus: async (id: string, status: string, docId: string | null = null) => {
     statusCalls.push({ id, status, docId });
+    if (throwOnStatus && status === throwOnStatus) throw new Error("db write failed");
   },
 }));
 
@@ -102,6 +104,7 @@ beforeEach(() => {
   ingestStatus = 200;
   ingestBody = { status: "ok", file_path: `/abs/data/sources/anthropic-summaries/${SUMMARY_DOC_ID}` };
   statusCalls = [];
+  throwOnStatus = null;
   installFetchMock();
 });
 
@@ -184,6 +187,20 @@ test("fails the job and errors the candidate when content cannot be resolved", a
   expect(job.status).toBe("error");
   expect(statusCalls).toHaveLength(1);
   expect(statusCalls[0]).toEqual({ id: "cand-4", status: "error", docId: null });
+});
+
+test("keeps the job complete when the final candidate status write fails", async () => {
+  // The summary is already ingested; a DB hiccup persisting the candidate
+  // bookkeeping must not flip the completed job to error.
+  throwOnStatus = "summarized";
+  const jobId = createJob("cand-6", "Title", CAND_URL);
+  await summarizeCandidate(jobId, "cand-6", "Title", CAND_URL, config, bot);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(job.docId).toBe(SUMMARY_DOC_ID);
+  // Only the (failed) summarized write was attempted — no error-status overwrite.
+  expect(statusCalls).toEqual([{ id: "cand-6", status: "summarized", docId: SUMMARY_DOC_ID }]);
 });
 
 test("errors the candidate when ingest returns non-200", async () => {

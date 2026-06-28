@@ -314,13 +314,23 @@ URL: ${url}`;
     }
 
     // 5. Complete — flip the candidate onto the shelf, linking its summary doc.
+    //    The summary is already ingested, so a failure to persist the candidate
+    //    bookkeeping must NOT bubble to the outer catch and flip this completed
+    //    job to `error`; log it and leave the job `complete`.
     completeJob(jobId, summary, category);
-    await setCandidateStatus(candidateId, "summarized", docId);
-    log.info("Candidate {candidateId} summarized → {collection} doc {docId}", {
-      candidateId,
-      collection: SUMMARIES_COLLECTION,
-      docId,
-    });
+    try {
+      await setCandidateStatus(candidateId, "summarized", docId);
+      log.info("Candidate {candidateId} summarized → {collection} doc {docId}", {
+        candidateId,
+        collection: SUMMARIES_COLLECTION,
+        docId,
+      });
+    } catch (err) {
+      log.error("Candidate {candidateId} ingested but status update failed: {error}", {
+        candidateId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("Anthropic summarization failed for job {jobId}: {error}", { jobId, error: msg });
