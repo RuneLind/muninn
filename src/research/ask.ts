@@ -19,12 +19,14 @@ import { RESEARCH_COLLECTIONS } from "./corpus.ts";
 import {
   assessCoverage,
   buildCitations,
+  buildRetrievalQuestion,
   buildSynthesisUserPrompt,
   citedIndices,
   coverageMessage,
   DEFAULT_MAX_SOURCES,
   SYNTHESIS_SYSTEM_PROMPT,
   type Citation,
+  type ResearchTurn,
 } from "./answer.ts";
 
 const log = getLog("research", "ask");
@@ -49,6 +51,12 @@ export interface ResearchAnswerOptions {
   question: string;
   config: Config;
   botConfig: BotConfig;
+  /**
+   * Prior turns of this conversation, oldest→newest, for follow-ups. Carried
+   * in-request (the page replays a compact, bounded slice each ask) — no server
+   * state. Empty/omitted ⇒ the single-shot path, unchanged. See {@link ResearchTurn}.
+   */
+  history?: ResearchTurn[];
   /** Override the corpus (tests / future scoping). Defaults to RESEARCH_COLLECTIONS. */
   collections?: string[];
   maxSources?: number;
@@ -65,14 +73,17 @@ export async function streamResearchAnswer(
   emit: (event: AnswerEvent) => void | Promise<void>,
 ): Promise<void> {
   const { question, config, botConfig } = opts;
+  const history = opts.history ?? [];
   const collections = opts.collections ?? RESEARCH_COLLECTIONS;
   const maxSources = opts.maxSources ?? DEFAULT_MAX_SOURCES;
 
   try {
     await emit({ type: "phase", phase: "searching" });
 
+    // On a follow-up, fold the prior question(s) into the retrieval query so the
+    // decomposer can resolve references; the user-facing `question` is unchanged.
     const result = await researchKnowledge({
-      question,
+      question: buildRetrievalQuestion(question, history),
       collections,
       limit: PER_SEARCH_LIMIT,
       botName: botConfig.name,
@@ -120,7 +131,7 @@ export async function streamResearchAnswer(
 
     await emit({ type: "phase", phase: "synthesizing" });
 
-    const userPrompt = buildSynthesisUserPrompt(question, citations);
+    const userPrompt = buildSynthesisUserPrompt(question, citations, history);
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
         void emit({ type: "delta", text: event.text });

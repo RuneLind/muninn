@@ -3,13 +3,17 @@ import type { ResearchHit } from "../ai/research-knowledge.ts";
 import {
   assessCoverage,
   buildCitations,
+  buildRetrievalQuestion,
   buildSynthesisUserPrompt,
   citedIndices,
   coverageMessage,
+  renderHistoryBlock,
   renderSourcesBlock,
   LOW_CONFIDENCE_MESSAGE,
   NO_HITS_MESSAGE,
   DEFAULT_MAX_SOURCES,
+  MAX_HISTORY_TURNS,
+  type ResearchTurn,
 } from "./answer.ts";
 
 function hit(over: Partial<ResearchHit> = {}): ResearchHit {
@@ -70,6 +74,86 @@ test("buildSynthesisUserPrompt embeds the question and the numbered sources", ()
   expect(prompt).toContain("Question: What is Claude Code?");
   expect(prompt).toContain("Cite with [n]");
   expect(prompt).toContain("[1] (Claude)");
+});
+
+// --- Multi-turn follow-ups: prior turns thread into retrieval + synthesis ---
+
+test("buildRetrievalQuestion: empty history returns the question verbatim (single-shot unchanged)", () => {
+  expect(buildRetrievalQuestion("What is prompt caching?")).toBe("What is prompt caching?");
+  expect(buildRetrievalQuestion("What is prompt caching?", [])).toBe("What is prompt caching?");
+});
+
+test("buildRetrievalQuestion: a follow-up prepends the prior question(s) so retrieval can resolve references", () => {
+  const history: ResearchTurn[] = [{ question: "What is Claude Code?", answer: "An agentic CLI." }];
+  const q = buildRetrievalQuestion("Does it support MCP?", history);
+  expect(q).toContain('"What is Claude Code?"');
+  expect(q).toContain("Does it support MCP?");
+  // The literal follow-up text is still present so retrieval keeps its own terms.
+  expect(q.endsWith("Does it support MCP?")).toBe(true);
+});
+
+test("buildRetrievalQuestion: uses at most the two most recent prior questions", () => {
+  const history: ResearchTurn[] = [
+    { question: "Q-oldest", answer: "a" },
+    { question: "Q-middle", answer: "b" },
+    { question: "Q-recent", answer: "c" },
+  ];
+  const q = buildRetrievalQuestion("now this", history);
+  expect(q).not.toContain("Q-oldest");
+  expect(q).toContain("Q-middle");
+  expect(q).toContain("Q-recent");
+});
+
+test("buildRetrievalQuestion: history with only blank questions falls back to the raw question", () => {
+  expect(buildRetrievalQuestion("real question", [{ question: "   ", answer: "x" }])).toBe("real question");
+});
+
+test("renderHistoryBlock: numbers turns and truncates long prior answers", () => {
+  const long = "x".repeat(2000);
+  const block = renderHistoryBlock([
+    { question: "first?", answer: "short answer" },
+    { question: "second?", answer: long },
+  ]);
+  expect(block).toContain("Q1: first?");
+  expect(block).toContain("A1: short answer");
+  expect(block).toContain("Q2: second?");
+  expect(block).toContain("…"); // long answer was truncated
+  expect(block.length).toBeLessThan(long.length);
+});
+
+test("renderHistoryBlock: keeps only the most recent MAX_HISTORY_TURNS", () => {
+  const history: ResearchTurn[] = Array.from({ length: MAX_HISTORY_TURNS + 3 }, (_, i) => ({
+    question: `q${i}`,
+    answer: `a${i}`,
+  }));
+  const block = renderHistoryBlock(history);
+  expect(block).not.toContain("q0");
+  expect(block).toContain(`q${history.length - 1}`);
+  // MAX_HISTORY_TURNS turns → that many "Q" lines.
+  expect(block.match(/^Q\d+:/gm)?.length).toBe(MAX_HISTORY_TURNS);
+});
+
+test("buildSynthesisUserPrompt: empty history is byte-identical to the single-shot prompt", () => {
+  const cites = buildCitations([hit()]);
+  const single = buildSynthesisUserPrompt("What is Claude Code?", cites);
+  const withEmpty = buildSynthesisUserPrompt("What is Claude Code?", cites, []);
+  expect(withEmpty).toBe(single);
+  expect(single).toContain("Question: What is Claude Code?");
+  expect(single).not.toContain("Conversation so far");
+});
+
+test("buildSynthesisUserPrompt: a follow-up embeds the conversation block, the follow-up, and the sources", () => {
+  const cites = buildCitations([hit()]);
+  const prompt = buildSynthesisUserPrompt("Does it support MCP?", cites, [
+    { question: "What is Claude Code?", answer: "An agentic CLI tool." },
+  ]);
+  expect(prompt).toContain("Conversation so far");
+  expect(prompt).toContain("Q1: What is Claude Code?");
+  expect(prompt).toContain("A1: An agentic CLI tool.");
+  expect(prompt).toContain("Follow-up question: Does it support MCP?");
+  expect(prompt).toContain("[1] (Claude)");
+  // Still instructs grounding in the numbered sources, not the prior turns.
+  expect(prompt).toContain("only these numbered sources");
 });
 
 test("citedIndices extracts distinct, sorted, in-text references", () => {
