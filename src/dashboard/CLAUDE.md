@@ -28,6 +28,7 @@ Routes are split by domain in `routes/`:
 | `summaries-routes.ts` | Unified `/summaries` page + `/api/summaries/documents` (merged, source-tagged archive across every summary source — see `src/summaries/sources.ts`) |
 | `youtube-routes.ts` | YouTube transcript fetch + summarization API. `/youtube` now 301-redirects to `/summaries?source=youtube`; the page lives in the merged view |
 | `x-article-routes.ts` | X/Twitter article summarization API (Chrome extension backend). `/x-articles` now 301-redirects to `/summaries?source=x-article` |
+| `anthropic-routes.ts` | Claude Learning Center **Curate** layer (Candidates → Summaries). The candidate inbox (`GET /api/anthropic/candidates`, `POST …/:id/{summarize,dismiss}`) + the summarizer vertical (`/api/anthropic/{stream,jobs,document,similar}`, mirroring youtube-routes against the `anthropic-summaries` collection). Summarizes a watcher-captured candidate by pulling its content from Huginn `anthropic-knowledge`; renders on `/summaries` badged "Claude". See `src/anthropic/{state,summarizer}.ts` + `src/watchers/anthropic.ts` (capture + ≥0.9 auto-promote). |
 | `route-utils.ts` | Shared helpers: UUID validation, pagination parsing |
 
 ## View System
