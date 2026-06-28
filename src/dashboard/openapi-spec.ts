@@ -966,6 +966,38 @@ export const spec = {
       },
     },
 
+    // ===================== Anthropic (Learning Center) =====================
+
+    "/api/anthropic/candidates": {
+      get: {
+        tags: ["Anthropic"],
+        summary: "Candidate inbox",
+        description:
+          "Gated discoveries captured by the Anthropic tracker (status `new`), ranked by score. Backs the candidate inbox on /summaries.",
+        operationId: "getAnthropicCandidates",
+        responses: {
+          "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { candidates: { type: "array", items: { type: "object" } } } } } } },
+          "500": errorResponse,
+        },
+      },
+    },
+
+    "/api/anthropic/candidates/{id}/dismiss": {
+      post: {
+        tags: ["Anthropic"],
+        summary: "Dismiss a candidate",
+        description: "Marks a candidate `dismissed` so it drops out of the inbox.",
+        operationId: "postAnthropicCandidateDismiss",
+        parameters: [pathId("id", "Candidate id")],
+        responses: {
+          "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
+          "400": errorResponse,
+          "404": errorResponse,
+          "500": errorResponse,
+        },
+      },
+    },
+
     // ===================== YouTube =====================
 
     "/api/youtube/summarize": {

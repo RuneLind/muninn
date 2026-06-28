@@ -4,6 +4,7 @@ import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientSourcesJson } from "../../summaries/sources.ts";
 import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
+import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 
@@ -26,6 +27,7 @@ export async function renderSummariesPage(): Promise<string> {
 
     ${sumSubmitFormStyles()}
     ${sumJobCardStyles()}
+    ${sumCandidatesStyles()}
     ${sumRecentlyAddedStyles()}
     ${sumArticleLibraryStyles()}
 
@@ -62,6 +64,9 @@ export async function renderSummariesPage(): Promise<string> {
     <!-- Active job card (hidden until a job is active) -->
     ${sumJobCardHtml()}
 
+    <!-- Candidate inbox (anthropic tracker discoveries; hidden until captured) -->
+    ${sumCandidatesHtml()}
+
     <!-- Recently added (persistent, date-grouped, source-filterable) -->
     ${sumRecentlyAddedHtml()}
 
@@ -79,6 +84,7 @@ export async function renderSummariesPage(): Promise<string> {
   <script>
     ${helpers}
     ${sumJobCardScript()}
+    ${sumCandidatesScript()}
     ${sumRecentlyAddedScript()}
     ${sumArticleLibraryScript()}
     ${sumSubmitFormScript()}
@@ -98,6 +104,7 @@ export async function renderSummariesPage(): Promise<string> {
         document.getElementById('knowledgeBanner').classList.add('visible');
       }
 
+      loadCandidates();
       loadRecentlyAdded();
       loadLibrary();
 
