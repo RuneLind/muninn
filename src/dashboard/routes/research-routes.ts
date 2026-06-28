@@ -1,8 +1,10 @@
 import type { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
+import { discoverAllBots, resolveSummarizerBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
+import { streamResearchAnswer } from "../../research/ask.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
@@ -36,6 +38,48 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
   app.get("/api/research/bots", (c) => {
     const bots = discoverAllBots().map((b) => ({ name: b.name }));
     return c.json({ bots });
+  });
+
+  // Research Q&A (Claude Learning Center, Research layer): retrieve across the
+  // shelf corpus via researchKnowledge, then synthesize one cited answer.
+  // SSE over GET so the browser drives it with a plain EventSource; the question
+  // rides in the `q` query param and the synthesizing bot in `bot` (defaults to
+  // the summarizer bot — pass an explicit bot to pin a faster one).
+  app.get("/api/research/ask", (c) => {
+    const question = (c.req.query("q") ?? "").trim();
+    const botName = c.req.query("bot")?.trim();
+    if (!question) return c.json({ error: "Missing query parameter: q" }, 400);
+
+    const allBots = discoverAllBots();
+    const botConfig =
+      (botName && allBots.find((b) => b.name === botName)) || resolveSummarizerBot(allBots);
+    if (!botConfig) return c.json({ error: "No bots configured" }, 500);
+
+    log.info("Research ask: bot={bot} q={q}", { bot: botConfig.name, q: question.slice(0, 120) });
+
+    return streamSSE(c, async (stream) => {
+      // Retrieval (≤30s) and a slow first synthesis token can leave a long gap
+      // with no events; a heartbeat keeps the connection alive through any proxy
+      // with a shorter idle window than the dashboard's own 255s (matches the
+      // youtube/anthropic SSE streams). The client has no 'heartbeat' listener,
+      // so these are silently ignored.
+      let alive = true;
+      const heartbeat = setInterval(() => {
+        if (!alive) return;
+        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
+      }, 30_000);
+      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
+      try {
+        await streamResearchAnswer({ question, config, botConfig }, async (event) => {
+          await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
+        });
+        // Final sentinel so the client can close the EventSource deterministically.
+        await stream.writeSSE({ event: "end", data: "{}" });
+      } finally {
+        alive = false;
+        clearInterval(heartbeat);
+      }
+    });
   });
 
   // Research: list jiraAnalysis prompt variants for a bot (Chrome extension dropdown)
