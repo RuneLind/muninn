@@ -165,8 +165,14 @@ Like the X watcher, the single Anthropic row is split into three rows that share
 | `quietMode` | `false` | Allow literal `SKIP` to suppress the batch/digest |
 | `hour` / `minute` | — | Time-of-day gate (Europe/Oslo) for digest rows, read by the runner's `isScheduledTimeDue` |
 | `prompt` | gate/daily default | Override the gate or digest criteria |
+| `captureCandidates` | `false` | Persist gated candidates into the `summary_candidates` inbox (Candidates → Summaries). Gate path only. Pair with the **standard** gate prompt (`DEFAULT_ANTHROPIC_GATE_PROMPT`) so the 0.5–0.8 middle is scored — the strict Highlights prompt only emits ≥0.8 and would leave the inbox to the alerted items. |
+| `candidateMinScore` | 0.5 | Inbox capture floor — candidates scored ≥ this are queued, **independent of `minScore`** (so the relevant-but-not-urgent middle that stays silent on Telegram still lands in the inbox). |
 
-State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — keys `tier2:llms` and `tier2:blog:<section>`. Added in migration `046` and mirrored in `db/init.sql` (the `schema-drift.test.ts` guard requires both, identical). `seed`: `scripts/setup-anthropic-watchers.ts` reconfigures the base row → Highlights (`{tier2, gate, minScore:0.8}`) and creates the Daily/Weekly digest rows (`{tier2, digest, hour, minute, model:sonnet}`).
+State table: `watcher_snapshots(watcher_id, key, value JSONB, updated_at)` — keys `tier2:llms` and `tier2:blog:<section>`. Added in migration `046` and mirrored in `db/init.sql` (the `schema-drift.test.ts` guard requires both, identical). `seed`: `scripts/setup-anthropic-watchers.ts` reconfigures the base row → Highlights (`{tier2, gate, minScore:0.8, captureCandidates, candidateMinScore:0.5}`, standard gate prompt) and creates the Daily/Weekly digest rows (`{tier2, digest, hour, minute, model:sonnet}`).
+
+### Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B)
+
+The Highlights row's gate already scores + writes a "why" for every new item. With `captureCandidates: true` it also persists each candidate scored ≥ `candidateMinScore` into **`summary_candidates`** (`src/db/summary-candidates.ts`) — a ranked, pre-annotated reading queue surfaced on `/summaries`. Two cuts on the one score: `minScore` (0.8) → Telegram alert, `candidateMinScore` (0.5) → inbox. So the relevant middle lands in the inbox instead of being dropped silently. Capture is best-effort (a DB error never breaks the alert path) and deduped by the table's `UNIQUE(source,url)` plus the upstream `lastNotifiedIds` filter (each item captured once; re-captures keep the max score, never resurrect a dismissed/summarized row). `status` walks new → summarizing → summarized | dismissed | error; `doc_id` links the resulting `anthropic-summaries` doc (Phase C/D). Table added in migration `047`, mirrored in `db/init.sql`.
 
 ## Configurable prompts
 

@@ -4,6 +4,7 @@ import { isSkipResult } from "./x.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
+import { upsertCandidate } from "../db/summary-candidates.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "anthropic");
@@ -55,6 +56,13 @@ const DEFAULT_BLOG_SECTIONS: readonly string[] = ["news", "engineering", "resear
 /** Default Haiku-gate threshold once `config.gate` is on. The model already omits
  *  routine churn; this is a defensive floor (Phase 4 calibrates against real output). */
 const DEFAULT_MIN_SCORE = 0.5;
+/** Capture floor for the Candidates → Summaries inbox (config.captureCandidates). A
+ *  candidate scored ≥ this lands in the inbox, INDEPENDENT of the alert `minScore` — so
+ *  the relevant-but-not-urgent middle (≥0.5, <0.8) that stays silent on Telegram is still
+ *  queued for summarizing. Pair captureCandidates with the STANDARD gate prompt
+ *  (DEFAULT_ANTHROPIC_GATE_PROMPT), which scores 0.5–1.0; the strict Highlights prompt only
+ *  emits ≥0.8, so it would leave the inbox sparse. */
+const DEFAULT_CANDIDATE_MIN_SCORE = 0.5;
 /** Gate model-call timeout when `config.timeoutMs` is unset. Kept UNDER the runner's
  *  120s watcher-timeout floor so the inner call settles before the outer net fires;
  *  set `config.timeoutMs` (≥ ~150s) on watchers that gate large candidate batches —
@@ -172,6 +180,15 @@ interface AnthropicConfig {
   quietMode?: boolean;
   /** Override the gate/digest criteria prompt. */
   prompt?: string;
+  // --- Candidate capture (Claude Learning Center, Phase B) ---
+  /**
+   * Persist gated candidates into the `summary_candidates` inbox (Candidates → Summaries).
+   * Gate path only (needs scores). Pair with the standard gate prompt so the 0.5–0.8 middle
+   * is scored and the inbox isn't limited to the alerted ≥0.8 items.
+   */
+  captureCandidates?: boolean;
+  /** Inbox capture floor — candidates scored ≥ this are queued (default 0.5), independent of `minScore`. */
+  candidateMinScore?: number;
   // --- Digest cadence (Phase 4) ---
   /**
    * Roll the window's candidates into ONE digest message (Daily/Weekly rows) instead of
@@ -378,6 +395,11 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
     visible: visible.length,
     total: candidates.length,
   });
+
+  // Capture the scored candidates into the inbox (Candidates → Summaries). Best-effort
+  // and independent of the alert threshold: every candidate the gate scored ≥
+  // candidateMinScore is queued, so the silent middle band lands in the inbox too.
+  if (config.captureCandidates) await captureGatedCandidates(candidates, byN, config, watcher);
 
   const alerts: WatcherAlert[] = [...baselineAlerts, ...visible];
   if (silentIds.length > 0) alerts.push(silentAlert(silentIds));
@@ -645,6 +667,57 @@ async function runGate(
       return { n: Number(o.n), score: Number(o.score), why: String(o.why ?? "") };
     })
     .filter((p) => Number.isFinite(p.n) && Number.isFinite(p.score));
+}
+
+// --- Candidate capture (Claude Learning Center, Phase B) ---
+
+/**
+ * Persist gated candidates into the `summary_candidates` inbox (Candidates → Summaries).
+ * Captures every candidate the gate scored at or above `candidateMinScore` (the model
+ * already omits routine churn), INDEPENDENT of the alert `minScore` — so the relevant
+ * middle band (≥0.5, <0.8) that stays silent on Telegram still lands in the inbox for
+ * manual summarizing. Best-effort: a DB error is logged, never breaks the alert path.
+ * Dedup rides the table's UNIQUE(source,url) + the upstream `last_notified_ids` filter,
+ * so each item is captured once (re-runs upsert and keep the max score).
+ */
+async function captureGatedCandidates(
+  candidates: Candidate[],
+  byN: Map<number, GateScore>,
+  config: AnthropicConfig,
+  watcher: Watcher,
+): Promise<void> {
+  const floor = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
+  let captured = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    const score = byN.get(i + 1);
+    if (!score || score.score < floor) continue;
+    const c = candidates[i]!;
+    try {
+      await upsertCandidate({
+        source: "anthropic",
+        url: c.url,
+        title: c.label,
+        candidateSrc: c.sourceLabel,
+        score: score.score,
+        why: score.why,
+        watcherId: watcher.id,
+        botName: watcher.botName ?? null,
+      });
+      captured++;
+    } catch (err) {
+      log.error("Watcher \"{name}\": failed to capture candidate {url}: {error}", {
+        name: watcher.name,
+        url: c.url,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (captured > 0) {
+    log.info("Watcher \"{name}\": captured {n} candidate(s) to the inbox", {
+      name: watcher.name,
+      n: captured,
+    });
+  }
 }
 
 // --- Digest mode (Phase 4) ---
