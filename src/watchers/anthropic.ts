@@ -683,19 +683,22 @@ async function enrichDocExcerpts(candidates: Candidate[]): Promise<void> {
   }
   await Promise.all(
     targets.map(async (c) => {
+      const controller = new AbortController();
+      // Arm the timer through the body read too — clearing it before res.text()
+      // would leave a slow-streaming body un-bounded and stall the awaited gate run.
+      const timeout = setTimeout(() => controller.abort(), DOC_EXCERPT_TIMEOUT_MS);
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), DOC_EXCERPT_TIMEOUT_MS);
         const res = await fetch(c.url, {
           headers: { "User-Agent": "muninn-anthropic-watcher", Accept: "text/markdown, text/plain, */*" },
           signal: controller.signal,
         });
-        clearTimeout(timeout);
         if (!res.ok) return;
         const excerpt = markdownExcerpt(await res.text());
         if (excerpt) c.excerpt = excerpt;
       } catch {
-        // Best-effort: a fetch/parse error leaves the candidate title-only.
+        // Best-effort: a fetch/parse/timeout error leaves the candidate title-only.
+      } finally {
+        clearTimeout(timeout);
       }
     }),
   );
