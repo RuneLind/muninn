@@ -8,9 +8,11 @@ import type { Watcher } from "../types.ts";
 
 let gateResult = "[]";
 let gateThrow = false;
+let lastGatePrompt = ""; // captured so the body-excerpt threading can be asserted
 mock.module("../scheduler/executor.ts", () => ({
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  spawnHaiku: async () => {
+  spawnHaiku: async (prompt: string) => {
+    lastGatePrompt = prompt;
     if (gateThrow) throw new Error("haiku down");
     return { result: gateResult, inputTokens: 0, outputTokens: 0, model: "claude-haiku-4-5-20251001" };
   },
@@ -49,8 +51,14 @@ mock.module("../anthropic/summarizer.ts", () => ({
   },
 }));
 
-const { parseAtomEntries, parseLlmsTxtDocs, parseBlogSlugs, checkAnthropic, DEFAULT_ANTHROPIC_FEEDS } =
-  await import("./anthropic.ts");
+const {
+  parseAtomEntries,
+  parseLlmsTxtDocs,
+  parseBlogSlugs,
+  checkAnthropic,
+  formatCandidateList,
+  DEFAULT_ANTHROPIC_FEEDS,
+} = await import("./anthropic.ts");
 
 const C1 = "https://github.com/anthropics/claude-code/commit/01f1617";
 const C2 = "https://github.com/anthropics/claude-code/commit/f0919a1";
@@ -145,6 +153,78 @@ describe("parseAtomEntries", () => {
     expect(DEFAULT_ANTHROPIC_FEEDS.length).toBeGreaterThan(5);
     expect(DEFAULT_ANTHROPIC_FEEDS.every((u) => u.startsWith("https://"))).toBe(true);
   });
+
+  // --- Alert depth (§10): body excerpt from <content>/<summary> ---
+
+  test("captures a plain-text body excerpt from <content> (HTML stripped, decoded)", () => {
+    const entries = parseAtomEntries(COMMITS_ATOM);
+    // <content>&lt;pre&gt;feat: add ...&lt;/pre&gt;</content> → decode → strip <pre>
+    expect(entries[0]!.excerpt).toBe("feat: add ...");
+    expect(entries[1]!.excerpt).toBe("chore");
+    // releases feed carries <h2>What's changed</h2>
+    expect(parseAtomEntries(RELEASES_ATOM)[0]!.excerpt).toBe("What's changed");
+  });
+
+  test("hard-truncates a long body to ~300 chars with an ellipsis", () => {
+    const long = "word ".repeat(200).trim(); // ~999 chars
+    const xml =
+      `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>F</title>` +
+      `<entry><id>i</id><link rel="alternate" type="text/html" href="https://e.test/a"/>` +
+      `<title>t</title><content type="html">${long}</content></entry></feed>`;
+    const e = parseAtomEntries(xml)[0]!;
+    expect(e.excerpt!.length).toBeLessThanOrEqual(301); // 300 + the ellipsis char
+    expect(e.excerpt!.endsWith("…")).toBe(true);
+  });
+
+  test("no <content>/<summary> → no excerpt (gate falls back to title-only)", () => {
+    const xml =
+      `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>F</title>` +
+      `<entry><id>i</id><link rel="alternate" type="text/html" href="https://e.test/a"/>` +
+      `<title>Bare entry</title><updated>2026-06-26T21:29:36Z</updated></entry></feed>`;
+    expect(parseAtomEntries(xml)[0]!.excerpt).toBeUndefined();
+  });
+
+  test("prefers <summary> when there is no <content>", () => {
+    const xml =
+      `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>F</title>` +
+      `<entry><id>i</id><link rel="alternate" type="text/html" href="https://e.test/a"/>` +
+      `<title>t</title><summary>a short summary</summary></entry></feed>`;
+    expect(parseAtomEntries(xml)[0]!.excerpt).toBe("a short summary");
+  });
+});
+
+describe("formatCandidateList (Alert depth §10)", () => {
+  const withExcerpt = {
+    id: "1",
+    sourceLabel: "Docs (llms.txt)",
+    label: "Agent Skills",
+    url: "https://platform.claude.com/docs/en/x.md",
+    excerpt: "Agent Skills let you package reusable instructions.",
+  };
+  const noExcerpt = {
+    id: "2",
+    sourceLabel: "Recent Commits",
+    label: "feat: thing",
+    url: "https://github.com/anthropics/x/commit/abc",
+  };
+
+  test("gate path (withExcerpt) appends the excerpt on its own line", () => {
+    const out = formatCandidateList([withExcerpt], { withExcerpt: true });
+    expect(out).toBe(
+      "1. [Docs (llms.txt)] Agent Skills\n   https://platform.claude.com/docs/en/x.md\n   Agent Skills let you package reusable instructions.",
+    );
+  });
+
+  test("falls back to title-only when a candidate has no excerpt", () => {
+    const out = formatCandidateList([noExcerpt], { withExcerpt: true });
+    expect(out).toBe("1. [Recent Commits] feat: thing\n   https://github.com/anthropics/x/commit/abc");
+  });
+
+  test("digest path (default) omits excerpts even when present", () => {
+    const out = formatCandidateList([withExcerpt]);
+    expect(out).not.toContain("reusable instructions");
+    expect(out).toBe("1. [Docs (llms.txt)] Agent Skills\n   https://platform.claude.com/docs/en/x.md");
+  });
 });
 
 describe("parseLlmsTxtDocs", () => {
@@ -187,6 +267,7 @@ describe("checkAnthropic", () => {
   beforeEach(() => {
     gateResult = "[]";
     gateThrow = false;
+    lastGatePrompt = "";
     snapStore.clear();
     setCalls.length = 0;
     upsertCalls.length = 0;
@@ -340,6 +421,65 @@ describe("checkAnthropic", () => {
       }),
     );
     expect(alerts).toEqual([]);
+  });
+
+  // --- Alert depth (§10): the gate scores off content, not just titles ---
+
+  test("gate prompt includes the Tier-1 body excerpt parsed from <content>", async () => {
+    stub(COMMITS_ATOM);
+    await checkAnthropic(
+      baseWatcher({
+        lastNotifiedIds: ["already-seen"],
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, gate: true },
+      }),
+    );
+    // C1's <content> body rides into the gate prompt alongside the title.
+    expect(lastGatePrompt).toContain("feat: add ...");
+    expect(lastGatePrompt).toContain("Recent Commits to claude-code:main");
+  });
+
+  test("a Tier-2 doc candidate is enriched with a .md body slice in the gate prompt", async () => {
+    const docBody = "# Quickstart\n\nThis guide shows how to build agent skills with the SDK.";
+    stub((url) => {
+      if (url.includes("feed.test")) return COMMITS_ATOM;
+      if (url.endsWith("llms.txt")) return LLMS_SAMPLE;
+      if (url === D2) return docBody; // the enrichment fetch for the new doc
+      if (url.includes("/news")) return NEWS_HTML;
+      if (url.includes("/engineering")) return `<a href="/engineering/eng-post">e</a>`;
+      if (url.includes("/research")) return `<a href="/research/res-paper">r</a>`;
+      return "";
+    });
+    await checkAnthropic(tier2Watcher()); // baseline every Tier-2 source
+    snapStore.set("tier2:llms", [D1]); // D2 is now a new doc candidate
+    gateResult = "[]";
+    await checkAnthropic(tier2Watcher());
+    // The .md body slice (heading/frontmatter softened) is fed to the gate.
+    expect(lastGatePrompt).toContain("build agent skills with the SDK");
+    expect(lastGatePrompt).toContain(D2);
+  });
+
+  test("a Tier-2 doc .md fetch failure degrades to title-only (no crash, gate still runs)", async () => {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url === D2) throw new Error("doc fetch down"); // enrichment fetch fails
+      let text = "";
+      if (url.includes("feed.test")) text = COMMITS_ATOM;
+      else if (url.endsWith("llms.txt")) text = LLMS_SAMPLE;
+      else if (url.includes("/news")) text = NEWS_HTML;
+      else if (url.includes("/engineering")) text = `<a href="/engineering/eng-post">e</a>`;
+      else if (url.includes("/research")) text = `<a href="/research/res-paper">r</a>`;
+      return { ok: true, status: 200, text: async () => text } as unknown as Response;
+    }) as typeof fetch;
+    await checkAnthropic(tier2Watcher()); // baseline
+    snapStore.set("tier2:llms", [D1]); // D2 new
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "new doc" }]);
+    const alerts = await checkAnthropic(tier2Watcher());
+    // The doc still gates on its title (no body) and surfaces — the failed fetch
+    // didn't break the run.
+    const visible = alerts.filter((a) => !a.silent);
+    expect(visible.length).toBe(1);
+    expect(visible[0]!.id).toBe(`an:${D2}`);
+    expect(lastGatePrompt).toContain(D2);
   });
 
   // --- Phase 3: Tier-2 snapshot-and-diff ---

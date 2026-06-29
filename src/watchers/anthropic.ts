@@ -71,6 +71,23 @@ const DEFAULT_CANDIDATE_MIN_SCORE = 0.5;
 const DEFAULT_GATE_TIMEOUT_MS = 90_000;
 
 /**
+ * Hard cap on the body excerpt fed to the gate per candidate (Alert depth, §10).
+ * A few hundred chars sharpens the score + "why" over a title-only signal without
+ * blowing Haiku's context — one gate call can carry ~200 candidates, so this stays
+ * modest. Excerpts ride the GATE path only; the digest (which rolls up to 200
+ * Tier-1 items into one prompt) stays title-only so its prompt can't balloon.
+ */
+const MAX_EXCERPT_CHARS = 300;
+/**
+ * Bound on Tier-2 doc body fetches per gate run. Tier-1 excerpts are free (parsed
+ * from the Atom `<content>`); Tier-2 docs need a small `.md` fetch each, so cap the
+ * fan-out — beyond this, the extra docs gate title-only.
+ */
+const MAX_DOC_EXCERPT_FETCHES = 10;
+/** Per-fetch timeout for a Tier-2 doc body slice (best-effort, short). */
+const DOC_EXCERPT_TIMEOUT_MS = 6_000;
+
+/**
  * Digest-mode (Phase 4) Tier-1 cap. The digest rows roll a whole window's candidates
  * into ONE message; this bounds the Tier-1 (feed) portion fed to the LLM. It equals the
  * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED = 10 × 20), so it is a safety
@@ -156,6 +173,13 @@ export interface AtomEntry {
   /** epoch ms from `<published>` (else `<updated>`); 0 if missing/unparseable. */
   updated: number;
   feedTitle: string;
+  /**
+   * Truncated plain-text body slice from the entry's `<content>`/`<summary>`, when
+   * the feed carried one (GitHub commit messages / release notes live there). Feeds
+   * the quality gate so it scores off content, not just the title. Absent → the gate
+   * sees title-only (today's behavior). See {@link MAX_EXCERPT_CHARS}.
+   */
+  excerpt?: string;
 }
 
 interface AnthropicConfig {
@@ -219,6 +243,12 @@ interface Candidate {
   /** The item's own label — commit/release title, doc title, or prettified blog slug. */
   label: string;
   url: string;
+  /**
+   * Truncated body slice fed to the gate alongside the title (Alert depth, §10).
+   * Tier-1 carries it for free from the Atom `<content>`; Tier-2 docs are enriched
+   * by a small `.md` fetch (see {@link enrichDocExcerpts}). Absent → title-only.
+   */
+  excerpt?: string;
 }
 
 interface GateScore {
@@ -334,6 +364,13 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
     await persistTier2();
     return [...baselineAlerts, ...candidates.map(toPlainAlert)];
   }
+
+  // Alert depth (§10): enrich the gate's view with a body slice so it scores off
+  // content, not just titles. Tier-1 excerpts are already on the candidates (free,
+  // from the Atom parse); this only fetches the Tier-2 doc `.md` bodies. Best-effort
+  // — a miss leaves a candidate title-only. Gate path only (the digest stays
+  // title-only), so it never runs on the Daily/Weekly rows.
+  await enrichDocExcerpts(candidates);
 
   // Gate the candidates. On failure DON'T advance snapshots, so the additions
   // re-surface and retry next run (mirrors the x watcher's no-fallback); still
@@ -463,6 +500,7 @@ function toFeedCandidate(e: AtomEntry): Candidate {
     sourceLabel: e.feedTitle,
     label: e.title.split("\n")[0]!.trim().slice(0, 200),
     url: e.url,
+    ...(e.excerpt ? { excerpt: e.excerpt } : {}),
   };
 }
 
@@ -623,11 +661,74 @@ function prettifySlug(slug: string): string {
   return slug.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/**
+ * Best-effort: enrich Tier-2 doc candidates with a body slice for the gate (Alert
+ * depth, §10). The llms.txt candidate URLs are clean-markdown `.md` docs (per L7,
+ * "`.md` doc URLs are clean markdown and fetchable directly"), so fetch the first
+ * slice straight from the URL — no Huginn id-resolution, and no indexing-lag miss
+ * for a brand-new doc that `anthropic-knowledge` hasn't crawled yet. Bounded to
+ * {@link MAX_DOC_EXCERPT_FETCHES} with a short per-fetch timeout; any miss/error or
+ * over-cap doc gates title-only. Blog candidates (HTML listings, no cheap clean
+ * body) stay title-only by design. Mutates the candidates in place.
+ */
+async function enrichDocExcerpts(candidates: Candidate[]): Promise<void> {
+  const docs = candidates.filter((c) => !c.excerpt && c.url.endsWith(".md"));
+  if (docs.length === 0) return;
+  const targets = docs.slice(0, MAX_DOC_EXCERPT_FETCHES);
+  if (docs.length > targets.length) {
+    log.warn("Doc-excerpt enrichment capped at {cap} (of {n}); the rest gate title-only", {
+      cap: MAX_DOC_EXCERPT_FETCHES,
+      n: docs.length,
+    });
+  }
+  await Promise.all(
+    targets.map(async (c) => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), DOC_EXCERPT_TIMEOUT_MS);
+        const res = await fetch(c.url, {
+          headers: { "User-Agent": "muninn-anthropic-watcher", Accept: "text/markdown, text/plain, */*" },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (!res.ok) return;
+        const excerpt = markdownExcerpt(await res.text());
+        if (excerpt) c.excerpt = excerpt;
+      } catch {
+        // Best-effort: a fetch/parse error leaves the candidate title-only.
+      }
+    }),
+  );
+}
+
+/**
+ * First usable plain-text slice from a clean-markdown doc: drop a leading YAML
+ * frontmatter block, soften markdown punctuation, collapse whitespace, and
+ * hard-truncate to {@link MAX_EXCERPT_CHARS}.
+ */
+function markdownExcerpt(md: string): string | undefined {
+  const stripped = md
+    .replace(/^﻿?\s*---\n[\s\S]*?\n---\s*/, "") // leading frontmatter, if any
+    .replace(/[#*_`>]+/g, " "); // soften md markers (headings, emphasis, quotes)
+  return cleanExcerpt(stripped);
+}
+
 // --- Haiku quality gate ---
 
-/** Numbered candidate list shared by the gate and digest prompts (keeps the two in sync). */
-function formatCandidateList(cands: Candidate[]): string {
-  return cands.map((c, i) => `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`).join("\n");
+/**
+ * Numbered candidate list shared by the gate and digest prompts (keeps the two in
+ * sync). With `withExcerpt` each candidate's truncated body slice is appended on its
+ * own line — the GATE passes this so it scores off content, not just titles; the
+ * digest omits it (default) because it rolls up to 200 items and would balloon.
+ * Candidates with no excerpt render title-only either way.
+ */
+export function formatCandidateList(cands: Candidate[], opts?: { withExcerpt?: boolean }): string {
+  return cands
+    .map((c, i) => {
+      const head = `${i + 1}. [${c.sourceLabel}] ${c.label}\n   ${c.url}`;
+      return opts?.withExcerpt && c.excerpt ? `${head}\n   ${c.excerpt}` : head;
+    })
+    .join("\n");
 }
 
 /** One Anthropic model call with the shared watcher attribution. Throws on a model error. */
@@ -659,7 +760,7 @@ async function runGate(
   watcher: Watcher,
 ): Promise<GateScore[] | "SKIP_ALL"> {
   const criteria = config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT;
-  const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates)}`;
+  const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates, { withExcerpt: true })}`;
 
   const model = config.model || DEFAULT_MODEL;
   const timeoutMs = config.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
@@ -938,12 +1039,14 @@ export function parseAtomEntries(xml: string): AtomEntry[] {
     if (!title || !url) continue;
     const ts = extractTag(block, "published") ?? extractTag(block, "updated");
     const updatedMs = ts ? new Date(ts).getTime() : 0;
+    const excerpt = extractEntryExcerpt(block);
     entries.push({
       id: url,
       url,
       title,
       updated: Number.isNaN(updatedMs) ? 0 : updatedMs,
       feedTitle,
+      ...(excerpt ? { excerpt } : {}),
     });
   }
   return entries;
@@ -967,4 +1070,25 @@ function extractAlternateHref(block: string): string | null {
   const alternate = links.find((l) => /rel=["']alternate["']/i.test(l)) ?? links[0]!;
   const href = alternate.match(/href=["']([^"']+)["']/i);
   return href ? decodeEntities(href[1]!) : null;
+}
+
+// --- Body excerpt (Alert depth, §10) ---
+
+/**
+ * Pull a short plain-text body slice from an Atom entry's `<content>`/`<summary>`
+ * for the quality gate. GitHub feeds carry the commit message / release notes there
+ * as escaped HTML, so `extractTag` decodes it once to real markup; strip the tags,
+ * collapse whitespace, and hard-truncate. Returns undefined when there's no usable
+ * body so the gate falls back to title-only. `<content>` wins over `<summary>`.
+ */
+function extractEntryExcerpt(block: string): string | undefined {
+  const raw = extractTag(block, "content") ?? extractTag(block, "summary");
+  return raw ? cleanExcerpt(raw.replace(/<[^>]+>/g, " ")) : undefined;
+}
+
+/** Collapse whitespace + hard-truncate a body slice to {@link MAX_EXCERPT_CHARS}. */
+function cleanExcerpt(text: string): string | undefined {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) return undefined;
+  return clean.length <= MAX_EXCERPT_CHARS ? clean : `${clean.slice(0, MAX_EXCERPT_CHARS).trimEnd()}…`;
 }
