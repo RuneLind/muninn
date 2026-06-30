@@ -249,23 +249,31 @@ export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
 }
 
 /**
- * A bot that answers a Research follow-up in seconds rather than minutes —
- * *and* whose model id actually works on the synthesis path. Research synthesis
- * runs through `executeClaudePrompt`, which always spawns the Claude CLI and
- * passes `botConfig.model` straight to `--model`, ignoring the bot's connector.
- * So two constraints, not one:
- *   - **CLI-native model id.** `copilot-sdk` bots carry Copilot-format ids (e.g.
- *     `"claude-sonnet-4.6"`) and `openai-compat` bots carry local-model ids (e.g.
- *     `"qwen3.5:35b"`); neither is a valid Claude CLI `--model`, and the
- *     connector that would make them work is bypassed here. Require a CLI-native
- *     connector (`claude-cli` / `claude-sdk` / unset).
- *   - **Fast tier.** Opus is the slow, expensive default (capra, the
- *     first-discovered bot). Skip it; an unset `model` falls back to the
- *     sonnet-class global `CLAUDE_MODEL`, so unset counts as fast.
+ * Whether a bot can synthesize a Research answer at all. Synthesis runs through
+ * `executeClaudePrompt`, which always spawns the Claude CLI and passes
+ * `botConfig.model` straight to `--model` (ignoring the bot's connector). So a
+ * `copilot-sdk` bot's Copilot-format id (e.g. melosys' `"claude-sonnet-4.6"`) or
+ * an `openai-compat` bot's local id (e.g. `"qwen3.5:35b"`) is not a valid CLI
+ * model and the spawn fails. Only CLI-native connectors qualify. The
+ * `/api/research/ask` route uses this to reject an explicit `?bot=` that can't
+ * synthesize, falling back to {@link resolveResearchBot} instead of crashing.
+ */
+export function canSynthesizeResearch(bot: BotConfig): boolean {
+  const connector = bot.connector ?? "claude-cli";
+  return connector !== "copilot-sdk" && connector !== "openai-compat";
+}
+
+/**
+ * A bot fit to be the *default* interactive Research synthesizer: it must be
+ * able to synthesize at all ({@link canSynthesizeResearch}) and be fast enough
+ * for interactive Q&A. Opus is the slow, expensive first-discovered default
+ * (capra), so skip it; an unset `model` falls back to the sonnet-class global
+ * `CLAUDE_MODEL`, so unset counts as fast. (An explicit `?bot=` may still pin a
+ * slow-but-valid CLI bot — this gate only governs the auto-pick in
+ * {@link resolveResearchBot}.)
  */
 function isFastResearchBot(bot: BotConfig): boolean {
-  const connector = bot.connector ?? "claude-cli";
-  if (connector === "copilot-sdk" || connector === "openai-compat") return false;
+  if (!canSynthesizeResearch(bot)) return false;
   if ((bot.model ?? "").toLowerCase().includes("opus")) return false;
   return true;
 }
@@ -278,8 +286,12 @@ function isFastResearchBot(bot: BotConfig): boolean {
  *   2. The first discovered bot fast enough for interactive Q&A (see
  *      `isFastResearchBot`) — skips opus and bots whose model id isn't valid for
  *      the CLI synthesis path (capra/opus, melosys/copilot, local-model bots).
- *   3. `resolveSummarizerBot` (which itself honors `SUMMARIZER_BOT`, then
- *      first-discovered) — so the behavior never regresses below the old default.
+ *   3. Any bot that can synthesize at all (`canSynthesizeResearch`) — a slow CLI
+ *      bot (e.g. opus) still beats a non-CLI bot the CLI can't run.
+ *   4. `resolveSummarizerBot` (which itself honors `SUMMARIZER_BOT`, then
+ *      first-discovered) — last resort; may return a non-CLI bot only when
+ *      nothing can synthesize, in which case synthesis fails with a visible
+ *      app error rather than a silent one.
  * The `?bot=` query param on `/api/research/ask` still overrides all of this.
  */
 export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
@@ -292,7 +304,11 @@ export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
       wanted,
     });
   }
-  return bots.find(isFastResearchBot) ?? resolveSummarizerBot(bots);
+  return (
+    bots.find(isFastResearchBot) ??
+    bots.find(canSynthesizeResearch) ??
+    resolveSummarizerBot(bots)
+  );
 }
 
 /**
