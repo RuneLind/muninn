@@ -578,7 +578,11 @@ export async function renderResearchPage(): Promise<string> {
         currentSource = null;
         active = null;
         btn.disabled = false;
-        if (!a.statusWrap.classList.contains('done')) {
+        // Don't clobber a terminal status: 'done' (clean finish) or 'error' (a
+        // server 'app_error' already put the real message on the card). Only an
+        // in-flight turn — searching/synthesizing, no terminal class — is a
+        // genuine drop worth labelling "Connection lost".
+        if (!a.statusWrap.classList.contains('done') && !a.statusWrap.classList.contains('error')) {
           setCardStatus(a, 'Connection lost', 'error');
         }
       };

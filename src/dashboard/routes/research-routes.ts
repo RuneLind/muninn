@@ -102,14 +102,13 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     // selection from another page can still arrive here despite the filtered
     // /api/research/bots list.)
     const requested = botName ? allBots.find((b) => b.name === botName) : undefined;
-    if (requested && !canSynthesizeResearch(requested)) {
+    const requestedUsable = !!requested && canSynthesizeResearch(requested);
+    if (requested && !requestedUsable) {
       log.warn("Research: requested bot={bot} can't synthesize on the CLI path — falling back", {
         bot: requested.name,
       });
     }
-    const botConfig =
-      (requested && canSynthesizeResearch(requested) ? requested : undefined) ??
-      resolveResearchBot(allBots);
+    const botConfig = (requestedUsable ? requested : undefined) ?? resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
     log.info("Research ask: bot={bot} turn={turn} q={q}", {
