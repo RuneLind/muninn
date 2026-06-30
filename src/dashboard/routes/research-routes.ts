@@ -3,7 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots, resolveResearchBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
+import { discoverAllBots, resolveResearchBot, canSynthesizeResearch, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { streamResearchAnswer } from "../../research/ask.ts";
 import { MAX_HISTORY_TURNS, type ResearchTurn } from "../../research/answer.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
@@ -72,7 +72,12 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
 
   // Research: list available bots
   app.get("/api/research/bots", (c) => {
-    const bots = discoverAllBots().map((b) => ({ name: b.name }));
+    // Only bots that can synthesize on the CLI path — copilot-sdk/openai-compat
+    // bots carry model ids the CLI rejects (see canSynthesizeResearch), so they
+    // must not appear as a pickable Research engine.
+    const bots = discoverAllBots()
+      .filter(canSynthesizeResearch)
+      .map((b) => ({ name: b.name }));
     return c.json({ bots });
   });
 
@@ -89,8 +94,22 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const history = parseResearchHistory(c.req.query("history"));
 
     const allBots = discoverAllBots();
+    // Honor an explicit ?bot= only if it can actually synthesize on the CLI path.
+    // A copilot-sdk/openai-compat bot (e.g. melosys, model "claude-sonnet-4.6")
+    // would crash the spawn with an invalid --model, so fall back to the fast
+    // CLI research bot instead — the corpus is fixed, so the synthesis engine is
+    // an implementation detail the reader doesn't pick. (A stale shared bot
+    // selection from another page can still arrive here despite the filtered
+    // /api/research/bots list.)
+    const requested = botName ? allBots.find((b) => b.name === botName) : undefined;
+    if (requested && !canSynthesizeResearch(requested)) {
+      log.warn("Research: requested bot={bot} can't synthesize on the CLI path — falling back", {
+        bot: requested.name,
+      });
+    }
     const botConfig =
-      (botName && allBots.find((b) => b.name === botName)) || resolveResearchBot(allBots);
+      (requested && canSynthesizeResearch(requested) ? requested : undefined) ??
+      resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
     log.info("Research ask: bot={bot} turn={turn} q={q}", {
@@ -113,7 +132,12 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
       try {
         await streamResearchAnswer({ question, config, botConfig, history }, async (event) => {
-          await stream.writeSSE({ event: event.type, data: JSON.stringify(event) });
+          // EventSource reserves the "error" event for connection-level failures
+          // (it also fires onerror), so a same-named app event gets masked as
+          // "Connection lost" on the client. Emit app errors under a distinct
+          // name; the payload still carries {type:"error", message}.
+          const wireEvent = event.type === "error" ? "app_error" : event.type;
+          await stream.writeSSE({ event: wireEvent, data: JSON.stringify(event) });
         });
         // Final sentinel so the client can close the EventSource deterministically.
         await stream.writeSSE({ event: "end", data: "{}" });

@@ -263,9 +263,23 @@ export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
  *     first-discovered bot). Skip it; an unset `model` falls back to the
  *     sonnet-class global `CLAUDE_MODEL`, so unset counts as fast.
  */
-function isFastResearchBot(bot: BotConfig): boolean {
+/**
+ * Whether a bot can synthesize a Research answer at all. Synthesis runs through
+ * `executeClaudePrompt`, which always spawns the Claude CLI and passes
+ * `botConfig.model` straight to `--model` (ignoring the bot's connector). So a
+ * `copilot-sdk` bot's Copilot-format id (e.g. melosys' `"claude-sonnet-4.6"`) or
+ * an `openai-compat` bot's local id (e.g. `"qwen3.5:35b"`) is not a valid CLI
+ * model and the spawn fails. Only CLI-native connectors qualify. The
+ * `/api/research/ask` route uses this to reject an explicit `?bot=` that can't
+ * synthesize, falling back to {@link resolveResearchBot} instead of crashing.
+ */
+export function canSynthesizeResearch(bot: BotConfig): boolean {
   const connector = bot.connector ?? "claude-cli";
-  if (connector === "copilot-sdk" || connector === "openai-compat") return false;
+  return connector !== "copilot-sdk" && connector !== "openai-compat";
+}
+
+function isFastResearchBot(bot: BotConfig): boolean {
+  if (!canSynthesizeResearch(bot)) return false;
   if ((bot.model ?? "").toLowerCase().includes("opus")) return false;
   return true;
 }

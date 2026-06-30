@@ -358,6 +358,11 @@ export async function renderResearchPage(): Promise<string> {
         var bots = data.bots || [];
 
         try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
+        // The selection is shared across pages, so it may point at a bot that
+        // can't synthesize Research (e.g. melosys/copilot, filtered out above).
+        // Drop it so the default-to-first below picks a usable one — otherwise
+        // we'd send &bot=melosys and the CLI synthesis would fail.
+        if (selectedBot && !bots.some(function(b) { return b.name === selectedBot; })) selectedBot = '';
 
         var container = document.getElementById('botSelector');
         container.innerHTML = bots.map(function(b) {
@@ -539,7 +544,12 @@ export async function renderResearchPage(): Promise<string> {
         updateComposer();
       });
 
-      es.addEventListener('error', function(e) {
+      // App-level failure from the server (synthesis error, no bot, etc.). Named
+      // 'app_error' not 'error' on purpose — EventSource reserves 'error' for
+      // connection drops (see es.onerror below), so a server 'error' event would
+      // be masked as "Connection lost" and hide the real message. The server's
+      // 'end' sentinel still follows and closes the stream.
+      es.addEventListener('app_error', function(e) {
         var msg = 'Something went wrong.';
         try { msg = JSON.parse(e.data).message || msg; } catch {}
         setCardStatus(a, msg, 'error');
