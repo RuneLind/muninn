@@ -29,8 +29,12 @@ export function themeInitScript(): string {
         if (t !== 'light' && t !== 'dark') {
           // One-time migration from the legacy chat-only key so an existing
           // explicit light/dark choice survives the move to the shared key.
+          // Must remove the legacy key after migrating, or picking 'system'
+          // (which clears THEME_KEY) would resurrect the stale legacy value
+          // on the very next load and silently override 'system' again.
           var legacy = localStorage.getItem('muninn-chat-theme');
           if (legacy === 'light' || legacy === 'dark') { t = legacy; localStorage.setItem('${THEME_KEY}', legacy); }
+          localStorage.removeItem('muninn-chat-theme');
         }
         if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
         else delete document.documentElement.dataset.theme;
