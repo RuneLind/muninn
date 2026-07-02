@@ -108,11 +108,12 @@ const DIGEST_MAX_TIER1 = 200;
 export const DEFAULT_ANTHROPIC_GATE_PROMPT = `You are a quality gate for proactive alerts sent to a senior AI engineer who lives in Claude Code and builds agents, tools, and retrieval systems. They only want to be interrupted for genuinely notable NEW Anthropic releases, docs, blog posts, or research — not routine churn.
 
 Weight HIGHEST: Claude Code features and releases; agents, tool use, and MCP; retrieval, RAG, and evals; new models or model updates; meaningful API or SDK changes.
-Weight LOW (omit): typo/whitespace fixes, dependency bumps, CI/internal chores, doc reformatting, minor wording tweaks, routine version housekeeping, and translated or duplicate doc pages.
+Weight LOW (omit): typo/whitespace fixes, dependency bumps, CI/internal chores, doc reformatting, minor wording tweaks, routine version housekeeping, merge/rollup commits, releases that are just a version bump with a routine changelog, corrections or small follow-ups to already-published posts, and translated or duplicate doc pages.
 
 Below is a numbered list of new candidates (GitHub commits/releases, new docs, and new blog/research posts). For EACH candidate that clears the bar, output one object:
   {"n": <the candidate number>, "score": <0.0-1.0>, "why": "<one short line on why it matters to this engineer>"}
 Use ~1.0 for must-see, ~0.7 for clearly relevant, ~0.5 for borderline. OMIT candidates that are routine churn — do not output them at all.
+Scores also feed a reading shelf of summarized items: score for whether reading the FULL content would teach this engineer something new — high-signal keywords (Claude, MCP, SDK) alone do not make an item notable.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing clears the bar, return [].`;
 
@@ -214,6 +215,15 @@ interface AnthropicConfig {
   captureCandidates?: boolean;
   /** Inbox capture floor — candidates scored ≥ this are queued (default 0.5), independent of `minScore`. */
   candidateMinScore?: number;
+  /**
+   * Per-kind overrides of the inbox capture floor, keyed by URL shape: `commit` /
+   * `release` (GitHub) / `doc` (.md) / `blog`. A kind left unset uses
+   * max(candidateMinScore, built-in kind default — commit 0.75, release 0.85); an
+   * explicit value wins outright (so it CAN lower a kind below its default). Lets
+   * keyword-rich GitHub churn (version-stub releases, spec-repo commits) earn an
+   * inbox slot only at a higher score, while docs/blog capture stays generous.
+   */
+  candidateMinScoreByKind?: Partial<Record<CandidateKind, number>>;
   /**
    * Auto-promote floor (Claude Learning Center, Phase B.3 / D-button). A captured
    * candidate scored ≥ this is summarized IN-PROCESS immediately — no manual click —
@@ -791,13 +801,65 @@ async function runGate(
 // --- Candidate capture (Claude Learning Center, Phase B) ---
 
 /**
+ * Shelf-capture classification of a candidate by URL shape (Candidates → Summaries).
+ * Drives the per-kind capture floors: GitHub churn (commits, version-stub releases)
+ * must clear a higher gate score to earn an inbox slot than a new doc or blog post,
+ * whose full content is always summarizable.
+ */
+export type CandidateKind = "commit" | "release" | "doc" | "blog";
+
+export function candidateKind(url: string): CandidateKind {
+  if (/github\.com\/[^/]+\/[^/]+\/commit\//.test(url)) return "commit";
+  if (/github\.com\/[^/]+\/[^/]+\/releases\/tag\//.test(url)) return "release";
+  if (url.endsWith(".md")) return "doc";
+  return "blog";
+}
+
+/** Commit titles that are pure repo plumbing — never shelf-worthy regardless of score. */
+const MERGE_COMMIT_RE = /^Merge (pull request|branch|remote-tracking branch)\b/i;
+
+/**
+ * Deterministic pre-filter for inbox CAPTURE only (alerts are untouched): a
+ * merge/rollup commit's content is a diff of other commits, so a summary of it is
+ * noise no matter how well the gate scored its keywords. Kind-scoped — a doc or blog
+ * post whose title happens to start with "Merge" is not filtered.
+ */
+export function isShelfWorthy(c: Pick<Candidate, "label" | "url">): boolean {
+  return !(candidateKind(c.url) === "commit" && MERGE_COMMIT_RE.test(c.label));
+}
+
+/**
+ * Built-in per-kind capture floors layered on `candidateMinScore` (raise-only via
+ * max — a raised base is never undercut). Calibrated against the 2026-07 inbox:
+ * spec-repo merge/doc commits scored 0.55–0.68 (noise) while shelf-worthy commits
+ * (cookbook adds, MCP schema features) scored 0.7–0.8 → commit floor 0.75; weekly SDK
+ * version-stub releases scored 0.75–0.8 while notable releases scored 0.85+ →
+ * release floor 0.85. Docs/blog stay at the base floor.
+ */
+const DEFAULT_KIND_FLOORS: Partial<Record<CandidateKind, number>> = {
+  commit: 0.75,
+  release: 0.85,
+};
+
+/** Effective inbox capture floor for one candidate kind (see candidateMinScoreByKind). */
+export function captureFloor(kind: CandidateKind, config: AnthropicConfig): number {
+  const explicit = config.candidateMinScoreByKind?.[kind];
+  if (explicit != null) return explicit;
+  const base = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
+  const kindDefault = DEFAULT_KIND_FLOORS[kind];
+  return kindDefault != null ? Math.max(base, kindDefault) : base;
+}
+
+/**
  * Persist gated candidates into the `summary_candidates` inbox (Candidates → Summaries).
- * Captures every candidate the gate scored at or above `candidateMinScore` (the model
- * already omits routine churn), INDEPENDENT of the alert `minScore` — so the relevant
- * middle band (≥0.5, <0.8) that stays silent on Telegram still lands in the inbox for
- * manual summarizing. Best-effort: a DB error is logged, never breaks the alert path.
- * Dedup rides the table's UNIQUE(source,url) + the upstream `last_notified_ids` filter,
- * so each item is captured once (re-runs upsert and keep the max score).
+ * Captures every candidate the gate scored at or above its kind's capture floor (see
+ * {@link captureFloor}), INDEPENDENT of the alert `minScore` — so the relevant middle
+ * band (≥0.5, <0.8) that stays silent on Telegram still lands in the inbox for manual
+ * summarizing. Merge/rollup commits are filtered deterministically first (see
+ * {@link isShelfWorthy}) — capture-only, they can still alert. Best-effort: a DB error
+ * is logged, never breaks the alert path. Dedup rides the table's UNIQUE(source,url)
+ * + the upstream `last_notified_ids` filter, so each item is captured once (re-runs
+ * upsert and keep the max score).
  */
 async function captureGatedCandidates(
   candidates: Candidate[],
@@ -805,12 +867,18 @@ async function captureGatedCandidates(
   config: AnthropicConfig,
   watcher: Watcher,
 ): Promise<void> {
-  const floor = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
   let captured = 0;
   for (let i = 0; i < candidates.length; i++) {
-    const score = byN.get(i + 1);
-    if (!score || score.score < floor) continue;
     const c = candidates[i]!;
+    if (!isShelfWorthy(c)) {
+      log.debug("Watcher \"{name}\": capture skipped merge commit — {label}", {
+        name: watcher.name,
+        label: c.label,
+      });
+      continue;
+    }
+    const score = byN.get(i + 1);
+    if (!score || score.score < captureFloor(candidateKind(c.url), config)) continue;
     try {
       await upsertCandidate({
         source: "anthropic",

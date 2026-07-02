@@ -58,6 +58,9 @@ const {
   checkAnthropic,
   formatCandidateList,
   DEFAULT_ANTHROPIC_FEEDS,
+  candidateKind,
+  isShelfWorthy,
+  captureFloor,
 } = await import("./anthropic.ts");
 
 const C1 = "https://github.com/anthropics/claude-code/commit/01f1617";
@@ -224,6 +227,43 @@ describe("formatCandidateList (Alert depth §10)", () => {
     const out = formatCandidateList([withExcerpt]);
     expect(out).not.toContain("reusable instructions");
     expect(out).toBe("1. [Docs (llms.txt)] Agent Skills\n   https://platform.claude.com/docs/en/x.md");
+  });
+});
+
+describe("shelf-capture policy (candidateKind / isShelfWorthy / captureFloor)", () => {
+  test("classifies candidate URLs by shape", () => {
+    expect(candidateKind("https://github.com/anthropics/claude-code/commit/01f1617")).toBe("commit");
+    expect(candidateKind("https://github.com/anthropics/claude-code/releases/tag/v2.1.195")).toBe("release");
+    expect(candidateKind(D1)).toBe("doc");
+    expect(candidateKind("https://www.anthropic.com/news/claude-sonnet-5")).toBe("blog");
+  });
+
+  test("merge/rollup commits are never shelf-worthy; feature commits are", () => {
+    const url = "https://github.com/modelcontextprotocol/modelcontextprotocol/commit/abc";
+    expect(isShelfWorthy({ label: "Merge pull request #2513 from devcrocod/kotlin-tier", url })).toBe(false);
+    expect(isShelfWorthy({ label: "Merge branch 'main' into next", url })).toBe(false);
+    expect(isShelfWorthy({ label: "feat(schema): add subscriptions/listen response (#2953)", url })).toBe(true);
+    // Kind-scoped: a doc/blog title that happens to start with "Merge" is not filtered.
+    expect(isShelfWorthy({ label: "Merge pull request semantics", url: D1 })).toBe(true);
+  });
+
+  test("built-in floors: commits 0.75, releases 0.85, docs/blog at the base floor", () => {
+    const config = { candidateMinScore: 0.5 };
+    expect(captureFloor("commit", config)).toBe(0.75);
+    expect(captureFloor("release", config)).toBe(0.85);
+    expect(captureFloor("doc", config)).toBe(0.5);
+    expect(captureFloor("blog", config)).toBe(0.5);
+  });
+
+  test("a raised base floor is never undercut by a kind default (max semantics)", () => {
+    expect(captureFloor("commit", { candidateMinScore: 0.8 })).toBe(0.8);
+    expect(captureFloor("release", { candidateMinScore: 0.9 })).toBe(0.9);
+  });
+
+  test("an explicit per-kind override wins outright (can lower below the default)", () => {
+    const config = { candidateMinScore: 0.5, candidateMinScoreByKind: { commit: 0.6, release: 0.7 } };
+    expect(captureFloor("commit", config)).toBe(0.6);
+    expect(captureFloor("release", config)).toBe(0.7);
   });
 });
 
@@ -772,14 +812,74 @@ describe("checkAnthropic", () => {
       ...over,
     });
 
-  test("captureCandidates upserts every gated candidate at/above the capture floor", async () => {
+  test("captureCandidates upserts every gated candidate at/above its kind's capture floor", async () => {
     stub(COMMITS_ATOM);
     gateResult = JSON.stringify([
       { n: 1, score: 0.95, why: "headliner" },
-      { n: 2, score: 0.6, why: "mid-band" },
+      { n: 2, score: 0.8, why: "solid commit" },
     ]);
     await checkAnthropic(captureWatcher({}));
     expect(upsertCalls.map((u) => u.url).sort()).toEqual([C1, C2].sort());
+  });
+
+  test("a commit below the 0.75 commit floor still alerts but is NOT captured", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.65, why: "keyword-relevant churn" }, // ≥ minScore 0.5 → alerts; < 0.75 → no inbox slot
+      { n: 2, score: 0.8, why: "shelf-worthy" },
+    ]);
+    const alerts = await checkAnthropic(captureWatcher({}));
+    expect(upsertCalls.map((u) => u.url)).toEqual([C2]);
+    // The alert path is untouched by the capture floors.
+    expect(alerts.filter((a) => !a.silent).map((a) => a.id).sort()).toEqual([C1, C2].sort());
+  });
+
+  test("a merge commit is never captured, whatever the gate scored it", async () => {
+    const M1 = "https://github.com/modelcontextprotocol/modelcontextprotocol/commit/m1";
+    const M2 = "https://github.com/modelcontextprotocol/modelcontextprotocol/commit/m2";
+    const MERGE_ATOM =
+      `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Recent Commits to modelcontextprotocol:main</title>` +
+      `<entry><id>m1</id><link rel="alternate" type="text/html" href="${M1}"/>` +
+      `<title>Merge pull request #2513 from devcrocod/kotlin-tier</title><updated>2026-06-26T21:29:36Z</updated></entry>` +
+      `<entry><id>m2</id><link rel="alternate" type="text/html" href="${M2}"/>` +
+      `<title>feat(schema): add subscriptions/listen response (#2953)</title><updated>2026-06-26T21:29:36Z</updated></entry>` +
+      `</feed>`;
+    stub(MERGE_ATOM);
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.95, why: "keywords look great" }, // merge commit — filtered regardless
+      { n: 2, score: 0.8, why: "real schema feature" },
+    ]);
+    const alerts = await checkAnthropic(captureWatcher({}));
+    expect(upsertCalls.map((u) => u.url)).toEqual([M2]);
+    // Capture-only filter: the merge commit still alerts on its score.
+    expect(alerts.filter((a) => !a.silent).map((a) => a.id)).toContain(M1);
+  });
+
+  test("a version-stub release below the 0.85 release floor is not captured", async () => {
+    stub(RELEASES_ATOM); // one release: v2.1.195
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "routine SDK release" }]);
+    await checkAnthropic(captureWatcher({}));
+    expect(upsertCalls).toHaveLength(0);
+  });
+
+  test("candidateMinScoreByKind overrides the built-in kind floor", async () => {
+    stub(RELEASES_ATOM);
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "routine SDK release" }]);
+    await checkAnthropic(
+      captureWatcher({
+        config: {
+          feeds: ["https://feed.test/releases.atom"],
+          lookbackDays: 100000,
+          gate: true,
+          captureCandidates: true,
+          candidateMinScore: 0.5,
+          candidateMinScoreByKind: { release: 0.7 },
+        },
+      }),
+    );
+    expect(upsertCalls.map((u) => u.url)).toEqual([
+      "https://github.com/anthropics/claude-code/releases/tag/v2.1.195",
+    ]);
   });
 
   test("auto-promote summarizes a ≥ autoPromoteScore candidate in-process, leaving the mid-band", async () => {
