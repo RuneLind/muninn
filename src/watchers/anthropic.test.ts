@@ -242,15 +242,19 @@ describe("shelf-capture policy (candidateKind / isShelfWorthy / captureFloor)", 
     const url = "https://github.com/modelcontextprotocol/modelcontextprotocol/commit/abc";
     expect(isShelfWorthy({ label: "Merge pull request #2513 from devcrocod/kotlin-tier", url })).toBe(false);
     expect(isShelfWorthy({ label: "Merge branch 'main' into next", url })).toBe(false);
+    // git's plural/tag default merge messages are covered too
+    expect(isShelfWorthy({ label: "Merge branches 'ide-release' and 'main'", url })).toBe(false);
+    expect(isShelfWorthy({ label: "Merge remote-tracking branches 'x' and 'y'", url })).toBe(false);
+    expect(isShelfWorthy({ label: "Merge tag 'v1.2.0'", url })).toBe(false);
     expect(isShelfWorthy({ label: "feat(schema): add subscriptions/listen response (#2953)", url })).toBe(true);
     // Kind-scoped: a doc/blog title that happens to start with "Merge" is not filtered.
     expect(isShelfWorthy({ label: "Merge pull request semantics", url: D1 })).toBe(true);
   });
 
-  test("built-in floors: commits 0.75, releases 0.85, docs/blog at the base floor", () => {
+  test("built-in floors: commits 0.7, releases 0.8, docs/blog at the base floor", () => {
     const config = { candidateMinScore: 0.5 };
-    expect(captureFloor("commit", config)).toBe(0.75);
-    expect(captureFloor("release", config)).toBe(0.85);
+    expect(captureFloor("commit", config)).toBe(0.7);
+    expect(captureFloor("release", config)).toBe(0.8);
     expect(captureFloor("doc", config)).toBe(0.5);
     expect(captureFloor("blog", config)).toBe(0.5);
   });
@@ -822,10 +826,10 @@ describe("checkAnthropic", () => {
     expect(upsertCalls.map((u) => u.url).sort()).toEqual([C1, C2].sort());
   });
 
-  test("a commit below the 0.75 commit floor still alerts but is NOT captured", async () => {
+  test("a commit below the 0.7 commit floor still alerts but is NOT captured", async () => {
     stub(COMMITS_ATOM);
     gateResult = JSON.stringify([
-      { n: 1, score: 0.65, why: "keyword-relevant churn" }, // ≥ minScore 0.5 → alerts; < 0.75 → no inbox slot
+      { n: 1, score: 0.65, why: "keyword-relevant churn" }, // ≥ minScore 0.5 → alerts; < 0.7 → no inbox slot
       { n: 2, score: 0.8, why: "shelf-worthy" },
     ]);
     const alerts = await checkAnthropic(captureWatcher({}));
@@ -855,16 +859,17 @@ describe("checkAnthropic", () => {
     expect(alerts.filter((a) => !a.silent).map((a) => a.id)).toContain(M1);
   });
 
-  test("a version-stub release below the 0.85 release floor is not captured", async () => {
+  test("a version-stub release below the 0.8 release floor is not captured", async () => {
     stub(RELEASES_ATOM); // one release: v2.1.195
-    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "routine SDK release" }]);
+    gateResult = JSON.stringify([{ n: 1, score: 0.75, why: "routine SDK release" }]);
     await checkAnthropic(captureWatcher({}));
     expect(upsertCalls).toHaveLength(0);
   });
 
-  test("candidateMinScoreByKind overrides the built-in kind floor", async () => {
+  test("candidateMinScoreByKind overrides the built-in kind floor (can lower it)", async () => {
     stub(RELEASES_ATOM);
-    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "routine SDK release" }]);
+    // 0.7 is below the built-in release floor (0.8) — only the explicit override captures it.
+    gateResult = JSON.stringify([{ n: 1, score: 0.7, why: "release this user wants shelved" }]);
     await checkAnthropic(
       captureWatcher({
         config: {
@@ -873,13 +878,35 @@ describe("checkAnthropic", () => {
           gate: true,
           captureCandidates: true,
           candidateMinScore: 0.5,
-          candidateMinScoreByKind: { release: 0.7 },
+          candidateMinScoreByKind: { release: 0.6 },
         },
       }),
     );
     expect(upsertCalls.map((u) => u.url)).toEqual([
       "https://github.com/anthropics/claude-code/releases/tag/v2.1.195",
     ]);
+  });
+
+  test("a mid-band Tier-2 doc candidate is captured at the base floor (no kind floor)", async () => {
+    tier2Stub();
+    const docCaptureWatcher = () =>
+      baseWatcher({
+        lastNotifiedIds: ["seen", C1, C2], // Tier-1 all seen → isolates the Tier-2 doc
+        config: {
+          feeds: ["https://feed.test/commits.atom"],
+          lookbackDays: 100000,
+          tier2: true,
+          gate: true,
+          captureCandidates: true,
+          candidateMinScore: 0.5,
+        },
+      });
+    await checkAnthropic(docCaptureWatcher()); // baseline every Tier-2 source
+    snapStore.set("tier2:llms", [D1]); // D2 is now a new doc candidate
+    gateResult = JSON.stringify([{ n: 1, score: 0.6, why: "useful new guide" }]);
+    await checkAnthropic(docCaptureWatcher());
+    // 0.6 would fail the commit (0.7) and release (0.8) floors — docs capture at 0.5.
+    expect(upsertCalls.map((u) => u.url)).toEqual([D2]);
   });
 
   test("auto-promote summarizes a ≥ autoPromoteScore candidate in-process, leaving the mid-band", async () => {

@@ -218,7 +218,7 @@ interface AnthropicConfig {
   /**
    * Per-kind overrides of the inbox capture floor, keyed by URL shape: `commit` /
    * `release` (GitHub) / `doc` (.md) / `blog`. A kind left unset uses
-   * max(candidateMinScore, built-in kind default — commit 0.75, release 0.85); an
+   * max(candidateMinScore, built-in kind default — commit 0.7, release 0.8); an
    * explicit value wins outright (so it CAN lower a kind below its default). Lets
    * keyword-rich GitHub churn (version-stub releases, spec-repo commits) earn an
    * inbox slot only at a higher score, while docs/blog capture stays generous.
@@ -815,8 +815,10 @@ export function candidateKind(url: string): CandidateKind {
   return "blog";
 }
 
-/** Commit titles that are pure repo plumbing — never shelf-worthy regardless of score. */
-const MERGE_COMMIT_RE = /^Merge (pull request|branch|remote-tracking branch)\b/i;
+/** Commit titles that are pure repo plumbing — never shelf-worthy regardless of score.
+ *  Covers git's default singular AND plural/tag forms ("Merge branches 'a' and 'b'",
+ *  "Merge tag 'v1.2'"). */
+const MERGE_COMMIT_RE = /^Merge (pull request|branch(es)?|remote-tracking branch(es)?|tag)\b/i;
 
 /**
  * Deterministic pre-filter for inbox CAPTURE only (alerts are untouched): a
@@ -831,14 +833,16 @@ export function isShelfWorthy(c: Pick<Candidate, "label" | "url">): boolean {
 /**
  * Built-in per-kind capture floors layered on `candidateMinScore` (raise-only via
  * max — a raised base is never undercut). Calibrated against the 2026-07 inbox:
- * spec-repo merge/doc commits scored 0.55–0.68 (noise) while shelf-worthy commits
- * (cookbook adds, MCP schema features) scored 0.7–0.8 → commit floor 0.75; weekly SDK
- * version-stub releases scored 0.75–0.8 while notable releases scored 0.85+ →
- * release floor 0.85. Docs/blog stay at the base floor.
+ * spec-repo churn (doc tweaks, blog corrections) scored 0.55–0.68 while every
+ * hand-summarized commit scored 0.7+ → commit floor 0.7; SDK version-stub releases
+ * clustered at 0.75–0.8 → release floor 0.8, which also equals the seeded Highlights
+ * alert `minScore`, so a release that interrupts on Telegram is always summarizable
+ * from the inbox (alerted ⇒ captured). Docs/blog stay at the base floor. Merge
+ * commits are handled by {@link isShelfWorthy}, not these floors.
  */
 const DEFAULT_KIND_FLOORS: Partial<Record<CandidateKind, number>> = {
-  commit: 0.75,
-  release: 0.85,
+  commit: 0.7,
+  release: 0.8,
 };
 
 /** Effective inbox capture floor for one candidate kind (see candidateMinScoreByKind). */
@@ -871,7 +875,9 @@ async function captureGatedCandidates(
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i]!;
     if (!isShelfWorthy(c)) {
-      log.debug("Watcher \"{name}\": capture skipped merge commit — {label}", {
+      // info, not debug: the adjacent gate-score line may say surfaced=true for the
+      // same item, so a silent capture skip would look like a bug when mining logs.
+      log.info("Watcher \"{name}\": capture skipped merge commit — {label}", {
         name: watcher.name,
         label: c.label,
       });
@@ -936,8 +942,9 @@ async function maybeAutoPromote(
     if (!score || score.score < threshold) continue;
     const c = candidates[i]!;
     try {
-      // Resolve the persisted row (captureGatedCandidates ran first, so a ≥ floor
-      // candidate exists) to read its current status — the dedup gate.
+      // Resolve the persisted row to read its status — the dedup gate. The row can
+      // be missing when capture filtered the candidate (merge commit, or scored
+      // below its kind's capture floor); such a candidate must never auto-promote.
       const row = await getCandidateBySourceUrl("anthropic", c.url);
       if (!row || row.status !== "new") continue;
 

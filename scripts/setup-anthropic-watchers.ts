@@ -30,11 +30,7 @@
  */
 import postgres from "postgres";
 import { loadConfig } from "../src/config.ts";
-import {
-  DEFAULT_ANTHROPIC_GATE_PROMPT,
-  DEFAULT_ANTHROPIC_DAILY_PROMPT,
-  DEFAULT_ANTHROPIC_WEEKLY_PROMPT,
-} from "../src/watchers/anthropic.ts";
+import { DEFAULT_ANTHROPIC_WEEKLY_PROMPT } from "../src/watchers/anthropic.ts";
 
 const apply = process.argv.includes("--apply");
 
@@ -53,13 +49,17 @@ const sql = postgres(config.databaseUrl, { max: 1 });
  *  inbox (Phase B). Keeps the base row's warm ids/snapshots. No `feeds` key (tracks the
  *  code-default DEFAULT_ANTHROPIC_FEEDS); no `hour` (daytime via quiet-hours).
  *
- *  Uses the STANDARD gate prompt (scores 0.5–1.0), not the strict Highlights prompt: the
- *  alert threshold (minScore 0.8) still keeps Telegram to the exceptional, while the lower
- *  capture floor (candidateMinScore 0.5) routes the relevant-but-not-urgent middle into the
- *  inbox instead of dropping it silently. One Haiku call, three cuts on the one score:
- *  minScore 0.8 → Telegram alert, candidateMinScore 0.5 → inbox, autoPromoteScore 0.9 →
- *  summarize in-process onto the shelf (true headliners skip the manual pick). The 0.9
- *  auto-promote floor starts high so only must-see items auto-spend a Claude call (§8 risk 5).
+ *  No `prompt` key: the row tracks the code-default STANDARD gate prompt (scores 0.5–1.0,
+ *  not the strict Highlights prompt), so prompt improvements land with deploys instead of
+ *  being frozen into the row's JSONB. The alert threshold (minScore 0.8) still keeps
+ *  Telegram to the exceptional, while the lower capture floor (candidateMinScore 0.5)
+ *  routes the relevant-but-not-urgent middle into the inbox instead of dropping it
+ *  silently. One Haiku call, three cuts on the one score: minScore 0.8 → Telegram alert,
+ *  the capture floor → inbox (per-kind: max(candidateMinScore, commit 0.7 / release 0.8);
+ *  merge commits are never captured — see the shelf-capture policy in
+ *  src/watchers/anthropic.ts), autoPromoteScore 0.9 → summarize in-process onto the shelf
+ *  (true headliners skip the manual pick). The 0.9 auto-promote floor starts high so only
+ *  must-see items auto-spend a Claude call (§8 risk 5).
  *
  *  NB: this seed only applies on a FRESH box — the script SKIPS reconfigure when a
  *  Highlights row already exists (never re-clobber a hand-tuned config). To add/adjust
@@ -72,10 +72,10 @@ const highlightsConfig = {
   candidateMinScore: 0.5,
   autoPromoteScore: 0.9,
   timeoutMs: TIMEOUT_MS,
-  prompt: DEFAULT_ANTHROPIC_GATE_PROMPT,
 };
 
-/** Daily digest: once/day at 12:00, one message. quietMode so an all-churn day can SKIP. */
+/** Daily digest: once/day at 12:00, one message. quietMode so an all-churn day can SKIP.
+ *  No `prompt` key — the digest default IS the daily prompt, so the row tracks it. */
 const dailyConfig = {
   tier2: true,
   digest: true,
@@ -85,10 +85,11 @@ const dailyConfig = {
   lookbackDays: 3, // retry cushion: > interval (1d) so a failed run's window survives
   hour: 12,
   minute: 0,
-  prompt: DEFAULT_ANTHROPIC_DAILY_PROMPT,
 };
 
-/** Weekly digest: once/week at 18:00, themes + top picks. Always sends (no quietMode). */
+/** Weekly digest: once/week at 18:00, themes + top picks. Always sends (no quietMode).
+ *  KEEPS an explicit `prompt`: runDigest's code default is the DAILY prompt, so the
+ *  weekly row's prompt is genuinely non-default and must be pinned in config. */
 const weeklyConfig = {
   tier2: true,
   digest: true,
