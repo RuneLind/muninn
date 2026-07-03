@@ -92,6 +92,7 @@ mock.module("./connectors/copilot-sdk.ts", () => ({
       copilotCalls.push({ sessionConfig, prompt: "", timeout: undefined });
       let handler: ((event: unknown) => void) | null = null;
       return {
+        sessionId: "fake-session-id",
         on(h: (event: unknown) => void) {
           handler = h;
           return () => { handler = null; };
@@ -106,10 +107,10 @@ mock.module("./connectors/copilot-sdk.ts", () => ({
           }
           return { data: { content: copilotResponseContent } };
         },
-        async destroy() {
-          copilotDestroyCount++;
-        },
       };
+    },
+    async deleteSession(_sessionId: string) {
+      copilotDestroyCount++;
     },
   }),
 }));

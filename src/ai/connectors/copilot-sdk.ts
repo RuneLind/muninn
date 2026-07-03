@@ -356,8 +356,10 @@ export async function executePrompt(
     throw error;
   } finally {
     unsubscribe();
-    session.destroy().catch((e) => {
-      log.warn("Failed to destroy Copilot SDK session: {error}", { error: String(e) });
+    // Sessions are per-request throwaways — delete permanently (disk state
+    // included) rather than disconnect(), which keeps them resumable on disk.
+    cl.deleteSession(session.sessionId).catch((e: unknown) => {
+      log.warn("Failed to delete Copilot SDK session: {error}", { error: String(e) });
     });
   }
 }

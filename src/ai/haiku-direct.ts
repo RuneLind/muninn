@@ -259,8 +259,9 @@ export async function callHaikuViaCopilot(
     };
   } finally {
     unsubscribe();
-    session.destroy().catch((e) => {
-      log.warn("Failed to destroy Copilot Haiku session: {error}", { error: String(e) });
+    // One-shot extraction session — delete permanently (disk state included).
+    cl.deleteSession(session.sessionId).catch((e: unknown) => {
+      log.warn("Failed to delete Copilot Haiku session: {error}", { error: String(e) });
     });
   }
 }
