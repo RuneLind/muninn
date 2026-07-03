@@ -359,6 +359,9 @@ export async function executePrompt(
     // Sessions are per-request throwaways — delete permanently (disk state
     // included) rather than disconnect(), which keeps them resumable on disk.
     cl.deleteSession(session.sessionId).catch((e: unknown) => {
+      // A failed delete leaves the session (and its handler closures) in the
+      // singleton client's registry — disconnect releases them, best-effort.
+      session.disconnect().catch(() => {});
       log.warn("Failed to delete Copilot SDK session: {error}", { error: String(e) });
     });
   }
