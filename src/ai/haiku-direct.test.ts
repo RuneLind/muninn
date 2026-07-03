@@ -84,7 +84,7 @@ let copilotUsageEvents: FakeUsage[] = [
   { inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" },
 ];
 let copilotSessionThrow: Error | null = null;
-let copilotDestroyCount = 0;
+let copilotDeleteSessionCount = 0;
 
 mock.module("./connectors/copilot-sdk.ts", () => ({
   getCopilotClient: async () => ({
@@ -92,6 +92,7 @@ mock.module("./connectors/copilot-sdk.ts", () => ({
       copilotCalls.push({ sessionConfig, prompt: "", timeout: undefined });
       let handler: ((event: unknown) => void) | null = null;
       return {
+        sessionId: "fake-session-id",
         on(h: (event: unknown) => void) {
           handler = h;
           return () => { handler = null; };
@@ -106,10 +107,10 @@ mock.module("./connectors/copilot-sdk.ts", () => ({
           }
           return { data: { content: copilotResponseContent } };
         },
-        async destroy() {
-          copilotDestroyCount++;
-        },
       };
+    },
+    async deleteSession(_sessionId: string) {
+      copilotDeleteSessionCount++;
     },
   }),
 }));
@@ -133,7 +134,7 @@ beforeEach(() => {
   copilotResponseContent = "copilot-result";
   copilotUsageEvents = [{ inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" }];
   copilotSessionThrow = null;
-  copilotDestroyCount = 0;
+  copilotDeleteSessionCount = 0;
   sdkThrow = null;
   constructorOpts = null;
   _resetClientForTests();
@@ -457,10 +458,10 @@ describe("callHaikuViaCopilot", () => {
     expect((sessionConfig as { workingDirectory?: string }).workingDirectory).toBeUndefined();
   });
 
-  test("destroys the session even when sendAndWait throws", async () => {
+  test("deletes the session even when sendAndWait throws", async () => {
     copilotSessionThrow = new Error("copilot boom");
     await expect(callHaikuViaCopilot("hi", { source: "test" })).rejects.toThrow("copilot boom");
-    expect(copilotDestroyCount).toBe(1);
+    expect(copilotDeleteSessionCount).toBe(1);
   });
 
   test("forwards opts.model and opts.timeoutMs", async () => {

@@ -207,7 +207,7 @@ export async function callHaikuDirect(
 /**
  * Routes a one-shot Haiku call through the shared CopilotClient singleton.
  * Reuses the same auth surface the bot's main chat uses. Session is lean —
- * no MCP servers, no custom agents — and is destroyed in `finally`.
+ * no MCP servers, no custom agents — and is deleted in `finally`.
  */
 export async function callHaikuViaCopilot(
   prompt: string,
@@ -259,8 +259,12 @@ export async function callHaikuViaCopilot(
     };
   } finally {
     unsubscribe();
-    session.destroy().catch((e) => {
-      log.warn("Failed to destroy Copilot Haiku session: {error}", { error: String(e) });
+    // One-shot extraction session — delete permanently (disk state included).
+    cl.deleteSession(session.sessionId).catch((e: unknown) => {
+      // A failed delete leaves the session (and its handler closures) in the
+      // singleton client's registry — disconnect releases them, best-effort.
+      session.disconnect().catch(() => {});
+      log.warn("Failed to delete Copilot Haiku session: {error}", { error: String(e) });
     });
   }
 }
