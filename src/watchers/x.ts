@@ -1,5 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { extractJson } from "../ai/json-extract.ts";
+import { upsertCandidate } from "../db/summary-candidates.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
 
@@ -62,6 +64,17 @@ interface XWatcherConfig {
   minScore?: number;
   /** If true, the LLM may return literal "SKIP" to silently suppress the alert. Combined with a prompt that tells the model to only surface truly exceptional content. */
   quietMode?: boolean;
+  // --- Candidate capture (Claude Learning Center, Phase B — X → summaries inbox) ---
+  /**
+   * Persist high-value LONG-FORM tweets into the `summary_candidates` inbox
+   * (Candidates → Summaries). Collection path only. Runs on the FULL fetched batch,
+   * independent of `minScore`/`quietMode` silencing — so a run that alerts nothing can
+   * still capture. Only long-form notes/articles are eligible (see the pre-filter); a
+   * short plain tweet is its own summary and is never captured.
+   */
+  captureCandidates?: boolean;
+  /** Inbox capture floor — long-form tweets scored ≥ this by the capture gate are queued (default 0.6). */
+  candidateMinScore?: number;
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -100,6 +113,33 @@ interface CollectionDoc {
 interface CompactedTweet {
   text: string;
   rankScore: number;
+  /** "@handle" (or "unknown") pulled from the doc heading — for the candidate title/src. */
+  handle: string;
+  /** Length of the extracted tweet body BEFORE truncation — the long-form capture signal. */
+  bodyLength: number;
+  /** The doc carries a `**Type:** note` marker (a long-form X note/article). */
+  isNote: boolean;
+  /** First body line of the tweet — used for the candidate title. */
+  firstLine: string;
+}
+
+/**
+ * One per-doc record for the capture path (Candidates → Summaries). Carries the
+ * bits capture needs that the compact digest text discards — the huginn `x-feed`
+ * doc id (so the summarizer can fetch full content), the body length + note marker
+ * (the long-form pre-filter), and the handle + first line (the candidate title).
+ * Additive on {@link FetchResult} so the legacy `fetchFromPython` path (no doc ids)
+ * compiles untouched; only the collection path populates it.
+ */
+export interface TweetDoc {
+  docId: string;
+  url: string;
+  handle: string;
+  bodyLength: number;
+  isNote: boolean;
+  firstLine: string;
+  /** The compact one-liner (same string sent to the digest LLM). */
+  text: string;
 }
 
 /**
@@ -119,7 +159,7 @@ export function extractRankScore(text: string): number {
  * Input:  "# @handle — Author\n\nTweet text...\n\n---\n\n- **Engagement:** 1,508 likes..."
  * Output: { text: "@handle: Tweet text (1,508 likes, 524k views)\n  URL: ...", rankScore: 12.34 }
  */
-function compactTweetText(rawText: string, url: string): CompactedTweet {
+export function compactTweetText(rawText: string, url: string): CompactedTweet {
   // Strip the bracketed document ID line huginn prepends
   const text = rawText.replace(/^\[.*?\]\n+/, "");
   const lines = text.split("\n");
@@ -137,6 +177,7 @@ function compactTweetText(rawText: string, url: string): CompactedTweet {
     .filter((l) => l.trim() && !l.startsWith("- **"))
     .map((l) => l.trim());
   const bodyRaw = bodyLines.join(" ");
+  const firstLine = bodyLines[0] ?? "";
   // Truncate at word boundary
   const body = bodyRaw.length > 500 ? bodyRaw.slice(0, bodyRaw.lastIndexOf(" ", 500)) + "..." : bodyRaw;
 
@@ -158,7 +199,10 @@ function compactTweetText(rawText: string, url: string): CompactedTweet {
   if (signals.length > 0) result += ` (${signals.join(", ")})`;
   if (isNote) result = `[ARTICLE/NOTE] ${result}`;
   result += `\n  URL: ${url}`;
-  return { text: result, rankScore };
+  // bodyLength measures the extracted body PRE-truncation (x-feed docs carry ~350–450
+  // chars of fixed scaffolding, so measuring the doc length would misclassify ordinary
+  // tweets as long-form — see isLongFormTweet).
+  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine };
 }
 
 function extractTweetId(docId: string): string {
@@ -171,9 +215,16 @@ interface FetchResult {
   trackingIds: string[];
   /** Highest rankScore among fetched tweets, used by checkX's minScore gate. Undefined when nothing was fetched. */
   topScore?: number;
+  /**
+   * Per-doc records for the FULL fetched batch (collection path only) — the input to
+   * the candidate-capture pre-filter + gate. NOT the `topN`-sliced digest subset, so a
+   * long-form tweet below the alert cutoff can still be captured. Undefined on the
+   * legacy `fetchFromPython` path (no doc ids).
+   */
+  docs?: TweetDoc[];
 }
 
-async function fetchFromCollection(
+export async function fetchFromCollection(
   config: XWatcherConfig,
   known: Set<string>,
   botName?: string,
@@ -217,7 +268,7 @@ async function fetchFromCollection(
   const toFetch = newDocs.slice(0, maxDocs);
 
   // Fetch in batches of 20 to avoid overwhelming huginn's Python server
-  const compacted: (CompactedTweet & { docId: string })[] = [];
+  const compacted: (CompactedTweet & { docId: string; url: string })[] = [];
   for (let i = 0; i < toFetch.length; i += 20) {
     const batch = toFetch.slice(i, i + 20);
     const results = await Promise.all(
@@ -226,8 +277,9 @@ async function fetchFromCollection(
           const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
           if (!resp.ok) return null;
           const data = await resp.json() as { text: string; metadata?: { url?: string } };
-          const { text, rankScore } = compactTweetText(data.text, data.metadata?.url || doc.url);
-          return { docId: doc.id, text, rankScore };
+          const resolvedUrl = data.metadata?.url || doc.url;
+          const compact = compactTweetText(data.text, resolvedUrl);
+          return { docId: doc.id, url: resolvedUrl, ...compact };
         } catch (err) {
           log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
           return null;
@@ -242,6 +294,18 @@ async function fetchFromCollection(
   compacted.sort((a, b) => b.rankScore - a.rankScore);
   // Track ALL fetched tweets so below-cutoff ones aren't re-fetched next tick
   const trackingIds = compacted.map((r) => `tw:${extractTweetId(r.docId)}`);
+
+  // Per-doc records for the capture path — the FULL batch (before the topN slice), so a
+  // long-form tweet outside the digest still reaches the inbox pre-filter + gate.
+  const tweetDocs: TweetDoc[] = compacted.map((r) => ({
+    docId: r.docId,
+    url: r.url,
+    handle: r.handle,
+    bodyLength: r.bodyLength,
+    isNote: r.isNote,
+    firstLine: r.firstLine,
+    text: r.text,
+  }));
 
   const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = compacted.slice(0, topN);
@@ -259,7 +323,7 @@ async function fetchFromCollection(
     topScore: compacted[0]?.rankScore.toFixed(3) ?? "n/a",
   });
 
-  return { texts, trackingIds, topScore: compacted[0]?.rankScore };
+  return { texts, trackingIds, topScore: compacted[0]?.rankScore, docs: tweetDocs };
 }
 
 // --- Legacy path (spawns huginn Python fetcher directly) ---
@@ -362,6 +426,166 @@ async function fetchFromPython(
   return { texts, trackingIds };
 }
 
+// --- Candidate capture (Claude Learning Center, Phase B — X → summaries inbox) ---
+
+/** Inbox capture floor when `config.candidateMinScore` is unset. */
+const DEFAULT_CANDIDATE_MIN_SCORE = 0.6;
+/**
+ * A tweet body must reach this many chars (measured PRE-truncation on the extracted
+ * body, not the raw doc) to count as long-form, unless the doc already carries the
+ * `**Type:** note` marker. Below it the tweet is its own summary — never captured.
+ */
+const LONGFORM_MIN_CHARS = 800;
+/** Capture-gate model-call timeout — Haiku over one small (dedupByTweetId) batch. */
+const CAPTURE_GATE_TIMEOUT_MS = 90_000;
+
+/**
+ * Capture-gate prompt (mirrors the anthropic watcher's `{n,score,why}` contract). Scores
+ * whether a SUMMARY of a long-form X post is worth a spot on a personal learning shelf —
+ * i.e. whether reading the full note would teach a senior AI engineer something. Only
+ * long-form notes/articles reach it (short tweets are pre-filtered out).
+ */
+export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of LONG-FORM X posts (notes/articles). For EACH one, decide whether a written summary of the FULL post is worth saving to read later.
+
+Weight HIGHEST: substantive technical insight, original analysis, research findings, agent/LLM/retrieval engineering lessons, thoughtful essays.
+Weight LOW (omit): hot takes, self-promotion, threads that are mostly links, engagement bait, news the engineer would already know, anything where the tweet already says everything.
+
+For EACH post worth saving, output one object:
+  {"n": <the post number>, "score": <0.0-1.0>, "why": "<one short line on what reading it would teach>"}
+Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT posts that aren't worth a summary — do not output them at all.
+
+Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
+
+interface GateScore {
+  n: number;
+  score: number;
+  why: string;
+}
+
+/**
+ * Long-form pre-filter (mirror of the anthropic watcher's `isShelfWorthy`): capture
+ * eligibility for the inbox. A long-form note/article — either the explicit `**Type:**
+ * note` marker or an extracted body ≥ {@link LONGFORM_MIN_CHARS} — is worth summarizing;
+ * a short plain tweet is its own summary and is deliberately excluded. Link-tweets are
+ * NOT captured either: the summarizer would only see the tweet's own (short) text, not
+ * the linked article, so they'd yield short-tweet summaries.
+ */
+export function isLongFormTweet(doc: Pick<TweetDoc, "bodyLength" | "isNote">): boolean {
+  return doc.isNote || doc.bodyLength >= LONGFORM_MIN_CHARS;
+}
+
+/** Truncate a candidate title at a word boundary near `max` chars. */
+function truncateTitle(s: string, max = 140): string {
+  const clean = s.replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.lastIndexOf(" ", max);
+  return `${clean.slice(0, cut > 0 ? cut : max)}…`;
+}
+
+/**
+ * Score the long-form subset with one Haiku call. Returns the parsed `{n,score,why}`
+ * array (model omits the not-worth-saving). Throws on a model error or unparseable
+ * output so the caller can log + fall back to the alert path.
+ */
+async function runCaptureGate(
+  docs: TweetDoc[],
+  botName: string | undefined,
+): Promise<GateScore[]> {
+  const list = docs.map((d, i) => `${i + 1}. ${d.text}`).join("\n\n");
+  const prompt = `${DEFAULT_X_CAPTURE_PROMPT}\n\nPosts:\n\n${list}`;
+
+  const { result } = await spawnHaiku(prompt, {
+    source: "watcher-x-capture",
+    entrypoint: `${botName ?? "jarvis"}-watcher`,
+    botName,
+    model: DEFAULT_MODEL,
+    timeoutMs: CAPTURE_GATE_TIMEOUT_MS,
+  });
+
+  const parsed = extractJson<unknown[]>(result);
+  if (!Array.isArray(parsed)) throw new Error("capture gate did not return a JSON array");
+  return parsed
+    .map((p) => {
+      const o = (p ?? {}) as Record<string, unknown>;
+      return { n: Number(o.n), score: Number(o.score), why: String(o.why ?? "") };
+    })
+    .filter((p) => Number.isFinite(p.n) && Number.isFinite(p.score));
+}
+
+/**
+ * Persist high-value long-form tweets into the `summary_candidates` inbox. Runs on the
+ * FULL fetched batch, INDEPENDENT of the alert `minScore`/`quietMode` silencing — a run
+ * that alerts nothing can still capture. Best-effort throughout: a capture-gate error is
+ * logged and the run proceeds with its normal alert path (the batch's shelf-worthy
+ * tweets are lost to the inbox this run — we deliberately do NOT hold tweet IDs back
+ * from tracking, so alert dedup never re-surfaces already-alerted tweets). Dedup rides
+ * the table's `UNIQUE(source,url)` + the upstream `lastNotifiedIds` filter.
+ */
+async function captureXCandidates(
+  docs: TweetDoc[],
+  config: XWatcherConfig,
+  watcher: Watcher,
+  botName?: string,
+): Promise<void> {
+  const eligible = docs.filter(isLongFormTweet);
+  if (eligible.length === 0) {
+    log.info("Capture: no long-form tweets in the batch of {n}", { botName, n: docs.length });
+    return;
+  }
+
+  let scored: GateScore[];
+  try {
+    scored = await runCaptureGate(eligible, botName);
+  } catch (err) {
+    log.error("Capture gate failed, proceeding with alert path ({n} long-form tweet(s) lost to inbox): {error}", {
+      botName,
+      n: eligible.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  const minScore = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
+  // Index scores by post number, keeping the HIGHEST if the model duplicates a number.
+  const byN = new Map<number, GateScore>();
+  for (const s of scored) {
+    if (s.n < 1 || s.n > eligible.length) continue;
+    const prev = byN.get(s.n);
+    if (!prev || s.score > prev.score) byN.set(s.n, s);
+  }
+
+  let captured = 0;
+  for (let i = 0; i < eligible.length; i++) {
+    const score = byN.get(i + 1);
+    if (!score || score.score < minScore) continue;
+    const doc = eligible[i]!;
+    const firstLine = doc.firstLine.trim() || doc.text;
+    try {
+      await upsertCandidate({
+        source: "x",
+        url: doc.url,
+        title: truncateTitle(`${doc.handle}: ${firstLine}`),
+        candidateSrc: `X (${doc.handle})`,
+        score: score.score,
+        why: score.why,
+        sourceDocId: doc.docId,
+        watcherId: watcher.id,
+        botName: botName ?? null,
+      });
+      captured++;
+    } catch (err) {
+      log.error("Failed to capture X candidate {url}: {error}", {
+        botName,
+        url: doc.url,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (captured > 0) {
+    log.info("Capture: queued {n} long-form X candidate(s) to the inbox", { botName, n: captured });
+  }
+}
+
 // --- Main entry point ---
 
 function silentAlert(trackingIds: string[]): WatcherAlert {
@@ -384,6 +608,21 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
     : await fetchFromPython(config, known, botName);
 
   if (!data) return []; // fetch error
+
+  // Candidate capture (Candidates → Summaries) runs on the FULL fetched batch BEFORE and
+  // INDEPENDENT of the silencing paths below (the minScore early return + the quietMode
+  // SKIP both permanently track tweet IDs), so a run that alerts nothing can still feed
+  // the inbox. Collection path only; best-effort — never breaks the alert path.
+  if (config.captureCandidates && data.docs && data.docs.length > 0) {
+    try {
+      await captureXCandidates(data.docs, config, watcher, botName);
+    } catch (err) {
+      log.error("Candidate capture failed (alert path unaffected): {error}", {
+        botName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // Score-based quality gate: if the top tweet doesn't clear the bar, track IDs silently
   // so the same tweets aren't re-evaluated, and skip the LLM call entirely.
