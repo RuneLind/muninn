@@ -129,7 +129,7 @@ export async function summarizeTikTok(
     //    multi-turn frame-reading session easily outruns the default 120s.
     updateStatus(jobId, "summarizing");
 
-    const ingestTitle = title && title !== url ? title : dl.title || dl.canonicalUrl;
+    const ingestTitle = title !== url ? title : dl.title || dl.canonicalUrl;
 
     const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
 

@@ -46,11 +46,8 @@ export function sumJobCardStyles(): string {
       letter-spacing: 0.5px;
     }
     .status-pending { background: color-mix(in srgb, var(--text-dim) 20%, transparent); color: var(--text-dim); }
-    .status-fetching_transcript { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
-    .status-downloading { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
-    .status-transcribing { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
-    .status-extracting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
-    .status-summarizing { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
+    .status-fetching_transcript, .status-downloading, .status-transcribing { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
+    .status-summarizing, .status-extracting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
     .status-ingesting { background: color-mix(in srgb, var(--status-warning) 20%, transparent); color: var(--status-warning); }
     .status-complete { background: color-mix(in srgb, var(--status-success) 20%, transparent); color: var(--status-success); }
     .status-error { background: color-mix(in srgb, var(--status-error) 20%, transparent); color: var(--status-error); }

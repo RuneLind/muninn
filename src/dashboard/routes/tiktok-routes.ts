@@ -5,7 +5,7 @@ import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe as subscribeTikTokJob } from "../../tiktok/state.ts";
 import { summarizeTikTok } from "../../tiktok/summarizer.ts";
 import { extractTikTokVideoId } from "../../tiktok/media.ts";
-import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { discoverAllBots, resolveSummarizerBot, isCliNativeBot } from "../../bots/config.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 
@@ -147,6 +147,18 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
+    }
+
+    // Fail fast on a non-CLI-native summarizer bot: frame reading runs through a
+    // raw `claude` spawn, and a copilot-sdk/openai-compat model id would kill
+    // that spawn only AFTER the expensive download + whisper pre-work.
+    if (!isCliNativeBot(summarizerBot)) {
+      return c.json(
+        {
+          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot drive the TikTok frame-reading Claude CLI spawn. Set SUMMARIZER_BOT to a CLI-native bot (connector "claude-cli" or "claude-sdk").`,
+        },
+        503,
+      );
     }
 
     // Fire and forget — background summarization
