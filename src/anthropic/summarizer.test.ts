@@ -24,6 +24,9 @@ let docDate: string | undefined;
 // Claude response (CATEGORY/SUMMARY envelope) + captured prompt.
 let claudeResult = "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point";
 let lastPrompt = "";
+let lastSystemPrompt = "";
+// Paths the summarizer asked the knowledge API for (source-content resolution).
+let docFetchPaths: string[] = [];
 
 // Direct-fetch fallback + ingest behaviour (global fetch).
 let directOk = true;
@@ -40,8 +43,9 @@ let statusCalls: Array<{ id: string; status: string; docId: string | null }> = [
 let throwOnStatus: string | null = null;
 
 mock.module("../ai/executor.ts", () => ({
-  executeClaudePrompt: async (prompt: string, _c: unknown, _b: unknown, _sys?: string, onProgress?: (e: { type: string; text: string }) => void) => {
+  executeClaudePrompt: async (prompt: string, _c: unknown, _b: unknown, sys?: string, onProgress?: (e: { type: string; text: string }) => void) => {
     lastPrompt = prompt;
+    lastSystemPrompt = sys ?? "";
     onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
@@ -51,7 +55,10 @@ mock.module("../ai/knowledge-api-client.ts", () => ({
   fetchKnowledgeApi: async (_baseUrl: string, path: string) => {
     if (path.includes("/documents")) return { documents: docListing };
     if (path.includes("/api/search")) return { results: searchResults };
-    if (path.includes("/api/document/")) return { text: docText, metadata: docDate ? { date: docDate } : {} };
+    if (path.includes("/api/document/")) {
+      docFetchPaths.push(path);
+      return { text: docText, metadata: docDate ? { date: docDate } : {} };
+    }
     return {};
   },
 }));
@@ -98,6 +105,8 @@ beforeEach(() => {
   docDate = "2026-06-25";
   claudeResult = "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point";
   lastPrompt = "";
+  lastSystemPrompt = "";
+  docFetchPaths = [];
   directOk = true;
   directText = "raw fetched markdown body";
   ingestOk = true;
@@ -231,4 +240,37 @@ test("errors the candidate when ingest returns non-200", async () => {
   const job = getJob(jobId)!;
   expect(job.status).toBe("error");
   expect(statusCalls[0]).toEqual({ id: "cand-5", status: "error", docId: null });
+});
+
+// --- X source (source_doc_id path) — Phase 2 ---
+
+const X_TWEET_URL = "https://x.com/karpathy/status/1789";
+const X_DOC_ID = "2026-07-04_karpathy_1789.md";
+
+test("X candidate: resolves content from the x-feed doc id, not the (unfetchable) url", async () => {
+  docListing = []; // no anthropic-knowledge listing hit — must not fall back to it
+  docText = "# @karpathy — Andrej Karpathy\n\nA long note on agent design and evals…";
+  const jobId = createJob("x-1", "@karpathy: A long note on agent design", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-1", "@karpathy: A long note on agent design", X_TWEET_URL, config, bot, X_DOC_ID);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  // Content came straight from the x-feed collection by doc id.
+  expect(docFetchPaths.some((p) => p.includes(`/api/document/x-feed/`) && p.includes(encodeURIComponent(X_DOC_ID)))).toBe(true);
+  // The X system-prompt variant was used (note framing, not "Anthropic release").
+  expect(lastSystemPrompt).toContain("long-form X");
+  // Still ingests onto the shared anthropic-summaries shelf, same CATEGORY contract.
+  expect(job.category).toBe("ai/claude-code");
+  expect(statusCalls[0]).toEqual({ id: "x-1", status: "summarized", docId: SUMMARY_DOC_ID });
+});
+
+test("X candidate: errors the job when the x-feed doc is empty (no url fallback)", async () => {
+  docText = ""; // empty x-feed doc
+  directOk = true; // even if a direct fetch would 200, the X path must not use it
+  const jobId = createJob("x-2", "@someone: note", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-2", "@someone: note", X_TWEET_URL, config, bot, X_DOC_ID);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("error");
+  expect(statusCalls[0]).toEqual({ id: "x-2", status: "error", docId: null });
 });

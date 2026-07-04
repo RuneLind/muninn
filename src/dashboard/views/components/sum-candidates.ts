@@ -101,6 +101,24 @@ export function sumCandidatesStyles(): string {
       letter-spacing: 0.04em;
       color: var(--text-dim);
       margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    /* Origin badge (anthropic / x) — one inbox, two verticals. */
+    .candidate-source-badge {
+      flex-shrink: 0;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      letter-spacing: 0.03em;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-soft);
+      background: var(--bg-surface);
+    }
+    .candidate-source-badge[data-source="x"] {
+      color: var(--text-primary);
+      border-color: var(--border-primary);
     }
     .candidate-title {
       font-size: 14px;
@@ -233,6 +251,13 @@ export function sumCandidatesScript(): string {
       return 'low';
     }
 
+    // Origin badge label — one inbox now carries anthropic releases + captured X posts.
+    function candidateSourceLabel(source) {
+      if (source === 'x') return 'X';
+      if (source === 'anthropic') return 'Anthropic';
+      return source || '';
+    }
+
     // Status → sort rank: actionable (new/error) first, then in-flight, then shelf.
     // Stable sort keeps the server's score-desc order within each rank.
     function candidateStatusRank(status) {
@@ -276,7 +301,11 @@ export function sumCandidatesScript(): string {
           ' data-status="' + esc(c.status) + '" data-doc-id="' + esc(c.docId || '') + '">' +
         '<div class="candidate-score" data-band="' + band + '">' + shown + '</div>' +
         '<div class="candidate-body">' +
-          (c.candidateSrc ? '<div class="candidate-meta">' + esc(c.candidateSrc) + '</div>' : '') +
+          '<div class="candidate-meta">' +
+            '<span class="candidate-source-badge" data-source="' + esc(c.source || '') + '">' +
+              esc(candidateSourceLabel(c.source)) + '</span>' +
+            (c.candidateSrc ? '<span>' + esc(c.candidateSrc) + '</span>' : '') +
+          '</div>' +
           '<div class="candidate-title">' + titleInner + '</div>' +
           (c.why ? '<div class="candidate-why">' + esc(c.why) + '</div>' : '') +
           '<a class="candidate-ask" href="' + askHref + '">Ask in Research &rarr;</a>' +

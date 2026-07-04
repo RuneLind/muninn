@@ -952,7 +952,12 @@ async function maybeAutoPromote(
       const row = await getCandidateBySourceUrl("anthropic", c.url);
       if (!row || row.status !== "new") continue;
 
-      const jobId = await autoPromoteCandidate({ id: row.id, title: row.title, url: row.url });
+      const jobId = await autoPromoteCandidate({
+        id: row.id,
+        title: row.title,
+        url: row.url,
+        sourceDocId: row.sourceDocId,
+      });
       if (jobId) {
         promoted++;
         log.info(
