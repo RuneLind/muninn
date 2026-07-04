@@ -1077,6 +1077,89 @@ export const spec = {
       },
     },
 
+    // ===================== TikTok =====================
+
+    "/api/tiktok/summarize": {
+      post: {
+        tags: ["TikTok"],
+        summary: "Summarize a TikTok video",
+        description:
+          "Starts a background summarization job for a TikTok video (yt-dlp download → whisper transcript → ffmpeg keyframes → Claude vision summary). Requires yt-dlp on PATH.",
+        operationId: "postTiktokSummarize",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  url: { type: "string", format: "uri" },
+                  title: { type: "string" },
+                  frames: {
+                    type: "boolean",
+                    description: "Extract keyframes for visual summarization (default true).",
+                  },
+                },
+                required: ["url"],
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { job_id: { type: "string" }, dashboard_url: { type: "string" } } } } } },
+          "400": errorResponse,
+          "500": errorResponse,
+        },
+      },
+    },
+
+    "/api/tiktok/jobs": {
+      get: {
+        tags: ["TikTok"],
+        summary: "Recent summarization jobs",
+        description: "List recent TikTok summarization jobs.",
+        operationId: "getTiktokJobs",
+        parameters: [limitQuery(20, 100)],
+        responses: {
+          "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { jobs: { type: "array", items: { type: "object" } } } } } } },
+        },
+      },
+    },
+
+    "/api/tiktok/document/{docPath}": {
+      get: {
+        tags: ["TikTok"],
+        summary: "Get TikTok summary",
+        description: "A specific stored TikTok video summary document.",
+        operationId: "getTiktokDocument",
+        parameters: [pathId("docPath", "Document path")],
+        responses: {
+          "200": { description: "Document content" },
+          "400": errorResponse,
+          "502": errorResponse,
+          "503": errorResponse,
+        },
+      },
+    },
+
+    "/api/tiktok/similar": {
+      get: {
+        tags: ["TikTok"],
+        summary: "Similar TikToks",
+        description: "Find similar TikTok summaries by semantic search.",
+        operationId: "getTiktokSimilar",
+        parameters: [
+          { name: "q", in: "query", schema: { type: "string" }, description: "Search query", required: true },
+        ],
+        responses: {
+          "200": { description: "Similar results" },
+          "400": errorResponse,
+          "502": errorResponse,
+          "503": errorResponse,
+        },
+      },
+    },
+
     // ===================== Chat (/chat prefix) =====================
 
     "/chat/knowledge-config": {

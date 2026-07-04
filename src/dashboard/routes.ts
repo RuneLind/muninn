@@ -11,6 +11,7 @@ import { registerResearchRoutes } from "./routes/research-routes.ts";
 import { registerToolsRoutes } from "./routes/tools-routes.ts";
 import { registerYouTubeRoutes } from "./routes/youtube-routes.ts";
 import { registerXArticleRoutes } from "./routes/x-article-routes.ts";
+import { registerTikTokRoutes } from "./routes/tiktok-routes.ts";
 import { registerSummariesRoutes } from "./routes/summaries-routes.ts";
 import { registerAnthropicRoutes } from "./routes/anthropic-routes.ts";
 import { registerSSERoutes } from "./routes/sse-routes.ts";
@@ -43,6 +44,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerAnthropicRoutes(app, config);
   registerYouTubeRoutes(app, config);
   registerXArticleRoutes(app, config);
+  registerTikTokRoutes(app, config);
   registerSSERoutes(app);
   registerGraphRoutes(app, config);
   registerBenchmarkRoutes(app);

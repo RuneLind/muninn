@@ -104,6 +104,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Voice | `src/voice/` | STT (whisper-cli) + TTS (macOS say + ffmpeg) |
 | YouTube | `src/youtube/` | Transcript fetch + summarization (backs `youtube-routes.ts` + Chrome extension) |
 | X article | `src/x-article/` | X/Twitter article summarization (backs `x-article-routes.ts` + Chrome extension) |
+| TikTok | `src/tiktok/` | TikTok video summarization *including visual content* — `media.ts` (yt-dlp download + whisper transcript + ffmpeg keyframes) → `summarizer.ts` (Claude reads frame JPEGs via `--add-dir`) → `tiktok-summaries` collection (backs `tiktok-routes.ts`). **Requires `yt-dlp` on PATH** (`brew install yt-dlp`); `SUMMARIZER_BOT` must be a CLI-native bot (frames are read through the `claude` CLI, so a copilot-sdk bot's model id would fail the spawn after the expensive download/whisper work). Optional `TIKTOK_WHISPER_MODEL_PATH` overrides the shared whisper model. |
 | Extensions | `extensions/` | Chrome extensions (Jira research, YouTube summarizer) — each subfolder is a standalone extension |
 
 ### Bot Folder Structure
@@ -184,7 +185,7 @@ PostgreSQL + pgvector via Docker (single container).
 | `SLACK_APP_TOKEN_<NAME>` | No | — | Slack app-level token (per bot) |
 | `SLACK_ALLOWED_USER_IDS_<NAME>` | No | — | Comma-separated Slack user IDs |
 | `LOG_DIR` | No | `./logs` | Log file directory (set `none` to disable file logging) |
-| `SUMMARIZER_BOT` | No | first discovered bot | Bot whose config (model + timeout) drives the dashboard YouTube / X-article summarization jobs. Matched by name (case-insensitive); falls back to the first discovered bot when unset or unmatched. These jobs are CLI-only, so without this knob the model silently depends on bot-folder directory order. |
+| `SUMMARIZER_BOT` | No | first discovered bot | Bot whose config (model + timeout) drives the dashboard YouTube / X-article / TikTok summarization jobs. Matched by name (case-insensitive); falls back to the first discovered bot when unset or unmatched. These jobs are CLI-only (TikTok additionally reads frame images through the CLI, so its summarizer bot **must** be CLI-native), so without this knob the model silently depends on bot-folder directory order. |
 | `RESEARCH_BOT` | No | first fast CLI bot | Bot that synthesizes `/research` (Claude Learning Center) answers — interactive Q&A, so the default favors speed over the slow summarizer default. Resolution (`resolveResearchBot`): `RESEARCH_BOT` (name, case-insensitive) → first discovered bot that is **non-opus AND CLI-native** (synthesis always runs through the Claude CLI, so `copilot-sdk`/`openai-compat` bots whose model id isn't a valid `--model` are skipped) → `resolveSummarizerBot`. The `?bot=` query param on `/api/research/ask` still overrides everything. |
 | `CORRECTIVE_RETRIEVAL_ENABLED` | No | `false` | Global default for prompt-level corrective retrieval (per-bot `correctiveRetrieval.enabled` overrides). |
 | `CORRECTIVE_RETRIEVAL_DISABLED` | No | — | Set to `1` to hard-disable corrective retrieval everywhere, regardless of per-bot config. |

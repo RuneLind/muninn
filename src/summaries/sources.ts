@@ -58,6 +58,14 @@ export const SUMMARY_SOURCES: SummarySource[] = [
     apiBase: "/api/anthropic",
     linkLabel: "Read on docs ↗",
   },
+  {
+    id: "tiktok",
+    label: "TikTok",
+    badge: "TikTok",
+    collection: "tiktok-summaries",
+    apiBase: "/api/tiktok",
+    linkLabel: "View on TikTok ↗",
+  },
 ];
 
 export function getSummarySource(id: string): SummarySource | undefined {
