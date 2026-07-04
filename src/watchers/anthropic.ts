@@ -2,7 +2,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { decodeEntities, extractTag } from "./news.ts";
 import { isSkipResult } from "./x.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
 import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
@@ -265,12 +265,6 @@ interface Candidate {
   excerpt?: string;
 }
 
-interface GateScore {
-  n: number;
-  score: number;
-  why: string;
-}
-
 /** Snapshot key namespace, one row per Tier-2 source. */
 const SNAP_LLMS = "tier2:llms";
 const snapBlogKey = (section: string) => `tier2:blog:${section}`;
@@ -415,15 +409,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   const minScore = config.minScore ?? DEFAULT_MIN_SCORE;
   // Index ALL model-returned scores by candidate number (not just the surfaced ones),
   // so the per-candidate calibration log below can also show below-threshold scores.
-  const byN = new Map<number, GateScore>();
-  for (const s of scored) {
-    if (s.n < 1 || s.n > candidates.length) continue;
-    // If the model emits more than one object for the same candidate number
-    // (off-contract — the prompt asks for one each), keep the HIGHEST score so a
-    // passing score is never masked by a later failing duplicate.
-    const prev = byN.get(s.n);
-    if (!prev || s.score > prev.score) byN.set(s.n, s);
-  }
+  const byN = indexScoresByN(scored, candidates.length);
 
   const visible: WatcherAlert[] = [];
   const silentIds: string[] = [];
@@ -792,14 +778,7 @@ async function runGate(
 
   if (config.quietMode && isSkipResult(result)) return "SKIP_ALL";
 
-  const parsed = extractJson<unknown[]>(result);
-  if (!Array.isArray(parsed)) throw new Error("gate did not return a JSON array");
-  return parsed
-    .map((p) => {
-      const o = (p ?? {}) as Record<string, unknown>;
-      return { n: Number(o.n), score: Number(o.score), why: String(o.why ?? "") };
-    })
-    .filter((p) => Number.isFinite(p.n) && Number.isFinite(p.score));
+  return parseGateScores(result);
 }
 
 // --- Candidate capture (Claude Learning Center, Phase B) ---

@@ -82,8 +82,11 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
           title = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.title ELSE summary_candidates.title END,
           candidate_src = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.candidate_src ELSE summary_candidates.candidate_src END,
           -- source_doc_id is identity-derived (a property of (source,url), not the
-          -- score), so keep the first non-null — never overwrite it with a null.
-          source_doc_id = COALESCE(summary_candidates.source_doc_id, EXCLUDED.source_doc_id),
+          -- score). Prefer the NEWEST non-null: huginn can re-index a tweet under a
+          -- fresh dated doc id while the old one is evicted (x-feed caps at 5000
+          -- docs), so a re-capture's id is at least as resolvable as the stored one.
+          -- Never overwrite with a null.
+          source_doc_id = COALESCE(EXCLUDED.source_doc_id, summary_candidates.source_doc_id),
           updated_at = now()
       WHERE summary_candidates.status = 'new'
   `;

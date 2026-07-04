@@ -98,7 +98,7 @@ describe("summary-candidates", () => {
     expect(await listCandidates({})).toHaveLength(3);
   });
 
-  test("upsert round-trips source_doc_id and keeps the first non-null on re-capture", async () => {
+  test("upsert round-trips source_doc_id, keeps newest non-null, never nulls it", async () => {
     await upsertCandidate({
       ...base,
       source: "x",
@@ -114,6 +114,17 @@ describe("summary-candidates", () => {
     const after = await getCandidateBySourceUrl("x", "https://x.com/u/2");
     expect(after!.score).toBeCloseTo(0.9, 5);
     expect(after!.sourceDocId).toBe("2026-07-04_handle_12345.md");
+
+    // A re-capture carrying a FRESH doc id wins (huginn re-indexed under a new date).
+    await upsertCandidate({
+      ...base,
+      source: "x",
+      url: "https://x.com/u/2",
+      score: 0.8,
+      sourceDocId: "2026-07-06_handle_12345.md",
+    });
+    const reindexed = await getCandidateBySourceUrl("x", "https://x.com/u/2");
+    expect(reindexed!.sourceDocId).toBe("2026-07-06_handle_12345.md");
 
     // Anthropic rows leave it null (resolve-by-URL behavior).
     await upsertCandidate({ ...base, url: "https://a/anthropic-null", score: 0.6 });

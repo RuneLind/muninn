@@ -1,6 +1,6 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
@@ -121,7 +121,16 @@ interface CompactedTweet {
   isNote: boolean;
   /** First body line of the tweet — used for the candidate title. */
   firstLine: string;
+  /** Body slice up to {@link GATE_EXCERPT_CHARS} for the capture gate (text caps at 500). */
+  gateBody: string;
 }
+
+/**
+ * Capture-gate body slice cap. The gate judges whether a FULL long-form post is worth
+ * summarizing, so it needs more than the digest's 500-char compact line — but stays
+ * bounded so a batch of eligible notes can't balloon the prompt.
+ */
+const GATE_EXCERPT_CHARS = 1200;
 
 /**
  * One per-doc record for the capture path (Candidates → Summaries). Carries the
@@ -140,6 +149,8 @@ export interface TweetDoc {
   firstLine: string;
   /** The compact one-liner (same string sent to the digest LLM). */
   text: string;
+  /** Longer body slice for the capture gate — see {@link GATE_EXCERPT_CHARS}. */
+  gateExcerpt: string;
 }
 
 /**
@@ -170,10 +181,13 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
   const handleMatch = heading.match(/@(\w+)/);
   const handle = handleMatch ? `@${handleMatch[1]}` : "unknown";
 
-  // Extract tweet body (lines between heading and "---" separator, excluding metadata)
+  // Extract tweet body (lines between heading and the FOOTER "---" separator, excluding
+  // metadata). The footer separator is the LAST "---" line — a long-form article can
+  // legitimately contain "---" horizontal rules of its own, and cutting at the first one
+  // would undercount bodyLength and misclassify exactly the long-form case we capture.
   const startIdx = headingIdx >= 0 ? headingIdx + 1 : 0;
-  const separatorIdx = lines.indexOf("---", startIdx);
-  const bodyLines = lines.slice(startIdx, separatorIdx > 0 ? separatorIdx : undefined)
+  const separatorIdx = lines.lastIndexOf("---");
+  const bodyLines = lines.slice(startIdx, separatorIdx > startIdx ? separatorIdx : undefined)
     .filter((l) => l.trim() && !l.startsWith("- **"))
     .map((l) => l.trim());
   const bodyRaw = bodyLines.join(" ");
@@ -201,8 +215,12 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
   result += `\n  URL: ${url}`;
   // bodyLength measures the extracted body PRE-truncation (x-feed docs carry ~350–450
   // chars of fixed scaffolding, so measuring the doc length would misclassify ordinary
-  // tweets as long-form — see isLongFormTweet).
-  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine };
+  // tweets as long-form — see isLongFormTweet). gateBody carries a longer slice for the
+  // capture gate, which judges long-form posts and would be blind on the 500-char text.
+  const gateBody = bodyRaw.length > GATE_EXCERPT_CHARS
+    ? bodyRaw.slice(0, bodyRaw.lastIndexOf(" ", GATE_EXCERPT_CHARS)) + "…"
+    : bodyRaw;
+  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine, gateBody };
 }
 
 function extractTweetId(docId: string): string {
@@ -296,16 +314,20 @@ export async function fetchFromCollection(
   const trackingIds = compacted.map((r) => `tw:${extractTweetId(r.docId)}`);
 
   // Per-doc records for the capture path — the FULL batch (before the topN slice), so a
-  // long-form tweet outside the digest still reaches the inbox pre-filter + gate.
-  const tweetDocs: TweetDoc[] = compacted.map((r) => ({
-    docId: r.docId,
-    url: r.url,
-    handle: r.handle,
-    bodyLength: r.bodyLength,
-    isNote: r.isNote,
-    firstLine: r.firstLine,
-    text: r.text,
-  }));
+  // long-form tweet outside the digest still reaches the inbox pre-filter + gate. Only
+  // built when the row actually captures; the digest rows never consume it.
+  const tweetDocs: TweetDoc[] | undefined = config.captureCandidates
+    ? compacted.map((r) => ({
+        docId: r.docId,
+        url: r.url,
+        handle: r.handle,
+        bodyLength: r.bodyLength,
+        isNote: r.isNote,
+        firstLine: r.firstLine,
+        text: r.text,
+        gateExcerpt: r.gateBody,
+      }))
+    : undefined;
 
   const topN = config.topN ?? DEFAULT_TOP_N;
   const ranked = compacted.slice(0, topN);
@@ -456,12 +478,6 @@ Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT p
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
 
-interface GateScore {
-  n: number;
-  score: number;
-  why: string;
-}
-
 /**
  * Long-form pre-filter (mirror of the anthropic watcher's `isShelfWorthy`): capture
  * eligibility for the inbox. A long-form note/article — either the explicit `**Type:**
@@ -491,7 +507,12 @@ async function runCaptureGate(
   docs: TweetDoc[],
   botName: string | undefined,
 ): Promise<GateScore[]> {
-  const list = docs.map((d, i) => `${i + 1}. ${d.text}`).join("\n\n");
+  // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
+  // judging whether the FULL long-form post is worth summarizing, and every eligible
+  // post is by definition longer than the compact line shows.
+  const list = docs
+    .map((d, i) => `${i + 1}. ${d.isNote ? "[ARTICLE/NOTE] " : ""}${d.handle}: ${d.gateExcerpt}\n   URL: ${d.url}`)
+    .join("\n\n");
   const prompt = `${DEFAULT_X_CAPTURE_PROMPT}\n\nPosts:\n\n${list}`;
 
   const { result } = await spawnHaiku(prompt, {
@@ -502,14 +523,7 @@ async function runCaptureGate(
     timeoutMs: CAPTURE_GATE_TIMEOUT_MS,
   });
 
-  const parsed = extractJson<unknown[]>(result);
-  if (!Array.isArray(parsed)) throw new Error("capture gate did not return a JSON array");
-  return parsed
-    .map((p) => {
-      const o = (p ?? {}) as Record<string, unknown>;
-      return { n: Number(o.n), score: Number(o.score), why: String(o.why ?? "") };
-    })
-    .filter((p) => Number.isFinite(p.n) && Number.isFinite(p.score));
+  return parseGateScores(result);
 }
 
 /**
@@ -546,13 +560,7 @@ async function captureXCandidates(
   }
 
   const minScore = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
-  // Index scores by post number, keeping the HIGHEST if the model duplicates a number.
-  const byN = new Map<number, GateScore>();
-  for (const s of scored) {
-    if (s.n < 1 || s.n > eligible.length) continue;
-    const prev = byN.get(s.n);
-    if (!prev || s.score > prev.score) byN.set(s.n, s);
-  }
+  const byN = indexScoresByN(scored, eligible.length);
 
   let captured = 0;
   for (let i = 0; i < eligible.length; i++) {
@@ -609,21 +617,41 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
 
   if (!data) return []; // fetch error
 
-  // Candidate capture (Candidates → Summaries) runs on the FULL fetched batch BEFORE and
+  // Candidate capture (Candidates → Summaries) runs on the FULL fetched batch,
   // INDEPENDENT of the silencing paths below (the minScore early return + the quietMode
   // SKIP both permanently track tweet IDs), so a run that alerts nothing can still feed
-  // the inbox. Collection path only; best-effort — never breaks the alert path.
-  if (config.captureCandidates && data.docs && data.docs.length > 0) {
-    try {
-      await captureXCandidates(data.docs, config, watcher, botName);
-    } catch (err) {
-      log.error("Candidate capture failed (alert path unaffected): {error}", {
-        botName,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // the inbox. Started here and awaited in the finally below, so it runs CONCURRENTLY
+  // with the digest model call — serialized, the capture gate's Haiku call plus a slow
+  // Sonnet digest could exceed the runner's per-watcher timeout net (timeoutMs + 30s)
+  // and get the digest killed. Collection path only; best-effort — captureXCandidates
+  // swallows its own errors and this catch is the last-resort boundary, so the promise
+  // never rejects and the alert path is never broken.
+  const capturePromise: Promise<void> =
+    config.captureCandidates && data.docs && data.docs.length > 0
+      ? captureXCandidates(data.docs, config, watcher, botName).catch((err) => {
+          log.error("Candidate capture failed (alert path unaffected): {error}", {
+            botName,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+      : Promise.resolve();
 
+  try {
+    return await runAlertPath(data, config, watcher, botName);
+  } finally {
+    // Every checkX exit waits for capture to settle so the runner's timeout net and the
+    // scheduler tick never leave an orphaned in-flight Haiku call behind.
+    await capturePromise;
+  }
+}
+
+/** The original checkX alert flow (minScore gate → digest LLM → SKIP/alert). */
+async function runAlertPath(
+  data: NonNullable<Awaited<ReturnType<typeof fetchFromCollection>>>,
+  config: XWatcherConfig,
+  watcher: Watcher,
+  botName?: string,
+): Promise<WatcherAlert[]> {
   // Score-based quality gate: if the top tweet doesn't clear the bar, track IDs silently
   // so the same tweets aren't re-evaluated, and skip the LLM call entirely.
   if (config.minScore != null && data.topScore != null && data.topScore < config.minScore) {

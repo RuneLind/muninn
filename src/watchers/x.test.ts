@@ -258,6 +258,18 @@ It continues across several lines with substance.
     expect(c.bodyLength).toBe("short tweet".length);
     expect(c.firstLine).toBe("short tweet");
   });
+
+  test("an internal --- horizontal rule does not truncate the body (footer is the LAST ---)", () => {
+    const before = "Part one of a long article. ".repeat(20).trim(); // ~560 chars
+    const after = "Part two continues after the rule. ".repeat(20).trim(); // ~700 chars
+    const doc = `# @writer — Writer\n\n${before}\n\n---\n\n${after}\n\n---\n\n- **Engagement:** 12 likes\n- **Type:** note`;
+    const c = compactTweetText(doc, "https://x.com/writer/status/3");
+    // Both halves counted — cutting at the FIRST --- would have dropped part two.
+    expect(c.bodyLength).toBeGreaterThan(before.length + after.length);
+    expect(c.isNote).toBe(true);
+    // The gate excerpt carries the longer slice (up to its cap), not the 500-char text.
+    expect(c.gateBody.length).toBeGreaterThan(500);
+  });
 });
 
 // ── isLongFormTweet: the capture pre-filter ─────────────────────────
@@ -355,7 +367,7 @@ describe("fetchFromCollection + checkX capture", () => {
 
   test("fetchFromCollection returns a per-doc records array for the full batch", async () => {
     const result = await fetchFromCollection(
-      { collection: "x-feed", windowDays: 1 },
+      { collection: "x-feed", windowDays: 1, captureCandidates: true },
       new Set<string>(),
       "jarvis",
     );
