@@ -249,18 +249,28 @@ export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
 }
 
 /**
- * Whether a bot can synthesize a Research answer at all. Synthesis runs through
- * `executeClaudePrompt`, which always spawns the Claude CLI and passes
- * `botConfig.model` straight to `--model` (ignoring the bot's connector). So a
- * `copilot-sdk` bot's Copilot-format id (e.g. melosys' `"claude-sonnet-4.6"`) or
- * an `openai-compat` bot's local id (e.g. `"qwen3.5:35b"`) is not a valid CLI
- * model and the spawn fails. Only CLI-native connectors qualify. The
- * `/api/research/ask` route uses this to reject an explicit `?bot=` that can't
- * synthesize, falling back to {@link resolveResearchBot} instead of crashing.
+ * Whether a bot's config can drive a raw `executeClaudePrompt` spawn. That path
+ * always spawns the Claude CLI and passes `botConfig.model` straight to
+ * `--model` (ignoring the bot's connector). So a `copilot-sdk` bot's
+ * Copilot-format id (e.g. melosys' `"claude-sonnet-4.6"`) or an `openai-compat`
+ * bot's local id (e.g. `"qwen3.5:35b"`) is not a valid CLI model and the spawn
+ * fails. Only CLI-native connectors qualify. Used by Research synthesis
+ * ({@link canSynthesizeResearch}) and the TikTok summarize route (which
+ * fail-fasts before its expensive download + whisper pre-work).
  */
-export function canSynthesizeResearch(bot: BotConfig): boolean {
+export function isCliNativeBot(bot: BotConfig): boolean {
   const connector = bot.connector ?? "claude-cli";
   return connector !== "copilot-sdk" && connector !== "openai-compat";
+}
+
+/**
+ * Whether a bot can synthesize a Research answer at all — i.e. it is CLI-native
+ * (see {@link isCliNativeBot}). The `/api/research/ask` route uses this to
+ * reject an explicit `?bot=` that can't synthesize, falling back to
+ * {@link resolveResearchBot} instead of crashing.
+ */
+export function canSynthesizeResearch(bot: BotConfig): boolean {
+  return isCliNativeBot(bot);
 }
 
 /**

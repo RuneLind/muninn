@@ -46,8 +46,8 @@ export function sumJobCardStyles(): string {
       letter-spacing: 0.5px;
     }
     .status-pending { background: color-mix(in srgb, var(--text-dim) 20%, transparent); color: var(--text-dim); }
-    .status-fetching_transcript { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
-    .status-summarizing { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
+    .status-fetching_transcript, .status-downloading, .status-transcribing { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
+    .status-summarizing, .status-extracting_frames { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
     .status-ingesting { background: color-mix(in srgb, var(--status-warning) 20%, transparent); color: var(--status-warning); }
     .status-complete { background: color-mix(in srgb, var(--status-success) 20%, transparent); color: var(--status-success); }
     .status-error { background: color-mix(in srgb, var(--status-error) 20%, transparent); color: var(--status-error); }
@@ -201,6 +201,9 @@ export function sumJobCardScript(): string {
     var STATUS_LABELS = {
       pending: 'Pending',
       fetching_transcript: 'Fetching transcript',
+      downloading: 'Downloading',
+      transcribing: 'Transcribing',
+      extracting_frames: 'Extracting frames',
       summarizing: 'Summarizing',
       ingesting: 'Indexing',
       complete: 'Complete',
@@ -346,7 +349,19 @@ export function sumJobCardScript(): string {
         loadJobSimilar(currentJobTitle); // replace with scored results
       });
 
-      eventSource.addEventListener('complete', function() {
+      eventSource.addEventListener('complete', function(e) {
+        // Backward-compatible: only TikTok ships a parsed summary on the complete
+        // event (its multi-turn frame-reading session leaks tool chatter into the
+        // streamed deltas). youtube/x/anthropic send an empty payload, so this is
+        // a no-op for them and finalizeSummary renders the accumulated text.
+        if (e && e.data) {
+          try {
+            var payload = JSON.parse(e.data);
+            if (payload && typeof payload.summary === 'string') {
+              accumulatedText = payload.summary;
+            }
+          } catch (err) {}
+        }
         finalizeSummary();
         updateStatusBadge('complete');
         eventSource.close();
