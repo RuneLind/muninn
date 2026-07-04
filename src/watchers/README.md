@@ -41,7 +41,7 @@ flowchart TD
         ALERT --> RUNDEDUP["Dedup alerts by ID + contentHash"]
         RUNDEDUP --> SEND["formatAlerts → Telegram HTML"]
         SEND --> SAVE["saveMessage to DB<br/>(active thread)"]
-        SAVE --> TRACK["Append tw:IDs + hashes<br/>to lastNotifiedIds<br/>(rolling window, max 400)"]
+        SAVE --> TRACK["Append tw:IDs + hashes<br/>to lastNotifiedIds<br/>(rolling window, max 600)"]
     end
 ```
 
@@ -116,7 +116,7 @@ After the run completes, `updateWatcherLastRun()` clears `force_next_run = false
 
 ```mermaid
 flowchart LR
-    subgraph "lastNotifiedIds (max 400, rolling window)"
+    subgraph "lastNotifiedIds (max 600, rolling window)"
         A["tw:12345<br/>tw:12346<br/>tw:12347<br/>..."]
         B["h:8a7f3c<br/>(content hashes)"]
         C["x-digest-1711100000<br/>(alert IDs)"]

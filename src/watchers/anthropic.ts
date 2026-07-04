@@ -15,7 +15,7 @@ const log = getLog("watchers", "anthropic");
  * (claude-code/commits) can land >10 entries in one 2h interval; the feed is
  * append-only, so anything past the cap that scrolls out of the next run's window
  * is missed permanently. 20 covers typical bursts while keeping the cold-start
- * baseline (≤feeds×cap ids) well under the runner's 400-id cap.
+ * baseline (≤feeds×cap ids) well under the runner's 600-id cap.
  */
 const MAX_PER_FEED = 20;
 /**
@@ -75,9 +75,10 @@ const DEFAULT_GATE_TIMEOUT_MS = 90_000;
 /**
  * Hard cap on the body excerpt fed to the gate per candidate (Alert depth, §10).
  * A few hundred chars sharpens the score + "why" over a title-only signal without
- * blowing Haiku's context — one gate call can carry ~200 candidates, so this stays
- * modest. Excerpts ride the GATE path only; the digest (which rolls up to 200
- * Tier-1 items into one prompt) stays title-only so its prompt can't balloon.
+ * blowing Haiku's context — one gate call can carry ~240 candidates, so this stays
+ * modest. Excerpts ride the GATE path only; the digest (which rolls up to
+ * DIGEST_MAX_TIER1 Tier-1 items into one prompt) stays title-only so its prompt
+ * can't balloon.
  */
 const MAX_EXCERPT_CHARS = 300;
 /**
@@ -92,14 +93,15 @@ const DOC_EXCERPT_TIMEOUT_MS = 6_000;
 /**
  * Digest-mode (Phase 4) Tier-1 cap. The digest rows roll a whole window's candidates
  * into ONE message; this bounds the Tier-1 (feed) portion fed to the LLM. It equals the
- * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED = 12 × 20), so it is a safety
+ * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED), so it is a safety
  * rail that does not bite in normal operation — per-feed capping already balances feeds.
- * Tier-2 additions are NEVER capped (see runDigest): their dedup is the snapshot, which
- * persistTier2 advances to the full set unconditionally, so an un-surfaced Tier-2
- * addition would be lost forever; a truncated Tier-1 item instead re-surfaces next run
- * via last_notified_ids (within lookbackDays).
+ * Derived, not hand-synced: adding a feed to DEFAULT_ANTHROPIC_FEEDS moves the rail
+ * automatically. Tier-2 additions are NEVER capped (see runDigest): their dedup is the
+ * snapshot, which persistTier2 advances to the full set unconditionally, so an
+ * un-surfaced Tier-2 addition would be lost forever; a truncated Tier-1 item instead
+ * re-surfaces next run via last_notified_ids (within lookbackDays).
  */
-const DIGEST_MAX_TIER1 = 240;
+const DIGEST_MAX_TIER1 = DEFAULT_ANTHROPIC_FEEDS.length * MAX_PER_FEED;
 
 /**
  * Quality-gate prompt: score each new candidate 0–1 for whether it's worth
@@ -734,7 +736,7 @@ function markdownExcerpt(md: string): string | undefined {
  * Numbered candidate list shared by the gate and digest prompts (keeps the two in
  * sync). With `withExcerpt` each candidate's truncated body slice is appended on its
  * own line — the GATE passes this so it scores off content, not just titles; the
- * digest omits it (default) because it rolls up to 200 items and would balloon.
+ * digest omits it (default) because it rolls up to DIGEST_MAX_TIER1 items and would balloon.
  * Candidates with no excerpt render title-only either way.
  */
 export function formatCandidateList(cands: Candidate[], opts?: { withExcerpt?: boolean }): string {

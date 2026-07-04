@@ -20,7 +20,12 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers");
 
-const MAX_NOTIFIED_IDS = 400; // IDs + content hashes share this array
+// IDs + content hashes share this rolling array. Sized so the anthropic Weekly
+// digest's dedup window survives two busy runs: each can track up to
+// DIGEST_MAX_TIER1 (12 feeds × 20) + 1 Tier-2/digest ids ≈ 241, and its
+// lookbackDays (16) spans two 7-day runs — at 400, ~82 of the older run's ids
+// were evicted and could re-surface as duplicates.
+const MAX_NOTIFIED_IDS = 600;
 
 /**
  * Per-watcher safety-net timeout. Each checker already applies its own model
