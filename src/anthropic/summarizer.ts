@@ -21,6 +21,8 @@ const log = getLog("anthropic", "summarizer");
 
 const KNOWLEDGE_COLLECTION = "anthropic-knowledge";
 const SUMMARIES_COLLECTION = "anthropic-summaries";
+/** Huginn collection the X watcher captures from — content is fetched by doc id (tweet URLs aren't fetchable). */
+const X_FEED_COLLECTION = "x-feed";
 
 // Cap resolved content before summarizing. Real docs/blogs/commits are small
 // (hundreds to a few thousand chars), but the direct-fetch fallback can pull a
@@ -65,6 +67,24 @@ Instructions:
    - Bullet points with emoji prefixes
    - **Bold** for key terms and takeaways
    - Lead with what changed and why it matters; keep it concise but comprehensive`;
+
+/**
+ * X variant of the summarize system prompt — for a captured long-form X post/article
+ * (borrows the framing of `src/x-article/summarizer.ts`). Same CATEGORY:/SUMMARY:
+ * contract + AI_CATEGORIES clamp as the anthropic prompt, so the parser is unchanged;
+ * only the framing (a personal note, not an Anthropic release) differs.
+ */
+const X_SUMMARIZE_SYSTEM_PROMPT = `You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer.
+
+Instructions:
+1. Start your response with EXACTLY this line: CATEGORY: <category>
+   Choose from: ${AI_CATEGORIES.join(", ")}
+2. Then add a blank line, then SUMMARY: on its own line
+3. Then write a structured summary with:
+   - ### Section headers for key topics
+   - Bullet points with emoji prefixes
+   - **Bold** for key terms and takeaways
+   - Lead with the author's main point and why it matters; keep it concise but comprehensive`;
 
 interface ResolvedContent {
   text: string;
@@ -132,8 +152,45 @@ async function resolveContent(
   config: Config,
   url: string,
   title: string,
+  sourceDocId?: string | null,
 ): Promise<ResolvedContent | null> {
   const baseUrl = config.knowledgeApiUrl;
+
+  // 0. Source-doc-id path (X): the candidate carries its huginn `x-feed` doc id, and
+  //    tweet URLs aren't fetchable, so resolve content straight from that doc. No URL
+  //    fallback here — a direct fetch of x.com would just yield the login wall.
+  if (sourceDocId) {
+    try {
+      const doc = await fetchKnowledgeApi(
+        baseUrl,
+        `/api/document/${X_FEED_COLLECTION}/${encodeURIComponent(sourceDocId)}`,
+        { timeoutMs: 12000 },
+      );
+      const text = typeof doc?.text === "string" ? doc.text : "";
+      const date = typeof doc?.metadata?.date === "string" ? doc.metadata.date : undefined;
+      if (text.trim()) {
+        log.info("Resolved {url} from {collection} doc {docId} ({len} chars)", {
+          url,
+          collection: X_FEED_COLLECTION,
+          docId: sourceDocId,
+          len: text.length,
+        });
+        return { text: capContent(text), date };
+      }
+      log.warn("{collection} doc {docId} was empty for {url}", {
+        collection: X_FEED_COLLECTION,
+        docId: sourceDocId,
+        url,
+      });
+    } catch (err) {
+      log.warn("{collection} document fetch failed for {docId}: {error}", {
+        collection: X_FEED_COLLECTION,
+        docId: sourceDocId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return null;
+  }
 
   // 1. Preferred — the doc Huginn already fetched + extracted.
   const docId = await resolveDocId(baseUrl, url, title);
@@ -223,20 +280,25 @@ export async function summarizeCandidate(
   url: string,
   config: Config,
   botConfig: BotConfig,
+  sourceDocId?: string | null,
 ): Promise<void> {
   try {
-    // 1. Resolve full content (still `pending` — no separate UI step, per plan).
-    const content = await resolveContent(config, url, title);
+    // 1. Resolve full content (still `pending` — no separate UI step, per plan). For X
+    //    the candidate carries a source doc id; anthropic resolves by URL (sourceDocId
+    //    null).
+    const content = await resolveContent(config, url, title, sourceDocId);
     if (!content) {
-      failJob(jobId, "Could not resolve candidate content from anthropic-knowledge or its URL");
+      failJob(jobId, "Could not resolve candidate content from its source doc or URL");
       await setCandidateStatus(candidateId, "error");
       return;
     }
 
-    // 2. Summarize with Claude.
+    // 2. Summarize with Claude. Source-aware system prompt: an X post gets the note
+    //    framing; anthropic keeps the ecosystem-release framing. Same CATEGORY contract.
     updateStatus(jobId, "summarizing");
 
-    const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
+    const basePrompt = sourceDocId ? X_SUMMARIZE_SYSTEM_PROMPT : SUMMARIZE_SYSTEM_PROMPT;
+    const systemPrompt = `${basePrompt}
 
 Title: ${title}
 URL: ${url}`;
@@ -351,6 +413,8 @@ export interface CandidateRef {
   id: string;
   title: string;
   url: string;
+  /** Origin doc id for source-doc resolution (X carries the `x-feed` doc id; anthropic null). */
+  sourceDocId?: string | null;
 }
 
 /**
@@ -373,13 +437,19 @@ export async function kickCandidateSummarize(
   const jobId = createJob(candidate.id, candidate.title, candidate.url);
   await setCandidateStatus(candidate.id, "summarizing");
   // Fire and forget — background summarization.
-  summarizeCandidate(jobId, candidate.id, candidate.title, candidate.url, config, botConfig).catch(
-    (err) => {
-      log.error("Anthropic summarization failed: {error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    },
-  );
+  summarizeCandidate(
+    jobId,
+    candidate.id,
+    candidate.title,
+    candidate.url,
+    config,
+    botConfig,
+    candidate.sourceDocId,
+  ).catch((err) => {
+    log.error("Anthropic summarization failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   return jobId;
 }
 

@@ -69,10 +69,23 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `dedupByTweetId` | `true` | Filter out tweets already in `lastNotifiedIds`. Set `false` on daily/weekly digests that re-rank the full window. |
 | `minScore` | — | Pre-LLM gate on `rankScore` (combined_score fallback engagement_score). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. |
 | `quietMode` | `false` | Allows the LLM to reply with literal `SKIP` (any case, optional surrounding markdown/punctuation) to suppress the alert. The fetched IDs are still tracked so the same tweets aren't re-evaluated next run. |
+| `captureCandidates` | `false` | Persist high-value **long-form** tweets into the `summary_candidates` inbox (Candidates → Summaries). Collection path only. Runs on the FULL fetched batch, BEFORE and independent of the `minScore`/`quietMode` silencing — a run that alerts nothing can still capture. See "Candidate capture" below. |
+| `candidateMinScore` | 0.6 | Inbox capture floor — long-form tweets scored ≥ this by the capture gate are queued. Independent of the alert `minScore`. |
 
 ### Silent alerts and the quality-gate pattern
 
 When `minScore` or `quietMode` suppresses a digest, `checkX` returns a single `WatcherAlert` with `silent: true` and populated `trackingIds`. The runner detects the flag (see runner.ts) and persists the IDs into `lastNotifiedIds` without sending, saving, or logging to `activityLog`. This keeps re-evaluation cost bounded — tweets that were considered and rejected won't be re-fetched next tick.
+
+### Candidate capture → the Candidates → Summaries inbox (Claude Learning Center, Phase B — X → shelf)
+
+With `captureCandidates: true` the X Highlights row feeds the SAME `summary_candidates` → `/summaries` → shelf pipeline the anthropic watcher uses, so high-value X content joins the reading shelf. The mechanics mirror the anthropic capture, with X-specific twists:
+
+- **Placement is load-bearing.** `checkX` has two silencing paths that permanently track tweet IDs (the pre-LLM `minScore` early return and the post-LLM `quietMode` SKIP). The live X Highlights row runs `minScore/quietMode`, so most runs silence the whole batch and never re-consider those IDs. Capture therefore runs on the **full fetched batch** (all docs via `FetchResult.docs`, NOT the `topN`-sliced digest subset), **before and independent of** both silencing paths — a run that alerts nothing still captures.
+- **Long-form pre-filter only** (`isLongFormTweet`): an extracted tweet *body* ≥ 800 chars (measured PRE-truncation, since x-feed docs carry ~350–450 chars of fixed scaffolding) OR the `**Type:** note` marker. A short plain tweet is its own summary — never captured. **Link-tweets are deliberately excluded** (the summarizer would only see the tweet's own text, not the linked article).
+- **One extra Haiku gate** (`DEFAULT_X_CAPTURE_PROMPT`, the anthropic gate's `{n,score,why}` shape) over the long-form subset only. Candidates scored ≥ `candidateMinScore` (default 0.6) are upserted with `source: 'x'`, `title: "@handle: <first line>"`, `candidateSrc: "X (@handle)"`, and `sourceDocId` = the huginn `x-feed` doc id (the summarizer fetches `/api/document/x-feed/<id>` for content — tweet URLs aren't directly fetchable).
+- **Capture-gate failure stance (decided):** on a capture Haiku error, log and proceed with the normal alert path — the run's long-form tweets are lost to the inbox this run (best-effort). We deliberately do NOT hold tweet IDs back from tracking: entangling alert dedup with capture health would re-surface already-alerted tweets. Best-effort throughout — a DB error never breaks the alert path. Dedup rides the table's `UNIQUE(source,url)` + the upstream `lastNotifiedIds` filter.
+
+Summarizer + inbox are source-aware: `resolveContent` fetches the `x-feed` doc when `source_doc_id` is set (X system-prompt variant), the summary still lands on the shared `anthropic-summaries` shelf, and the inbox route (`GET /api/anthropic/candidates`) reads `source: ["anthropic","x"]` with a small source badge per row. `dashboard_url` stays `source=anthropic` for all rows (that param keys the shelf registry, not the candidate origin). Column added in migration `048` (`source_doc_id`, nullable), mirrored in `db/init.sql`.
 
 ### 3-watcher pattern (daytime alerts + daily + weekly)
 

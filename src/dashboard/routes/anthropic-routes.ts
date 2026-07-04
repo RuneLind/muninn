@@ -45,8 +45,11 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // `dismissed` rows stay hidden.
   app.get("/api/anthropic/candidates", async (c) => {
     try {
+      // Both verticals share this inbox — anthropic releases + captured long-form X
+      // posts. (dashboard_url stays source=anthropic for all: that param keys the shelf
+      // registry, and both land on the anthropic-summaries shelf — see sources.ts.)
       const candidates = await listCandidates({
-        source: "anthropic",
+        source: ["anthropic", "x"],
         status: ["new", "summarizing", "summarized", "error"],
       });
       return c.json({ candidates });

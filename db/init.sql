@@ -368,6 +368,7 @@ CREATE TABLE summary_candidates (
   status        TEXT NOT NULL DEFAULT 'new'
     CHECK (status IN ('new', 'summarizing', 'summarized', 'dismissed', 'error')),
   doc_id        TEXT,
+  source_doc_id TEXT,
   watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
   bot_name      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
