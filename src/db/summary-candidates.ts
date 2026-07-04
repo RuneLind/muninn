@@ -19,12 +19,12 @@ export type SummaryCandidateStatus =
 
 export interface SummaryCandidate {
   id: string;
-  /** Source vertical (e.g. "anthropic"). */
+  /** Source vertical (e.g. "anthropic", "x"). */
   source: string;
   /** Canonical item URL — candidate identity together with `source`. */
   url: string;
   title: string;
-  /** Where it came from inside the source ("Recent Commits to …", "Docs (llms.txt)", "News"). */
+  /** Where it came from inside the source ("Recent Commits to …", "Docs (llms.txt)", "X (@handle)"). */
   candidateSrc: string | null;
   /** Gate score 0–1. */
   score: number;
@@ -32,6 +32,12 @@ export interface SummaryCandidate {
   status: SummaryCandidateStatus;
   /** Resulting anthropic-summaries doc id once summarized (Phase C/D). */
   docId: string | null;
+  /**
+   * Origin doc id in the source's knowledge collection — set for X (the huginn
+   * `x-feed` doc id, which the summarizer fetches for content), NULL for anthropic
+   * (whose summarizer resolves content by exact-URL match instead).
+   */
+  sourceDocId: string | null;
   /** Watcher that captured it (provenance; ON DELETE SET NULL). */
   watcherId: string | null;
   botName: string | null;
@@ -46,6 +52,8 @@ interface UpsertCandidateParams {
   candidateSrc?: string | null;
   score: number;
   why?: string | null;
+  /** Origin doc id in the source collection (x-feed doc id for X; null for anthropic). */
+  sourceDocId?: string | null;
   watcherId?: string | null;
   botName?: string | null;
 }
@@ -59,10 +67,10 @@ interface UpsertCandidateParams {
 export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
   const sql = getDb();
   await sql`
-    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, watcher_id, bot_name)
+    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, source_doc_id, watcher_id, bot_name)
     VALUES (
       ${p.source}, ${p.url}, ${p.title}, ${p.candidateSrc ?? null},
-      ${p.score}, ${p.why ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
+      ${p.score}, ${p.why ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
     )
     ON CONFLICT (source, url) DO UPDATE
       SET score = GREATEST(summary_candidates.score, EXCLUDED.score),
@@ -73,6 +81,9 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
           why = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.why ELSE summary_candidates.why END,
           title = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.title ELSE summary_candidates.title END,
           candidate_src = CASE WHEN EXCLUDED.score >= summary_candidates.score THEN EXCLUDED.candidate_src ELSE summary_candidates.candidate_src END,
+          -- source_doc_id is identity-derived (a property of (source,url), not the
+          -- score), so keep the first non-null — never overwrite it with a null.
+          source_doc_id = COALESCE(summary_candidates.source_doc_id, EXCLUDED.source_doc_id),
           updated_at = now()
       WHERE summary_candidates.status = 'new'
   `;
@@ -80,7 +91,8 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
 
 export async function listCandidates(
   opts: {
-    source?: string;
+    /** One source ("anthropic") or several (["anthropic","x"]) — mirrors `status`. */
+    source?: string | string[];
     status?: SummaryCandidateStatus | SummaryCandidateStatus[];
     botName?: string;
     limit?: number;
@@ -89,9 +101,11 @@ export async function listCandidates(
   const sql = getDb();
   const statuses =
     opts.status == null ? null : Array.isArray(opts.status) ? opts.status : [opts.status];
+  const sources =
+    opts.source == null ? null : Array.isArray(opts.source) ? opts.source : [opts.source];
   const rows = await sql`
     SELECT * FROM summary_candidates
-    WHERE (${opts.source ?? null}::text IS NULL OR source = ${opts.source ?? null})
+    WHERE (${sources}::text[] IS NULL OR source = ANY(${sources}))
       AND (${opts.botName ?? null}::text IS NULL OR bot_name = ${opts.botName ?? null})
       AND (${statuses}::text[] IS NULL OR status = ANY(${statuses}))
     ORDER BY score DESC, created_at DESC
@@ -152,6 +166,7 @@ function mapRow(r: Record<string, any>): SummaryCandidate {
     why: r.why ?? null,
     status: r.status as SummaryCandidateStatus,
     docId: r.doc_id ?? null,
+    sourceDocId: r.source_doc_id ?? null,
     watcherId: r.watcher_id ?? null,
     botName: r.bot_name ?? null,
     createdAt: new Date(r.created_at).getTime(),

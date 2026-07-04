@@ -85,6 +85,42 @@ describe("summary-candidates", () => {
     expect(await listCandidates({ status: ["new", "summarizing"] })).toHaveLength(2);
   });
 
+  test("listCandidates accepts a source array (the inbox reads anthropic + x)", async () => {
+    await upsertCandidate({ ...base, source: "anthropic", url: "https://a/1", score: 0.7 });
+    await upsertCandidate({ ...base, source: "x", url: "https://x.com/u/1", score: 0.8 });
+    await upsertCandidate({ ...base, source: "youtube", url: "https://yt/1", score: 0.9 });
+    // A single source string still works (unchanged behavior).
+    expect(await listCandidates({ source: "anthropic" })).toHaveLength(1);
+    // The array form spans both verticals, still ordered by score desc.
+    const both = await listCandidates({ source: ["anthropic", "x"] });
+    expect(both.map((c) => c.source)).toEqual(["x", "anthropic"]);
+    // No source filter returns every source.
+    expect(await listCandidates({})).toHaveLength(3);
+  });
+
+  test("upsert round-trips source_doc_id and keeps the first non-null on re-capture", async () => {
+    await upsertCandidate({
+      ...base,
+      source: "x",
+      url: "https://x.com/u/2",
+      score: 0.7,
+      sourceDocId: "2026-07-04_handle_12345.md",
+    });
+    const [row] = await listCandidates({ source: "x" });
+    expect(row!.sourceDocId).toBe("2026-07-04_handle_12345.md");
+
+    // A higher-score re-capture that omits the doc id must not null it out.
+    await upsertCandidate({ ...base, source: "x", url: "https://x.com/u/2", score: 0.9 });
+    const after = await getCandidateBySourceUrl("x", "https://x.com/u/2");
+    expect(after!.score).toBeCloseTo(0.9, 5);
+    expect(after!.sourceDocId).toBe("2026-07-04_handle_12345.md");
+
+    // Anthropic rows leave it null (resolve-by-URL behavior).
+    await upsertCandidate({ ...base, url: "https://a/anthropic-null", score: 0.6 });
+    const anth = await getCandidateBySourceUrl("anthropic", "https://a/anthropic-null");
+    expect(anth!.sourceDocId).toBeNull();
+  });
+
   test("getCandidateBySourceUrl resolves a row by its (source,url) identity, with current status", async () => {
     expect(await getCandidateBySourceUrl("anthropic", base.url)).toBeNull();
     await upsertCandidate(base);

@@ -1,0 +1,14 @@
+-- Carry the origin doc id for a captured candidate (Phase 2 — X → summaries inbox).
+--
+-- The anthropic summarizer resolves a candidate's content by exact-URL match against
+-- the anthropic-knowledge collection, so anthropic rows leave this NULL. X candidates
+-- can't be resolved by URL (x.com tweet URLs aren't directly fetchable), so the X
+-- watcher stamps the huginn x-feed doc id here and the summarizer fetches
+-- /api/document/x-feed/<source_doc_id> for the full note text.
+--
+-- Nullable, no backfill: NULL means "resolve by URL" — the existing anthropic behavior.
+--
+-- ⚠️ Mirror of db/init.sql: the column must exist on BOTH sides or
+-- schema-drift.test.ts reds (the diff is structural + order-independent, so ADD
+-- COLUMN appending here vs init.sql's mid-table placement is fine).
+ALTER TABLE summary_candidates ADD COLUMN source_doc_id TEXT;
