@@ -24,12 +24,17 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
 }
 
 export function loadConfig() {
+  const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
     dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),
     databaseUrl: requireEnv("DATABASE_URL"),
-    whisperModelPath: optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin"),
+    whisperModelPath,
+    // TikTok summarizer transcription model. Falls back to the shared whisper
+    // model so English-only bots keep working; set TIKTOK_WHISPER_MODEL_PATH to
+    // a multilingual model (e.g. ggml-base.bin) without touching Telegram voice.
+    tiktokWhisperModelPath: optionalEnv("TIKTOK_WHISPER_MODEL_PATH", whisperModelPath),
     goalCheckIntervalMs: optionalEnvInt("GOAL_CHECK_INTERVAL_MS", 1800000),
     goalCheckEnabled: optionalEnv("GOAL_CHECK_ENABLED", "true") === "true",
     schedulerIntervalMs: optionalEnvInt(
