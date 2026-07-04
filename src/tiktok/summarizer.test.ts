@@ -198,7 +198,7 @@ test("empty transcript with frames present summarizes from the frames", async ()
   expect(lastPrompt).toContain("frame_001.jpg");
 });
 
-test("botConfig clone grants --add-dir on the work dir and raises the timeout to >=300s", async () => {
+test("botConfig clone grants --add-dir on the work dir and raises the timeout to >=600s", async () => {
   const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
   await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
 
@@ -211,7 +211,7 @@ test("botConfig clone grants --add-dir on the work dir and raises the timeout to
   const workDir = spawnArgs[addDirIdx + 1]!;
   expect(workDir).toBe(join(tmpdir(), `muninn-tiktok-${jobId}`));
   expect(downloadCalls[0]!.workDir).toBe(workDir);
-  expect(lastBotConfig!.timeoutMs).toBeGreaterThanOrEqual(300_000);
+  expect(lastBotConfig!.timeoutMs).toBeGreaterThanOrEqual(600_000);
   // The original bot config was cloned, not mutated.
   expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]);
   expect(bot.timeoutMs).toBeUndefined();

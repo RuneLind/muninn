@@ -31,7 +31,7 @@ const log = getLog("tiktok", "summarizer");
 const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following TikTok video, using BOTH its speech transcript and the extracted keyframe images.
 
 Instructions:
-1. Read each frame image listed below (with the Read tool) before summarizing. TikToks often carry most of their information on screen — capture diagrams, code, on-screen text, and visual demos.
+1. Read ALL the frame images listed below (with the Read tool) FIRST, batching many Read tool calls into one turn (parallel tool calls) — do NOT read one frame per message. TikToks often carry most of their information on screen — capture diagrams, code, on-screen text, and visual demos.
 2. Note explicitly when key information is visual-only (not spoken).
 3. Start your response with EXACTLY this line: CATEGORY: <category>
    Choose from: ${VALID_CATEGORIES.join(", ")}
@@ -149,7 +149,9 @@ Author: ${dl.uploader}`;
     const tiktokBotConfig: BotConfig = {
       ...botConfig,
       spawnArgs: [...(botConfig.spawnArgs ?? []), "--add-dir", workDir],
-      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 300_000),
+      // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
+      // (opus + thinking) — this is a background job, nothing blocks on it.
+      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
     };
 
     const onProgress: StreamProgressCallback = (event) => {
