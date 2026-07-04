@@ -13,7 +13,7 @@ interface SaveWatcherParams {
 const DEFAULT_INTERVALS: Record<string, number> = {
   news: 3600000,    // 1 hour — news changes slower
   x: 86400000,      // 24 hours — daily digest
-  anthropic: 7200000, // 2 hours — Atom feed polling (~10 feeds)
+  anthropic: 7200000, // 2 hours — Atom feed polling (~12 feeds)
 };
 const DEFAULT_INTERVAL_MS = 300000; // 5 minutes
 
