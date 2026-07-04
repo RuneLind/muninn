@@ -30,7 +30,7 @@ const DEFAULT_LOOKBACK_DAYS = 7;
  * Verified Tier-1 Atom feeds (CONTEXT.md §11c). For the content repos
  * (cookbooks/quickstarts/courses/skills/tutorial) the *commits* feed is the real
  * signal — their `releases.atom` returns 200 but is usually empty. Release feeds
- * matter for claude-code + the two SDKs. Override per-watcher via `config.feeds`.
+ * matter for claude-code + the four SDKs. Override per-watcher via `config.feeds`.
  *
  * Phase 1 narrowed the live watcher to releases-only to cut per-commit noise; with
  * the Phase 3 Haiku gate (`config.gate`) the full high-churn set can be restored —
@@ -41,6 +41,8 @@ export const DEFAULT_ANTHROPIC_FEEDS: readonly string[] = [
   "https://github.com/anthropics/claude-code/releases.atom",
   "https://github.com/anthropics/anthropic-sdk-python/releases.atom",
   "https://github.com/anthropics/anthropic-sdk-typescript/releases.atom",
+  "https://github.com/anthropics/claude-agent-sdk-python/releases.atom",
+  "https://github.com/anthropics/claude-agent-sdk-typescript/releases.atom",
   "https://github.com/anthropics/claude-cookbooks/commits/main.atom",
   "https://github.com/anthropics/claude-quickstarts/commits/main.atom",
   "https://github.com/anthropics/courses/commits/master.atom",
@@ -90,14 +92,14 @@ const DOC_EXCERPT_TIMEOUT_MS = 6_000;
 /**
  * Digest-mode (Phase 4) Tier-1 cap. The digest rows roll a whole window's candidates
  * into ONE message; this bounds the Tier-1 (feed) portion fed to the LLM. It equals the
- * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED = 10 × 20), so it is a safety
+ * structural Tier-1 max (DEFAULT feed count × MAX_PER_FEED = 12 × 20), so it is a safety
  * rail that does not bite in normal operation — per-feed capping already balances feeds.
  * Tier-2 additions are NEVER capped (see runDigest): their dedup is the snapshot, which
  * persistTier2 advances to the full set unconditionally, so an un-surfaced Tier-2
  * addition would be lost forever; a truncated Tier-1 item instead re-surfaces next run
  * via last_notified_ids (within lookbackDays).
  */
-const DIGEST_MAX_TIER1 = 200;
+const DIGEST_MAX_TIER1 = 240;
 
 /**
  * Quality-gate prompt: score each new candidate 0–1 for whether it's worth

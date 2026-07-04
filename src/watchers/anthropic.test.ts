@@ -750,9 +750,9 @@ describe("checkAnthropic", () => {
   });
 
   test("digest caps Tier-1 at DIGEST_MAX_TIER1 but NEVER truncates Tier-2 additions", async () => {
-    // 11 feeds × MAX_PER_FEED(20) = 220 Tier-1 entries > the 200 cap; the 11th feed's
+    // 13 feeds × MAX_PER_FEED(20) = 260 Tier-1 entries > the 240 cap; the 13th feed's
     // entries are dropped from trackingIds, while the Tier-2 doc addition is always kept.
-    const FEEDS = Array.from({ length: 11 }, (_, f) => `https://feed.test/f${f}.atom`);
+    const FEEDS = Array.from({ length: 13 }, (_, f) => `https://feed.test/f${f}.atom`);
     const atomFor = (f: number) => {
       const entries = Array.from({ length: 20 }, (_, i) => {
         const url = `https://github.com/anthropics/f${f}/commit/c${i}`;
@@ -785,18 +785,18 @@ describe("checkAnthropic", () => {
 
     const alerts = await checkAnthropic(
       digestWatcher({
-        lastNotifiedIds: ["seen"], // not cold; matches no feed url → all 220 Tier-1 are new
+        lastNotifiedIds: ["seen"], // not cold; matches no feed url → all 260 Tier-1 are new
         config: { feeds: FEEDS, lookbackDays: 100000, tier2: true, digest: true },
       }),
     );
     expect(alerts.length).toBe(1);
     const ids = alerts[0]!.trackingIds!;
-    // 200 capped Tier-1 + 1 Tier-2 = 201
-    expect(ids.length).toBe(201);
+    // 240 capped Tier-1 + 1 Tier-2 = 241
+    expect(ids.length).toBe(241);
     // Tier-2 addition is ALWAYS retained
     expect(ids).toContain(`an:${D2}`);
-    // The 11th feed (f10) was dropped by the cap
-    expect(ids).not.toContain("https://github.com/anthropics/f10/commit/c0");
+    // The 13th feed (f12) was dropped by the cap
+    expect(ids).not.toContain("https://github.com/anthropics/f12/commit/c0");
     // The first feed survived
     expect(ids).toContain("https://github.com/anthropics/f0/commit/c0");
   });
