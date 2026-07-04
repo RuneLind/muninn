@@ -11,7 +11,9 @@ extensions/
 │   └── README.md     ← per-extension docs
 ├── youtube/          ← YouTube video → summarize
 │   └── README.md
-└── x-article/        ← X/Twitter article → summarize
+├── x-article/        ← X/Twitter article → summarize
+│   └── README.md
+└── tiktok/           ← TikTok video → summarize (audio + frames)
     └── README.md
 ```
 
