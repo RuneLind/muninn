@@ -11,8 +11,8 @@
       ],
       "env": {
         "KNOWLEDGE_API_URL": "http://localhost:8321",
-        "KNOWLEDGE_COLLECTIONS": "wiki,youtube-summaries,x-feed",
-        "KNOWLEDGE_DESCRIPTION": "wiki (synthesized knowledge pages), youtube-summaries, x-feed (X/Twitter timeline tweets)"
+        "KNOWLEDGE_COLLECTIONS": "wiki,wiki-life,youtube-summaries,x-feed",
+        "KNOWLEDGE_DESCRIPTION": "wiki (synthesized AI/tech knowledge pages), wiki-life (synthesized life knowledge — health, parenting, entertainment), youtube-summaries, x-feed (X/Twitter timeline tweets)"
       }
     },
     "gmail": {

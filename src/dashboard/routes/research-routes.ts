@@ -5,6 +5,7 @@ import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
 import { discoverAllBots, resolveResearchBot, canSynthesizeResearch, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { streamResearchAnswer } from "../../research/ask.ts";
+import { resolveProfile } from "../../research/corpus.ts";
 import { MAX_HISTORY_TURNS, type ResearchTurn } from "../../research/answer.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
@@ -93,6 +94,12 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
 
     const history = parseResearchHistory(c.req.query("history"));
 
+    // Corpus profile scopes retrieval to a domain (ai | life). Stateless like
+    // history: the page sends profile= on every ask (including follow-ups), so
+    // reading it here keeps the whole conversation in-domain. Unknown/missing
+    // resolves to the default `ai` profile.
+    const profile = resolveProfile(c.req.query("profile"));
+
     const allBots = discoverAllBots();
     // Honor an explicit ?bot= only if it can actually synthesize on the CLI path.
     // A copilot-sdk/openai-compat bot (e.g. melosys, model "claude-sonnet-4.6")
@@ -111,8 +118,9 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const botConfig = (requestedUsable ? requested : undefined) ?? resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
-    log.info("Research ask: bot={bot} turn={turn} q={q}", {
+    log.info("Research ask: bot={bot} profile={profile} turn={turn} q={q}", {
       bot: botConfig.name,
+      profile: profile.label,
       turn: history.length + 1,
       q: question.slice(0, 120),
     });
@@ -130,7 +138,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       }, 30_000);
       stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
       try {
-        await streamResearchAnswer({ question, config, botConfig, history }, async (event) => {
+        await streamResearchAnswer({ question, config, botConfig, history, collections: profile.collections }, async (event) => {
           // EventSource reserves the "error" event for connection-level failures
           // (it also fires onerror), so a same-named app event gets masked as
           // "Connection lost" on the client. Emit app errors under a distinct
