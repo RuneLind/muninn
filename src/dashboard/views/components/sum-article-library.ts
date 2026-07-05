@@ -231,6 +231,61 @@ export function sumArticleLibraryScript(): string {
       return 'uncategorized';
     }
 
+    // --- Domain filter (AI vs Life) ---
+    // Page-global filter derived from each doc's category. DOMAIN_MAP (injected
+    // from src/summaries/domain.ts) maps a category's top segment to a domain;
+    // this mirrors categoryToDomain: split on slash, look up the top segment,
+    // default to ai. null activeDomain = show all domains. Composes with the
+    // Recently Added source filter (both apply) and narrows the Article Library.
+    var activeDomain = null;
+
+    function docDomain(docId) {
+      var top = docCategory(docId).split('/')[0];
+      return DOMAIN_MAP[top] || 'ai';
+    }
+
+    function matchesDomain(doc) {
+      return !activeDomain || docDomain(doc.id) === activeDomain;
+    }
+
+    // Render the All / AI / Life domain chips into #domainFilter (which sits
+    // alongside the source chips in Recently Added). Counts come from the full
+    // format-filtered archive. Clicking a chip sets activeDomain and re-renders
+    // both the library and the recently-added list from cache.
+    var DOMAIN_LABELS = { ai: 'AI', life: 'Life' };
+    async function renderDomainFilter() {
+      var el = document.getElementById('domainFilter');
+      if (!el) return;
+      var docs = (await getSummaryDocuments()).filter(function(d) {
+        return d.id && d.id.includes('/') && d.id.endsWith('.md');
+      });
+      var counts = { ai: 0, life: 0 };
+      docs.forEach(function(d) { counts[docDomain(d.id)]++; });
+      var order = ['ai', 'life'];
+      var chips = ['<span class="source-chip' + (activeDomain === null ? ' active' : '') +
+        '" data-domain="">All <span class="chip-count">' + docs.length + '</span></span>'];
+      order.forEach(function(id) {
+        if (!counts[id]) return;  // skip an empty domain
+        chips.push('<span class="source-chip' + (activeDomain === id ? ' active' : '') +
+          '" data-domain="' + esc(id) + '">' + esc(DOMAIN_LABELS[id] || id) +
+          ' <span class="chip-count">' + counts[id] + '</span></span>');
+      });
+      el.innerHTML = chips.join('');
+      el.querySelectorAll('.source-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+          var d = chip.getAttribute('data-domain');
+          activeDomain = d || null;
+          // Reset the source filter too: the previously-selected source may not
+          // exist in the new domain, which would strand the list on an empty
+          // result with no source chips to recover from.
+          if (typeof activeSource !== 'undefined') activeSource = null;
+          renderDomainFilter();
+          loadLibrary();
+          if (typeof loadRecentlyAdded === 'function') loadRecentlyAdded();
+        });
+      });
+    }
+
     // Per-source API prefix lookup with a youtube fallback for legacy deep links.
     function docApiBase(source) {
       var s = SOURCES[source];
@@ -310,8 +365,10 @@ export function sumArticleLibraryScript(): string {
 
         // Group docs by category (computed from the merged listing — categories
         // naturally merge across sources since they share the same taxonomy).
+        // The active domain chip narrows which docs (and therefore which
+        // category chips) are shown.
         docsByCategory = {};
-        allDocuments.forEach(function(doc) {
+        allDocuments.filter(matchesDomain).forEach(function(doc) {
           var cat = docCategory(doc.id);
           if (!docsByCategory[cat]) docsByCategory[cat] = [];
           docsByCategory[cat].push(doc);
@@ -322,7 +379,16 @@ export function sumArticleLibraryScript(): string {
           docs.sort(function(a, b) { return docTitle(a.id).localeCompare(docTitle(b.id)); });
         });
 
-        document.getElementById('libraryCount').textContent = allDocuments.length + ' articles';
+        // Count reflects the active domain (docsByCategory is already narrowed).
+        var visibleCount = Object.values(docsByCategory).reduce(function(n, ds) { return n + ds.length; }, 0);
+        document.getElementById('libraryCount').textContent = visibleCount + ' articles';
+
+        // If the domain change dropped the open category, collapse its grid.
+        if (activeCategory && !docsByCategory[activeCategory]) {
+          activeCategory = null;
+          var grid = document.getElementById('articlesGrid');
+          if (grid) grid.innerHTML = '';
+        }
 
         // Render category chips with counts (highest first).
         var chips = Object.keys(docsByCategory)

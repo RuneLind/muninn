@@ -2,6 +2,7 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientSourcesJson } from "../../summaries/sources.ts";
+import { clientDomainMapJson } from "../../summaries/domain.ts";
 import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
@@ -80,6 +81,8 @@ export async function renderSummariesPage(): Promise<string> {
   <script>
     // Summary-source registry projection (from src/summaries/sources.ts).
     const SOURCES = ${clientSourcesJson()};
+    // Category top-segment -> knowledge domain (from src/summaries/domain.ts).
+    const DOMAIN_MAP = ${clientDomainMapJson()};
   </script>
   <script>
     ${helpers}
@@ -107,6 +110,7 @@ export async function renderSummariesPage(): Promise<string> {
       loadCandidates();
       loadRecentlyAdded();
       loadLibrary();
+      renderDomainFilter();
 
       var params = new URLSearchParams(window.location.search);
       // Legacy deep links (/youtube?…, /x-articles?…) redirect here with ?source=.

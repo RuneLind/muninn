@@ -142,6 +142,9 @@ export function sumRecentlyAddedHtml(): string {
   return `
     <div class="recent-section" id="recentlyAddedSection">
       <h2>Recently Added <span class="count" id="recentlyAddedCount"></span></h2>
+      <!-- Domain filter (All / AI / Life), rendered by sum-article-library's
+           renderDomainFilter(). Sits alongside the source chips; both compose. -->
+      <div class="source-filter" id="domainFilter"></div>
       <div class="source-filter" id="sourceFilter"></div>
       <div id="recentlyAddedList">
         <div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">Loading...</div>
@@ -224,8 +227,11 @@ export function sumRecentlyAddedScript(): string {
           return d.id && d.id.includes('/') && d.id.endsWith('.md');
         });
 
-        renderSourceFilter(all);
-        var docs = activeSource ? all.filter(function(d) { return d.source === activeSource; }) : all.slice();
+        // Narrow to the active domain first (matchesDomain from sum-article-
+        // library), so the source chips + list compose with the domain filter.
+        var domainDocs = all.filter(matchesDomain);
+        renderSourceFilter(domainDocs);
+        var docs = activeSource ? domainDocs.filter(function(d) { return d.source === activeSource; }) : domainDocs.slice();
 
         if (docs.length === 0) {
           list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste a YouTube URL above or use the Chrome extension to get started.</div>';
