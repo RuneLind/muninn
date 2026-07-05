@@ -2,11 +2,10 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { markdownContentStyles, docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
-import { RESEARCH_CORPUS, clientCorpusJson } from "../../research/corpus.ts";
+import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
 
 export async function renderResearchPage(): Promise<string> {
   const helpers = await helpersClientScript();
-  const corpusLabels = RESEARCH_CORPUS.map((c) => c.label).join(" · ");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -64,6 +63,31 @@ export async function renderResearchPage(): Promise<string> {
       margin-bottom: 20px;
     }
     .corpus-line strong { color: var(--text-secondary); font-weight: 500; }
+
+    /* --- Corpus profile toggle (AI & tech / Life) --- */
+    .profile-toggle {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .profile-chip {
+      padding: 4px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .profile-chip:hover { border-color: var(--accent); color: var(--text-primary); }
+    .profile-chip.active {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 15%, transparent);
+      color: var(--accent-light);
+    }
 
     /* --- Conversation turns --- */
     /* The corpus Q&A is multi-turn: each ask appends a turn card; the running
@@ -289,7 +313,8 @@ export async function renderResearchPage(): Promise<string> {
   </div>
 
   <div class="page-content">
-    <div class="corpus-line">Searches across <strong>${corpusLabels}</strong></div>
+    <div class="profile-toggle" id="profileToggle"></div>
+    <div class="corpus-line" id="corpusLine"></div>
 
     <div class="empty-hint" id="emptyHint">
       Ask a question and Muninn answers from the shelf — with citations you can open.
@@ -330,6 +355,9 @@ export async function renderResearchPage(): Promise<string> {
     ${helpers}
 
     var CORPUS = ${clientCorpusJson()};
+    var PROFILES = ${clientProfilesJson()};
+    var DEFAULT_PROFILE = ${JSON.stringify(DEFAULT_PROFILE)};
+    var selectedProfile = DEFAULT_PROFILE;
     var collections = [];
     var botCollectionNames = [];
     var allDocuments = [];
@@ -397,6 +425,52 @@ export async function renderResearchPage(): Promise<string> {
       } else {
         browseLoaded = false;
       }
+    }
+
+    // === Corpus profile (AI & tech / Life) ===
+
+    // Restore the persisted profile, guarding against a stale value no longer in
+    // the registry (falls back to the default).
+    function initProfile() {
+      try {
+        var saved = localStorage.getItem('muninn-research-profile');
+        if (saved && PROFILES[saved]) selectedProfile = saved;
+      } catch (e) {}
+      renderProfileToggle();
+      renderCorpusLine();
+    }
+
+    function renderProfileToggle() {
+      var el = document.getElementById('profileToggle');
+      if (!el) return;
+      el.innerHTML = Object.keys(PROFILES).map(function(name) {
+        var active = name === selectedProfile ? ' active' : '';
+        return '<span class="profile-chip' + active + '" data-profile="' + esc(name) + '">' + esc(PROFILES[name].label) + '</span>';
+      }).join('');
+      el.querySelectorAll('.profile-chip').forEach(function(chip) {
+        chip.onclick = function() { selectProfile(chip.dataset.profile); };
+      });
+    }
+
+    // Show which collection labels the active profile searches across, resolved
+    // through CORPUS so citations and this line stay in sync.
+    function renderCorpusLine() {
+      var el = document.getElementById('corpusLine');
+      if (!el) return;
+      var prof = PROFILES[selectedProfile];
+      var names = (prof && prof.collections) || [];
+      var labels = names.map(function(name) {
+        return (CORPUS[name] && CORPUS[name].label) || name;
+      });
+      el.innerHTML = 'Searches across <strong>' + esc(labels.join(' · ')) + '</strong>';
+    }
+
+    function selectProfile(name) {
+      if (!PROFILES[name] || name === selectedProfile) return;
+      selectedProfile = name;
+      try { localStorage.setItem('muninn-research-profile', name); } catch (e) {}
+      renderProfileToggle();
+      renderCorpusLine();
     }
 
     // === Q&A ===
@@ -495,6 +569,7 @@ export async function renderResearchPage(): Promise<string> {
 
       var url = '/api/research/ask?q=' + encodeURIComponent(q);
       if (selectedBot) url += '&bot=' + encodeURIComponent(selectedBot);
+      url += '&profile=' + encodeURIComponent(selectedProfile);
       var hist = compactHistory();
       if (hist) url += '&history=' + encodeURIComponent(hist);
 
@@ -788,6 +863,8 @@ export async function renderResearchPage(): Promise<string> {
     document.getElementById('browseDetails').addEventListener('toggle', function() {
       if (this.open && !browseLoaded) { browseLoaded = true; loadBotCollections(); }
     });
+
+    initProfile();
 
     (async function() {
       await loadBotList();
