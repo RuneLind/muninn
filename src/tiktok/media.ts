@@ -246,7 +246,7 @@ export async function downloadVideo(
   }
   if (exitCode !== 0) {
     throw new Error(
-      `yt-dlp failed (exit ${exitCode}). TikTok may have changed — try 'brew upgrade yt-dlp'.\n${stderr.slice(0, 500)}`,
+      `yt-dlp failed (exit ${exitCode}). TikTok may have changed — try 'brew upgrade yt-dlp'.\n${stderr.slice(-500)}`,
     );
   }
 
@@ -312,6 +312,30 @@ export async function transcribeVideo(
   const workDir = dirname(videoPath);
   const wavPath = join(workDir, "audio.wav");
 
+  // TikTok sometimes serves a video-only file even when yt-dlp's format
+  // metadata claims an aac track, so probe before extracting: no audio stream
+  // means "no speech" (same contract as an empty transcript), not an error.
+  // The probe fails open — a missing/broken ffprobe just falls through to the
+  // ffmpeg extraction, which worked without ffprobe before this check existed.
+  try {
+    const probe = await runProc(
+      ["ffprobe", "-v", "error", "-select_streams", "a",
+       "-show_entries", "stream=codec_type", "-of", "csv=p=0", videoPath],
+      FFMPEG_AUDIO_TIMEOUT_MS,
+      "ffprobe audio probe",
+    );
+    if (probe.exitCode === 0 && probe.stdout.trim() === "") {
+      log.info("No audio stream in {videoPath} — summary will rely on frames", {
+        videoPath,
+      });
+      return "";
+    }
+  } catch (err) {
+    log.warn("ffprobe audio probe failed — proceeding with extraction: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Convert to 16kHz mono WAV (whisper-cli's required input format).
   const ffmpeg = await runProc(
     ["ffmpeg", "-i", videoPath, "-ar", "16000", "-ac", "1", "-y", wavPath],
@@ -319,8 +343,10 @@ export async function transcribeVideo(
     "ffmpeg audio extract",
   );
   if (ffmpeg.exitCode !== 0) {
+    // Slice the tail — ffmpeg prints its version banner first, so the head of
+    // stderr never contains the actual error.
     throw new Error(
-      `ffmpeg audio extraction failed (exit ${ffmpeg.exitCode}): ${ffmpeg.stderr.slice(0, 500)}`,
+      `ffmpeg audio extraction failed (exit ${ffmpeg.exitCode}): ${ffmpeg.stderr.slice(-500)}`,
     );
   }
 
@@ -337,7 +363,7 @@ export async function transcribeVideo(
   );
   if (whisper.exitCode !== 0) {
     throw new Error(
-      `whisper-cli failed (exit ${whisper.exitCode}): ${whisper.stderr.slice(0, 500)}`,
+      `whisper-cli failed (exit ${whisper.exitCode}): ${whisper.stderr.slice(-500)}`,
     );
   }
 
@@ -358,6 +384,12 @@ export async function transcribeVideo(
 // ---------------------------------------------------------------------------
 // 3. Keyframes
 // ---------------------------------------------------------------------------
+
+// Shared tail of both keyframe filtergraphs (scene detection + uniform
+// fallback). format=yuvj420p converts to full-range: ffmpeg 8's mjpeg encoder
+// rejects limited-range YUV (common in TikTok HEVC downloads) when an explicit
+// filtergraph suppresses the automatic range conversion.
+const FRAME_VF_TAIL = "scale=512:-1,format=yuvj420p,showinfo";
 
 /**
  * Run ffmpeg with the given video filter (which must include `showinfo`),
@@ -390,7 +422,7 @@ async function runFrameExtraction(
   );
   if (exitCode !== 0) {
     throw new Error(
-      `ffmpeg keyframe extraction failed (exit ${exitCode}): ${stderr.slice(0, 500)}`,
+      `ffmpeg keyframe extraction failed (exit ${exitCode}): ${stderr.slice(-500)}`,
     );
   }
 
@@ -443,7 +475,7 @@ export async function extractKeyframes(
   let frames = await runFrameExtraction(
     videoPath,
     workDir,
-    "select='gt(scene,0.3)',scale=512:-1,showinfo",
+    `select='gt(scene,0.3)',${FRAME_VF_TAIL}`,
   );
 
   if (frames.length < 4) {
@@ -457,7 +489,7 @@ export async function extractKeyframes(
       frames = await runFrameExtraction(
         videoPath,
         workDir,
-        `fps=${fps},scale=512:-1,showinfo`,
+        `fps=${fps},${FRAME_VF_TAIL}`,
       );
     } else {
       log.warn(
