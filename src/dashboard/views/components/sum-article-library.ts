@@ -275,6 +275,10 @@ export function sumArticleLibraryScript(): string {
         chip.addEventListener('click', function() {
           var d = chip.getAttribute('data-domain');
           activeDomain = d || null;
+          // Reset the source filter too: the previously-selected source may not
+          // exist in the new domain, which would strand the list on an empty
+          // result with no source chips to recover from.
+          if (typeof activeSource !== 'undefined') activeSource = null;
           renderDomainFilter();
           loadLibrary();
           if (typeof loadRecentlyAdded === 'function') loadRecentlyAdded();
