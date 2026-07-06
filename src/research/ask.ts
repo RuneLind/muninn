@@ -12,7 +12,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
 import { getLog } from "../logging.ts";
 import { RESEARCH_COLLECTIONS } from "./corpus.ts";
@@ -138,12 +138,11 @@ export async function streamResearchAnswer(
       }
     };
 
-    const claude = await executeClaudePrompt(
+    const claude = await executeOneShot(
       userPrompt,
       config,
       botConfig,
-      SYNTHESIS_SYSTEM_PROMPT,
-      onProgress,
+      { systemPrompt: SYNTHESIS_SYSTEM_PROMPT, onProgress },
     );
 
     const answer = (claude.result ?? "").trim();

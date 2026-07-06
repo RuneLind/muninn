@@ -4,7 +4,8 @@ import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../tiktok/state.ts";
 import { summarizeTikTok } from "../../tiktok/summarizer.ts";
 import { extractTikTokVideoId } from "../../tiktok/media.ts";
-import { discoverAllBots, resolveSummarizerBot, isCliNativeBot } from "../../bots/config.ts";
+import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
@@ -141,13 +142,14 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       return c.json({ error: "No bots configured" }, 500);
     }
 
-    // Fail fast on a non-CLI-native summarizer bot: frame reading runs through a
-    // raw `claude` spawn, and a copilot-sdk/openai-compat model id would kill
-    // that spawn only AFTER the expensive download + whisper pre-work.
-    if (!isCliNativeBot(summarizerBot)) {
+    // Fail fast if the summarizer bot's connector can't grant --add-dir access:
+    // the multi-turn flow Reads frame JPEGs from a tmp dir, which only the
+    // Claude CLI connector can express. Reject here, before the expensive
+    // download + whisper pre-work.
+    if (!connectorCapabilities(summarizerBot).supportsExtraDirs) {
       return c.json(
         {
-          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot drive the TikTok frame-reading Claude CLI spawn. Set SUMMARIZER_BOT to a CLI-native bot (connector "claude-cli" or "claude-sdk").`,
+          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted TikTok frames (no --add-dir support). Set SUMMARIZER_BOT to a claude-cli bot.`,
         },
         503,
       );

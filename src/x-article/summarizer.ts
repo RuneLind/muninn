@@ -1,7 +1,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary } from "../summaries/summarizer-shared.ts";
@@ -47,12 +47,11 @@ Article URL: ${url}`;
       }
     };
 
-    const result = await executeClaudePrompt(
+    const result = await executeOneShot(
       articleText,
       config,
       botConfig,
-      systemPrompt,
-      onProgress,
+      { systemPrompt, onProgress },
     );
 
     // 2. Parse response

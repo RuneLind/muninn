@@ -51,7 +51,7 @@ function cleanTestBots() {
   createdDirs.length = 0;
 }
 
-import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, resolveResearchBot, canSynthesizeResearch, type BotConfig, type ConnectorType } from "./config.ts";
+import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, resolveResearchBot, type BotConfig, type ConnectorType } from "./config.ts";
 
 function stubBot(name: string, overrides: Partial<BotConfig> = {}): BotConfig {
   return {
@@ -524,57 +524,39 @@ describe("resolveResearchBot", () => {
     expect(resolveResearchBot(bots)?.name).toBe("plain");
   });
 
-  test("skips bots whose model id isn't CLI-native (copilot / openai-compat)", () => {
-    // Synthesis always runs through the Claude CLI, so a Copilot/local model id
-    // (e.g. melosys "claude-sonnet-4.6", qwen) would break --model. Prefer jarvis.
+  test("picks any-connector bot by speed now that synthesis routes through executeOneShot", () => {
+    // Connector no longer gates selection — the first non-opus bot wins, even a
+    // copilot-sdk one. (Previously copilot/openai bots were skipped for the CLI.)
     const bots = [
       stubBot("melosys", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }),
       stubBot("local", { connector: "openai-compat", model: "qwen3.5:35b" }),
       stubBot("jarvis", { model: "claude-sonnet-4-6" }),
     ];
-    expect(resolveResearchBot(bots)?.name).toBe("jarvis");
+    expect(resolveResearchBot(bots)?.name).toBe("melosys");
   });
 
-  test("prefers a slow CLI bot (opus) over a non-CLI bot when no fast bot exists", () => {
-    // No fast CLI bot: local is non-CLI, capra is opus (slow but CLI-native).
-    // Opus can still synthesize, so it beats the non-CLI bot the CLI can't run.
+  test("prefers a fast non-CLI bot over a slow (opus) CLI bot", () => {
+    // local (openai, fast) beats capra (opus, slow) — only speed matters now.
     const bots = [
       stubBot("local", { connector: "openai-compat", model: "qwen3.5:35b" }),
       stubBot("capra", { model: "claude-opus-4-6" }),
     ];
-    expect(resolveResearchBot(bots)?.name).toBe("capra");
+    expect(resolveResearchBot(bots)?.name).toBe("local");
   });
 
-  test("falls back to resolveSummarizerBot only when no bot can synthesize at all", () => {
-    process.env.SUMMARIZER_BOT = "copilotB"; // last-resort summarizer pick honored
+  test("falls back to resolveSummarizerBot when every bot is a slow (opus) one", () => {
+    process.env.SUMMARIZER_BOT = "opusB"; // last-resort summarizer pick honored
     const bots = [
-      stubBot("copilotA", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }),
-      stubBot("copilotB", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }),
+      stubBot("opusA", { model: "claude-opus-4-6" }),
+      stubBot("opusB", { model: "claude-opus-4-6" }),
     ];
-    // Every bot is non-CLI, so neither isFastResearchBot nor canSynthesizeResearch
-    // matches; the summarizer fallback returns its pick (here a non-CLI bot —
-    // synthesis would then fail with a now-visible app error).
-    expect(resolveResearchBot(bots)?.name).toBe("copilotB");
+    // No fast (non-opus) bot exists, so the summarizer fallback returns its pick.
+    expect(resolveResearchBot(bots)?.name).toBe("opusB");
   });
 
   test("RESEARCH_BOT naming a missing bot falls through to the fast-bot heuristic", () => {
     process.env.RESEARCH_BOT = "ghost";
     const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("jarvis", { model: "claude-sonnet-4-6" })];
     expect(resolveResearchBot(bots)?.name).toBe("jarvis");
-  });
-});
-
-describe("canSynthesizeResearch", () => {
-  test("rejects copilot-sdk and openai-compat (CLI --model would break)", () => {
-    expect(canSynthesizeResearch(stubBot("melosys", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }))).toBe(false);
-    expect(canSynthesizeResearch(stubBot("local", { connector: "openai-compat", model: "qwen3.5:35b" }))).toBe(false);
-  });
-
-  test("accepts CLI-native connectors (claude-cli, claude-sdk, unset) regardless of model speed", () => {
-    expect(canSynthesizeResearch(stubBot("jarvis", { connector: "claude-cli", model: "claude-sonnet-4-6" }))).toBe(true);
-    expect(canSynthesizeResearch(stubBot("sdk", { connector: "claude-sdk", model: "claude-sonnet-4-6" }))).toBe(true);
-    expect(canSynthesizeResearch(stubBot("plain"))).toBe(true);
-    // Opus is slow but still a valid CLI model — synthesizable even if not "fast".
-    expect(canSynthesizeResearch(stubBot("capra", { model: "claude-opus-4-6" }))).toBe(true);
   });
 });

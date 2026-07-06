@@ -5,6 +5,7 @@
 | File | Role |
 |---|---|
 | `connector.ts` | `AiConnector` type + `resolveConnector()` — selects the right AI backend for a bot |
+| `one-shot.ts` | `executeOneShot()` — one-shot (batch/background) prompt→text seam that routes through `resolveConnector`, so summarizers + research synthesis honor the bot's connector (not a raw CLI spawn). Plus `connectorCapabilities()` — `supportsExtraDirs` (CLI-only `--add-dir`, used by the TikTok frame-reading pre-flight). |
 | `executor.ts` | Claude CLI executor — spawns `claude` process, reads NDJSON stdout, handles timeout |
 | `prompt-builder.ts` | Assembles system + user prompts from persona, memories, goals, tasks, history |
 | `stream-parser.ts` | `StreamParser` class — parses NDJSON stream events, extracts tool calls with timing |
