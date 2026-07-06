@@ -3,7 +3,10 @@
  * Renders the anthropic watcher's gated discoveries as a ranked, pre-annotated
  * reading queue at the top of /summaries. Each row shows the gate score, where
  * inside the source it came from, the title, and the gate's "why" line, plus
- * status-driven actions.
+ * status-driven actions. X rows additionally carry an author tier badge (★ top 1% / ☆
+ * top 5% of tracked X authors, from server-computed percentile cuts in AUTHOR_TIERS) and
+ * a "Top authors" filter chip that composes with the kind chips. Author signal is
+ * transparency + filtering only — it never re-sorts the inbox.
  *
  * Reads GET /api/anthropic/candidates (the actionable + in-flight + shelf set:
  * statuses new / summarizing / summarized / error). The inbox proper shows only
@@ -125,6 +128,16 @@ export function sumCandidatesStyles(): string {
       color: var(--text-primary);
       border-color: var(--border-primary);
     }
+    /* Author tier badge (X rows only) — ★ top 1%, ☆ top 5% of tracked X authors.
+       Transparency only: it never re-ranks the inbox. Tooltip carries the stored score. */
+    .candidate-author-badge {
+      flex-shrink: 0;
+      font-size: 12px;
+      line-height: 1;
+      cursor: help;
+      color: var(--status-warning);
+    }
+    .candidate-author-badge[data-tier="top1"] { color: var(--status-success); }
     .candidate-title {
       font-size: 14px;
       color: var(--text-primary);
@@ -333,6 +346,26 @@ export function sumCandidatesScript(): string {
       return source || '';
     }
 
+    // Author tier for an X candidate, from its capture-time score vs the CURRENT
+    // server-computed percentile cuts (AUTHOR_TIERS). Returns 'top1' | 'top5' | null.
+    // Null when there's no score, no thresholds, or the score is below the top-5% cut.
+    function candidateAuthorTier(c) {
+      if (!AUTHOR_TIERS || c.authorScore == null) return null;
+      if (c.authorScore >= AUTHOR_TIERS.top1) return 'top1';
+      if (c.authorScore >= AUTHOR_TIERS.top5) return 'top5';
+      return null;
+    }
+
+    // ★/☆ badge markup for the meta row, or '' when the row isn't a top author.
+    function candidateAuthorBadgeHtml(c) {
+      var tier = candidateAuthorTier(c);
+      if (!tier) return '';
+      var pct = tier === 'top1' ? 'top 1%' : 'top 5%';
+      var glyph = tier === 'top1' ? '\\u2605' : '\\u2606'; // ★ / ☆
+      var title = 'Author rank ' + c.authorScore.toFixed(2) + ' — ' + pct + ' of tracked X authors';
+      return '<span class="candidate-author-badge" data-tier="' + tier + '" title="' + esc(title) + '">' + glyph + '</span>';
+    }
+
     // Status → sort rank within the inbox: actionable (new/error) first, then
     // in-flight. (summarized rows never reach the inbox — they render in the
     // "Done recently" group.) Stable sort keeps the server's score-desc order
@@ -375,6 +408,7 @@ export function sumCandidatesScript(): string {
           '<div class="candidate-meta">' +
             '<span class="candidate-source-badge" data-source="' + esc(c.source || '') + '">' +
               esc(candidateSourceLabel(c.source)) + '</span>' +
+            candidateAuthorBadgeHtml(c) +
             (c.candidateSrc ? '<span>' + esc(c.candidateSrc) + '</span>' : '') +
           '</div>' +
           '<div class="candidate-title">' + titleInner + '</div>' +
@@ -402,6 +436,14 @@ export function sumCandidatesScript(): string {
     // is unaffected. Sticky: it stays selected even when its kind empties out (the
     // inbox then shows the filtered-empty message) — the user widens via "All".
     var activeKind = null;
+    // Independent boolean toggle (composes with the kind filter): show only rows whose
+    // author is in the top 5% of tracked X authors (authorScore >= AUTHOR_TIERS.top5).
+    var topAuthorsOnly = false;
+
+    // Does this candidate clear the top-5% author cut? (The "Top authors" filter test.)
+    function candidateIsTopAuthor(c) {
+      return !!AUTHOR_TIERS && c.authorScore != null && c.authorScore >= AUTHOR_TIERS.top5;
+    }
 
     // Kind → chip label. Order = chip order. 'blog' shows as "News" (the chip label
     // and the stored kind deliberately differ — we filter on 'blog', never 'news').
@@ -428,7 +470,12 @@ export function sumCandidatesScript(): string {
       var present = CANDIDATE_KINDS.filter(function(d) {
         return counts[d.kind] || d.kind === activeKind;
       });
-      if (activeKind === null && present.length <= 1) {
+      // "Top authors" count is over the full inbox (independent of the kind selection),
+      // so the chip reads the same regardless of which kind is active.
+      var topAuthorCount = inbox.filter(candidateIsTopAuthor).length;
+      var showTopAuthors = topAuthorsOnly || topAuthorCount > 0;
+      // Hide the whole row only when there's nothing to filter on either axis.
+      if (activeKind === null && !topAuthorsOnly && present.length <= 1 && !showTopAuthors) {
         el.innerHTML = '';
         return;
       }
@@ -439,11 +486,22 @@ export function sumCandidatesScript(): string {
           '" data-kind="' + esc(d.kind) + '">' + esc(d.label) +
           ' <span class="chip-count">' + (counts[d.kind] || 0) + '</span></span>');
       });
+      // Author-axis toggle, rendered after the kind chips (an independent boolean, not a
+      // member of the single-select kind set — carries data-top-author, not data-kind).
+      if (showTopAuthors) {
+        chips.push('<span class="source-chip' + (topAuthorsOnly ? ' active' : '') +
+          '" data-top-author="1" title="Only authors in the top 5% of the tracked X network">' +
+          '\\u2605 Top authors <span class="chip-count">' + topAuthorCount + '</span></span>');
+      }
       el.innerHTML = chips.join('');
       el.querySelectorAll('.source-chip').forEach(function(chip) {
         chip.addEventListener('click', function() {
-          var k = chip.getAttribute('data-kind');
-          activeKind = k || null;
+          if (chip.getAttribute('data-top-author')) {
+            topAuthorsOnly = !topAuthorsOnly;
+          } else {
+            var k = chip.getAttribute('data-kind');
+            activeKind = k || null;
+          }
           renderCandidates();
         });
       });
@@ -519,16 +577,25 @@ export function sumCandidatesScript(): string {
       // Chips over the full inbox (the active kind's chip stays, at count 0 if it
       // just emptied), then narrow the rendered rows to the active kind.
       renderKindFilter(inbox);
-      var shownInbox = activeKind
-        ? inbox.filter(function(c) { return c.kind === activeKind; })
-        : inbox;
+      var shownInbox = inbox.filter(function(c) {
+        if (activeKind && c.kind !== activeKind) return false;
+        if (topAuthorsOnly && !candidateIsTopAuthor(c)) return false;
+        return true;
+      });
 
       if (inbox.length === 0 && done.length === 0) {
         list.innerHTML = '<div class="candidate-empty">Nothing new — the tracker hasn\\'t surfaced anything to summarize.</div>';
       } else if (shownInbox.length === 0) {
-        // A kind filter with no matches reads differently from a truly empty inbox.
-        list.innerHTML = activeKind
-          ? '<div class="candidate-empty">No ' + esc(candidateKindLabel(activeKind)) + ' candidates right now.</div>'
+        // A filter with no matches reads differently from a truly empty inbox.
+        var filterLabel = topAuthorsOnly && activeKind
+          ? 'top-author ' + candidateKindLabel(activeKind)
+          : topAuthorsOnly
+            ? 'top-author'
+            : activeKind
+              ? candidateKindLabel(activeKind)
+              : '';
+        list.innerHTML = filterLabel
+          ? '<div class="candidate-empty">No ' + esc(filterLabel) + ' candidates right now.</div>'
           : ''; // only done rows remain; the done group carries them
       } else {
         list.innerHTML = shownInbox.map(renderCandidateRow).join('');

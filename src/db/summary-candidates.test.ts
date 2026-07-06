@@ -153,6 +153,44 @@ describe("summary-candidates", () => {
     expect((await getCandidateBySourceUrl("anthropic", "https://a/kind-null"))!.kind).toBeNull();
   });
 
+  test("upsert round-trips author/author_score, keeps newest non-null, never nulls them", async () => {
+    await upsertCandidate({
+      ...base,
+      source: "x",
+      url: "https://x.com/u/author",
+      score: 0.7,
+      author: "karpathy",
+      authorScore: 0.6,
+    });
+    const first = await getCandidateBySourceUrl("x", "https://x.com/u/author");
+    expect(first!.author).toBe("karpathy");
+    expect(first!.authorScore).toBeCloseTo(0.6, 5);
+
+    // A re-capture that omits author/author_score must not null the stored values.
+    await upsertCandidate({ ...base, source: "x", url: "https://x.com/u/author", score: 0.9 });
+    const after = await getCandidateBySourceUrl("x", "https://x.com/u/author");
+    expect(after!.score).toBeCloseTo(0.9, 5);
+    expect(after!.author).toBe("karpathy");
+    expect(after!.authorScore).toBeCloseTo(0.6, 5);
+
+    // A newer non-null score wins (identity-derived, COALESCE-newest).
+    await upsertCandidate({
+      ...base,
+      source: "x",
+      url: "https://x.com/u/author",
+      score: 0.95,
+      author: "karpathy",
+      authorScore: 0.72,
+    });
+    expect((await getCandidateBySourceUrl("x", "https://x.com/u/author"))!.authorScore).toBeCloseTo(0.72, 5);
+
+    // Anthropic rows carry neither.
+    await upsertCandidate({ ...base, url: "https://a/author-null", score: 0.6 });
+    const anth = await getCandidateBySourceUrl("anthropic", "https://a/author-null");
+    expect(anth!.author).toBeNull();
+    expect(anth!.authorScore).toBeNull();
+  });
+
   test("getCandidateBySourceUrl resolves a row by its (source,url) identity, with current status", async () => {
     expect(await getCandidateBySourceUrl("anthropic", base.url)).toBeNull();
     await upsertCandidate(base);

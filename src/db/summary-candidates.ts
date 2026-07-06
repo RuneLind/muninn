@@ -39,6 +39,17 @@ export interface SummaryCandidate {
   status: SummaryCandidateStatus;
   /** Capture-time kind — drives the inbox filter chips. NULL for pre-migration rows. */
   kind: SummaryCandidateKind | null;
+  /**
+   * Normalized (lowercased, bare) X handle for X candidates — the huginn author-scores
+   * key. NULL for anthropic rows and for X rows whose heading had no handle ("unknown").
+   */
+  author: string | null;
+  /**
+   * Capture-time snapshot of the author's huginn ranking score (0–1), or NULL. A snapshot,
+   * not live — the /summaries page compares it against CURRENT percentile thresholds, so
+   * a boundary tier can drift slightly as huginn regenerates the ranking.
+   */
+  authorScore: number | null;
   /** Resulting anthropic-summaries doc id once summarized (Phase C/D). */
   docId: string | null;
   /**
@@ -63,6 +74,10 @@ interface UpsertCandidateParams {
   why?: string | null;
   /** Capture-time kind (commit/release/doc/blog for anthropic, x-post for X). */
   kind?: SummaryCandidateKind | null;
+  /** Normalized (lowercased, bare) X handle — null for anthropic / "unknown". */
+  author?: string | null;
+  /** Capture-time huginn author ranking score (0–1) — null when unknown/unavailable. */
+  authorScore?: number | null;
   /** Origin doc id in the source collection (x-feed doc id for X; null for anthropic). */
   sourceDocId?: string | null;
   watcherId?: string | null;
@@ -78,10 +93,10 @@ interface UpsertCandidateParams {
 export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
   const sql = getDb();
   await sql`
-    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, kind, source_doc_id, watcher_id, bot_name)
+    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, kind, author, author_score, source_doc_id, watcher_id, bot_name)
     VALUES (
       ${p.source}, ${p.url}, ${p.title}, ${p.candidateSrc ?? null},
-      ${p.score}, ${p.why ?? null}, ${p.kind ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
+      ${p.score}, ${p.why ?? null}, ${p.kind ?? null}, ${p.author ?? null}, ${p.authorScore ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
     )
     ON CONFLICT (source, url) DO UPDATE
       SET score = GREATEST(summary_candidates.score, EXCLUDED.score),
@@ -101,6 +116,11 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
           -- kind is identity-derived (a property of (source,url), not the score). Prefer
           -- a non-null capture value; never overwrite a stored kind with a null.
           kind = COALESCE(EXCLUDED.kind, summary_candidates.kind),
+          -- author / author_score are identity-derived (a property of the tweet's
+          -- handle, not the score). Prefer the NEWEST non-null so a backfilled row picks
+          -- up a score on its next re-capture; never overwrite a stored value with null.
+          author = COALESCE(EXCLUDED.author, summary_candidates.author),
+          author_score = COALESCE(EXCLUDED.author_score, summary_candidates.author_score),
           updated_at = now()
       WHERE summary_candidates.status = 'new'
   `;
@@ -219,6 +239,8 @@ function mapRow(r: Record<string, any>): SummaryCandidate {
     why: r.why ?? null,
     status: r.status as SummaryCandidateStatus,
     kind: (r.kind ?? null) as SummaryCandidateKind | null,
+    author: r.author ?? null,
+    authorScore: r.author_score == null ? null : Number(r.author_score),
     docId: r.doc_id ?? null,
     sourceDocId: r.source_doc_id ?? null,
     watcherId: r.watcher_id ?? null,

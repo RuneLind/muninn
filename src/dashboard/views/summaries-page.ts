@@ -3,6 +3,7 @@ import { docPanelHtml, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientSourcesJson } from "../../summaries/sources.ts";
 import { clientDomainMapJson } from "../../summaries/domain.ts";
+import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
 import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
@@ -33,6 +34,11 @@ const SUMMARIES_TABS: SectionTabsConfig = {
 
 export async function renderSummariesPage(): Promise<string> {
   const helpers = await helpersClientScript();
+  // Percentile cuts on the CURRENT huginn author ranking, computed once at render and
+  // embedded — the page is fully server-rendered, so the X author tier badges + "Top
+  // authors" filter read these directly (no extra endpoint). null when the scores file
+  // is unavailable, which the client treats as "no author tiers".
+  const authorTiers = await getAuthorTierThresholds();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -110,6 +116,9 @@ export async function renderSummariesPage(): Promise<string> {
     const SOURCES = ${clientSourcesJson()};
     // Category top-segment -> knowledge domain (from src/summaries/domain.ts).
     const DOMAIN_MAP = ${clientDomainMapJson()};
+    // Percentile cuts on huginn's X author ranking (top 1% / top 5%), or null when the
+    // scores file was unavailable at render. Drives the X author tier badge + filter.
+    const AUTHOR_TIERS = ${JSON.stringify(authorTiers)};
   </script>
   <script>
     ${helpers}
