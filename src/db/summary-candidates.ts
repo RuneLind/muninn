@@ -99,6 +99,14 @@ export async function listCandidates(
     status?: SummaryCandidateStatus | SummaryCandidateStatus[];
     botName?: string;
     limit?: number;
+    /**
+     * Recency cut applied ONLY to `summarized` rows: when set, drop summarized
+     * rows last touched more than N days ago. Other statuses are unaffected. Off
+     * by default so every other caller keeps the honest full-history contract —
+     * the inbox route opts in so its 200-row cap (ordered score DESC) can't let
+     * high-scoring old shelf rows crowd out low-scoring fresh `new` ones.
+     */
+    summarizedWithinDays?: number;
   } = {},
 ): Promise<SummaryCandidate[]> {
   const sql = getDb();
@@ -111,10 +119,38 @@ export async function listCandidates(
     WHERE (${sources}::text[] IS NULL OR source = ANY(${sources}))
       AND (${opts.botName ?? null}::text IS NULL OR bot_name = ${opts.botName ?? null})
       AND (${statuses}::text[] IS NULL OR status = ANY(${statuses}))
+      AND (
+        ${opts.summarizedWithinDays ?? null}::int IS NULL
+        OR status <> 'summarized'
+        OR updated_at >= now() - make_interval(days => ${opts.summarizedWithinDays ?? null}::int)
+      )
     ORDER BY score DESC, created_at DESC
     LIMIT ${opts.limit ?? 200}
   `;
   return rows.map(mapRow);
+}
+
+/**
+ * Auto-dismiss stale non-terminal rows: `new`/`error`/`summarizing` candidates
+ * with no activity for `days` are flipped to `dismissed`. Staleness is measured
+ * from the LAST activity (GREATEST of created_at/updated_at), not first-seen —
+ * an old capture the user just retried (fresh updated_at) must not vanish.
+ * `summarizing` is included so a row wedged mid-job by a process crash (which
+ * the summarize route would otherwise 409 forever) eventually clears too. One
+ * cheap indexed UPDATE, run on inbox load so the backlog stays bounded
+ * regardless of whether the watcher's capture cycle is currently enabled.
+ * Returns the number expired.
+ */
+export async function expireStaleCandidates(days = 14): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE summary_candidates
+    SET status = 'dismissed', updated_at = now()
+    WHERE status IN ('new', 'error', 'summarizing')
+      AND GREATEST(created_at, updated_at) < now() - make_interval(days => ${days})
+    RETURNING id
+  `;
+  return rows.length;
 }
 
 export async function getCandidateById(id: string): Promise<SummaryCandidate | null> {

@@ -236,6 +236,7 @@ export function sumRecentlyAddedScript(): string {
         if (docs.length === 0) {
           list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste a YouTube URL above or use the Chrome extension to get started.</div>';
           document.getElementById('recentlyAddedCount').textContent = '';
+          if (typeof updateTabCount === 'function') updateTabCount('recently', 0);
           return;
         }
 
@@ -249,6 +250,7 @@ export function sumRecentlyAddedScript(): string {
         });
 
         document.getElementById('recentlyAddedCount').textContent = docs.length + ' articles';
+        if (typeof updateTabCount === 'function') updateTabCount('recently', docs.length);
 
         // Group into buckets, preserving sort order.
         var buckets = [];

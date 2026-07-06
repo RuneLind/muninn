@@ -105,8 +105,9 @@ export function sumSubmitFormScript(): string {
           input.value = '';
           return;
         }
-        // Update URL without reload
-        history.replaceState(null, '', '/summaries?source=youtube&job=' + data.job_id);
+        // Update URL without reload. Preserve the active tab hash (switchSection
+        // wrote it) so the rewrite doesn't yank the user off their current tab.
+        history.replaceState(null, '', '/summaries?source=youtube&job=' + data.job_id + location.hash);
         showJob(data.job_id, url, url, 'youtube');
         connectSSE(data.job_id, 'youtube');
         input.value = '';
