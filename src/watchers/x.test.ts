@@ -25,6 +25,7 @@ const upsertCalls: Array<{
   title: string;
   candidateSrc?: string | null;
   score: number;
+  kind?: string | null;
   sourceDocId?: string | null;
 }> = [];
 let upsertThrow = false;
@@ -39,6 +40,7 @@ mock.module("../db/summary-candidates.ts", () => ({
     title: string;
     candidateSrc?: string | null;
     score: number;
+    kind?: string | null;
     sourceDocId?: string | null;
   }) => {
     if (upsertThrow) throw new Error("db down");
@@ -415,6 +417,7 @@ describe("fetchFromCollection + checkX capture", () => {
     expect(byUrl["https://x.com/alice/status/1"]!.source).toBe("x");
     expect(byUrl["https://x.com/alice/status/1"]!.sourceDocId).toBe(`${today}_alice_1.md`);
     expect(byUrl["https://x.com/alice/status/1"]!.candidateSrc).toBe("X (@alice)");
+    expect(byUrl["https://x.com/alice/status/1"]!.kind).toBe("x-post");
     expect(byUrl["https://x.com/alice/status/1"]!.title).toContain("@alice:");
     // Carol (short tweet) was pre-filtered — never captured.
     expect(byUrl["https://x.com/carol/status/3"]).toBeUndefined();

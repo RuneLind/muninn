@@ -17,6 +17,13 @@ export type SummaryCandidateStatus =
   | "dismissed"
   | "error";
 
+/**
+ * Capture-time classification, stored so the inbox can filter one uniform column.
+ * `commit`/`release`/`doc`/`blog` mirror `candidateKind()` (URL shape, anthropic
+ * vertical); `x-post` tags every X candidate.
+ */
+export type SummaryCandidateKind = "commit" | "release" | "doc" | "blog" | "x-post";
+
 export interface SummaryCandidate {
   id: string;
   /** Source vertical (e.g. "anthropic", "x"). */
@@ -30,6 +37,8 @@ export interface SummaryCandidate {
   score: number;
   why: string | null;
   status: SummaryCandidateStatus;
+  /** Capture-time kind — drives the inbox filter chips. NULL for pre-migration rows. */
+  kind: SummaryCandidateKind | null;
   /** Resulting anthropic-summaries doc id once summarized (Phase C/D). */
   docId: string | null;
   /**
@@ -52,6 +61,8 @@ interface UpsertCandidateParams {
   candidateSrc?: string | null;
   score: number;
   why?: string | null;
+  /** Capture-time kind (commit/release/doc/blog for anthropic, x-post for X). */
+  kind?: SummaryCandidateKind | null;
   /** Origin doc id in the source collection (x-feed doc id for X; null for anthropic). */
   sourceDocId?: string | null;
   watcherId?: string | null;
@@ -67,10 +78,10 @@ interface UpsertCandidateParams {
 export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
   const sql = getDb();
   await sql`
-    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, source_doc_id, watcher_id, bot_name)
+    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, kind, source_doc_id, watcher_id, bot_name)
     VALUES (
       ${p.source}, ${p.url}, ${p.title}, ${p.candidateSrc ?? null},
-      ${p.score}, ${p.why ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
+      ${p.score}, ${p.why ?? null}, ${p.kind ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
     )
     ON CONFLICT (source, url) DO UPDATE
       SET score = GREATEST(summary_candidates.score, EXCLUDED.score),
@@ -87,6 +98,9 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
           -- docs), so a re-capture's id is at least as resolvable as the stored one.
           -- Never overwrite with a null.
           source_doc_id = COALESCE(EXCLUDED.source_doc_id, summary_candidates.source_doc_id),
+          -- kind is identity-derived (a property of (source,url), not the score). Prefer
+          -- a non-null capture value; never overwrite a stored kind with a null.
+          kind = COALESCE(EXCLUDED.kind, summary_candidates.kind),
           updated_at = now()
       WHERE summary_candidates.status = 'new'
   `;
@@ -204,6 +218,7 @@ function mapRow(r: Record<string, any>): SummaryCandidate {
     score: typeof r.score === "number" ? r.score : Number(r.score),
     why: r.why ?? null,
     status: r.status as SummaryCandidateStatus,
+    kind: (r.kind ?? null) as SummaryCandidateKind | null,
     docId: r.doc_id ?? null,
     sourceDocId: r.source_doc_id ?? null,
     watcherId: r.watcher_id ?? null,

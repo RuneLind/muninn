@@ -369,6 +369,9 @@ CREATE TABLE summary_candidates (
     CHECK (status IN ('new', 'summarizing', 'summarized', 'dismissed', 'error')),
   doc_id        TEXT,
   source_doc_id TEXT,
+  -- Capture-time classification (mirror of migration 049). Keep the CHECK value-set
+  -- order identical to the migration so schema-drift.test.ts's constraintdef diff matches.
+  kind          TEXT CHECK (kind IN ('commit', 'release', 'doc', 'blog', 'x-post')),
   watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
   bot_name      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -301,6 +301,10 @@ export function sumCandidatesHtml(): string {
     <div class="candidates-section" id="candidatesSection">
       <h2>Candidates <span class="count" id="candidatesCount"></span></h2>
       <p class="candidates-subtitle">Gated discoveries from the Anthropic tracker — pick what's worth a summary. Headliners summarize themselves.</p>
+      <!-- Kind filter chips (All / X posts / News / Docs / Commits / Releases), rendered
+           by renderKindFilter() over the inbox. Reuses the .source-chip / .source-filter
+           styles declared in sum-recently-added. -->
+      <div class="source-filter" id="candidateKindFilter"></div>
       <div class="candidate-list" id="candidateList"></div>
       <div class="candidate-done" id="candidateDone" hidden>
         <button class="candidate-done-toggle" id="candidateDoneToggle" type="button" aria-expanded="false">
@@ -394,6 +398,64 @@ export function sumCandidatesScript(): string {
     var candidatesState = [];
     var candidatesLoadError = false;
     var candidateDoneExpanded = false;
+    // Active kind filter (null = all). Filters the inbox client-side; the done group
+    // is unaffected. Sticky: it stays selected even when its kind empties out (the
+    // inbox then shows the filtered-empty message) — the user widens via "All".
+    var activeKind = null;
+
+    // Kind → chip label. Order = chip order. 'blog' shows as "News" (the chip label
+    // and the stored kind deliberately differ — we filter on 'blog', never 'news').
+    var CANDIDATE_KINDS = [
+      { kind: 'x-post', label: 'X posts' },
+      { kind: 'blog', label: 'News' },
+      { kind: 'doc', label: 'Docs' },
+      { kind: 'commit', label: 'Commits' },
+      { kind: 'release', label: 'Releases' },
+    ];
+
+    // Render the kind-filter chips over the (unfiltered) inbox with live counts.
+    // Mirrors sum-recently-added's renderSourceFilter: "All" + one chip per present
+    // kind. A sticky active filter keeps its chip rendered even at count 0 (so the
+    // filtered-empty state below is reachable and the user explicitly clicks All to
+    // widen). The row only hides when NO filter is active and there's nothing to
+    // filter (≤1 kind present) — never while a filter is applied, which would strand
+    // the user on an invisible filter with no All chip to recover.
+    function renderKindFilter(inbox) {
+      var el = document.getElementById('candidateKindFilter');
+      if (!el) return;
+      var counts = {};
+      inbox.forEach(function(c) { if (c.kind) counts[c.kind] = (counts[c.kind] || 0) + 1; });
+      var present = CANDIDATE_KINDS.filter(function(d) {
+        return counts[d.kind] || d.kind === activeKind;
+      });
+      if (activeKind === null && present.length <= 1) {
+        el.innerHTML = '';
+        return;
+      }
+      var chips = ['<span class="source-chip' + (activeKind === null ? ' active' : '') +
+        '" data-kind="">All <span class="chip-count">' + inbox.length + '</span></span>'];
+      present.forEach(function(d) {
+        chips.push('<span class="source-chip' + (activeKind === d.kind ? ' active' : '') +
+          '" data-kind="' + esc(d.kind) + '">' + esc(d.label) +
+          ' <span class="chip-count">' + (counts[d.kind] || 0) + '</span></span>');
+      });
+      el.innerHTML = chips.join('');
+      el.querySelectorAll('.source-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+          var k = chip.getAttribute('data-kind');
+          activeKind = k || null;
+          renderCandidates();
+        });
+      });
+    }
+
+    // Human label for a kind (filtered-empty message). Falls back to the raw kind.
+    function candidateKindLabel(kind) {
+      for (var i = 0; i < CANDIDATE_KINDS.length; i++) {
+        if (CANDIDATE_KINDS[i].kind === kind) return CANDIDATE_KINDS[i].label;
+      }
+      return kind || '';
+    }
 
     function findCandidate(id) {
       for (var i = 0; i < candidatesState.length; i++) {
@@ -442,6 +504,7 @@ export function sumCandidatesScript(): string {
           '<button class="candidate-retry-btn" id="candidateRetryBtn" type="button">Retry</button></div>';
         var rb = document.getElementById('candidateRetryBtn');
         if (rb) rb.addEventListener('click', loadCandidates);
+        renderKindFilter([]);
         renderDoneGroup([]);
         updateCandidateCounts();
         return;
@@ -453,12 +516,22 @@ export function sumCandidatesScript(): string {
       // Float actionable (new/error) above in-flight; server already ordered by score.
       inbox.sort(function(a, b) { return candidateStatusRank(a.status) - candidateStatusRank(b.status); });
 
+      // Chips over the full inbox (the active kind's chip stays, at count 0 if it
+      // just emptied), then narrow the rendered rows to the active kind.
+      renderKindFilter(inbox);
+      var shownInbox = activeKind
+        ? inbox.filter(function(c) { return c.kind === activeKind; })
+        : inbox;
+
       if (inbox.length === 0 && done.length === 0) {
         list.innerHTML = '<div class="candidate-empty">Nothing new — the tracker hasn\\'t surfaced anything to summarize.</div>';
-      } else if (inbox.length === 0) {
-        list.innerHTML = ''; // only done rows remain; the done group carries them
+      } else if (shownInbox.length === 0) {
+        // A kind filter with no matches reads differently from a truly empty inbox.
+        list.innerHTML = activeKind
+          ? '<div class="candidate-empty">No ' + esc(candidateKindLabel(activeKind)) + ' candidates right now.</div>'
+          : ''; // only done rows remain; the done group carries them
       } else {
-        list.innerHTML = inbox.map(renderCandidateRow).join('');
+        list.innerHTML = shownInbox.map(renderCandidateRow).join('');
         list.querySelectorAll('.candidate-item').forEach(bindCandidateRow);
       }
 
