@@ -75,3 +75,4 @@ CLAUDE.local.md
 # Local probe / investigation outputs (logs, JSONL, status HTML).
 # Same role as runs/ inside the private benchmarks repo — local-only data.
 test-results/
+.claude/worktrees/
