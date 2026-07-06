@@ -1,7 +1,7 @@
 import { loadConfig, type Config } from "../config.ts";
 import { discoverAllBots, resolveSummarizerBot, type BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
@@ -308,12 +308,11 @@ URL: ${url}`;
       }
     };
 
-    const result = await executeClaudePrompt(
+    const result = await executeOneShot(
       content.text,
       config,
       botConfig,
-      systemPrompt,
-      onProgress,
+      { systemPrompt, onProgress },
     );
 
     // 3. Parse response. Clamp to ai/* — the anthropic-summaries collection only

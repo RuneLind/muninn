@@ -44,17 +44,16 @@ mock.module("../ai/research-knowledge.ts", () => ({
   },
 }));
 
-mock.module("../ai/executor.ts", () => ({
-  executeClaudePrompt: async (
+mock.module("../ai/one-shot.ts", () => ({
+  executeOneShot: async (
     prompt: string,
     _c: unknown,
     _b: unknown,
-    sys?: string,
-    onProgress?: (e: { type: string; text: string }) => void,
+    opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
     lastUserPrompt = prompt;
-    lastSystemPrompt = sys ?? "";
-    onProgress?.({ type: "text_delta", text: claudeAnswer });
+    lastSystemPrompt = opts?.systemPrompt ?? "";
+    opts?.onProgress?.({ type: "text_delta", text: claudeAnswer });
     return { result: claudeAnswer, outputTokens: 30, inputTokens: 12, wallClockMs: 4 };
   },
 }));
@@ -156,7 +155,7 @@ test("follow-up: prior turns fold into the retrieval query AND the synthesis pro
 test("no hits: skips the Claude call and answers with the honest fallback", async () => {
   mockResults = [];
   const events = await collect("something not indexed");
-  expect(lastUserPrompt).toBe(""); // executeClaudePrompt never called
+  expect(lastUserPrompt).toBe(""); // executeOneShot never called
   const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
   expect(done.noHits).toBe(true);
   expect(done.lowConfidence).toBe(false);

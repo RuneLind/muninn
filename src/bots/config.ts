@@ -228,11 +228,12 @@ export function discoverAllBots(): BotConfig[] {
 }
 
 /**
- * Picks the bot used for backend summarization jobs (YouTube / X article).
- * Honors the `SUMMARIZER_BOT` env var (matched by name, case-insensitive);
- * falls back to the first discovered bot when unset or unmatched. The chosen
- * bot's config decides the model + timeout for these CLI-only jobs, so without
- * this knob the model silently depends on bot-folder directory order.
+ * Picks the bot used for backend summarization jobs (YouTube / X article /
+ * anthropic / TikTok). Honors the `SUMMARIZER_BOT` env var (matched by name,
+ * case-insensitive); falls back to the first discovered bot when unset or
+ * unmatched. The chosen bot's config decides the connector + model + timeout for
+ * these jobs (routed through `executeOneShot`), so without this knob the model
+ * silently depends on bot-folder directory order.
  */
 export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
   if (bots.length === 0) return undefined;
@@ -249,59 +250,27 @@ export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
 }
 
 /**
- * Whether a bot's config can drive a raw `executeClaudePrompt` spawn. That path
- * always spawns the Claude CLI and passes `botConfig.model` straight to
- * `--model` (ignoring the bot's connector). So a `copilot-sdk` bot's
- * Copilot-format id (e.g. melosys' `"claude-sonnet-4.6"`) or an `openai-compat`
- * bot's local id (e.g. `"qwen3.5:35b"`) is not a valid CLI model and the spawn
- * fails. Only CLI-native connectors qualify. Used by Research synthesis
- * ({@link canSynthesizeResearch}) and the TikTok summarize route (which
- * fail-fasts before its expensive download + whisper pre-work).
- */
-export function isCliNativeBot(bot: BotConfig): boolean {
-  const connector = bot.connector ?? "claude-cli";
-  return connector !== "copilot-sdk" && connector !== "openai-compat";
-}
-
-/**
- * Whether a bot can synthesize a Research answer at all — i.e. it is CLI-native
- * (see {@link isCliNativeBot}). The `/api/research/ask` route uses this to
- * reject an explicit `?bot=` that can't synthesize, falling back to
- * {@link resolveResearchBot} instead of crashing.
- */
-export function canSynthesizeResearch(bot: BotConfig): boolean {
-  return isCliNativeBot(bot);
-}
-
-/**
- * A bot fit to be the *default* interactive Research synthesizer: it must be
- * able to synthesize at all ({@link canSynthesizeResearch}) and be fast enough
+ * A bot fit to be the *default* interactive Research synthesizer: fast enough
  * for interactive Q&A. Opus is the slow, expensive first-discovered default
  * (capra), so skip it; an unset `model` falls back to the sonnet-class global
  * `CLAUDE_MODEL`, so unset counts as fast. (An explicit `?bot=` may still pin a
- * slow-but-valid CLI bot — this gate only governs the auto-pick in
- * {@link resolveResearchBot}.)
+ * slow bot — this gate only governs the auto-pick in {@link resolveResearchBot}.)
+ * Connector no longer matters: synthesis routes through `executeOneShot`, so
+ * every connector (copilot-sdk / openai-compat / claude-sdk / claude-cli) works.
  */
 function isFastResearchBot(bot: BotConfig): boolean {
-  if (!canSynthesizeResearch(bot)) return false;
-  if ((bot.model ?? "").toLowerCase().includes("opus")) return false;
-  return true;
+  return !(bot.model ?? "").toLowerCase().includes("opus");
 }
 
 /**
  * Picks the bot used to synthesize Research (Claude Learning Center) answers.
- * Unlike the batch summarizer, Research is interactive — and now spends a Claude
- * call per follow-up turn — so the default must be fast. Resolution order:
+ * Unlike the batch summarizer, Research is interactive — and spends a Claude
+ * call per follow-up turn — so the default favors speed. Resolution order:
  *   1. `RESEARCH_BOT` env (matched by name, case-insensitive) — explicit override.
  *   2. The first discovered bot fast enough for interactive Q&A (see
- *      `isFastResearchBot`) — skips opus and bots whose model id isn't valid for
- *      the CLI synthesis path (capra/opus, melosys/copilot, local-model bots).
- *   3. Any bot that can synthesize at all (`canSynthesizeResearch`) — a slow CLI
- *      bot (e.g. opus) still beats a non-CLI bot the CLI can't run.
- *   4. `resolveSummarizerBot` (which itself honors `SUMMARIZER_BOT`, then
- *      first-discovered) — last resort; may return a non-CLI bot only when
- *      nothing can synthesize, in which case synthesis fails with a visible
- *      app error rather than a silent one.
+ *      `isFastResearchBot`) — skips opus.
+ *   3. `resolveSummarizerBot` (which itself honors `SUMMARIZER_BOT`, then
+ *      first-discovered) — last resort when every bot is a slow (opus) one.
  * The `?bot=` query param on `/api/research/ask` still overrides all of this.
  */
 export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
@@ -314,11 +283,7 @@ export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
       wanted,
     });
   }
-  return (
-    bots.find(isFastResearchBot) ??
-    bots.find(canSynthesizeResearch) ??
-    resolveSummarizerBot(bots)
-  );
+  return bots.find(isFastResearchBot) ?? resolveSummarizerBot(bots);
 }
 
 /**

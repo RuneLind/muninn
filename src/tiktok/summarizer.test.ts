@@ -25,6 +25,7 @@ let executorCalls = 0;
 let lastPrompt = "";
 let lastSystemPrompt = "";
 let lastBotConfig: BotConfig | undefined;
+let lastOpts: { systemPrompt?: string; timeoutMs?: number; extraDirs?: string[] } | undefined;
 
 // Ingest behaviour (global fetch) + captured payload.
 let ingestOk = true;
@@ -51,19 +52,19 @@ mock.module("./media.ts", () => ({
   extractTikTokVideoId: (url: string) => url.match(/\/video\/(\d+)/)?.[1] ?? null,
 }));
 
-mock.module("../ai/executor.ts", () => ({
-  executeClaudePrompt: async (
+mock.module("../ai/one-shot.ts", () => ({
+  executeOneShot: async (
     prompt: string,
     _c: unknown,
     botConfig: BotConfig,
-    sys?: string,
-    onProgress?: (e: { type: string; text: string }) => void,
+    opts?: { systemPrompt?: string; timeoutMs?: number; extraDirs?: string[]; onProgress?: (e: { type: string; text: string }) => void },
   ) => {
     executorCalls++;
     lastPrompt = prompt;
-    lastSystemPrompt = sys ?? "";
+    lastSystemPrompt = opts?.systemPrompt ?? "";
     lastBotConfig = botConfig;
-    onProgress?.({ type: "text_delta", text: claudeResult });
+    lastOpts = opts;
+    opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
 }));
@@ -115,6 +116,7 @@ beforeEach(() => {
   lastPrompt = "";
   lastSystemPrompt = "";
   lastBotConfig = undefined;
+  lastOpts = undefined;
   ingestOk = true;
   ingestPayload = undefined;
   installFetchMock();
@@ -198,21 +200,19 @@ test("empty transcript with frames present summarizes from the frames", async ()
   expect(lastPrompt).toContain("frame_001.jpg");
 });
 
-test("botConfig clone grants --add-dir on the work dir and raises the timeout to >=600s", async () => {
+test("passes the work dir as extraDirs and raises the timeout to >=600s", async () => {
   const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
   await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
 
-  expect(lastBotConfig).toBeDefined();
-  const spawnArgs = lastBotConfig!.spawnArgs!;
-  // Original spawnArgs are preserved, --add-dir <workDir> appended.
-  expect(spawnArgs[0]).toBe("--strict-mcp-config");
-  const addDirIdx = spawnArgs.indexOf("--add-dir");
-  expect(addDirIdx).toBeGreaterThan(0);
-  const workDir = spawnArgs[addDirIdx + 1]!;
-  expect(workDir).toBe(join(tmpdir(), `muninn-tiktok-${jobId}`));
+  expect(lastOpts).toBeDefined();
+  // The tmp work dir is handed to executeOneShot as extraDirs (→ CLI --add-dir).
+  const workDir = join(tmpdir(), `muninn-tiktok-${jobId}`);
+  expect(lastOpts!.extraDirs).toEqual([workDir]);
   expect(downloadCalls[0]!.workDir).toBe(workDir);
-  expect(lastBotConfig!.timeoutMs).toBeGreaterThanOrEqual(600_000);
-  // The original bot config was cloned, not mutated.
+  expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
+  // The caller's bot config is passed through untouched — executeOneShot clones
+  // internally, the summarizer no longer mutates or clones it itself.
+  expect(lastBotConfig).toBe(bot);
   expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]);
   expect(bot.timeoutMs).toBeUndefined();
 });

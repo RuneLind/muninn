@@ -42,11 +42,11 @@ let ingestBody: Record<string, unknown> = {
 let statusCalls: Array<{ id: string; status: string; docId: string | null }> = [];
 let throwOnStatus: string | null = null;
 
-mock.module("../ai/executor.ts", () => ({
-  executeClaudePrompt: async (prompt: string, _c: unknown, _b: unknown, sys?: string, onProgress?: (e: { type: string; text: string }) => void) => {
+mock.module("../ai/one-shot.ts", () => ({
+  executeOneShot: async (prompt: string, _c: unknown, _b: unknown, opts?: { systemPrompt?: string; onProgress?: (e: { type: string; text: string }) => void }) => {
     lastPrompt = prompt;
-    lastSystemPrompt = sys ?? "";
-    onProgress?.({ type: "text_delta", text: claudeResult });
+    lastSystemPrompt = opts?.systemPrompt ?? "";
+    opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
 }));

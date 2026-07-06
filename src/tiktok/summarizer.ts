@@ -4,7 +4,7 @@ import { mkdir, rm } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeClaudePrompt } from "../ai/executor.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { ingestSummary } from "../summaries/summarizer-shared.ts";
@@ -124,10 +124,13 @@ export async function summarizeTikTok(
       return;
     }
 
-    // 4. Summarize with Claude. The botConfig clone (a) grants Read access to the
-    //    tmp frame dir via --add-dir (non-interactive claude auto-denies paths
-    //    outside the bot dir otherwise), and (b) raises the timeout — the
-    //    multi-turn frame-reading session easily outruns the default 120s.
+    // 4. Summarize with Claude. Via executeOneShot's opts we (a) grant Read
+    //    access to the tmp frame dir via `extraDirs` → CLI `--add-dir`
+    //    (non-interactive claude auto-denies paths outside the bot dir
+    //    otherwise), and (b) raise the timeout — the multi-turn frame-reading
+    //    session easily outruns the default 120s. `extraDirs` is CLI-only; the
+    //    tiktok route pre-flights the connector's supportsExtraDirs capability
+    //    before kicking this expensive job.
     updateStatus(jobId, "summarizing");
 
     const ingestTitle = title !== url ? title : dl.title || dl.canonicalUrl;
@@ -147,27 +150,20 @@ Author: ${dl.uploader}`;
         : "";
     const userPrompt = `${transcriptSection}${framesSection}`;
 
-    const tiktokBotConfig: BotConfig = {
-      ...botConfig,
-      spawnArgs: [...(botConfig.spawnArgs ?? []), "--add-dir", workDir],
-      // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
-      // (opus + thinking) — this is a background job, nothing blocks on it.
-      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
-    };
-
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
         appendText(jobId, event.text);
       }
     };
 
-    const result = await executeClaudePrompt(
-      userPrompt,
-      config,
-      tiktokBotConfig,
+    const result = await executeOneShot(userPrompt, config, botConfig, {
       systemPrompt,
       onProgress,
-    );
+      extraDirs: [workDir],
+      // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
+      // (opus + thinking) — this is a background job, nothing blocks on it.
+      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
+    });
 
     // 5. Parse response.
     const { category, summary } = parseSummaryResponse(result.result);

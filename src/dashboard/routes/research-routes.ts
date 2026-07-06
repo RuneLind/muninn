@@ -3,7 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
-import { discoverAllBots, resolveResearchBot, canSynthesizeResearch, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
+import { discoverAllBots, resolveResearchBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
 import { streamResearchAnswer } from "../../research/ask.ts";
 import { resolveProfile } from "../../research/corpus.ts";
 import { MAX_HISTORY_TURNS, type ResearchTurn } from "../../research/answer.ts";
@@ -71,14 +71,10 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     return c.html(await renderResearchPage());
   });
 
-  // Research: list available bots
+  // Research: list available bots. Every connector can synthesize now (synthesis
+  // routes through executeOneShot), so all discovered bots are pickable.
   app.get("/api/research/bots", (c) => {
-    // Only bots that can synthesize on the CLI path — copilot-sdk/openai-compat
-    // bots carry model ids the CLI rejects (see canSynthesizeResearch), so they
-    // must not appear as a pickable Research engine.
-    const bots = discoverAllBots()
-      .filter(canSynthesizeResearch)
-      .map((b) => ({ name: b.name }));
+    const bots = discoverAllBots().map((b) => ({ name: b.name }));
     return c.json({ bots });
   });
 
@@ -101,21 +97,12 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     const profile = resolveProfile(c.req.query("profile"));
 
     const allBots = discoverAllBots();
-    // Honor an explicit ?bot= only if it can actually synthesize on the CLI path.
-    // A copilot-sdk/openai-compat bot (e.g. melosys, model "claude-sonnet-4.6")
-    // would crash the spawn with an invalid --model, so fall back to the fast
-    // CLI research bot instead — the corpus is fixed, so the synthesis engine is
-    // an implementation detail the reader doesn't pick. (A stale shared bot
-    // selection from another page can still arrive here despite the filtered
-    // /api/research/bots list.)
+    // Honor an explicit ?bot= when it names a real bot; any connector can
+    // synthesize (routed through executeOneShot), so no CLI-native filter here.
+    // The corpus is fixed, so the synthesis engine is an implementation detail
+    // the reader doesn't pick — an unknown name falls back to the fast default.
     const requested = botName ? allBots.find((b) => b.name === botName) : undefined;
-    const requestedUsable = !!requested && canSynthesizeResearch(requested);
-    if (requested && !requestedUsable) {
-      log.warn("Research: requested bot={bot} can't synthesize on the CLI path — falling back", {
-        bot: requested.name,
-      });
-    }
-    const botConfig = (requestedUsable ? requested : undefined) ?? resolveResearchBot(allBots);
+    const botConfig = requested ?? resolveResearchBot(allBots);
     if (!botConfig) return c.json({ error: "No bots configured" }, 500);
 
     log.info("Research ask: bot={bot} profile={profile} turn={turn} q={q}", {
