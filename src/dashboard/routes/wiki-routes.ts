@@ -19,7 +19,7 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
 
 /** Dashboard /wiki reader: the huginn-jarvis knowledge wiki as a browsable site. */
 export function registerWikiRoutes(app: Hono): void {
-  app.get("/wiki", (c) => c.html(renderWikiPage()));
+  app.get("/wiki", async (c) => c.html(await renderWikiPage()));
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
   app.get("/api/wiki/pages", async (c) => {
