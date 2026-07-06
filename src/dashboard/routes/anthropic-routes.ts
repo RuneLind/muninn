@@ -6,6 +6,7 @@ import {
   listCandidates,
   getCandidateById,
   setCandidateStatus,
+  expireStaleCandidates,
 } from "../../db/summary-candidates.ts";
 import {
   getJob,
@@ -41,16 +42,29 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // The ranked, pre-annotated candidate inbox. Returns the actionable + in-flight +
   // on-the-shelf set so the client can render each row by status: `new` (active
   // Summarize), `summarizing` (in progress, e.g. an auto-promoted ≥0.9 item mid-run),
-  // `summarized` (read-only "On the shelf", links to its doc), and `error` (retryable).
-  // `dismissed` rows stay hidden.
+  // `summarized` (read-only "On the shelf", links to its doc — the client collapses
+  // these into an expandable "Done recently" group), and `error` (retryable).
+  // `dismissed` rows stay hidden. On each load two housekeeping steps keep the set
+  // bounded: stale `new`/`error` rows older than 14 days are auto-dismissed, and
+  // `summarized` rows are cut to the last 7 days (so old high-scoring shelf rows
+  // can't crowd out fresh low-scoring `new` ones under the 200-row score-DESC cap).
   app.get("/api/anthropic/candidates", async (c) => {
     try {
+      // Cheap indexed cleanup on load — never fatal to the listing.
+      try {
+        await expireStaleCandidates(14);
+      } catch (err) {
+        log.warn("expireStaleCandidates failed: {error}", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       // Both verticals share this inbox — anthropic releases + captured long-form X
       // posts. (dashboard_url stays source=anthropic for all: that param keys the shelf
       // registry, and both land on the anthropic-summaries shelf — see sources.ts.)
       const candidates = await listCandidates({
         source: ["anthropic", "x"],
         status: ["new", "summarizing", "summarized", "error"],
+        summarizedWithinDays: 7,
       });
       return c.json({ candidates });
     } catch (err) {

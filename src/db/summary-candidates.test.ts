@@ -1,11 +1,13 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import {
   upsertCandidate,
   listCandidates,
   getCandidateById,
   getCandidateBySourceUrl,
   setCandidateStatus,
+  expireStaleCandidates,
 } from "./summary-candidates.ts";
 
 setupTestDb();
@@ -144,6 +146,70 @@ describe("summary-candidates", () => {
     expect((await getCandidateBySourceUrl("anthropic", base.url))!.status).toBe("summarizing");
     // Scoped by source — a different source with the same url path doesn't collide.
     expect(await getCandidateBySourceUrl("youtube", base.url)).toBeNull();
+  });
+
+  test("listCandidates summarizedWithinDays cuts old summarized rows but keeps other statuses", async () => {
+    const sql = getDb();
+    // A `new` row must NOT be cut by the summarized recency filter (only summarized is).
+    await upsertCandidate({ ...base, url: "https://a/new-old", score: 0.5 });
+
+    // An old summarized row (updated_at 30 days ago) — should be excluded.
+    await upsertCandidate({ ...base, url: "https://a/done-old", score: 0.8 });
+    const oldDone = (await getCandidateBySourceUrl("anthropic", "https://a/done-old"))!;
+    await setCandidateStatus(oldDone.id, "summarized", "doc-old");
+    await sql`UPDATE summary_candidates SET updated_at = now() - interval '30 days' WHERE id = ${oldDone.id}`;
+
+    // A recent summarized row (updated_at 2 days ago) — should be kept.
+    await upsertCandidate({ ...base, url: "https://a/done-new", score: 0.9 });
+    const recentDone = (await getCandidateBySourceUrl("anthropic", "https://a/done-new"))!;
+    await setCandidateStatus(recentDone.id, "summarized", "doc-new");
+    await sql`UPDATE summary_candidates SET updated_at = now() - interval '2 days' WHERE id = ${recentDone.id}`;
+
+    // Without the option, both summarized rows come back (honest full-history contract).
+    const all = await listCandidates({ source: "anthropic" });
+    expect(all.map((c) => c.url).sort()).toEqual([
+      "https://a/done-new",
+      "https://a/done-old",
+      "https://a/new-old",
+    ]);
+
+    // With summarizedWithinDays: 7 the old summarized row drops; the `new` row stays.
+    const cut = await listCandidates({ source: "anthropic", summarizedWithinDays: 7 });
+    const urls = cut.map((c) => c.url).sort();
+    expect(urls).toEqual(["https://a/done-new", "https://a/new-old"]);
+    expect(urls).not.toContain("https://a/done-old");
+  });
+
+  test("expireStaleCandidates dismisses stale new/error rows but spares fresh + terminal ones", async () => {
+    const sql = getDb();
+    // Stale `new` (15 days old) → should be dismissed.
+    await upsertCandidate({ ...base, url: "https://a/stale-new", score: 0.6 });
+    const staleNew = (await getCandidateBySourceUrl("anthropic", "https://a/stale-new"))!;
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '15 days' WHERE id = ${staleNew.id}`;
+
+    // Stale `error` (20 days old) → should be dismissed.
+    await upsertCandidate({ ...base, url: "https://a/stale-err", score: 0.6 });
+    const staleErr = (await getCandidateBySourceUrl("anthropic", "https://a/stale-err"))!;
+    await setCandidateStatus(staleErr.id, "error");
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '20 days' WHERE id = ${staleErr.id}`;
+
+    // Fresh `new` → untouched.
+    await upsertCandidate({ ...base, url: "https://a/fresh-new", score: 0.6 });
+    const freshNew = (await getCandidateBySourceUrl("anthropic", "https://a/fresh-new"))!;
+
+    // Old `summarized` → NOT actionable, must be spared even though it's old.
+    await upsertCandidate({ ...base, url: "https://a/old-done", score: 0.6 });
+    const oldDone = (await getCandidateBySourceUrl("anthropic", "https://a/old-done"))!;
+    await setCandidateStatus(oldDone.id, "summarized", "doc-x");
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '90 days' WHERE id = ${oldDone.id}`;
+
+    const expired = await expireStaleCandidates(14);
+    expect(expired).toBe(2);
+
+    expect((await getCandidateById(staleNew.id))!.status).toBe("dismissed");
+    expect((await getCandidateById(staleErr.id))!.status).toBe("dismissed");
+    expect((await getCandidateById(freshNew.id))!.status).toBe("new");
+    expect((await getCandidateById(oldDone.id))!.status).toBe("summarized");
   });
 
   test("setCandidateStatus with null docId leaves an existing doc_id untouched", async () => {

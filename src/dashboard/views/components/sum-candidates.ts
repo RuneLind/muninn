@@ -6,19 +6,24 @@
  * status-driven actions.
  *
  * Reads GET /api/anthropic/candidates (the actionable + in-flight + shelf set:
- * statuses new / summarizing / summarized / error). Rows render by status:
+ * statuses new / summarizing / summarized / error). The inbox proper shows only
+ * the actionable + in-flight rows; `summarized` rows collapse into an expandable
+ * "Done recently" group below it. Rows render by status:
  *  - `new`        → active [Summarize] + [Dismiss]
  *  - `error`      → "Failed" + [Retry] + [Dismiss]
  *  - `summarizing`→ "Summarizing…" chip (e.g. an auto-promoted ≥0.9 headliner mid-run)
- *  - `summarized` → read-only "On the shelf ↗" linking the summary doc
+ *  - `summarized` → compact "Done recently" line + "On the shelf ↗" linking the doc
  *
  * [Summarize] POSTs /api/anthropic/candidates/:id/summarize, then reuses the shared
  * job-card + SSE streamer (the YouTube/X summarize flow — `showJob` + `connectSSE`)
- * for the visible card; a lightweight per-row EventSource flips the row to "On the
- * shelf" on completion. Handles the 409 (already in flight) and `{duplicate,doc_id}`
- * (already on shelf) responses. Dismiss POSTs …/:id/dismiss and drops the row.
- * The whole section stays hidden when the inbox is empty. Uses the shared esc() +
- * openSummaryDoc() helpers (all summaries component scripts share one page scope). */
+ * for the visible card; a lightweight per-row EventSource flips the row to summarized
+ * on completion (moving it from the inbox into the done group). Handles the 409
+ * (already in flight) and `{duplicate,doc_id}` (already on shelf) responses. Dismiss
+ * POSTs …/:id/dismiss and drops the row. The section is always visible (it lives
+ * behind the Candidates tab): an empty inbox shows a "Nothing new" state, and a
+ * fetch failure shows a distinct "Couldn't load candidates" retry state. Rendering is
+ * state-driven — a client-side array is re-rendered on every change. Uses the shared
+ * esc() + openSummaryDoc() helpers (all summaries component scripts share one page scope). */
 
 export function sumCandidatesStyles(): string {
   return `
@@ -229,15 +234,101 @@ export function sumCandidatesStyles(): string {
       text-align: center;
       color: var(--status-error);
     }
+
+    /* Empty / error states — the section is always mounted behind the tab, so it
+       carries its own zero states rather than hiding. */
+    .candidate-empty {
+      padding: 22px 14px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--text-dim);
+      border: 1px dashed var(--border-primary);
+      border-radius: 8px;
+    }
+    .candidate-empty.error { color: var(--status-error); border-color: color-mix(in srgb, var(--status-error) 40%, transparent); }
+    .candidate-retry-btn {
+      margin-left: 8px;
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--border-secondary);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+    }
+    .candidate-retry-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+
+    /* "Done recently" collapse — summarized rows fold into one compact list. */
+    .candidate-done { margin-top: 14px; }
+    .candidate-done-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 4px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-dim);
+    }
+    .candidate-done-toggle:hover { color: var(--text-secondary); }
+    .candidate-done-caret {
+      display: inline-block;
+      transition: transform 0.15s;
+      font-size: 11px;
+    }
+    .candidate-done-toggle[aria-expanded="true"] .candidate-done-caret { transform: rotate(90deg); }
+    .candidate-done-list {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin-top: 6px;
+    }
+    .candidate-done-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
+    .candidate-done-item:hover { background: var(--bg-surface); }
+    .candidate-done-title {
+      flex: 1;
+      min-width: 0;
+      font-size: 13px;
+      color: var(--text-soft);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .candidate-done-shelf {
+      flex-shrink: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--status-success);
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .candidate-done-shelf:hover { text-decoration: underline; }
+    .candidate-done-shelf.static { color: var(--text-dim); cursor: default; }
   `;
 }
 
 export function sumCandidatesHtml(): string {
   return `
-    <div class="candidates-section" id="candidatesSection" hidden>
+    <div class="candidates-section" id="candidatesSection">
       <h2>Candidates <span class="count" id="candidatesCount"></span></h2>
       <p class="candidates-subtitle">Gated discoveries from the Anthropic tracker — pick what's worth a summary. Headliners summarize themselves.</p>
       <div class="candidate-list" id="candidateList"></div>
+      <div class="candidate-done" id="candidateDone" hidden>
+        <button class="candidate-done-toggle" id="candidateDoneToggle" type="button" aria-expanded="false">
+          <span class="candidate-done-caret">&#9656;</span>
+          <span id="candidateDoneLabel">Done recently</span>
+        </button>
+        <div class="candidate-done-list" id="candidateDoneList" hidden></div>
+      </div>
     </div>`;
 }
 
@@ -326,26 +417,125 @@ export function sumCandidatesScript(): string {
       });
     }
 
-    // Re-render a single row's action area after a status transition + rebind it.
-    function setCandidateRowStatus(row, status, docId) {
-      row.dataset.status = status;
-      if (docId) row.dataset.docId = docId;
-      var actions = row.querySelector('.candidate-actions');
-      if (actions) {
-        actions.innerHTML = candidateActionsHtml({ status: status, docId: docId || row.dataset.docId });
-        bindCandidateRow(row);
+    // Client-side model — the inbox is state-driven: a full array from the API,
+    // re-rendered on every change so a row can move between the inbox and the
+    // "Done recently" group as its status flips.
+    var candidatesState = [];
+    var candidatesLoadError = false;
+    var candidateDoneExpanded = false;
+
+    function findCandidate(id) {
+      for (var i = 0; i < candidatesState.length; i++) {
+        if (candidatesState[i].id === id) return candidatesState[i];
       }
-      updateCandidateCount();
+      return null;
     }
 
-    function updateCandidateCount() {
+    // Mutate one candidate's status in the model + re-render. A summarizing row
+    // that flips to summarized moves from the inbox into the done group.
+    function updateCandidateStatus(id, status, docId) {
+      var c = findCandidate(id);
+      if (!c) return;
+      c.status = status;
+      if (docId) c.docId = docId;
+      if (status === 'summarized') c.updatedAt = Date.now();
+      renderCandidates();
+    }
+
+    function removeCandidate(id) {
+      candidatesState = candidatesState.filter(function(c) { return c.id !== id; });
+      renderCandidates();
+    }
+
+    // Header count + Candidates tab badge both track the ACTIONABLE count (new +
+    // error) — the rows that actually need a decision.
+    function updateCandidateCounts() {
+      var actionable = candidatesState.filter(function(c) {
+        return c.status === 'new' || c.status === 'error';
+      }).length;
+      var countEl = document.getElementById('candidatesCount');
+      if (countEl) countEl.textContent = actionable > 0 ? actionable : '';
+      if (typeof updateTabCount === 'function') updateTabCount('candidates', actionable);
+    }
+
+    // Render the inbox (new/error/summarizing) + the collapsed done group from the
+    // model. Always mounted behind the Candidates tab, so it carries its own zero
+    // states instead of hiding.
+    function renderCandidates() {
       var section = document.getElementById('candidatesSection');
       var list = document.getElementById('candidateList');
-      var countEl = document.getElementById('candidatesCount');
       if (!section || !list) return;
-      var n = list.querySelectorAll('.candidate-item').length;
-      if (n === 0) { section.hidden = true; return; }
-      countEl.textContent = n;
+
+      if (candidatesLoadError) {
+        list.innerHTML = '<div class="candidate-empty error">Couldn\\'t load candidates. ' +
+          '<button class="candidate-retry-btn" id="candidateRetryBtn" type="button">Retry</button></div>';
+        var rb = document.getElementById('candidateRetryBtn');
+        if (rb) rb.addEventListener('click', loadCandidates);
+        renderDoneGroup([]);
+        updateCandidateCounts();
+        return;
+      }
+
+      var inbox = candidatesState.filter(function(c) { return c.status !== 'summarized'; });
+      var done = candidatesState.filter(function(c) { return c.status === 'summarized'; });
+
+      // Float actionable (new/error) above in-flight; server already ordered by score.
+      inbox.sort(function(a, b) { return candidateStatusRank(a.status) - candidateStatusRank(b.status); });
+
+      if (inbox.length === 0 && done.length === 0) {
+        list.innerHTML = '<div class="candidate-empty">Nothing new — the tracker hasn\\'t surfaced anything to summarize.</div>';
+      } else if (inbox.length === 0) {
+        list.innerHTML = ''; // only done rows remain; the done group carries them
+      } else {
+        list.innerHTML = inbox.map(renderCandidateRow).join('');
+        list.querySelectorAll('.candidate-item').forEach(bindCandidateRow);
+      }
+
+      renderDoneGroup(done);
+      updateCandidateCounts();
+    }
+
+    // The "Done recently (N)" collapse — compact one-line-per-item, newest first.
+    function renderDoneGroup(done) {
+      var wrap = document.getElementById('candidateDone');
+      var listEl = document.getElementById('candidateDoneList');
+      var label = document.getElementById('candidateDoneLabel');
+      var toggle = document.getElementById('candidateDoneToggle');
+      if (!wrap || !listEl || !label || !toggle) return;
+
+      if (toggle && !toggle.dataset.bound) {
+        toggle.dataset.bound = '1';
+        toggle.addEventListener('click', function() {
+          candidateDoneExpanded = !candidateDoneExpanded;
+          renderDoneGroup(candidatesState.filter(function(c) { return c.status === 'summarized'; }));
+        });
+      }
+
+      if (done.length === 0) { wrap.hidden = true; return; }
+      wrap.hidden = false;
+
+      done.sort(function(a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0); });
+
+      label.textContent = 'Done recently (' + done.length + ')';
+      listEl.hidden = !candidateDoneExpanded;
+      toggle.setAttribute('aria-expanded', candidateDoneExpanded ? 'true' : 'false');
+
+      listEl.innerHTML = done.map(function(c) {
+        var shelf = c.docId
+          ? '<a class="candidate-done-shelf" href="#" data-act="open-done" data-doc-id="' + esc(c.docId) + '" data-url="' + esc(c.url || '') + '">On the shelf &#8599;</a>'
+          : '<span class="candidate-done-shelf static">On the shelf</span>';
+        return '<div class="candidate-done-item">' +
+          '<span class="candidate-done-title" title="' + esc(c.title || '') + '">' + esc(c.title || '') + '</span>' +
+          shelf +
+        '</div>';
+      }).join('');
+
+      listEl.querySelectorAll('[data-act="open-done"]').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+          e.preventDefault();
+          openSummaryDoc(a.getAttribute('data-doc-id'), a.getAttribute('data-url') || '', 'anthropic');
+        });
+      });
     }
 
     // POST /summarize → reuse the shared job-card + SSE streamer (the YouTube/X flow)
@@ -361,13 +551,13 @@ export function sumCandidatesScript(): string {
         var res = await fetch('/api/anthropic/candidates/' + encodeURIComponent(id) + '/summarize', { method: 'POST' });
 
         // Already summarizing (double-click, or the auto-promote path beat us to it).
-        if (res.status === 409) { setCandidateRowStatus(row, 'summarizing'); return; }
+        if (res.status === 409) { updateCandidateStatus(id, 'summarizing'); return; }
 
         var data = await res.json().catch(function() { return {}; });
 
         // Already on the shelf — surface the existing doc and flip the row.
         if (data && data.duplicate) {
-          setCandidateRowStatus(row, 'summarized', data.doc_id);
+          updateCandidateStatus(id, 'summarized', data.doc_id);
           if (typeof showDuplicateBanner === 'function') showDuplicateBanner();
           return;
         }
@@ -379,19 +569,21 @@ export function sumCandidatesScript(): string {
         }
 
         // Stream the visible job card (reuse wholesale) and flip the row in-progress.
-        setCandidateRowStatus(row, 'summarizing');
+        updateCandidateStatus(id, 'summarizing');
         showJob(data.job_id, title, url, 'anthropic');
         connectSSE(data.job_id, 'anthropic');
-        watchCandidateJob(data.job_id, row);
+        watchCandidateJob(data.job_id, id);
       } catch (err) {
         if (sBtn) sBtn.disabled = false;
         console.error('startCandidateSummarize failed:', err);
       }
     }
 
-    // A per-row SSE listener that only watches for terminal events to flip the row —
-    // decoupled from the job card's own stream so the shared streamer stays untouched.
-    function watchCandidateJob(jobId, row) {
+    // A per-row SSE listener that only watches for terminal events to flip the row's
+    // model entry — decoupled from the job card's own stream so the shared streamer
+    // stays untouched. Keyed by candidate id (not a DOM node) because a re-render
+    // replaces the row element while the job runs.
+    function watchCandidateJob(jobId, id) {
       var es = new EventSource('/api/anthropic/stream/' + jobId);
       es.addEventListener('complete', async function() {
         es.close();
@@ -406,12 +598,12 @@ export function sumCandidatesScript(): string {
           var job = (d.jobs || []).find(function(j) { return j.id === jobId; });
           if (job && job.docId) docId = job.docId;
         } catch {}
-        setCandidateRowStatus(row, 'summarized', docId);
+        updateCandidateStatus(id, 'summarized', docId);
       });
       es.addEventListener('error', function(e) {
         // e.data present = an application-level job error; a bare error is just a
         // transient connection blip (EventSource auto-reconnects) — ignore it.
-        if (e.data) { es.close(); setCandidateRowStatus(row, 'error'); }
+        if (e.data) { es.close(); updateCandidateStatus(id, 'error'); }
       });
     }
 
@@ -423,9 +615,9 @@ export function sumCandidatesScript(): string {
         var row = btn.closest('.candidate-item');
         if (row) {
           row.classList.add('removing');
-          setTimeout(function() { row.remove(); updateCandidateCount(); }, 200);
+          setTimeout(function() { removeCandidate(id); }, 200);
         } else {
-          updateCandidateCount();
+          removeCandidate(id);
         }
       } catch (err) {
         btn.disabled = false;
@@ -434,31 +626,21 @@ export function sumCandidatesScript(): string {
     }
 
     async function loadCandidates() {
-      var section = document.getElementById('candidatesSection');
       var list = document.getElementById('candidateList');
-      if (!section || !list) return;
+      if (!list) return;
       try {
         var res = await fetch('/api/anthropic/candidates');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
-        var candidates = (data && data.candidates) || [];
-        if (candidates.length === 0) { section.hidden = true; return; }
-
-        // Float actionable (new/error) rows above in-flight + on-the-shelf ones;
-        // the server already ordered by score within each status.
-        candidates.sort(function(a, b) {
-          return candidateStatusRank(a.status) - candidateStatusRank(b.status);
-        });
-
-        list.innerHTML = candidates.map(renderCandidateRow).join('');
-        document.getElementById('candidatesCount').textContent = candidates.length;
-        section.hidden = false;
-
-        list.querySelectorAll('.candidate-item').forEach(bindCandidateRow);
+        candidatesState = (data && data.candidates) || [];
+        candidatesLoadError = false;
+        renderCandidates();
       } catch (err) {
-        // A failed/empty inbox shouldn't break the page — leave the section hidden.
+        // A failed inbox shouldn't break the page — show a distinct error state.
         console.error('loadCandidates failed:', err);
-        section.hidden = true;
+        candidatesState = [];
+        candidatesLoadError = true;
+        renderCandidates();
       }
     }
   `;

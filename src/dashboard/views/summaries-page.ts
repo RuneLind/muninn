@@ -8,6 +8,28 @@ import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
+import {
+  sectionTabsStyles,
+  sectionTabsHtml,
+  sectionTabsScript,
+  type SectionTabsConfig,
+} from "./components/section-tabs.ts";
+
+// The summaries page mounts its own tab bar (independent of the main dashboard's).
+// Submit form + job card stay ABOVE the tabs — cross-cutting affordances a job can
+// stream into regardless of which panel is active. `padded: false` because the tabs
+// live inside the already-padded `.page-content` column.
+const SUMMARIES_TABS: SectionTabsConfig = {
+  tabs: [
+    { id: "candidates", label: "Candidates" },
+    { id: "recently", label: "Recently Added" },
+    { id: "library", label: "Library" },
+  ],
+  storageKey: "muninn-active-tab-summaries",
+  defaultTab: "candidates",
+  contentSelector: ".sum-tab-content",
+  padded: false,
+};
 
 export async function renderSummariesPage(): Promise<string> {
   const helpers = await helpersClientScript();
@@ -28,6 +50,7 @@ export async function renderSummariesPage(): Promise<string> {
 
     ${sumSubmitFormStyles()}
     ${sumJobCardStyles()}
+    ${sectionTabsStyles(SUMMARIES_TABS)}
     ${sumCandidatesStyles()}
     ${sumRecentlyAddedStyles()}
     ${sumArticleLibraryStyles()}
@@ -62,17 +85,21 @@ export async function renderSummariesPage(): Promise<string> {
     <!-- Manual submit form (YouTube; X comes from the Chrome extension) -->
     ${sumSubmitFormHtml()}
 
-    <!-- Active job card (hidden until a job is active) -->
+    <!-- Active job card (hidden until a job is active) — stays above the tabs so a
+         job kicked from any panel (incl. a candidate row) streams in one shared card. -->
     ${sumJobCardHtml()}
 
-    <!-- Candidate inbox (anthropic tracker discoveries; hidden until captured) -->
-    ${sumCandidatesHtml()}
+    ${sectionTabsHtml(SUMMARIES_TABS)}
+    <div class="sum-tab-content">
+      <!-- Candidate inbox (anthropic tracker discoveries) -->
+      <div data-section="candidates">${sumCandidatesHtml()}</div>
 
-    <!-- Recently added (persistent, date-grouped, source-filterable) -->
-    ${sumRecentlyAddedHtml()}
+      <!-- Recently added (persistent, date-grouped, source-filterable) -->
+      <div data-section="recently">${sumRecentlyAddedHtml()}</div>
 
-    <!-- Article Library -->
-    ${sumArticleLibraryHtml()}
+      <!-- Article Library -->
+      <div data-section="library">${sumArticleLibraryHtml()}</div>
+    </div>
   </div>
 
   ${docPanelHtml({ askFollowUp: true })}
@@ -86,6 +113,7 @@ export async function renderSummariesPage(): Promise<string> {
   </script>
   <script>
     ${helpers}
+    ${sectionTabsScript(SUMMARIES_TABS)}
     ${sumJobCardScript()}
     ${sumCandidatesScript()}
     ${sumRecentlyAddedScript()}
@@ -112,19 +140,33 @@ export async function renderSummariesPage(): Promise<string> {
       loadLibrary();
       renderDomainFilter();
 
+      // Mount the tab bar (picks the initial tab from hash > localStorage > default).
+      initSectionTabs();
+
       var params = new URLSearchParams(window.location.search);
       // Legacy deep links (/youtube?…, /x-articles?…) redirect here with ?source=.
       // Fall back to youtube so an old bookmark without a source still resolves.
+      // NB: ?source= alone is NOT tab-affecting — the submit form rewrites the URL to
+      // ?source=…&job=… via replaceState, so treating it as a tab switch would yank a
+      // reload off the tab the user was on.
       var source = params.get('source') || 'youtube';
 
       var deepLinkDoc = params.get('doc');
       if (deepLinkDoc) {
+        // A doc deep link lands on Recently Added (the doc panel overlays on top).
+        // Deep link wins over the localStorage default.
+        switchSection('recently');
         if (params.get('duplicate') === '1') showDuplicateBanner();
         openSummaryDoc(deepLinkDoc, '', source);
       }
 
       var jobId = params.get('job');
       if (!jobId) return;
+
+      // A candidate-originated summarize rewrites the URL to source=anthropic&job=…;
+      // land on Candidates so the originating row is in view. The job card itself is
+      // above the tabs, so it streams regardless of which tab is active.
+      if (source === 'anthropic') switchSection('candidates');
 
       // Fetch current job state from the source's job store
       try {

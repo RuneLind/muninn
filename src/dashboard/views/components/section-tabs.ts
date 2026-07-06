@@ -1,21 +1,59 @@
-/** Section tabs — horizontal pill-style tab navigation with hash routing */
+/** Section tabs — horizontal pill-style tab navigation with hash routing.
+ *
+ * Parameterized via a SectionTabsConfig so multiple pages can each mount an
+ * independent tab bar with its own tab set, localStorage key, default tab, and
+ * content-wrapper selector. The main dashboard uses the built-in DASHBOARD_TABS
+ * default (call sites pass no args); the summaries page passes its own config. */
 
-const TABS = [
-  { id: "overview", label: "Overview", hash: "#overview" },
-  { id: "users", label: "Users", hash: "#users" },
-  { id: "memories-goals", label: "Memories & Goals", hash: "#memories-goals" },
-  { id: "schedules-watchers", label: "Schedules & Watchers", hash: "#schedules-watchers" },
-  { id: "connectors", label: "Connectors", hash: "#connectors" },
-  { id: "memsearch", label: "MemSearch", hash: "#memsearch" },
-  { id: "slack", label: "Slack", hash: "#slack" },
-] as const;
+export interface SectionTabDef {
+  id: string;
+  label: string;
+  /** Hash written to the URL on activation; defaults to "#<id>". */
+  hash?: string;
+  /** Start hidden (revealed later via the client-side showTab helper). */
+  hidden?: boolean;
+}
 
-export function sectionTabsStyles(): string {
+export interface SectionTabsConfig {
+  tabs: readonly SectionTabDef[];
+  /** localStorage key for the last-active tab. */
+  storageKey: string;
+  /** Tab id shown when neither the hash nor localStorage matches. */
+  defaultTab: string;
+  /** CSS selector of the wrapper holding the `[data-section]` panels. */
+  contentSelector?: string;
+  /** Horizontal 24px gutter on the tab bar + panels (full-width pages like the
+   *  main dashboard). Set false for pages that already pad their own content
+   *  column (e.g. summaries lives inside a padded `.page-content`). */
+  padded?: boolean;
+}
+
+/** The main dashboard's tab set — kept as the default so page.ts call sites stay
+ *  argument-free and behaviorally identical. */
+const DASHBOARD_TABS: SectionTabsConfig = {
+  tabs: [
+    { id: "overview", label: "Overview" },
+    { id: "users", label: "Users" },
+    { id: "memories-goals", label: "Memories & Goals" },
+    { id: "schedules-watchers", label: "Schedules & Watchers" },
+    { id: "connectors", label: "Connectors" },
+    { id: "memsearch", label: "MemSearch" },
+    { id: "slack", label: "Slack", hidden: true },
+  ],
+  storageKey: "muninn-active-tab",
+  defaultTab: "overview",
+  contentSelector: ".section-content",
+  padded: true,
+};
+
+export function sectionTabsStyles(config: SectionTabsConfig = DASHBOARD_TABS): string {
+  const sel = config.contentSelector ?? ".section-content";
+  const padX = config.padded === false ? "0" : "24px";
   return `
     .section-tabs {
       display: flex;
       gap: 4px;
-      padding: 0 24px 12px;
+      padding: 0 ${padX} 12px;
       overflow-x: auto;
       -webkit-overflow-scrolling: touch;
     }
@@ -57,28 +95,38 @@ export function sectionTabsStyles(): string {
       background: color-mix(in srgb, var(--accent) 25%, transparent);
       color: var(--accent-light);
     }
-    .section-content > [data-section] {
+    ${sel} > [data-section] {
       display: none;
-      padding: 0 24px 24px;
+      padding: 0 ${padX} 24px;
     }
-    .section-content > [data-section].active {
+    ${sel} > [data-section].active {
       display: block;
     }
     .section-tab.tab-hidden { display: none; }
   `;
 }
 
-export function sectionTabsHtml(): string {
+export function sectionTabsHtml(config: SectionTabsConfig = DASHBOARD_TABS): string {
   return `
     <div class="section-tabs" id="sectionTabs">
-      ${TABS.map((t, i) => `<button class="section-tab${i === 0 ? " active" : ""}${t.id === "slack" ? " tab-hidden" : ""}" data-tab="${t.id}" title="Alt+${i + 1}">${t.label}<span class="tab-count" id="tabCount-${t.id}"></span></button>`).join("\n      ")}
+      ${config.tabs
+        .map((t, i) => {
+          const hidden = t.hidden ? " tab-hidden" : "";
+          return `<button class="section-tab${i === 0 ? " active" : ""}${hidden}" data-tab="${t.id}" title="Alt+${i + 1}">${t.label}<span class="tab-count" id="tabCount-${t.id}"></span></button>`;
+        })
+        .join("\n      ")}
     </div>`;
 }
 
-export function sectionTabsScript(): string {
+export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): string {
+  const tabs = config.tabs.map((t) => ({ id: t.id, label: t.label, hash: t.hash ?? `#${t.id}` }));
+  const contentSelector = config.contentSelector ?? ".section-content";
   return `
-    const SECTION_TABS = ${JSON.stringify(TABS)};
-    let activeSection = 'overview';
+    const SECTION_TABS = ${JSON.stringify(tabs)};
+    const SECTION_STORAGE_KEY = ${JSON.stringify(config.storageKey)};
+    const SECTION_DEFAULT_TAB = ${JSON.stringify(config.defaultTab)};
+    const SECTION_CONTENT_SELECTOR = ${JSON.stringify(contentSelector)};
+    let activeSection = SECTION_DEFAULT_TAB;
 
     var sectionActivateCallbacks = {};
 
@@ -97,16 +145,16 @@ export function sectionTabsScript(): string {
         btn.classList.toggle('active', btn.dataset.tab === sectionId);
       });
 
-      // Show/hide sections
-      document.querySelectorAll('[data-section]').forEach(el => {
+      // Show/hide sections (scoped to this page's content wrapper)
+      document.querySelectorAll(SECTION_CONTENT_SELECTOR + ' > [data-section]').forEach(el => {
         el.classList.toggle('active', el.dataset.section === sectionId);
       });
 
-      // Update hash without scroll
+      // Update hash without scroll (bare fragment — keeps path + query intact)
       history.replaceState(null, '', tab.hash);
 
       // Save to localStorage
-      try { localStorage.setItem('muninn-active-tab', sectionId); } catch {}
+      try { localStorage.setItem(SECTION_STORAGE_KEY, sectionId); } catch {}
 
       // Call activate callback if registered
       if (sectionActivateCallbacks[sectionId]) {
@@ -117,10 +165,10 @@ export function sectionTabsScript(): string {
     function initSectionTabs() {
       // Determine initial tab: hash > localStorage > default
       const hash = location.hash.replace('#', '');
-      const saved = (() => { try { return localStorage.getItem('muninn-active-tab'); } catch { return null; } })();
+      const saved = (() => { try { return localStorage.getItem(SECTION_STORAGE_KEY); } catch { return null; } })();
       const matchedHash = SECTION_TABS.find(t => t.id === hash);
       const matchedSaved = SECTION_TABS.find(t => t.id === saved);
-      const initial = matchedHash ? hash : (matchedSaved ? saved : 'overview');
+      const initial = matchedHash ? hash : (matchedSaved ? saved : SECTION_DEFAULT_TAB);
       switchSection(initial);
 
       // Tab click handlers
@@ -135,9 +183,12 @@ export function sectionTabsScript(): string {
         if (h && SECTION_TABS.find(t => t.id === h)) switchSection(h);
       });
 
-      // Keyboard: Alt+1 through Alt+6
+      // Keyboard: Alt+1 through Alt+N — but not while typing in a field. On macOS
+      // Alt+digit types characters, and some pages (summaries) have a prominent
+      // URL input, so skip the shortcut when focus is inside an editable element.
       document.addEventListener('keydown', (e) => {
         if (e.altKey && !e.ctrlKey && !e.metaKey) {
+          if (!(e.target instanceof Element) || e.target.closest('input, textarea, select, [contenteditable]')) return;
           const idx = parseInt(e.key) - 1;
           if (idx >= 0 && idx < SECTION_TABS.length) {
             e.preventDefault();
