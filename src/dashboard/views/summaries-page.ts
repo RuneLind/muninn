@@ -154,8 +154,9 @@ export async function renderSummariesPage(): Promise<string> {
       var deepLinkDoc = params.get('doc');
       if (deepLinkDoc) {
         // A doc deep link lands on Recently Added (the doc panel overlays on top).
-        // Deep link wins over the localStorage default.
-        switchSection('recently');
+        // Deep link wins over the localStorage default for THIS view, but doesn't
+        // persist — a bookmarked URL must not rewrite the user's saved default tab.
+        switchSection('recently', { persist: false });
         if (params.get('duplicate') === '1') showDuplicateBanner();
         openSummaryDoc(deepLinkDoc, '', source);
       }
@@ -166,7 +167,7 @@ export async function renderSummariesPage(): Promise<string> {
       // A candidate-originated summarize rewrites the URL to source=anthropic&job=…;
       // land on Candidates so the originating row is in view. The job card itself is
       // above the tabs, so it streams regardless of which tab is active.
-      if (source === 'anthropic') switchSection('candidates');
+      if (source === 'anthropic') switchSection('candidates', { persist: false });
 
       // Fetch current job state from the source's job store
       try {

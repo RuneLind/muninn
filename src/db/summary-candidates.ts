@@ -131,18 +131,23 @@ export async function listCandidates(
 }
 
 /**
- * Auto-dismiss stale actionable rows: `new`/`error` candidates older than
- * `days` (by created_at) are flipped to `dismissed`. One cheap indexed UPDATE,
- * run on inbox load so the backlog stays bounded regardless of whether the
- * watcher's capture cycle is currently enabled. Returns the number expired.
+ * Auto-dismiss stale non-terminal rows: `new`/`error`/`summarizing` candidates
+ * with no activity for `days` are flipped to `dismissed`. Staleness is measured
+ * from the LAST activity (GREATEST of created_at/updated_at), not first-seen —
+ * an old capture the user just retried (fresh updated_at) must not vanish.
+ * `summarizing` is included so a row wedged mid-job by a process crash (which
+ * the summarize route would otherwise 409 forever) eventually clears too. One
+ * cheap indexed UPDATE, run on inbox load so the backlog stays bounded
+ * regardless of whether the watcher's capture cycle is currently enabled.
+ * Returns the number expired.
  */
 export async function expireStaleCandidates(days = 14): Promise<number> {
   const sql = getDb();
   const rows = await sql`
     UPDATE summary_candidates
     SET status = 'dismissed', updated_at = now()
-    WHERE status IN ('new', 'error')
-      AND created_at < now() - make_interval(days => ${days})
+    WHERE status IN ('new', 'error', 'summarizing')
+      AND GREATEST(created_at, updated_at) < now() - make_interval(days => ${days})
     RETURNING id
   `;
   return rows.length;

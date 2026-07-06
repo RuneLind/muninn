@@ -184,26 +184,6 @@ export function sumCandidatesStyles(): string {
       opacity: 0.45;
     }
 
-    /* On-the-shelf affordance (summarized — read-only; opens the summary doc panel). */
-    .candidate-onshelf {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      padding: 5px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      white-space: nowrap;
-      text-decoration: none;
-      cursor: pointer;
-      border: 1px solid color-mix(in srgb, var(--status-success) 40%, transparent);
-      color: var(--status-success);
-      background: color-mix(in srgb, var(--status-success) 12%, transparent);
-    }
-    .candidate-onshelf:hover { background: color-mix(in srgb, var(--status-success) 20%, transparent); }
-    .candidate-onshelf.static { cursor: default; }
-
     /* In-progress chip (summarizing — e.g. an auto-promoted headliner mid-run). */
     .candidate-status-chip {
       display: inline-flex;
@@ -349,11 +329,12 @@ export function sumCandidatesScript(): string {
       return source || '';
     }
 
-    // Status → sort rank: actionable (new/error) first, then in-flight, then shelf.
-    // Stable sort keeps the server's score-desc order within each rank.
+    // Status → sort rank within the inbox: actionable (new/error) first, then
+    // in-flight. (summarized rows never reach the inbox — they render in the
+    // "Done recently" group.) Stable sort keeps the server's score-desc order
+    // within each rank.
     function candidateStatusRank(status) {
       if (status === 'summarizing') return 1;
-      if (status === 'summarized') return 2;
       return 0; // new + error — needs a decision
     }
 
@@ -361,11 +342,6 @@ export function sumCandidatesScript(): string {
     // data-act marker (bound in bindCandidateRow); their handlers read id/title/url
     // off the row's dataset, so the actions can be re-rendered on a status flip.
     function candidateActionsHtml(c) {
-      if (c.status === 'summarized') {
-        return c.docId
-          ? '<a class="candidate-onshelf" href="#" data-act="open">On the shelf ↗</a>'
-          : '<span class="candidate-onshelf static">On the shelf</span>';
-      }
       if (c.status === 'summarizing') {
         return '<span class="candidate-status-chip"><span class="candidate-spinner"></span>Summarizing…</span>';
       }
@@ -410,11 +386,6 @@ export function sumCandidatesScript(): string {
       if (sBtn) sBtn.addEventListener('click', function() { startCandidateSummarize(row); });
       var dBtn = row.querySelector('[data-act="dismiss"]');
       if (dBtn) dBtn.addEventListener('click', function() { dismissCandidate(row.dataset.id, dBtn); });
-      var open = row.querySelector('[data-act="open"]');
-      if (open) open.addEventListener('click', function(e) {
-        e.preventDefault();
-        if (row.dataset.docId) openSummaryDoc(row.dataset.docId, row.dataset.url || '', 'anthropic');
-      });
     }
 
     // Client-side model — the inbox is state-driven: a full array from the API,
@@ -506,8 +477,10 @@ export function sumCandidatesScript(): string {
       if (toggle && !toggle.dataset.bound) {
         toggle.dataset.bound = '1';
         toggle.addEventListener('click', function() {
+          // Pure visibility flip — no need to re-filter/re-sort/rebuild the list.
           candidateDoneExpanded = !candidateDoneExpanded;
-          renderDoneGroup(candidatesState.filter(function(c) { return c.status === 'summarized'; }));
+          listEl.hidden = !candidateDoneExpanded;
+          toggle.setAttribute('aria-expanded', candidateDoneExpanded ? 'true' : 'false');
         });
       }
 

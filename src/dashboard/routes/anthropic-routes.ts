@@ -45,9 +45,10 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // `summarized` (read-only "On the shelf", links to its doc — the client collapses
   // these into an expandable "Done recently" group), and `error` (retryable).
   // `dismissed` rows stay hidden. On each load two housekeeping steps keep the set
-  // bounded: stale `new`/`error` rows older than 14 days are auto-dismissed, and
-  // `summarized` rows are cut to the last 7 days (so old high-scoring shelf rows
-  // can't crowd out fresh low-scoring `new` ones under the 200-row score-DESC cap).
+  // bounded: non-terminal rows (`new`/`error`/`summarizing`) with no activity for 14
+  // days are auto-dismissed, and `summarized` rows are cut to the last 7 days (so old
+  // high-scoring shelf rows can't crowd out fresh low-scoring `new` ones under the
+  // 200-row score-DESC cap).
   app.get("/api/anthropic/candidates", async (c) => {
     try {
       // Cheap indexed cleanup on load — never fatal to the listing.

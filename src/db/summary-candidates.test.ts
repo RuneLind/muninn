@@ -180,34 +180,50 @@ describe("summary-candidates", () => {
     expect(urls).not.toContain("https://a/done-old");
   });
 
-  test("expireStaleCandidates dismisses stale new/error rows but spares fresh + terminal ones", async () => {
+  test("expireStaleCandidates dismisses inactive new/error/summarizing rows, spares active + terminal ones", async () => {
     const sql = getDb();
-    // Stale `new` (15 days old) → should be dismissed.
+    // Stale `new` (no activity for 15 days) → should be dismissed.
     await upsertCandidate({ ...base, url: "https://a/stale-new", score: 0.6 });
     const staleNew = (await getCandidateBySourceUrl("anthropic", "https://a/stale-new"))!;
-    await sql`UPDATE summary_candidates SET created_at = now() - interval '15 days' WHERE id = ${staleNew.id}`;
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '15 days', updated_at = now() - interval '15 days' WHERE id = ${staleNew.id}`;
 
-    // Stale `error` (20 days old) → should be dismissed.
+    // Stale `error` (no activity for 20 days) → should be dismissed.
     await upsertCandidate({ ...base, url: "https://a/stale-err", score: 0.6 });
     const staleErr = (await getCandidateBySourceUrl("anthropic", "https://a/stale-err"))!;
     await setCandidateStatus(staleErr.id, "error");
-    await sql`UPDATE summary_candidates SET created_at = now() - interval '20 days' WHERE id = ${staleErr.id}`;
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '20 days', updated_at = now() - interval '20 days' WHERE id = ${staleErr.id}`;
+
+    // Wedged `summarizing` (process crashed mid-job 30 days ago) → should be dismissed,
+    // otherwise the summarize route 409s retries on it forever.
+    await upsertCandidate({ ...base, url: "https://a/wedged", score: 0.6 });
+    const wedged = (await getCandidateBySourceUrl("anthropic", "https://a/wedged"))!;
+    await setCandidateStatus(wedged.id, "summarizing");
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '30 days', updated_at = now() - interval '30 days' WHERE id = ${wedged.id}`;
+
+    // Old capture with RECENT activity (created 15 days ago, retried today → error
+    // with fresh updated_at) → must NOT be expired; staleness keys on last activity.
+    await upsertCandidate({ ...base, url: "https://a/retried", score: 0.6 });
+    const retried = (await getCandidateBySourceUrl("anthropic", "https://a/retried"))!;
+    await setCandidateStatus(retried.id, "error");
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '15 days' WHERE id = ${retried.id}`;
 
     // Fresh `new` → untouched.
     await upsertCandidate({ ...base, url: "https://a/fresh-new", score: 0.6 });
     const freshNew = (await getCandidateBySourceUrl("anthropic", "https://a/fresh-new"))!;
 
-    // Old `summarized` → NOT actionable, must be spared even though it's old.
+    // Old `summarized` → terminal, must be spared even though it's old.
     await upsertCandidate({ ...base, url: "https://a/old-done", score: 0.6 });
     const oldDone = (await getCandidateBySourceUrl("anthropic", "https://a/old-done"))!;
     await setCandidateStatus(oldDone.id, "summarized", "doc-x");
-    await sql`UPDATE summary_candidates SET created_at = now() - interval '90 days' WHERE id = ${oldDone.id}`;
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '90 days', updated_at = now() - interval '90 days' WHERE id = ${oldDone.id}`;
 
     const expired = await expireStaleCandidates(14);
-    expect(expired).toBe(2);
+    expect(expired).toBe(3);
 
     expect((await getCandidateById(staleNew.id))!.status).toBe("dismissed");
     expect((await getCandidateById(staleErr.id))!.status).toBe("dismissed");
+    expect((await getCandidateById(wedged.id))!.status).toBe("dismissed");
+    expect((await getCandidateById(retried.id))!.status).toBe("error");
     expect((await getCandidateById(freshNew.id))!.status).toBe("new");
     expect((await getCandidateById(oldDone.id))!.status).toBe("summarized");
   });

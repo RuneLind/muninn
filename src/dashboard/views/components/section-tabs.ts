@@ -134,7 +134,11 @@ export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): s
       sectionActivateCallbacks[sectionId] = callback;
     }
 
-    function switchSection(sectionId) {
+    // opts.persist=false skips the localStorage write — deep-link activations
+    // (e.g. opening a bookmarked ?doc= URL) must not permanently overwrite the
+    // user's saved default tab. User-driven switches (clicks, Alt+N, hashchange)
+    // use the default (persist).
+    function switchSection(sectionId, opts) {
       const tab = SECTION_TABS.find(t => t.id === sectionId);
       if (!tab) return;
 
@@ -154,7 +158,9 @@ export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): s
       history.replaceState(null, '', tab.hash);
 
       // Save to localStorage
-      try { localStorage.setItem(SECTION_STORAGE_KEY, sectionId); } catch {}
+      if (!opts || opts.persist !== false) {
+        try { localStorage.setItem(SECTION_STORAGE_KEY, sectionId); } catch {}
+      }
 
       // Call activate callback if registered
       if (sectionActivateCallbacks[sectionId]) {
