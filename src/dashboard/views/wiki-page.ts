@@ -414,7 +414,7 @@ export function renderWikiPage(): string {
         });
         var news = 0, upds = 0;
         items.forEach(function(it) { if (it.kind === 'new') news++; else upds++; });
-        html += '<div class="wiki-day">' + d + ' <span>\\u00b7 '
+        html += '<div class="wiki-day">' + esc(d) + ' <span>\\u00b7 '
           + (news ? news + ' new' : '') + (news && upds ? ' \\u00b7 ' : '') + (upds ? upds + ' updated' : '')
           + '</span></div>';
         items.forEach(function(it) {

@@ -196,7 +196,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         relPath,
       };
       pages.push(meta);
-      rawOutgoing.set(name, extractWikilinks(content).filter((t) => t !== name));
+      rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
     }),
   );
 
@@ -214,20 +214,23 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
 
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
-  for (const [source, targets] of rawOutgoing) {
+  for (const meta of pages) {
+    // Stem-collision loser: resolve() can only ever return the winner, so
+    // attribute links once, to the first-registered page — never clobber.
+    if (outgoing.has(meta.name)) continue;
     const resolved = new Set<string>();
-    for (const target of targets) {
-      const meta = resolve(target);
-      if (meta && meta.name !== source) resolved.add(meta.name);
+    for (const target of rawOutgoing.get(meta.relPath) ?? []) {
+      const targetMeta = resolve(target);
+      if (targetMeta && targetMeta.name !== meta.name) resolved.add(targetMeta.name);
     }
-    outgoing.set(source, [...resolved]);
+    outgoing.set(meta.name, [...resolved]);
     for (const targetName of resolved) {
       let arr = backlinks.get(targetName);
       if (!arr) {
         arr = [];
         backlinks.set(targetName, arr);
       }
-      arr.push(source);
+      arr.push(meta.name);
     }
   }
   for (const arr of backlinks.values()) arr.sort();

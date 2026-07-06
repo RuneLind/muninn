@@ -134,6 +134,25 @@ describe("buildWikiIndex", () => {
     expect(index.outgoing.get("Harness Engineering")).toEqual(["Own the Folder"]);
   });
 
+  test("duplicate stems don't clobber link attribution — winner keeps its own links", async () => {
+    // Same stem in the AI root and life/ subtree; the root page registers
+    // first (sorted relPath order) and must keep ITS outgoing links.
+    await Bun.write(
+      path.join(root, "concepts/Chronotypes.md"),
+      "---\ntype: concept\n---\n\nAI take on [[Harness Engineering]].",
+    );
+    await Bun.write(
+      path.join(root, "life/sources/Chronotypes.md"),
+      "---\ntype: source\n---\n\nLife take on [[Creatine]].",
+    );
+    const index = await buildWikiIndex(root);
+    const winner = index.resolve("Chronotypes")!;
+    expect(winner.relPath).toBe("concepts/Chronotypes.md");
+    expect(index.outgoing.get("Chronotypes")).toEqual(["Harness Engineering"]);
+    // the life page's link must not leak into the winner's attribution
+    expect(index.backlinks.get("Creatine") ?? []).toEqual([]);
+  });
+
   test("readWikiPage returns raw markdown", async () => {
     const index = await buildWikiIndex(root);
     const md = await readWikiPage(index, index.resolve("index")!);
