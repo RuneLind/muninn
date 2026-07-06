@@ -32,11 +32,11 @@ mock.module("../db/watchers.ts", () => ({
 // Candidate inbox: capture is a no-op recorder; getCandidateBySourceUrl serves rows
 // from a controllable map so the auto-promote dedup gate (status === 'new') can be
 // exercised without a live DB.
-const upsertCalls: { url: string; score: number }[] = [];
+const upsertCalls: { url: string; score: number; kind?: string | null }[] = [];
 const candidateRows = new Map<string, { id: string; title: string; url: string; status: string }>();
 mock.module("../db/summary-candidates.ts", () => ({
-  upsertCandidate: async (p: { url: string; score: number }) => {
-    upsertCalls.push({ url: p.url, score: p.score });
+  upsertCandidate: async (p: { url: string; score: number; kind?: string | null }) => {
+    upsertCalls.push({ url: p.url, score: p.score, kind: p.kind });
   },
   getCandidateBySourceUrl: async (_source: string, url: string) => candidateRows.get(url) ?? null,
 }));
@@ -824,6 +824,8 @@ describe("checkAnthropic", () => {
     ]);
     await checkAnthropic(captureWatcher({}));
     expect(upsertCalls.map((u) => u.url).sort()).toEqual([C1, C2].sort());
+    // Both are /commit/ URLs → stamped kind 'commit'.
+    expect(upsertCalls.map((u) => u.kind)).toEqual(["commit", "commit"]);
   });
 
   test("a commit below the 0.7 commit floor still alerts but is NOT captured", async () => {
@@ -885,6 +887,7 @@ describe("checkAnthropic", () => {
     expect(upsertCalls.map((u) => u.url)).toEqual([
       "https://github.com/anthropics/claude-code/releases/tag/v2.1.195",
     ]);
+    expect(upsertCalls.map((u) => u.kind)).toEqual(["release"]);
   });
 
   test("a mid-band Tier-2 doc candidate is captured at the base floor (no kind floor)", async () => {
@@ -907,6 +910,7 @@ describe("checkAnthropic", () => {
     await checkAnthropic(docCaptureWatcher());
     // 0.6 would fail the commit (0.7) and release (0.8) floors — docs capture at 0.5.
     expect(upsertCalls.map((u) => u.url)).toEqual([D2]);
+    expect(upsertCalls.map((u) => u.kind)).toEqual(["doc"]);
   });
 
   test("auto-promote summarizes a ≥ autoPromoteScore candidate in-process, leaving the mid-band", async () => {

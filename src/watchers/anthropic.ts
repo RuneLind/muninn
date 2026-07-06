@@ -866,8 +866,9 @@ async function captureGatedCandidates(
       });
       continue;
     }
+    const kind = candidateKind(c.url);
     const score = byN.get(i + 1);
-    if (!score || score.score < captureFloor(candidateKind(c.url), config)) continue;
+    if (!score || score.score < captureFloor(kind, config)) continue;
     try {
       await upsertCandidate({
         source: "anthropic",
@@ -876,6 +877,7 @@ async function captureGatedCandidates(
         candidateSrc: c.sourceLabel,
         score: score.score,
         why: score.why,
+        kind,
         watcherId: watcher.id,
         botName: watcher.botName ?? null,
       });

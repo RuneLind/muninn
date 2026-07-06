@@ -576,6 +576,7 @@ async function captureXCandidates(
         candidateSrc: `X (${doc.handle})`,
         score: score.score,
         why: score.why,
+        kind: "x-post",
         sourceDocId: doc.docId,
         watcherId: watcher.id,
         botName: botName ?? null,

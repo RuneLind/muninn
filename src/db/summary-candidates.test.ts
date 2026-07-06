@@ -134,6 +134,25 @@ describe("summary-candidates", () => {
     expect(anth!.sourceDocId).toBeNull();
   });
 
+  test("upsert round-trips kind, keeps newest non-null, never nulls it", async () => {
+    await upsertCandidate({ ...base, url: "https://a/kind-doc", score: 0.7, kind: "doc" });
+    expect((await getCandidateBySourceUrl("anthropic", "https://a/kind-doc"))!.kind).toBe("doc");
+
+    // X candidates carry x-post.
+    await upsertCandidate({ ...base, source: "x", url: "https://x.com/u/k", score: 0.8, kind: "x-post" });
+    expect((await getCandidateBySourceUrl("x", "https://x.com/u/k"))!.kind).toBe("x-post");
+
+    // A re-capture that omits kind must not null the stored value.
+    await upsertCandidate({ ...base, url: "https://a/kind-doc", score: 0.9 });
+    const after = await getCandidateBySourceUrl("anthropic", "https://a/kind-doc");
+    expect(after!.score).toBeCloseTo(0.9, 5);
+    expect(after!.kind).toBe("doc");
+
+    // A row captured without a kind leaves it null.
+    await upsertCandidate({ ...base, url: "https://a/kind-null", score: 0.6 });
+    expect((await getCandidateBySourceUrl("anthropic", "https://a/kind-null"))!.kind).toBeNull();
+  });
+
   test("getCandidateBySourceUrl resolves a row by its (source,url) identity, with current status", async () => {
     expect(await getCandidateBySourceUrl("anthropic", base.url)).toBeNull();
     await upsertCandidate(base);
