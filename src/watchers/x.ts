@@ -573,7 +573,7 @@ async function captureXCandidates(
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
     // Both degrade to null (unknown handle / scores file unavailable) — best-effort.
     const author = normalizeHandle(doc.handle);
-    const authorScore = await getAuthorScore(doc.handle);
+    const authorScore = await getAuthorScore(author);
     try {
       await upsertCandidate({
         source: "x",

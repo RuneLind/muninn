@@ -51,7 +51,9 @@ let noScore = 0;
 
 for (const row of rows) {
   // Prefer the stored author; else parse the handle out of candidate_src ('X (@handle)').
-  const fromSrc = row.candidate_src?.match(/X \(@?([^)]+)\)/)?.[1] ?? null;
+  // Regex kept IDENTICAL to migration 050's pattern (@ required) — 'X (unknown)' has no @
+  // and must not match here either.
+  const fromSrc = row.candidate_src?.match(/X \(@([^)]+)\)/)?.[1] ?? null;
   const handle = normalizeHandle(row.author ?? fromSrc);
   if (!handle) {
     noHandle++;

@@ -52,10 +52,42 @@ describe("score loader (temp file)", () => {
 
     const t = await getAuthorTierThresholds();
     expect(t).not.toBeNull();
-    // DESC scores are 1.00..0.01; floor(0.01*100)=1 → score at index 1 = 0.99,
-    // floor(0.05*100)=5 → index 5 = 0.95.
-    expect(t!.top1).toBeCloseTo(0.99, 5);
-    expect(t!.top5).toBeCloseTo(0.95, 5);
+    // DESC scores are 1.00..0.01. Top 1% of 100 = exactly 1 author → cut = scores[0]
+    // = 1.00; top 5% = 5 authors → cut = scores[4] = 0.96. (Cuts are float4-rounded
+    // via Math.fround, hence toBeCloseTo.)
+    expect(t!.top1).toBeCloseTo(1.0, 5);
+    expect(t!.top5).toBeCloseTo(0.96, 5);
+    // Exactly ONE author clears the top-1% cut (pins the off-by-one: a floor-index
+    // cut paired with >= would admit two).
+    const clearing = Object.values(map).filter((e) => Math.fround(e.author_score) >= t!.top1);
+    expect(clearing.length).toBe(1);
+    // And exactly five clear top-5%.
+    expect(Object.values(map).filter((e) => Math.fround(e.author_score) >= t!.top5).length).toBe(5);
+  });
+
+  test("returns no tiers for a degenerate tiny author set (N < 20)", async () => {
+    const map: Record<string, { author_score: number }> = {};
+    for (let i = 0; i < 10; i++) map[`a${i}`] = { author_score: (10 - i) / 10 };
+    const p = path.join(tmpdir(), `author-scores-tiny-${Date.now()}.json`);
+    await Bun.write(p, JSON.stringify(map));
+    process.env.X_AUTHOR_SCORES_PATH = p;
+    __resetAuthorScoresCacheForTest();
+
+    expect(await getAuthorTierThresholds()).toBeNull();
+    // Individual score lookups still work — only the tiering degrades.
+    expect(await getAuthorScore("@a0")).toBeCloseTo(1.0, 5);
+  });
+
+  test("degrades to null on valid JSON of the wrong shape (no silent feature-vanish)", async () => {
+    // e.g. huginn someday wraps the entries under a metadata key.
+    const wrapped = { generated_at: "2026-07-06", authors: { karpathy: { author_score: 0.6 } } };
+    const p = path.join(tmpdir(), `author-scores-shape-${Date.now()}.json`);
+    await Bun.write(p, JSON.stringify(wrapped));
+    process.env.X_AUTHOR_SCORES_PATH = p;
+    __resetAuthorScoresCacheForTest();
+
+    expect(await getAuthorScore("@karpathy")).toBeNull();
+    expect(await getAuthorTierThresholds()).toBeNull();
   });
 
   test("degrades to null on a missing file (no throw)", async () => {

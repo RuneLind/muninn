@@ -67,14 +67,27 @@ let cache: ScoreCache | null = null;
 /** Gate so a missing/broken file warns once, not once per candidate. */
 let warnedDegraded = false;
 
+/**
+ * Below this many ranked authors the percentile cuts degenerate (both collapse onto the
+ * max score and every top-scored author would read ★ top 1%) — the signature of a
+ * truncated/partial file. Treated like a missing file: no tiers.
+ */
+const MIN_AUTHORS_FOR_TIERS = 20;
+
 function computeThresholds(map: Record<string, AuthorScoreEntry>): AuthorTierThresholds | null {
   const scores = Object.values(map)
     .map((e) => e?.author_score)
     .filter((s): s is number => typeof s === "number")
     .sort((a, b) => b - a);
-  if (scores.length === 0) return null;
-  // Rank-index for a top-p cut: the score at position floor(p * N) in the DESC list.
-  const at = (p: number) => scores[Math.min(scores.length - 1, Math.floor(p * scores.length))]!;
+  if (scores.length < MIN_AUTHORS_FOR_TIERS) return null;
+  // Cut admitting exactly the top ceil(p*N) authors: the LAST admitted score in the DESC
+  // list, index ceil(p*N) - 1. (A floor(p*N) index paired with a >= test would admit one
+  // extra author per tier — e.g. TWO authors clearing "top 1%" of 100.)
+  // Math.fround: author_score round-trips through a REAL (float4) column, so the cut must
+  // live in float4 space too — otherwise the author DEFINING a cut could fail her own
+  // >= comparison after storage rounding.
+  const at = (p: number) =>
+    Math.fround(scores[Math.max(0, Math.ceil(p * scores.length) - 1)]!);
   return { top1: at(0.01), top5: at(0.05) };
 }
 
@@ -104,12 +117,16 @@ async function loadScores(): Promise<ScoreCache | null> {
 
   try {
     const map = (await Bun.file(scoresPath).json()) as Record<string, AuthorScoreEntry>;
+    // Shape guard: valid JSON of the WRONG shape (e.g. huginn someday wraps entries under
+    // a metadata key) would otherwise silently NULL every lookup with zero log signal.
+    // Same degradation path as a parse failure.
+    if (!isAuthorScoreMap(map)) throw new Error("unexpected shape (not a map of {author_score} entries)");
     cache = { mtimeMs, map, thresholds: computeThresholds(map) };
     warnedDegraded = false; // a good load re-arms the one-shot warning
     return cache;
   } catch (err) {
     if (!warnedDegraded) {
-      log.warn("X author scores file at {path} is unparseable — author tiers disabled: {error}", {
+      log.warn("X author scores file at {path} is unusable — author tiers disabled: {error}", {
         path: scoresPath,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -118,6 +135,20 @@ async function loadScores(): Promise<ScoreCache | null> {
     cache = null;
     return null;
   }
+}
+
+/**
+ * True when `v` looks like the expected flat handle→entry map: a non-empty plain object
+ * whose entries (a small sample — the file is ~2.4k entries) carry a numeric author_score.
+ */
+function isAuthorScoreMap(v: unknown): v is Record<string, AuthorScoreEntry> {
+  if (v == null || typeof v !== "object" || Array.isArray(v)) return false;
+  const values = Object.values(v);
+  if (values.length === 0) return false;
+  const sample = values.slice(0, 5);
+  return sample.every(
+    (e) => e != null && typeof e === "object" && typeof (e as AuthorScoreEntry).author_score === "number",
+  );
 }
 
 /**
