@@ -399,7 +399,8 @@ export function sumCandidatesScript(): string {
     var candidatesLoadError = false;
     var candidateDoneExpanded = false;
     // Active kind filter (null = all). Filters the inbox client-side; the done group
-    // is unaffected. Reset to null when the selected kind has no rows left.
+    // is unaffected. Sticky: it stays selected even when its kind empties out (the
+    // inbox then shows the filtered-empty message) — the user widens via "All".
     var activeKind = null;
 
     // Kind → chip label. Order = chip order. 'blog' shows as "News" (the chip label
@@ -414,22 +415,29 @@ export function sumCandidatesScript(): string {
 
     // Render the kind-filter chips over the (unfiltered) inbox with live counts.
     // Mirrors sum-recently-added's renderSourceFilter: "All" + one chip per present
-    // kind, hidden entirely when there's nothing to filter (≤1 kind present).
+    // kind. A sticky active filter keeps its chip rendered even at count 0 (so the
+    // filtered-empty state below is reachable and the user explicitly clicks All to
+    // widen). The row only hides when NO filter is active and there's nothing to
+    // filter (≤1 kind present) — never while a filter is applied, which would strand
+    // the user on an invisible filter with no All chip to recover.
     function renderKindFilter(inbox) {
       var el = document.getElementById('candidateKindFilter');
       if (!el) return;
       var counts = {};
       inbox.forEach(function(c) { if (c.kind) counts[c.kind] = (counts[c.kind] || 0) + 1; });
-      // Don't strand the user on a filter whose kind just emptied out.
-      if (activeKind && !counts[activeKind]) activeKind = null;
-      var present = CANDIDATE_KINDS.filter(function(d) { return counts[d.kind]; });
-      if (present.length <= 1) { el.innerHTML = ''; return; }
+      var present = CANDIDATE_KINDS.filter(function(d) {
+        return counts[d.kind] || d.kind === activeKind;
+      });
+      if (activeKind === null && present.length <= 1) {
+        el.innerHTML = '';
+        return;
+      }
       var chips = ['<span class="source-chip' + (activeKind === null ? ' active' : '') +
         '" data-kind="">All <span class="chip-count">' + inbox.length + '</span></span>'];
       present.forEach(function(d) {
         chips.push('<span class="source-chip' + (activeKind === d.kind ? ' active' : '') +
           '" data-kind="' + esc(d.kind) + '">' + esc(d.label) +
-          ' <span class="chip-count">' + counts[d.kind] + '</span></span>');
+          ' <span class="chip-count">' + (counts[d.kind] || 0) + '</span></span>');
       });
       el.innerHTML = chips.join('');
       el.querySelectorAll('.source-chip').forEach(function(chip) {
@@ -508,8 +516,8 @@ export function sumCandidatesScript(): string {
       // Float actionable (new/error) above in-flight; server already ordered by score.
       inbox.sort(function(a, b) { return candidateStatusRank(a.status) - candidateStatusRank(b.status); });
 
-      // Chips over the full inbox (may reset activeKind if its kind just emptied),
-      // then narrow the rendered rows to the active kind.
+      // Chips over the full inbox (the active kind's chip stays, at count 0 if it
+      // just emptied), then narrow the rendered rows to the active kind.
       renderKindFilter(inbox);
       var shownInbox = activeKind
         ? inbox.filter(function(c) { return c.kind === activeKind; })
