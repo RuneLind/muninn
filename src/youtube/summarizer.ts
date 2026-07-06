@@ -4,6 +4,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
+import { buildSummarySystemPrompt, ingestSummary } from "../summaries/summarizer-shared.ts";
 import {
   updateStatus,
   appendText,
@@ -15,17 +16,10 @@ import {
 
 const log = getLog("youtube", "summarizer");
 
-const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following YouTube video transcript.
-
-Instructions:
-1. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${VALID_CATEGORIES.join(", ")}
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Keep it concise but comprehensive`;
+const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
+  "You are a video content analyst. Summarize the following YouTube video transcript.",
+  VALID_CATEGORIES,
+);
 
 export async function summarizeVideo(
   jobId: string,
@@ -104,38 +98,18 @@ Video URL: ${url}`;
     // 4. Ingest into knowledge base (best-effort)
     updateStatus(jobId, "ingesting");
 
-    try {
-      const ingestUrl = `${config.knowledgeApiUrl}/api/youtube/ingest`;
-      const ingestController = new AbortController();
-      const ingestTimeout = setTimeout(() => ingestController.abort(), 15_000);
-
-      const ingestRes = await fetch(ingestUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          url,
-          summary,
-          category,
-          date: new Date().toISOString().split("T")[0],
-        }),
-        signal: ingestController.signal,
-      });
-      clearTimeout(ingestTimeout);
-
-      if (ingestRes.ok) {
-        const ingestData = await ingestRes.json() as { similar?: Array<{ title: string; url: string; snippet?: string }> };
-        if (ingestData.similar && ingestData.similar.length > 0) {
-          setSimilar(jobId, ingestData.similar);
-        }
-      } else {
-        log.warn("Knowledge API ingest returned {status}", { status: ingestRes.status });
-      }
-    } catch (err) {
-      log.warn("Knowledge API ingest failed: {error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    await ingestSummary({
+      knowledgeApiUrl: config.knowledgeApiUrl,
+      ingestPath: "/api/youtube/ingest",
+      body: {
+        title,
+        url,
+        summary,
+        category,
+        date: new Date().toISOString().split("T")[0],
+      },
+      onSimilar: (similar) => setSimilar(jobId, similar),
+    });
 
     // 5. Complete
     completeJob(jobId, summary, category);
