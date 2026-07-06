@@ -98,6 +98,47 @@ export function renderWikiPage(): string {
     .type-analysis { background: var(--status-magenta); }
     .type-note { background: var(--text-dim); }
 
+    /* Start-view tabs (Hubs / Timeline) */
+    .wiki-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border-primary); margin: 18px 0 10px; }
+    .wiki-tab {
+      padding: 6px 14px;
+      font-size: 12.5px;
+      color: var(--text-muted);
+      cursor: pointer;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      font-family: inherit;
+    }
+    .wiki-tab:hover { color: var(--text-primary); }
+    .wiki-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* Timeline */
+    .wiki-day { margin: 16px 4px 6px; font-size: 12px; color: var(--text-tertiary); font-weight: 600; }
+    .wiki-day span { color: var(--text-dim); font-weight: 400; }
+    .wiki-tl-item { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+    .wiki-tl-item:hover { background: var(--bg-surface); }
+    .wiki-tl-kind { font-size: 11px; width: 24px; flex-shrink: 0; text-align: center; }
+    .wiki-tl-kind.new { color: var(--status-success); }
+    .wiki-tl-kind.upd { color: var(--text-dim); }
+    .wiki-tl-title { font-size: 12.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Connections mini-graph (1-hop neighborhood) */
+    .wiki-mini-graph { border-bottom: 1px solid var(--border-primary); padding: 6px 6px 2px; margin-bottom: 8px; }
+    .wiki-mini-graph svg { width: 100%; height: auto; display: block; }
+    .mini-edge { stroke: var(--border-secondary); stroke-width: 1; }
+    .mini-edge.both { stroke: var(--accent-muted); stroke-width: 1.6; }
+    .mini-node { cursor: pointer; }
+    .mini-node text { fill: var(--text-muted); font-size: 9px; }
+    .mini-node:hover text { fill: var(--text-primary); }
+    .mini-center text { fill: var(--text-primary); font-size: 9.5px; font-weight: 600; }
+    circle.t-concept { fill: var(--accent); }
+    circle.t-entity { fill: var(--status-cyan); }
+    circle.t-source { fill: var(--status-info); }
+    circle.t-analysis { fill: var(--status-magenta); }
+    circle.t-note { fill: var(--text-dim); }
+    .wiki-mini-more { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 2px 0 4px; }
+
     /* ── Middle: article pane ──────────────────────────── */
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
@@ -195,6 +236,7 @@ export function renderWikiPage(): string {
           <button class="wiki-chip" data-domain="life">Life</button>
         </div>
         <div class="wiki-chip-row" id="typeChips"></div>
+        <div class="wiki-chip-row" id="tagChips"></div>
         <div class="wiki-sort-row">
           <select id="wikiSort" class="wiki-sort">
             <option value="updated">Recently updated</option>
@@ -225,7 +267,9 @@ export function renderWikiPage(): string {
   (function() {
     var allPages = [];
     var currentName = null;
-    var filters = { q: '', domain: '', type: '' };
+    var filters = { q: '', domain: '', type: '', tag: '' };
+    var startTab = 'hubs';
+    var tagsExpanded = false;
     var TYPE_ORDER = ['concept', 'entity', 'source', 'analysis', 'note'];
     var TYPE_LABEL = { concept: 'Concepts', entity: 'Entities', source: 'Sources', analysis: 'Analyses', note: 'Notes' };
 
@@ -241,6 +285,7 @@ export function renderWikiPage(): string {
       return allPages.filter(function(p) {
         if (filters.domain && p.domain !== filters.domain) return false;
         if (filters.type && p.type !== filters.type) return false;
+        if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
         if (!q) return true;
         if (p.title.toLowerCase().indexOf(q) !== -1) return true;
         if (p.name.toLowerCase().indexOf(q) !== -1) return true;
@@ -282,6 +327,31 @@ export function renderWikiPage(): string {
       document.getElementById('typeChips').innerHTML = html;
     }
 
+    function renderTagChips() {
+      var counts = {};
+      allPages.forEach(function(p) {
+        if (filters.domain && p.domain !== filters.domain) return;
+        if (filters.type && p.type !== filters.type) return;
+        p.tags.forEach(function(t) { counts[t] = (counts[t] || 0) + 1; });
+      });
+      var tags = Object.keys(counts).sort(function(a, b) {
+        return counts[b] - counts[a] || a.localeCompare(b);
+      });
+      var limit = tagsExpanded ? 36 : 8;
+      var shown = tags.slice(0, limit);
+      if (filters.tag && shown.indexOf(filters.tag) === -1) shown.unshift(filters.tag);
+      var html = '';
+      shown.forEach(function(t) {
+        html += '<button class="wiki-chip' + (filters.tag === t ? ' active' : '') + '" data-tag="' + esc(t) + '">#'
+          + esc(t) + ' ' + (counts[t] || 0) + '</button>';
+      });
+      if (tags.length > shown.length || tagsExpanded) {
+        html += '<button class="wiki-chip" data-tag-more="1">'
+          + (tagsExpanded ? 'less' : '+' + (tags.length - shown.length) + ' tags') + '</button>';
+      }
+      document.getElementById('tagChips').innerHTML = html;
+    }
+
     function renderList() {
       var pages = sortPages(filtered());
       var mode = document.getElementById('wikiSort').value;
@@ -307,19 +377,8 @@ export function renderWikiPage(): string {
       return html;
     }
 
-    function renderStart() {
-      currentName = null;
-      var counts = {};
-      allPages.forEach(function(p) { counts[p.type] = (counts[p.type] || 0) + 1; });
-      var html = '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>'
-        + '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>'
-        + '<div class="wiki-start-stats">';
-      TYPE_ORDER.forEach(function(t) {
-        if (!counts[t]) return;
-        html += '<div class="wiki-stat"><b>' + counts[t] + '</b><span>' + TYPE_LABEL[t] + '</span></div>';
-      });
-      html += '</div>';
-
+    function hubsHtml() {
+      var html = '';
       ['concept', 'entity'].forEach(function(t) {
         var top = allPages.filter(function(p) { return p.type === t; })
           .sort(function(a, b) { return b.backlinkCount - a.backlinkCount; })
@@ -334,10 +393,113 @@ export function renderWikiPage(): string {
         });
         html += '</div>';
       });
-      html += '</div>';
+      return html;
+    }
+
+    function timelineHtml() {
+      var groups = {};
+      filtered().forEach(function(p) {
+        if (p.created) (groups[p.created] = groups[p.created] || []).push({ p: p, kind: 'new' });
+        if (p.updated && p.updated !== p.created) {
+          (groups[p.updated] = groups[p.updated] || []).push({ p: p, kind: 'upd' });
+        }
+      });
+      var dates = Object.keys(groups).sort().reverse();
+      if (!dates.length) return '<div class="wiki-conn-empty">No dated pages match the current filters.</div>';
+      var html = '';
+      dates.forEach(function(d) {
+        var items = groups[d];
+        items.sort(function(a, b) {
+          return a.kind === b.kind ? a.p.title.localeCompare(b.p.title) : (a.kind === 'new' ? -1 : 1);
+        });
+        var news = 0, upds = 0;
+        items.forEach(function(it) { if (it.kind === 'new') news++; else upds++; });
+        html += '<div class="wiki-day">' + d + ' <span>\\u00b7 '
+          + (news ? news + ' new' : '') + (news && upds ? ' \\u00b7 ' : '') + (upds ? upds + ' updated' : '')
+          + '</span></div>';
+        items.forEach(function(it) {
+          html += '<div class="wiki-tl-item" data-page="' + esc(it.p.name) + '">'
+            + '<div class="wiki-tl-kind ' + it.kind + '">' + (it.kind === 'new' ? '+' : '~') + '</div>'
+            + '<div class="wiki-type-dot type-' + it.p.type + '"></div>'
+            + '<div class="wiki-tl-title">' + esc(it.p.title) + '</div>'
+            + '</div>';
+        });
+      });
+      return html;
+    }
+
+    function startBodyHtml() {
+      return startTab === 'hubs' ? hubsHtml() : timelineHtml();
+    }
+
+    /** Re-render the hubs/timeline area in place when filters change on the start view. */
+    function refreshStartBody() {
+      var el = document.getElementById('startBody');
+      if (el && currentName === null) el.innerHTML = startBodyHtml();
+    }
+
+    function renderStart() {
+      currentName = null;
+      var counts = {};
+      allPages.forEach(function(p) { counts[p.type] = (counts[p.type] || 0) + 1; });
+      var html = '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>'
+        + '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>'
+        + '<div class="wiki-start-stats">';
+      TYPE_ORDER.forEach(function(t) {
+        if (!counts[t]) return;
+        html += '<div class="wiki-stat"><b>' + counts[t] + '</b><span>' + TYPE_LABEL[t] + '</span></div>';
+      });
+      html += '</div>'
+        + '<div class="wiki-tabs">'
+        + '<button class="wiki-tab' + (startTab === 'hubs' ? ' active' : '') + '" data-tab="hubs">Hubs</button>'
+        + '<button class="wiki-tab' + (startTab === 'timeline' ? ' active' : '') + '" data-tab="timeline">Timeline</button>'
+        + '</div>'
+        + '<div id="startBody">' + startBodyHtml() + '</div></div>';
       document.getElementById('articleWrap').innerHTML = html;
       document.getElementById('connBody').innerHTML = '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
       renderList();
+    }
+
+    /** 1-hop neighborhood as a small radial SVG: current page centered, top neighbors on a ring. */
+    function miniGraphHtml(data) {
+      var byName = {};
+      data.outgoing.forEach(function(p) { byName[p.name] = { p: p, out: true, inn: false }; });
+      data.backlinks.forEach(function(p) {
+        if (byName[p.name]) byName[p.name].inn = true;
+        else byName[p.name] = { p: p, out: false, inn: true };
+      });
+      var all = Object.keys(byName).map(function(k) { return byName[k]; });
+      if (!all.length) return '';
+      all.sort(function(a, b) {
+        var ab = (a.out && a.inn) ? 1 : 0;
+        var bb = (b.out && b.inn) ? 1 : 0;
+        return bb - ab || b.p.backlinkCount - a.p.backlinkCount;
+      });
+      var shown = all.slice(0, 12);
+      var W = 272, H = 244, cx = W / 2, cy = H / 2 - 4, r = 86;
+      function short(t) { return t.length > 15 ? t.slice(0, 14) + '\\u2026' : t; }
+      var edges = '', nodes = '';
+      shown.forEach(function(n, i) {
+        var ang = (2 * Math.PI * i) / shown.length - Math.PI / 2;
+        n.x = cx + r * Math.cos(ang);
+        n.y = cy + r * Math.sin(ang);
+        edges += '<line class="mini-edge' + (n.out && n.inn ? ' both' : '') + '"'
+          + (n.inn && !n.out ? ' stroke-dasharray="3,3"' : '')
+          + ' x1="' + cx + '" y1="' + cy + '" x2="' + n.x.toFixed(1) + '" y2="' + n.y.toFixed(1) + '"/>';
+      });
+      shown.forEach(function(n) {
+        var ly = n.y + (n.y >= cy ? 15 : -9);
+        nodes += '<g class="mini-node" data-page="' + esc(n.p.name) + '"><title>' + esc(n.p.title) + '</title>'
+          + '<circle class="mini-hit" cx="' + n.x.toFixed(1) + '" cy="' + n.y.toFixed(1) + '" r="14" fill="transparent"></circle>'
+          + '<circle class="t-' + n.p.type + '" cx="' + n.x.toFixed(1) + '" cy="' + n.y.toFixed(1) + '" r="5"></circle>'
+          + '<text x="' + n.x.toFixed(1) + '" y="' + ly.toFixed(1) + '" text-anchor="middle">' + esc(short(n.p.title)) + '</text></g>';
+      });
+      nodes += '<g class="mini-center"><circle class="t-' + data.meta.type + '" cx="' + cx + '" cy="' + cy + '" r="7"></circle>'
+        + '<text x="' + cx + '" y="' + (cy + 21) + '" text-anchor="middle">' + esc(short(data.meta.title)) + '</text></g>';
+      var more = all.length > shown.length
+        ? '<div class="wiki-mini-more">strongest ' + shown.length + ' of ' + all.length + ' \\u2014 full lists below</div>'
+        : '';
+      return '<div class="wiki-mini-graph"><svg viewBox="0 0 ' + W + ' ' + H + '">' + edges + nodes + '</svg>' + more + '</div>';
     }
 
     function renderConnections(data) {
@@ -358,7 +520,7 @@ export function renderWikiPage(): string {
         return html + '</div>';
       }
       document.getElementById('connBody').innerHTML =
-        section('Linked from', data.backlinks) + section('Links to', data.outgoing);
+        miniGraphHtml(data) + section('Linked from', data.backlinks) + section('Links to', data.outgoing);
     }
 
     function loadPage(name, push) {
@@ -396,6 +558,12 @@ export function renderWikiPage(): string {
 
     // ── Event wiring (all clicks delegated) ──────────────
     document.body.addEventListener('click', function(e) {
+      var tab = e.target.closest ? e.target.closest('.wiki-tab') : null;
+      if (tab) {
+        startTab = tab.getAttribute('data-tab') || 'hubs';
+        renderStart();
+        return;
+      }
       var link = e.target.closest ? e.target.closest('[data-wiki-page], [data-page]') : null;
       if (!link) return;
       var name = link.getAttribute('data-wiki-page') || link.getAttribute('data-page');
@@ -407,6 +575,7 @@ export function renderWikiPage(): string {
     document.getElementById('wikiSearch').addEventListener('input', function(e) {
       filters.q = e.target.value;
       renderList();
+      refreshStartBody();
     });
     document.getElementById('domainChips').addEventListener('click', function(e) {
       var chip = e.target.closest ? e.target.closest('.wiki-chip') : null;
@@ -415,14 +584,32 @@ export function renderWikiPage(): string {
       this.querySelectorAll('.wiki-chip').forEach(function(c) { c.classList.remove('active'); });
       chip.classList.add('active');
       renderTypeChips();
+      renderTagChips();
       renderList();
+      refreshStartBody();
     });
     document.getElementById('typeChips').addEventListener('click', function(e) {
       var chip = e.target.closest ? e.target.closest('.wiki-chip') : null;
       if (!chip) return;
       filters.type = chip.getAttribute('data-type') || '';
       renderTypeChips();
+      renderTagChips();
       renderList();
+      refreshStartBody();
+    });
+    document.getElementById('tagChips').addEventListener('click', function(e) {
+      var chip = e.target.closest ? e.target.closest('.wiki-chip') : null;
+      if (!chip) return;
+      if (chip.hasAttribute('data-tag-more')) {
+        tagsExpanded = !tagsExpanded;
+        renderTagChips();
+        return;
+      }
+      var tag = chip.getAttribute('data-tag') || '';
+      filters.tag = filters.tag === tag ? '' : tag;
+      renderTagChips();
+      renderList();
+      refreshStartBody();
     });
     document.getElementById('wikiSort').addEventListener('change', renderList);
 
@@ -444,6 +631,7 @@ export function renderWikiPage(): string {
         }
         allPages = data.pages;
         renderTypeChips();
+        renderTagChips();
         var params = new URLSearchParams(location.search);
         var page = params.get('page');
         if (page) loadPage(page, false);
