@@ -10,17 +10,23 @@
       <h1>TikTok Summarizer</h1>
     </header>
 
-    <div id="not-video" class="message hidden">
-      <p>Navigate to a TikTok video to summarize it.</p>
-    </div>
-
     <div id="video-info" class="hidden">
       <div class="video-title" id="video-title"></div>
       <div class="controls">
         <button id="btn-summarize" class="primary">Summarize</button>
       </div>
-      <div id="status" class="hidden"></div>
     </div>
+
+    <div id="manual">
+      <p id="manual-hint" class="hint">Paste a TikTok URL to summarize it:</p>
+      <input id="manual-url" type="url" class="url-input"
+             placeholder="https://www.tiktok.com/@user/video/…" />
+      <div class="controls">
+        <button id="btn-manual" class="primary">Summarize URL</button>
+      </div>
+    </div>
+
+    <div id="status" class="hidden"></div>
   </div>
 
   <footer>

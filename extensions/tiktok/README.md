@@ -10,6 +10,13 @@ including visual content (on-screen text, diagrams, demos), not just speech.
 3. Click "Summarize"
 4. Muninn dashboard opens in a new tab with the summary streaming in real-time
 
+**Paste-a-URL fallback:** in the For You feed (and other views) TikTok keeps the URL
+at `/foryou`, so the content script can't read a `/video/<id>` off the path. In that
+case the popup shows a URL field — paste the link to the video (canonical
+`/@user/video/<id>` or a `vm.tiktok.com` / `vt.tiktok.com` share link) and click
+"Summarize URL". The same field also appears under a detected video as a "Not this
+video?" override, for when the feed advanced past the one you wanted.
+
 The server downloads the video, transcribes the audio (whisper), extracts key
 frames, summarizes it with Claude, categorizes it, and indexes it in the
 knowledge base for later search.
@@ -51,6 +58,11 @@ When clicked on a TikTok video page:
 3. Shows the caption and a "Summarize" button
 4. On click, sends `SUMMARIZE` to the background worker
 5. Background worker POSTs to the API and opens the dashboard
+
+When no video is detected (or as an override under a detected one), the popup shows
+a URL field. A pasted link is normalized client-side (scheme added if missing,
+host checked against `tiktok.com`) and sent through the same `SUMMARIZE` path; the
+server resolves short links and extracts the numeric id from the URL.
 
 ### Background (`background.js`)
 
