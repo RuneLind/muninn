@@ -64,6 +64,35 @@ header h1 {
 .message { padding: 20px; text-align: center; color: var(--text-secondary); }
 .hidden { display: none !important; }
 
+.hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.url-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.url-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+#manual.with-divider {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+
 .video-title {
   font-weight: 600;
   font-size: 14px;
