@@ -324,59 +324,56 @@ export function sumJobCardScript(): string {
       currentJobId = jobId;
       if (source) currentSource = source;
 
-      eventSource = new EventSource(sourceApiBase() + '/stream/' + jobId);
-
-      eventSource.addEventListener('status', function(e) {
-        var data = JSON.parse(e.data);
-        updateStatusBadge(data.status);
-      });
-
-      eventSource.addEventListener('text_delta', function(e) {
-        var data = JSON.parse(e.data);
-        accumulatedText += data.text;
-        updateSummaryArea();
-      });
-
-      eventSource.addEventListener('category', function(e) {
-        var data = JSON.parse(e.data);
-        showCategory(data.category);
-      });
-
-      eventSource.addEventListener('similar', function(e) {
-        var data = JSON.parse(e.data);
-        // Ingest returned similar articles — fetch scored results from search API
-        renderSimilar(data.articles); // show immediately as fallback
-        loadJobSimilar(currentJobTitle); // replace with scored results
-      });
-
-      eventSource.addEventListener('complete', function(e) {
-        // Backward-compatible: only TikTok ships a parsed summary on the complete
-        // event (its multi-turn frame-reading session leaks tool chatter into the
-        // streamed deltas). youtube/x/anthropic send an empty payload, so this is
-        // a no-op for them and finalizeSummary renders the accumulated text.
-        if (e && e.data) {
-          try {
-            var payload = JSON.parse(e.data);
-            if (payload && typeof payload.summary === 'string') {
-              accumulatedText = payload.summary;
-            }
-          } catch (err) {}
-        }
-        finalizeSummary();
-        updateStatusBadge('complete');
-        eventSource.close();
-        eventSource = null;
-        loadRecentlyAdded(true);  // force-refresh so the just-ingested doc appears
-      });
-
-      eventSource.addEventListener('error', function(e) {
-        if (e.data) {
+      eventSource = sseClient(sourceApiBase() + '/stream/' + jobId, {
+        status: function(e) {
           var data = JSON.parse(e.data);
-          showError(data.message);
-        }
-        updateStatusBadge('error');
-        eventSource.close();
-        eventSource = null;
+          updateStatusBadge(data.status);
+        },
+        text_delta: function(e) {
+          var data = JSON.parse(e.data);
+          accumulatedText += data.text;
+          updateSummaryArea();
+        },
+        category: function(e) {
+          var data = JSON.parse(e.data);
+          showCategory(data.category);
+        },
+        similar: function(e) {
+          var data = JSON.parse(e.data);
+          // Ingest returned similar articles — fetch scored results from search API
+          renderSimilar(data.articles); // show immediately as fallback
+          loadJobSimilar(currentJobTitle); // replace with scored results
+        },
+        complete: function(e) {
+          // Backward-compatible: only TikTok ships a parsed summary on the complete
+          // event (its multi-turn frame-reading session leaks tool chatter into the
+          // streamed deltas). youtube/x/anthropic send an empty payload, so this is
+          // a no-op for them and finalizeSummary renders the accumulated text.
+          if (e && e.data) {
+            try {
+              var payload = JSON.parse(e.data);
+              if (payload && typeof payload.summary === 'string') {
+                accumulatedText = payload.summary;
+              }
+            } catch (err) {}
+          }
+          finalizeSummary();
+          updateStatusBadge('complete');
+          if (eventSource) eventSource.close();
+          eventSource = null;
+          loadRecentlyAdded(true);  // force-refresh so the just-ingested doc appears
+        },
+        // Server-sent named 'error' event (carries a message payload), distinct
+        // from a native connection drop.
+        error: function(e) {
+          if (e.data) {
+            var data = JSON.parse(e.data);
+            showError(data.message);
+          }
+          updateStatusBadge('error');
+          if (eventSource) eventSource.close();
+          eventSource = null;
+        },
       });
     }
 
