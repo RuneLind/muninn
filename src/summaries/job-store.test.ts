@@ -188,8 +188,16 @@ test("TTL cleanup timer evicts expired jobs and keeps fresh ones", async () => {
 
   expect(store.getJob(oldId)).toBeUndefined();
 
-  // A freshly created job survives the next sweep.
-  const freshId = store.createJob({ videoId: "fresh", title: "T", url: "u" });
-  await new Promise((r) => setTimeout(r, 15));
-  expect(store.getJob(freshId)).toBeDefined();
+  // A fresh job survives sweeps — generous TTL so slow CI can't cross the
+  // eviction boundary while we wait for the sweep to run.
+  const survivorStore = createJobStore<Status, { videoId: string }>({
+    subsystem: "test",
+    label: "Test",
+    initialStatus: "pending",
+    ttlMs: 10_000,
+    cleanupIntervalMs: 10,
+  });
+  const freshId = survivorStore.createJob({ videoId: "fresh", title: "T", url: "u" });
+  await new Promise((r) => setTimeout(r, 30));
+  expect(survivorStore.getJob(freshId)).toBeDefined();
 });
