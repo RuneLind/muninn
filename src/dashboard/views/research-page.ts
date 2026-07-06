@@ -387,9 +387,8 @@ export async function renderResearchPage(): Promise<string> {
 
         try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
         // The selection is shared across pages, so it may point at a bot that
-        // can't synthesize Research (e.g. melosys/copilot, filtered out above).
-        // Drop it so the default-to-first below picks a usable one — otherwise
-        // we'd send &bot=melosys and the CLI synthesis would fail.
+        // no longer exists (deleted folder / renamed). Drop it so the
+        // default-to-first below picks a real one.
         if (selectedBot && !bots.some(function(b) { return b.name === selectedBot; })) selectedBot = '';
 
         var container = document.getElementById('botSelector');
