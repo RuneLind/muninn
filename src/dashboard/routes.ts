@@ -16,6 +16,7 @@ import { registerSummariesRoutes } from "./routes/summaries-routes.ts";
 import { registerAnthropicRoutes } from "./routes/anthropic-routes.ts";
 import { registerSSERoutes } from "./routes/sse-routes.ts";
 import { registerGraphRoutes } from "./routes/graph-routes.ts";
+import { registerWikiRoutes } from "./routes/wiki-routes.ts";
 import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
@@ -47,6 +48,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerTikTokRoutes(app, config);
   registerSSERoutes(app);
   registerGraphRoutes(app, config);
+  registerWikiRoutes(app);
   registerBenchmarkRoutes(app);
 
   return app;
