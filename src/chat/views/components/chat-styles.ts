@@ -1,70 +1,32 @@
-/* ── Chat-page-scoped palette overrides (dark). chatStyles() is served only on
-   /chat, so these do NOT affect the dashboard. --bg-elevated and --bg-chat are
-   NEW tokens (not in shared-styles); the rest refine shared values. ── */
-const CHAT_DARK = `
-      --bg-page: #0b0b0f;
-      --bg-panel: #101016;
+/* ── Chat-only design tokens, layered on top of SHARED_STYLES (the chat page
+   injects SHARED_STYLES *before* chatStyles(), so the shared DARK_TOKENS /
+   LIGHT_TOKENS palette is the base). We no longer fork the shared palette — the
+   old CHAT_DARK/CHAT_LIGHT blocks re-declared the same CSS var names and silently
+   overrode (and had drifted from) shared-styles.ts. Only tokens that do NOT exist
+   in shared-styles are defined here: the theme-aware --bg-chat / --bg-elevated,
+   plus the theme-independent --mono. Everything else (backgrounds, borders,
+   text, accent, status, chat-assistant-text) now comes from shared-styles. ── */
+const CHAT_EXTRA_DARK = `
       --bg-chat: #0c0c11;
-      --bg-surface: #1e1e29;
       --bg-elevated: #282835;
-      --bg-inset: #0e0e13;
-      --border-primary: #2a2a38;
-      --border-secondary: #353544;
-      --border-subtle: #232330;
-      --chat-assistant-text: #b4b4bf;
 `;
-
-/* ── Light theme (chat). Applied under prefers-color-scheme: light (system follow)
-   and forced under html[data-theme="light"]. The app uses color-mix(... var(--accent) ...)
-   inline throughout, so accent tints adapt automatically; we only override base
-   tokens here. Status colors are darkened vs the dark ramp so they stay legible. ── */
-const CHAT_LIGHT = `
-      --bg-page: #f3f4f7;
-      --bg-panel: #ffffff;
+const CHAT_EXTRA_LIGHT = `
       --bg-chat: #fafbfc;
-      --bg-surface: #f1f2f6;
       --bg-elevated: #ffffff;
-      --bg-inset: #eceef3;
-      --bg-deep: #eceef3;
-      --border-primary: #e2e4ea;
-      --border-secondary: #d2d5de;
-      --border-subtle: #edeef2;
-      --scrollbar-thumb: #d2d5de;
-      --text-primary: #14151a;
-      --text-secondary: #3a3d47;
-      --text-tertiary: #4a4d57;
-      --text-soft: #5a5e68;
-      --text-muted: #6c707d;
-      --text-dim: #80848f;
-      --text-faint: #9aa0ad;
-      --text-disabled: #b8bcc6;
-      --accent: #6357f0;
-      --accent-hover: #5247d8;
-      --accent-light: #5247d8;
-      --accent-muted: #6b6f9a;
-      --status-success: #16a34a;
-      --status-error: #dc2626;
-      --status-warning: #d97706;
-      --status-info: #2563eb;
-      --status-tool: #c2620a;
-      /* Agents-tab discovery accent (latest-note text, discovery chip, "new" dot).
-         The dark-theme #22d3ee is too light on white — darken for contrast. */
-      --status-cyan: #0891b2;
-      --chat-assistant-text: #4b4f5a;
 `;
 
 /** Chat page styles — layout, sidebar, messages, inspector, modals */
 export function chatStyles(): string {
   return `
     :root {
-      ${CHAT_DARK}
+      ${CHAT_EXTRA_DARK}
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
     @media (prefers-color-scheme: light) {
-      :root {${CHAT_LIGHT}      }
+      :root {${CHAT_EXTRA_LIGHT}      }
     }
-    html[data-theme="dark"] {${CHAT_DARK}    }
-    html[data-theme="light"] {${CHAT_LIGHT}    }
+    html[data-theme="dark"] {${CHAT_EXTRA_DARK}    }
+    html[data-theme="light"] {${CHAT_EXTRA_LIGHT}    }
     body {
       display: flex;
       flex-direction: column;

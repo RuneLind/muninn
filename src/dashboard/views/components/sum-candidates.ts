@@ -697,26 +697,26 @@ export function sumCandidatesScript(): string {
     // stays untouched. Keyed by candidate id (not a DOM node) because a re-render
     // replaces the row element while the job runs.
     function watchCandidateJob(jobId, id) {
-      var es = new EventSource('/api/anthropic/stream/' + jobId);
-      es.addEventListener('complete', async function() {
-        es.close();
-        var docId = '';
-        try {
-          // limit=100 (the endpoint's cap): the jobs list is newest-first, and an
-          // auto-promote burst can create several jobs in the window between this
-          // job's kick and its completion — the default 20 could evict it and lose
-          // its docId (→ a non-functional "On the shelf" link).
-          var r = await fetch('/api/anthropic/jobs?limit=100');
-          var d = await r.json();
-          var job = (d.jobs || []).find(function(j) { return j.id === jobId; });
-          if (job && job.docId) docId = job.docId;
-        } catch {}
-        updateCandidateStatus(id, 'summarized', docId);
-      });
-      es.addEventListener('error', function(e) {
+      var conn = sseClient('/api/anthropic/stream/' + jobId, {
+        complete: async function() {
+          conn.close();
+          var docId = '';
+          try {
+            // limit=100 (the endpoint's cap): the jobs list is newest-first, and an
+            // auto-promote burst can create several jobs in the window between this
+            // job's kick and its completion — the default 20 could evict it and lose
+            // its docId (→ a non-functional "On the shelf" link).
+            var d = await getJson('/api/anthropic/jobs?limit=100');
+            var job = (d.jobs || []).find(function(j) { return j.id === jobId; });
+            if (job && job.docId) docId = job.docId;
+          } catch {}
+          updateCandidateStatus(id, 'summarized', docId);
+        },
         // e.data present = an application-level job error; a bare error is just a
         // transient connection blip (EventSource auto-reconnects) — ignore it.
-        if (e.data) { es.close(); updateCandidateStatus(id, 'error'); }
+        error: function(e) {
+          if (e.data) { conn.close(); updateCandidateStatus(id, 'error'); }
+        },
       });
     }
 
@@ -742,9 +742,7 @@ export function sumCandidatesScript(): string {
       var list = document.getElementById('candidateList');
       if (!list) return;
       try {
-        var res = await fetch('/api/anthropic/candidates');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        var data = await res.json();
+        var data = await getJson('/api/anthropic/candidates');
         candidatesState = (data && data.candidates) || [];
         candidatesLoadError = false;
         renderCandidates();

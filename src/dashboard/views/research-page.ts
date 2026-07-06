@@ -573,94 +573,94 @@ export async function renderResearchPage(): Promise<string> {
       var hist = compactHistory();
       if (hist) url += '&history=' + encodeURIComponent(hist);
 
-      var es = new EventSource(url);
-      currentSource = es;
+      var conn = sseClient(url, {
+        phase: function(e) {
+          var d = JSON.parse(e.data);
+          if (d.phase === 'searching') setCardStatus(a, 'Searching the shelf…', '');
+          else if (d.phase === 'synthesizing') setCardStatus(a, 'Synthesizing answer…', '');
+        },
 
-      es.addEventListener('phase', function(e) {
-        var d = JSON.parse(e.data);
-        if (d.phase === 'searching') setCardStatus(a, 'Searching the shelf…', '');
-        else if (d.phase === 'synthesizing') setCardStatus(a, 'Synthesizing answer…', '');
+        sources: function(e) {
+          var d = JSON.parse(e.data);
+          a.citations = d.citations || [];
+          a.sourcesEl.innerHTML = sourcesHtml(a.citations, []);
+          bindSources(a.sourcesEl, a.citations);
+        },
+
+        delta: function(e) {
+          var d = JSON.parse(e.data);
+          a.buffer += d.text || '';
+          a.bodyEl.textContent = a.buffer;
+          a.bodyEl.scrollIntoView({ block: 'nearest' });
+        },
+
+        done: function(e) {
+          var d = JSON.parse(e.data);
+          a.buffer = d.answer || a.buffer || '';
+          a.bodyEl.className = 'answer-body';
+          a.bodyEl.innerHTML = renderMarkdown(a.buffer);
+          linkifyCitations(a.bodyEl, a.citations);
+          a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
+          bindSources(a.sourcesEl, a.citations);
+          var statusText;
+          if (d.lowConfidence) statusText = 'No strong match — showing the closest sources';
+          else if (d.noHits) statusText = 'No matching sources';
+          else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
+          setCardStatus(a, statusText, 'done');
+          // Commit the turn so the next ask carries it as context (only question +
+          // answer are replayed — see compactHistory). We keep even a declined
+          // (no-coverage) turn — the follow-up still benefits from knowing what was
+          // asked. The rendered card already holds this turn's citations.
+          turns.push({ question: a.question, answer: a.buffer });
+          active = null;
+          btn.disabled = false;
+          updateComposer();
+        },
+
+        // App-level failure from the server (synthesis error, no bot, etc.). Named
+        // 'app_error' not 'error' on purpose — EventSource reserves 'error' for
+        // connection drops (see onerror below), so a server 'error' event would
+        // be masked as "Connection lost" and hide the real message. The server's
+        // 'end' sentinel still follows and closes the stream.
+        app_error: function(e) {
+          var msg = 'Something went wrong.';
+          try { msg = JSON.parse(e.data).message || msg; } catch {}
+          setCardStatus(a, msg, 'error');
+          if (!a.buffer) { a.bodyEl.className = 'answer-body'; a.bodyEl.innerHTML = ''; }
+          active = null;
+          btn.disabled = false;
+        },
+
+        // Server sends an explicit 'end' sentinel after the stream is done.
+        end: function() {
+          if (currentSource !== conn) return; // a newer ask superseded this stream
+          currentSource.close();
+          currentSource = null;
+          btn.disabled = false;
+        },
+
+        // Network-level failure (not an app 'error' event) — EventSource.onerror.
+        // Terminal: close so EventSource does NOT silently auto-reconnect on a
+        // transient mid-stream drop (readyState CONNECTING) and re-run the whole
+        // — expensive — synthesis, appending a duplicate answer onto the buffer.
+        // Normal completion goes through the 'end' sentinel, which nulls
+        // currentSource first, so this guard returns early for a finished stream.
+        onerror: function() {
+          if (currentSource !== conn) return; // stale stream from a superseded ask
+          conn.close();
+          currentSource = null;
+          active = null;
+          btn.disabled = false;
+          // Don't clobber a terminal status: 'done' (clean finish) or 'error' (a
+          // server 'app_error' already put the real message on the card). Only an
+          // in-flight turn — searching/synthesizing, no terminal class — is a
+          // genuine drop worth labelling "Connection lost".
+          if (!a.statusWrap.classList.contains('done') && !a.statusWrap.classList.contains('error')) {
+            setCardStatus(a, 'Connection lost', 'error');
+          }
+        },
       });
-
-      es.addEventListener('sources', function(e) {
-        var d = JSON.parse(e.data);
-        a.citations = d.citations || [];
-        a.sourcesEl.innerHTML = sourcesHtml(a.citations, []);
-        bindSources(a.sourcesEl, a.citations);
-      });
-
-      es.addEventListener('delta', function(e) {
-        var d = JSON.parse(e.data);
-        a.buffer += d.text || '';
-        a.bodyEl.textContent = a.buffer;
-        a.bodyEl.scrollIntoView({ block: 'nearest' });
-      });
-
-      es.addEventListener('done', function(e) {
-        var d = JSON.parse(e.data);
-        a.buffer = d.answer || a.buffer || '';
-        a.bodyEl.className = 'answer-body';
-        a.bodyEl.innerHTML = renderMarkdown(a.buffer);
-        linkifyCitations(a.bodyEl, a.citations);
-        a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
-        bindSources(a.sourcesEl, a.citations);
-        var statusText;
-        if (d.lowConfidence) statusText = 'No strong match — showing the closest sources';
-        else if (d.noHits) statusText = 'No matching sources';
-        else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
-        setCardStatus(a, statusText, 'done');
-        // Commit the turn so the next ask carries it as context (only question +
-        // answer are replayed — see compactHistory). We keep even a declined
-        // (no-coverage) turn — the follow-up still benefits from knowing what was
-        // asked. The rendered card already holds this turn's citations.
-        turns.push({ question: a.question, answer: a.buffer });
-        active = null;
-        btn.disabled = false;
-        updateComposer();
-      });
-
-      // App-level failure from the server (synthesis error, no bot, etc.). Named
-      // 'app_error' not 'error' on purpose — EventSource reserves 'error' for
-      // connection drops (see es.onerror below), so a server 'error' event would
-      // be masked as "Connection lost" and hide the real message. The server's
-      // 'end' sentinel still follows and closes the stream.
-      es.addEventListener('app_error', function(e) {
-        var msg = 'Something went wrong.';
-        try { msg = JSON.parse(e.data).message || msg; } catch {}
-        setCardStatus(a, msg, 'error');
-        if (!a.buffer) { a.bodyEl.className = 'answer-body'; a.bodyEl.innerHTML = ''; }
-        active = null;
-        btn.disabled = false;
-      });
-
-      // Server sends an explicit 'end' sentinel after the stream is done.
-      es.addEventListener('end', function() {
-        if (currentSource !== es) return; // a newer ask superseded this stream
-        currentSource.close();
-        currentSource = null;
-        btn.disabled = false;
-      });
-
-      // Network-level failure (not an app 'error' event) — EventSource.onerror.
-      // Terminal: close so EventSource does NOT silently auto-reconnect on a
-      // transient mid-stream drop (readyState CONNECTING) and re-run the whole
-      // — expensive — synthesis, appending a duplicate answer onto the buffer.
-      // Normal completion goes through the 'end' sentinel, which nulls
-      // currentSource first, so this guard returns early for a finished stream.
-      es.onerror = function() {
-        if (currentSource !== es) return; // stale stream from a superseded ask
-        es.close();
-        currentSource = null;
-        active = null;
-        btn.disabled = false;
-        // Don't clobber a terminal status: 'done' (clean finish) or 'error' (a
-        // server 'app_error' already put the real message on the card). Only an
-        // in-flight turn — searching/synthesizing, no terminal class — is a
-        // genuine drop worth labelling "Connection lost".
-        if (!a.statusWrap.classList.contains('done') && !a.statusWrap.classList.contains('error')) {
-          setCardStatus(a, 'Connection lost', 'error');
-        }
-      };
+      currentSource = conn;
     }
 
     // Walk text nodes and turn [n] markers into clickable citation chips, bound to

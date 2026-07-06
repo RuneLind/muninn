@@ -155,39 +155,39 @@ const CHAT_SSE_SCRIPT = `
   }
 
   function connectSSE() {
-    var es = new EventSource('/api/events');
+    var conn = sseClient('/api/events', {
+      agent_status: function(e) {
+        updateAgentStatus(JSON.parse(e.data));
+      },
 
-    es.addEventListener('agent_status', function(e) {
-      updateAgentStatus(JSON.parse(e.data));
-    });
-
-    es.addEventListener('request_progress', function(e) {
-      var data = JSON.parse(e.data);
-      updateRequestProgress(data);
-      // Auto-dismiss completed progress after 8s
-      if (data && data.completed) {
-        clearAutoDismissTimers();
-        autoDismissTimer = setTimeout(function() {
+      request_progress: function(e) {
+        var data = JSON.parse(e.data);
+        updateRequestProgress(data);
+        // Auto-dismiss completed progress after 8s
+        if (data && data.completed) {
+          clearAutoDismissTimers();
+          autoDismissTimer = setTimeout(function() {
+            var panel = document.getElementById('requestProgress');
+            if (panel && panel.classList.contains('completed')) {
+              panel.classList.add('auto-dismiss');
+              autoDismissInner = setTimeout(function() {
+                panel.classList.remove('visible', 'completed', 'auto-dismiss');
+                panel.innerHTML = '';
+              }, 350);
+            }
+          }, 8000);
+        } else if (data) {
+          clearAutoDismissTimers();
           var panel = document.getElementById('requestProgress');
-          if (panel && panel.classList.contains('completed')) {
-            panel.classList.add('auto-dismiss');
-            autoDismissInner = setTimeout(function() {
-              panel.classList.remove('visible', 'completed', 'auto-dismiss');
-              panel.innerHTML = '';
-            }, 350);
-          }
-        }, 8000);
-      } else if (data) {
-        clearAutoDismissTimers();
-        var panel = document.getElementById('requestProgress');
-        if (panel) panel.classList.remove('auto-dismiss');
-      }
-    });
+          if (panel) panel.classList.remove('auto-dismiss');
+        }
+      },
 
-    es.onerror = function() {
-      es.close();
-      setTimeout(connectSSE, 3000);
-    };
+      onerror: function() {
+        conn.close();
+        setTimeout(connectSSE, 3000);
+      },
+    });
   }
 
   // Wrap dismissRequestProgress to also clear auto-dismiss timers

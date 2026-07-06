@@ -6,6 +6,7 @@ import { escHtml, escAttr } from "./escape.ts";
 import { extractToolInputLabel } from "./tool-helpers.ts";
 import { deriveSpanLabelHtml } from "./span-label.ts";
 import { summarizeSearchTrace } from "./search-helpers.ts";
+import { sseClient, getJson, HttpError } from "./client-runtime.ts";
 import {
   formatTime,
   timeAgo,
@@ -30,6 +31,9 @@ Object.assign(globalThis, {
   fmtDuration,
   fmtTokens,
   formatSchedule,
+  sseClient,
+  getJson,
+  HttpError,
 });
 
 // Build-hash freshness check. Pages that inject the `muninn-build-hash` meta
