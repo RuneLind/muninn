@@ -7,6 +7,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeClaudePrompt } from "../ai/executor.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
+import { ingestSummary } from "../summaries/summarizer-shared.ts";
 import {
   downloadVideo,
   transcribeVideo,
@@ -191,41 +192,19 @@ Author: ${dl.uploader}`;
     //    defeats dedup.
     updateStatus(jobId, "ingesting");
 
-    try {
-      const ingestUrl = `${config.knowledgeApiUrl}/api/tiktok/ingest`;
-      const ingestController = new AbortController();
-      const ingestTimeout = setTimeout(() => ingestController.abort(), 15_000);
-
-      const ingestRes = await fetch(ingestUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: ingestTitle,
-          url: dl.canonicalUrl,
-          summary,
-          category,
-          date: new Date().toISOString().split("T")[0],
-          author: dl.uploader,
-        }),
-        signal: ingestController.signal,
-      });
-      clearTimeout(ingestTimeout);
-
-      if (ingestRes.ok) {
-        const ingestData = (await ingestRes.json()) as {
-          similar?: Array<{ title: string; url: string; snippet?: string }>;
-        };
-        if (ingestData.similar && ingestData.similar.length > 0) {
-          setSimilar(jobId, ingestData.similar);
-        }
-      } else {
-        log.warn("Knowledge API ingest returned {status}", { status: ingestRes.status });
-      }
-    } catch (err) {
-      log.warn("Knowledge API ingest failed: {error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    await ingestSummary({
+      knowledgeApiUrl: config.knowledgeApiUrl,
+      ingestPath: "/api/tiktok/ingest",
+      body: {
+        title: ingestTitle,
+        url: dl.canonicalUrl,
+        summary,
+        category,
+        date: new Date().toISOString().split("T")[0],
+        author: dl.uploader,
+      },
+      onSimilar: (similar) => setSimilar(jobId, similar),
+    });
 
     // 7. Complete.
     completeJob(jobId, summary, category);

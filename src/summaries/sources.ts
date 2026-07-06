@@ -12,10 +12,12 @@
  *    link. A minimal JSON projection is injected into the page via
  *    `clientSourcesJson()`.
  *
- * Adding a source = add an entry here + a routes module exposing
- * `<apiBase>/summarize|stream|jobs|documents|document|similar` (the existing
- * youtube-routes.ts / x-article-routes.ts are the templates), and an ingest
- * collection in huginn.
+ * Adding a source = add an entry here + a routes module that calls
+ * `registerSummaryVertical()` (dashboard/routes/summary-vertical.ts) for the
+ * shared plumbing (stream/jobs/document/similar/CORS/redirect) plus its own
+ * bespoke `POST <apiBase>/summarize` handler, a job store instantiated from
+ * `createJobStore()` (summaries/job-store.ts), and an ingest collection in
+ * huginn. youtube-routes.ts is the smallest worked example.
  */
 
 export interface SummarySource {

@@ -5,6 +5,7 @@ import { executeClaudePrompt } from "../ai/executor.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
+import { buildSummarySystemPrompt } from "../summaries/summarizer-shared.ts";
 import { setCandidateStatus } from "../db/summary-candidates.ts";
 import {
   createJob,
@@ -56,17 +57,16 @@ function collectionRelativeId(filePath: string): string {
   return filePath.replace(/^\.?\//, "");
 }
 
-const SUMMARIZE_SYSTEM_PROMPT = `You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.
-
-Instructions:
-1. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${AI_CATEGORIES.join(", ")}
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Lead with what changed and why it matters; keep it concise but comprehensive`;
+const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
+  "You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.",
+  AI_CATEGORIES,
+  [
+    "- ### Section headers for key topics",
+    "- Bullet points with emoji prefixes",
+    "- **Bold** for key terms and takeaways",
+    "- Lead with what changed and why it matters; keep it concise but comprehensive",
+  ],
+);
 
 /**
  * X variant of the summarize system prompt — for a captured long-form X post/article
@@ -74,17 +74,16 @@ Instructions:
  * contract + AI_CATEGORIES clamp as the anthropic prompt, so the parser is unchanged;
  * only the framing (a personal note, not an Anthropic release) differs.
  */
-const X_SUMMARIZE_SYSTEM_PROMPT = `You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer.
-
-Instructions:
-1. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${AI_CATEGORIES.join(", ")}
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Lead with the author's main point and why it matters; keep it concise but comprehensive`;
+const X_SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
+  "You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer.",
+  AI_CATEGORIES,
+  [
+    "- ### Section headers for key topics",
+    "- Bullet points with emoji prefixes",
+    "- **Bold** for key terms and takeaways",
+    "- Lead with the author's main point and why it matters; keep it concise but comprehensive",
+  ],
+);
 
 interface ResolvedContent {
   text: string;

@@ -46,6 +46,17 @@ export type Job<S extends string, F> = BaseJob<S> & F;
 
 type JobSubscriber<S extends string> = (event: JobEvent<S>) => void;
 
+/**
+ * The two terminal states every capture-vertical job store settles into
+ * (`completeJob` → "complete", `failJob` → "error"). Centralized so the SSE
+ * route plumbing doesn't hardcode the set per vertical. Accepts a plain string
+ * so it works on both a job `status` and a `JobEvent["type"]` — they share the
+ * "complete"/"error" tokens.
+ */
+export function isTerminalStatus(value: string): boolean {
+  return value === "complete" || value === "error";
+}
+
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
