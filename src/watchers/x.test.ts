@@ -26,9 +26,30 @@ const upsertCalls: Array<{
   candidateSrc?: string | null;
   score: number;
   kind?: string | null;
+  author?: string | null;
+  authorScore?: number | null;
   sourceDocId?: string | null;
 }> = [];
 let upsertThrow = false;
+
+// Author-scores loader — mocked so capture doesn't depend on the real huginn JSON file.
+// normalizeHandle keeps its real behavior (so candidateSrc/author normalization is
+// exercised); getAuthorScore returns a fixed lookup keyed by normalized handle.
+const authorScoreByHandle: Record<string, number> = {};
+mock.module("../summaries/author-scores.ts", () => ({
+  normalizeHandle: (raw: string | null | undefined) => {
+    if (!raw) return null;
+    const bare = raw.trim().replace(/^@+/, "").toLowerCase();
+    if (!bare || bare === "unknown") return null;
+    return bare;
+  },
+  getAuthorScore: async (raw: string | null | undefined) => {
+    if (!raw) return null;
+    const bare = raw.trim().replace(/^@+/, "").toLowerCase();
+    return authorScoreByHandle[bare] ?? null;
+  },
+  getAuthorTierThresholds: async () => null,
+}));
 // NB: mock.module leaks across the watcher test files (one process). Export the FULL
 // public surface — sibling files' graphs (summarizer.ts et al.) statically import
 // setCandidateStatus / getCandidateBySourceUrl, and a partial mock would break their
@@ -41,6 +62,8 @@ mock.module("../db/summary-candidates.ts", () => ({
     candidateSrc?: string | null;
     score: number;
     kind?: string | null;
+    author?: string | null;
+    authorScore?: number | null;
     sourceDocId?: string | null;
   }) => {
     if (upsertThrow) throw new Error("db down");
@@ -344,6 +367,7 @@ describe("fetchFromCollection + checkX capture", () => {
     lastGatePrompt = "";
     upsertCalls.length = 0;
     upsertThrow = false;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
     stub();
   });
   afterEach(() => {
@@ -392,6 +416,8 @@ describe("fetchFromCollection + checkX capture", () => {
       { n: 1, score: 0.82, why: "sharp eval insight" },
       { n: 2, score: 0.71, why: "worthwhile deep dive" },
     ]);
+    authorScoreByHandle["alice"] = 0.55; // ranked author → captured with a score
+    // bob intentionally absent → authorScore null (handle still normalized + stored)
     // minScore + quietMode: the top rankScore is 0 (docs carry no combined/engagement
     // rank field), so the batch is silenced — yet capture still happened.
     const alerts = await checkX(
@@ -419,6 +445,12 @@ describe("fetchFromCollection + checkX capture", () => {
     expect(byUrl["https://x.com/alice/status/1"]!.candidateSrc).toBe("X (@alice)");
     expect(byUrl["https://x.com/alice/status/1"]!.kind).toBe("x-post");
     expect(byUrl["https://x.com/alice/status/1"]!.title).toContain("@alice:");
+    // Author transparency: normalized handle + looked-up score for a ranked author.
+    expect(byUrl["https://x.com/alice/status/1"]!.author).toBe("alice");
+    expect(byUrl["https://x.com/alice/status/1"]!.authorScore).toBe(0.55);
+    // bob is long-form + captured, but absent from the ranking → handle stored, score null.
+    expect(byUrl["https://x.com/bob/status/2"]!.author).toBe("bob");
+    expect(byUrl["https://x.com/bob/status/2"]!.authorScore).toBeNull();
     // Carol (short tweet) was pre-filtered — never captured.
     expect(byUrl["https://x.com/carol/status/3"]).toBeUndefined();
     // The gate prompt only carried the two long-form posts.

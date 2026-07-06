@@ -2,6 +2,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
+import { normalizeHandle, getAuthorScore } from "../summaries/author-scores.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
 
@@ -568,6 +569,11 @@ async function captureXCandidates(
     if (!score || score.score < minScore) continue;
     const doc = eligible[i]!;
     const firstLine = doc.firstLine.trim() || doc.text;
+    // Author transparency: the normalized handle keys huginn's ranking; the score is a
+    // capture-time snapshot the /summaries page tiers against current percentile cuts.
+    // Both degrade to null (unknown handle / scores file unavailable) — best-effort.
+    const author = normalizeHandle(doc.handle);
+    const authorScore = await getAuthorScore(doc.handle);
     try {
       await upsertCandidate({
         source: "x",
@@ -577,6 +583,8 @@ async function captureXCandidates(
         score: score.score,
         why: score.why,
         kind: "x-post",
+        author,
+        authorScore,
         sourceDocId: doc.docId,
         watcherId: watcher.id,
         botName: botName ?? null,

@@ -372,6 +372,11 @@ CREATE TABLE summary_candidates (
   -- Capture-time classification (mirror of migration 049). Keep the CHECK value-set
   -- order identical to the migration so schema-drift.test.ts's constraintdef diff matches.
   kind          TEXT CHECK (kind IN ('commit', 'release', 'doc', 'blog', 'x-post')),
+  -- X author transparency (mirror of migration 050). `author` = normalized (lowercased,
+  -- bare) handle = huginn author-scores key; `author_score` = capture-time ranking
+  -- snapshot (0–1). Both nullable (anthropic rows, unknown handles, unavailable file).
+  author        TEXT,
+  author_score  REAL,
   watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
   bot_name      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
