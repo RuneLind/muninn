@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveBotWikiRoot, listWikiBots } from "./bot-root.ts";
+import { resolveBotWikiRoot, listWikiBots, defaultWikiBot, resolveWikiRequest } from "./bot-root.ts";
 import type { BotConfig } from "../bots/config.ts";
 
 /** Minimal BotConfig stubs — only the fields the resolver reads. */
@@ -47,5 +47,54 @@ describe("resolveBotWikiRoot", () => {
 describe("listWikiBots", () => {
   test("lists only bots that expose a wiki", () => {
     expect(listWikiBots(BOTS)).toEqual(["jarvis", "melosys"]);
+  });
+});
+
+describe("defaultWikiBot", () => {
+  test("prefers jarvis when it exposes a wiki", () => {
+    expect(defaultWikiBot(BOTS)).toBe("jarvis");
+  });
+
+  test("matches jarvis case-insensitively", () => {
+    expect(defaultWikiBot([bot("Jarvis", "/w"), bot("melosys", "/m")])).toBe("Jarvis");
+  });
+
+  test("falls back to the first wiki bot when jarvis has no wiki", () => {
+    expect(defaultWikiBot([bot("jarvis"), bot("melosys", "/m"), bot("capra", "/c")])).toBe("melosys");
+  });
+
+  test("undefined when no bot exposes a wiki", () => {
+    expect(defaultWikiBot([bot("nowiki"), bot("other")])).toBeUndefined();
+  });
+});
+
+describe("resolveWikiRequest", () => {
+  test("known bot → canonical name (case-corrected), no env override", () => {
+    expect(resolveWikiRequest(BOTS, "MELOSYS", undefined)).toEqual({ bot: "melosys", envOverride: false });
+    expect(resolveWikiRequest(BOTS, "  Jarvis ", undefined)).toEqual({ bot: "jarvis", envOverride: false });
+  });
+
+  test("unknown/no-wikiDir bot keeps the raw name so the client hits the empty state", () => {
+    expect(resolveWikiRequest(BOTS, "ghost", undefined)).toEqual({ bot: "ghost", envOverride: false });
+    expect(resolveWikiRequest(BOTS, "nowiki", undefined)).toEqual({ bot: "nowiki", envOverride: false });
+  });
+
+  test("bare /wiki resolves the default wiki bot (same path as ?bot=<default>)", () => {
+    expect(resolveWikiRequest(BOTS, undefined, undefined)).toEqual({ bot: "jarvis", envOverride: false });
+    expect(resolveWikiRequest(BOTS, "", undefined)).toEqual({ bot: "jarvis", envOverride: false });
+  });
+
+  test("bare /wiki with WIKI_DIR set → env override, no bot claimed", () => {
+    expect(resolveWikiRequest(BOTS, undefined, "/some/wiki")).toEqual({ bot: "", envOverride: true });
+    // whitespace-only env is treated as unset
+    expect(resolveWikiRequest(BOTS, undefined, "  ")).toEqual({ bot: "jarvis", envOverride: false });
+  });
+
+  test("an explicit ?bot= wins over the WIKI_DIR override", () => {
+    expect(resolveWikiRequest(BOTS, "melosys", "/some/wiki")).toEqual({ bot: "melosys", envOverride: false });
+  });
+
+  test("no bot exposes a wiki → empty bot, store's own fallback serves content", () => {
+    expect(resolveWikiRequest([bot("nowiki")], undefined, undefined)).toEqual({ bot: "", envOverride: false });
   });
 });

@@ -41,8 +41,12 @@ interface WikiPagesResponse {
 }
 
 // ── Page state ────────────────────────────────────────────────────────
-/** Which bot's wiki is being browsed — from `?bot=`. Empty = the default (jarvis). */
-const BOT = new URLSearchParams(location.search).get("bot") || "";
+/** Which bot's wiki is being browsed — the server injects the *canonical* bot
+ *  name (case-corrected, or the resolved default) as `window.__WIKI_BOT__`, so
+ *  our `?bot=` fetches and the picker's selected option always agree. Falls back
+ *  to the raw `?bot=` query if the global is somehow absent. Empty = default/env. */
+const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
+const BOT = typeof injectedBot === "string" ? injectedBot : new URLSearchParams(location.search).get("bot") || "";
 /** Append the active `bot` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withBot(url: string): string {
   if (!BOT) return url;
@@ -421,8 +425,14 @@ fetch(withBot("/api/wiki/pages"))
   .then((r) => r.json())
   .then((data: WikiPagesResponse) => {
     if (data.error && !(data.pages || []).length) {
+      // Distinguish the two BOT-set failures the server reports: an unconfigured
+      // bot ("no wiki configured…") vs. a configured wikiDir whose directory is
+      // missing on disk ("wiki directory not found") — different, accurate hints.
+      const configured = /directory not found/i.test(data.error);
       const hint = BOT
-        ? `No wiki configured for bot <code>${esc(BOT)}</code>. Add a <code>wikiDir</code> to its config.json.`
+        ? configured
+          ? `Wiki directory not found for bot <code>${esc(BOT)}</code>. Check its <code>wikiDir</code> path exists on disk.`
+          : `No wiki configured for bot <code>${esc(BOT)}</code>. Add a <code>wikiDir</code> to its config.json.`
         : "Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the wiki path.";
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">${hint}</div>`;

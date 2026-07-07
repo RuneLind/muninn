@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
+import { escHtml, escAttr } from "./components/escape.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -13,19 +14,27 @@ import { wikiClientScript } from "./components/wiki-client.ts";
  * injected below via `wikiClientScript()`.
  *
  * `wikiBots` populates the wiki picker (bots that expose a `wikiDir`); `selected`
- * is the currently-browsed bot (from `?bot=`, or the jarvis default). Switching
- * wiki is a full navigation to `/wiki?bot=<name>` so links stay shareable.
+ * is the canonical name of the currently-browsed bot (from `?bot=`, or the
+ * default wiki bot) — it also drives the client's `?bot=` fetches via an injected
+ * global, so content and picker state can't disagree. `envOverride` marks the
+ * legacy `WIKI_DIR` bare-`/wiki` case, where no bot is claimed in the picker.
+ * Switching wiki is a full navigation to `/wiki?bot=<name>` so links stay shareable.
  */
-export async function renderWikiPage(opts?: { wikiBots?: string[]; selected?: string }): Promise<string> {
+export async function renderWikiPage(opts?: {
+  wikiBots?: string[];
+  selected?: string;
+  envOverride?: boolean;
+}): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikiBots = opts?.wikiBots ?? [];
   const selected = opts?.selected ?? "";
-  const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+  const envOverride = opts?.envOverride ?? false;
   const wikiSelector =
     wikiBots.length > 1
       ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
+        (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
         wikiBots
-          .map((b) => `<option value="${esc(b)}"${b === selected ? " selected" : ""}>${esc(b)}</option>`)
+          .map((b) => `<option value="${escAttr(b)}"${!envOverride && b === selected ? " selected" : ""}>${escHtml(b)}</option>`)
           .join("") +
         `</select>`
       : "";
@@ -281,6 +290,9 @@ export async function renderWikiPage(opts?: { wikiBots?: string[]; selected?: st
     </div>
   </div>
 
+  <script>
+    window.__WIKI_BOT__ = ${JSON.stringify(selected)};
+  </script>
   <script>
     ${clientScript}
   </script>
