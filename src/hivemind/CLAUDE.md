@@ -78,8 +78,12 @@ Phases 1, 2, 3, and 4 of the integration plan in `docs/hivemind-integration-plan
   basename). Inbound messages from listed peers run the bot's normal
   prompt-builder + connector pipeline (`processMessage` from
   `core/message-processor.ts` with `skipUserSave: true` so the inbound peer
-  message is the only persisted copy of the trigger). The bot's response is
-  saved as `role='assistant'` in the same `peer:<name>` thread *and* relayed
+  message is the only persisted copy of the trigger). The text passed to the
+  connector is wrapped by `framePeerMessage()` (router.ts) — trust framing that
+  tells the model the peer is user-allowlisted and read-only requests are
+  pre-authorized; without it the model refuses peer requests as prompt
+  injection. The persisted `role='peer'` message stays raw. The bot's response
+  is saved as `role='assistant'` in the same `peer:<name>` thread *and* relayed
   back to the originating peer via `HivemindBotClient.sendMessage`.
 - **Loop guards.** `loop-guard.ts` enforces a rolling-hour cap on assistant
   turns per peer thread (`maxAutoTurnsPerHour`, default 20). When the cap is
