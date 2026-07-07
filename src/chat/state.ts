@@ -44,7 +44,7 @@ export type ChatEvent =
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null; name?: string; displayName?: string }
   | { type: "tool_end"; conversationId: string; threadId?: string | null; name: string; displayName: string; tokensEstimate?: number }
   | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; messageId?: string; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] }
   | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] }
   | { type: "dev_run_event"; conversationId: string; runId: string; threadId?: string; event: DevRunEvent };
@@ -257,6 +257,8 @@ export class ChatState {
   /** Broadcast response metadata (tokens, timing) after a response completes */
   publishResponseMeta(conversationId: string, meta: {
     threadId?: string | null;
+    /** DB id of the persisted assistant message — anchors the web 👍/👎 control. */
+    messageId?: string;
     inputTokens: number;
     outputTokens: number;
     contextTokens?: number;
@@ -273,6 +275,7 @@ export class ChatState {
       type: "response_meta",
       conversationId,
       threadId: meta.threadId,
+      messageId: meta.messageId,
       inputTokens: meta.inputTokens,
       outputTokens: meta.outputTokens,
       contextTokens: meta.contextTokens,

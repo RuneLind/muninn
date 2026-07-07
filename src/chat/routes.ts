@@ -9,7 +9,8 @@ import { renderChatPage } from "./views/page.ts";
 import { listThreads, createThread, deleteThreadById, getThreadById, updateThreadConnector, setThreadAutoRespondPaused } from "../db/threads.ts";
 import { listConnectors, getConnector } from "../db/connectors.ts";
 import { getChatPreferences, setPreferredConnector, getBotDefaultUser, setBotDefaultUser } from "../db/chat-preferences.ts";
-import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage } from "../db/messages.ts";
+import { getSimMessages, getLastResponseMeta, getMostRecentPeerIdForThread, saveMessage, getMessageById } from "../db/messages.ts";
+import { upsertFeedback, deleteFeedback } from "../db/message-feedback.ts";
 import { hivemindManager } from "../hivemind/manager.ts";
 import { parsePeerThreadName } from "../hivemind/router.ts";
 import { setPendingPeer } from "../hivemind/correlation.ts";
@@ -345,6 +346,41 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
         model: m.model,
       })),
     });
+  });
+
+  // Response-quality feedback: a lightweight 👍/👎 on an assistant message.
+  // value 1 / -1 upserts; value null clears. user/bot/platform are derived from
+  // the message row (not trusted from the client). Capture-only — nothing
+  // consumes this yet; the point is to accumulate a labeled dataset.
+  app.post("/feedback", async (c) => {
+    const body = await c.req.json<{ messageId?: string; value?: number | null }>();
+    const messageId = body.messageId;
+    if (!messageId || !isValidUuid(messageId)) {
+      return c.json({ error: "valid messageId is required" }, 400);
+    }
+    if (body.value !== 1 && body.value !== -1 && body.value !== null) {
+      return c.json({ error: "value must be 1, -1, or null" }, 400);
+    }
+
+    const owner = await getMessageById(messageId);
+    if (!owner) {
+      return c.json({ error: "Message not found" }, 404);
+    }
+
+    if (body.value === null) {
+      await deleteFeedback(messageId, owner.userId, "web");
+      return c.json({ ok: true, value: null });
+    }
+
+    await upsertFeedback({
+      messageId,
+      userId: owner.userId,
+      botName: owner.botName,
+      platform: owner.platform,
+      source: "web",
+      value: body.value,
+    });
+    return c.json({ ok: true, value: body.value });
   });
 
   // Consume a pending research message (one-time use)

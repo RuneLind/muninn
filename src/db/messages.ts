@@ -37,6 +37,63 @@ export async function saveMessage(msg: SaveMessageParams): Promise<string> {
   return row!.id;
 }
 
+/** Row identity needed to attribute feedback to an assistant message. */
+export interface MessageOwner {
+  id: string;
+  userId: string;
+  botName: string;
+  platform: string | null;
+}
+
+/** Stamp the sent Telegram (chat_id, message_id) onto an assistant message row so
+ *  an incoming message_reaction can be resolved back to it. Best-effort: a missing
+ *  row (e.g. evicted) is a no-op. */
+export async function setTelegramMessageId(
+  messageId: string,
+  chatId: number,
+  telegramMessageId: number,
+): Promise<void> {
+  const sql = getDb();
+  await sql`
+    UPDATE messages
+    SET telegram_chat_id = ${chatId}, telegram_message_id = ${telegramMessageId}
+    WHERE id = ${messageId}
+  `;
+}
+
+/** Resolve a Telegram reaction target (chat_id, message_id) back to the assistant
+ *  message it belongs to. Returns null when the reaction is on an untracked message
+ *  (e.g. the user's own message, or a reply we never stamped). */
+export async function getMessageByTelegramId(
+  chatId: number,
+  telegramMessageId: number,
+): Promise<MessageOwner | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT id, user_id, bot_name, platform
+    FROM messages
+    WHERE telegram_chat_id = ${chatId} AND telegram_message_id = ${telegramMessageId}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  if (!row) return null;
+  return { id: row.id, userId: row.user_id, botName: row.bot_name, platform: row.platform ?? null };
+}
+
+/** Look up a message by its DB id — the web feedback route derives (user_id,
+ *  bot_name, platform) from the message row rather than trusting the client. */
+export async function getMessageById(messageId: string): Promise<MessageOwner | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT id, user_id, bot_name, platform
+    FROM messages
+    WHERE id = ${messageId}
+    LIMIT 1
+  `;
+  if (!row) return null;
+  return { id: row.id, userId: row.user_id, botName: row.bot_name, platform: row.platform ?? null };
+}
+
 export async function getRecentMessages(
   userId: string,
   limit = 20,

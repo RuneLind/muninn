@@ -168,6 +168,7 @@ export async function processChatMessage(
     if (result) {
       chatState.publishResponseMeta(conversationId, {
         threadId: threadId ?? null,
+        messageId: result.messageId,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         contextTokens: result.contextTokens,

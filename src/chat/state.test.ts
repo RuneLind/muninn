@@ -189,6 +189,27 @@ describe("ChatState", () => {
       expect(events).toHaveLength(1);
     });
 
+    test("response_meta carries the DB messageId (feedback anchor)", () => {
+      const events: ChatEvent[] = [];
+      state.subscribe((event) => events.push(event));
+
+      state.publishResponseMeta("conv-1", {
+        threadId: null,
+        messageId: "db-msg-99",
+        inputTokens: 10,
+        outputTokens: 5,
+        durationMs: 100,
+        costUsd: 0,
+        model: "sonnet",
+        numTurns: 1,
+      });
+
+      expect(events).toHaveLength(1);
+      const evt = events[0]!;
+      expect(evt.type).toBe("response_meta");
+      expect(evt.type === "response_meta" && evt.messageId).toBe("db-msg-99");
+    });
+
     test("subscriber error does not affect other subscribers", () => {
       const events: ChatEvent[] = [];
 

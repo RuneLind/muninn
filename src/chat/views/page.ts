@@ -998,6 +998,13 @@ const CHAT_SCRIPT = `
       }
     }
 
+    // Replayed web history: attach the 👍/👎 feedback control using the DB message
+    // id (msg.id is the real row id on replay). Live turns get theirs from
+    // showResponseMeta instead, because say() rendered them with a throwaway id.
+    if (msg.sender === 'bot' && isWeb && !isLive && msg.id) {
+      attachFeedbackControls(div, msg.id);
+    }
+
     // Show action buttons after a LIVE bot reply in a research thread. (Replayed
     // history skips this — loadThreadMessages does one fetch+render at the end.)
     // Two client-transient gates take precedence over run-state rendering:

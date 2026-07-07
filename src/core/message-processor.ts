@@ -84,6 +84,10 @@ export interface ProcessMessageParams {
 
 export interface ProcessMessageResult {
   responseText: string;
+  /** DB id of the persisted assistant message — the anchor for response-quality
+   *  feedback (Telegram reactions, web 👍/👎). Always set by processMessage;
+   *  optional only so lightweight test stubs of the result need not supply it. */
+  messageId?: string;
   traceId: string;
   durationMs: number;
   inputTokens: number;
@@ -308,6 +312,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     return {
       responseText,
+      messageId,
       traceId: t.traceId,
       durationMs: Math.round(t.totalMs()),
       inputTokens: result.inputTokens,
