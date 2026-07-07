@@ -14,27 +14,32 @@ const POSITIVE = new Set(["👍", "❤️", "❤", "🔥", "👏", "💯"]);
 const NEGATIVE = new Set(["👎", "💩", "🤮"]);
 
 /** Map a reaction emoji to a feedback value. Returns null for any emoji outside
- *  the known positive/negative sets — the caller ignores those (no value 0 exists). */
+ *  the known positive/negative sets (no value 0 exists). */
 export function mapReactionEmojiToValue(emoji: string): 1 | -1 | null {
   if (POSITIVE.has(emoji)) return 1;
   if (NEGATIVE.has(emoji)) return -1;
   return null;
 }
 
-/** First plain-emoji reaction in a reaction list, or null if the list has only
- *  custom/paid reactions (which carry no unicode emoji we can classify). */
-export function firstEmoji(reactions: ReactionType[]): string | null {
+/** First MAPPABLE plain-emoji reaction in a reaction list — e.g. [🎉, 👍] must
+ *  yield 👍/+1, not stop at the unmapped 🎉. Returns null when the list has no
+ *  classifiable emoji at all (only unknown emojis and/or custom/paid reactions). */
+export function firstMappableReaction(reactions: ReactionType[]): { emoji: string; value: 1 | -1 } | null {
   for (const r of reactions) {
-    if (r.type === "emoji") return r.emoji;
+    if (r.type !== "emoji") continue;
+    const value = mapReactionEmojiToValue(r.emoji);
+    if (value !== null) return { emoji: r.emoji, value };
   }
   return null;
 }
 
 /**
  * Telegram `message_reaction` handler. Resolves the reacted-to Telegram message
- * back to the assistant DB row we stamped when sending it, maps the emoji to a
- * +1/-1 signal, and upserts feedback. An empty new_reaction list is a retraction
- * (the user removed their reaction) → delete the row.
+ * back to the assistant DB row we stamped when sending it, maps the reaction to a
+ * +1/-1 signal, and upserts feedback. When the new reaction list carries NO
+ * mappable signal — empty (retraction) or only unknown/custom emojis (the user
+ * changed 👍 to 🎉) — any previously recorded vote is stale, so the row is
+ * deleted rather than left standing.
  *
  * Auth is handled upstream by createAuthMiddleware (bot.use) — only allowed user
  * ids reach this handler.
@@ -61,19 +66,14 @@ export function createReactionHandler(_config: Config, botConfig: BotConfig) {
     const userId = String(ctx.from.id);
     const newReactions = reaction.new_reaction ?? [];
 
-    // Retraction: the user cleared their reaction.
-    if (newReactions.length === 0) {
+    const mapped = firstMappableReaction(newReactions);
+    if (!mapped) {
+      // Retraction (empty list) or a switch to only-unmappable reactions —
+      // either way the current reaction carries no vote, so clear any prior one.
       await deleteFeedback(owner.id, userId, "telegram_reaction");
-      log.debug("Feedback retracted for message {messageId}", { botName: botConfig.name, messageId: owner.id });
-      return;
-    }
-
-    const emoji = firstEmoji(newReactions);
-    if (!emoji) return; // custom/paid reaction only — ignore
-
-    const value = mapReactionEmojiToValue(emoji);
-    if (value === null) {
-      log.debug("Ignoring unmapped reaction emoji {emoji}", { botName: botConfig.name, emoji });
+      log.debug("Feedback cleared for message {messageId} ({count} unmappable reactions)", {
+        botName: botConfig.name, messageId: owner.id, count: newReactions.length,
+      });
       return;
     }
 
@@ -83,11 +83,11 @@ export function createReactionHandler(_config: Config, botConfig: BotConfig) {
       botName: botConfig.name,
       platform: "telegram",
       source: "telegram_reaction",
-      value,
-      raw: emoji,
+      value: mapped.value,
+      raw: mapped.emoji,
     });
     log.info("Reaction feedback {value} ({emoji}) on message {messageId}", {
-      botName: botConfig.name, value, emoji, messageId: owner.id,
+      botName: botConfig.name, value: mapped.value, emoji: mapped.emoji, messageId: owner.id,
     });
   };
 }

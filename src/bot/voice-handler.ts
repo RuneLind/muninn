@@ -11,6 +11,7 @@ import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus } from "../observability/agent-status.ts";
 import { Tracer } from "../tracing/index.ts";
 import { getActiveThreadId } from "../db/threads.ts";
+import { setTelegramMessageId } from "../db/messages.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("bot", "voice");
@@ -79,11 +80,19 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
     await ctx.replyWithChatAction("typing").catch(() => {});
 
     try {
-      // Delegate to shared pipeline — say callback handles Telegram HTML with fallback
+      // Delegate to shared pipeline — say callback handles Telegram HTML with
+      // fallback. Track the last successfully-sent reply's message_id so a
+      // reaction on the text reply resolves back to the assistant DB row
+      // (same anchoring as handler.ts: last chunk of a split response).
+      let lastReplyMessageId: number | undefined;
       const say = async (msg: string) => {
-        await ctx.reply(msg, { parse_mode: "HTML" }).catch(async () => {
-          await ctx.reply(stripHtml(msg));
-        });
+        try {
+          const sent = await ctx.reply(msg, { parse_mode: "HTML" });
+          lastReplyMessageId = sent.message_id;
+        } catch {
+          const sent = await ctx.reply(stripHtml(msg)).catch(() => undefined);
+          if (sent) lastReplyMessageId = sent.message_id;
+        }
       };
 
       const result = await processMessage({
@@ -100,6 +109,16 @@ export function createVoiceHandler(config: Config, botConfig: BotConfig) {
       });
 
       if (!result) return;
+
+      // Anchor the assistant DB row to the sent Telegram message for reaction
+      // feedback (see reaction-handler.ts).
+      if (result.messageId && lastReplyMessageId !== undefined && ctx.chat) {
+        await setTelegramMessageId(result.messageId, ctx.chat.id, lastReplyMessageId).catch((err) => {
+          log.warn("Failed to stamp Telegram message id: {error}", {
+            ...props, error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
 
       // --- TTS voice reply ---
       agentStatus.set("synthesizing_voice", username);

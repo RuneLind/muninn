@@ -12,9 +12,11 @@
 -- partial composite index. Storing chat_id alongside message_id is required because
 -- message_id is only unique within a chat.
 --
--- ⚠️ Mirror of db/init.sql: identical column order + constraints + indexes +
--- trigger so schema-drift.test.ts (which diffs the live schema against init.sql)
--- stays green.
+-- ⚠️ Mirrored in db/init.sql: same columns, constraints, indexes and trigger so
+-- schema-drift.test.ts (which diffs both build paths structurally) stays green.
+-- Column ORDER on `messages` differs by construction — init.sql places the
+-- telegram columns before created_at while this migration appends them — which is
+-- fine because the drift test compares columns by name, not position.
 
 ALTER TABLE messages ADD COLUMN telegram_chat_id BIGINT;
 ALTER TABLE messages ADD COLUMN telegram_message_id BIGINT;

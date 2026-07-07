@@ -17,7 +17,7 @@ mock.module("../db/message-feedback.ts", () => ({
   deleteFeedback: mockDeleteFeedback,
 }));
 
-const { createReactionHandler, mapReactionEmojiToValue, firstEmoji } = await import("./reaction-handler.ts");
+const { createReactionHandler, mapReactionEmojiToValue, firstMappableReaction } = await import("./reaction-handler.ts");
 
 const config = {} as any;
 const botConfig = { name: "testbot" } as any;
@@ -55,12 +55,18 @@ describe("mapReactionEmojiToValue", () => {
   });
 });
 
-describe("firstEmoji", () => {
-  test("returns first plain-emoji reaction", () => {
-    expect(firstEmoji([{ type: "custom_emoji", custom_emoji_id: "x" }, emoji("👍")] as any)).toBe("👍");
+describe("firstMappableReaction", () => {
+  test("skips unmapped emoji and returns the first mappable one", () => {
+    expect(firstMappableReaction([emoji("🎉"), emoji("👍")] as any)).toEqual({ emoji: "👍", value: 1 });
+  });
+  test("skips custom reactions and returns the first mappable emoji", () => {
+    expect(firstMappableReaction([{ type: "custom_emoji", custom_emoji_id: "x" }, emoji("👎")] as any)).toEqual({ emoji: "👎", value: -1 });
   });
   test("returns null when only custom/paid reactions present", () => {
-    expect(firstEmoji([{ type: "custom_emoji", custom_emoji_id: "x" }, { type: "paid" }] as any)).toBeNull();
+    expect(firstMappableReaction([{ type: "custom_emoji", custom_emoji_id: "x" }, { type: "paid" }] as any)).toBeNull();
+  });
+  test("returns null when only unmapped emojis present", () => {
+    expect(firstMappableReaction([emoji("🎉"), emoji("🤔")] as any)).toBeNull();
   });
 });
 
@@ -91,9 +97,30 @@ describe("createReactionHandler", () => {
     expect(arg.value).toBe(-1);
   });
 
-  test("unknown emoji is ignored (no upsert, no delete)", async () => {
+  test("unknown emoji clears any existing vote (no upsert, delete instead)", async () => {
+    // Changing 👍 → 🎉 arrives as new_reaction=[🎉]: the recorded +1 is stale.
     await handler(makeCtx([emoji("🎉")]));
     expect(mockUpsertFeedback).not.toHaveBeenCalled();
+    expect(mockDeleteFeedback).toHaveBeenCalledTimes(1);
+    const args = mockDeleteFeedback.mock.calls[0] as any[];
+    expect(args[0]).toBe("msg-1");
+    expect(args[1]).toBe("7");
+    expect(args[2]).toBe("telegram_reaction");
+  });
+
+  test("changing back from unknown to a mapped emoji upserts again", async () => {
+    // 🎉 → 👍 arrives as new_reaction=[👍]: record +1.
+    await handler(makeCtx([emoji("👍")]));
+    expect(mockUpsertFeedback).toHaveBeenCalledTimes(1);
+    expect(mockDeleteFeedback).not.toHaveBeenCalled();
+  });
+
+  test("mixed [unknown, mapped] records the mapped emoji, not ignored", async () => {
+    await handler(makeCtx([emoji("🎉"), emoji("👍")]));
+    expect(mockUpsertFeedback).toHaveBeenCalledTimes(1);
+    const arg = (mockUpsertFeedback.mock.calls[0] as any[])[0];
+    expect(arg.value).toBe(1);
+    expect(arg.raw).toBe("👍");
     expect(mockDeleteFeedback).not.toHaveBeenCalled();
   });
 
@@ -107,10 +134,10 @@ describe("createReactionHandler", () => {
     expect(mockUpsertFeedback).not.toHaveBeenCalled();
   });
 
-  test("custom-emoji-only reaction is ignored", async () => {
+  test("custom-emoji-only reaction clears any existing vote", async () => {
     await handler(makeCtx([{ type: "custom_emoji", custom_emoji_id: "abc" }]));
     expect(mockUpsertFeedback).not.toHaveBeenCalled();
-    expect(mockDeleteFeedback).not.toHaveBeenCalled();
+    expect(mockDeleteFeedback).toHaveBeenCalledTimes(1);
   });
 
   test("reaction on an untracked message does nothing", async () => {
