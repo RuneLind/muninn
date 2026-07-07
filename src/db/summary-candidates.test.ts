@@ -8,6 +8,7 @@ import {
   getCandidateBySourceUrl,
   setCandidateStatus,
   expireStaleCandidates,
+  candidateOutcomeStats,
 } from "./summary-candidates.ts";
 
 setupTestDb();
@@ -293,5 +294,104 @@ describe("summary-candidates", () => {
     const after = await getCandidateById(row!.id);
     expect(after!.status).toBe("error");
     expect(after!.docId).toBe("doc-1");
+  });
+
+  describe("candidateOutcomeStats", () => {
+    // Small factory: upsert a candidate then drive it to a terminal outcome.
+    // status 'summarized' records a doc; a dismissal takes an explicit reason
+    // ('manual' / 'expired'); omit the reason to leave it NULL ("unknown").
+    async function seedOutcome(
+      slug: string,
+      score: number,
+      kind: "doc" | "commit" | "release" | "blog" | "x-post",
+      status: "summarized" | "dismissed" | "error",
+      reason?: "manual" | "expired",
+      source = "anthropic",
+    ) {
+      const url = "https://o/" + slug;
+      await upsertCandidate({ ...base, source, url, score, kind });
+      const row = (await getCandidateBySourceUrl(source, url))!;
+      if (status === "summarized") await setCandidateStatus(row.id, "summarized", "doc-" + slug);
+      else if (status === "dismissed") await setCandidateStatus(row.id, "dismissed", null, reason ?? null);
+      else await setCandidateStatus(row.id, "error");
+      return row;
+    }
+
+    test("separates dismissed reasons; acceptance excludes expired + unknown; ignores pending rows", async () => {
+      await seedOutcome("s1", 0.7, "doc", "summarized");
+      await seedOutcome("s2", 0.7, "doc", "summarized");
+      await seedOutcome("dm", 0.7, "doc", "dismissed", "manual");
+      await seedOutcome("dx", 0.7, "doc", "dismissed", "expired");
+      await seedOutcome("du", 0.7, "doc", "dismissed"); // NULL reason = unknown
+      // A still-`new` row must not count toward any outcome.
+      await upsertCandidate({ ...base, url: "https://o/pending", score: 0.7, kind: "doc" });
+
+      const stats = await candidateOutcomeStats();
+      const doc = stats.byKind.find((k) => k.source === "anthropic" && k.kind === "doc")!;
+      expect(doc).toBeDefined();
+      expect(doc.summarized).toBe(2);
+      expect(doc.dismissedManual).toBe(1);
+      expect(doc.dismissedExpired).toBe(1);
+      expect(doc.dismissedUnknown).toBe(1);
+      expect(doc.error).toBe(0);
+      // total counts scored outcomes only — the pending `new` row is excluded.
+      expect(doc.total).toBe(5);
+      // acceptance = summarized / (summarized + manual) = 2/3; expired + unknown are OUT.
+      expect(doc.acceptanceRate).toBeCloseTo(2 / 3, 3);
+    });
+
+    test("acceptanceRate is null when there are no accept/reject decisions", async () => {
+      // Only an expired dismissal — the denominator (summarized + manual) is 0.
+      await seedOutcome("only-expired", 0.6, "doc", "dismissed", "expired");
+      const stats = await candidateOutcomeStats();
+      const doc = stats.byKind.find((k) => k.kind === "doc")!;
+      expect(doc.summarized + doc.dismissedManual).toBe(0);
+      expect(doc.acceptanceRate).toBeNull();
+    });
+
+    test("expireStaleCandidates stamps dismissed_reason='expired'; a manual dismiss keeps 'manual'", async () => {
+      const sql = getDb();
+      await upsertCandidate({ ...base, url: "https://o/stale", score: 0.6, kind: "doc" });
+      const stale = (await getCandidateBySourceUrl("anthropic", "https://o/stale"))!;
+      await sql`UPDATE summary_candidates SET created_at = now() - interval '20 days', updated_at = now() - interval '20 days' WHERE id = ${stale.id}`;
+
+      const man = await seedOutcome("man", 0.6, "doc", "dismissed", "manual");
+
+      const n = await expireStaleCandidates(14);
+      expect(n).toBe(1); // only the stale non-terminal row
+      const expired = (await getCandidateById(stale.id))!;
+      expect(expired.status).toBe("dismissed");
+      expect(expired.dismissedReason).toBe("expired");
+      // The already-dismissed manual row is terminal — expire never touches it.
+      expect((await getCandidateById(man.id))!.dismissedReason).toBe("manual");
+    });
+
+    test("suggests the lowest floor whose at-or-above acceptance ≥ 0.5, and bins score bands float-safely", async () => {
+      // commit kind across three bands with known accept/reject:
+      //   0.9: 3 summarized, 0 manual   (this band 1.0)
+      //   0.7: 1 summarized, 1 manual   (this band 0.5)
+      //   0.5: 0 summarized, 5 manual   (this band 0.0)
+      // Cumulative-from-top: ≥0.9 → 3/3=1.0 ; ≥0.7 → 4/5=0.8 ; ≥0.5 → 4/10=0.4.
+      // Lowest floor still clearing 0.5 is 0.7.
+      await seedOutcome("c9a", 0.9, "commit", "summarized");
+      await seedOutcome("c9b", 0.9, "commit", "summarized");
+      await seedOutcome("c9c", 0.9, "commit", "summarized");
+      await seedOutcome("c7a", 0.7, "commit", "summarized");
+      await seedOutcome("c7b", 0.7, "commit", "dismissed", "manual");
+      for (let i = 0; i < 5; i++) await seedOutcome("c5_" + i, 0.5, "commit", "dismissed", "manual");
+
+      const stats = await candidateOutcomeStats();
+      const commit = stats.suggestedFloors.find((s) => s.kind === "commit")!;
+      expect(commit.suggestedFloor).toBeCloseTo(0.7, 5);
+
+      // Score bands are 0.1-wide and bin by the displayed score despite REAL float error
+      // (0.7 stored as 0.69999998 must NOT fall into band 0.6).
+      const bands: Record<string, (typeof stats.byBand)[number]> = {};
+      for (const b of stats.byBand) bands[b.band.toFixed(1)] = b;
+      expect(bands["0.9"]!.summarized).toBe(3);
+      expect(bands["0.7"]!.total).toBe(2);
+      expect(bands["0.5"]!.dismissedManual).toBe(5);
+      expect(bands["0.6"]).toBeUndefined();
+    });
   });
 });
