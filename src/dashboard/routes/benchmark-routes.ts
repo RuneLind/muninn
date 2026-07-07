@@ -18,6 +18,8 @@ import { getTrace } from "../../db/traces.ts";
 import { renderBenchmarkListPage } from "../views/benchmark/list-page.ts";
 import { renderBenchmarkDetailPage } from "../views/benchmark/detail-page.ts";
 import { renderBenchmarkRunLivePage } from "../views/benchmark/live-page.ts";
+import { renderRetrievalListPage } from "../views/benchmark/retrieval-list-page.ts";
+import { listRetrievalRuns } from "../../db/benchmark-retrieval-runs.ts";
 
 const log = getLog("dashboard", "benchmark");
 
@@ -132,6 +134,18 @@ export function registerBenchmarkRoutes(app: Hono): void {
         error: err instanceof Error ? err.message : String(err),
       });
       return c.html("Failed to load benchmark runs", 500);
+    }
+  });
+
+  app.get("/benchmark/retrieval", async (c) => {
+    try {
+      const runs = await listRetrievalRuns(50);
+      return c.html(renderRetrievalListPage(runs));
+    } catch (err) {
+      log.error("Failed to render retrieval eval list: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.html("Failed to load retrieval eval runs", 500);
     }
   });
 
