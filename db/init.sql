@@ -377,6 +377,11 @@ CREATE TABLE summary_candidates (
   -- snapshot (0–1). Both nullable (anthropic rows, unknown handles, unavailable file).
   author        TEXT,
   author_score  REAL,
+  -- Why a dismissed row was dismissed (mirror of migration 051): 'manual' (human
+  -- clicked Dismiss), 'expired' (auto-dismissed stale by expireStaleCandidates),
+  -- NULL (pre-051 dismissals = unknown). Plain nullable TEXT (no CHECK); the
+  -- calibration aggregation excludes 'expired'/NULL from the acceptance denominator.
+  dismissed_reason TEXT,
   watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
   bot_name      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),

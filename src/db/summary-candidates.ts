@@ -37,6 +37,12 @@ export interface SummaryCandidate {
   score: number;
   why: string | null;
   status: SummaryCandidateStatus;
+  /**
+   * Why a dismissed row was dismissed: 'manual' (human clicked Dismiss), 'expired'
+   * (auto-dismissed stale by expireStaleCandidates), or NULL — both non-dismissed
+   * rows and pre-051 dismissals ("unknown"). Drives the calibration acceptance metric.
+   */
+  dismissedReason: string | null;
   /** Capture-time kind — drives the inbox filter chips. NULL for pre-migration rows. */
   kind: SummaryCandidateKind | null;
   /**
@@ -179,7 +185,7 @@ export async function expireStaleCandidates(days = 14): Promise<number> {
   const sql = getDb();
   const rows = await sql`
     UPDATE summary_candidates
-    SET status = 'dismissed', updated_at = now()
+    SET status = 'dismissed', dismissed_reason = 'expired', updated_at = now()
     WHERE status IN ('new', 'error', 'summarizing')
       AND GREATEST(created_at, updated_at) < now() - make_interval(days => ${days})
     RETURNING id
@@ -211,21 +217,241 @@ export async function getCandidateBySourceUrl(
 
 /**
  * Advance a candidate's status. `docId` is recorded when summarization completes;
- * pass null (the default) to leave any existing doc_id untouched.
+ * pass null (the default) to leave any existing doc_id untouched. `dismissedReason`
+ * labels a manual dismissal ('manual') so the calibration aggregation can tell it
+ * apart from an auto-expired row ('expired', set by expireStaleCandidates) — pass
+ * null (the default) to leave any existing reason untouched.
  */
 export async function setCandidateStatus(
   id: string,
   status: SummaryCandidateStatus,
   docId: string | null = null,
+  dismissedReason: string | null = null,
 ): Promise<void> {
   const sql = getDb();
   await sql`
     UPDATE summary_candidates
     SET status = ${status},
         doc_id = COALESCE(${docId}, doc_id),
+        dismissed_reason = COALESCE(${dismissedReason}, dismissed_reason),
         updated_at = now()
     WHERE id = ${id}
   `;
+}
+
+// ============================================================================
+// Gate-outcome calibration (display-only)
+//
+// summary_candidates is a labeled dataset of capture-gate quality: each row carries
+// the gate `score`, its `kind`, and a terminal `status` (summarized = a human/auto
+// judged it worth a summary; dismissed = not). `candidateOutcomeStats` aggregates
+// acceptance rates per (source, kind) and per 0.1-wide score band, and derives a
+// suggested per-kind capture floor — surfaced on the /summaries "Calibration" tab so
+// the operator can hand-tune `candidateMinScoreByKind`. It NEVER writes watcher config.
+// ============================================================================
+
+/** Acceptance rate the suggested-floor heuristic targets. */
+const ACCEPTANCE_TARGET = 0.5;
+
+const round3 = (x: number): number => Math.round(x * 1000) / 1000;
+/** Snap a 0.1-band boundary to 1 decimal, shedding REAL/float noise (0.7000001 → 0.7). */
+const round1 = (x: number): number => Math.round(x * 10) / 10;
+
+/** Aggregate outcome counts + the derived human accept-vs-reject rate. */
+export interface OutcomeCounts {
+  /** Rows that reached a scored outcome (summarized + dismissed + error). Excludes
+   *  still-pending new/summarizing rows. */
+  total: number;
+  summarized: number;
+  /** Dismissed by a human clicking Dismiss (dismissed_reason = 'manual'). */
+  dismissedManual: number;
+  /** Auto-dismissed stale (dismissed_reason = 'expired') — NOT a quality judgement. */
+  dismissedExpired: number;
+  /** Dismissed before migration 051 (dismissed_reason NULL) — origin unknown. */
+  dismissedUnknown: number;
+  error: number;
+  /**
+   * summarized / (summarized + dismissedManual). Expired + unknown dismissals and
+   * errors are deliberately OUT of the denominator (they aren't accept/reject
+   * judgements). null when the denominator is 0 (no labeled decisions yet).
+   */
+  acceptanceRate: number | null;
+}
+
+export interface KindOutcomeStats extends OutcomeCounts {
+  source: string;
+  kind: string | null;
+}
+
+export interface ScoreBandOutcomeStats extends OutcomeCounts {
+  /** Lower bound of the 0.1-wide band, e.g. 0.7 covers scores in [0.70, 0.80). */
+  band: number;
+}
+
+export interface KindFloorSuggestion {
+  kind: string;
+  /**
+   * Suggested per-kind capture floor (heuristic): the LOWEST score-band lower-bound
+   * at/above which the cumulative acceptance rate — over every candidate with score
+   * ≥ that bound — is ≥ 0.5. In plain terms: "put the floor where at least half of
+   * what you'd still capture turned out worth summarizing." Simple + explainable, not
+   * an optimizer. null when no band clears 0.5 (or the kind has no labeled decisions).
+   */
+  suggestedFloor: number | null;
+}
+
+export interface CandidateOutcomeStats {
+  /** Per (source, kind) acceptance breakdown. */
+  byKind: KindOutcomeStats[];
+  /** Global 0.1-wide score-band histogram of outcomes. */
+  byBand: ScoreBandOutcomeStats[];
+  /** Suggested per-kind capture floor (see KindFloorSuggestion). */
+  suggestedFloors: KindFloorSuggestion[];
+}
+
+interface RawCell {
+  source: string;
+  kind: string | null;
+  band: number;
+  summarized: number;
+  dismissedManual: number;
+  dismissedExpired: number;
+  dismissedUnknown: number;
+  error: number;
+}
+
+function emptyCounts(): OutcomeCounts {
+  return {
+    total: 0,
+    summarized: 0,
+    dismissedManual: 0,
+    dismissedExpired: 0,
+    dismissedUnknown: 0,
+    error: 0,
+    acceptanceRate: null,
+  };
+}
+
+function accumulate(acc: OutcomeCounts, c: RawCell): void {
+  acc.summarized += c.summarized;
+  acc.dismissedManual += c.dismissedManual;
+  acc.dismissedExpired += c.dismissedExpired;
+  acc.dismissedUnknown += c.dismissedUnknown;
+  acc.error += c.error;
+}
+
+function finalize(acc: OutcomeCounts): void {
+  acc.total =
+    acc.summarized + acc.dismissedManual + acc.dismissedExpired + acc.dismissedUnknown + acc.error;
+  const denom = acc.summarized + acc.dismissedManual;
+  acc.acceptanceRate = denom > 0 ? round3(acc.summarized / denom) : null;
+}
+
+/**
+ * Aggregate the labeled capture-gate dataset for the Calibration tab. Read-only —
+ * pure aggregation, no writes. Groups outcomes per (source, kind) and per 0.1-wide
+ * score band, and derives a suggested per-kind floor. Only rows in a scored terminal
+ * status (summarized / dismissed / error) are counted; new + summarizing are pending.
+ */
+export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT
+      source,
+      kind,
+      -- Round the REAL to 4 dp before binning: score is float4, so 0.7 is stored as
+      -- 0.69999998 and a naive floor(0.7*10) lands in band 0.6. round(…,4) collapses
+      -- that float error so a 0.1 band boundary bins where the displayed score says.
+      floor(round(score::numeric, 4) * 10) / 10 AS band,
+      count(*) FILTER (WHERE status = 'summarized')::int AS summarized,
+      count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = 'manual')::int AS dismissed_manual,
+      count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = 'expired')::int AS dismissed_expired,
+      count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason IS NULL)::int AS dismissed_unknown,
+      count(*) FILTER (WHERE status = 'error')::int AS error
+    FROM summary_candidates
+    WHERE status IN ('summarized', 'dismissed', 'error')
+    GROUP BY source, kind, floor(round(score::numeric, 4) * 10) / 10
+  `;
+
+  const cells: RawCell[] = rows.map((r: Record<string, any>) => ({
+    source: r.source,
+    kind: r.kind ?? null,
+    band: round1(Number(r.band)),
+    summarized: Number(r.summarized),
+    dismissedManual: Number(r.dismissed_manual),
+    dismissedExpired: Number(r.dismissed_expired),
+    dismissedUnknown: Number(r.dismissed_unknown),
+    error: Number(r.error),
+  }));
+
+  // --- byKind: group by (source, kind) ---
+  const kindMap = new Map<string, KindOutcomeStats>();
+  for (const c of cells) {
+    const key = `${c.source} ${c.kind ?? ""}`;
+    let entry = kindMap.get(key);
+    if (!entry) {
+      entry = { source: c.source, kind: c.kind, ...emptyCounts() };
+      kindMap.set(key, entry);
+    }
+    accumulate(entry, c);
+  }
+  const byKind = [...kindMap.values()];
+  byKind.forEach(finalize);
+  byKind.sort(
+    (a, b) => a.source.localeCompare(b.source) || (a.kind ?? "").localeCompare(b.kind ?? ""),
+  );
+
+  // --- byBand: global 0.1-wide histogram ---
+  const bandMap = new Map<number, ScoreBandOutcomeStats>();
+  for (const c of cells) {
+    let entry = bandMap.get(c.band);
+    if (!entry) {
+      entry = { band: c.band, ...emptyCounts() };
+      bandMap.set(c.band, entry);
+    }
+    accumulate(entry, c);
+  }
+  const byBand = [...bandMap.values()];
+  byBand.forEach(finalize);
+  byBand.sort((a, b) => a.band - b.band);
+
+  // --- suggestedFloors: per-kind heuristic ---
+  // Floors are keyed by kind (the config field candidateMinScoreByKind), not source —
+  // x-post maps to source 'x', the anthropic kinds to source 'anthropic'. A NULL-kind
+  // row can't get a per-kind floor, so it's skipped here (still counted in byKind).
+  const cellsByKind = new Map<string, RawCell[]>();
+  for (const c of cells) {
+    if (c.kind == null) continue;
+    const arr = cellsByKind.get(c.kind);
+    if (arr) arr.push(c);
+    else cellsByKind.set(c.kind, [c]);
+  }
+  const suggestedFloors: KindFloorSuggestion[] = [];
+  for (const [kind, cs] of cellsByKind) {
+    const bands = [...new Set(cs.map((c) => c.band))].sort((a, b) => a - b);
+    let suggested: number | null = null;
+    // Ascending → the first (lowest) floor whose at-or-above set clears the target is
+    // the most generous floor that still keeps acceptance ≥ 0.5.
+    for (const floorBand of bands) {
+      let cumSummarized = 0;
+      let cumManual = 0;
+      for (const c of cs) {
+        if (c.band >= floorBand - 1e-9) {
+          cumSummarized += c.summarized;
+          cumManual += c.dismissedManual;
+        }
+      }
+      const denom = cumSummarized + cumManual;
+      if (denom > 0 && cumSummarized / denom >= ACCEPTANCE_TARGET) {
+        suggested = floorBand;
+        break;
+      }
+    }
+    suggestedFloors.push({ kind, suggestedFloor: suggested });
+  }
+  suggestedFloors.sort((a, b) => a.kind.localeCompare(b.kind));
+
+  return { byKind, byBand, suggestedFloors };
 }
 
 function mapRow(r: Record<string, any>): SummaryCandidate {
@@ -238,6 +464,7 @@ function mapRow(r: Record<string, any>): SummaryCandidate {
     score: typeof r.score === "number" ? r.score : Number(r.score),
     why: r.why ?? null,
     status: r.status as SummaryCandidateStatus,
+    dismissedReason: r.dismissed_reason ?? null,
     kind: (r.kind ?? null) as SummaryCandidateKind | null,
     author: r.author ?? null,
     authorScore: r.author_score == null ? null : Number(r.author_score),
