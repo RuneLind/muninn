@@ -236,6 +236,64 @@ export function streamingUiScript(): string {
         }
       }
     }
+
+    // Attach the 👍/👎 feedback control to the just-finalized bot message. A live
+    // turn only learns its DB message id here (the say() callback rendered the
+    // bubble with a throwaway client id), so this is where web feedback becomes
+    // possible for live replies. Web conversations only.
+    if (meta.messageId) {
+      var conv = conversations[meta.conversationId];
+      if (conv && conv.type === 'web') {
+        var fbMsgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
+        var lastFb = fbMsgs.length > 0 ? fbMsgs[fbMsgs.length - 1] : null;
+        if (lastFb) attachFeedbackControls(lastFb, meta.messageId);
+      }
+    }
+  }
+
+  // ── Response feedback (👍/👎) ─────────────────────────────────────────
+
+  // Attach a lightweight thumbs-up/down control to a finalized bot message. The
+  // vote persists per (message, user, source=web); clicking the active button
+  // again clears it. Capture-only — no analytics UI consumes it yet.
+  function attachFeedbackControls(botDiv, messageId) {
+    if (!botDiv || !messageId) return;
+    if (botDiv.querySelector('.msg-feedback')) return; // idempotent
+    var wrap = document.createElement('div');
+    wrap.className = 'msg-feedback';
+    var up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'msg-feedback-btn';
+    up.title = 'Good response';
+    up.textContent = '\\uD83D\\uDC4D';
+    var down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'msg-feedback-btn';
+    down.title = 'Bad response';
+    down.textContent = '\\uD83D\\uDC4E';
+    function send(value) {
+      fetch('/chat/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId: messageId, value: value })
+      }).catch(function() { /* best-effort */ });
+    }
+    function choose(btn, value) {
+      var wasActive = btn.classList.contains('active');
+      up.classList.remove('active');
+      down.classList.remove('active');
+      if (wasActive) {
+        send(null); // toggle off clears the vote
+      } else {
+        btn.classList.add('active');
+        send(value);
+      }
+    }
+    up.onclick = function() { choose(up, 1); };
+    down.onclick = function() { choose(down, -1); };
+    wrap.appendChild(up);
+    wrap.appendChild(down);
+    botDiv.appendChild(wrap);
   }
 
   // ── Load tool calls from trace ───────────────────────────────────────

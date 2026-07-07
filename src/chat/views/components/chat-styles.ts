@@ -325,6 +325,33 @@ export function chatStyles(): string {
     .msg-head-sep { opacity: .4; }
     .msg-head-time { font-family: var(--mono); color: var(--text-faint); margin-left: auto; }
     .msg-body { white-space: pre-wrap; }
+    .msg-feedback {
+      display: flex;
+      gap: 4px;
+      margin-top: 10px;
+      opacity: 0;
+      transition: opacity .15s ease;
+    }
+    .msg-bot:hover .msg-feedback, .msg-feedback:focus-within { opacity: 1; }
+    .msg-feedback-btn {
+      background: transparent;
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 1px 7px;
+      font-size: 13px;
+      line-height: 1.4;
+      cursor: pointer;
+      filter: grayscale(1);
+      opacity: .55;
+      transition: opacity .12s ease, filter .12s ease, border-color .12s ease;
+    }
+    .msg-feedback-btn:hover { opacity: 1; filter: grayscale(0); border-color: var(--accent); }
+    .msg-feedback-btn.active {
+      opacity: 1;
+      filter: grayscale(0);
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+    }
     .msg-user {
       color: var(--text-secondary);
     }

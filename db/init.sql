@@ -129,6 +129,11 @@ CREATE TABLE messages (
   thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
   trace_id UUID,
   from_peer_id TEXT,
+  -- Telegram (chat_id, message_id) of the sent assistant reply — the reaction
+  -- lookup path (from migration 054-message-feedback.sql). message_id is only
+  -- unique within a chat, so chat_id is stored alongside.
+  telegram_chat_id BIGINT,
+  telegram_message_id BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -139,6 +144,10 @@ CREATE INDEX idx_messages_trace_id ON messages (trace_id) WHERE trace_id IS NOT 
 -- Platform analytics indexes (from migration 009-platform-index.sql)
 CREATE INDEX idx_messages_platform ON messages (platform);
 CREATE INDEX idx_messages_platform_created ON messages (platform, created_at);
+-- Reaction lookup (from migration 054-message-feedback.sql): resolve a Telegram
+-- (chat_id, message_id) back to the assistant messages row it belongs to.
+CREATE INDEX idx_messages_telegram_msg ON messages (telegram_chat_id, telegram_message_id)
+  WHERE telegram_message_id IS NOT NULL;
 
 -- ============================================================================
 -- Activity log: persisted version of the in-memory ring buffer
@@ -636,6 +645,39 @@ CREATE TABLE search_signals (
 );
 
 CREATE INDEX idx_search_signals_lowconf ON search_signals (low_confidence, created_at DESC);
+
+-- ============================================================================
+-- Message feedback: per-assistant-message response-quality signal
+-- (from migration 054-message-feedback.sql). Telegram reactions + web 👍/👎.
+-- ============================================================================
+CREATE TABLE message_feedback (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  message_id  UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id     TEXT NOT NULL,
+  bot_name    TEXT,
+  platform    TEXT,
+  source      TEXT NOT NULL CHECK (source IN ('telegram_reaction', 'web')),
+  value       SMALLINT NOT NULL CHECK (value IN (-1, 1)),
+  raw         TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (message_id, user_id, source)
+);
+
+CREATE INDEX idx_message_feedback_message ON message_feedback (message_id);
+
+CREATE OR REPLACE FUNCTION update_message_feedback_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER message_feedback_updated_at
+  BEFORE UPDATE ON message_feedback
+  FOR EACH ROW
+  EXECUTE FUNCTION update_message_feedback_updated_at();
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
