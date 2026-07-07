@@ -10,6 +10,7 @@ import { runWatchers, getDueWatchers } from "../watchers/runner.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
+import { harvestSearchSignals } from "../db/search-signals.ts";
 import { runScheduledTasksFromList } from "./task-executor.ts";
 import { runGoalRemindersFromList, runGoalCheckinsFromList } from "./goal-runner.ts";
 import { getLog } from "../logging.ts";
@@ -143,6 +144,18 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
   const now = Date.now();
   if (now - lastCleanupAt > 3_600_000) {
     lastCleanupAt = now;
+    // Harvest durable retrieval signals BEFORE the trace delete — the search
+    // quality attrs live only in trace JSONB, so this must run ahead of
+    // cleanupOldTraces or the signal is erased unharvested. Own try-block:
+    // a harvest failure must never block the retention cleanup behind it.
+    try {
+      const harvested = await harvestSearchSignals();
+      if (harvested > 0) {
+        log.info("Harvested {count} search signals", { botName, count: harvested });
+      }
+    } catch (err) {
+      log.error("Search-signal harvest failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
+    }
     try {
       const deleted = await cleanupOldTraces(config.tracingRetentionDays);
       if (deleted > 0) {

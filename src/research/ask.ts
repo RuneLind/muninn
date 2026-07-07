@@ -14,6 +14,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
+import { persistResearchCitations } from "../db/research-citations.ts";
 import { getLog } from "../logging.ts";
 import { RESEARCH_COLLECTIONS } from "./corpus.ts";
 import {
@@ -119,6 +120,16 @@ export async function streamResearchAnswer(
         hits: result.results.length,
       });
       await emit({ type: "delta", text: message });
+      // Persist the presented-but-ignored sources: on a declined verdict the weak
+      // sources still rode out on the `sources` event, so they are retrieved-and-
+      // ignored signal. All cited=false (the canned message references none).
+      void persistResearchCitations({
+        botName: botConfig.name,
+        traceId: result.traceId,
+        question,
+        citations,
+        citedIndices: [],
+      });
       await emit({
         type: "done",
         answer: message,
@@ -152,12 +163,23 @@ export async function streamResearchAnswer(
       tokens: claude.outputTokens,
     });
 
+    const cited = citedIndices(answer);
+    // Persist all presented citations, flagging which the answer actually used —
+    // fire-and-forget so it never blocks closing the SSE stream.
+    void persistResearchCitations({
+      botName: botConfig.name,
+      traceId: result.traceId,
+      question,
+      citations,
+      citedIndices: cited,
+    });
+
     await emit({
       type: "done",
       answer,
       noHits: false,
       lowConfidence: false,
-      cited: citedIndices(answer),
+      cited,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
