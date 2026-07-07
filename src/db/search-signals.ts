@@ -46,16 +46,27 @@ export async function harvestSearchSignals(): Promise<number> {
       t.attributes->>'subQuestion',
       t.attributes->'collections',
       COALESCE((t.attributes->>'resultCount')::int, 0),
-      (t.attributes->>'bestScore')::real,
+      -- bestScore + the corrective block come from huginn (untrusted JSON):
+      -- regex-guard every cast so one malformed span can't fail the whole
+      -- INSERT…SELECT and starve the retention cleanup behind it.
+      CASE WHEN t.attributes->>'bestScore' ~ '^-?\\d+(\\.\\d+)?([eE][+-]?\\d+)?$'
+           THEN (t.attributes->>'bestScore')::real END,
       COALESCE((t.attributes->>'lowConfidence')::boolean, false),
       COALESCE((t.attributes->>'resultCount')::int, 0) = 0,
-      COALESCE((t.attributes#>>'{searchTrace,response,corrective,rescueFired}')::boolean, false),
-      t.attributes#>>'{searchTrace,response,corrective,verdict}',
-      (t.attributes#>>'{searchTrace,response,corrective,retries}')::int,
+      COALESCE(t.attributes#>>'{searchTrace,response,corrective,rescueFired}' = 'true', false),
+      CASE WHEN t.attributes#>>'{searchTrace,response,corrective,rescueFired}' = 'true'
+           THEN t.attributes#>>'{searchTrace,response,corrective,verdict}' END,
+      CASE WHEN t.attributes#>>'{searchTrace,response,corrective,rescueFired}' = 'true'
+            AND t.attributes#>>'{searchTrace,response,corrective,retries}' ~ '^\\d+$'
+           THEN (t.attributes#>>'{searchTrace,response,corrective,retries}')::int END,
       t.started_at
     FROM traces t
     WHERE t.name = 'search'
       AND t.attributes ? 'subQuestion'
+      -- Errored sub-searches (timeout, huginn 5xx) carry no resultCount and
+      -- would harvest as no_hits=true — a transient outage is not a knowledge
+      -- gap, so they are excluded rather than recorded.
+      AND NOT (t.attributes ? 'error')
     ON CONFLICT (span_id) DO NOTHING
   `;
   return result.count;

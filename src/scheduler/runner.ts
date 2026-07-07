@@ -144,14 +144,19 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
   const now = Date.now();
   if (now - lastCleanupAt > 3_600_000) {
     lastCleanupAt = now;
+    // Harvest durable retrieval signals BEFORE the trace delete — the search
+    // quality attrs live only in trace JSONB, so this must run ahead of
+    // cleanupOldTraces or the signal is erased unharvested. Own try-block:
+    // a harvest failure must never block the retention cleanup behind it.
     try {
-      // Harvest durable retrieval signals BEFORE the trace delete — the search
-      // quality attrs live only in trace JSONB, so this must run ahead of
-      // cleanupOldTraces or the signal is erased unharvested.
       const harvested = await harvestSearchSignals();
       if (harvested > 0) {
         log.info("Harvested {count} search signals", { botName, count: harvested });
       }
+    } catch (err) {
+      log.error("Search-signal harvest failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
+    }
+    try {
       const deleted = await cleanupOldTraces(config.tracingRetentionDays);
       if (deleted > 0) {
         log.info("Cleaned up {count} old traces", { botName, count: deleted });

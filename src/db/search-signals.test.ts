@@ -127,6 +127,54 @@ describe("search-signals", () => {
     expect(row).not.toBeNull();
   });
 
+  test("skips errored sub-searches — a transient failure is not a knowledge gap", async () => {
+    const errorSpan = makeSearchSpan({
+      subQuestion: "How does MCP work?",
+      error: "Search timed out after 15000ms",
+      collections: ["anthropic-knowledge"],
+    });
+    await saveSpan(errorSpan);
+
+    const inserted = await harvestSearchSignals();
+    expect(inserted).toBe(0);
+    expect(await getSearchSignalBySpanId(errorSpan.id)).toBeNull();
+  });
+
+  test("malformed corrective fields from huginn do not fail the harvest", async () => {
+    const poisoned = makeSearchSpan(
+      { subQuestion: "poison", resultCount: 2, bestScore: "not-a-number" },
+      { rescueFired: true, verdict: "rescued", retries: "2.0" },
+    );
+    const healthy = makeSearchSpan({ subQuestion: "healthy", resultCount: 3, bestScore: 0.9 });
+    await saveSpan(poisoned);
+    await saveSpan(healthy);
+
+    const inserted = await harvestSearchSignals();
+    expect(inserted).toBe(2);
+
+    const poisonedRow = await getSearchSignalBySpanId(poisoned.id);
+    expect(poisonedRow!.bestScore).toBeNull();
+    expect(poisonedRow!.rescueFired).toBe(true);
+    expect(poisonedRow!.rescueVerdict).toBe("rescued");
+    expect(poisonedRow!.rescueRetries).toBeNull();
+    const healthyRow = await getSearchSignalBySpanId(healthy.id);
+    expect(healthyRow!.bestScore).toBeCloseTo(0.9, 5);
+  });
+
+  test("rescue verdict and retries are null when rescue did not fire", async () => {
+    const span = makeSearchSpan(
+      { subQuestion: "no-op corrective", resultCount: 1, bestScore: 0.4, lowConfidence: true },
+      { rescueFired: false, verdict: "still_weak", retries: 1 },
+    );
+    await saveSpan(span);
+
+    await harvestSearchSignals();
+    const row = await getSearchSignalBySpanId(span.id);
+    expect(row!.rescueFired).toBe(false);
+    expect(row!.rescueVerdict).toBeNull();
+    expect(row!.rescueRetries).toBeNull();
+  });
+
   test("skips spans that are not research search spans", async () => {
     // A 'search'-named span without a subQuestion attr (defensive filter).
     const notResearch = {
