@@ -131,7 +131,7 @@ export async function renderBenchmarkListPage(
   <div class="bench-container">
     <div class="page-header">
       <h1>Jira Analysis Benchmark</h1>
-      <p>How much of each issue's reviewed analysis does muninn's first-pass capture?</p>
+      <p>How much of each issue's reviewed analysis does muninn's first-pass capture? · <a href="/benchmark/retrieval" style="color: var(--accent);">Retrieval eval →</a></p>
     </div>
     ${runFormHtml}
     ${rowsHtml}
