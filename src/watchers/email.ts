@@ -14,12 +14,17 @@ const OSLO_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 
-export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user. Important emails:
+export const DEFAULT_EMAIL_PROMPT = `For each new unread email, evaluate if it's worth notifying the user.
+
+Worth notifying:
 - From real people (not automated marketing/newsletters)
 - Urgent or time-sensitive
 - Action items or requests
 - Security alerts, expiring tokens, important notifications
-- NOT worth notifying LinkedIn — Connection suggestion`;
+
+Not worth notifying:
+- Marketing, newsletters, promotional offers
+- Social-network noise (LinkedIn connection suggestions, follow recommendations, digests)`;
 
 
 export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {

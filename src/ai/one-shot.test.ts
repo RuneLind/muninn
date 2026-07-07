@@ -90,3 +90,15 @@ test("empty extraDirs is a no-op (no spawnArgs added, no throw) on any connector
   await executeOneShot("p", config, bot, { extraDirs: [] });
   expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined();
 });
+
+test("empty prompt throws before the connector runs (unresolved template variable)", async () => {
+  const bot = stubBot({ connector: "claude-cli" });
+  await expect(executeOneShot("   ", config, bot)).rejects.toThrow(/empty prompt/);
+  expect(connectorArgs).toBeUndefined(); // never dispatched
+});
+
+test("prompt with an unresolved-looking path marker still dispatches (warn-only)", async () => {
+  const bot = stubBot({ connector: "claude-cli" });
+  await executeOneShot("Read the file undefined/secret.txt and reply.", config, bot);
+  expect(connectorArgs?.prompt).toContain("undefined/secret.txt"); // warned, not rejected
+});
