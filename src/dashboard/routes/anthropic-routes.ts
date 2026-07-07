@@ -6,6 +6,7 @@ import {
   getCandidateById,
   setCandidateStatus,
   expireStaleCandidates,
+  candidateOutcomeStats,
 } from "../../db/summary-candidates.ts";
 import {
   getJob,
@@ -147,7 +148,10 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
       if (!candidate) {
         return c.json({ error: "Candidate not found" }, 404);
       }
-      await setCandidateStatus(id, "dismissed");
+      // 'manual' distinguishes this human "not worth a summary" judgement from an
+      // auto-expired stale row ('expired'), so the calibration acceptance metric
+      // counts only real rejections against summarized rows.
+      await setCandidateStatus(id, "dismissed", null, "manual");
       return c.json({ ok: true });
     } catch (err) {
       log.error("Dismissing anthropic candidate {id} failed: {error}", {
@@ -155,6 +159,22 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "Failed to dismiss candidate" }, 500);
+    }
+  });
+
+  // Gate-outcome calibration (display-only). Aggregates the labeled candidate dataset
+  // — acceptance rates per (source, kind) + per 0.1 score band, plus a suggested
+  // per-kind capture floor — for the /summaries "Calibration" tab. Read-only: it
+  // NEVER writes watcher config; the operator hand-copies the suggested floors.
+  app.get("/api/anthropic/candidates/stats", async (c) => {
+    try {
+      const stats = await candidateOutcomeStats();
+      return c.json(stats);
+    } catch (err) {
+      log.error("Loading candidate outcome stats failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "Failed to load calibration stats" }, 500);
     }
   });
 
