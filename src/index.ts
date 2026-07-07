@@ -191,6 +191,11 @@ for (const botConfig of botConfigs) {
     activityLog.push("system", `Starting ${botConfig.name} Telegram bot...`);
 
     bot.start({
+      // grammy omits message_reaction from the default allowed_updates, so it must
+      // be listed explicitly for reaction-based feedback to be delivered. Listing
+      // allowed_updates opts out of the default, so "message" (commands + text +
+      // voice) is enumerated too.
+      allowed_updates: ["message", "message_reaction"],
       onStart: (botInfo) => {
         activityLog.push("system", `${botConfig.name} Telegram connected as @${botInfo.username}`);
         log.info("{botName} Telegram is live — bot: @{botUsername}, dashboard: http://localhost:{port}", { botName: botConfig.name, botUsername: botInfo.username, port: server.port });

@@ -5,6 +5,10 @@ import type { UserIdentity } from "../types.ts";
 import { processMessage } from "../core/message-processor.ts";
 import { stripHtml } from "./telegram-format.ts";
 import { getActiveThreadId } from "../db/threads.ts";
+import { setTelegramMessageId } from "../db/messages.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("bot", "handler");
 
 export function createMessageHandler(config: Config, botConfig: BotConfig) {
   return async (ctx: Context) => {
@@ -27,11 +31,20 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
     }, 4_000);
     await ctx.replyWithChatAction("typing").catch(() => {});
 
-    // say callback — message-processor already handles splitting for Telegram
+    // say callback — message-processor already handles splitting for Telegram.
+    // Track the last successfully-sent reply's message_id so an incoming
+    // reaction can be resolved back to this turn's assistant DB row. A long
+    // response may be split into several Telegram messages but maps to one DB
+    // row; we anchor on the last chunk (the tail the user sees in the chat).
+    let lastReplyMessageId: number | undefined;
     const say = async (html: string) => {
-      await ctx.reply(html, { parse_mode: "HTML" }).catch(async () => {
-        await ctx.reply(stripHtml(html));
-      });
+      try {
+        const msg = await ctx.reply(html, { parse_mode: "HTML" });
+        lastReplyMessageId = msg.message_id;
+      } catch {
+        const msg = await ctx.reply(stripHtml(html)).catch(() => undefined);
+        if (msg) lastReplyMessageId = msg.message_id;
+      }
     };
 
     // Tool status: send one message, edit it to append each new line, delete when done.
@@ -59,7 +72,7 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
 
     try {
       const threadId = await getActiveThreadId(userId, botConfig.name);
-      await processMessage({
+      const result = await processMessage({
         text,
         userId,
         username,
@@ -71,6 +84,16 @@ export function createMessageHandler(config: Config, botConfig: BotConfig) {
         threadId,
         onToolStatus,
       });
+      // Anchor the assistant DB row to the sent Telegram message so a later
+      // 👍/👎 reaction can be attributed to it (see reaction-handler.ts).
+      if (result?.messageId && lastReplyMessageId !== undefined) {
+        await setTelegramMessageId(result.messageId, chatId, lastReplyMessageId).catch((err) => {
+          log.warn("Failed to stamp Telegram message id: {error}", {
+            botName: botConfig.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
     } catch (error) {
       // processMessage handles its own errors and calls say() with the error message,
       // but if say() itself fails (e.g. Telegram API down), we need a last-resort fallback
