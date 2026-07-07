@@ -3,6 +3,8 @@ import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore } from "../summaries/author-scores.ts";
+import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
 
@@ -507,6 +509,7 @@ function truncateTitle(s: string, max = 140): string {
 async function runCaptureGate(
   docs: TweetDoc[],
   botName: string | undefined,
+  interestProfile: string | null,
 ): Promise<GateScore[]> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
   // judging whether the FULL long-form post is worth summarizing, and every eligible
@@ -514,7 +517,8 @@ async function runCaptureGate(
   const list = docs
     .map((d, i) => `${i + 1}. ${d.isNote ? "[ARTICLE/NOTE] " : ""}${d.handle}: ${d.gateExcerpt}\n   URL: ${d.url}`)
     .join("\n\n");
-  const prompt = `${DEFAULT_X_CAPTURE_PROMPT}\n\nPosts:\n\n${list}`;
+  const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
+  const prompt = `${criteria}\n\nPosts:\n\n${list}`;
 
   const { result } = await spawnHaiku(prompt, {
     source: "watcher-x-capture",
@@ -541,6 +545,7 @@ async function captureXCandidates(
   config: XWatcherConfig,
   watcher: Watcher,
   botName?: string,
+  interestProfile: string | null = null,
 ): Promise<void> {
   const eligible = docs.filter(isLongFormTweet);
   if (eligible.length === 0) {
@@ -550,7 +555,7 @@ async function captureXCandidates(
 
   let scored: GateScore[];
   try {
-    scored = await runCaptureGate(eligible, botName);
+    scored = await runCaptureGate(eligible, botName, interestProfile);
   } catch (err) {
     log.error("Capture gate failed, proceeding with alert path ({n} long-form tweet(s) lost to inbox): {error}", {
       botName,
@@ -626,6 +631,12 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
 
   if (!data) return []; // fetch error
 
+  // Load the bot user's interest profile ONCE per run (not per candidate). Null
+  // when the bot has no default user / no profile / on any error, in which case
+  // the capture-gate and digest prompts are byte-identical to today (the profile
+  // only ever augments the hardcoded baseline criteria — anti-filter-bubble).
+  const interestProfile = await loadInterestProfileForBot(botName ?? watcher.botName);
+
   // Candidate capture (Candidates → Summaries) runs on the FULL fetched batch,
   // INDEPENDENT of the silencing paths below (the minScore early return + the quietMode
   // SKIP both permanently track tweet IDs), so a run that alerts nothing can still feed
@@ -637,7 +648,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
   // never rejects and the alert path is never broken.
   const capturePromise: Promise<void> =
     config.captureCandidates && data.docs && data.docs.length > 0
-      ? captureXCandidates(data.docs, config, watcher, botName).catch((err) => {
+      ? captureXCandidates(data.docs, config, watcher, botName, interestProfile).catch((err) => {
           log.error("Candidate capture failed (alert path unaffected): {error}", {
             botName,
             error: err instanceof Error ? err.message : String(err),
@@ -646,7 +657,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
       : Promise.resolve();
 
   try {
-    return await runAlertPath(data, config, watcher, botName);
+    return await runAlertPath(data, config, watcher, botName, interestProfile);
   } finally {
     // Every checkX exit waits for capture to settle so the runner's timeout net and the
     // scheduler tick never leave an orphaned in-flight Haiku call behind.
@@ -660,6 +671,7 @@ async function runAlertPath(
   config: XWatcherConfig,
   watcher: Watcher,
   botName?: string,
+  interestProfile: string | null = null,
 ): Promise<WatcherAlert[]> {
   // Score-based quality gate: if the top tweet doesn't clear the bar, track IDs silently
   // so the same tweets aren't re-evaluated, and skip the LLM call entirely.
@@ -677,7 +689,7 @@ async function runAlertPath(
 
   const { texts, trackingIds } = data;
   const separator = config.collection ? "\n\n---\n\n" : "\n---\n";
-  const userPrompt = config.prompt || DEFAULT_X_PROMPT;
+  const userPrompt = withInterestProfile(config.prompt || DEFAULT_X_PROMPT, interestProfile);
 
   const prompt = `You are curating a user's X/Twitter timeline into a digest.
 

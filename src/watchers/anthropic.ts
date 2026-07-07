@@ -6,6 +6,8 @@ import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.t
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
 import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
+import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "anthropic");
@@ -346,6 +348,12 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
     return baselineAlerts;
   }
 
+  // Load the bot user's interest profile ONCE per run (not per candidate). Null
+  // when the bot has no default user / no profile / on any error, in which case
+  // the gate & digest prompts are byte-identical to today (anti-filter-bubble:
+  // the profile only ever augments the hardcoded baseline criteria).
+  const interestProfile = await loadInterestProfileForBot(watcher.botName);
+
   // Digest mode (Phase 4): roll this window's candidates into ONE digest message
   // (Daily/Weekly rows) instead of per-item gated alerts. Reached only with ≥1
   // candidate, so cold-start digest rows already returned the silent baseline above.
@@ -354,7 +362,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // leaves the Tier-2 snapshots unadvanced and the whole window re-surfaces next run.
   if (config.digest) {
     try {
-      const digestAlerts = await runDigest(tier1Cands, tier2Cands, config, watcher);
+      const digestAlerts = await runDigest(tier1Cands, tier2Cands, config, watcher, interestProfile);
       await persistTier2();
       return [...baselineAlerts, ...digestAlerts];
     } catch (err) {
@@ -385,7 +393,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // return the Tier-1 baseline so a cold-start run makes forward progress.
   let scored: GateScore[] | "SKIP_ALL";
   try {
-    scored = await runGate(candidates, config, watcher);
+    scored = await runGate(candidates, config, watcher, interestProfile);
   } catch (err) {
     log.error("Watcher \"{name}\": gate failed, suppressing {count} candidate(s) this run: {error}", {
       name: watcher.name,
@@ -761,8 +769,9 @@ async function runGate(
   candidates: Candidate[],
   config: AnthropicConfig,
   watcher: Watcher,
+  interestProfile: string | null,
 ): Promise<GateScore[] | "SKIP_ALL"> {
-  const criteria = config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT;
+  const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT, interestProfile);
   const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates, { withExcerpt: true })}`;
 
   const model = config.model || DEFAULT_MODEL;
@@ -985,6 +994,7 @@ async function runDigest(
   tier2Cands: Candidate[],
   config: AnthropicConfig,
   watcher: Watcher,
+  interestProfile: string | null,
 ): Promise<WatcherAlert[]> {
   const cappedTier1 = tier1Cands.slice(0, DIGEST_MAX_TIER1);
   const dropped = tier1Cands.length - cappedTier1.length;
@@ -999,7 +1009,7 @@ async function runDigest(
   const digestList: Candidate[] = [...tier2Cands, ...cappedTier1];
   const ids = digestList.map((c) => c.id);
 
-  const criteria = config.prompt || DEFAULT_ANTHROPIC_DAILY_PROMPT;
+  const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_DAILY_PROMPT, interestProfile);
   const prompt = `${criteria}\n\nItems:\n\n${formatCandidateList(digestList)}`;
 
   const model = config.model || DEFAULT_MODEL;

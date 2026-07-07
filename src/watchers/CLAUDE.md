@@ -22,6 +22,27 @@ Scheduler tick (every 60s)
 | `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
 | `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (Highlights) / Sonnet digest (Daily/Weekly) |
 
+## Interest-profile personalization (gate/capture prompts)
+
+The `x` and `anthropic` gate/capture/digest prompts carry a hardcoded BASELINE of
+topics (e.g. "a senior AI engineer who lives in Claude Code…"). On top of that,
+each run loads a per-user **interest profile** — a periodically-refreshed
+distillation of the bot user's active goals + recent memories (`interest_profiles`
+table; built by `src/profile/generator.ts` on a scheduler step gated by a
+"stale > 7 days" predicate). `withInterestProfile()` (`src/profile/inject.ts`)
+appends it as a clearly-delimited section that **augments, never narrows** the
+baseline — the anti-filter-bubble guard: baseline topics always qualify on their
+own; the profile only RAISES relevance for the user's own interests.
+
+- **Loaded once per watcher run** (not per candidate), via
+  `loadInterestProfileForBot(botName)` which resolves the bot's primary user
+  through `bot_default_user`. Best-effort: no default user / no profile row / any
+  DB error → returns `null`, and the prompt is **byte-identical to today**.
+- Wired at: the anthropic `runGate` + `runDigest` criteria, and the X `runAlertPath`
+  (highlights/digest) + `runCaptureGate` (capture) prompts.
+- No config knob — personalization is automatic and silent when a profile exists.
+  The profile is visible only via the DB this PR (no dashboard UI yet).
+
 ## X/Twitter Watcher — Key Lessons
 
 ### Architecture
