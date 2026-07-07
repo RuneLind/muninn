@@ -7,6 +7,7 @@ import { getAuthorTierThresholds } from "../../summaries/author-scores.ts";
 import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./components/sum-submit-form.ts";
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
+import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./components/sum-outcomes.ts";
 import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 import {
@@ -25,6 +26,7 @@ const SUMMARIES_TABS: SectionTabsConfig = {
     { id: "candidates", label: "Candidates" },
     { id: "recently", label: "Recently Added" },
     { id: "library", label: "Library" },
+    { id: "calibration", label: "Calibration" },
   ],
   storageKey: "muninn-active-tab-summaries",
   defaultTab: "candidates",
@@ -60,6 +62,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumCandidatesStyles()}
     ${sumRecentlyAddedStyles()}
     ${sumArticleLibraryStyles()}
+    ${sumOutcomesStyles()}
 
     .duplicate-banner {
       display: none;
@@ -105,6 +108,9 @@ export async function renderSummariesPage(): Promise<string> {
 
       <!-- Article Library -->
       <div data-section="library">${sumArticleLibraryHtml()}</div>
+
+      <!-- Gate-outcome calibration (display-only) -->
+      <div data-section="calibration">${sumOutcomesHtml()}</div>
     </div>
   </div>
 
@@ -127,6 +133,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumCandidatesScript()}
     ${sumRecentlyAddedScript()}
     ${sumArticleLibraryScript()}
+    ${sumOutcomesScript()}
     ${sumSubmitFormScript()}
 
     function showDuplicateBanner() {
@@ -147,6 +154,7 @@ export async function renderSummariesPage(): Promise<string> {
       loadCandidates();
       loadRecentlyAdded();
       loadLibrary();
+      loadOutcomes();
       renderDomainFilter();
 
       // Mount the tab bar (picks the initial tab from hash > localStorage > default).

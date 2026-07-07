@@ -386,6 +386,11 @@ CREATE TABLE summary_candidates (
   -- snapshot (0–1). Both nullable (anthropic rows, unknown handles, unavailable file).
   author        TEXT,
   author_score  REAL,
+  -- Why a dismissed row was dismissed (mirror of migration 051): 'manual' (human
+  -- clicked Dismiss), 'expired' (auto-dismissed stale by expireStaleCandidates),
+  -- NULL (pre-051 dismissals = unknown). Plain nullable TEXT (no CHECK); the
+  -- calibration aggregation excludes 'expired'/NULL from the acceptance denominator.
+  dismissed_reason TEXT,
   watcher_id    UUID REFERENCES watchers(id) ON DELETE SET NULL,
   bot_name      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -591,6 +596,55 @@ CREATE TABLE dev_run_events (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_dev_run_events_run ON dev_run_events (run_id, created_at);
+
+-- ============================================================================
+-- Retrieval signals (PR2): durable ledgers for signals that were previously
+-- generated-then-discarded. See db/migrations/052-retrieval-signals.sql for the
+-- full rationale. ⚠️ Mirror: both tables must match that migration byte-for-byte
+-- or src/db/schema-drift.test.ts reds.
+-- ============================================================================
+
+-- Presented Research sources, one row per (answer × source). `cited` = the answer
+-- referenced this source via an inline [n] marker.
+CREATE TABLE research_citations (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bot_name    TEXT,
+  user_id     TEXT,
+  trace_id    UUID,
+  question    TEXT,
+  doc_id      TEXT NOT NULL,
+  collection  TEXT NOT NULL,
+  url         TEXT,
+  title       TEXT,
+  relevance   REAL,
+  cited       BOOLEAN NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_research_citations_created ON research_citations (created_at DESC);
+CREATE INDEX idx_research_citations_cited ON research_citations (cited, created_at DESC);
+
+-- Harvested per-sub-question search quality. `span_id` is the source `traces.id`
+-- and the idempotency key for the hourly harvest.
+CREATE TABLE search_signals (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  span_id         UUID NOT NULL UNIQUE,
+  trace_id        UUID,
+  bot_name        TEXT,
+  query           TEXT,
+  collections     JSONB,
+  result_count    INTEGER NOT NULL DEFAULT 0,
+  best_score      REAL,
+  low_confidence  BOOLEAN NOT NULL DEFAULT false,
+  no_hits         BOOLEAN NOT NULL DEFAULT false,
+  rescue_fired    BOOLEAN NOT NULL DEFAULT false,
+  rescue_verdict  TEXT,
+  rescue_retries  INTEGER,
+  span_started_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_search_signals_lowconf ON search_signals (low_confidence, created_at DESC);
 
 -- ============================================================================
 -- Message feedback: per-assistant-message response-quality signal
