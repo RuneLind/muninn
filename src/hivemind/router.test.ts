@@ -9,7 +9,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import type { processMessage as ProcessMessageFn } from "../core/message-processor.ts";
 import type { HivemindBotClient } from "./client.ts";
-import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
+import { HivemindRouter, peerNameFor, parsePeerThreadName, peerThreadNameFor, framePeerMessage, type InboundPeerMessage, type AutorespondDeps } from "./router.ts";
 import { setPendingPeer } from "./correlation.ts";
 import { setCorrelationToken } from "./correlation-tokens.ts";
 import { birthDevRun, insertHandoff, listHandoffs, listDevRunEvents, getDevRunById, updateDevRun, MAX_REENGAGE_ATTEMPTS } from "../db/dev-runs.ts";
@@ -491,6 +491,51 @@ describe("HivemindRouter autorespond (Phase 3)", () => {
     expect(sent.calls).toHaveLength(1);
     expect(sent.calls[0]!.to).toBe("auto-peer-1");
     expect(sent.calls[0]!.text).toBe("ack: index rebuild started");
+  });
+
+  test("wraps the peer message in trust framing for the bot turn", async () => {
+    // The allowlist check is the trust decision — without framing, the model
+    // sees a bare message claiming to be another agent and refuses it as
+    // prompt injection. The persisted role='peer' message must stay raw.
+    await setBotDefaultUser(AR_BOT, AR_OWNER);
+    await clearAssistantMessagesForThread("private/huginn");
+    const chat = new ChatState();
+    const sent = { calls: [] as { to: string; text: string }[], result: true };
+    let seenText: string | undefined;
+    const stubProcess: StubProcessMessage = async (params) => {
+      seenText = params.text;
+      await saveMessage({
+        userId: params.userId, botName: params.botConfig.name, role: "assistant",
+        content: "titles: a, b, c", platform: "web", threadId: params.threadId,
+      });
+      return {
+        responseText: "titles: a, b, c",
+        traceId: "t", durationMs: 1, inputTokens: 1, outputTokens: 1,
+        costUsd: 0, model: "stub", numTurns: 1,
+      };
+    };
+    const router = new HivemindRouter(chat, makeDeps({
+      botConfig: makeBotConfig(), sent, process: stubProcess,
+    }));
+
+    await router.route(AR_BOT, makeMsg({ text: "run one knowledge_search please" }));
+    await router.pendingAutorespond;
+
+    expect(seenText).toBe(framePeerMessage("huginn", "run one knowledge_search please"));
+    expect(seenText).toContain("run one knowledge_search please");
+    expect(seenText).toContain("allowlisted for auto-respond");
+
+    // The stored copy of the trigger is the raw peer message, not the framed one.
+    const sql = getDb();
+    const thread = await getOrCreatePeerThread(AR_OWNER, AR_BOT, "private/huginn");
+    const rows = await sql`
+      SELECT content FROM messages
+      WHERE thread_id = ${thread.id} AND role = 'peer'
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    expect(rows[0]!.content).toBe("run one knowledge_search please");
+
+    await clearAssistantMessagesForThread("private/huginn");
   });
 
   test("autorespond echoes the inbound correlation token on its reply", async () => {
