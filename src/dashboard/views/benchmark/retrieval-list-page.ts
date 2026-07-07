@@ -77,7 +77,7 @@ export function renderRetrievalListPage(runs: RetrievalRunRow[]): string {
   <div class="bench-container">
     <div class="page-header">
       <h1>Retrieval Eval</h1>
-      <p>Golden-set recall@k / hit-rate / MRR for huginn search, memory search, and the research flow. Hover a row for the per-target breakdown.</p>
+      <p>Golden-set recall@k / hit-rate / MRR for huginn search, memory search, and the research flow. Hover a row for the per-target breakdown. · <a href="/benchmark" style="color: var(--accent);">← Jira benchmark</a></p>
     </div>
     ${rowsHtml}
   </div>

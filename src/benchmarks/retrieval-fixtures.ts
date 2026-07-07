@@ -7,15 +7,31 @@
  * golden set can name them as `expected_doc_ids`. `saveMemory` mints random
  * UUIDs, so we insert these directly with fixed ids.
  *
- * These are seeded into the TEST database only (via the CLI's
- * `--seed-memories` flag or the db test). When they're absent — e.g. the CLI
- * pointed at a prod DB — the memory target is skipped rather than scored as a
+ * Seeding embeds each fixture via the real embeddings module so the vector
+ * arm of `searchMemoriesHybrid` can rank them. If the embedding model is
+ * unavailable the rows are seeded without embeddings (warn logged) — the
+ * eval still works through the FTS arm, but the vector arm is then untested.
+ *
+ * The golden queries for this target live in {@link MEMORY_GOLDEN_QUERIES} —
+ * the single source the local-only `benchmarks/retrieval/golden-queries.jsonl`
+ * memory rows are copied from, and what the db test runs end-to-end against
+ * seeded fixtures. Keep the query wording FTS-satisfiable: `searchMemories`
+ * uses `plainto_tsquery('english', …)` AND-semantics, so EVERY content word
+ * in a query must stem-match the fixture's summary/content/tags text.
+ *
+ * Seeding is intended for the TEST database; the CLI's `--seed-memories`
+ * refuses non-`*_test` databases unless `--allow-live-seed` is passed. When
+ * fixtures are absent the memory target is skipped rather than scored as a
  * miss (see `hasSeededMemoryFixtures`). Content is fully synthetic; no real
  * user data lives here, so this module is safe to commit.
  */
 
+import { getLog } from "../logging.ts";
 import { getDb } from "../db/client.ts";
 import { ensureUser } from "../db/users.ts";
+import { generateEmbedding } from "../ai/embeddings.ts";
+
+const log = getLog("benchmarks", "retrieval-fixtures");
 
 export const MEMORY_FIXTURE_USER_ID = "retrieval-eval-fixture-user";
 export const MEMORY_FIXTURE_BOT_NAME = "retrieval-eval-bot";
@@ -48,19 +64,43 @@ export const MEMORY_FIXTURES: MemoryFixture[] = [
   },
 ];
 
-/** Golden queries for the memory target, referencing the fixture ids above. */
-export const MEMORY_GOLDEN_QUERIES = [
-  { id: "mem-coffee", query: "what coffee does the user like", expected: ["00000000-0000-4000-8000-000000000101"] },
-  { id: "mem-marathon", query: "user marathon running training schedule", expected: ["00000000-0000-4000-8000-000000000102"] },
-  { id: "mem-homelab", query: "user home server kubernetes cluster setup", expected: ["00000000-0000-4000-8000-000000000103"] },
-] as const;
+export interface MemoryGoldenQuery {
+  id: string;
+  query: string;
+  expected: string[];
+}
+
+/**
+ * Golden queries for the memory target — the single source of truth for the
+ * memory rows in `benchmarks/retrieval/golden-queries.jsonl`, and run
+ * end-to-end (real search against seeded fixtures) by the db test. Every
+ * content word here appears (stem-wise) in the paired fixture's text so
+ * plainto_tsquery's AND-semantics can match.
+ */
+export const MEMORY_GOLDEN_QUERIES: MemoryGoldenQuery[] = [
+  { id: "mem-coffee", query: "user prefers dark roast coffee", expected: ["00000000-0000-4000-8000-000000000101"] },
+  { id: "mem-marathon", query: "user training Oslo marathon", expected: ["00000000-0000-4000-8000-000000000102"] },
+  { id: "mem-homelab", query: "home server raspberry pi kubernetes cluster", expected: ["00000000-0000-4000-8000-000000000103"] },
+];
+
+export interface SeedMemoryFixturesOptions {
+  /**
+   * Embedding function — defaults to the real model. Tests inject a
+   * deterministic fake here: loading the HF/onnx model inside `bun test`
+   * crashes the runtime (native C++ exception), which is also why every
+   * other test file mocks `generateEmbedding` rather than calling it.
+   */
+  embed?: (text: string) => Promise<number[] | null>;
+}
 
 /**
  * Seed (or re-seed) the synthetic memory fixtures. Idempotent — deletes any
  * prior fixture rows first, then re-inserts. The search_vector column is
- * auto-populated by the memories trigger.
+ * auto-populated by the memories trigger; embeddings are generated here (see
+ * module doc for the null-tolerant fallback).
  */
-export async function seedMemoryFixtures(): Promise<void> {
+export async function seedMemoryFixtures(opts: SeedMemoryFixturesOptions = {}): Promise<void> {
+  const embed = opts.embed ?? generateEmbedding;
   await ensureUser({
     id: MEMORY_FIXTURE_USER_ID,
     username: "retrieval-eval-fixture",
@@ -72,10 +112,24 @@ export async function seedMemoryFixtures(): Promise<void> {
   await sql`DELETE FROM memories WHERE id = ANY(${ids})`;
 
   for (const m of MEMORY_FIXTURES) {
-    await sql`
-      INSERT INTO memories (id, user_id, bot_name, content, summary, tags, scope)
-      VALUES (${m.id}, ${MEMORY_FIXTURE_USER_ID}, ${MEMORY_FIXTURE_BOT_NAME}, ${m.content}, ${m.summary}, ${m.tags}, 'personal')
-    `;
+    const embedding = await embed(`${m.summary} ${m.content}`);
+    if (embedding) {
+      const embeddingStr = `[${embedding.join(",")}]`;
+      await sql.unsafe(
+        `INSERT INTO memories (id, user_id, bot_name, content, summary, tags, scope, embedding)
+         VALUES ($1, $2, $3, $4, $5, $6, 'personal', $7::vector)`,
+        [m.id, MEMORY_FIXTURE_USER_ID, MEMORY_FIXTURE_BOT_NAME, m.content, m.summary, m.tags, embeddingStr],
+      );
+    } else {
+      log.warn(
+        "Embedding model unavailable — seeding fixture {id} without embedding (vector search arm untested)",
+        { id: m.id },
+      );
+      await sql`
+        INSERT INTO memories (id, user_id, bot_name, content, summary, tags, scope)
+        VALUES (${m.id}, ${MEMORY_FIXTURE_USER_ID}, ${MEMORY_FIXTURE_BOT_NAME}, ${m.content}, ${m.summary}, ${m.tags}, 'personal')
+      `;
+    }
   }
 }
 

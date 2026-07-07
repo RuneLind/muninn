@@ -12,10 +12,29 @@ import {
   seedMemoryFixtures,
   hasSeededMemoryFixtures,
   MEMORY_FIXTURES,
+  MEMORY_GOLDEN_QUERIES,
   MEMORY_FIXTURE_USER_ID,
   MEMORY_FIXTURE_BOT_NAME,
 } from "../benchmarks/retrieval-fixtures.ts";
-import { searchMemories } from "./memories.ts";
+import { searchMemories, searchMemoriesHybrid } from "./memories.ts";
+
+/**
+ * Deterministic bag-of-words embedding for tests. Loading the real HF/onnx
+ * model inside `bun test` crashes the runtime (native C++ exception — same
+ * reason extractor/prompt-builder tests mock generateEmbedding), so the seed
+ * takes an injectable embed fn. Shared words → shared dims → higher cosine
+ * similarity, which is enough to exercise the pgvector arm end-to-end.
+ */
+async function fakeEmbed(text: string): Promise<number[]> {
+  const v = new Array<number>(384).fill(0);
+  for (const word of text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)) {
+    let h = 0;
+    for (let i = 0; i < word.length; i++) h = (h * 31 + word.charCodeAt(i)) >>> 0;
+    v[h % 384]! += 1;
+  }
+  const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+  return v.map((x) => x / norm);
+}
 
 setupTestDb();
 
@@ -135,21 +154,70 @@ describe("benchmark-retrieval-runs CRUD", () => {
 describe("memory fixtures seeding", () => {
   test("hasSeededMemoryFixtures is false before seeding, true after", async () => {
     expect(await hasSeededMemoryFixtures()).toBe(false);
-    await seedMemoryFixtures();
+    await seedMemoryFixtures({ embed: fakeEmbed });
     expect(await hasSeededMemoryFixtures()).toBe(true);
   });
 
-  test("seeded memories are FTS-searchable under the fixture user", async () => {
-    await seedMemoryFixtures();
-    // FTS path (embedding null) avoids loading the embedding model in tests.
-    const hits = await searchMemories(MEMORY_FIXTURE_USER_ID, "coffee French press", 5, MEMORY_FIXTURE_BOT_NAME);
-    const ids = hits.map((h) => h.id);
-    expect(ids).toContain(MEMORY_FIXTURES[0]!.id);
+  test("every MEMORY_GOLDEN_QUERIES entry retrieves its expected doc end-to-end (hybrid)", async () => {
+    // These are the exact query strings the golden set uses — if a query
+    // stops being satisfiable against the fixture text, this fails instead
+    // of the eval silently scoring 0 (adversarial-review finding).
+    await seedMemoryFixtures({ embed: fakeEmbed });
+    for (const golden of MEMORY_GOLDEN_QUERIES) {
+      const embedding = await fakeEmbed(golden.query);
+      const hits = await searchMemoriesHybrid(
+        MEMORY_FIXTURE_USER_ID,
+        golden.query,
+        embedding,
+        5,
+        MEMORY_FIXTURE_BOT_NAME,
+      );
+      const ids = hits.map((h) => h.id);
+      for (const expectedId of golden.expected) {
+        expect(ids).toContain(expectedId);
+      }
+    }
+  });
+
+  test("golden queries are FTS-satisfiable on their own (vector arm may be absent)", async () => {
+    // plainto_tsquery AND-semantics: every content word in a golden query
+    // must stem-match its fixture. Run the pure FTS path so retrieval holds
+    // even when the embedding model is unavailable at seed time.
+    await seedMemoryFixtures({ embed: async () => null });
+    for (const golden of MEMORY_GOLDEN_QUERIES) {
+      const hits = await searchMemories(MEMORY_FIXTURE_USER_ID, golden.query, 5, MEMORY_FIXTURE_BOT_NAME);
+      const ids = hits.map((h) => h.id);
+      for (const expectedId of golden.expected) {
+        expect(ids).toContain(expectedId);
+      }
+    }
+  });
+
+  test("seeding attaches embeddings so the vector arm can rank fixtures", async () => {
+    await seedMemoryFixtures({ embed: fakeEmbed });
+    const sql = getDb();
+    const [row] = await sql<{ n: number }[]>`
+      SELECT COUNT(*)::int AS n FROM memories
+      WHERE user_id = ${MEMORY_FIXTURE_USER_ID} AND embedding IS NOT NULL
+    `;
+    expect(row!.n).toBe(MEMORY_FIXTURES.length);
+  });
+
+  test("null-embed fallback seeds rows without embeddings (warn path)", async () => {
+    await seedMemoryFixtures({ embed: async () => null });
+    const sql = getDb();
+    const [row] = await sql<{ total: number; embedded: number }[]>`
+      SELECT COUNT(*)::int AS total,
+             COUNT(embedding)::int AS embedded
+      FROM memories WHERE user_id = ${MEMORY_FIXTURE_USER_ID}
+    `;
+    expect(row!.total).toBe(MEMORY_FIXTURES.length);
+    expect(row!.embedded).toBe(0);
   });
 
   test("re-seeding is idempotent (stable ids, no duplicates)", async () => {
-    await seedMemoryFixtures();
-    await seedMemoryFixtures();
+    await seedMemoryFixtures({ embed: fakeEmbed });
+    await seedMemoryFixtures({ embed: fakeEmbed });
     const sql = getDb();
     const [row] = await sql<{ n: number }[]>`
       SELECT COUNT(*)::int AS n FROM memories WHERE user_id = ${MEMORY_FIXTURE_USER_ID}

@@ -10,6 +10,12 @@
  *   bun scripts/retrieval-eval.ts --seed-memories     # seed synthetic memory fixtures first
  *   bun scripts/retrieval-eval.ts --no-persist        # don't write a run row
  *
+ * --seed-memories writes fixture rows into whatever DATABASE_URL points at,
+ * so it refuses unless the database name ends with "_test". Pass
+ * --allow-live-seed to override deliberately (the fixtures are synthetic and
+ * live under a dedicated fixture user, but a live DB should not be seeded by
+ * accident).
+ *
  * Golden set lives in the gitignored benchmarks/retrieval/*.jsonl (same
  * local-only policy as benchmarks/issues + benchmarks/rag).
  */
@@ -33,8 +39,9 @@ function parseArgs(argv: string[]) {
     baseUrl?: string;
     bot?: string;
     seedMemories: boolean;
+    allowLiveSeed: boolean;
     persist: boolean;
-  } = { seedMemories: false, persist: true };
+  } = { seedMemories: false, allowLiveSeed: false, persist: true };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--target") {
@@ -49,6 +56,8 @@ function parseArgs(argv: string[]) {
       args.bot = argv[++i];
     } else if (a === "--seed-memories") {
       args.seedMemories = true;
+    } else if (a === "--allow-live-seed") {
+      args.allowLiveSeed = true;
     } else if (a === "--no-persist") {
       args.persist = false;
     } else {
@@ -56,6 +65,16 @@ function parseArgs(argv: string[]) {
     }
   }
   return args;
+}
+
+/** Database name from a postgres:// URL, or null when unparseable. */
+function databaseName(databaseUrl: string): string | null {
+  try {
+    const name = new URL(databaseUrl).pathname.replace(/^\//, "");
+    return name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 function fmtPct(n: number): string {
@@ -78,8 +97,17 @@ initDb(config);
 
 try {
   if (args.seedMemories) {
+    const dbName = databaseName(config.databaseUrl);
+    if (!dbName?.endsWith("_test") && !args.allowLiveSeed) {
+      console.error(
+        `Refusing --seed-memories: DATABASE_URL points at "${dbName ?? "?"}", which does not end with "_test".\n` +
+          "Seeding writes fixture rows into this database. Point DATABASE_URL at the test DB, " +
+          "or pass --allow-live-seed to seed it anyway.",
+      );
+      process.exit(1);
+    }
     await seedMemoryFixtures();
-    console.log("Seeded synthetic memory fixtures.\n");
+    console.log(`Seeded synthetic memory fixtures into "${dbName}".\n`);
   }
 
   const sets = await discoverRetrievalSets();
