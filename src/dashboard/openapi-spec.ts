@@ -982,6 +982,34 @@ export const spec = {
       },
     },
 
+    "/api/anthropic/candidates/stats": {
+      get: {
+        tags: ["Anthropic"],
+        summary: "Candidate outcome calibration",
+        description:
+          "Read-only aggregation of the labeled candidate dataset: acceptance rates per (source, kind) and per 0.1 score band, plus a suggested per-kind capture floor. Backs the /summaries Calibration tab. Never writes watcher config.",
+        operationId: "getAnthropicCandidateStats",
+        responses: {
+          "200": {
+            description: "OK",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    byKind: { type: "array", items: { type: "object" } },
+                    byBand: { type: "array", items: { type: "object" } },
+                    suggestedFloors: { type: "array", items: { type: "object" } },
+                  },
+                },
+              },
+            },
+          },
+          "500": errorResponse,
+        },
+      },
+    },
+
     "/api/anthropic/candidates/{id}/dismiss": {
       post: {
         tags: ["Anthropic"],
