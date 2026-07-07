@@ -41,6 +41,23 @@ interface WikiPagesResponse {
 }
 
 // ── Page state ────────────────────────────────────────────────────────
+/** Which bot's wiki is being browsed — the server injects the *canonical* bot
+ *  name (case-corrected, or the resolved default) as `window.__WIKI_BOT__`, so
+ *  our `?bot=` fetches and the picker's selected option always agree. Falls back
+ *  to the raw `?bot=` query if the global is somehow absent. Empty = default/env. */
+const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
+const BOT = typeof injectedBot === "string" ? injectedBot : new URLSearchParams(location.search).get("bot") || "";
+/** Append the active `bot` param to a URL so every /api/wiki/* fetch stays on-wiki. */
+function withBot(url: string): string {
+  if (!BOT) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + "bot=" + encodeURIComponent(BOT);
+}
+/** Build a shareable in-page URL that preserves the active wiki. */
+function pageUrl(name: string): string {
+  const bot = BOT ? "bot=" + encodeURIComponent(BOT) + "&" : "";
+  return "/wiki?" + bot + "page=" + encodeURIComponent(name);
+}
+
 let allPages: WikiListing[] = [];
 let currentName: string | null = null;
 const filters: WikiFilters = { q: "", domain: "", type: "", tag: "" };
@@ -287,7 +304,7 @@ function renderConnections(data: WikiPageDetail): void {
 }
 
 function loadPage(name: string, push: boolean): void {
-  fetch("/api/wiki/page?name=" + encodeURIComponent(name))
+  fetch(withBot("/api/wiki/page?name=" + encodeURIComponent(name)))
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       if (data.error) {
@@ -297,7 +314,7 @@ function loadPage(name: string, push: boolean): void {
       }
       currentName = data.meta.name;
       if (push) {
-        history.pushState({ page: currentName }, "", "/wiki?page=" + encodeURIComponent(currentName));
+        history.pushState({ page: currentName }, "", pageUrl(currentName));
       }
       const m = data.meta;
       let head = `<div class="wiki-article-head"><h1>${esc(m.title)}</h1><div class="wiki-meta-row">` + badgeHtml(m);
@@ -387,6 +404,15 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
 
 document.getElementById("wikiSort")!.addEventListener("change", renderList);
 
+// Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
+const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
+if (wikiBotSel) {
+  wikiBotSel.addEventListener("change", () => {
+    const value = wikiBotSel.value;
+    location.href = value ? "/wiki?bot=" + encodeURIComponent(value) : "/wiki";
+  });
+}
+
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
   const page = params.get("page");
@@ -395,12 +421,21 @@ window.addEventListener("popstate", () => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────
-fetch("/api/wiki/pages")
+fetch(withBot("/api/wiki/pages"))
   .then((r) => r.json())
   .then((data: WikiPagesResponse) => {
     if (data.error && !(data.pages || []).length) {
+      // Distinguish the two BOT-set failures the server reports: an unconfigured
+      // bot ("no wiki configured…") vs. a configured wikiDir whose directory is
+      // missing on disk ("wiki directory not found") — different, accurate hints.
+      const configured = /directory not found/i.test(data.error);
+      const hint = BOT
+        ? configured
+          ? `Wiki directory not found for bot <code>${esc(BOT)}</code>. Check its <code>wikiDir</code> path exists on disk.`
+          : `No wiki configured for bot <code>${esc(BOT)}</code>. Add a <code>wikiDir</code> to its config.json.`
+        : "Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the wiki path.";
       document.getElementById("articleWrap")!.innerHTML =
-        '<div class="wiki-empty-state">Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the huginn-jarvis wiki path.</div>';
+        `<div class="wiki-empty-state">${hint}</div>`;
       return;
     }
     allPages = data.pages;

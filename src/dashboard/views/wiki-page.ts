@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
+import { escHtml, escAttr } from "./components/escape.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -11,9 +12,32 @@ import { wikiClientScript } from "./components/wiki-client.ts";
  *
  * The client logic is a real bundled TS entrypoint (`components/wiki-browser.ts`),
  * injected below via `wikiClientScript()`.
+ *
+ * `wikiBots` populates the wiki picker (bots that expose a `wikiDir`); `selected`
+ * is the canonical name of the currently-browsed bot (from `?bot=`, or the
+ * default wiki bot) — it also drives the client's `?bot=` fetches via an injected
+ * global, so content and picker state can't disagree. `envOverride` marks the
+ * legacy `WIKI_DIR` bare-`/wiki` case, where no bot is claimed in the picker.
+ * Switching wiki is a full navigation to `/wiki?bot=<name>` so links stay shareable.
  */
-export async function renderWikiPage(): Promise<string> {
+export async function renderWikiPage(opts?: {
+  wikiBots?: string[];
+  selected?: string;
+  envOverride?: boolean;
+}): Promise<string> {
   const clientScript = await wikiClientScript();
+  const wikiBots = opts?.wikiBots ?? [];
+  const selected = opts?.selected ?? "";
+  const envOverride = opts?.envOverride ?? false;
+  const wikiSelector =
+    wikiBots.length > 1
+      ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
+        (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
+        wikiBots
+          .map((b) => `<option value="${escAttr(b)}"${!envOverride && b === selected ? " selected" : ""}>${escHtml(b)}</option>`)
+          .join("") +
+        `</select>`
+      : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -231,6 +255,7 @@ export async function renderWikiPage(): Promise<string> {
   <div class="wiki-layout">
     <div class="wiki-pane">
       <div class="wiki-browse-head">
+        ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
         <div class="wiki-chip-row" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
@@ -265,6 +290,9 @@ export async function renderWikiPage(): Promise<string> {
     </div>
   </div>
 
+  <script>
+    window.__WIKI_BOT__ = ${JSON.stringify(selected)};
+  </script>
   <script>
     ${clientScript}
   </script>

@@ -172,6 +172,34 @@ describe("buildWikiIndex", () => {
     }
   });
 
+  test("getWikiIndex isolates caches + degraded state per explicit root", async () => {
+    __resetWikiCacheForTest();
+    // A second, differently-shaped wiki root alongside the beforeEach `root`.
+    const rootB = await mkdtemp(path.join(tmpdir(), "wiki-test-b-"));
+    await mkdir(path.join(rootB, "concepts"), { recursive: true });
+    await Bun.write(path.join(rootB, "concepts/Only In B.md"), "---\ntype: concept\n---\n\nB-only.");
+    const missing = path.join(rootB, "does-not-exist");
+    try {
+      const a = await getWikiIndex({ root });
+      const b = await getWikiIndex({ root: rootB });
+      // Distinct indexes — no cross-contamination between roots.
+      expect(a).not.toBe(b);
+      expect(a!.root).toBe(root);
+      expect(b!.root).toBe(rootB);
+      expect(a!.pages.length).toBe(4);
+      expect(b!.resolve("Only In B")).toBeDefined();
+      expect(a!.resolve("Only In B")).toBeUndefined();
+      expect(b!.resolve("index")).toBeUndefined();
+      // A missing root degrades to null without disturbing the healthy caches.
+      expect(await getWikiIndex({ root: missing })).toBeNull();
+      expect(await getWikiIndex({ root })).toBe(a!);
+      expect(await getWikiIndex({ root: rootB })).toBe(b!);
+    } finally {
+      await rm(rootB, { recursive: true, force: true });
+      __resetWikiCacheForTest();
+    }
+  });
+
   test("getWikiIndex caches and refreshes via env-configured root", async () => {
     __resetWikiCacheForTest();
     const prev = process.env.WIKI_DIR;

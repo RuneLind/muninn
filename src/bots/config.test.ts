@@ -397,6 +397,29 @@ describe("bot discovery", () => {
       expect(found!.model).toBe("claude-sonnet-4-6");
       expect(found!.timeoutMs).toBeUndefined();
     });
+
+    test("resolves wikiDir relative to the bot folder", () => {
+      const dir = setupTestBot("_test_wikidir", {
+        config: { wikiDir: "../../../huginn/huginn-jarvis/data/wiki" },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikidir");
+      expect(found).toBeDefined();
+      // Stored as an absolute path resolved against the bot's dir.
+      expect(found!.wikiDir).toBe(resolve(dir, "../../../huginn/huginn-jarvis/data/wiki"));
+    });
+
+    test("drops a mistyped wikiDir (falls back to no wiki)", () => {
+      setupTestBot("_test_wikidir_bad", {
+        config: { wikiDir: 42 },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikidir_bad");
+      expect(found).toBeDefined();
+      expect(found!.wikiDir).toBeUndefined();
+    });
   });
 
   // ── environment variable parsing ─────────────────────────────────────
