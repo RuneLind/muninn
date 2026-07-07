@@ -16,6 +16,7 @@ const ALL_TABLES = [
   "activity_log",
   "messages",
   "chat_preferences",
+  "interest_profiles",
   "threads",
   "connectors",
   "user_settings",

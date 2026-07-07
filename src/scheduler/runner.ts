@@ -13,12 +13,18 @@ import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
 import { harvestSearchSignals } from "../db/search-signals.ts";
 import { runScheduledTasksFromList } from "./task-executor.ts";
 import { runGoalRemindersFromList, runGoalCheckinsFromList } from "./goal-runner.ts";
+import { getBotDefaultUser } from "../db/chat-preferences.ts";
+import { isProfileStale } from "../db/interest-profiles.ts";
+import { refreshInterestProfile } from "../profile/generator.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("scheduler");
 
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
+/** Bots with an interest-profile refresh in flight — guards against a slow Haiku
+ *  refresh being re-dispatched by ticks that fire before it writes its row. */
+const profileRefreshInFlight = new Set<string>();
 let lastCleanupAt = 0;
 const TICK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per tick
 
@@ -134,13 +140,19 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
     // 4. Watchers (email, calendar, etc.) — reuse the already-resolved due list
     await runWatchers(api, botConfig, t?.context, dueWatchers);
 
+    // 5. Interest-profile refresh (fire-and-forget). Keeps the profile that
+    //    personalizes the watcher gate prompts in sync with the user's goals +
+    //    memories. Gated by a "stale > 7 days" DB predicate so it only spends a
+    //    Haiku call about weekly, not every tick.
+    await maybeRefreshInterestProfile(botConfig);
+
     t?.finish("ok");
   } catch (err) {
     t?.error(err instanceof Error ? err : String(err));
     throw err;
   }
 
-  // 5. Retention cleanup — once per hour
+  // 6. Retention cleanup — once per hour
   const now = Date.now();
   if (now - lastCleanupAt > 3_600_000) {
     lastCleanupAt = now;
@@ -168,5 +180,36 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
     } catch (err) {
       log.error("Trace cleanup failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });
     }
+  }
+}
+
+/**
+ * If the bot has a default user whose interest profile is stale (missing or > 7
+ * days old), dispatch a fire-and-forget refresh. The staleness check is awaited
+ * (cheap PK lookup); the refresh itself runs detached so a slow Haiku call never
+ * blocks the tick. In-flight guard prevents a slow refresh from being re-queued
+ * by the next tick before it writes its row. Best-effort throughout — a failure
+ * here must never disrupt the scheduler tick.
+ */
+async function maybeRefreshInterestProfile(botConfig: BotConfig): Promise<void> {
+  const botName = botConfig.name;
+  if (profileRefreshInFlight.has(botName)) return;
+  try {
+    const userId = await getBotDefaultUser(botName);
+    if (!userId) return; // no primary user → nothing to personalize against
+    if (!(await isProfileStale(userId, botName, 7))) return;
+
+    profileRefreshInFlight.add(botName);
+    // Detached: matches how the async extractors are dispatched. The generator
+    // swallows its own errors; this .finally only clears the in-flight guard.
+    void refreshInterestProfile(userId, botName, {
+      connector: botConfig.connector,
+      haikuBackend: botConfig.haikuBackend,
+    }).finally(() => profileRefreshInFlight.delete(botName));
+  } catch (err) {
+    log.error("Interest-profile refresh dispatch failed: {error}", {
+      botName,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }

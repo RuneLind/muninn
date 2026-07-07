@@ -459,6 +459,23 @@ CREATE TABLE bot_default_user (
 );
 
 -- ============================================================================
+-- Interest profiles: a persistent, periodically-refreshed distillation of what
+-- a user cares about following/reading, derived from their active goals +
+-- recent memories by a cheap Haiku call (src/profile/generator.ts). Templated
+-- into the watcher gate/capture prompts so proactive alerts rank against the
+-- user's OWN interests, augmenting (never replacing) the hardcoded baseline.
+-- One row per (user, bot). Mirror of db/migrations/055-interest-profiles.sql.
+-- ============================================================================
+CREATE TABLE interest_profiles (
+  user_id      TEXT NOT NULL,
+  bot_name     TEXT NOT NULL,
+  profile      TEXT NOT NULL,
+  derived_from JSONB NOT NULL DEFAULT '{}',
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, bot_name)
+);
+
+-- ============================================================================
 -- Peer-reply correlation: maps an outbound (bot, peer) to the originating
 -- thread so an inbound reply routes back there instead of the default
 -- peer:<ns>/<name> bucket. Durable so it survives muninn restarts + long peer
