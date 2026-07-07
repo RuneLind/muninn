@@ -28,9 +28,19 @@ describe("withInterestProfile", () => {
     expect(out.toLowerCase()).toContain("do not narrow");
   });
 
+  test("re-asserts the output-format contract as the LAST line after the profile", () => {
+    const out = withInterestProfile(BASE, "- topic A\n- topic B");
+    // The base prompts end with an output-format instruction; the injected
+    // section must not leave augmentation prose as the model's final read.
+    expect(out.endsWith("The output-format instructions above still apply exactly — respond in that format only.")).toBe(true);
+    // And the profile bullets sit BEFORE the re-assertion.
+    expect(out.indexOf("- topic B")).toBeLessThan(out.indexOf("output-format instructions above still apply"));
+  });
+
   test("trims surrounding whitespace on the injected profile", () => {
     const out = withInterestProfile(BASE, "\n\n- topic\n\n");
     expect(out).toContain("- topic");
-    expect(out).not.toContain("- topic\n\n");
+    // The profile slot itself is trimmed (followed by the format re-assertion block).
+    expect(out).toContain("- topic\n\nThe output-format instructions");
   });
 });

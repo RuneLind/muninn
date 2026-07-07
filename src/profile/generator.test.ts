@@ -40,7 +40,7 @@ const mockCallHaiku = mock(async () => ({
 }));
 mock.module("../ai/haiku-direct.ts", () => ({ callHaikuWithFallback: mockCallHaiku }));
 
-const { refreshInterestProfile, loadInterestProfileForBot } = await import("./generator.ts");
+const { refreshInterestProfile, loadInterestProfileForBot, isValidProfileShape } = await import("./generator.ts");
 
 beforeEach(() => {
   goals = [];
@@ -91,6 +91,36 @@ describe("refreshInterestProfile", () => {
     mockCallHaiku.mockRejectedValueOnce(new Error("haiku exploded"));
     await expect(refreshInterestProfile("user-1", "jarvis")).resolves.toBeUndefined();
     expect(mockUpsert).toHaveBeenCalledTimes(0);
+  });
+
+  test("rejects (no upsert) model output with no bullet lines — refusals/prose", async () => {
+    goals = [{ title: "x", description: null, tags: [] }];
+    haikuResult = "I'm sorry, but I can't create a profile from this information.";
+    await refreshInterestProfile("user-1", "jarvis");
+    expect(mockCallHaiku).toHaveBeenCalledTimes(1);
+    expect(mockUpsert).toHaveBeenCalledTimes(0);
+  });
+
+  test("rejects (no upsert) model output over the length cap", async () => {
+    goals = [{ title: "x", description: null, tags: [] }];
+    haikuResult = "- runaway bullet " + "x".repeat(2000);
+    await refreshInterestProfile("user-1", "jarvis");
+    expect(mockUpsert).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("isValidProfileShape", () => {
+  test("accepts bullet lists under the cap (-, •, *)", () => {
+    expect(isValidProfileShape("- a\n- b")).toBe(true);
+    expect(isValidProfileShape("• a")).toBe(true);
+    expect(isValidProfileShape("* a")).toBe(true);
+    // Bullets can start after a non-bullet first line, too.
+    expect(isValidProfileShape("interests:\n- a")).toBe(true);
+  });
+
+  test("rejects prose without bullets and over-long output", () => {
+    expect(isValidProfileShape("Sorry, I cannot help with that.")).toBe(false);
+    expect(isValidProfileShape("- ok\n" + "y".repeat(1600))).toBe(false);
   });
 });
 

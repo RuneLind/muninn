@@ -13,6 +13,25 @@ const log = getLog("profile", "generator");
 const MEMORY_LIMIT = 30;
 /** Haiku call timeout for the (cheap, background) distillation. */
 const REFRESH_TIMEOUT_MS = 60_000;
+/**
+ * Hard cap on a persisted profile. 4-8 bullets with a "why" clause lands well
+ * under this; anything longer is runaway prose (or content the gate prompts
+ * shouldn't carry) — reject rather than truncate, so a half-bullet never ships.
+ */
+const MAX_PROFILE_CHARS = 1500;
+/** A valid profile has at least one markdown bullet line (the prompt's contract). */
+const BULLET_LINE_RE = /^[-•*] /m;
+
+/**
+ * Shape-gate the model output before it is persisted for 7 days. The distiller
+ * can return refusals, apologies, or prose instead of bullets; persisting that
+ * would ride every gate prompt until the next refresh. Stale-but-valid beats
+ * fresh-but-junk: on rejection the caller keeps the prior profile and the next
+ * stale tick retries. Exported for tests.
+ */
+export function isValidProfileShape(profile: string): boolean {
+  return profile.length <= MAX_PROFILE_CHARS && BULLET_LINE_RE.test(profile);
+}
 
 /** Options threaded to the Haiku router so the refresh honors the bot's backend. */
 export interface RefreshOptions {
@@ -96,6 +115,15 @@ export async function refreshInterestProfile(
     const profile = result.trim();
     if (!profile) {
       log.warn("Interest-profile refresh produced empty output — leaving prior profile intact", { botName, userId });
+      return;
+    }
+    // Shape gate: never persist a refusal/apology/prose blob for 7 days of gate
+    // prompts. Stale-but-valid beats fresh-but-junk — the next stale tick retries.
+    if (!isValidProfileShape(profile)) {
+      log.warn(
+        "Interest-profile refresh output failed shape gate ({len} chars, bullets={bullets}) — leaving prior profile intact",
+        { botName, userId, len: profile.length, bullets: BULLET_LINE_RE.test(profile) },
+      );
       return;
     }
 
