@@ -56,6 +56,12 @@ export interface BotConfig {
   timeoutMs?: number;
   /** Base URL for OpenAI-compatible API (e.g. "http://localhost:1234/v1") */
   baseUrl?: string;
+  /** Absolute path to the bot's knowledge wiki, browsed by the dashboard `/wiki`
+   *  reader. Configured in config.json as a path relative to the bot folder
+   *  (same semantics as `.mcp.json` relative paths); resolved to absolute at
+   *  discovery. Unset means the bot has no browsable wiki (`/wiki?bot=<name>`
+   *  shows an empty state). */
+  wikiDir?: string;
   /** Context window size in tokens — used to show usage percentage (e.g. 32768 for local models) */
   contextWindow?: number;
   /** Per-tool-group user restrictions — tools not listed here are available to all */
@@ -394,7 +400,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -406,6 +412,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
         validateScalarField(botSettings, "model", "string", name);
         validateScalarField(botSettings, "baseUrl", "string", name);
+        validateScalarField(botSettings, "wikiDir", "string", name);
         validateScalarField(botSettings, "thinkingMaxTokens", "number", name);
         validateScalarField(botSettings, "timeoutMs", "number", name);
         validateScalarField(botSettings, "contextWindow", "number", name);
@@ -467,6 +474,10 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       thinkingMaxTokens: botSettings.thinkingMaxTokens as number | undefined,
       timeoutMs: botSettings.timeoutMs as number | undefined,
       baseUrl: botSettings.baseUrl as string | undefined,
+      wikiDir:
+        typeof botSettings.wikiDir === "string"
+          ? resolve(dir, botSettings.wikiDir)
+          : undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,

@@ -51,7 +51,13 @@ const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_REL_PATH = "../huginn/huginn-jarvis/data/wiki";
 
-function resolveWikiRoot(): string {
+/**
+ * Resolve the wiki root to scan. An explicit `root` (a bot's configured
+ * `wikiDir`) wins; otherwise fall back to today's behavior — the `WIKI_DIR` env
+ * override, then the jarvis default. So a bare `/wiki` (no `?bot=`) is unchanged.
+ */
+function resolveWikiRoot(explicit?: string): string {
+  if (explicit && explicit.trim()) return explicit.trim();
   const override = process.env.WIKI_DIR;
   if (override && override.trim()) return override.trim();
   // import.meta.dir = <root>/src/wiki → repo root is two levels up.
@@ -238,42 +244,49 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   return { pages, outgoing, backlinks, resolve, scannedAt: Date.now(), root };
 }
 
-let cache: WikiIndex | null = null;
-let warnedDegraded = false;
+/** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */
+const caches = new Map<string, WikiIndex>();
+/** Roots we've already warned about being unreadable (one warn per root). */
+const warnedRoots = new Set<string>();
 
 /**
- * TTL-cached index over the configured wiki root. Returns null (and warns once)
- * when the wiki directory is missing — the caller renders an empty state.
+ * TTL-cached index over a wiki root. Pass `root` (a bot's `wikiDir`) to browse a
+ * specific bot's wiki; omit it to keep today's behavior (`WIKI_DIR` env → jarvis
+ * default). Each root is cached and degraded independently — a missing melosys
+ * wiki never affects the jarvis cache. Returns null (and warns once per root)
+ * when the directory is missing — the caller renders an empty state.
  */
-export async function getWikiIndex(opts?: { refresh?: boolean }): Promise<WikiIndex | null> {
-  const root = resolveWikiRoot();
-  if (cache && cache.root === root && !opts?.refresh && Date.now() - cache.scannedAt < CACHE_TTL_MS) {
-    return cache;
+export async function getWikiIndex(opts?: { root?: string; refresh?: boolean }): Promise<WikiIndex | null> {
+  const root = resolveWikiRoot(opts?.root);
+  const cached = caches.get(root);
+  if (cached && !opts?.refresh && Date.now() - cached.scannedAt < CACHE_TTL_MS) {
+    return cached;
   }
   try {
     const st = await stat(root);
     if (!st.isDirectory()) throw new Error("not a directory");
   } catch (err) {
-    if (!warnedDegraded) {
+    if (!warnedRoots.has(root)) {
       log.warn("Wiki directory not readable at {path} — /wiki disabled: {error}", {
         path: root,
         error: err instanceof Error ? err.message : String(err),
       });
-      warnedDegraded = true;
+      warnedRoots.add(root);
     }
-    cache = null;
+    caches.delete(root);
     return null;
   }
 
   const started = Date.now();
-  cache = await buildWikiIndex(root);
-  warnedDegraded = false;
+  const index = await buildWikiIndex(root);
+  caches.set(root, index);
+  warnedRoots.delete(root);
   log.info("Wiki index built: {pages} pages in {ms}ms from {path}", {
-    pages: cache.pages.length,
+    pages: index.pages.length,
     ms: Date.now() - started,
     path: root,
   });
-  return cache;
+  return index;
 }
 
 /** Raw markdown of one page (by resolved meta). Null when the file vanished. */
@@ -285,8 +298,8 @@ export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promis
   }
 }
 
-/** Test-only: drop the TTL cache + re-arm the one-shot warning between cases. */
+/** Test-only: drop all per-root caches + re-arm the one-shot warnings between cases. */
 export function __resetWikiCacheForTest(): void {
-  cache = null;
-  warnedDegraded = false;
+  caches.clear();
+  warnedRoots.clear();
 }

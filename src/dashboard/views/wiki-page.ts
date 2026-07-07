@@ -11,9 +11,24 @@ import { wikiClientScript } from "./components/wiki-client.ts";
  *
  * The client logic is a real bundled TS entrypoint (`components/wiki-browser.ts`),
  * injected below via `wikiClientScript()`.
+ *
+ * `wikiBots` populates the wiki picker (bots that expose a `wikiDir`); `selected`
+ * is the currently-browsed bot (from `?bot=`, or the jarvis default). Switching
+ * wiki is a full navigation to `/wiki?bot=<name>` so links stay shareable.
  */
-export async function renderWikiPage(): Promise<string> {
+export async function renderWikiPage(opts?: { wikiBots?: string[]; selected?: string }): Promise<string> {
   const clientScript = await wikiClientScript();
+  const wikiBots = opts?.wikiBots ?? [];
+  const selected = opts?.selected ?? "";
+  const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+  const wikiSelector =
+    wikiBots.length > 1
+      ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
+        wikiBots
+          .map((b) => `<option value="${esc(b)}"${b === selected ? " selected" : ""}>${esc(b)}</option>`)
+          .join("") +
+        `</select>`
+      : "";
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -231,6 +246,7 @@ export async function renderWikiPage(): Promise<string> {
   <div class="wiki-layout">
     <div class="wiki-pane">
       <div class="wiki-browse-head">
+        ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
         <div class="wiki-chip-row" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
