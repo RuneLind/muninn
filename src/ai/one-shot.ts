@@ -16,6 +16,34 @@ import type { BotConfig, ConnectorType } from "../bots/config.ts";
 import type { ClaudeExecResult } from "./executor.ts";
 import type { StreamProgressCallback } from "./stream-parser.ts";
 import { resolveConnector } from "./connector.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("ai", "one-shot");
+
+/**
+ * Callers build one-shot prompts with template strings over dynamic values
+ * (paths, dates, retrieved content). When one of those values is missing, the
+ * bug surfaces as a literal "undefined" baked into the prompt and a connector
+ * run is wasted on garbage — a real dispatch once asked a bot to read
+ * "undefined/secret.txt". An empty prompt is unambiguously a caller bug and
+ * throws; the marker strings can legitimately occur inside interpolated
+ * content (an email quoting JS errors, a code transcript), so they only log
+ * loudly instead of rejecting the run.
+ */
+const UNRESOLVED_TEMPLATE_MARKERS = ["undefined/", "/undefined", "[object Object]", "NaN/"];
+
+export function checkPromptResolved(prompt: string): void {
+  if (!prompt.trim()) {
+    throw new Error("executeOneShot: empty prompt — a template variable likely didn't resolve.");
+  }
+  const marker = UNRESOLVED_TEMPLATE_MARKERS.find((m) => prompt.includes(m));
+  if (marker) {
+    log.warn(
+      'One-shot prompt contains "{marker}" — possible unresolved template variable. Prompt head: {head}',
+      { marker, head: prompt.slice(0, 160) },
+    );
+  }
+}
 
 export interface OneShotOptions {
   /** System prompt (persona / instructions). Passed through to the connector. */
@@ -65,6 +93,8 @@ export async function executeOneShot(
   opts: OneShotOptions = {},
 ): Promise<ClaudeExecResult> {
   const { systemPrompt, timeoutMs, onProgress, extraDirs } = opts;
+
+  checkPromptResolved(prompt);
 
   let effective = botConfig;
 
