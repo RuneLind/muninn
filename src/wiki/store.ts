@@ -257,6 +257,22 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     }),
   );
 
+  // An explainer whose stem collides with a markdown page would make resolve()
+  // (and wikilinks to that stem) ambiguous — markdown wins, the explainer is
+  // dropped from the index.
+  const mdNames = new Set(
+    pages.filter((p) => p.type !== "explainer").map((p) => p.name.toLowerCase()),
+  );
+  for (let i = pages.length - 1; i >= 0; i--) {
+    const p = pages[i]!;
+    if (p.type === "explainer" && mdNames.has(p.name.toLowerCase())) {
+      log.debug("explainer {relPath} shadowed by same-stem markdown page — dropped", {
+        relPath: p.relPath,
+      });
+      pages.splice(i, 1);
+    }
+  }
+
   pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
   // Registration order decides stem-collision winners: root AI pages sort before
   // life/ and register first, matching Obsidian's ambiguous-link behavior closely
