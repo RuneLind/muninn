@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
   buildWikiRegistry,
@@ -104,8 +104,8 @@ interface WikiPageListing extends WikiPageMeta {
 function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
   return {
     ...meta,
-    linkCount: index.outgoing.get(meta.name)?.length ?? 0,
-    backlinkCount: index.backlinks.get(meta.name)?.length ?? 0,
+    linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
+    backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
 }
 
@@ -305,17 +305,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
 
-    const listings = (names: string[] | undefined) =>
-      (names ?? [])
-        .map((n) => index.resolve(n))
+    const listings = (relPaths: string[] | undefined) =>
+      (relPaths ?? [])
+        .map((rp) => index.resolveRelPath(rp))
         .filter((m): m is WikiPageMeta => m !== undefined)
         .map((m) => toListing(index, m));
 
     return c.json({
       meta: toListing(index, meta),
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title }),
-      outgoing: listings(index.outgoing.get(meta.name)),
-      backlinks: listings(index.backlinks.get(meta.name)),
+      outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
+      backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
     });
   });
 

@@ -19,8 +19,7 @@ import {
   HUB_TYPES,
   sortPages,
   tagCounts,
-  topPagesByConnections,
-  topPagesByType,
+  topPages,
   typeCounts,
   TYPE_LABEL,
   TYPE_ORDER,
@@ -264,13 +263,13 @@ function hubsHtml(): string {
   if (hasTypedHubs(allPages)) {
     let html = "";
     HUB_TYPES.forEach((t) => {
-      const top = topPagesByType(allPages, t, 12);
+      const top = topPages(allPages, (p) => p.type === t, 12);
       if (!top.length) return;
       html += hubGridHtml(`Top ${TYPE_LABEL[t].toLowerCase()} by connections`, top);
     });
     return html;
   }
-  const top = topPagesByConnections(allPages, 12);
+  const top = topPages(allPages, (p) => p.backlinkCount > 0, 12);
   if (!top.length) {
     return '<div class="wiki-conn-empty">No linked pages yet — this wiki has no resolvable internal links.</div>';
   }

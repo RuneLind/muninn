@@ -101,28 +101,17 @@ export const HUB_TYPES: WikiPageType[] = ["concept", "entity"];
  *  plain markdown links and no frontmatter `type` have none — they fall back to a
  *  single "Top pages by connections" hub section instead. */
 export function hasTypedHubs(pages: WikiListing[]): boolean {
-  return pages.some((p) => HUB_TYPES.indexOf(p.type) !== -1);
+  return pages.some((p) => HUB_TYPES.includes(p.type));
 }
 
-/** Top `limit` pages of a given type, most-linked-to first (used per hub section). */
-export function topPagesByType(
+/** Top `limit` pages matching `predicate`, most-linked-to first. Drives the hub
+ *  sections: per-type for typed wikis, `backlinkCount > 0` for the untyped fallback. */
+export function topPages(
   pages: WikiListing[],
-  type: WikiPageType,
+  predicate: (p: WikiListing) => boolean,
   limit = 12,
 ): WikiListing[] {
-  return pages
-    .filter((p) => p.type === type)
-    .sort((a, b) => b.backlinkCount - a.backlinkCount)
-    .slice(0, limit);
-}
-
-/** Fallback hub for untyped wikis: top `limit` pages across all types that have
- *  at least one backlink, most-linked-to first. Empty when nothing is linked. */
-export function topPagesByConnections(pages: WikiListing[], limit = 12): WikiListing[] {
-  return pages
-    .filter((p) => p.backlinkCount > 0)
-    .sort((a, b) => b.backlinkCount - a.backlinkCount)
-    .slice(0, limit);
+  return sortPages(pages.filter(predicate), "backlinks").slice(0, limit);
 }
 
 /** Count pages per tag, honoring the active domain + type filters (used for the tag chip row). */
