@@ -1,7 +1,8 @@
 /**
  * Knowledge-wiki read side — scans the huginn-jarvis Obsidian wiki on disk and
- * builds an in-memory index: page metadata (frontmatter), outgoing [[wikilinks]],
- * and inverted backlinks. Powers the dashboard `/wiki` reader page.
+ * builds an in-memory index: page metadata (frontmatter), outgoing links
+ * ([[wikilinks]] + relative markdown links), and inverted backlinks, keyed by
+ * relPath. Powers the dashboard `/wiki` reader page.
  *
  * Like `src/summaries/author-scores.ts`, the wiki is a sibling-checkout file
  * dependency: default path `../huginn/huginn-jarvis/data/wiki` relative to the
@@ -37,14 +38,26 @@ export interface WikiPageMeta {
 
 export interface WikiIndex {
   pages: WikiPageMeta[];
-  /** Outgoing wikilink targets per page name, as canonical names (resolved). */
+  /**
+   * Outgoing link targets per page, keyed by normalized lowercased relPath
+   * (`normalizeRelPath`); values are target relPaths in the same form.
+   * relPath-keyed (not name-keyed) so same-stem pages in different folders
+   * (e.g. mimir's three projects/<x>/architecture.md) keep distinct link sets.
+   */
   outgoing: Map<string, string[]>;
-  /** Inverted index: pages whose content links TO this page name. */
+  /** Inverted index: relPaths of pages whose content links TO this relPath. */
   backlinks: Map<string, string[]>;
   /** Resolve a wikilink target (name or alias, case-insensitive) to a page. */
   resolve: (target: string) => WikiPageMeta | undefined;
+  /** Resolve a relPath (as stored in the graph's keys/values) back to its page. */
+  resolveRelPath: (relPath: string) => WikiPageMeta | undefined;
   scannedAt: number;
   root: string;
+}
+
+/** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
+export function normalizeRelPath(relPath: string): string {
+  return path.posix.normalize(relPath).toLowerCase();
 }
 
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
@@ -133,6 +146,66 @@ export function extractWikilinks(content: string): string[] {
   return [...targets];
 }
 
+const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
+
+/**
+ * Extract relative markdown link targets — `[text](target.md)` — from raw page
+ * content. Wikis that use plain relative links instead of Obsidian [[wikilinks]]
+ * (e.g. mimir, melosys-kode-wiki) join the same link graph through these. Returns
+ * deduped, URL-decoded targets ending in `.md` (case-insensitive), with any
+ * `#anchor` fragment stripped, still *relative to the linking page* (resolution
+ * happens in `resolveMarkdownTargets`). Skips: images (`![...](...)`), absolute
+ * URLs / any `scheme:` target (http:, https:, mailto:, …), absolute filesystem
+ * paths (leading `/`), and non-`.md` targets. Like `extractWikilinks`, this does
+ * not special-case fenced code blocks — matching that function's behavior.
+ */
+export function extractMarkdownLinks(content: string): string[] {
+  const targets = new Set<string>();
+  for (const m of content.matchAll(MD_LINK_RE)) {
+    if (m[1]) continue; // leading '!' → image, not a link
+    let target = (m[2] ?? "").trim();
+    if (!target) continue;
+    // Drop a link title: [text](url "title") → url
+    const sp = target.search(/\s/);
+    if (sp !== -1) target = target.slice(0, sp);
+    // Strip an #anchor fragment; a bare same-page anchor (#foo) isn't a page link.
+    const hash = target.indexOf("#");
+    if (hash === 0) continue;
+    if (hash > 0) target = target.slice(0, hash);
+    if (!target) continue;
+    // Ignore absolute URLs / any scheme: prefix and absolute filesystem paths.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) continue;
+    if (target.startsWith("/")) continue;
+    let decoded = target;
+    try {
+      decoded = decodeURIComponent(target);
+    } catch {
+      // Malformed %-escape — keep the raw form so a real .md link isn't lost.
+    }
+    if (!decoded.toLowerCase().endsWith(".md")) continue;
+    targets.add(decoded);
+  }
+  return [...targets];
+}
+
+/**
+ * Resolve extracted relative `.md` targets against the linking page's own
+ * location within the wiki, returning normalized, lowercased target relPaths
+ * that stay inside the wiki root. Targets that escape the root via `../` are
+ * dropped. Lowercasing mirrors the case-insensitive `resolve()` used for the
+ * wikilink graph so both link kinds match pages the same way.
+ */
+function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
+  const dir = path.posix.dirname(fromRelPath);
+  const out: string[] = [];
+  for (const t of targets) {
+    const joined = path.posix.normalize(path.posix.join(dir, t));
+    if (joined === ".." || joined.startsWith("../")) continue; // escaped the root
+    out.push(normalizeRelPath(joined));
+  }
+  return out;
+}
+
 const VALID_TYPES: WikiPageType[] = ["source", "concept", "entity", "analysis", "note"];
 
 function typeFromFrontmatter(fm: Record<string, string | string[]>, relPath: string): WikiPageType {
@@ -216,6 +289,8 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const pages: WikiPageMeta[] = [];
   const byKey = new Map<string, WikiPageMeta>();
   const rawOutgoing = new Map<string, string[]>();
+  /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
+  const rawMdTargets = new Map<string, string[]>();
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -254,6 +329,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
+      rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
     }),
   );
 
@@ -285,30 +361,48 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
 
   const resolve = (target: string) => byKey.get(target.trim().toLowerCase());
 
+  // relPath lookup for the graph: both link kinds resolve to a target *page* and
+  // are stored as that page's normalized relPath — unique even when stems collide,
+  // so same-stem pages in different folders keep distinct link sets and counts.
+  const byRelPath = new Map<string, WikiPageMeta>();
+  for (const meta of pages) {
+    const key = normalizeRelPath(meta.relPath);
+    if (!byRelPath.has(key)) byRelPath.set(key, meta);
+  }
+  const resolveRelPath = (relPath: string) => byRelPath.get(normalizeRelPath(relPath));
+
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
   for (const meta of pages) {
-    // Stem-collision loser: resolve() can only ever return the winner, so
-    // attribute links once, to the first-registered page — never clobber.
-    if (outgoing.has(meta.name)) continue;
+    const key = normalizeRelPath(meta.relPath);
     const resolved = new Set<string>();
+    // Wikilinks resolve by name/alias (ambiguous stems go to the first-registered
+    // winner, as before) — then join the graph as the winner's relPath.
     for (const target of rawOutgoing.get(meta.relPath) ?? []) {
       const targetMeta = resolve(target);
-      if (targetMeta && targetMeta.name !== meta.name) resolved.add(targetMeta.name);
+      if (!targetMeta) continue;
+      const targetKey = normalizeRelPath(targetMeta.relPath);
+      if (targetKey !== key) resolved.add(targetKey);
     }
-    outgoing.set(meta.name, [...resolved]);
-    for (const targetName of resolved) {
-      let arr = backlinks.get(targetName);
+    // Relative markdown links resolve by path and feed the same set — a page
+    // linked both by [[wikilink]] and [text](path.md) counts once. Explainers
+    // can't be markdown-link targets (targets always end in .md).
+    for (const rel of rawMdTargets.get(meta.relPath) ?? []) {
+      if (rel !== key && byRelPath.has(rel)) resolved.add(rel);
+    }
+    outgoing.set(key, [...resolved]);
+    for (const targetKey of resolved) {
+      let arr = backlinks.get(targetKey);
       if (!arr) {
         arr = [];
-        backlinks.set(targetName, arr);
+        backlinks.set(targetKey, arr);
       }
-      arr.push(meta.name);
+      arr.push(key);
     }
   }
   for (const arr of backlinks.values()) arr.sort();
 
-  return { pages, outgoing, backlinks, resolve, scannedAt: Date.now(), root };
+  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root };
 }
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */

@@ -6,6 +6,7 @@ import {
   parseFrontmatter,
   splitInlineArray,
   extractWikilinks,
+  extractMarkdownLinks,
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
@@ -62,6 +63,45 @@ describe("extractWikilinks", () => {
       "See [[Claude Code]] and [[Claude Code|CC]] plus [[Skills System|skills]].",
     );
     expect(links).toEqual(["Claude Code", "Skills System"]);
+  });
+});
+
+describe("extractMarkdownLinks", () => {
+  test("extracts relative .md targets, decodes %20, strips #anchors, dedupes", () => {
+    const links = extractMarkdownLinks(
+      [
+        "See [overview](overview.md) and [sub](sub/page.md#section).",
+        "Also [parent](../repos/muninn.md) and [encoded](my%20notes.md).",
+        "Repeat [again](overview.md).",
+      ].join("\n"),
+    );
+    expect(links).toEqual([
+      "overview.md",
+      "sub/page.md",
+      "../repos/muninn.md",
+      "my notes.md",
+    ]);
+  });
+
+  test("ignores http/https, mailto, absolute paths, images, and non-.md", () => {
+    const links = extractMarkdownLinks(
+      [
+        "[web](https://example.com/x.md)",
+        "[http](http://example.com/y.md)",
+        "[mail](mailto:me@example.com)",
+        "[abs](/etc/passwd.md)",
+        "![img](diagram.png)",
+        "![mdimg](fake.md)",
+        "[html](page.html)",
+        "[anchor](#local-section)",
+        "[real](kept.md)",
+      ].join("\n"),
+    );
+    expect(links).toEqual(["kept.md"]);
+  });
+
+  test("is case-insensitive on the .md extension", () => {
+    expect(extractMarkdownLinks("[x](Notes.MD)")).toEqual(["Notes.MD"]);
   });
 });
 
@@ -123,34 +163,68 @@ describe("buildWikiIndex", () => {
     expect(idx.type).toBe("note");
   });
 
-  test("resolves aliases and builds backlinks both ways", async () => {
+  test("resolves aliases and builds backlinks both ways (relPath-keyed)", async () => {
     const index = await buildWikiIndex(root);
     // alias resolution: [[Harness Engineer]] → Harness Engineering
-    expect(index.outgoing.get("Own the Folder")).toEqual(["Harness Engineering"]);
+    expect(index.outgoing.get("sources/own the folder.md")).toEqual([
+      "concepts/harness engineering.md",
+    ]);
     // backlinks include alias-based and title-cased links
-    expect(index.backlinks.get("Harness Engineering")).toEqual(["Own the Folder", "index"]);
-    expect(index.backlinks.get("Own the Folder")).toEqual(["Harness Engineering"]);
+    expect(index.backlinks.get("concepts/harness engineering.md")).toEqual([
+      "index.md",
+      "sources/own the folder.md",
+    ]);
+    expect(index.backlinks.get("sources/own the folder.md")).toEqual([
+      "concepts/harness engineering.md",
+    ]);
     // unresolved targets are dropped from outgoing
-    expect(index.outgoing.get("Harness Engineering")).toEqual(["Own the Folder"]);
+    expect(index.outgoing.get("concepts/harness engineering.md")).toEqual([
+      "sources/own the folder.md",
+    ]);
+    // graph values round-trip back to pages via resolveRelPath
+    expect(index.resolveRelPath("concepts/harness engineering.md")!.title).toBe(
+      "Harness Engineering",
+    );
   });
 
-  test("duplicate stems don't clobber link attribution — winner keeps its own links", async () => {
-    // Same stem in the AI root and life/ subtree; the root page registers
-    // first (sorted relPath order) and must keep ITS outgoing links.
+  test("same-stem pages keep distinct link sets; cross-links count, self-links don't", async () => {
+    // Same stem in the AI root and life/ subtree — with a relPath-keyed graph
+    // BOTH pages keep their own outgoing edges and their own backlink counts.
     await Bun.write(
       path.join(root, "concepts/Chronotypes.md"),
       "---\ntype: concept\n---\n\nAI take on [[Harness Engineering]].",
     );
     await Bun.write(
       path.join(root, "life/sources/Chronotypes.md"),
-      "---\ntype: source\n---\n\nLife take on [[Creatine]].",
+      [
+        "---",
+        "type: source",
+        "---",
+        "",
+        "Life take on [[Creatine]].",
+        "Cross-link to the same-stem AI page: [ai take](../../concepts/Chronotypes.md).",
+        "A real self-link: [me](Chronotypes.md).", // must stay excluded
+      ].join("\n"),
     );
     const index = await buildWikiIndex(root);
-    const winner = index.resolve("Chronotypes")!;
-    expect(winner.relPath).toBe("concepts/Chronotypes.md");
-    expect(index.outgoing.get("Chronotypes")).toEqual(["Harness Engineering"]);
-    // the life page's link must not leak into the winner's attribution
-    expect(index.backlinks.get("Creatine") ?? []).toEqual([]);
+    // Winner (first-registered stem) keeps its own links…
+    expect(index.outgoing.get("concepts/chronotypes.md")).toEqual([
+      "concepts/harness engineering.md",
+    ]);
+    // …and the stem-collision loser now keeps ITS links too, including the
+    // legitimate markdown cross-link to the same-stem page — but not the self-link.
+    expect(index.outgoing.get("life/sources/chronotypes.md")!.slice().sort()).toEqual([
+      "concepts/chronotypes.md",
+      "life/sources/creatine.md",
+    ]);
+    // Distinct backlink sets per relPath — no merged counts.
+    expect(index.backlinks.get("concepts/chronotypes.md")).toEqual([
+      "life/sources/chronotypes.md",
+    ]);
+    expect(index.backlinks.get("life/sources/chronotypes.md") ?? []).toEqual([]);
+    expect(index.backlinks.get("life/sources/creatine.md")).toEqual([
+      "life/sources/chronotypes.md",
+    ]);
   });
 
   test("indexes standalone HTML explainers: <title>, stem fallback, mtime dates, no link graph", async () => {
@@ -183,8 +257,43 @@ describe("buildWikiIndex", () => {
     expect(untitled.title).toBe("no-title");
 
     // Explainers carry no wikilinks and are not link targets/sources.
-    expect(index.outgoing.get("Deep Dive")).toEqual([]);
-    expect(index.backlinks.get("Deep Dive") ?? []).toEqual([]);
+    expect(index.outgoing.get("blogs/deep dive.html")).toEqual([]);
+    expect(index.backlinks.get("blogs/deep dive.html") ?? []).toEqual([]);
+  });
+
+  test("relative markdown links join the graph: same dir, ../ traversal, #anchor, %20, dedupe, out-of-root ignored", async () => {
+    await mkdir(path.join(root, "repos"), { recursive: true });
+    await Bun.write(path.join(root, "repos/muninn.md"), "---\ntype: note\n---\n\nMuninn repo.");
+    await Bun.write(path.join(root, "repos/huginn.md"), "---\ntype: note\n---\n\nHuginn repo.");
+    await Bun.write(
+      path.join(root, "repos/overview.md"),
+      [
+        "---",
+        "type: note",
+        "---",
+        "",
+        "Links to [muninn](muninn.md) and [huginn](huginn.md#search).", // same dir + anchor
+        "Up to [index](../index.md).", // ../ traversal, resolves to root index.md
+        "Escapes [outside](../../../etc/passwd.md).", // out of root — ignored
+        "Encoded [own](../sources/Own%20the%20Folder.md).", // %20 decode → "Own the Folder"
+        "And a wikilink [[Muninn]] to the same page.", // dedupe with [muninn](muninn.md)
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const out = index.outgoing.get("repos/overview.md")!;
+    expect(out.slice().sort()).toEqual([
+      "index.md",
+      "repos/huginn.md",
+      "repos/muninn.md",
+      "sources/own the folder.md",
+    ]);
+    // [[Muninn]] + [muninn](muninn.md) collapse to a single edge.
+    expect(out.filter((rp) => rp === "repos/muninn.md").length).toBe(1);
+    // Backlinks recorded on the targets.
+    expect(index.backlinks.get("repos/muninn.md")).toContain("repos/overview.md");
+    expect(index.backlinks.get("index.md")).toContain("repos/overview.md");
+    // The out-of-root target never created a phantom page or edge.
+    expect(index.resolve("passwd")).toBeUndefined();
   });
 
   test("readWikiPage returns raw markdown", async () => {
