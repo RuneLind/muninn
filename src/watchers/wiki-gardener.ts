@@ -1,0 +1,132 @@
+/**
+ * Wiki-gardener watcher checker.
+ *
+ * `runChecker` (runner.ts) passes the bot's full `BotConfig` through, so this
+ * checker only resolves the muninn `Config` (for `executeOneShot`) and reads the
+ * knowledge-API URL from env (like x.ts). It wires the real seams and delegates
+ * to `runGardener`.
+ *
+ * PR 1: proposals accumulate in Postgres and a Telegram alert announces them —
+ * no wiki writes, no review UI (those land in PR 2).
+ */
+
+import type { Watcher, WatcherAlert } from "../types.ts";
+import type { BotConfig } from "../bots/config.ts";
+import { loadConfig } from "../config.ts";
+import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
+import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
+import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { getWikiIndex } from "../wiki/store.ts";
+import { SUMMARY_SOURCES } from "../summaries/sources.ts";
+import { Tracer } from "../tracing/index.ts";
+import {
+  getConsumedDocIds,
+  getLiveTopicKeys,
+  getRejectedTopicKeys,
+  insertWikiProposal,
+} from "../db/wiki-proposals.ts";
+import { resolveGardenerConfig } from "../gardener/types.ts";
+import { runGardener } from "../gardener/runner.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("watchers", "wiki-gardener");
+
+const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+const DRAFT_TIMEOUT_MS = 300_000;
+const DRAFT_THINKING_MAX_TOKENS = 8_000;
+const DOC_FETCH_TIMEOUT_MS = 15_000;
+
+export async function checkWikiGardener(
+  watcher: Watcher,
+  botConfig: BotConfig,
+): Promise<WatcherAlert[]> {
+  const name = botConfig.name;
+  if (!botConfig.wikiDir) {
+    log.warn("Wiki-gardener: bot \"{name}\" has no wikiDir configured — skipping", {
+      botName: name,
+      name,
+    });
+    return [];
+  }
+  if (botConfig.gardener?.enabled === false) {
+    log.info("Wiki-gardener: disabled via config for \"{name}\" — skipping", { botName: name, name });
+    return [];
+  }
+
+  const config = loadConfig();
+  const resolved = resolveGardenerConfig(botConfig.gardener);
+  const apiUrl = DEFAULT_API_URL;
+  const wikiDir = botConfig.wikiDir;
+
+  const tracer = new Tracer("wiki-gardener", { botName: name, userId: watcher.userId });
+
+  try {
+    const alerts = await runGardener({
+      botName: name,
+      wikiDir,
+      collections: SUMMARY_SOURCES.map((s) => s.collection),
+      minClusterSize: resolved.minClusterSize,
+      lookbackDays: resolved.lookbackDays,
+      maxProposalsPerRun: resolved.maxProposalsPerRun,
+      draftTimeoutMs: DRAFT_TIMEOUT_MS,
+      now: () => Date.now(),
+      tracer,
+
+      listDocs: async (collection) => {
+        const data = await fetchKnowledgeApi(
+          apiUrl,
+          `/api/collection/${encodeURIComponent(collection)}/documents?include_dates=1`,
+        );
+        return Array.isArray(data?.documents) ? data.documents : [];
+      },
+      fetchDoc: async (collection, id) => {
+        return await fetchKnowledgeApi(
+          apiUrl,
+          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+          { timeoutMs: DOC_FETCH_TIMEOUT_MS },
+        );
+      },
+
+      callCluster: async (prompt) => {
+        const { result } = await callHaikuWithFallback(prompt, {
+          source: "wiki_gardener_cluster",
+          entrypoint: `${name}-watcher`,
+          botName: name,
+          connector: botConfig.connector,
+          haikuBackend: botConfig.haikuBackend,
+        });
+        return result;
+      },
+      loadInterestProfile: () => loadInterestProfileForBot(name),
+
+      getWikiIndex: () => getWikiIndex({ root: wikiDir }),
+
+      callDraft: async (prompt, timeoutMs) => {
+        // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
+        // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
+        const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
+        const { result } = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
+        return result;
+      },
+      readWikiFile: async (absPath) => {
+        try {
+          return await Bun.file(absPath).text();
+        } catch {
+          return null;
+        }
+      },
+
+      liveTopicKeys: () => getLiveTopicKeys(name),
+      rejectedTopicKeys: () => getRejectedTopicKeys(name),
+      consumedDocIds: () => getConsumedDocIds(name),
+      insertProposal: (params) => insertWikiProposal(params),
+    });
+
+    tracer.finish("ok", { alertsSent: alerts.length });
+    return alerts;
+  } catch (err) {
+    tracer.error(err instanceof Error ? err : String(err));
+    throw err;
+  }
+}

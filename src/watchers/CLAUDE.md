@@ -21,6 +21,7 @@ Scheduler tick (every 60s)
 | `news` | `news.ts` | Google News RSS (no AI) | — |
 | `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
 | `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (Highlights) / Sonnet digest (Daily/Weekly) |
+| `wiki-gardener` | `wiki-gardener.ts` | Recent summary collections (knowledge API) | Haiku cluster + bot-connector draft |
 
 ## Interest-profile personalization (gate/capture prompts)
 
@@ -216,6 +217,57 @@ The Highlights row's gate already scores + writes a "why" for every new item. Wi
 **Hybrid curation (Phase D).** A *third* cut on the same score auto-promotes the clear headliners: with `autoPromoteScore` set (≥ ~0.9), every captured candidate at/above it is summarized **in-process right after capture** (`maybeAutoPromote` → `autoPromoteCandidate` → the shared `kickCandidateSummarize` the `/summarize` route also uses), landing on the shelf with no manual click. The mid-band (≥ `candidateMinScore`, < `autoPromoteScore`) waits in the `/summaries` inbox for a hand-pick. Auto-promote is opt-in, fire-and-forget (the slow Claude call never blocks the watcher run), and deduped to rows still `new`. The seed sets it to 0.9 on the Highlights row — but only on a fresh box, since the setup script skips reconfigure when the row already exists.
 
 The stricter `DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT` (≥0.8-only) remains exported as a config option for anyone who wants the original quiet-alerting calibration back — but it leaves the inbox to the alerted items only (no middle band), so it's not paired with `captureCandidates`.
+
+## Wiki Gardener (wiki-gardener.ts + src/gardener/)
+
+A weekly watcher that clusters recently-ingested summaries (the four
+`SUMMARY_SOURCES` collections) and drafts knowledge-wiki page **proposals** into
+the `wiki_proposals` table. **PR 1 is the proposal pipeline only** — no wiki
+writes, no review UI (those land in PR 2). Proposals accumulate in Postgres
+(inspectable via psql) and a Telegram alert (🌱) announces them.
+
+Pipeline (`src/gardener/runner.ts` `runGardener`): harvest → cluster →
+target-resolve → draft → shape-gate → persist → notify.
+
+- **Harvest** (`harvest.ts`): list docs across the summary collections
+  (`GET /api/collection/<c>/documents?include_dates=1`), filter to `date >= now −
+  lookbackDays` (default 14) and drop the consumed set (`source_docs` of `applied`
+  proposals), then fetch full bodies (batched 20). The listing gives only
+  `{id,url,date}`; title/category/author are derived from the fetched body.
+- **Cluster** (`cluster.ts`): one Haiku call (`callHaikuWithFallback`, `source:
+  "wiki_gardener_cluster"`) with the interest profile injected augment-only.
+  Output JSON clusters `{topicKey, kind, domain, label, docIds[], rationale}`.
+  A pure skip/size/cap filter runs **before any draft call**: unknown docIds
+  dropped, `docIds.length >= minClusterSize` (default 3), skip topicKeys with a
+  prior `rejected` OR a live `draft`/`approved` proposal, cap at
+  `maxProposalsPerRun` (default 3).
+- **Target-resolve** (`target-resolve.ts`): the LOCAL wiki store
+  (`getWikiIndex({root: wikiDir})`) is the oracle — `update` on a normalized
+  title/alias near-match, else `create` (huginn scores are never consulted).
+- **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
+  (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
+  **untrusted** delimited data. The **shape-gate** rejects a draft unless the
+  frontmatter parses with required keys, `type` matches the cluster kind, the body
+  is non-empty, and `target_path` is **path-confined** (relative, `..`-free,
+  inside `wikiDir` under `concepts/`/`entities/`/`life/**` matching the domain, or
+  the update target's existing dir).
+- **Persist + notify**: each proposal is persisted **as its drafting completes**
+  (a mid-run timeout can't strand undrafted proposals). One alert with a
+  **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
+  `lastNotifiedIds` dedup runs unconditionally, so a static id would drop every
+  run after the first. `skipContentHash` is extended to cover `wiki-gardener`.
+
+**Config** (per-bot `config.json` `gardener` block, validated at discovery):
+`{ enabled?, minClusterSize?, lookbackDays?, maxProposalsPerRun? }`. Requires the
+bot to have `wikiDir` set (a missing `wikiDir` warns and returns no alerts).
+
+**Seed**: `bun scripts/setup-wiki-gardener.ts [--apply]` creates the jarvis
+`wiki-gardener` row — weekly interval, `config.hour: 10` (daytime, clear of quiet
+hours), `config.timeoutMs: 1200000` (net headroom for 3 drafts at 300s + cluster + harvest;
+a timed-out run advances last_run_at and loses the week).
+
+Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`); the
+`watchers.type` CHECK gains `'wiki-gardener'` (migration `056`).
 
 ## Configurable prompts
 

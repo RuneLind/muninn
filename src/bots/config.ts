@@ -5,6 +5,7 @@ import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
 import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
+import type { GardenerConfig } from "../gardener/types.ts";
 
 const log = getLog("bots");
 
@@ -102,6 +103,9 @@ export interface BotConfig {
    *  server doesn't re-read .mcp.json on every tool call. `undefined` means
    *  "search all collections huginn knows about". */
   defaultKnowledgeCollections?: string[];
+  /** Wiki-gardener config (per-bot config.json `gardener` block). Requires
+   *  `wikiDir`. See src/gardener/. */
+  gardener?: GardenerConfig;
 }
 
 export interface CorrectiveRetrievalBotConfig {
@@ -340,6 +344,29 @@ function validateScalarField(
   }
 }
 
+/**
+ * Validate the nested `gardener` config block (per-bot config.json). A non-object
+ * value is dropped whole; individual mistyped sub-fields warn + drop (falling back
+ * to the code default), matching {@link validateScalarField}'s graceful posture.
+ */
+function validateGardenerConfig(settings: Record<string, unknown>, botName: string): void {
+  const value = settings.gardener;
+  if (value === undefined) return;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    log.warn(
+      `Bot "{name}" config.json field "gardener" should be an object — ignoring it (using defaults)`,
+      { name: botName },
+    );
+    delete settings.gardener;
+    return;
+  }
+  const g = value as Record<string, unknown>;
+  validateScalarField(g, "enabled", "boolean", botName);
+  validateScalarField(g, "minClusterSize", "number", botName);
+  validateScalarField(g, "lookbackDays", "number", botName);
+  validateScalarField(g, "maxProposalsPerRun", "number", botName);
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
@@ -400,7 +427,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "gardener"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -417,6 +444,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateScalarField(botSettings, "timeoutMs", "number", name);
         validateScalarField(botSettings, "contextWindow", "number", name);
         validateScalarField(botSettings, "showWaterfall", "boolean", name);
+        validateGardenerConfig(botSettings, name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }
@@ -488,6 +516,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       correctiveRetrieval,
       hasResearchKnowledge,
       defaultKnowledgeCollections,
+      gardener: botSettings.gardener as GardenerConfig | undefined,
     });
 
     const configParts: string[] = [];
