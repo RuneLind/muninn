@@ -49,7 +49,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerTikTokRoutes(app, config);
   registerSSERoutes(app);
   registerGraphRoutes(app, config);
-  registerWikiRoutes(app);
+  registerWikiRoutes(app, config);
   registerWikiGardenerRoutes(app);
   registerBenchmarkRoutes(app);
 

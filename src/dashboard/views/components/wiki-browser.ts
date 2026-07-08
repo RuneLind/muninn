@@ -12,6 +12,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { sseClient, type SseHandle } from "./client-runtime.ts";
 import {
   filterPages,
   sortPages,
@@ -451,6 +452,236 @@ window.addEventListener("popstate", () => {
   const page = params.get("page");
   if (page) loadPage(page, false);
   else renderStart();
+});
+
+// ── Ask tab: research-style Q&A scoped to this wiki ───────────────────
+interface AskCitation {
+  n: number;
+  collection: string;
+  docId: string;
+  title: string;
+  url?: string;
+  badge: string;
+  relevance: number;
+  wikiName?: string;
+  pageName?: string;
+}
+interface AskCard {
+  question: string;
+  citations: AskCitation[];
+  buffer: string;
+  statusWrap: HTMLElement;
+  statusEl: HTMLElement;
+  bodyEl: HTMLElement;
+  sourcesEl: HTMLElement;
+}
+const askTurns: { question: string; answer: string }[] = [];
+let askConn: SseHandle | null = null;
+let askActive: AskCard | null = null;
+const ASK_MAX_HISTORY = 4;
+const ASK_ANSWER_CHARS = 700;
+
+/** Compact, bounded replay of committed turns sent as context on each follow-up. */
+function askHistoryParam(): string {
+  if (!askTurns.length) return "";
+  const recent = askTurns.slice(-ASK_MAX_HISTORY).map((t) => ({
+    q: (t.question || "").slice(0, 500),
+    a: (t.answer || "").slice(0, ASK_ANSWER_CHARS),
+  }));
+  return JSON.stringify(recent);
+}
+
+function switchConnTab(tab: string): void {
+  document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
+  });
+  const connBody = document.getElementById("connBody")!;
+  const askBody = document.getElementById("askBody")!;
+  const ask = tab === "ask";
+  connBody.style.display = ask ? "none" : "";
+  askBody.style.display = ask ? "flex" : "none";
+  if (ask) (document.getElementById("wikiAskInput") as HTMLTextAreaElement).focus();
+}
+
+function setAskStatus(a: AskCard, text: string, state: string): void {
+  a.statusWrap.className = "wiki-ask-status" + (state ? " " + state : "");
+  a.statusEl.textContent = text;
+}
+
+function startAskCard(question: string): AskCard {
+  document.getElementById("wikiAskHint")!.style.display = "none";
+  const card = document.createElement("div");
+  card.className = "wiki-ask-card";
+  card.innerHTML =
+    '<div class="wiki-ask-q"></div>' +
+    '<div class="wiki-ask-status"><span class="spinner"></span><span class="st">Searching…</span></div>' +
+    '<div class="wiki-ask-answer"></div>' +
+    '<div class="wiki-ask-sources"></div>';
+  card.querySelector(".wiki-ask-q")!.textContent = question;
+  document.getElementById("wikiAskTurns")!.appendChild(card);
+  return {
+    question,
+    citations: [],
+    buffer: "",
+    statusWrap: card.querySelector(".wiki-ask-status") as HTMLElement,
+    statusEl: card.querySelector(".wiki-ask-status .st") as HTMLElement,
+    bodyEl: card.querySelector(".wiki-ask-answer") as HTMLElement,
+    sourcesEl: card.querySelector(".wiki-ask-sources") as HTMLElement,
+  };
+}
+
+/** Render the citation list — matched pages become in-reader links (data-page,
+ *  handled by the global delegated click), the rest are plain rows. */
+function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
+  if (!citations.length) return "";
+  const citedSet: Record<number, boolean> = {};
+  (cited || []).forEach((n) => { citedSet[n] = true; });
+  const anyCited = (cited || []).length > 0;
+  const rows = citations
+    .map((c) => {
+      const uncited = anyCited && !citedSet[c.n] ? " uncited" : "";
+      const linked = c.pageName ? " linked" : "";
+      const pageAttr = c.pageName ? ' data-page="' + esc(c.pageName) + '"' : "";
+      const pageTag = c.pageName ? '<span class="wiki-ask-src-page">page ↗</span>' : "";
+      return (
+        '<div class="wiki-ask-src' + uncited + linked + '"' + pageAttr + ">" +
+        '<span class="wiki-ask-src-num">' + c.n + "</span>" +
+        '<span class="wiki-ask-src-badge">' + esc(c.badge || "") + "</span>" +
+        '<span class="wiki-ask-src-title">' + esc(c.title || c.docId) + "</span>" +
+        pageTag +
+        "</div>"
+      );
+    })
+    .join("");
+  return '<div class="wiki-ask-src-head">Sources</div>' + rows;
+}
+
+/** Turn [n] markers in the answer text into clickable page links (matched
+ *  citations only); leaves out-of-range or unmatched markers as plain text. */
+function linkifyAskCites(root: HTMLElement, citations: AskCitation[]): void {
+  const maxN = citations.length;
+  if (maxN === 0) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const targets: Text[] = [];
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    if (/\[\d+\]/.test(node.nodeValue || "")) targets.push(node as Text);
+  }
+  targets.forEach((textNode) => {
+    const frag = document.createDocumentFragment();
+    const text = textNode.nodeValue || "";
+    const re = /\[(\d+)\]/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    let replaced = false;
+    while ((m = re.exec(text))) {
+      const n = parseInt(m[1]!, 10);
+      const c = citations[n - 1];
+      if (n < 1 || n > maxN || !c || !c.pageName) continue;
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const sup = document.createElement("sup");
+      sup.className = "wiki-ask-cite";
+      sup.textContent = "[" + n + "]";
+      sup.title = c.title || "";
+      sup.setAttribute("data-page", c.pageName);
+      frag.appendChild(sup);
+      last = m.index + m[0].length;
+      replaced = true;
+    }
+    if (!replaced) return;
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.parentNode!.replaceChild(frag, textNode);
+  });
+}
+
+function askQuestion(): void {
+  const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement;
+  const q = input.value.trim();
+  if (!q) return;
+
+  // Supersede any in-flight ask: close its stream and drop its (uncommitted) card.
+  if (askConn) { askConn.close(); askConn = null; }
+  if (askActive && askActive.statusWrap.closest(".wiki-ask-card")) {
+    askActive.statusWrap.closest(".wiki-ask-card")!.remove();
+  }
+  askActive = null;
+  input.value = "";
+
+  const a = startAskCard(q);
+  askActive = a;
+  const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
+  btn.disabled = true;
+
+  let url = "/api/wiki/ask?q=" + encodeURIComponent(q);
+  if (WIKI) url += "&wiki=" + encodeURIComponent(WIKI);
+  const hist = askHistoryParam();
+  if (hist) url += "&history=" + encodeURIComponent(hist);
+
+  const conn = sseClient(url, {
+    phase: (e: MessageEvent) => {
+      const d = JSON.parse((e as MessageEvent).data);
+      setAskStatus(a, d.phase === "synthesizing" ? "Synthesizing…" : "Searching…", "");
+    },
+    sources: (e: MessageEvent) => {
+      const d = JSON.parse((e as MessageEvent).data);
+      a.citations = d.citations || [];
+      a.sourcesEl.innerHTML = askSourcesHtml(a.citations, []);
+    },
+    delta: (e: MessageEvent) => {
+      const d = JSON.parse((e as MessageEvent).data);
+      a.buffer += d.text || "";
+      a.bodyEl.textContent = a.buffer;
+    },
+    done: (e: MessageEvent) => {
+      const d = JSON.parse((e as MessageEvent).data);
+      a.buffer = d.answer || a.buffer || "";
+      a.bodyEl.textContent = a.buffer;
+      linkifyAskCites(a.bodyEl, a.citations);
+      a.sourcesEl.innerHTML = askSourcesHtml(a.citations, d.cited || []);
+      let statusText: string;
+      if (d.lowConfidence) statusText = "No strong match — closest sources below";
+      else if (d.noHits) statusText = "No matching sources";
+      else statusText = "Answered from " + a.citations.length + " source" + (a.citations.length === 1 ? "" : "s");
+      setAskStatus(a, statusText, "done");
+      askTurns.push({ question: a.question, answer: a.buffer });
+      askActive = null;
+      btn.disabled = false;
+    },
+    app_error: (e: MessageEvent) => {
+      let msg = "Something went wrong.";
+      try { msg = JSON.parse((e as MessageEvent).data).message || msg; } catch {}
+      setAskStatus(a, msg, "error");
+      askActive = null;
+      btn.disabled = false;
+    },
+    end: () => {
+      if (askConn !== conn) return;
+      askConn.close();
+      askConn = null;
+      btn.disabled = false;
+    },
+    onerror: () => {
+      if (askConn !== conn) return;
+      conn.close();
+      askConn = null;
+      askActive = null;
+      btn.disabled = false;
+      if (!a.statusWrap.classList.contains("done") && !a.statusWrap.classList.contains("error")) {
+        setAskStatus(a, "Connection lost", "error");
+      }
+    },
+  });
+  askConn = conn;
+}
+
+document.querySelector(".wiki-conn-tabs")?.addEventListener("click", (e) => {
+  const tab = (e.target as HTMLElement).closest(".wiki-conn-tab");
+  if (tab) switchConnTab(tab.getAttribute("data-conntab") || "conn");
+});
+document.getElementById("wikiAskBtn")?.addEventListener("click", askQuestion);
+document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
+  const ke = e as KeyboardEvent;
+  if (ke.key === "Enter" && !ke.shiftKey) { e.preventDefault(); askQuestion(); }
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────

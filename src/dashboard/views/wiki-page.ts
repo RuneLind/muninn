@@ -274,9 +274,75 @@ export async function renderWikiPage(opts?: {
     .wiki-hub-title { font-size: 13px; color: var(--text-primary); }
     .wiki-hub-sub { font-size: 11px; color: var(--text-dim); }
 
-    /* ── Right: connections pane ───────────────────────── */
+    /* ── Right: connections + ask pane ─────────────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
+    .wiki-conn-tabs { display: flex; border-bottom: 1px solid var(--border-primary); }
+    .wiki-conn-tab {
+      flex: 1;
+      padding: 10px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-conn-tab:hover { color: var(--text-primary); }
+    .wiki-conn-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .wiki-conn-body { flex: 1; overflow-y: auto; padding: 10px; }
+
+    /* Ask tab */
+    .wiki-ask-body { display: flex; flex-direction: column; }
+    .wiki-ask-turns { display: flex; flex-direction: column; gap: 14px; }
+    .wiki-ask-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
+    .wiki-ask-card { border-bottom: 1px solid var(--border-primary); padding-bottom: 12px; }
+    .wiki-ask-card:last-child { border-bottom: none; }
+    .wiki-ask-q { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.45; margin-bottom: 8px; }
+    .wiki-ask-q::before { content: '› '; color: var(--accent); font-weight: 700; }
+    .wiki-ask-status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+    .wiki-ask-status .spinner { width: 12px; height: 12px; border: 2px solid var(--border-secondary); border-top-color: var(--accent); border-radius: 50%; animation: wikiAskSpin 0.7s linear infinite; }
+    @keyframes wikiAskSpin { to { transform: rotate(360deg); } }
+    .wiki-ask-status.done .spinner { display: none; }
+    .wiki-ask-status.error { color: var(--status-error); }
+    .wiki-ask-answer { font-size: 13px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-wrap: break-word; }
+    .wiki-ask-cite {
+      display: inline-block; cursor: pointer; color: var(--accent-light);
+      font-size: 0.78em; font-weight: 600; vertical-align: super; line-height: 0; padding: 0 1px;
+    }
+    .wiki-ask-cite:hover { text-decoration: underline; }
+    .wiki-ask-sources { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+    .wiki-ask-src-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); margin-bottom: 2px; }
+    .wiki-ask-src {
+      display: flex; align-items: center; gap: 7px;
+      padding: 5px 8px; border-radius: 6px;
+      background: var(--bg-surface); border: 1px solid var(--border-primary);
+    }
+    .wiki-ask-src.linked { cursor: pointer; }
+    .wiki-ask-src.linked:hover { border-color: var(--accent); }
+    .wiki-ask-src.uncited { opacity: 0.55; }
+    .wiki-ask-src-num { flex-shrink: 0; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; border-radius: 5px; background: var(--bg-inset); color: var(--text-secondary); font-size: 10px; font-weight: 700; }
+    .wiki-ask-src-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); }
+    .wiki-ask-src-title { flex: 1; font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-ask-src-page { flex-shrink: 0; font-size: 10px; color: var(--accent-light); }
+    .wiki-ask-compose { display: flex; gap: 6px; margin-top: 12px; }
+    .wiki-ask-input {
+      flex: 1; padding: 8px 10px; border-radius: 7px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12.5px; font-family: inherit;
+      resize: none; line-height: 1.4;
+    }
+    .wiki-ask-input:focus { outline: none; border-color: var(--accent); }
+    .wiki-ask-btn {
+      padding: 0 14px; border-radius: 7px; border: none;
+      background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .wiki-ask-btn:hover { opacity: 0.9; }
+    .wiki-ask-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-conn-section { margin-bottom: 14px; }
     .wiki-conn-title { font-size: 12px; color: var(--text-tertiary); font-weight: 600; margin: 4px 4px 6px; }
     .wiki-conn-group { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.4px; margin: 8px 4px 3px; }
@@ -328,9 +394,20 @@ export async function renderWikiPage(opts?: {
     </div>
 
     <div class="wiki-pane wiki-conn-pane">
-      <div class="wiki-conn-head">Connections</div>
+      <div class="wiki-conn-tabs">
+        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
+        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
+      </div>
       <div class="wiki-conn-body" id="connBody">
         <div class="wiki-conn-empty">Select a page to see its connections.</div>
+      </div>
+      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
+        <div class="wiki-ask-turns" id="wikiAskTurns"></div>
+        <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers with citations you can open as pages.</div>
+        <div class="wiki-ask-compose">
+          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
+          <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
+        </div>
       </div>
     </div>
   </div>

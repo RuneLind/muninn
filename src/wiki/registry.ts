@@ -25,6 +25,12 @@ export interface WikiRegistryEntry {
   /** Absolute filesystem root the store scans for this wiki. */
   root: string;
   source: WikiSource;
+  /** Huginn search collections backing this wiki's **Ask** tab (research-style
+   *  Q&A scoped to the wiki). Bot wikis get it from `config.json`'s
+   *  `wikiCollections`; standalone wikis from the optional third `WIKI_EXTRA`
+   *  segment (`name=path=coll1+coll2`). Absent/empty ⇒ the Ask tab has no corpus
+   *  and the ask route returns a clean "no collection connected" error. */
+  collections?: string[];
 }
 
 /** Repo root: import.meta.dir = <root>/src/wiki → two levels up. Relative
@@ -54,35 +60,40 @@ export function buildWikiRegistry(
   const entries: WikiRegistryEntry[] = [];
   const seen = new Set<string>();
 
-  const add = (name: string, root: string, source: WikiSource): boolean => {
+  const add = (name: string, root: string, source: WikiSource, collections?: string[]): boolean => {
     const key = name.toLowerCase();
     if (seen.has(key)) return false;
     seen.add(key);
-    entries.push({ name, root, source });
+    const entry: WikiRegistryEntry = { name, root, source };
+    if (collections && collections.length > 0) entry.collections = collections;
+    entries.push(entry);
     return true;
   };
 
   for (const b of bots) {
-    if (b.wikiDir) add(b.name, b.wikiDir, "bot");
+    if (b.wikiDir) add(b.name, b.wikiDir, "bot", b.wikiCollections);
   }
 
   for (const rawPair of (extraRaw ?? "").split(",")) {
     const pair = rawPair.trim();
     if (!pair) continue;
-    const eq = pair.indexOf("=");
-    if (eq === -1) {
-      log.warn("WIKI_EXTRA: skipping malformed entry {pair} (expected name=path)", { pair });
-      continue;
-    }
-    const name = pair.slice(0, eq).trim();
-    const rawPath = pair.slice(eq + 1).trim();
+    // `name=path` or `name=path=coll1+coll2` (third segment optional). Split on
+    // `=` into at most three logical parts; a `=` inside a path is unsupported
+    // (paths don't contain `=` in practice). The two-segment form is unchanged.
+    const parts = pair.split("=").map((s) => s.trim());
+    const name = parts[0] ?? "";
+    const rawPath = parts[1] ?? "";
+    const rawColls = parts[2];
     if (!name || !rawPath) {
-      log.warn("WIKI_EXTRA: skipping malformed entry {pair} (empty name or path)", { pair });
+      log.warn("WIKI_EXTRA: skipping malformed entry {pair} (expected name=path[=coll+coll])", { pair });
       continue;
     }
+    const collections = rawColls
+      ? rawColls.split("+").map((s) => s.trim()).filter(Boolean)
+      : undefined;
     const absPath = expandTilde(rawPath);
     const root = path.isAbsolute(absPath) ? absPath : path.resolve(repoRoot, absPath);
-    if (!add(name, root, "extra")) {
+    if (!add(name, root, "extra", collections)) {
       log.warn("WIKI_EXTRA: skipping {name} — name collides with an existing wiki", { name });
     }
   }

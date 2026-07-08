@@ -199,6 +199,19 @@ export async function renderResearchPage(): Promise<string> {
       white-space: nowrap;
     }
     .source-rel { flex-shrink: 0; font-size: 11px; color: var(--text-dim); }
+    .source-wiki {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+      text-decoration: none;
+      padding: 2px 7px;
+      border-radius: 5px;
+      border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+      color: var(--accent-light);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+    }
+    .source-wiki:hover { border-color: var(--accent); }
     .source-shelf {
       flex-shrink: 0;
       font-size: 10px;
@@ -712,11 +725,18 @@ export async function renderResearchPage(): Promise<string> {
         var shelf = c.sourceId === 'anthropic'
           ? '<span class="source-shelf" title="A summary you curated onto your shelf">★ your shelf</span>'
           : '';
+        // When the citation's collection maps to a registered wiki and its doc
+        // resolves to a page (server-enriched: wikiName + pageName), offer an
+        // in-reader link. stopPropagation so it doesn't also open the doc panel.
+        var wikiLink = (c.wikiName && c.pageName)
+          ? '<a class="source-wiki" href="/wiki?wiki=' + encodeURIComponent(c.wikiName) + '&page=' + encodeURIComponent(c.pageName) + '" onclick="event.stopPropagation()" title="Open in the wiki reader">📖 wiki</a>'
+          : '';
         return '<div class="source-row' + uncited + '" data-n="' + c.n + '">' +
           '<span class="source-num">' + c.n + '</span>' +
           '<span class="source-badge">' + esc(c.badge || '') + '</span>' +
           '<span class="source-title">' + esc(c.title || c.docId) + '</span>' +
           shelf +
+          wikiLink +
           (rel ? '<span class="source-rel">' + rel + '</span>' : '') +
         '</div>';
       }).join('');

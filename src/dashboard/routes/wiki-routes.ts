@@ -1,5 +1,7 @@
 import path from "node:path";
 import type { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
+import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
@@ -9,7 +11,10 @@ import {
   resolveWikiRequest,
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { discoverAllBots, resolveResearchBot } from "../../bots/config.ts";
+import { streamResearchAnswer } from "../../research/ask.ts";
+import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
 import { getLog } from "../../logging.ts";
 
@@ -31,6 +36,12 @@ export function getWikiRegistry(): WikiRegistryEntry[] {
   return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
 }
 
+/** Test-only: drop the memoized registry so a test can re-derive it from a
+ *  freshly-set `WIKI_EXTRA` (mirrors `__resetWikiCacheForTest` in the store). */
+export function __resetWikiRegistryForTest(): void {
+  cachedRegistry = null;
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -50,7 +61,7 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
  *  `?bot=<name>` is a legacy alias. A bare `/wiki` renders the default wiki
  *  (jarvis if registered, else the first) — unless `WIKI_DIR` is set, which
  *  stays an explicit legacy override with no wiki claimed in the picker. */
-export function registerWikiRoutes(app: Hono): void {
+export function registerWikiRoutes(app: Hono, config: Config): void {
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();
     const wikis = listWikis(registry);
@@ -172,6 +183,72 @@ export function registerWikiRoutes(app: Hono): void {
     if (!(await file.exists())) return c.text("explainer file not found", 404);
     return new Response(file, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  });
+
+  // Wiki Ask tab: research-style cited Q&A scoped to a single wiki's search
+  // collections. Mirrors /api/research/ask (SSE over GET, bounded `history`
+  // replayed from the client) but pins the corpus to the selected wiki's
+  // `collections` and enriches each citation with the matched wiki page name so
+  // the reader can open it in-place. A wiki with no collections (or an unknown
+  // name) returns a clean app_error instead of searching the whole corpus.
+  app.get("/api/wiki/ask", (c) => {
+    const question = (c.req.query("q") ?? "").trim();
+    if (!question) return c.json({ error: "Missing query parameter: q" }, 400);
+
+    const registry = getWikiRegistry();
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    const history = parseResearchHistory(c.req.query("history"));
+    const botConfig = resolveResearchBot(discoverAllBots());
+
+    return streamSSE(c, async (stream) => {
+      let alive = true;
+      const heartbeat = setInterval(() => {
+        if (!alive) return;
+        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
+      }, 30_000);
+      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
+
+      const appError = (message: string) =>
+        stream.writeSSE({ event: "app_error", data: JSON.stringify({ type: "error", message }) });
+
+      try {
+        const collections = entry?.collections ?? [];
+        if (unknownWiki || !entry) {
+          await appError(`No wiki configured for "${wiki || "(none)"}".`);
+        } else if (collections.length === 0) {
+          await appError("No search collection connected for this wiki.");
+        } else if (!botConfig) {
+          await appError("No bots configured to synthesize an answer.");
+        } else {
+          log.info("Wiki ask: wiki={wiki} bot={bot} turn={turn} q={q}", {
+            wiki: entry.name,
+            bot: botConfig.name,
+            turn: history.length + 1,
+            q: question.slice(0, 120),
+          });
+          await streamResearchAnswer(
+            { question, config, botConfig, history, collections },
+            async (event) => {
+              let out: typeof event = event;
+              if (event.type === "sources") {
+                out = { ...event, citations: await enrichCitationsWithPages(event.citations, registry) };
+              }
+              const wireEvent = out.type === "error" ? "app_error" : out.type;
+              await stream.writeSSE({ event: wireEvent, data: JSON.stringify(out) });
+            },
+          );
+        }
+        await stream.writeSSE({ event: "end", data: "{}" });
+      } finally {
+        alive = false;
+        clearInterval(heartbeat);
+      }
     });
   });
 }
