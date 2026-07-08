@@ -272,16 +272,26 @@ header carries a 🌱 Gardener link + pending-draft count badge.
   race returns null → **409**. Endpoints: `POST /api/wiki/proposals/:id/{approve,
   reject}` and `GET /api/wiki/proposals?bot=<name>` (all statuses, newest first).
 - **Apply** (`src/gardener/apply.ts`, DB-free + temp-dir-testable — the route owns
-  the status CAS): re-run path confinement (defense in depth) → staleness check
-  (`update`: sha256(current) must equal `base_hash`; `create`: target must not
-  exist — either mismatch ⇒ `stale`, no write) → `Bun.write` the draft → prepend a
-  `log.md` entry **after the `# Activity Log` header, before the first `## [`**
-  (`## [YYYY-MM-DD] create|update | <Title>` + `- via wiki-gardener, N sources`,
-  Europe/Oslo date; creates log.md if missing) → refresh the wiki-store cache
-  (`getWikiIndex refresh`) → best-effort huginn reindex (collection derived from
-  `target_path`: `life/**` → `wiki-life`, else `wiki`; failures warn, never fail
-  the apply) → mark `applied`. `stale` rows show an explanation and become
-  eligible again on the next weekly run.
+  the status CAS): update mode first resolves the target against the LOCAL wiki
+  index (an unindexed target ⇒ `error` — the row's own path is never trusted as
+  its confinement anchor) → re-run path confinement (defense in depth; reserved
+  basenames `log.md`/`index.md`/`CLAUDE.md` are always rejected, also at the
+  shape-gate) → staleness check (`update`: sha256(current) must equal `base_hash`;
+  `create`: target must not exist — either mismatch ⇒ `stale`, no write) →
+  `Bun.write` the draft → insert a `log.md` entry **after the `# Activity Log`
+  header, before the first `## [`** (`## [YYYY-MM-DD] create|update | <Title>` +
+  `- via wiki-gardener, N sources`, Europe/Oslo date; creates log.md if missing) →
+  refresh the wiki-store cache (`getWikiIndex refresh`) → fire-and-forget huginn
+  reindex (collection derived from `target_path`: `life/**` → `wiki-life`, else
+  `wiki`; failures warn, never fail or delay the apply) → mark `applied`. `stale`
+  rows show an explanation and become eligible again on the next weekly run.
+- **Recovery + races**: apply is **re-run safe** (target already == draft ⇒
+  `applied` without rewriting or duplicating the log entry), and the approve
+  endpoint also accepts rows stuck at `approved` (crash between the approve CAS
+  and the terminal CAS) — re-approving re-runs apply. Applies are **serialized per
+  wiki root** (in-process single-flight), so two create proposals racing to the
+  same `target_path` resolve one `applied` / one `stale`. Every terminal CAS
+  result is checked — a lost CAS is surfaced as 409, never reported as success.
 
 **Config** (per-bot `config.json` `gardener` block, validated at discovery):
 `{ enabled?, minClusterSize?, lookbackDays?, maxProposalsPerRun? }`. Requires the

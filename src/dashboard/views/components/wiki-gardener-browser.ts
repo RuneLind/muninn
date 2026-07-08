@@ -114,18 +114,23 @@ function cardHtml(p: ProposalView): string {
   }
   html += sourcesHtml(p.sourceDocs);
 
-  // Toggles: diff (update only) + preview
+  // Toggles: diff (update only) + preview. Terminal rows (applied/rejected/error)
+  // carry no server-rendered preview/diff — metadata only.
   html += '<div class="gard-toggle-row">';
   if (p.diff && p.diff.length) {
     html += `<button class="gard-toggle" data-toggle="diff">Show diff</button>`;
   }
-  html += `<button class="gard-toggle" data-toggle="preview">Show preview</button>`;
+  if (p.previewHtml) {
+    html += `<button class="gard-toggle" data-toggle="preview">Show preview</button>`;
+  }
   html += "</div>";
 
   if (p.diff && p.diff.length) {
     html += `<div class="gard-collapsible" data-section="diff">${diffHtml(p.diff)}</div>`;
   }
-  html += `<div class="gard-collapsible" data-section="preview"><div class="gard-preview">${p.previewHtml}</div></div>`;
+  if (p.previewHtml) {
+    html += `<div class="gard-collapsible" data-section="preview"><div class="gard-preview">${p.previewHtml}</div></div>`;
+  }
   html += "</div>";
 
   // Actions (draft only)
@@ -182,16 +187,9 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     // Update local state + re-render so the status chip + filters reflect the outcome.
     const p = allProposals.find((x) => x.id === id);
     if (p) {
-      p.status =
-        data.outcome === "applied"
-          ? "applied"
-          : data.outcome === "stale"
-            ? "stale"
-            : data.outcome === "rejected"
-              ? "rejected"
-              : data.outcome === "error"
-                ? "error"
-                : p.status;
+      p.status = ["applied", "stale", "rejected", "error"].includes(data.outcome)
+        ? data.outcome
+        : p.status;
       p.resolvedAt = Date.now();
     }
     render();

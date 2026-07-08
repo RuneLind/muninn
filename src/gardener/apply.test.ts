@@ -6,13 +6,12 @@ import {
   applyWikiProposal,
   insertLogEntry,
   reindexCollectionFor,
+  draftTitle,
   type ApplyDeps,
 } from "./apply.ts";
+import { sha256 } from "./util.ts";
+import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
-
-function sha256(text: string): string {
-  return new Bun.CryptoHasher("sha256").update(text).digest("hex");
-}
 
 const DRAFT_BODY = `---
 type: concept
@@ -91,6 +90,13 @@ describe("reindexCollectionFor", () => {
   });
 });
 
+describe("draftTitle", () => {
+  test("uses frontmatter title, falling back to topicKey", () => {
+    expect(draftTitle(makeProposal())).toBe("Context Compaction");
+    expect(draftTitle(makeProposal({ draft: "no frontmatter here" }))).toBe("context-compaction");
+  });
+});
+
 describe("applyWikiProposal", () => {
   let wikiDir: string;
   let reindexed: string[];
@@ -111,14 +117,7 @@ describe("applyWikiProposal", () => {
         await mkdir(path.dirname(absPath), { recursive: true });
         await writeFile(absPath, content);
       },
-      fileExists: async (absPath) => {
-        try {
-          await readFile(absPath);
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      getWikiIndex: () => buildWikiIndex(wikiDir),
       refreshIndex: async () => {
         refreshed++;
       },
@@ -155,7 +154,7 @@ describe("applyWikiProposal", () => {
     expect(reindexed).toEqual(["wiki"]);
   });
 
-  test("create-mode existing file ⇒ stale, no write", async () => {
+  test("create-mode existing DIFFERENT file ⇒ stale, no write", async () => {
     const target = path.join(wikiDir, "concepts/Context Compaction.md");
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, "pre-existing content");
@@ -165,6 +164,33 @@ describe("applyWikiProposal", () => {
     // Untouched.
     expect(await readFile(target, "utf8")).toBe("pre-existing content");
     expect(reindexed).toEqual([]);
+  });
+
+  test("re-run safety: target already equals the draft ⇒ applied without rewriting", async () => {
+    // Simulates a crash between the file write and the terminal status CAS: the
+    // file is on disk (write happened, incl. trailing newline) but the row is
+    // still `approved`. Re-approving re-runs apply, which must report applied
+    // and not duplicate the log entry.
+    const d = deps();
+    const first = await applyWikiProposal(makeProposal(), d);
+    expect(first.outcome).toBe("applied");
+    const logAfterFirst = await readFile(path.join(wikiDir, "log.md"), "utf8");
+
+    const second = await applyWikiProposal(makeProposal(), d);
+    expect(second.outcome).toBe("applied");
+    const logAfterSecond = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(logAfterSecond).toBe(logAfterFirst);
+    const entries = logAfterSecond.match(/## \[2026-07-08\] create \| Context Compaction/g) ?? [];
+    expect(entries.length).toBe(1);
+  });
+
+  test("crash-after-write simulation: file == draft, no log yet ⇒ applied", async () => {
+    const target = path.join(wikiDir, "concepts/Context Compaction.md");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, `${DRAFT_BODY}\n`); // exactly what apply would write
+
+    const res = await applyWikiProposal(makeProposal(), deps());
+    expect(res.outcome).toBe("applied");
   });
 
   test("update-mode happy path writes + logs an update entry, reindex wiki-life for life/**", async () => {
@@ -193,7 +219,7 @@ describe("applyWikiProposal", () => {
   test("update-mode hash mismatch ⇒ stale, no write", async () => {
     const target = path.join(wikiDir, "concepts/Drifted.md");
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, "the file changed on disk after drafting");
+    await writeFile(target, "---\ntitle: Drifted\n---\n\nthe file changed on disk after drafting");
 
     const proposal = makeProposal({
       mode: "update",
@@ -204,18 +230,34 @@ describe("applyWikiProposal", () => {
 
     const res = await applyWikiProposal(proposal, deps());
     expect(res.outcome).toBe("stale");
-    expect(await readFile(target, "utf8")).toBe("the file changed on disk after drafting");
+    expect(await readFile(target, "utf8")).toContain("the file changed on disk");
     expect(reindexed).toEqual([]);
   });
 
-  test("update-mode target vanished ⇒ stale", async () => {
+  test("update-mode empty-but-existing page with matching baseHash applies", async () => {
+    // Guards the runner-side fix: an empty current page hashes to sha256("").
+    const target = path.join(wikiDir, "concepts/Empty.md");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "");
+
+    const proposal = makeProposal({
+      mode: "update",
+      targetPath: "concepts/Empty.md",
+      baseHash: sha256(""),
+      draft: DRAFT_BODY,
+    });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("applied");
+  });
+
+  test("update-mode target not an indexed page ⇒ error (vanished or bogus target)", async () => {
     const proposal = makeProposal({
       mode: "update",
       targetPath: "concepts/Gone.md",
       baseHash: sha256("whatever"),
     });
     const res = await applyWikiProposal(proposal, deps());
-    expect(res.outcome).toBe("stale");
+    expect(res.outcome).toBe("error");
   });
 
   test("path-confinement rejection at apply (escaping target) ⇒ error, no write", async () => {
@@ -230,5 +272,28 @@ describe("applyWikiProposal", () => {
     const proposal = makeProposal({ kind: "concept", targetPath: "entities/Wrong.md" });
     const res = await applyWikiProposal(proposal, deps());
     expect(res.outcome).toBe("error");
+  });
+
+  test("forbidden basenames (log.md / index.md / CLAUDE.md) are rejected", async () => {
+    for (const targetPath of ["concepts/log.md", "concepts/index.md", "concepts/CLAUDE.md"]) {
+      const res = await applyWikiProposal(makeProposal({ targetPath }), deps());
+      expect(res.outcome).toBe("error");
+    }
+  });
+
+  test("concurrent creates to the same new path: one applied, one stale", async () => {
+    // The DB unique index is on topic_key, not target_path — two proposals with
+    // different topics can race to the same create path. The per-wikiDir
+    // single-flight serializes them: the winner writes, the loser sees the file
+    // (different content) and goes stale.
+    const p1 = makeProposal({ topicKey: "topic-a", draft: DRAFT_BODY });
+    const p2 = makeProposal({
+      topicKey: "topic-b",
+      draft: DRAFT_BODY.replace("A technique for shrinking context.", "Entirely different body."),
+    });
+    const d = deps();
+    const [r1, r2] = await Promise.all([applyWikiProposal(p1, d), applyWikiProposal(p2, d)]);
+    const outcomes = [r1.outcome, r2.outcome].sort();
+    expect(outcomes).toEqual(["applied", "stale"]);
   });
 });

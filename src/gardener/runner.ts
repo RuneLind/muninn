@@ -22,20 +22,10 @@ import { harvestDocs } from "./harvest.ts";
 import { buildClusterPrompt, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
 import { buildDraftPrompt, normalizeDraftOutput, shapeGate } from "./draft.ts";
+import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "runner");
-
-const OSLO_DATE_FMT = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/Oslo",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-function sha256(text: string): string {
-  return new Bun.CryptoHasher("sha256").update(text).digest("hex");
-}
 
 export interface GardenerDeps {
   botName: string;
@@ -71,10 +61,6 @@ export interface GardenerDeps {
   rejectedTopicKeys: () => Promise<string[]>;
   consumedDocIds: () => Promise<Set<string>>;
   insertProposal: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
-}
-
-function todayOslo(now: number): string {
-  return OSLO_DATE_FMT.format(new Date(now));
 }
 
 function sourceDocsFor(cluster: Cluster, byKey: Map<string, HarvestedDoc>): WikiProposalSourceDoc[] {
@@ -166,7 +152,9 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     let baseHash: string | null = null;
     if (target.mode === "update" && target.existingRelPath) {
       currentBody = await deps.readWikiFile(path.join(deps.wikiDir, target.existingRelPath));
-      if (currentBody) baseHash = sha256(currentBody);
+      // Null check, not truthiness — an existing-but-empty page must still get a
+      // baseHash, or apply would always report it stale.
+      if (currentBody !== null) baseHash = sha256(currentBody);
     }
 
     const prompt = buildDraftPrompt({

@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { gardenerClientScript } from "./components/wiki-gardener-client.ts";
-import { escHtml, escAttr } from "./components/escape.ts";
+import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 
 /**
  * /wiki/gardener — the wiki-gardener review gate.
@@ -167,7 +167,7 @@ export async function renderWikiGardenerPage(opts?: {
   </div>
 
   <script>
-    window.__WIKI_BOT__ = ${JSON.stringify(selected)};
+    window.__WIKI_BOT__ = ${escJsonScript(selected)};
   </script>
   <script>
     ${clientScript}

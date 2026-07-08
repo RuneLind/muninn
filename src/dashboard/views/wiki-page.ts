@@ -1,6 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
-import { escHtml, escAttr } from "./components/escape.ts";
+import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -308,7 +308,7 @@ export async function renderWikiPage(opts?: {
   </div>
 
   <script>
-    window.__WIKI_BOT__ = ${JSON.stringify(selected)};
+    window.__WIKI_BOT__ = ${escJsonScript(selected)};
   </script>
   <script>
     ${clientScript}
