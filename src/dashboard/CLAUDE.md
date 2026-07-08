@@ -23,6 +23,8 @@ Routes are split by domain in `routes/`:
 | `research-routes.ts` | `/research` page: cited Q&A over the shelf corpus (`GET /api/research/ask` SSE — retrieve via `researchKnowledge`, synthesize one cited answer; see `src/research/{corpus,answer,ask}.ts`) + the browse `/api/research/*` endpoints. Also the Jira research flow (`/api/research/chat`: trigger analysis, post to chat). |
 | `memsearch-routes.ts` | Memory semantic search (hybrid FTS + vector) |
 | `graph-routes.ts` | Knowledge graph page + wikilink edge extraction across knowledge collections |
+| `wiki-routes.ts` | `/wiki` reader page + `/api/wiki/{pages,page}` (per-bot knowledge-wiki browser) |
+| `wiki-gardener-routes.ts` | `/wiki/gardener` review gate + `/api/wiki/proposals` list & `:id/{approve,reject}` — approve runs the apply step (writes the page into the wiki, updates log.md, reindexes). See `src/gardener/apply.ts` + the "Wiki Gardener" section of `src/watchers/CLAUDE.md`. |
 | `logs-routes.ts` | Log file viewer (JSONL files from LogTape) |
 | `tools-routes.ts` | MCP tool debug: connect, list, call, disconnect |
 | `summaries-routes.ts` | Unified `/summaries` page + `/api/summaries/documents` (merged, source-tagged archive across every summary source — see `src/summaries/sources.ts`) |

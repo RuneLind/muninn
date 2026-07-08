@@ -4,3 +4,9 @@ export function escHtml(s: string | null | undefined): string {
 }
 
 export function escAttr(s: string | null | undefined): string { return escHtml(s); }
+
+/** JSON.stringify safe to embed in an inline `<script>`: escapes `<` so a value
+ *  containing `</script>` (e.g. a reflected `?bot=` query) can't break out. */
+export function escJsonScript(v: unknown): string {
+  return JSON.stringify(v).replace(/</g, "\\u003c");
+}

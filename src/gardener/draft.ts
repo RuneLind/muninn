@@ -161,10 +161,18 @@ function toPosixRel(rel: string): string {
   return rel.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/** Basenames the gardener must never target — wiki infrastructure, not pages. */
+const FORBIDDEN_BASENAMES = new Set(["log.md", "index.md", "claude.md"]);
+
 /**
  * Path confinement: `target_path` must be relative, `..`-free, resolve inside
- * `wikiDir`, end in `.md`, and either (create) sit under the domain+kind's
+ * `wikiDir`, end in `.md`, not be a reserved infrastructure file (log.md,
+ * index.md, CLAUDE.md), and either (create) sit under the domain+kind's
  * expected dir, or (update) exactly equal the existing page's path.
+ *
+ * Confinement is LEXICAL (path normalization + prefix check), not realpath-based:
+ * a symlink inside `wikiDir` pointing elsewhere is outside the threat model — the
+ * vault is user-owned.
  */
 export function isPathConfined(opts: {
   targetPath: string;
@@ -179,6 +187,7 @@ export function isPathConfined(opts: {
   const norm = toPosixRel(path.normalize(targetPath));
   if (norm === ".." || norm.startsWith("../") || norm.split("/").includes("..")) return false;
   if (!norm.toLowerCase().endsWith(".md")) return false;
+  if (FORBIDDEN_BASENAMES.has(norm.split("/").pop()!.toLowerCase())) return false;
 
   const root = path.resolve(wikiDir);
   const abs = path.resolve(root, norm);

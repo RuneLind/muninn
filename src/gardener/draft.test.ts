@@ -44,6 +44,15 @@ describe("isPathConfined", () => {
     expect(isPathConfined({ targetPath: "concepts/Foo.md", wikiDir: WIKI, domain: "ai", kind: "concept", existingRelPath: "concepts/Foo.md" })).toBe(true);
     expect(isPathConfined({ targetPath: "concepts/Other.md", wikiDir: WIKI, domain: "ai", kind: "concept", existingRelPath: "concepts/Foo.md" })).toBe(false);
   });
+
+  test("forbidden infrastructure basenames are rejected in both modes", () => {
+    for (const base of ["log.md", "index.md", "CLAUDE.md", "LOG.md"]) {
+      expect(isPathConfined({ targetPath: `concepts/${base}`, wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+      expect(isPathConfined({ targetPath: `concepts/${base}`, wikiDir: WIKI, domain: "ai", kind: "concept", existingRelPath: `concepts/${base}` })).toBe(false);
+    }
+    // A page merely containing one of the words is fine.
+    expect(isPathConfined({ targetPath: "concepts/Logging.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(true);
+  });
 });
 
 describe("shapeGate", () => {
@@ -71,6 +80,12 @@ describe("shapeGate", () => {
 
   test("rejects a path-confinement violation", () => {
     expect(shapeGate(draftFile(), { ...okOpts, targetPath: "../evil.md" }).ok).toBe(false);
+  });
+
+  test("rejects forbidden infrastructure basenames", () => {
+    expect(shapeGate(draftFile(), { ...okOpts, targetPath: "concepts/log.md" }).ok).toBe(false);
+    expect(shapeGate(draftFile(), { ...okOpts, targetPath: "concepts/index.md" }).ok).toBe(false);
+    expect(shapeGate(draftFile(), { ...okOpts, targetPath: "concepts/CLAUDE.md" }).ok).toBe(false);
   });
 
   test("rejects a type value with a trailing inline comment (prompt regression guard)", () => {

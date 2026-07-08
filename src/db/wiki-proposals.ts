@@ -116,6 +116,94 @@ export async function getWikiProposalById(id: string): Promise<WikiProposal | nu
   return row ? mapRow(row) : null;
 }
 
+/** All of a bot's proposals (every status), newest first — backs the review page. */
+export async function listAllWikiProposals(botName: string): Promise<WikiProposal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM wiki_proposals
+    WHERE bot_name = ${botName}
+    ORDER BY created_at DESC
+  `;
+  return rows.map(mapRow);
+}
+
+/** Count of a bot's proposals still awaiting review (status `draft`) — the /wiki header badge. */
+export async function countDraftWikiProposals(botName: string): Promise<number> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT COUNT(*)::int AS n FROM wiki_proposals
+    WHERE bot_name = ${botName} AND status = 'draft'
+  `;
+  return row ? (row.n as number) : 0;
+}
+
+/**
+ * CAS the given proposal `draft → approved`. Mirrors the dev_runs claim pattern:
+ * the `WHERE … AND status = 'draft'` predicate makes concurrent approvers race
+ * cleanly — exactly one wins the row, the loser gets `null` (surfaced as 409).
+ */
+export async function approveWikiProposal(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'approved'
+    WHERE id = ${id} AND status = 'draft'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/** CAS `draft → rejected` (+ resolved_at). A lost race returns `null` (409). */
+export async function rejectWikiProposal(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'rejected', resolved_at = now()
+    WHERE id = ${id} AND status = 'draft'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * CAS `approved → applied` (+ resolved_at) — the terminal transition after the
+ * apply step wrote the file successfully. Only an `approved` row (the one this
+ * process just claimed) can flip, so a stray double-apply is a no-op.
+ */
+export async function markWikiProposalApplied(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
+    WHERE id = ${id} AND status = 'approved'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * CAS `approved → stale` (+ resolved_at) — the target changed since drafting
+ * (update-mode hash mismatch, or a create-mode path that now exists), so nothing
+ * was written and the topic becomes eligible again on the next weekly run.
+ */
+export async function markWikiProposalStale(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+    WHERE id = ${id} AND status = 'approved'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/** CAS `approved → error` (+ resolved_at) — the apply step failed unexpectedly. */
+export async function markWikiProposalError(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'error', resolved_at = now()
+    WHERE id = ${id} AND status = 'approved'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
 /**
  * TopicKeys with a live (draft/approved) proposal for this bot — the cluster-time
  * skip list guarding "one topic = at most one live proposal".
