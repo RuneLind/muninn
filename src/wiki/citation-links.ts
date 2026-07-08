@@ -20,6 +20,11 @@ import { getWikiIndex, type WikiIndex, type WikiPageMeta } from "./store.ts";
  * Collection name → owning wiki name. The first registry entry that lists a
  * collection wins (registry order: bot wikis before standalone). Collections are
  * matched exactly (they are Huginn collection ids, not free text).
+ *
+ * Assumes collections are 1:1 per wiki — a given collection belongs to exactly
+ * one wiki. `/research` passes the full registry and relies on this first-wins
+ * behavior; `/api/wiki/ask` sidesteps the assumption by passing only the resolved
+ * wiki entry, so a collection shared across wikis still attributes correctly.
  */
 export function buildCollectionWikiMap(registry: WikiRegistryEntry[]): Map<string, string> {
   const map = new Map<string, string>();

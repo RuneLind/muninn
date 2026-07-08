@@ -77,13 +77,26 @@ export function buildWikiRegistry(
   for (const rawPair of (extraRaw ?? "").split(",")) {
     const pair = rawPair.trim();
     if (!pair) continue;
-    // `name=path` or `name=path=coll1+coll2` (third segment optional). Split on
-    // `=` into at most three logical parts; a `=` inside a path is unsupported
-    // (paths don't contain `=` in practice). The two-segment form is unchanged.
-    const parts = pair.split("=").map((s) => s.trim());
-    const name = parts[0] ?? "";
-    const rawPath = parts[1] ?? "";
-    const rawColls = parts[2];
+    // `name=path` or `name=path=coll1+coll2` (third segment optional). The name
+    // is everything before the FIRST `=`. For the remainder we only peel off a
+    // trailing `=coll+coll` segment when the text after the LAST `=` is a bare
+    // collection list (charset `[A-Za-z0-9][A-Za-z0-9+_-]*`, `+` = list sep) or
+    // empty (a trailing `=`) — otherwise the whole remainder is the path, so a
+    // path that itself contains `=` round-trips intact (2-segment form).
+    const eq = pair.indexOf("=");
+    const name = (eq === -1 ? pair : pair.slice(0, eq)).trim();
+    const remainder = eq === -1 ? "" : pair.slice(eq + 1);
+    let rawPath = remainder.trim();
+    let rawColls: string | undefined;
+    const lastEq = remainder.lastIndexOf("=");
+    if (lastEq !== -1) {
+      // Strip whitespace so a spaced-out `a + b` still reads as a collection list.
+      const compact = remainder.slice(lastEq + 1).replace(/\s+/g, "");
+      if (compact === "" || /^[A-Za-z0-9][A-Za-z0-9+_-]*$/.test(compact)) {
+        rawPath = remainder.slice(0, lastEq).trim();
+        rawColls = compact || undefined;
+      }
+    }
     if (!name || !rawPath) {
       log.warn("WIKI_EXTRA: skipping malformed entry {pair} (expected name=path[=coll+coll])", { pair });
       continue;

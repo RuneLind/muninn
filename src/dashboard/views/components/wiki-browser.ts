@@ -623,16 +623,21 @@ function askQuestion(): void {
       setAskStatus(a, d.phase === "synthesizing" ? "Synthesizing…" : "Searching…", "");
     },
     sources: (e: MessageEvent) => {
+      // Guard against a superseded connection whose late events would clobber the
+      // active turn (a follow-up ask swaps askConn before the old stream drains).
+      if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
       a.citations = d.citations || [];
       a.sourcesEl.innerHTML = askSourcesHtml(a.citations, []);
     },
     delta: (e: MessageEvent) => {
+      if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
       a.buffer += d.text || "";
       a.bodyEl.textContent = a.buffer;
     },
     done: (e: MessageEvent) => {
+      if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
       a.buffer = d.answer || a.buffer || "";
       a.bodyEl.textContent = a.buffer;
@@ -646,15 +651,26 @@ function askQuestion(): void {
       askTurns.push({ question: a.question, answer: a.buffer });
       askActive = null;
       btn.disabled = false;
+      // Close on `done`: the turn is complete, so drop the stream now rather than
+      // wait for the `end` sentinel. If the connection dropped between `done` and
+      // `end`, EventSource would auto-reconnect and re-run the whole expensive ask.
+      conn.close();
+      askConn = null;
     },
     app_error: (e: MessageEvent) => {
+      if (askConn !== conn) return;
       let msg = "Something went wrong.";
       try { msg = JSON.parse((e as MessageEvent).data).message || msg; } catch {}
       setAskStatus(a, msg, "error");
       askActive = null;
       btn.disabled = false;
+      // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
+      conn.close();
+      askConn = null;
     },
     end: () => {
+      // Redundant for the wiki client now that `done`/`app_error` close the
+      // stream, but handled defensively in case it arrives first (or alone).
       if (askConn !== conn) return;
       askConn.close();
       askConn = null;

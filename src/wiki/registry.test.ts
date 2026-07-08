@@ -126,6 +126,27 @@ describe("buildWikiRegistry", () => {
     const reg = buildWikiRegistry([], "kode=/abs/k=", REPO);
     expect(reg).toEqual([{ name: "kode", root: "/abs/k", source: "extra" }]);
   });
+
+  test("WIKI_EXTRA 2-segment: '=' inside the path round-trips (tail isn't a collection charset)", () => {
+    // Tail after the last '=' is "b/c" — has a '/', so it's a path, not collections.
+    const reg = buildWikiRegistry([], "weird=/abs/a=b/c", REPO);
+    expect(reg).toEqual([{ name: "weird", root: "/abs/a=b/c", source: "extra" }]);
+    expect(reg[0]!.collections).toBeUndefined();
+  });
+
+  test("WIKI_EXTRA 3-segment: path itself contains '=' AND a trailing collection list", () => {
+    const reg = buildWikiRegistry([], "weird=/abs/a=b=nav-wiki+kode", REPO);
+    expect(reg).toEqual([
+      { name: "weird", root: "/abs/a=b", source: "extra", collections: ["nav-wiki", "kode"] },
+    ]);
+  });
+
+  test("WIKI_EXTRA 3-segment normal: name before first '=', path, +-separated collections", () => {
+    const reg = buildWikiRegistry([], "mimir=../mimir=mimir+notes", REPO);
+    expect(reg).toEqual([
+      { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir", "notes"] },
+    ]);
+  });
 });
 
 const REG: WikiRegistryEntry[] = [

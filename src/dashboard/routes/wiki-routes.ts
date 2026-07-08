@@ -1,6 +1,5 @@
 import path from "node:path";
 import type { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
@@ -13,7 +12,7 @@ import {
 } from "../../wiki/registry.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import { discoverAllBots, resolveResearchBot } from "../../bots/config.ts";
-import { streamResearchAnswer } from "../../research/ask.ts";
+import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
 import { getLog } from "../../logging.ts";
@@ -206,49 +205,37 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const history = parseResearchHistory(c.req.query("history"));
     const botConfig = resolveResearchBot(discoverAllBots());
 
-    return streamSSE(c, async (stream) => {
-      let alive = true;
-      const heartbeat = setInterval(() => {
-        if (!alive) return;
-        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
-      }, 30_000);
-      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
+    // Corpus is pinned to this wiki's collections. Compute the wiki/collection
+    // preflight errors here; the shared helper handles the "no bots" case. The
+    // "no bots" message deliberately lives in the helper (shared with /research).
+    const collections = entry?.collections ?? [];
+    let preflightError: string | null = null;
+    if (unknownWiki || !entry) {
+      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
+    } else if (collections.length === 0) {
+      preflightError = "No search collection connected for this wiki.";
+    }
+    if (!preflightError && entry && botConfig) {
+      log.info("Wiki ask: wiki={wiki} bot={bot} turn={turn} q={q}", {
+        wiki: entry.name,
+        bot: botConfig.name,
+        turn: history.length + 1,
+        q: question.slice(0, 120),
+      });
+    }
 
-      const appError = (message: string) =>
-        stream.writeSSE({ event: "app_error", data: JSON.stringify({ type: "error", message }) });
-
-      try {
-        const collections = entry?.collections ?? [];
-        if (unknownWiki || !entry) {
-          await appError(`No wiki configured for "${wiki || "(none)"}".`);
-        } else if (collections.length === 0) {
-          await appError("No search collection connected for this wiki.");
-        } else if (!botConfig) {
-          await appError("No bots configured to synthesize an answer.");
-        } else {
-          log.info("Wiki ask: wiki={wiki} bot={bot} turn={turn} q={q}", {
-            wiki: entry.name,
-            bot: botConfig.name,
-            turn: history.length + 1,
-            q: question.slice(0, 120),
-          });
-          await streamResearchAnswer(
-            { question, config, botConfig, history, collections },
-            async (event) => {
-              let out: typeof event = event;
-              if (event.type === "sources") {
-                out = { ...event, citations: await enrichCitationsWithPages(event.citations, registry) };
-              }
-              const wireEvent = out.type === "error" ? "app_error" : out.type;
-              await stream.writeSSE({ event: wireEvent, data: JSON.stringify(out) });
-            },
-          );
-        }
-        await stream.writeSSE({ event: "end", data: "{}" });
-      } finally {
-        alive = false;
-        clearInterval(heartbeat);
-      }
+    return streamResearchSSE(c, {
+      question,
+      config,
+      botConfig: botConfig ?? null,
+      history,
+      collections,
+      preflightError,
+      // Pin enrichment to the resolved wiki (not the whole registry) so a
+      // collection shared by two wikis can't attribute a citation to the wrong
+      // one. `entry` is guaranteed set whenever enrich runs (preflightError
+      // covers the unknown-wiki case), so a missing entry disables enrichment.
+      enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
     });
   });
 }

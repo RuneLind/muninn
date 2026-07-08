@@ -1,10 +1,9 @@
 import type { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
 import { discoverAllBots, resolveResearchBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
-import { streamResearchAnswer } from "../../research/ask.ts";
+import { streamResearchSSE } from "./research-sse.ts";
 import { resolveProfile } from "../../research/corpus.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
@@ -79,40 +78,16 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       q: question.slice(0, 120),
     });
 
-    return streamSSE(c, async (stream) => {
-      // Retrieval (≤30s) and a slow first synthesis token can leave a long gap
-      // with no events; a heartbeat keeps the connection alive through any proxy
-      // with a shorter idle window than the dashboard's own 255s (matches the
-      // youtube/anthropic SSE streams). The client has no 'heartbeat' listener,
-      // so these are silently ignored.
-      let alive = true;
-      const heartbeat = setInterval(() => {
-        if (!alive) return;
-        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
-      }, 30_000);
-      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
-      try {
-        await streamResearchAnswer({ question, config, botConfig, history, collections: profile.collections }, async (event) => {
-          // Enrich citations whose collection maps to a registered wiki with the
-          // matched page name, so the research page can link them into the /wiki
-          // reader. Non-wiki collections pass through unchanged.
-          let out: typeof event = event;
-          if (event.type === "sources") {
-            out = { ...event, citations: await enrichCitationsWithPages(event.citations, getWikiRegistry()) };
-          }
-          // EventSource reserves the "error" event for connection-level failures
-          // (it also fires onerror), so a same-named app event gets masked as
-          // "Connection lost" on the client. Emit app errors under a distinct
-          // name; the payload still carries {type:"error", message}.
-          const wireEvent = out.type === "error" ? "app_error" : out.type;
-          await stream.writeSSE({ event: wireEvent, data: JSON.stringify(out) });
-        });
-        // Final sentinel so the client can close the EventSource deterministically.
-        await stream.writeSSE({ event: "end", data: "{}" });
-      } finally {
-        alive = false;
-        clearInterval(heartbeat);
-      }
+    return streamResearchSSE(c, {
+      question,
+      config,
+      botConfig,
+      history,
+      collections: profile.collections,
+      // Enrich citations whose collection maps to a registered wiki with the
+      // matched page name, so the research page can link them into the /wiki
+      // reader. Non-wiki collections pass through unchanged.
+      enrich: (citations) => enrichCitationsWithPages(citations, getWikiRegistry()),
     });
   });
 
