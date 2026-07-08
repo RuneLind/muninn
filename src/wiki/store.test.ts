@@ -153,6 +153,40 @@ describe("buildWikiIndex", () => {
     expect(index.backlinks.get("Creatine") ?? []).toEqual([]);
   });
 
+  test("indexes standalone HTML explainers: <title>, stem fallback, mtime dates, no link graph", async () => {
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+    await Bun.write(
+      path.join(root, "blogs/Deep Dive.html"),
+      "<!doctype html><html><head><title>Deep Dive Explained</title></head><body><h1>Hi</h1></body></html>",
+    );
+    await Bun.write(
+      path.join(root, "blogs/no-title.html"),
+      "<!doctype html><html><body>No title element here</body></html>",
+    );
+    const index = await buildWikiIndex(root);
+    // 4 markdown pages from beforeEach + 2 explainers.
+    expect(index.pages.length).toBe(6);
+
+    const titled = index.resolve("Deep Dive")!;
+    expect(titled.type).toBe("explainer");
+    expect(titled.title).toBe("Deep Dive Explained");
+    expect(titled.domain).toBe("ai");
+    expect(titled.relPath).toBe("blogs/Deep Dive.html");
+    // mtime rendered as yyyy-mm-dd; created === updated (HTML has no frontmatter).
+    expect(titled.created).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(titled.updated).toBe(titled.created!);
+    expect(titled.tags).toEqual([]);
+
+    // Falls back to the filename stem when there's no <title>.
+    const untitled = index.resolve("no-title")!;
+    expect(untitled.type).toBe("explainer");
+    expect(untitled.title).toBe("no-title");
+
+    // Explainers carry no wikilinks and are not link targets/sources.
+    expect(index.outgoing.get("Deep Dive")).toEqual([]);
+    expect(index.backlinks.get("Deep Dive") ?? []).toEqual([]);
+  });
+
   test("readWikiPage returns raw markdown", async () => {
     const index = await buildWikiIndex(root);
     const md = await readWikiPage(index, index.resolve("index")!);

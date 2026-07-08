@@ -16,7 +16,7 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "store");
 
-export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note";
+export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note" | "explainer";
 
 export interface WikiPageMeta {
   /** Canonical page name — the filename stem; what [[wikilinks]] resolve against. */
@@ -154,13 +154,56 @@ function asStringArray(v: string | string[] | undefined): string[] {
   return [];
 }
 
+/** Bounded prefix (bytes) read from an .html explainer to sniff its <title>. */
+const HTML_TITLE_SNIFF_BYTES = 4096;
+const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+
 /**
- * Build the index by scanning every .md file under the wiki root (dot-dirs like
- * .obsidian excluded). ~700 small files — a full scan is well under a second,
- * and results are TTL-cached, so no incremental tracking is needed.
+ * Build metadata for a standalone HTML explainer. Unlike markdown pages these
+ * carry no frontmatter and don't join the wikilink graph — title comes from the
+ * file's <title> (sniffed from a bounded prefix) or the filename stem, and the
+ * created/updated dates are the file's mtime (yyyy-mm-dd). Returns null when the
+ * file is unreadable so the rest of the wiki stays browsable.
+ */
+async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPageMeta | null> {
+  const abs = path.join(root, relPath);
+  const stem = path.basename(relPath, ".html");
+  let title = stem;
+  try {
+    const prefix = await Bun.file(abs).slice(0, HTML_TITLE_SNIFF_BYTES).text();
+    const m = prefix.match(HTML_TITLE_RE);
+    if (m && m[1]!.trim()) title = m[1]!.trim();
+  } catch {
+    return null; // unreadable — skip, keep the rest of the wiki browsable
+  }
+  let date: string | undefined;
+  try {
+    date = (await stat(abs)).mtime.toISOString().slice(0, 10);
+  } catch {
+    date = undefined;
+  }
+  return {
+    name: stem,
+    title,
+    type: "explainer",
+    domain: relPath.startsWith("life/") ? "life" : "ai",
+    tags: [],
+    aliases: [],
+    created: date,
+    updated: date,
+    relPath,
+  };
+}
+
+/**
+ * Build the index by scanning every .md and .html file under the wiki root
+ * (dot-dirs like .obsidian excluded). ~700 small files — a full scan is well
+ * under a second, and results are TTL-cached, so no incremental tracking is
+ * needed. Markdown pages carry frontmatter + [[wikilinks]] and join the link
+ * graph; standalone HTML explainers do not (title/mtime only, no backlinks).
  */
 export async function buildWikiIndex(root: string): Promise<WikiIndex> {
-  const glob = new Bun.Glob("**/*.md");
+  const glob = new Bun.Glob("**/*.{md,html}");
   const relPaths: string[] = [];
   for await (const p of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
@@ -181,6 +224,14 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
 
   await Promise.all(
     relPaths.map(async (relPath) => {
+      if (relPath.endsWith(".html")) {
+        const meta = await buildExplainerMeta(root, relPath);
+        if (meta) {
+          pages.push(meta);
+          rawOutgoing.set(relPath, []); // explainers don't join the link graph
+        }
+        return;
+      }
       let content: string;
       try {
         content = await Bun.file(path.join(root, relPath)).text();

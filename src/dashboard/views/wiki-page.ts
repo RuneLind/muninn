@@ -153,6 +153,7 @@ export async function renderWikiPage(opts?: {
     .type-entity { background: var(--status-cyan); }
     .type-source { background: var(--status-info); }
     .type-analysis { background: var(--status-magenta); }
+    .type-explainer { background: var(--status-warning); }
     .type-note { background: var(--text-dim); }
 
     /* Start-view tabs (Hubs / Timeline) */
@@ -193,6 +194,7 @@ export async function renderWikiPage(opts?: {
     circle.t-entity { fill: var(--status-cyan); }
     circle.t-source { fill: var(--status-info); }
     circle.t-analysis { fill: var(--status-magenta); }
+    circle.t-explainer { fill: var(--status-warning); }
     circle.t-note { fill: var(--text-dim); }
     .wiki-mini-more { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 2px 0 4px; }
 
@@ -213,12 +215,23 @@ export async function renderWikiPage(opts?: {
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
     .badge-source { background: var(--tint-info); color: var(--status-info); }
     .badge-analysis { background: var(--tint-magenta); color: var(--status-magenta); }
+    .badge-explainer { background: var(--tint-warning); color: var(--status-warning); }
     .badge-note { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-life { background: var(--tint-success); color: var(--status-success); }
     .wiki-tag { font-size: 11px; color: var(--text-muted); background: var(--bg-surface); padding: 2px 8px; border-radius: 999px; }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }
+
+    /* Standalone HTML explainer rendered in an iframe filling the article pane. */
+    .wiki-explainer-frame {
+      width: 100%;
+      height: calc(100vh - 200px);
+      min-height: 480px;
+      border: 1px solid var(--border-primary);
+      border-radius: 8px;
+      background: #fff;
+    }
 
     .wiki-article { font-size: 14px; line-height: 1.65; color: var(--text-secondary); }
     .wiki-article h1, .wiki-article h2, .wiki-article h3, .wiki-article h4 { color: var(--text-primary); margin: 20px 0 8px; }
@@ -298,7 +311,7 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-chip-row" id="tagChips"></div>
         <div class="wiki-sort-row">
           <select id="wikiSort" class="wiki-sort">
-            <option value="updated">Recently updated</option>
+            <option value="updated" selected>Recently updated</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
           </select>

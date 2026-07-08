@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Hono } from "hono";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
@@ -137,6 +138,40 @@ export function registerWikiRoutes(app: Hono): void {
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title }),
       outgoing: listings(index.outgoing.get(meta.name)),
       backlinks: listings(index.backlinks.get(meta.name)),
+    });
+  });
+
+  // Raw HTML for a standalone explainer, served for the reader's <iframe>. The
+  // page is resolved strictly via its index entry's stored relPath — the `name`
+  // query is only ever a lookup key, never joined into a filesystem path — and
+  // the resolved path is verified to stay under the wiki root before serving.
+  app.get("/api/wiki/html", async (c) => {
+    const name = c.req.query("name");
+    if (!name) return c.text("name query param required", 400);
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki) return c.text("no wiki configured for that name", 404);
+    const index = await getWikiIndex({ root: entry?.root });
+    if (!index) return c.text("wiki directory not found", 503);
+    const meta = index.resolve(name);
+    if (!meta || meta.type !== "explainer") {
+      return c.text(`no explainer named "${name}"`, 404);
+    }
+    // meta.relPath is the index's own stored path (never user input); still,
+    // defend in depth — confirm the resolved file stays under the wiki root.
+    const rootAbs = path.resolve(index.root);
+    const fileAbs = path.resolve(rootAbs, meta.relPath);
+    if (fileAbs !== rootAbs && !fileAbs.startsWith(rootAbs + path.sep)) {
+      return c.text("invalid path", 400);
+    }
+    const file = Bun.file(fileAbs);
+    if (!(await file.exists())) return c.text("explainer file not found", 404);
+    return new Response(file, {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   });
 }
