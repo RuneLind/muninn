@@ -68,6 +68,123 @@ const filters: WikiFilters = { q: "", domain: "", type: "", tag: "" };
 let startTab: "hubs" | "timeline" = "hubs";
 let tagsExpanded = false;
 
+// ── "What's new" digest (start view) ──────────────────────────────────
+interface WikiDigest {
+  bullets: string;
+  html: string;
+  generatedAt: number;
+  logMtimeMs: number;
+  entryCount: number;
+  fromDate: string;
+  toDate: string;
+}
+/** Cached rendered card body — reused across renderStart calls (tab switches).
+ *  Retained across a failed refresh so a transient error never drops the last
+ *  good digest. */
+let whatsNewHtml: string | null = null;
+/** Guards a single lazy first fetch and any in-flight refresh. */
+let whatsNewLoading = false;
+/** True only while a user-clicked refresh is in flight — lets a refresh supersede
+ *  an in-flight auto-load, while still coalescing duplicate refreshes. */
+let whatsNewRefreshInFlight = false;
+/** Monotonic token so a superseded (older) fetch's late result is ignored. */
+let whatsNewFetchId = 0;
+/** Set once the first auto-load is dispatched; reset on failure so a later tab
+ *  switch re-fetches instead of leaving the card permanently blank. */
+let digestAttempted = false;
+
+/** Build the card's inner HTML from a digest. `d.html` is server-rendered reader
+ *  HTML (wikilinks already anchors) — safe to inject. */
+function buildWhatsNewInner(d: WikiDigest): string {
+  const range = d.fromDate === d.toDate ? d.toDate : d.fromDate + " – " + d.toDate;
+  let gen = "";
+  if (d.generatedAt) {
+    try {
+      gen = "generated " + new Date(d.generatedAt).toLocaleString();
+    } catch {
+      gen = "";
+    }
+  }
+  return (
+    '<div class="wiki-wn-head">' +
+    '<span class="wiki-wn-title">What’s new</span>' +
+    '<span class="wiki-wn-range">' + esc(range) + "</span>" +
+    '<button class="wiki-wn-refresh" id="wikiWhatsNewRefresh" title="Regenerate digest">↻</button>' +
+    "</div>" +
+    '<div class="wiki-wn-bullets">' + d.html + "</div>" +
+    (gen ? '<div class="wiki-wn-gen">' + esc(gen) + "</div>" : "")
+  );
+}
+
+/** Paint an inline error + retry affordance, keeping the last good digest (if
+ *  any) above it so a transient failure never blanks the card. The retry button
+ *  carries the shared `.wiki-wn-refresh`-family class so the delegated click
+ *  handler re-runs a refresh. */
+function renderWhatsNewError(el: HTMLElement, message: string): void {
+  el.innerHTML =
+    (whatsNewHtml || "") +
+    '<div class="wiki-wn-error"><span>' + esc(message) + "</span>" +
+    '<button class="wiki-wn-retry" id="wikiWhatsNewRetry">Retry</button></div>';
+  el.style.display = "";
+}
+
+/** Fetch (or refresh) the digest and paint the card. Hidden entirely when the
+ *  wiki genuinely has no digest (no log.md / no bot, and no error); a failure
+ *  keeps the previous digest and shows a retry instead. A user refresh may
+ *  supersede an in-flight auto-load; duplicate loads/refreshes are coalesced. */
+function loadDigest(refresh: boolean): void {
+  const el = document.getElementById("wikiWhatsNew");
+  if (!el) return;
+  // Coalesce: if a load is in flight, only an explicit refresh (and only when a
+  // refresh isn't already running) may supersede it — everything else is dropped.
+  if (whatsNewLoading && !(refresh && !whatsNewRefreshInFlight)) return;
+  whatsNewLoading = true;
+  if (refresh) whatsNewRefreshInFlight = true;
+  const myId = ++whatsNewFetchId;
+  const spin = document.getElementById("wikiWhatsNewRefresh");
+  if (spin) {
+    spin.classList.add("spinning");
+    (spin as HTMLButtonElement).disabled = true;
+  }
+  let url = "/api/wiki/digest";
+  if (refresh) url += "?refresh=1";
+  fetch(withWiki(url))
+    .then((r) => r.json())
+    .then((data: { digest: WikiDigest | null; error?: string }) => {
+      if (myId !== whatsNewFetchId) return; // superseded by a newer fetch
+      whatsNewLoading = false;
+      whatsNewRefreshInFlight = false;
+      const cur = document.getElementById("wikiWhatsNew");
+      if (!cur) return;
+      if (!data.digest) {
+        if (data.error) {
+          // Generation failed (busy connector / timeout) — keep any prior digest
+          // and offer a retry; allow a later tab switch to re-fetch.
+          digestAttempted = false;
+          renderWhatsNewError(cur, "Couldn’t refresh what’s new — " + data.error + ".");
+          return;
+        }
+        // Genuine "no digest" (no log.md / no bot) — hide the card entirely.
+        whatsNewHtml = null;
+        cur.innerHTML = "";
+        cur.style.display = "none";
+        return;
+      }
+      whatsNewHtml = buildWhatsNewInner(data.digest);
+      cur.innerHTML = whatsNewHtml;
+      cur.style.display = "";
+    })
+    .catch(() => {
+      if (myId !== whatsNewFetchId) return;
+      whatsNewLoading = false;
+      whatsNewRefreshInFlight = false;
+      // Transient network error — reset so a tab switch retries, keep prior data.
+      digestAttempted = false;
+      const cur = document.getElementById("wikiWhatsNew");
+      if (cur) renderWhatsNewError(cur, "Couldn’t load what’s new.");
+    });
+}
+
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
 }
@@ -203,6 +320,7 @@ function renderStart(): void {
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
+    '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
     '<div class="wiki-start-stats">';
   TYPE_ORDER.forEach((t) => {
     if (!counts[t]) return;
@@ -218,6 +336,19 @@ function renderStart(): void {
   document.getElementById("articleWrap")!.innerHTML = html;
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
+  // Re-attach the "what's new" card: reuse the cached render if we have it (tab
+  // switches re-run renderStart), otherwise lazily fetch it once so it never
+  // blocks the page list from rendering.
+  const wn = document.getElementById("wikiWhatsNew");
+  if (wn) {
+    if (whatsNewHtml) {
+      wn.innerHTML = whatsNewHtml;
+      wn.style.display = "";
+    } else if (!digestAttempted) {
+      digestAttempted = true;
+      loadDigest(false);
+    }
+  }
   renderList();
 }
 
@@ -376,6 +507,10 @@ function loadPage(name: string, push: boolean): void {
 // ── Event wiring (all clicks delegated) ───────────────────────────────
 document.body.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
+  if (target.closest && target.closest("#wikiWhatsNewRefresh, #wikiWhatsNewRetry")) {
+    loadDigest(true);
+    return;
+  }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
     startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline") || "hubs";

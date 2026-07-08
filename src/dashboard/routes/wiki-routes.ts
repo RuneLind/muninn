@@ -11,6 +11,12 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import {
+  generateWikiDigest,
+  readLogMtimeMs,
+  newestLogEntryDate,
+  type WikiDigest,
+} from "../../wiki/digest.ts";
 import { discoverAllBots, resolveResearchBot } from "../../bots/config.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
@@ -41,6 +47,53 @@ export function __resetWikiRegistryForTest(): void {
   cachedRegistry = null;
 }
 
+/**
+ * In-memory "what's new" digest cache, keyed by canonical wiki name. A digest is
+ * reused while the wiki's `log.md` mtime is unchanged; `?refresh=1` bypasses it.
+ * An in-process Map is deliberate: digests are cheap to regenerate, the dashboard
+ * restarts rarely, and there's no existing persistent job-store the reader shares
+ * — so a durable store would be over-engineering. A future scheduler that wants
+ * warm digests across restarts can precompute via `generateWikiDigest` and store
+ * the plain-markdown `WikiDigest` itself.
+ */
+const digestCache = new Map<string, WikiDigest>();
+
+/**
+ * Single-flight guard: concurrent generations for the same wiki (two tabs, or an
+ * auto-load racing a manual refresh) share one connector call instead of each
+ * spawning their own. A refresh joins any in-flight generation rather than
+ * starting a second. Keyed by canonical wiki name; the entry is cleared when the
+ * generation settles.
+ */
+const digestInFlight = new Map<string, Promise<WikiDigest | null>>();
+
+/** Test-only: clear the digest cache (and in-flight guard) between cases. */
+export function __resetWikiDigestCacheForTest(): void {
+  digestCache.clear();
+  digestInFlight.clear();
+}
+
+/** Test-only: seed the digest cache to exercise the cache-hit path. */
+export function __seedWikiDigestForTest(name: string, digest: WikiDigest): void {
+  digestCache.set(name, digest);
+}
+
+/**
+ * Cache decision for `/api/wiki/digest`: reuse a cached digest only when it's
+ * present, the caller didn't ask for a refresh, and its `logMtimeMs` still
+ * matches the wiki's current `log.md` mtime. Pure so the mtime-match / refresh-
+ * bypass rules are unit-testable without a connector run.
+ */
+export function digestCacheDecision(
+  cached: WikiDigest | undefined,
+  logMtimeMs: number,
+  refresh: boolean,
+): "hit" | "regenerate" {
+  if (refresh) return "regenerate";
+  if (cached && cached.logMtimeMs === logMtimeMs) return "hit";
+  return "regenerate";
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -53,6 +106,45 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
     linkCount: index.outgoing.get(meta.name)?.length ?? 0,
     backlinkCount: index.backlinks.get(meta.name)?.length ?? 0,
   };
+}
+
+/**
+ * Freshness date (`YYYY-MM-DD`) per wiki, for the picker labels. Derived from the
+ * newest `## [date]` header in `log.md` (a bounded read) so it matches the dates
+ * the digest shows and doesn't drift a day near midnight the way the file's mtime
+ * (a wall-clock instant rendered in UTC) does. Falls back to `log.md`'s mtime
+ * date when no header parses, then to the newest page date from the (TTL-cached)
+ * index when there's no `log.md` at all. Wikis with none are omitted (no date).
+ */
+async function computeWikiFreshness(
+  registry: WikiRegistryEntry[],
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  await Promise.all(
+    registry.map(async (entry) => {
+      const headerDate = await newestLogEntryDate(entry.root);
+      if (headerDate) {
+        out[entry.name] = headerDate;
+        return;
+      }
+      // Log exists but no parseable header — fall back to its mtime date.
+      const mtime = await readLogMtimeMs(entry.root);
+      if (mtime !== null) {
+        out[entry.name] = new Date(mtime).toISOString().slice(0, 10);
+        return;
+      }
+      // No log.md — fall back to the newest page date from the index.
+      const index = await getWikiIndex({ root: entry.root });
+      if (!index) return;
+      let newest = "";
+      for (const p of index.pages) {
+        const d = p.updated || p.created || "";
+        if (d > newest) newest = d;
+      }
+      if (newest) out[entry.name] = newest;
+    }),
+  );
+  return out;
 }
 
 /** Dashboard /wiki reader: a named knowledge wiki as a browsable site.
@@ -85,9 +177,20 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         });
       }
     }
+    // Per-wiki freshness dates for the picker labels (best-effort — a failure
+    // just omits dates, never blocks the reader).
+    let wikiDates: Record<string, string> = {};
+    try {
+      wikiDates = await computeWikiFreshness(registry);
+    } catch (err) {
+      log.warn("Wiki: freshness computation failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return c.html(
       await renderWikiPage({
         wikis,
+        wikiDates,
         selected,
         envOverride,
         unknownWiki,
@@ -116,6 +219,70 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     return c.json({
       pages: index.pages.map((m) => toListing(index, m)),
       scannedAt: index.scannedAt,
+    });
+  });
+
+  // "What's new" digest — an AI summary of the wiki's recent `log.md` entries
+  // for the reader's start view. Cached per wiki while `log.md`'s mtime is
+  // unchanged; `?refresh=1` regenerates unconditionally. A wiki without a
+  // `log.md` (or an unknown/absent wiki) returns `{ digest: null }` so the card
+  // simply stays hidden. The stored digest carries plain-markdown `bullets`; we
+  // render them to reader HTML here (page mentions → in-reader links) so the
+  // persistable form stays render-agnostic.
+  app.get("/api/wiki/digest", async (c) => {
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) return c.json({ digest: null });
+
+    const logMtimeMs = await readLogMtimeMs(entry.root);
+    if (logMtimeMs === null) return c.json({ digest: null });
+
+    const refresh = c.req.query("refresh") === "1";
+    const cached = digestCache.get(entry.name);
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return c.json({ digest: null });
+
+    let digest: WikiDigest | null = cached ?? null;
+    if (digestCacheDecision(cached, logMtimeMs, refresh) === "regenerate") {
+      const botConfig = resolveResearchBot(discoverAllBots());
+      if (!botConfig) return c.json({ digest: null, error: "no bot available to summarize" });
+      // Single-flight: reuse an in-flight generation for this wiki (a second tab
+      // or a refresh racing the auto-load joins it) rather than spawning a
+      // second connector call.
+      let pending = digestInFlight.get(entry.name);
+      if (!pending) {
+        pending = generateWikiDigest(entry.root, index, config, botConfig).finally(() => {
+          digestInFlight.delete(entry.name);
+        });
+        digestInFlight.set(entry.name, pending);
+      }
+      try {
+        digest = await pending;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn("Wiki digest generation failed for {wiki}: {error}", {
+          wiki: entry.name,
+          error: msg,
+        });
+        const timedOut = /time?d?\s*out|timeout/i.test(msg);
+        return c.json({
+          digest: null,
+          error: timedOut ? "digest generation timed out" : "digest generation failed",
+        });
+      }
+      if (!digest) return c.json({ digest: null });
+      digestCache.set(entry.name, digest);
+    }
+
+    if (!digest) return c.json({ digest: null });
+    // Render the stored markdown bullets to reader HTML (wikilinks → in-reader
+    // page anchors) at response time — cheap, and keeps the cached form plain.
+    return c.json({
+      digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve) },
     });
   });
 

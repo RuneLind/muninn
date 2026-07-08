@@ -3,8 +3,15 @@ import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { registerWikiRoutes, __resetWikiRegistryForTest } from "./wiki-routes.ts";
+import {
+  registerWikiRoutes,
+  __resetWikiRegistryForTest,
+  __resetWikiDigestCacheForTest,
+  __seedWikiDigestForTest,
+  digestCacheDecision,
+} from "./wiki-routes.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -119,5 +126,95 @@ describe("GET /api/wiki/ask — resolution errors", () => {
     const body = await res.text();
     expect(body).toContain("event: app_error");
     expect(body).toContain("No wiki configured");
+  });
+});
+
+describe("digestCacheDecision", () => {
+  const digest = { logMtimeMs: 1000 } as WikiDigest;
+
+  test("refresh always regenerates, even on a matching mtime", () => {
+    expect(digestCacheDecision(digest, 1000, true)).toBe("regenerate");
+  });
+
+  test("hit when cached and mtime matches", () => {
+    expect(digestCacheDecision(digest, 1000, false)).toBe("hit");
+  });
+
+  test("regenerate when mtime differs (log.md changed)", () => {
+    expect(digestCacheDecision(digest, 2000, false)).toBe("regenerate");
+  });
+
+  test("regenerate when nothing cached", () => {
+    expect(digestCacheDecision(undefined, 1000, false)).toBe("regenerate");
+  });
+});
+
+/**
+ * `/api/wiki/digest` route seams that don't require a connector run: a wiki
+ * without a `log.md` yields `{ digest: null }`, and a pre-seeded cache whose
+ * `logMtimeMs` matches the on-disk `log.md` is served straight back (cache hit,
+ * no generation). Uses a `WIKI_EXTRA` temp wiki so there IS a registry entry to
+ * resolve (the digest route needs one — the bare `WIKI_DIR` override never
+ * claims a wiki). Cache-hit returns the seeded digest, proving no regeneration.
+ */
+describe("GET /api/wiki/digest", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-digest-route-"));
+    await Bun.write(
+      path.join(root, "knowledge-graph.md"),
+      "---\ntype: concept\ntitle: knowledge-graph\n---\n\nBody.",
+    );
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `digwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWikiDigestCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWikiDigestCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("wiki without log.md → { digest: null }", async () => {
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ digest: null });
+  });
+
+  test("cache hit: seeded digest with matching mtime is served (bullets rendered to html)", async () => {
+    await Bun.write(
+      path.join(root, "log.md"),
+      "# Log\n\n## [2026-05-01] note | Init\n\nBody mentions [[knowledge-graph]].",
+    );
+    const mtime = (await readLogMtimeMs(root))!;
+    const seeded: WikiDigest = {
+      bullets: "- Grew [[knowledge-graph]]",
+      generatedAt: 42,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-05-01",
+      toDate: "2026-05-01",
+    };
+    __seedWikiDigestForTest("digwiki", seeded);
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { digest: (WikiDigest & { html: string }) | null };
+    expect(body.digest).not.toBeNull();
+    // Same seeded generatedAt ⇒ not regenerated.
+    expect(body.digest!.generatedAt).toBe(42);
+    expect(body.digest!.bullets).toBe("- Grew [[knowledge-graph]]");
+    // The wikilink resolved to a real page ⇒ rendered as an in-reader anchor.
+    expect(body.digest!.html).toContain('data-wiki-page="knowledge-graph"');
   });
 });

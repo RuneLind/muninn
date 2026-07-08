@@ -24,6 +24,8 @@ import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
  */
 export async function renderWikiPage(opts?: {
   wikis?: string[];
+  /** Per-wiki freshness date (`YYYY-MM-DD`) shown in the picker label. */
+  wikiDates?: Record<string, string>;
   selected?: string;
   envOverride?: boolean;
   unknownWiki?: boolean;
@@ -32,6 +34,7 @@ export async function renderWikiPage(opts?: {
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
+  const wikiDates = opts?.wikiDates ?? {};
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
   const unknownWiki = opts?.unknownWiki ?? false;
@@ -53,7 +56,13 @@ export async function renderWikiPage(opts?: {
         (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
         (unknownSel ? `<option value="" selected disabled>${escHtml(selected)}</option>` : "") +
         wikis
-          .map((w) => `<option value="${escAttr(w)}"${!envOverride && !unknownSel && w === selected ? " selected" : ""}>${escHtml(w)}</option>`)
+          .map((w) => {
+            // Annotate the label (not the value — the client navigates by value)
+            // with the wiki's freshness date when known: `mimir · 2026-07-08`.
+            const date = wikiDates[w];
+            const label = date ? `${w} · ${date}` : w;
+            return `<option value="${escAttr(w)}"${!envOverride && !unknownSel && w === selected ? " selected" : ""}>${escHtml(label)}</option>`;
+          })
           .join("") +
         `</select>`
       : "";
@@ -273,6 +282,52 @@ export async function renderWikiPage(opts?: {
     .wiki-hub-card:hover { border-color: var(--accent); }
     .wiki-hub-title { font-size: 13px; color: var(--text-primary); }
     .wiki-hub-sub { font-size: 11px; color: var(--text-dim); }
+
+    /* "What's new" digest card (start view) */
+    .wiki-whatsnew {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin: 18px 0 6px;
+    }
+    .wiki-wn-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .wiki-wn-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+    .wiki-wn-range { font-size: 11.5px; color: var(--text-dim); }
+    .wiki-wn-refresh {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-wn-refresh:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-wn-refresh:disabled { opacity: 0.5; cursor: default; }
+    .wiki-wn-refresh.spinning { animation: wikiWnSpin 0.7s linear infinite; }
+    @keyframes wikiWnSpin { to { transform: rotate(360deg); } }
+    .wiki-wn-bullets { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+    .wiki-wn-bullets ul { margin: 4px 0 4px 20px; }
+    .wiki-wn-bullets li { margin: 3px 0; }
+    .wiki-wn-bullets p { margin: 4px 0; }
+    .wiki-wn-gen { font-size: 10.5px; color: var(--text-faint); margin-top: 8px; }
+    .wiki-wn-error { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+    .wiki-wn-retry {
+      background: transparent;
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1;
+      padding: 3px 9px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-wn-retry:hover { color: var(--accent-light); border-color: var(--accent); }
 
     /* ── Right: connections + ask pane ─────────────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
