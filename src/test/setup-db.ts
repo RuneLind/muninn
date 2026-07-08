@@ -4,6 +4,7 @@ import { initDb, getDb } from "../db/client.ts";
 const TEST_DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn_test";
 
 const ALL_TABLES = [
+  "wiki_proposals",
   "research_citations",
   "search_signals",
   "traces",

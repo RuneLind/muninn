@@ -311,7 +311,7 @@ CREATE TABLE watchers (
   user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   name TEXT NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic')),
+  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic', 'wiki-gardener')),
   config JSONB NOT NULL DEFAULT '{}',
   interval_ms INTEGER NOT NULL DEFAULT 300000,  -- 5 min default
   enabled BOOLEAN NOT NULL DEFAULT true,
@@ -695,6 +695,29 @@ CREATE TRIGGER message_feedback_updated_at
   BEFORE UPDATE ON message_feedback
   FOR EACH ROW
   EXECUTE FUNCTION update_message_feedback_updated_at();
+
+-- ============================================================================
+-- Wiki-gardener proposals: drafted knowledge-wiki pages awaiting review
+-- (from migration 057-wiki-proposals.sql).
+-- ============================================================================
+CREATE TABLE wiki_proposals (
+  id            BIGSERIAL PRIMARY KEY,
+  bot_name      TEXT NOT NULL,
+  topic_key     TEXT NOT NULL,           -- stable slug for dedup across runs
+  kind          TEXT NOT NULL,           -- concept | entity
+  mode          TEXT NOT NULL,           -- create | update
+  target_path   TEXT NOT NULL,           -- wiki-relative, e.g. concepts/Context Compaction.md
+  base_hash     TEXT,                    -- sha256 of target file at draft time (update mode)
+  draft         TEXT NOT NULL,           -- full file body incl. frontmatter
+  source_docs   JSONB NOT NULL,          -- [{collection, docId, title, url}]
+  rationale     TEXT,
+  status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at   TIMESTAMPTZ
+);
+
+CREATE INDEX ON wiki_proposals (bot_name, status);
+CREATE UNIQUE INDEX ON wiki_proposals (bot_name, topic_key) WHERE status IN ('draft', 'approved');
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

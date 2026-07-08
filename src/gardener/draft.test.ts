@@ -1,0 +1,93 @@
+import { test, expect, describe } from "bun:test";
+import { shapeGate, isPathConfined, buildDraftPrompt } from "./draft.ts";
+import type { Cluster, HarvestedDoc } from "./types.ts";
+
+const WIKI = "/tmp/wiki-root";
+
+function draftFile(opts: { type?: string; title?: string; body?: string } = {}): string {
+  const type = opts.type ?? "concept";
+  const title = opts.title === undefined ? "Context Compaction" : opts.title;
+  const titleLine = opts.title === undefined || opts.title ? `title: ${title}\n` : "";
+  const body = opts.body === undefined ? "# Context Compaction\n\nLead.\n\n## See also\n- [[X]]" : opts.body;
+  return `---\ntype: ${type}\n${titleLine}aliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: []\n---\n\n${body}`;
+}
+
+describe("isPathConfined", () => {
+  test("accepts a create path in the domain+kind dir", () => {
+    expect(isPathConfined({ targetPath: "concepts/Foo.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(true);
+    expect(isPathConfined({ targetPath: "life/concepts/Foo.md", wikiDir: WIKI, domain: "life", kind: "concept" })).toBe(true);
+    expect(isPathConfined({ targetPath: "entities/Bar.md", wikiDir: WIKI, domain: "ai", kind: "entity" })).toBe(true);
+  });
+
+  test("rejects `..` traversal", () => {
+    expect(isPathConfined({ targetPath: "../escape.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+    expect(isPathConfined({ targetPath: "concepts/../../escape.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+  });
+
+  test("rejects an absolute path", () => {
+    expect(isPathConfined({ targetPath: "/etc/passwd.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+  });
+
+  test("rejects the wrong dir for the kind", () => {
+    expect(isPathConfined({ targetPath: "entities/Foo.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+  });
+
+  test("rejects a domain mismatch (life cluster into the ai subtree)", () => {
+    expect(isPathConfined({ targetPath: "concepts/Foo.md", wikiDir: WIKI, domain: "life", kind: "concept" })).toBe(false);
+  });
+
+  test("rejects a non-.md path", () => {
+    expect(isPathConfined({ targetPath: "concepts/Foo.txt", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(false);
+  });
+
+  test("update mode: only the exact existing path passes", () => {
+    expect(isPathConfined({ targetPath: "concepts/Foo.md", wikiDir: WIKI, domain: "ai", kind: "concept", existingRelPath: "concepts/Foo.md" })).toBe(true);
+    expect(isPathConfined({ targetPath: "concepts/Other.md", wikiDir: WIKI, domain: "ai", kind: "concept", existingRelPath: "concepts/Foo.md" })).toBe(false);
+  });
+});
+
+describe("shapeGate", () => {
+  const okOpts = { kind: "concept" as const, targetPath: "concepts/Context Compaction.md", wikiDir: WIKI, domain: "ai" as const };
+
+  test("accepts a well-formed create draft", () => {
+    expect(shapeGate(draftFile(), okOpts)).toEqual({ ok: true });
+  });
+
+  test("rejects missing frontmatter", () => {
+    expect(shapeGate("# just a body", okOpts).ok).toBe(false);
+  });
+
+  test("rejects a type/kind mismatch", () => {
+    expect(shapeGate(draftFile({ type: "entity" }), okOpts).ok).toBe(false);
+  });
+
+  test("rejects a missing title", () => {
+    expect(shapeGate(draftFile({ title: "" }), okOpts).ok).toBe(false);
+  });
+
+  test("rejects an empty body", () => {
+    expect(shapeGate(draftFile({ body: "" }), okOpts).ok).toBe(false);
+  });
+
+  test("rejects a path-confinement violation", () => {
+    expect(shapeGate(draftFile(), { ...okOpts, targetPath: "../evil.md" }).ok).toBe(false);
+  });
+});
+
+describe("buildDraftPrompt", () => {
+  const cluster: Cluster = { topicKey: "t", kind: "concept", domain: "ai", label: "T", docIds: ["c/1"] };
+  const docs: HarvestedDoc[] = [{ key: "c/1", collection: "c", id: "1", url: "https://x", title: "Doc", text: "summary body" }];
+
+  test("create prompt inlines summaries as untrusted", () => {
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-07-08" });
+    expect(p).toContain("UNTRUSTED source material");
+    expect(p).toContain("https://x");
+    expect(p).not.toContain("BEGIN CURRENT PAGE");
+  });
+
+  test("update prompt inlines the current page body", () => {
+    const p = buildDraftPrompt({ cluster, mode: "update", docs, today: "2026-07-08", currentBody: "existing content" });
+    expect(p).toContain("BEGIN CURRENT PAGE");
+    expect(p).toContain("existing content");
+  });
+});

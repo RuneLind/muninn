@@ -7,6 +7,7 @@ import { checkEmail } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
+import { checkWikiGardener } from "./wiki-gardener.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -222,7 +223,11 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // URLs, so id-dedup is already complete; running content-hash on it only
       // causes false drops (two distinct commits like "Update README" fingerprint
       // identically) and doubles slot use in the 400-cap window. Skip it here.
-      const skipContentHash = watcher.type === "anthropic";
+      // Anthropic ids are stable canonical URLs; the wiki-gardener alert id is
+      // already per-run-unique (embeds the persisted proposal ids) and its
+      // summary names the same topic labels across runs — content-hash dedup
+      // would false-drop a legitimate weekly notification. Skip it for both.
+      const skipContentHash = watcher.type === "anthropic" || watcher.type === "wiki-gardener";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
@@ -349,6 +354,8 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
       return await checkX(watcher, cwd, botName);
     case "anthropic":
       return await checkAnthropic(watcher);
+    case "wiki-gardener":
+      return await checkWikiGardener(watcher, cwd, botName);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -357,7 +364,7 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";
