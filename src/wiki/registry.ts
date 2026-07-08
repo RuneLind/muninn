@@ -10,6 +10,7 @@
  * spinning up bot discovery.
  */
 
+import os from "node:os";
 import path from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import { getLog } from "../logging.ts";
@@ -29,6 +30,14 @@ export interface WikiRegistryEntry {
 /** Repo root: import.meta.dir = <root>/src/wiki → two levels up. Relative
  *  `WIKI_EXTRA` paths resolve against this, same base the store's default uses. */
 const REPO_ROOT = path.resolve(import.meta.dir, "../../");
+
+/** Expand a leading `~`/`~/` in a `WIKI_EXTRA` path to the user's home dir —
+ *  otherwise `path.resolve(repoRoot, "~/x")` yields the literal `<repo>/~/x`. */
+function expandTilde(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
 
 /**
  * Build the wiki registry from discovered bots + the raw `WIKI_EXTRA` env string.
@@ -71,7 +80,8 @@ export function buildWikiRegistry(
       log.warn("WIKI_EXTRA: skipping malformed entry {pair} (empty name or path)", { pair });
       continue;
     }
-    const root = path.isAbsolute(rawPath) ? rawPath : path.resolve(repoRoot, rawPath);
+    const absPath = expandTilde(rawPath);
+    const root = path.isAbsolute(absPath) ? absPath : path.resolve(repoRoot, absPath);
     if (!add(name, root, "extra")) {
       log.warn("WIKI_EXTRA: skipping {name} — name collides with an existing wiki", { name });
     }
@@ -80,28 +90,18 @@ export function buildWikiRegistry(
   return entries;
 }
 
-export interface WikiRootResolution {
-  /** Explicit root to scan. Undefined = store default (WIKI_DIR env → jarvis). */
-  root?: string;
-  /** True when a wiki name was given but isn't in the registry. */
-  unknownWiki?: boolean;
-}
-
 /**
- * Resolve the wiki root for a requested name:
- *   - no/blank name → `{}` (store falls back to `WIKI_DIR` env → jarvis default).
- *   - known wiki → `{ root }`.
- *   - unknown wiki → `{ unknownWiki: true }`.
+ * The single name-matching rule shared by every resolver + route: case-insensitive,
+ * whitespace-trimmed lookup of a registry entry by name. Returns undefined for a
+ * blank name or a name no entry carries.
  */
-export function resolveWikiRoot(
+export function findWiki(
   registry: WikiRegistryEntry[],
   name: string | undefined,
-): WikiRootResolution {
+): WikiRegistryEntry | undefined {
   const wanted = name?.trim();
-  if (!wanted) return {};
-  const entry = registry.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
-  if (!entry) return { unknownWiki: true };
-  return { root: entry.root };
+  if (!wanted) return undefined;
+  return registry.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
 }
 
 /** Names of every registered wiki (bot + extra) — populates the reader's picker. */
@@ -110,12 +110,17 @@ export function listWikis(registry: WikiRegistryEntry[]): string[] {
 }
 
 /**
- * The wiki a bare `/wiki` renders: jarvis if registered, else the first
- * registry entry, else undefined (no wiki at all). Derived from the actual
- * registry so the picker's selection and rendered content can't disagree.
+ * The entry a bare `/wiki` renders: jarvis if registered, else the first registry
+ * entry, else undefined (no wiki at all). Derived from the actual registry so the
+ * picker's selection, the scanned root, and rendered content can't disagree.
  */
+export function defaultWikiEntry(registry: WikiRegistryEntry[]): WikiRegistryEntry | undefined {
+  return findWiki(registry, "jarvis") ?? registry[0];
+}
+
+/** Name of the default wiki (see `defaultWikiEntry`) — undefined for an empty registry. */
 export function defaultWiki(registry: WikiRegistryEntry[]): string | undefined {
-  return registry.find((e) => e.name.toLowerCase() === "jarvis")?.name ?? registry[0]?.name;
+  return defaultWikiEntry(registry)?.name;
 }
 
 export interface WikiRequestResolution {
@@ -123,19 +128,26 @@ export interface WikiRequestResolution {
   wiki: string;
   /** True when a bare `/wiki` is served from the legacy `WIKI_DIR` env override. */
   envOverride: boolean;
+  /** The resolved registry entry (name/root/source) when the wiki is known —
+   *  undefined for an unknown name or the `WIKI_DIR` env-override case. Lets routes
+   *  read root + source without re-finding. */
+  entry?: WikiRegistryEntry;
+  /** True when a name was given (via `wiki` or `bot`) but no entry matched it. */
+  unknownWiki: boolean;
 }
 
 /**
- * Resolve which wiki the `/wiki` reader page selects (picker + client `?wiki=`).
- * `?wiki=` wins over the legacy `?bot=` alias when both are present:
- *   - a name (from `wiki`, else `bot`) → canonical registry name (case-corrected)
- *     so the picker's `selected` matches the store's case-insensitive lookup. An
- *     unknown name is echoed back so the client re-queries it and lands on the
- *     empty state (not a silent default).
+ * The one place the `?wiki=`/`?bot=` precedence and registry lookup live — every
+ * reader/gardener route resolves through this and reads back `entry` (root +
+ * source) instead of re-finding. `?wiki=` wins over the legacy `?bot=` alias:
+ *   - a name (from `wiki`, else `bot`) → the matching entry (canonical name
+ *     case-corrected so the picker's `selected` agrees with the lookup). An
+ *     unknown name is echoed back with `unknownWiki: true` so the client
+ *     re-queries it and lands on the empty state (not a silent default).
  *   - bare `/wiki` with `WIKI_DIR` set → `{ wiki: "", envOverride: true }`: the
- *     legacy env override stays explicit and the picker claims no wiki.
- *   - bare `/wiki` otherwise → the `defaultWiki` (or "" when the registry is
- *     empty, so the store's own env/hardcoded fallback still serves content).
+ *     legacy env override stays explicit, no entry, and the picker claims no wiki.
+ *   - bare `/wiki` otherwise → the `defaultWikiEntry` (or `{ wiki: "" }` when the
+ *     registry is empty, so the store's own env/hardcoded fallback serves content).
  */
 export function resolveWikiRequest(
   registry: WikiRegistryEntry[],
@@ -145,9 +157,10 @@ export function resolveWikiRequest(
 ): WikiRequestResolution {
   const wanted = rawWiki?.trim() || rawBot?.trim();
   if (wanted) {
-    const entry = registry.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
-    return { wiki: entry ? entry.name : wanted, envOverride: false };
+    const entry = findWiki(registry, wanted);
+    return { wiki: entry ? entry.name : wanted, envOverride: false, entry, unknownWiki: !entry };
   }
-  if (envWikiDir && envWikiDir.trim()) return { wiki: "", envOverride: true };
-  return { wiki: defaultWiki(registry) ?? "", envOverride: false };
+  if (envWikiDir && envWikiDir.trim()) return { wiki: "", envOverride: true, unknownWiki: false };
+  const entry = defaultWikiEntry(registry);
+  return { wiki: entry?.name ?? "", envOverride: false, entry, unknownWiki: false };
 }

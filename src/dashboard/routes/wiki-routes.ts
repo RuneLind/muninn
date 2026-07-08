@@ -4,7 +4,6 @@ import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from ".
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
   buildWikiRegistry,
-  resolveWikiRoot,
   listWikis,
   resolveWikiRequest,
   type WikiRegistryEntry,
@@ -21,13 +20,14 @@ const log = getLog("dashboard", "wiki");
  * re-runs bot discovery and re-logs config/env-validation warnings on each click.
  */
 let cachedRegistry: WikiRegistryEntry[] | null = null;
-function getRegistry(): WikiRegistryEntry[] {
-  return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
-}
 
-/** The requested wiki name: `?wiki=` wins, `?bot=` is the legacy alias. */
-function requestedWiki(wiki: string | undefined, bot: string | undefined): string | undefined {
-  return wiki?.trim() ? wiki : bot;
+/**
+ * The full wiki registry (bot wikis + `WIKI_EXTRA` standalone wikis), memoized.
+ * Exported so the gardener shares this one seam (filtering to `source === "bot"`)
+ * instead of re-running bot discovery + env parsing behind a second memo.
+ */
+export function getWikiRegistry(): WikiRegistryEntry[] {
+  return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
 }
 
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
@@ -51,17 +51,16 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
  *  stays an explicit legacy override with no wiki claimed in the picker. */
 export function registerWikiRoutes(app: Hono): void {
   app.get("/wiki", async (c) => {
-    const registry = getRegistry();
+    const registry = getWikiRegistry();
     const wikis = listWikis(registry);
-    const { wiki: selected, envOverride } = resolveWikiRequest(
+    const { wiki: selected, envOverride, entry, unknownWiki } = resolveWikiRequest(
       registry,
       c.req.query("wiki"),
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
     // The gardener is a bot feature — only bot-source wikis carry proposals.
-    const isBotWiki =
-      registry.find((e) => e.name.toLowerCase() === selected.toLowerCase())?.source === "bot";
+    const isBotWiki = entry?.source === "bot";
     // Pending-draft count for the selected bot wiki — drives the "Gardener"
     // header badge. Best-effort: a DB hiccup must not take the reader down.
     let gardenerPending = 0;
@@ -76,19 +75,29 @@ export function registerWikiRoutes(app: Hono): void {
       }
     }
     return c.html(
-      await renderWikiPage({ wikis, selected, envOverride, gardenerPending, gardener: isBotWiki }),
+      await renderWikiPage({
+        wikis,
+        selected,
+        envOverride,
+        unknownWiki,
+        gardenerPending,
+        gardener: isBotWiki,
+      }),
     );
   });
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
   app.get("/api/wiki/pages", async (c) => {
-    const { root, unknownWiki } = resolveWikiRoot(
-      getRegistry(),
-      requestedWiki(c.req.query("wiki"), c.req.query("bot")),
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
     );
     if (unknownWiki) {
       return c.json({ pages: [], scannedAt: null, error: "no wiki configured for that name" });
     }
+    const root = entry?.root;
     const index = await getWikiIndex({ root, refresh: c.req.query("refresh") === "1" });
     if (!index) {
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
@@ -103,12 +112,14 @@ export function registerWikiRoutes(app: Hono): void {
   app.get("/api/wiki/page", async (c) => {
     const name = c.req.query("name");
     if (!name) return c.json({ error: "name query param required" }, 400);
-    const { root, unknownWiki } = resolveWikiRoot(
-      getRegistry(),
-      requestedWiki(c.req.query("wiki"), c.req.query("bot")),
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
     );
     if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
-    const index = await getWikiIndex({ root });
+    const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
     const meta = index.resolve(name);
     if (!meta) return c.json({ error: `no wiki page named "${name}"` }, 404);

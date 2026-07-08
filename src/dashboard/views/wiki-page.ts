@@ -26,6 +26,7 @@ export async function renderWikiPage(opts?: {
   wikis?: string[];
   selected?: string;
   envOverride?: boolean;
+  unknownWiki?: boolean;
   gardenerPending?: number;
   gardener?: boolean;
 }): Promise<string> {
@@ -33,18 +34,26 @@ export async function renderWikiPage(opts?: {
   const wikis = opts?.wikis ?? [];
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
+  const unknownWiki = opts?.unknownWiki ?? false;
   const gardenerPending = opts?.gardenerPending ?? 0;
   const gardener = opts?.gardener ?? true;
-  const gardenerHref = `/wiki/gardener${selected ? "?bot=" + encodeURIComponent(selected) : ""}`;
+  const gardenerHref = `/wiki/gardener${selected ? "?wiki=" + encodeURIComponent(selected) : ""}`;
   const gardenerLink = gardener
     ? `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
     : "";
+  // An unknown `?wiki=` matches no real option — render its raw name as a
+  // disabled, selected placeholder so the picker and the "No wiki named X" pane
+  // agree instead of the browser highlighting the first wiki. Show the picker for
+  // any non-empty registry so a single-wiki deploy with a typo'd `?wiki=` still
+  // has an in-page way back.
+  const unknownSel = unknownWiki && !!selected && !envOverride;
   const wikiSelector =
-    wikis.length > 1
+    wikis.length >= 1
       ? `<select id="wikiSelect" class="wiki-sort" aria-label="Wiki">` +
         (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
+        (unknownSel ? `<option value="" selected disabled>${escHtml(selected)}</option>` : "") +
         wikis
-          .map((w) => `<option value="${escAttr(w)}"${!envOverride && w === selected ? " selected" : ""}>${escHtml(w)}</option>`)
+          .map((w) => `<option value="${escAttr(w)}"${!envOverride && !unknownSel && w === selected ? " selected" : ""}>${escHtml(w)}</option>`)
           .join("") +
         `</select>`
       : "";

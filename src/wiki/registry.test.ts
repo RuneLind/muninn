@@ -1,7 +1,9 @@
 import { test, expect, describe } from "bun:test";
+import os from "node:os";
+import path from "node:path";
 import {
   buildWikiRegistry,
-  resolveWikiRoot,
+  findWiki,
   listWikis,
   defaultWiki,
   resolveWikiRequest,
@@ -72,6 +74,15 @@ describe("buildWikiRegistry", () => {
     const reg = buildWikiRegistry([], "mimir=../a,mimir=../b", REPO);
     expect(reg).toEqual([{ name: "mimir", root: "/repo/a", source: "extra" }]);
   });
+
+  test("expands a leading ~ / ~/ to the home dir (not <repo>/~/…)", () => {
+    const home = os.homedir();
+    const reg = buildWikiRegistry([], "notes=~/n/wiki, home=~", REPO);
+    expect(reg).toEqual([
+      { name: "notes", root: path.join(home, "n/wiki"), source: "extra" },
+      { name: "home", root: home, source: "extra" },
+    ]);
+  });
 });
 
 const REG: WikiRegistryEntry[] = [
@@ -80,24 +91,24 @@ const REG: WikiRegistryEntry[] = [
   { name: "mimir", root: "/repo/mimir", source: "extra" },
 ];
 
-describe("resolveWikiRoot", () => {
-  test("no/blank name → default (no explicit root)", () => {
-    expect(resolveWikiRoot(REG, undefined)).toEqual({});
-    expect(resolveWikiRoot(REG, "")).toEqual({});
-    expect(resolveWikiRoot(REG, "  ")).toEqual({});
+describe("findWiki", () => {
+  test("no/blank name → undefined", () => {
+    expect(findWiki(REG, undefined)).toBeUndefined();
+    expect(findWiki(REG, "")).toBeUndefined();
+    expect(findWiki(REG, "  ")).toBeUndefined();
   });
 
-  test("known wiki (bot or extra) → its root", () => {
-    expect(resolveWikiRoot(REG, "melosys")).toEqual({ root: "/abs/huginn-nav/wiki" });
-    expect(resolveWikiRoot(REG, "mimir")).toEqual({ root: "/repo/mimir" });
+  test("known wiki (bot or extra) → its entry", () => {
+    expect(findWiki(REG, "melosys")).toEqual(REG[1]);
+    expect(findWiki(REG, "mimir")).toEqual(REG[2]);
   });
 
   test("match is case-insensitive and trims whitespace", () => {
-    expect(resolveWikiRoot(REG, "  MIMIR ")).toEqual({ root: "/repo/mimir" });
+    expect(findWiki(REG, "  MIMIR ")).toEqual(REG[2]);
   });
 
-  test("unknown wiki → unknownWiki", () => {
-    expect(resolveWikiRoot(REG, "ghost")).toEqual({ unknownWiki: true });
+  test("unknown wiki → undefined", () => {
+    expect(findWiki(REG, "ghost")).toBeUndefined();
   });
 });
 
@@ -126,40 +137,115 @@ describe("defaultWiki", () => {
 });
 
 describe("resolveWikiRequest", () => {
-  test("known wiki → canonical name (case-corrected), no env override", () => {
-    expect(resolveWikiRequest(REG, "MIMIR", undefined, undefined)).toEqual({ wiki: "mimir", envOverride: false });
-    expect(resolveWikiRequest(REG, "  melosys ", undefined, undefined)).toEqual({ wiki: "melosys", envOverride: false });
+  const jarvis = REG[0];
+  const melosys = REG[1];
+  const mimir = REG[2];
+
+  test("known wiki → canonical name (case-corrected) + entry, no env override", () => {
+    expect(resolveWikiRequest(REG, "MIMIR", undefined, undefined)).toEqual({
+      wiki: "mimir",
+      envOverride: false,
+      entry: mimir,
+      unknownWiki: false,
+    });
+    expect(resolveWikiRequest(REG, "  melosys ", undefined, undefined)).toEqual({
+      wiki: "melosys",
+      envOverride: false,
+      entry: melosys,
+      unknownWiki: false,
+    });
   });
 
   test("?wiki= wins over the ?bot= alias when both are present", () => {
-    expect(resolveWikiRequest(REG, "mimir", "melosys", undefined)).toEqual({ wiki: "mimir", envOverride: false });
+    expect(resolveWikiRequest(REG, "mimir", "melosys", undefined)).toEqual({
+      wiki: "mimir",
+      envOverride: false,
+      entry: mimir,
+      unknownWiki: false,
+    });
   });
 
   test("falls back to the ?bot= alias when ?wiki= is absent/blank", () => {
-    expect(resolveWikiRequest(REG, undefined, "melosys", undefined)).toEqual({ wiki: "melosys", envOverride: false });
-    expect(resolveWikiRequest(REG, "  ", "melosys", undefined)).toEqual({ wiki: "melosys", envOverride: false });
+    expect(resolveWikiRequest(REG, undefined, "melosys", undefined)).toEqual({
+      wiki: "melosys",
+      envOverride: false,
+      entry: melosys,
+      unknownWiki: false,
+    });
+    expect(resolveWikiRequest(REG, "  ", "melosys", undefined)).toEqual({
+      wiki: "melosys",
+      envOverride: false,
+      entry: melosys,
+      unknownWiki: false,
+    });
   });
 
-  test("unknown name is echoed back so the client hits the empty state", () => {
-    expect(resolveWikiRequest(REG, "ghost", undefined, undefined)).toEqual({ wiki: "ghost", envOverride: false });
+  test("unknown name is echoed back with unknownWiki so the client hits the empty state", () => {
+    expect(resolveWikiRequest(REG, "ghost", undefined, undefined)).toEqual({
+      wiki: "ghost",
+      envOverride: false,
+      entry: undefined,
+      unknownWiki: true,
+    });
   });
 
-  test("bare /wiki resolves the default wiki (same path as ?wiki=<default>)", () => {
-    expect(resolveWikiRequest(REG, undefined, undefined, undefined)).toEqual({ wiki: "jarvis", envOverride: false });
+  test("a discovered bot WITHOUT a wikiDir is absent → unknown/empty state (no silent default)", () => {
+    // `nowiki` is discovered but carries no wikiDir, so buildWikiRegistry drops it.
+    const reg = buildWikiRegistry(BOTS, undefined, REPO);
+    expect(resolveWikiRequest(reg, "nowiki", undefined, undefined)).toEqual({
+      wiki: "nowiki",
+      envOverride: false,
+      entry: undefined,
+      unknownWiki: true,
+    });
   });
 
-  test("bare /wiki with WIKI_DIR set → env override, no wiki claimed", () => {
-    expect(resolveWikiRequest(REG, undefined, undefined, "/some/wiki")).toEqual({ wiki: "", envOverride: true });
+  test("bare /wiki resolves the default wiki entry (same root as ?wiki=<default>)", () => {
+    expect(resolveWikiRequest(REG, undefined, undefined, undefined)).toEqual({
+      wiki: "jarvis",
+      envOverride: false,
+      entry: jarvis,
+      unknownWiki: false,
+    });
+  });
+
+  test("bare /wiki with WIKI_DIR set → env override, no wiki/entry claimed", () => {
+    expect(resolveWikiRequest(REG, undefined, undefined, "/some/wiki")).toEqual({
+      wiki: "",
+      envOverride: true,
+      entry: undefined,
+      unknownWiki: false,
+    });
     // whitespace-only env is treated as unset
-    expect(resolveWikiRequest(REG, undefined, undefined, "  ")).toEqual({ wiki: "jarvis", envOverride: false });
+    expect(resolveWikiRequest(REG, undefined, undefined, "  ")).toEqual({
+      wiki: "jarvis",
+      envOverride: false,
+      entry: jarvis,
+      unknownWiki: false,
+    });
   });
 
   test("an explicit wiki/bot wins over the WIKI_DIR override", () => {
-    expect(resolveWikiRequest(REG, "mimir", undefined, "/some/wiki")).toEqual({ wiki: "mimir", envOverride: false });
-    expect(resolveWikiRequest(REG, undefined, "melosys", "/some/wiki")).toEqual({ wiki: "melosys", envOverride: false });
+    expect(resolveWikiRequest(REG, "mimir", undefined, "/some/wiki")).toEqual({
+      wiki: "mimir",
+      envOverride: false,
+      entry: mimir,
+      unknownWiki: false,
+    });
+    expect(resolveWikiRequest(REG, undefined, "melosys", "/some/wiki")).toEqual({
+      wiki: "melosys",
+      envOverride: false,
+      entry: melosys,
+      unknownWiki: false,
+    });
   });
 
   test("empty registry → empty wiki, store's own fallback serves content", () => {
-    expect(resolveWikiRequest([], undefined, undefined, undefined)).toEqual({ wiki: "", envOverride: false });
+    expect(resolveWikiRequest([], undefined, undefined, undefined)).toEqual({
+      wiki: "",
+      envOverride: false,
+      entry: undefined,
+      unknownWiki: false,
+    });
   });
 });

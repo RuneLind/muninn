@@ -240,8 +240,12 @@ if (wikiBotSel) {
   });
 }
 
-// Boot.
-fetch(withBot("/api/wiki/proposals"))
+// Boot. A non-bot (extra) wiki has no proposals — the server already rendered the
+// "unavailable" notice into #gardList, so skip the fetch and leave it in place.
+const unavailable = (window as unknown as { __WIKI_GARDENER_UNAVAILABLE__?: unknown })
+  .__WIKI_GARDENER_UNAVAILABLE__ === true;
+if (!unavailable)
+  fetch(withBot("/api/wiki/proposals"))
   .then((r) => r.json())
   .then((data: ProposalsResponse) => {
     if (data.error && !(data.proposals || []).length) {
