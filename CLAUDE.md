@@ -95,6 +95,7 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | Profile | `src/profile/` | Interest profile — weekly Haiku distillation of goals+memories (`generator.ts`), augment-only injection into watcher gate prompts (`inject.ts`); keyed by `bot_default_user` |
 | Scheduler | `src/scheduler/` | Unified scheduler (scheduled tasks + goal reminders + watchers), task detector, shared Haiku executor |
 | Watchers | `src/watchers/` | Proactive outreach — email watcher (Haiku + Gmail MCP), quiet hours, runner |
+| Gardener | `src/gardener/` | Wiki gardener — weekly `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile) and drafts wiki-page proposals into `wiki_proposals`; human review gate at `/wiki/gardener` (approve/reject, CAS); approve writes the page into the bot's `wikiDir`, inserts a `log.md` entry, and fires the matching huginn reindex (`wiki`/`wiki-life`). Requires `wikiDir`; per-bot `gardener` config block; seed via `scripts/setup-wiki-gardener.ts`. See `src/watchers/CLAUDE.md` for pipeline details |
 | Threads | `src/db/threads.ts`, `src/bot/topic-commands.ts` | Per-user+bot conversation threads for isolated chat history |
 | DB | `src/db/` | Postgres CRUD — messages, memories, activity, goals, scheduled tasks, watchers, threads, user settings |
 | Tracing | `src/tracing/` | Request tracing with span hierarchy, tool call child spans |
