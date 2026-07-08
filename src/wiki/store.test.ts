@@ -6,6 +6,7 @@ import {
   parseFrontmatter,
   splitInlineArray,
   extractWikilinks,
+  extractMarkdownLinks,
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
@@ -62,6 +63,45 @@ describe("extractWikilinks", () => {
       "See [[Claude Code]] and [[Claude Code|CC]] plus [[Skills System|skills]].",
     );
     expect(links).toEqual(["Claude Code", "Skills System"]);
+  });
+});
+
+describe("extractMarkdownLinks", () => {
+  test("extracts relative .md targets, decodes %20, strips #anchors, dedupes", () => {
+    const links = extractMarkdownLinks(
+      [
+        "See [overview](overview.md) and [sub](sub/page.md#section).",
+        "Also [parent](../repos/muninn.md) and [encoded](my%20notes.md).",
+        "Repeat [again](overview.md).",
+      ].join("\n"),
+    );
+    expect(links).toEqual([
+      "overview.md",
+      "sub/page.md",
+      "../repos/muninn.md",
+      "my notes.md",
+    ]);
+  });
+
+  test("ignores http/https, mailto, absolute paths, images, and non-.md", () => {
+    const links = extractMarkdownLinks(
+      [
+        "[web](https://example.com/x.md)",
+        "[http](http://example.com/y.md)",
+        "[mail](mailto:me@example.com)",
+        "[abs](/etc/passwd.md)",
+        "![img](diagram.png)",
+        "![mdimg](fake.md)",
+        "[html](page.html)",
+        "[anchor](#local-section)",
+        "[real](kept.md)",
+      ].join("\n"),
+    );
+    expect(links).toEqual(["kept.md"]);
+  });
+
+  test("is case-insensitive on the .md extension", () => {
+    expect(extractMarkdownLinks("[x](Notes.MD)")).toEqual(["Notes.MD"]);
   });
 });
 
@@ -185,6 +225,38 @@ describe("buildWikiIndex", () => {
     // Explainers carry no wikilinks and are not link targets/sources.
     expect(index.outgoing.get("Deep Dive")).toEqual([]);
     expect(index.backlinks.get("Deep Dive") ?? []).toEqual([]);
+  });
+
+  test("relative markdown links join the graph: same dir, ../ traversal, #anchor, %20, dedupe, out-of-root ignored", async () => {
+    await mkdir(path.join(root, "repos"), { recursive: true });
+    await Bun.write(path.join(root, "repos/muninn.md"), "---\ntype: note\n---\n\nMuninn repo.");
+    await Bun.write(path.join(root, "repos/huginn.md"), "---\ntype: note\n---\n\nHuginn repo.");
+    await Bun.write(
+      path.join(root, "repos/overview.md"),
+      [
+        "---",
+        "type: note",
+        "---",
+        "",
+        "Links to [muninn](muninn.md) and [huginn](huginn.md#search).", // same dir + anchor
+        "Up to [index](../index.md).", // ../ traversal, resolves to root index.md
+        "Escapes [outside](../../../etc/passwd.md).", // out of root — ignored
+        "Encoded [own](../sources/Own%20the%20Folder.md).", // %20 decode → "Own the Folder"
+        "And a wikilink [[Muninn]] to the same page.", // dedupe with [muninn](muninn.md)
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const out = index.outgoing.get("overview")!;
+    expect(out.slice().sort()).toEqual(
+      ["Own the Folder", "huginn", "index", "muninn"].sort(),
+    );
+    // [[Muninn]] + [muninn](muninn.md) collapse to a single edge.
+    expect(out.filter((n) => n === "muninn").length).toBe(1);
+    // Backlinks recorded on the targets.
+    expect(index.backlinks.get("muninn")).toContain("overview");
+    expect(index.backlinks.get("index")).toContain("overview");
+    // The out-of-root target never created a phantom page or edge.
+    expect(index.resolve("passwd")).toBeUndefined();
   });
 
   test("readWikiPage returns raw markdown", async () => {

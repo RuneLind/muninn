@@ -1,8 +1,11 @@
 import { test, expect } from "bun:test";
 import {
   filterPages,
+  hasTypedHubs,
   sortPages,
   tagCounts,
+  topPagesByConnections,
+  topPagesByType,
   typeCounts,
   type WikiFilters,
   type WikiListing,
@@ -90,4 +93,35 @@ test("typeCounts: honors domain filter", () => {
 test("tagCounts: honors domain + type filters", () => {
   expect(tagCounts(PAGES, "", "")).toEqual({ search: 1, llm: 2, health: 1, org: 1 });
   expect(tagCounts(PAGES, "ai", "entity")).toEqual({ llm: 1, org: 1 });
+});
+
+test("hasTypedHubs: true when concepts/entities exist, false for untyped wikis", () => {
+  expect(hasTypedHubs(PAGES)).toBe(true);
+  const untyped: WikiListing[] = [
+    page({ name: "a", type: "note", backlinkCount: 3 }),
+    page({ name: "b", type: "note", backlinkCount: 1 }),
+  ];
+  expect(hasTypedHubs(untyped)).toBe(false);
+});
+
+test("topPagesByType: filters to type and sorts by backlinkCount desc", () => {
+  const pages: WikiListing[] = [
+    page({ name: "c1", type: "concept", backlinkCount: 2 }),
+    page({ name: "c2", type: "concept", backlinkCount: 8 }),
+    page({ name: "n1", type: "note", backlinkCount: 99 }),
+  ];
+  expect(topPagesByType(pages, "concept").map((p) => p.name)).toEqual(["c2", "c1"]);
+  expect(topPagesByType(pages, "concept", 1).map((p) => p.name)).toEqual(["c2"]);
+});
+
+test("topPagesByConnections: cross-type, only backlinked pages, sorted desc", () => {
+  const pages: WikiListing[] = [
+    page({ name: "hub", type: "note", backlinkCount: 7 }),
+    page({ name: "mid", type: "note", backlinkCount: 3 }),
+    page({ name: "orphan", type: "note", backlinkCount: 0 }),
+  ];
+  expect(topPagesByConnections(pages).map((p) => p.name)).toEqual(["hub", "mid"]);
+  // Nothing linked → empty (drives the muted empty-state in hubsHtml).
+  const none: WikiListing[] = [page({ name: "x", type: "note", backlinkCount: 0 })];
+  expect(topPagesByConnections(none)).toEqual([]);
 });

@@ -15,14 +15,17 @@ import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import {
   filterPages,
+  hasTypedHubs,
+  HUB_TYPES,
   sortPages,
   tagCounts,
+  topPagesByConnections,
+  topPagesByType,
   typeCounts,
   TYPE_LABEL,
   TYPE_ORDER,
   type WikiFilters,
   type WikiListing,
-  type WikiPageType,
   type WikiSortMode,
 } from "./wiki-filter.ts";
 
@@ -241,25 +244,37 @@ function badgeHtml(p: WikiListing): string {
   return html;
 }
 
-function hubsHtml(): string {
-  let html = "";
-  (["concept", "entity"] as WikiPageType[]).forEach((t) => {
-    const top = allPages
-      .filter((p) => p.type === t)
-      .sort((a, b) => b.backlinkCount - a.backlinkCount)
-      .slice(0, 12);
-    if (!top.length) return;
-    html += `<h2>Top ${TYPE_LABEL[t].toLowerCase()} by connections</h2><div class="wiki-hub-grid">`;
-    top.forEach((p) => {
-      html +=
-        `<div class="wiki-hub-card" data-page="${esc(p.name)}">` +
-        `<div class="wiki-hub-title">${esc(p.title)}</div>` +
-        `<div class="wiki-hub-sub">${p.backlinkCount} pages link here</div>` +
-        `</div>`;
-    });
-    html += "</div>";
+/** One hub grid of cards from a pre-sorted page list. */
+function hubGridHtml(heading: string, pages: WikiListing[]): string {
+  let html = `<h2>${heading}</h2><div class="wiki-hub-grid">`;
+  pages.forEach((p) => {
+    html +=
+      `<div class="wiki-hub-card" data-page="${esc(p.name)}">` +
+      `<div class="wiki-hub-title">${esc(p.title)}</div>` +
+      `<div class="wiki-hub-sub">${p.backlinkCount} pages link here</div>` +
+      `</div>`;
   });
-  return html;
+  return html + "</div>";
+}
+
+function hubsHtml(): string {
+  // Typed wikis (huginn-jarvis) get per-type hub sections. Wikis that use plain
+  // markdown links and no frontmatter `type` (mimir, melosys-kode-wiki) have no
+  // concept/entity pages — fall back to a single cross-type "by connections" hub.
+  if (hasTypedHubs(allPages)) {
+    let html = "";
+    HUB_TYPES.forEach((t) => {
+      const top = topPagesByType(allPages, t, 12);
+      if (!top.length) return;
+      html += hubGridHtml(`Top ${TYPE_LABEL[t].toLowerCase()} by connections`, top);
+    });
+    return html;
+  }
+  const top = topPagesByConnections(allPages, 12);
+  if (!top.length) {
+    return '<div class="wiki-conn-empty">No linked pages yet — this wiki has no resolvable internal links.</div>';
+  }
+  return hubGridHtml("Top pages by connections", top);
 }
 
 function timelineHtml(): string {

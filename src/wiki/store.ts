@@ -133,6 +133,66 @@ export function extractWikilinks(content: string): string[] {
   return [...targets];
 }
 
+const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
+
+/**
+ * Extract relative markdown link targets — `[text](target.md)` — from raw page
+ * content. Wikis that use plain relative links instead of Obsidian [[wikilinks]]
+ * (e.g. mimir, melosys-kode-wiki) join the same link graph through these. Returns
+ * deduped, URL-decoded targets ending in `.md` (case-insensitive), with any
+ * `#anchor` fragment stripped, still *relative to the linking page* (resolution
+ * happens in `resolveMarkdownTargets`). Skips: images (`![...](...)`), absolute
+ * URLs / any `scheme:` target (http:, https:, mailto:, …), absolute filesystem
+ * paths (leading `/`), and non-`.md` targets. Like `extractWikilinks`, this does
+ * not special-case fenced code blocks — matching that function's behavior.
+ */
+export function extractMarkdownLinks(content: string): string[] {
+  const targets = new Set<string>();
+  for (const m of content.matchAll(MD_LINK_RE)) {
+    if (m[1]) continue; // leading '!' → image, not a link
+    let target = (m[2] ?? "").trim();
+    if (!target) continue;
+    // Drop a link title: [text](url "title") → url
+    const sp = target.search(/\s/);
+    if (sp !== -1) target = target.slice(0, sp);
+    // Strip an #anchor fragment; a bare same-page anchor (#foo) isn't a page link.
+    const hash = target.indexOf("#");
+    if (hash === 0) continue;
+    if (hash > 0) target = target.slice(0, hash);
+    if (!target) continue;
+    // Ignore absolute URLs / any scheme: prefix and absolute filesystem paths.
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) continue;
+    if (target.startsWith("/")) continue;
+    let decoded = target;
+    try {
+      decoded = decodeURIComponent(target);
+    } catch {
+      // Malformed %-escape — keep the raw form so a real .md link isn't lost.
+    }
+    if (!decoded.toLowerCase().endsWith(".md")) continue;
+    targets.add(decoded);
+  }
+  return [...targets];
+}
+
+/**
+ * Resolve extracted relative `.md` targets against the linking page's own
+ * location within the wiki, returning normalized, lowercased target relPaths
+ * that stay inside the wiki root. Targets that escape the root via `../` are
+ * dropped. Lowercasing mirrors the case-insensitive `resolve()` used for the
+ * wikilink graph so both link kinds match pages the same way.
+ */
+function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[] {
+  const dir = path.posix.dirname(fromRelPath);
+  const out: string[] = [];
+  for (const t of targets) {
+    const joined = path.posix.normalize(path.posix.join(dir, t));
+    if (joined === ".." || joined.startsWith("../")) continue; // escaped the root
+    out.push(joined.toLowerCase());
+  }
+  return out;
+}
+
 const VALID_TYPES: WikiPageType[] = ["source", "concept", "entity", "analysis", "note"];
 
 function typeFromFrontmatter(fm: Record<string, string | string[]>, relPath: string): WikiPageType {
@@ -216,6 +276,8 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const pages: WikiPageMeta[] = [];
   const byKey = new Map<string, WikiPageMeta>();
   const rawOutgoing = new Map<string, string[]>();
+  /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
+  const rawMdTargets = new Map<string, string[]>();
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -254,6 +316,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
+      rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
     }),
   );
 
@@ -285,6 +348,17 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
 
   const resolve = (target: string) => byKey.get(target.trim().toLowerCase());
 
+  // Markdown links resolve by path, not name — index the markdown pages by their
+  // normalized, lowercased relPath so a resolved `[text](target.md)` maps back to
+  // the same canonical page name the wikilink graph uses. Explainers (.html) never
+  // join the link graph, so they're excluded as targets.
+  const byRelPath = new Map<string, WikiPageMeta>();
+  for (const meta of pages) {
+    if (meta.type === "explainer") continue;
+    const key = path.posix.normalize(meta.relPath).toLowerCase();
+    if (!byRelPath.has(key)) byRelPath.set(key, meta);
+  }
+
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
   for (const meta of pages) {
@@ -294,6 +368,12 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     const resolved = new Set<string>();
     for (const target of rawOutgoing.get(meta.relPath) ?? []) {
       const targetMeta = resolve(target);
+      if (targetMeta && targetMeta.name !== meta.name) resolved.add(targetMeta.name);
+    }
+    // Relative markdown links feed the same set — a page linked both by [[wikilink]]
+    // and by [text](path.md) counts once (dedup by canonical name).
+    for (const rel of rawMdTargets.get(meta.relPath) ?? []) {
+      const targetMeta = byRelPath.get(rel);
       if (targetMeta && targetMeta.name !== meta.name) resolved.add(targetMeta.name);
     }
     outgoing.set(meta.name, [...resolved]);
