@@ -306,7 +306,48 @@ function renderConnections(data: WikiPageDetail): void {
     miniGraphHtml(data) + section("Linked from", data.backlinks) + section("Links to", data.outgoing);
 }
 
+/** Article-head block (title, badges, tags, dates, source link) — shared by
+ *  markdown pages and HTML explainers. */
+function articleHeadHtml(m: WikiListing): string {
+  let head = `<div class="wiki-article-head"><h1>${esc(m.title)}</h1><div class="wiki-meta-row">` + badgeHtml(m);
+  m.tags.forEach((t) => {
+    head += `<span class="wiki-tag">${esc(t)}</span>`;
+  });
+  if (m.created || m.updated) {
+    head += `<span class="wiki-dates">${esc(m.created || "")}${m.updated && m.updated !== m.created ? " · upd " + esc(m.updated) : ""}</span>`;
+  }
+  if (m.url) {
+    head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
+  }
+  head += "</div></div>";
+  return head;
+}
+
+/** Standalone HTML explainers aren't markdown and don't join the wikilink graph,
+ *  so render them in a sandboxed <iframe> (scripts allowed — they use inline
+ *  JS/mermaid and are trusted local docs on a loopback-only dashboard) instead
+ *  of fetching /api/wiki/page. Connections panel shows a "no wikilinks" note. */
+function loadExplainer(m: WikiListing, push: boolean): void {
+  currentName = m.name;
+  if (push) {
+    history.pushState({ page: currentName }, "", pageUrl(currentName));
+  }
+  const src = withWiki("/api/wiki/html?name=" + encodeURIComponent(m.name));
+  document.getElementById("articleWrap")!.innerHTML =
+    articleHeadHtml(m) +
+    `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="allow-scripts allow-popups" title="${esc(m.title)}"></iframe>`;
+  document.getElementById("articleWrap")!.scrollTop = 0;
+  document.getElementById("connBody")!.innerHTML =
+    '<div class="wiki-conn-empty">Explainer — standalone HTML, no wikilinks.</div>';
+  renderList();
+}
+
 function loadPage(name: string, push: boolean): void {
+  const listing = allPages.find((p) => p.name === name);
+  if (listing && listing.type === "explainer") {
+    loadExplainer(listing, push);
+    return;
+  }
   fetch(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)))
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -319,19 +360,8 @@ function loadPage(name: string, push: boolean): void {
       if (push) {
         history.pushState({ page: currentName }, "", pageUrl(currentName));
       }
-      const m = data.meta;
-      let head = `<div class="wiki-article-head"><h1>${esc(m.title)}</h1><div class="wiki-meta-row">` + badgeHtml(m);
-      m.tags.forEach((t) => {
-        head += `<span class="wiki-tag">${esc(t)}</span>`;
-      });
-      if (m.created || m.updated) {
-        head += `<span class="wiki-dates">${esc(m.created || "")}${m.updated && m.updated !== m.created ? " · upd " + esc(m.updated) : ""}</span>`;
-      }
-      if (m.url) {
-        head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
-      }
-      head += "</div></div>";
-      document.getElementById("articleWrap")!.innerHTML = head + `<div class="wiki-article">${data.html}</div>`;
+      document.getElementById("articleWrap")!.innerHTML =
+        articleHeadHtml(data.meta) + `<div class="wiki-article">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
       renderConnections(data);
       renderList();

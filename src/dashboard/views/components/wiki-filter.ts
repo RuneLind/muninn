@@ -5,7 +5,7 @@
  * `src/dashboard/routes/wiki-routes.ts`.
  */
 
-export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note";
+export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note" | "explainer";
 
 export interface WikiListing {
   name: string;
@@ -31,12 +31,20 @@ export interface WikiFilters {
 
 export type WikiSortMode = "updated" | "backlinks" | "title";
 
-export const TYPE_ORDER: WikiPageType[] = ["concept", "entity", "source", "analysis", "note"];
+export const TYPE_ORDER: WikiPageType[] = [
+  "concept",
+  "entity",
+  "source",
+  "analysis",
+  "explainer",
+  "note",
+];
 export const TYPE_LABEL: Record<WikiPageType, string> = {
   concept: "Concepts",
   entity: "Entities",
   source: "Sources",
   analysis: "Analyses",
+  explainer: "Explainers",
   note: "Notes",
 };
 
