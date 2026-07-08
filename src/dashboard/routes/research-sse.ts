@@ -32,6 +32,13 @@ export interface ResearchSseOptions {
   /** Route-computed preflight error (unknown wiki, no collection, …). When set,
    *  the helper emits it as an `app_error` and skips retrieval/synthesis. */
   preflightError?: string | null;
+  /** Optional final-render hook. When set, after the terminal `done` event the
+   *  helper renders the final answer markdown to HTML (via this fn, using the
+   *  enriched citations seen on the `sources` event) and emits it as a trailing
+   *  `answer_html` event. The wiki reader sets it so the answer shows as a
+   *  formatted article in the main pane; `/research` leaves it unset (it renders
+   *  client-side). A throw here is swallowed — the streamed plain text stands. */
+  renderAnswerHtml?: (answer: string, citations: Citation[]) => string;
 }
 
 /**
@@ -62,6 +69,10 @@ export function streamResearchSSE(c: Context, opts: ResearchSseOptions): Respons
       } else if (!opts.botConfig) {
         await appError("No bots configured to synthesize an answer.");
       } else {
+        // Latest enriched citations from the `sources` event — reused by the
+        // optional `answer_html` final render so its `[n]` markers link to the
+        // same pages the `sources` payload advertised.
+        let lastCitations: Citation[] = [];
         await streamResearchAnswer(
           {
             question: opts.question,
@@ -84,12 +95,30 @@ export function streamResearchSSE(c: Context, opts: ResearchSseOptions): Respons
                 out = event;
               }
             }
+            if (out.type === "sources") lastCitations = out.citations;
             // EventSource reserves the "error" event for connection-level failures
             // (it also fires onerror), so a same-named app event gets masked as
             // "Connection lost" on the client. Emit app errors under a distinct
             // name; the payload still carries {type:"error", message}.
             const wireEvent = out.type === "error" ? "app_error" : out.type;
             await stream.writeSSE({ event: wireEvent, data: JSON.stringify(out) });
+            // After the terminal `done`, optionally emit a server-rendered
+            // `answer_html` so the client can swap its streamed plain text for a
+            // formatted article. Rendering must never break the turn — on a throw
+            // the streamed text stands and the `end` sentinel still fires.
+            if (out.type === "done" && opts.renderAnswerHtml) {
+              try {
+                const html = opts.renderAnswerHtml(out.answer, lastCitations);
+                await stream.writeSSE({
+                  event: "answer_html",
+                  data: JSON.stringify({ html, cited: out.cited }),
+                });
+              } catch (err) {
+                log.warn("answer_html render failed — keeping streamed text: {error}", {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
           },
         );
       }

@@ -11,6 +11,7 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
   generateWikiDigest,
   readLogMtimeMs,
@@ -403,6 +404,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // one. `entry` is guaranteed set whenever enrich runs (preflightError
       // covers the unknown-wiki case), so a missing entry disables enrichment.
       enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
+      // The reader renders the answer as a formatted article in its main pane, so
+      // the route emits a trailing `answer_html` (markdown → reader HTML, `[n]`
+      // markers linked to matched pages). `/research` leaves this unset.
+      renderAnswerHtml: renderAskAnswerHtml,
     });
   });
 }
