@@ -19,23 +19,35 @@ export async function renderWikiGardenerPage(opts?: {
   wikiBots?: string[];
   selected?: string;
   envOverride?: boolean;
+  /** True when `?wiki=` names a real but non-bot (extra) wiki — the gardener has
+   *  no proposals for it, so render a clean "unavailable" state, not an error. */
+  notBotWiki?: boolean;
 }): Promise<string> {
   const clientScript = await gardenerClientScript();
   const wikiBots = opts?.wikiBots ?? [];
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
+  const notBotWiki = opts?.notBotWiki ?? false;
+  // A non-bot wiki matches no bot option — render its raw name as a disabled,
+  // selected placeholder so the picker agrees with the "unavailable" body. Show
+  // the picker for any non-empty bot registry so there's always a way back.
+  const placeholder = notBotWiki && !!selected && !envOverride;
   const wikiSelector =
-    wikiBots.length > 1
+    wikiBots.length >= 1
       ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
         (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
+        (placeholder ? `<option value="" selected disabled>${escHtml(selected)}</option>` : "") +
         wikiBots
           .map(
             (b) =>
-              `<option value="${escAttr(b)}"${!envOverride && b === selected ? " selected" : ""}>${escHtml(b)}</option>`,
+              `<option value="${escAttr(b)}"${!envOverride && !placeholder && b === selected ? " selected" : ""}>${escHtml(b)}</option>`,
           )
           .join("") +
         `</select>`
       : "";
+  const gardListInit = notBotWiki
+    ? `<div class="gard-empty"><strong>${escHtml(selected)}</strong> is a standalone wiki — the gardener is only available for bot wikis. Pick a bot wiki above.</div>`
+    : `<div class="gard-empty">Loading proposals…</div>`;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -152,7 +164,7 @@ export async function renderWikiGardenerPage(opts?: {
       <h1>🌱 Wiki Gardener</h1>
       <div style="display:flex; gap:10px; align-items:center;">
         ${wikiSelector}
-        <a href="/wiki${selected ? "?bot=" + escAttr(selected) : ""}">← Wiki reader</a>
+        <a href="/wiki${selected ? "?wiki=" + escAttr(selected) : ""}">← Wiki reader</a>
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
@@ -163,11 +175,12 @@ export async function renderWikiGardenerPage(opts?: {
       <button class="gard-filter" data-status="rejected">Rejected</button>
       <button class="gard-filter" data-status="stale">Stale</button>
     </div>
-    <div id="gardList"><div class="gard-empty">Loading proposals…</div></div>
+    <div id="gardList">${gardListInit}</div>
   </div>
 
   <script>
     window.__WIKI_BOT__ = ${escJsonScript(selected)};
+    window.__WIKI_GARDENER_UNAVAILABLE__ = ${notBotWiki ? "true" : "false"};
   </script>
   <script>
     ${clientScript}

@@ -13,32 +13,47 @@ import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
  * The client logic is a real bundled TS entrypoint (`components/wiki-browser.ts`),
  * injected below via `wikiClientScript()`.
  *
- * `wikiBots` populates the wiki picker (bots that expose a `wikiDir`); `selected`
- * is the canonical name of the currently-browsed bot (from `?bot=`, or the
- * default wiki bot) — it also drives the client's `?bot=` fetches via an injected
- * global, so content and picker state can't disagree. `envOverride` marks the
- * legacy `WIKI_DIR` bare-`/wiki` case, where no bot is claimed in the picker.
- * Switching wiki is a full navigation to `/wiki?bot=<name>` so links stay shareable.
+ * `wikis` populates the wiki picker — every registered wiki (bot wikis with a
+ * `wikiDir` plus `WIKI_EXTRA` standalone wikis). `selected` is the canonical
+ * name of the currently-browsed wiki (from `?wiki=`/`?bot=`, or the default) — it
+ * also drives the client's `?wiki=` fetches via an injected global, so content
+ * and picker state can't disagree. `envOverride` marks the legacy `WIKI_DIR`
+ * bare-`/wiki` case, where no wiki is claimed in the picker. `gardener` gates the
+ * (bot-only) Gardener link. Switching wiki is a full navigation to
+ * `/wiki?wiki=<name>` so links stay shareable.
  */
 export async function renderWikiPage(opts?: {
-  wikiBots?: string[];
+  wikis?: string[];
   selected?: string;
   envOverride?: boolean;
+  unknownWiki?: boolean;
   gardenerPending?: number;
+  gardener?: boolean;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
-  const wikiBots = opts?.wikiBots ?? [];
+  const wikis = opts?.wikis ?? [];
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
+  const unknownWiki = opts?.unknownWiki ?? false;
   const gardenerPending = opts?.gardenerPending ?? 0;
-  const gardenerHref = `/wiki/gardener${selected ? "?bot=" + encodeURIComponent(selected) : ""}`;
-  const gardenerLink = `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`;
+  const gardener = opts?.gardener ?? true;
+  const gardenerHref = `/wiki/gardener${selected ? "?wiki=" + encodeURIComponent(selected) : ""}`;
+  const gardenerLink = gardener
+    ? `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
+    : "";
+  // An unknown `?wiki=` matches no real option — render its raw name as a
+  // disabled, selected placeholder so the picker and the "No wiki named X" pane
+  // agree instead of the browser highlighting the first wiki. Show the picker for
+  // any non-empty registry so a single-wiki deploy with a typo'd `?wiki=` still
+  // has an in-page way back.
+  const unknownSel = unknownWiki && !!selected && !envOverride;
   const wikiSelector =
-    wikiBots.length > 1
-      ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
+    wikis.length >= 1
+      ? `<select id="wikiSelect" class="wiki-sort" aria-label="Wiki">` +
         (envOverride ? `<option value="" selected disabled>env override</option>` : "") +
-        wikiBots
-          .map((b) => `<option value="${escAttr(b)}"${!envOverride && b === selected ? " selected" : ""}>${escHtml(b)}</option>`)
+        (unknownSel ? `<option value="" selected disabled>${escHtml(selected)}</option>` : "") +
+        wikis
+          .map((w) => `<option value="${escAttr(w)}"${!envOverride && !unknownSel && w === selected ? " selected" : ""}>${escHtml(w)}</option>`)
           .join("") +
         `</select>`
       : "";
@@ -272,7 +287,7 @@ export async function renderWikiPage(opts?: {
     <div class="wiki-pane">
       <div class="wiki-browse-head">
         ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
-        <div class="wiki-sort-row">${gardenerLink}</div>
+        ${gardenerLink ? `<div class="wiki-sort-row">${gardenerLink}</div>` : ""}
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
         <div class="wiki-chip-row" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
@@ -308,7 +323,7 @@ export async function renderWikiPage(opts?: {
   </div>
 
   <script>
-    window.__WIKI_BOT__ = ${escJsonScript(selected)};
+    window.__WIKI_NAME__ = ${escJsonScript(selected)};
   </script>
   <script>
     ${clientScript}
