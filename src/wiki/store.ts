@@ -359,8 +359,6 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     for (const alias of meta.aliases) register(alias, meta);
   }
 
-  const resolve = (target: string) => byKey.get(target.trim().toLowerCase());
-
   // relPath lookup for the graph: both link kinds resolve to a target *page* and
   // are stored as that page's normalized relPath — unique even when stems collide,
   // so same-stem pages in different folders keep distinct link sets and counts.
@@ -370,6 +368,16 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     if (!byRelPath.has(key)) byRelPath.set(key, meta);
   }
   const resolveRelPath = (relPath: string) => byRelPath.get(normalizeRelPath(relPath));
+
+  const resolve = (target: string) => {
+    const t = target.trim().toLowerCase();
+    const direct = byKey.get(t);
+    if (direct) return direct;
+    // Path-form wikilinks ([[concepts/trygdeavgift]], melosys-kode-wiki style)
+    // resolve root-relative with `.md` implied — stems only match byKey above.
+    if (t.includes("/")) return byRelPath.get(normalizeRelPath(t.endsWith(".md") ? t : `${t}.md`));
+    return undefined;
+  };
 
   const outgoing = new Map<string, string[]>();
   const backlinks = new Map<string, string[]>();
