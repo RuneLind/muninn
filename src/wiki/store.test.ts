@@ -151,6 +151,29 @@ describe("buildWikiIndex", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  test("resolves path-form wikilinks root-relative with .md implied", async () => {
+    await Bun.write(
+      path.join(root, "flows/Aarsavregning.md"),
+      "See [[concepts/Harness Engineering]] and [[sources/Own the Folder.md]] and [[flows/missing]].",
+    );
+    const index = await buildWikiIndex(root);
+    // resolve(): path form finds the page a bare stem lookup also finds…
+    expect(index.resolve("concepts/Harness Engineering")?.relPath).toBe(
+      "concepts/Harness Engineering.md",
+    );
+    // …with or without the .md suffix, but a missing path stays unresolved.
+    expect(index.resolve("sources/Own the Folder.md")?.name).toBe("Own the Folder");
+    expect(index.resolve("flows/missing")).toBeUndefined();
+    // Both resolved targets join the outgoing graph for the linking page.
+    expect(index.outgoing.get("flows/aarsavregning.md")).toEqual([
+      "concepts/harness engineering.md",
+      "sources/own the folder.md",
+    ]);
+    expect(index.backlinks.get("concepts/harness engineering.md")).toContain(
+      "flows/aarsavregning.md",
+    );
+  });
+
   test("indexes pages with type, domain, and skips dot-dirs", async () => {
     const index = await buildWikiIndex(root);
     expect(index.pages.length).toBe(4);
