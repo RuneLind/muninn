@@ -1,12 +1,13 @@
 import type { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { renderResearchPage } from "../views/research-page.ts";
 import { discoverAllBots, resolveResearchBot, DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../../bots/config.ts";
-import { streamResearchAnswer } from "../../research/ask.ts";
+import { streamResearchSSE } from "./research-sse.ts";
 import { resolveProfile } from "../../research/corpus.ts";
-import { MAX_HISTORY_TURNS, type ResearchTurn } from "../../research/answer.ts";
+import { parseResearchHistory } from "../../research/history-param.ts";
+import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { getWikiRegistry } from "./wiki-routes.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
@@ -28,41 +29,6 @@ Gi en oppsummering av:
 - Relaterte Jira-saker (epic, linked issues, lignende oppgaver)
 - Koblinger til eksisterende arbeid
 - Eventuelle mangler eller uklarheter`;
-
-// Loose upper bounds for the replayed `history` param — these only cap untrusted
-// input size, they are NOT the synthesis budget (that is the binding cap in
-// renderHistoryBlock, answer.ts). Kept generous (≥ that budget) so bumping the
-// answer.ts budget actually takes effect rather than silently clamping here.
-const HISTORY_PARAM_MAX_CHARS = 20_000; // whole param; rejected before JSON.parse
-const HISTORY_QUESTION_CHARS = 1_000;
-const HISTORY_ANSWER_CHARS = 4_000;
-
-/**
- * Parse the compact `history` query param the Research page replays on a
- * follow-up: a JSON array of `{ q, a }` prior turns (oldest→newest). The corpus
- * Q&A is stateless on the server, so the running conversation lives entirely in
- * this param. Malformed/oversized input degrades to single-shot (empty history)
- * rather than erroring — a follow-up that loses context still answers standalone.
- */
-function parseResearchHistory(raw: string | undefined): ResearchTurn[] {
-  if (!raw || raw.length > HISTORY_PARAM_MAX_CHARS) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(
-        (t): t is { q: string; a: string } =>
-          !!t && typeof t.q === "string" && typeof t.a === "string" && t.q.trim().length > 0,
-      )
-      .slice(-MAX_HISTORY_TURNS)
-      .map((t) => ({
-        question: t.q.slice(0, HISTORY_QUESTION_CHARS),
-        answer: t.a.slice(0, HISTORY_ANSWER_CHARS),
-      }));
-  } catch {
-    return [];
-  }
-}
 
 export function registerResearchRoutes(app: Hono, config: Config): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
@@ -112,33 +78,16 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       q: question.slice(0, 120),
     });
 
-    return streamSSE(c, async (stream) => {
-      // Retrieval (≤30s) and a slow first synthesis token can leave a long gap
-      // with no events; a heartbeat keeps the connection alive through any proxy
-      // with a shorter idle window than the dashboard's own 255s (matches the
-      // youtube/anthropic SSE streams). The client has no 'heartbeat' listener,
-      // so these are silently ignored.
-      let alive = true;
-      const heartbeat = setInterval(() => {
-        if (!alive) return;
-        stream.writeSSE({ event: "heartbeat", data: "{}" }).catch(() => { alive = false; });
-      }, 30_000);
-      stream.onAbort(() => { alive = false; clearInterval(heartbeat); });
-      try {
-        await streamResearchAnswer({ question, config, botConfig, history, collections: profile.collections }, async (event) => {
-          // EventSource reserves the "error" event for connection-level failures
-          // (it also fires onerror), so a same-named app event gets masked as
-          // "Connection lost" on the client. Emit app errors under a distinct
-          // name; the payload still carries {type:"error", message}.
-          const wireEvent = event.type === "error" ? "app_error" : event.type;
-          await stream.writeSSE({ event: wireEvent, data: JSON.stringify(event) });
-        });
-        // Final sentinel so the client can close the EventSource deterministically.
-        await stream.writeSSE({ event: "end", data: "{}" });
-      } finally {
-        alive = false;
-        clearInterval(heartbeat);
-      }
+    return streamResearchSSE(c, {
+      question,
+      config,
+      botConfig,
+      history,
+      collections: profile.collections,
+      // Enrich citations whose collection maps to a registered wiki with the
+      // matched page name, so the research page can link them into the /wiki
+      // reader. Non-wiki collections pass through unchanged.
+      enrich: (citations) => enrichCitationsWithPages(citations, getWikiRegistry()),
     });
   });
 

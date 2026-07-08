@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { Hono } from "hono";
+import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
@@ -9,7 +10,10 @@ import {
   resolveWikiRequest,
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { discoverAllBots, resolveResearchBot } from "../../bots/config.ts";
+import { streamResearchSSE } from "./research-sse.ts";
+import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
 import { getLog } from "../../logging.ts";
 
@@ -31,6 +35,12 @@ export function getWikiRegistry(): WikiRegistryEntry[] {
   return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
 }
 
+/** Test-only: drop the memoized registry so a test can re-derive it from a
+ *  freshly-set `WIKI_EXTRA` (mirrors `__resetWikiCacheForTest` in the store). */
+export function __resetWikiRegistryForTest(): void {
+  cachedRegistry = null;
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -50,7 +60,7 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
  *  `?bot=<name>` is a legacy alias. A bare `/wiki` renders the default wiki
  *  (jarvis if registered, else the first) — unless `WIKI_DIR` is set, which
  *  stays an explicit legacy override with no wiki claimed in the picker. */
-export function registerWikiRoutes(app: Hono): void {
+export function registerWikiRoutes(app: Hono, config: Config): void {
   app.get("/wiki", async (c) => {
     const registry = getWikiRegistry();
     const wikis = listWikis(registry);
@@ -172,6 +182,60 @@ export function registerWikiRoutes(app: Hono): void {
     if (!(await file.exists())) return c.text("explainer file not found", 404);
     return new Response(file, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  });
+
+  // Wiki Ask tab: research-style cited Q&A scoped to a single wiki's search
+  // collections. Mirrors /api/research/ask (SSE over GET, bounded `history`
+  // replayed from the client) but pins the corpus to the selected wiki's
+  // `collections` and enriches each citation with the matched wiki page name so
+  // the reader can open it in-place. A wiki with no collections (or an unknown
+  // name) returns a clean app_error instead of searching the whole corpus.
+  app.get("/api/wiki/ask", (c) => {
+    const question = (c.req.query("q") ?? "").trim();
+    if (!question) return c.json({ error: "Missing query parameter: q" }, 400);
+
+    const registry = getWikiRegistry();
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    const history = parseResearchHistory(c.req.query("history"));
+    const botConfig = resolveResearchBot(discoverAllBots());
+
+    // Corpus is pinned to this wiki's collections. Compute the wiki/collection
+    // preflight errors here; the shared helper handles the "no bots" case. The
+    // "no bots" message deliberately lives in the helper (shared with /research).
+    const collections = entry?.collections ?? [];
+    let preflightError: string | null = null;
+    if (unknownWiki || !entry) {
+      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
+    } else if (collections.length === 0) {
+      preflightError = "No search collection connected for this wiki.";
+    }
+    if (!preflightError && entry && botConfig) {
+      log.info("Wiki ask: wiki={wiki} bot={bot} turn={turn} q={q}", {
+        wiki: entry.name,
+        bot: botConfig.name,
+        turn: history.length + 1,
+        q: question.slice(0, 120),
+      });
+    }
+
+    return streamResearchSSE(c, {
+      question,
+      config,
+      botConfig: botConfig ?? null,
+      history,
+      collections,
+      preflightError,
+      // Pin enrichment to the resolved wiki (not the whole registry) so a
+      // collection shared by two wikis can't attribute a citation to the wrong
+      // one. `entry` is guaranteed set whenever enrich runs (preflightError
+      // covers the unknown-wiki case), so a missing entry disables enrichment.
+      enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
     });
   });
 }

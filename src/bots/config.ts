@@ -63,6 +63,11 @@ export interface BotConfig {
    *  discovery. Unset means the bot has no browsable wiki (`/wiki?bot=<name>`
    *  shows an empty state). */
   wikiDir?: string;
+  /** Huginn search collections backing this wiki's `/wiki` **Ask** tab (research-
+   *  style Q&A scoped to the wiki). Configured in config.json as `wikiCollections`
+   *  (a string array). Unset ⇒ the Ask tab has no corpus and returns a clean
+   *  "no collection connected" error. Plumbed onto the wiki registry entry. */
+  wikiCollections?: string[];
   /** Context window size in tokens — used to show usage percentage (e.g. 32768 for local models) */
   contextWindow?: number;
   /** Per-tool-group user restrictions — tools not listed here are available to all */
@@ -345,6 +350,28 @@ function validateScalarField(
 }
 
 /**
+ * Guards a string-array config.json field (e.g. `wikiCollections`). A non-array,
+ * or an array containing a non-string element, is warned about and dropped whole
+ * so the field falls back to its default (undefined) — same graceful posture as
+ * {@link validateScalarField}. An empty array is valid (kept).
+ */
+function validateStringArrayField(
+  settings: Record<string, unknown>,
+  key: string,
+  botName: string,
+): void {
+  const value = settings[key];
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+    log.warn(
+      `Bot "{name}" config.json field "${key}" should be an array of strings — ignoring it (using default)`,
+      { name: botName, value: String(value) },
+    );
+    delete settings[key];
+  }
+}
+
+/**
  * Validate the nested `gardener` config block (per-bot config.json). A non-object
  * value is dropped whole; individual mistyped sub-fields warn + drop (falling back
  * to the code default), matching {@link validateScalarField}'s graceful posture.
@@ -427,7 +454,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "gardener"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "gardener"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -440,6 +467,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateScalarField(botSettings, "model", "string", name);
         validateScalarField(botSettings, "baseUrl", "string", name);
         validateScalarField(botSettings, "wikiDir", "string", name);
+        validateStringArrayField(botSettings, "wikiCollections", name);
         validateScalarField(botSettings, "thinkingMaxTokens", "number", name);
         validateScalarField(botSettings, "timeoutMs", "number", name);
         validateScalarField(botSettings, "contextWindow", "number", name);
@@ -506,6 +534,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         typeof botSettings.wikiDir === "string"
           ? resolve(dir, botSettings.wikiDir)
           : undefined,
+      wikiCollections: botSettings.wikiCollections as string[] | undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,

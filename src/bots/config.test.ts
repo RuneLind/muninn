@@ -420,6 +420,39 @@ describe("bot discovery", () => {
       expect(found).toBeDefined();
       expect(found!.wikiDir).toBeUndefined();
     });
+
+    test("keeps a valid wikiCollections string array", () => {
+      setupTestBot("_test_wikicoll", {
+        config: { wikiCollections: ["wiki", "wiki-life"] },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikicoll");
+      expect(found).toBeDefined();
+      expect(found!.wikiCollections).toEqual(["wiki", "wiki-life"]);
+    });
+
+    test("drops wikiCollections when it is not an array", () => {
+      setupTestBot("_test_wikicoll_notarr", {
+        config: { wikiCollections: "wiki" },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikicoll_notarr");
+      expect(found).toBeDefined();
+      expect(found!.wikiCollections).toBeUndefined();
+    });
+
+    test("drops wikiCollections when an element is not a string", () => {
+      setupTestBot("_test_wikicoll_badelem", {
+        config: { wikiCollections: ["wiki", 42] },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikicoll_badelem");
+      expect(found).toBeDefined();
+      expect(found!.wikiCollections).toBeUndefined();
+    });
   });
 
   // ── environment variable parsing ─────────────────────────────────────

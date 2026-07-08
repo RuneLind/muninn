@@ -2,5 +2,6 @@
   "model": "claude-sonnet-4-6",
   "thinkingMaxTokens": 40000,
   "timeoutMs": 300000,
-  "wikiDir": "../../../huginn/huginn-jarvis/data/wiki"
+  "wikiDir": "../../../huginn/huginn-jarvis/data/wiki",
+  "wikiCollections": ["wiki", "wiki-life"]
 }

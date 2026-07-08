@@ -104,6 +104,13 @@ export interface Citation {
   relevance: number;
   /** First matched chunk text — the context the model summarizes from. */
   snippet?: string;
+  /** When this citation's doc resolves to a page in a registered wiki, the wiki's
+   *  canonical name — set by `enrichCitationsWithPages` (wiki/citation-links.ts).
+   *  Lets the UI render an in-reader page link. */
+  wikiName?: string;
+  /** The matched wiki page name (see `wikiName`) — the `?page=` target in the
+   *  `/wiki` reader. Present only alongside `wikiName`. */
+  pageName?: string;
 }
 
 /** Pull the best chunk's text off a hit (mirrors research-knowledge's private extractor). */

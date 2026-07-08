@@ -12,7 +12,7 @@ import {
 import type { BotConfig } from "../bots/config.ts";
 
 /** Minimal BotConfig stubs — only the fields the registry reads. */
-function bot(name: string, wikiDir?: string): BotConfig {
+function bot(name: string, wikiDir?: string, wikiCollections?: string[]): BotConfig {
   return {
     name,
     dir: `/bots/${name}`,
@@ -20,6 +20,7 @@ function bot(name: string, wikiDir?: string): BotConfig {
     telegramAllowedUserIds: [],
     slackAllowedUserIds: [],
     wikiDir,
+    wikiCollections,
   } as BotConfig;
 }
 
@@ -81,6 +82,69 @@ describe("buildWikiRegistry", () => {
     expect(reg).toEqual([
       { name: "notes", root: path.join(home, "n/wiki"), source: "extra" },
       { name: "home", root: home, source: "extra" },
+    ]);
+  });
+
+  test("bot wiki carries its wikiCollections onto the registry entry", () => {
+    const reg = buildWikiRegistry([bot("jarvis", "/w", ["wiki", "wiki-life"])], undefined, REPO);
+    expect(reg).toEqual([
+      { name: "jarvis", root: "/w", source: "bot", collections: ["wiki", "wiki-life"] },
+    ]);
+  });
+
+  test("bot wiki without wikiCollections has no collections key", () => {
+    const [entry] = buildWikiRegistry([bot("jarvis", "/w")], undefined, REPO);
+    expect(entry).toEqual({ name: "jarvis", root: "/w", source: "bot" });
+    expect(entry!.collections).toBeUndefined();
+  });
+
+  test("bot wiki with empty wikiCollections array drops the key (no collections)", () => {
+    const [entry] = buildWikiRegistry([bot("jarvis", "/w", [])], undefined, REPO);
+    expect(entry).toEqual({ name: "jarvis", root: "/w", source: "bot" });
+  });
+
+  test("WIKI_EXTRA 3-segment: parses +-separated collection list", () => {
+    const reg = buildWikiRegistry([], "mimir=../mimir=mimir, kode=/abs/k=nav-wiki+kode-wiki", REPO);
+    expect(reg).toEqual([
+      { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir"] },
+      { name: "kode", root: "/abs/k", source: "extra", collections: ["nav-wiki", "kode-wiki"] },
+    ]);
+  });
+
+  test("WIKI_EXTRA 2-segment (no collections) still works — no collections key", () => {
+    const reg = buildWikiRegistry([], "mimir=../mimir", REPO);
+    expect(reg).toEqual([{ name: "mimir", root: "/repo/mimir", source: "extra" }]);
+    expect(reg[0]!.collections).toBeUndefined();
+  });
+
+  test("WIKI_EXTRA 3-segment trims whitespace inside the collection list", () => {
+    const reg = buildWikiRegistry([], "  kode = /abs/k = a + b ", REPO);
+    expect(reg).toEqual([{ name: "kode", root: "/abs/k", source: "extra", collections: ["a", "b"] }]);
+  });
+
+  test("WIKI_EXTRA empty third segment (trailing =) yields no collections", () => {
+    const reg = buildWikiRegistry([], "kode=/abs/k=", REPO);
+    expect(reg).toEqual([{ name: "kode", root: "/abs/k", source: "extra" }]);
+  });
+
+  test("WIKI_EXTRA 2-segment: '=' inside the path round-trips (tail isn't a collection charset)", () => {
+    // Tail after the last '=' is "b/c" — has a '/', so it's a path, not collections.
+    const reg = buildWikiRegistry([], "weird=/abs/a=b/c", REPO);
+    expect(reg).toEqual([{ name: "weird", root: "/abs/a=b/c", source: "extra" }]);
+    expect(reg[0]!.collections).toBeUndefined();
+  });
+
+  test("WIKI_EXTRA 3-segment: path itself contains '=' AND a trailing collection list", () => {
+    const reg = buildWikiRegistry([], "weird=/abs/a=b=nav-wiki+kode", REPO);
+    expect(reg).toEqual([
+      { name: "weird", root: "/abs/a=b", source: "extra", collections: ["nav-wiki", "kode"] },
+    ]);
+  });
+
+  test("WIKI_EXTRA 3-segment normal: name before first '=', path, +-separated collections", () => {
+    const reg = buildWikiRegistry([], "mimir=../mimir=mimir+notes", REPO);
+    expect(reg).toEqual([
+      { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir", "notes"] },
     ]);
   });
 });
