@@ -3,7 +3,13 @@ import path from "node:path";
 import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
-import { resolveBotWikiRoot, listWikiBots, resolveWikiRequest } from "../../wiki/bot-root.ts";
+import {
+  buildWikiRegistry,
+  resolveWikiRoot,
+  listWikis,
+  resolveWikiRequest,
+  type WikiRegistryEntry,
+} from "../../wiki/registry.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
@@ -28,6 +34,16 @@ const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:832
 let cachedBots: BotConfig[] | null = null;
 function getBots(): BotConfig[] {
   return (cachedBots ??= discoverAllBots());
+}
+
+/**
+ * The gardener is bot-scoped — proposals are keyed by bot, and applying writes
+ * into a bot's wiki. So its registry is built from bots only (no `WIKI_EXTRA`
+ * standalone wikis), which naturally keeps the picker to bot wikis.
+ */
+let cachedRegistry: WikiRegistryEntry[] | null = null;
+function getRegistry(): WikiRegistryEntry[] {
+  return (cachedRegistry ??= buildWikiRegistry(getBots(), undefined));
 }
 
 /** The rich per-proposal shape the review page renders (meta + server-computed preview/diff). */
@@ -112,10 +128,11 @@ async function finishProposal(
 export function registerWikiGardenerRoutes(app: Hono): void {
   // Review page.
   app.get("/wiki/gardener", async (c) => {
-    const bots = getBots();
-    const wikiBots = listWikiBots(bots);
-    const { bot: selected, envOverride } = resolveWikiRequest(
-      bots,
+    const registry = getRegistry();
+    const wikiBots = listWikis(registry);
+    const { wiki: selected, envOverride } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
@@ -126,11 +143,12 @@ export function registerWikiGardenerRoutes(app: Hono): void {
   // computed for the rows a reviewer actually inspects (draft/stale) so the page
   // cost doesn't grow unbounded with terminal history.
   app.get("/api/wiki/proposals", async (c) => {
-    const { root, unknownBot } = resolveBotWikiRoot(getBots(), c.req.query("bot"));
-    if (unknownBot) {
-      return c.json({ proposals: [], error: "no wiki configured for that bot" });
+    const name = c.req.query("wiki")?.trim() ? c.req.query("wiki") : c.req.query("bot");
+    const { root, unknownWiki } = resolveWikiRoot(getRegistry(), name);
+    if (unknownWiki) {
+      return c.json({ proposals: [], error: "no wiki configured for that name" });
     }
-    const bot = resolveProposalBot(c.req.query("bot"));
+    const bot = resolveProposalBot(name);
     if (!bot) return c.json({ proposals: [], error: "no wiki bot resolved" });
 
     const rows = await listAllWikiProposals(bot.name);
@@ -240,10 +258,9 @@ export function registerWikiGardenerRoutes(app: Hono): void {
   });
 }
 
-/** Resolve the BotConfig backing a `?bot=` query (or the default wiki bot). */
-function resolveProposalBot(rawBot: string | undefined): BotConfig | undefined {
-  const bots = getBots();
-  const { bot: selected } = resolveWikiRequest(bots, rawBot, process.env.WIKI_DIR);
+/** Resolve the BotConfig backing a wiki name (or the default wiki bot). */
+function resolveProposalBot(rawName: string | undefined): BotConfig | undefined {
+  const { wiki: selected } = resolveWikiRequest(getRegistry(), rawName, undefined, process.env.WIKI_DIR);
   if (!selected) return undefined;
-  return bots.find((b) => b.name.toLowerCase() === selected.toLowerCase() && !!b.wikiDir);
+  return getBots().find((b) => b.name.toLowerCase() === selected.toLowerCase() && !!b.wikiDir);
 }

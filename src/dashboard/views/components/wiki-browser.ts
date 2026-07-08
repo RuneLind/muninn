@@ -41,21 +41,24 @@ interface WikiPagesResponse {
 }
 
 // ── Page state ────────────────────────────────────────────────────────
-/** Which bot's wiki is being browsed — the server injects the *canonical* bot
- *  name (case-corrected, or the resolved default) as `window.__WIKI_BOT__`, so
- *  our `?bot=` fetches and the picker's selected option always agree. Falls back
- *  to the raw `?bot=` query if the global is somehow absent. Empty = default/env. */
-const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
-const BOT = typeof injectedBot === "string" ? injectedBot : new URLSearchParams(location.search).get("bot") || "";
-/** Append the active `bot` param to a URL so every /api/wiki/* fetch stays on-wiki. */
-function withBot(url: string): string {
-  if (!BOT) return url;
-  return url + (url.indexOf("?") === -1 ? "?" : "&") + "bot=" + encodeURIComponent(BOT);
+/** Which wiki is being browsed — the server injects the *canonical* wiki name
+ *  (case-corrected, or the resolved default) as `window.__WIKI_NAME__`, so our
+ *  `?wiki=` fetches and the picker's selected option always agree. Falls back to
+ *  the raw `?wiki=` (or legacy `?bot=`) query if the global is somehow absent.
+ *  Empty = default/env. */
+const injectedName = (window as unknown as { __WIKI_NAME__?: unknown }).__WIKI_NAME__;
+const params0 = new URLSearchParams(location.search);
+const WIKI =
+  typeof injectedName === "string" ? injectedName : params0.get("wiki") || params0.get("bot") || "";
+/** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
+function withWiki(url: string): string {
+  if (!WIKI) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + "wiki=" + encodeURIComponent(WIKI);
 }
 /** Build a shareable in-page URL that preserves the active wiki. */
 function pageUrl(name: string): string {
-  const bot = BOT ? "bot=" + encodeURIComponent(BOT) + "&" : "";
-  return "/wiki?" + bot + "page=" + encodeURIComponent(name);
+  const wiki = WIKI ? "wiki=" + encodeURIComponent(WIKI) + "&" : "";
+  return "/wiki?" + wiki + "page=" + encodeURIComponent(name);
 }
 
 let allPages: WikiListing[] = [];
@@ -304,7 +307,7 @@ function renderConnections(data: WikiPageDetail): void {
 }
 
 function loadPage(name: string, push: boolean): void {
-  fetch(withBot("/api/wiki/page?name=" + encodeURIComponent(name)))
+  fetch(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)))
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       if (data.error) {
@@ -405,11 +408,11 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
 document.getElementById("wikiSort")!.addEventListener("change", renderList);
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
-const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
-if (wikiBotSel) {
-  wikiBotSel.addEventListener("change", () => {
-    const value = wikiBotSel.value;
-    location.href = value ? "/wiki?bot=" + encodeURIComponent(value) : "/wiki";
+const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
+if (wikiSel) {
+  wikiSel.addEventListener("change", () => {
+    const value = wikiSel.value;
+    location.href = value ? "/wiki?wiki=" + encodeURIComponent(value) : "/wiki";
   });
 }
 
@@ -421,18 +424,18 @@ window.addEventListener("popstate", () => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────
-fetch(withBot("/api/wiki/pages"))
+fetch(withWiki("/api/wiki/pages"))
   .then((r) => r.json())
   .then((data: WikiPagesResponse) => {
     if (data.error && !(data.pages || []).length) {
-      // Distinguish the two BOT-set failures the server reports: an unconfigured
-      // bot ("no wiki configured…") vs. a configured wikiDir whose directory is
-      // missing on disk ("wiki directory not found") — different, accurate hints.
+      // Distinguish the two WIKI-set failures the server reports: an unknown wiki
+      // ("no wiki configured…") vs. a registered wiki whose directory is missing
+      // on disk ("wiki directory not found") — different, accurate hints.
       const configured = /directory not found/i.test(data.error);
-      const hint = BOT
+      const hint = WIKI
         ? configured
-          ? `Wiki directory not found for bot <code>${esc(BOT)}</code>. Check its <code>wikiDir</code> path exists on disk.`
-          : `No wiki configured for bot <code>${esc(BOT)}</code>. Add a <code>wikiDir</code> to its config.json.`
+          ? `Wiki directory not found for <code>${esc(WIKI)}</code>. Check its configured path exists on disk.`
+          : `No wiki named <code>${esc(WIKI)}</code>. Add it as a bot <code>wikiDir</code> or a <code>WIKI_EXTRA</code> entry.`
         : "Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the wiki path.";
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">${hint}</div>`;
