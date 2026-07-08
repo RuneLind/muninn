@@ -33,7 +33,8 @@ import { getLog } from "../logging.ts";
 const log = getLog("watchers", "wiki-gardener");
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-const DRAFT_TIMEOUT_MS = 180_000;
+const DRAFT_TIMEOUT_MS = 300_000;
+const DRAFT_THINKING_MAX_TOKENS = 8_000;
 const DOC_FETCH_TIMEOUT_MS = 15_000;
 
 export async function checkWikiGardener(
@@ -102,7 +103,10 @@ export async function checkWikiGardener(
       getWikiIndex: () => getWikiIndex({ root: wikiDir }),
 
       callDraft: async (prompt, timeoutMs) => {
-        const { result } = await executeOneShot(prompt, config, botConfig, { timeoutMs });
+        // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
+        // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
+        const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
+        const { result } = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
         return result;
       },
       readWikiFile: async (absPath) => {

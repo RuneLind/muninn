@@ -9,7 +9,7 @@
  *  - `interval_ms` weekly (7d).
  *  - `config.hour: 10` — a daytime fire, so a weekly run never lands in quiet
  *    hours (a quiet-hours skip still advances last_run_at, silently costing a week).
- *  - `config.timeoutMs: 720000` (12 min) — the runner's net is
+ *  - `config.timeoutMs: 1200000` (20 min) — the runner's net is
  *    max(120s, timeoutMs + 30s); 3 drafts × 180s + cluster + harvest need the
  *    headroom, and a timed-out run advances last_run_at and loses the week.
  *
@@ -33,7 +33,7 @@ const NAME = "Wiki Gardener";
 const WEEKLY_INTERVAL_MS = 604_800_000; // 7d
 const gardenerConfig = {
   hour: 10, // daytime — clear of quiet hours
-  timeoutMs: 720_000, // 12 min net headroom for 3 drafts + cluster + harvest
+  timeoutMs: 1_200_000, // 20 min net headroom for 3 drafts (300s each) + cluster + harvest
 };
 
 const config = loadConfig();

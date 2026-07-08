@@ -21,7 +21,7 @@ import type { Cluster, HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts
 import { harvestDocs } from "./harvest.ts";
 import { buildClusterPrompt, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
-import { buildDraftPrompt, shapeGate } from "./draft.ts";
+import { buildDraftPrompt, normalizeDraftOutput, shapeGate } from "./draft.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "runner");
@@ -179,7 +179,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
     let draftText: string;
     try {
-      draftText = await deps.callDraft(prompt, deps.draftTimeoutMs);
+      draftText = normalizeDraftOutput(await deps.callDraft(prompt, deps.draftTimeoutMs));
     } catch (err) {
       log.error("Gardener draft failed for topic {topic}: {error}", {
         botName,

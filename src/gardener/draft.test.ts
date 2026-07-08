@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { shapeGate, isPathConfined, buildDraftPrompt, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
+import { shapeGate, isPathConfined, buildDraftPrompt, normalizeDraftOutput, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
 import type { Cluster, HarvestedDoc } from "./types.ts";
 
 const WIKI = "/tmp/wiki-root";
@@ -114,12 +114,37 @@ describe("buildDraftPrompt", () => {
     }));
     const bigCluster = { ...cluster, docIds: many.map((d) => d.key) };
     const p = buildDraftPrompt({ cluster: bigCluster, mode: "create", docs: many, today: "2026-07-08" });
-    // 12-doc cap, most recent first: the 3 OLDEST (Doc 1–3) are dropped.
+    // 8-doc cap, most recent first: the 7 OLDEST (Doc 1–7) are dropped.
     expect(p).toContain("Doc 15");
-    expect(p).toContain("Doc 4");
-    expect(p).not.toContain("Doc 3:");
+    expect(p).toContain("Doc 8");
+    expect(p).not.toContain("Doc 7:");
     // The 7000-char doc (Doc 15, kept as most recent) is truncated with a marker.
     expect(p).toContain("[… truncated for length]");
-    expect(p).not.toContain("x".repeat(6500));
+    expect(p).not.toContain("x".repeat(4500));
+  });
+});
+
+describe("normalizeDraftOutput", () => {
+  const file = `---\ntype: concept\ntitle: T\n---\n\n# T\n\nBody.`;
+
+  test("passes bare file content through unchanged", () => {
+    expect(normalizeDraftOutput(file)).toBe(file);
+  });
+
+  test("unwraps a whole-output markdown code fence", () => {
+    expect(normalizeDraftOutput("```markdown\n" + file + "\n```")).toBe(file);
+    expect(normalizeDraftOutput("```\n" + file + "\n```\n")).toBe(file);
+  });
+
+  test("drops conversational preamble before the frontmatter fence", () => {
+    expect(normalizeDraftOutput("Here is the wiki page you asked for:\n\n" + file)).toBe(file);
+  });
+
+  test("leaves text without a terminated frontmatter block untouched", () => {
+    const junk = "Sorry, I cannot draft this page.";
+    expect(normalizeDraftOutput(junk)).toBe(junk);
+    // A stray `---` divider with no closing fence is not mistaken for frontmatter.
+    const divider = "Intro\n---\nno closing fence here";
+    expect(normalizeDraftOutput(divider)).toBe(divider);
   });
 });

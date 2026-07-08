@@ -245,7 +245,7 @@ target-resolve → draft → shape-gate → persist → notify.
   (`getWikiIndex({root: wikiDir})`) is the oracle — `update` on a normalized
   title/alias near-match, else `create` (huginn scores are never consulted).
 - **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
-  (explicit `timeoutMs: 180000`, no extraDirs). Summaries are inlined as
+  (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
   **untrusted** delimited data. The **shape-gate** rejects a draft unless the
   frontmatter parses with required keys, `type` matches the cluster kind, the body
   is non-empty, and `target_path` is **path-confined** (relative, `..`-free,
@@ -263,7 +263,7 @@ bot to have `wikiDir` set (a missing `wikiDir` warns and returns no alerts).
 
 **Seed**: `bun scripts/setup-wiki-gardener.ts [--apply]` creates the jarvis
 `wiki-gardener` row — weekly interval, `config.hour: 10` (daytime, clear of quiet
-hours), `config.timeoutMs: 720000` (net headroom for 3 drafts + cluster + harvest;
+hours), `config.timeoutMs: 1200000` (net headroom for 3 drafts at 300s + cluster + harvest;
 a timed-out run advances last_run_at and loses the week).
 
 Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`); the
