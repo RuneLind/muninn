@@ -254,7 +254,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     {
       id: `wiki-gardener:${ids.join(",")}`,
       source: "wiki-gardener",
-      summary: `${persisted.length} wiki draft(s) pending review — ${labels.join(", ")}`,
+      summary: `${persisted.length} wiki draft(s) pending review — ${labels.join(", ")} — /wiki/gardener`,
       urgency: "low",
     },
   ];

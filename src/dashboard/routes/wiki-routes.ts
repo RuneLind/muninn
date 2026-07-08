@@ -4,6 +4,10 @@ import { getWikiIndex, readWikiPage, type WikiIndex, type WikiPageMeta } from ".
 import { renderWikiHtml } from "../../wiki/render.ts";
 import { resolveBotWikiRoot, listWikiBots, resolveWikiRequest } from "../../wiki/bot-root.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
+import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
+import { getLog } from "../../logging.ts";
+
+const log = getLog("dashboard", "wiki");
 
 /**
  * Bot configs are static until restart, so discover once and memoize — otherwise
@@ -38,7 +42,20 @@ export function registerWikiRoutes(app: Hono): void {
     const bots = getBots();
     const wikiBots = listWikiBots(bots);
     const { bot: selected, envOverride } = resolveWikiRequest(bots, c.req.query("bot"), process.env.WIKI_DIR);
-    return c.html(await renderWikiPage({ wikiBots, selected, envOverride }));
+    // Pending-draft count for the selected bot — drives the "Gardener" header
+    // badge. Best-effort: a DB hiccup must not take the reader down.
+    let gardenerPending = 0;
+    if (selected) {
+      try {
+        gardenerPending = await countDraftWikiProposals(selected);
+      } catch (err) {
+        log.warn("Wiki: draft-proposal count failed for {bot}: {error}", {
+          bot: selected,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return c.html(await renderWikiPage({ wikiBots, selected, envOverride, gardenerPending }));
   });
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).

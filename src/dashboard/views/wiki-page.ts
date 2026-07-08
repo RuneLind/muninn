@@ -24,11 +24,15 @@ export async function renderWikiPage(opts?: {
   wikiBots?: string[];
   selected?: string;
   envOverride?: boolean;
+  gardenerPending?: number;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikiBots = opts?.wikiBots ?? [];
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
+  const gardenerPending = opts?.gardenerPending ?? 0;
+  const gardenerHref = `/wiki/gardener${selected ? "?bot=" + encodeURIComponent(selected) : ""}`;
+  const gardenerLink = `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`;
   const wikiSelector =
     wikiBots.length > 1
       ? `<select id="wikiBot" class="wiki-sort" aria-label="Wiki">` +
@@ -101,6 +105,18 @@ export async function renderWikiPage(opts?: {
       padding: 4px 6px;
     }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
+
+    .wiki-gardener-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-muted); text-decoration: none;
+      padding: 4px 10px; border: 1px solid var(--border-secondary); border-radius: 6px;
+    }
+    .wiki-gardener-link:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-gardener-badge {
+      background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
+      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
     .wiki-list-item {
@@ -256,6 +272,7 @@ export async function renderWikiPage(opts?: {
     <div class="wiki-pane">
       <div class="wiki-browse-head">
         ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
+        <div class="wiki-sort-row">${gardenerLink}</div>
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
         <div class="wiki-chip-row" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>

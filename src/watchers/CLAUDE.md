@@ -222,12 +222,13 @@ The stricter `DEFAULT_ANTHROPIC_HIGHLIGHTS_PROMPT` (≥0.8-only) remains exporte
 
 A weekly watcher that clusters recently-ingested summaries (the four
 `SUMMARY_SOURCES` collections) and drafts knowledge-wiki page **proposals** into
-the `wiki_proposals` table. **PR 1 is the proposal pipeline only** — no wiki
-writes, no review UI (those land in PR 2). Proposals accumulate in Postgres
-(inspectable via psql) and a Telegram alert (🌱) announces them.
+the `wiki_proposals` table, plus a **web review gate** (`/wiki/gardener`) that
+approves a draft into the wiki (muninn's first wiki write) or rejects it. The
+Telegram alert (🌱) names the `/wiki/gardener` route.
 
 Pipeline (`src/gardener/runner.ts` `runGardener`): harvest → cluster →
-target-resolve → draft → shape-gate → persist → notify.
+target-resolve → draft → shape-gate → persist → notify → **(web gate) approve →
+apply**.
 
 - **Harvest** (`harvest.ts`): list docs across the summary collections
   (`GET /api/collection/<c>/documents?include_dates=1`), filter to `date >= now −
@@ -256,6 +257,31 @@ target-resolve → draft → shape-gate → persist → notify.
   **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
   `lastNotifiedIds` dedup runs unconditionally, so a static id would drop every
   run after the first. `skipContentHash` is extended to cover `wiki-gardener`.
+
+**Review gate + apply (PR 2).** The `/wiki/gardener` dashboard page
+(`src/dashboard/routes/wiki-gardener-routes.ts` + `views/wiki-gardener-page.ts` +
+the bundled `wiki-gardener-browser.ts` client) lists a bot's proposals with a
+rendered markdown preview (reuses `renderWikiHtml`), a current-file→draft unified
+diff for `update` mode (`src/gardener/diff.ts`, dependency-free LCS line diff),
+the source summaries, and Approve / Reject buttons (draft rows only). The `/wiki`
+header carries a 🌱 Gardener link + pending-draft count badge.
+
+- **Status machine** (CAS in `src/db/wiki-proposals.ts`, mirroring dev_runs):
+  `draft → approved → applied | stale | error`, and `draft → rejected`. Each
+  transition is `UPDATE … WHERE id=… AND status=<from>` returning the row; a lost
+  race returns null → **409**. Endpoints: `POST /api/wiki/proposals/:id/{approve,
+  reject}` and `GET /api/wiki/proposals?bot=<name>` (all statuses, newest first).
+- **Apply** (`src/gardener/apply.ts`, DB-free + temp-dir-testable — the route owns
+  the status CAS): re-run path confinement (defense in depth) → staleness check
+  (`update`: sha256(current) must equal `base_hash`; `create`: target must not
+  exist — either mismatch ⇒ `stale`, no write) → `Bun.write` the draft → prepend a
+  `log.md` entry **after the `# Activity Log` header, before the first `## [`**
+  (`## [YYYY-MM-DD] create|update | <Title>` + `- via wiki-gardener, N sources`,
+  Europe/Oslo date; creates log.md if missing) → refresh the wiki-store cache
+  (`getWikiIndex refresh`) → best-effort huginn reindex (collection derived from
+  `target_path`: `life/**` → `wiki-life`, else `wiki`; failures warn, never fail
+  the apply) → mark `applied`. `stale` rows show an explanation and become
+  eligible again on the next weekly run.
 
 **Config** (per-bot `config.json` `gardener` block, validated at discovery):
 `{ enabled?, minClusterSize?, lookbackDays?, maxProposalsPerRun? }`. Requires the

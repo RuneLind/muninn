@@ -17,6 +17,7 @@ import { registerAnthropicRoutes } from "./routes/anthropic-routes.ts";
 import { registerSSERoutes } from "./routes/sse-routes.ts";
 import { registerGraphRoutes } from "./routes/graph-routes.ts";
 import { registerWikiRoutes } from "./routes/wiki-routes.ts";
+import { registerWikiGardenerRoutes } from "./routes/wiki-gardener-routes.ts";
 import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
@@ -49,6 +50,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerSSERoutes(app);
   registerGraphRoutes(app, config);
   registerWikiRoutes(app);
+  registerWikiGardenerRoutes(app);
   registerBenchmarkRoutes(app);
 
   return app;
