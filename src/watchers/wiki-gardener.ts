@@ -1,17 +1,17 @@
 /**
  * Wiki-gardener watcher checker.
  *
- * `runChecker` (runner.ts) passes only `(watcher, cwd, botName)`, so this checker
- * resolves the bot's `Config`/`BotConfig` via discovery (like the anthropic
- * summarizer's auto-promote path) and reads the knowledge-API URL from env (like
- * x.ts). It wires the real seams and delegates to `runGardener`.
+ * `runChecker` (runner.ts) passes the bot's full `BotConfig` through, so this
+ * checker only resolves the muninn `Config` (for `executeOneShot`) and reads the
+ * knowledge-API URL from env (like x.ts). It wires the real seams and delegates
+ * to `runGardener`.
  *
  * PR 1: proposals accumulate in Postgres and a Telegram alert announces them —
  * no wiki writes, no review UI (those land in PR 2).
  */
 
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { discoverAllBots } from "../bots/config.ts";
+import type { BotConfig } from "../bots/config.ts";
 import { loadConfig } from "../config.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
@@ -38,15 +38,9 @@ const DOC_FETCH_TIMEOUT_MS = 15_000;
 
 export async function checkWikiGardener(
   watcher: Watcher,
-  _cwd?: string,
-  botName?: string,
+  botConfig: BotConfig,
 ): Promise<WatcherAlert[]> {
-  const name = botName ?? watcher.botName;
-  const botConfig = discoverAllBots().find((b) => b.name === name);
-  if (!botConfig) {
-    log.warn("Wiki-gardener: bot \"{name}\" not discovered — skipping", { botName: name, name });
-    return [];
-  }
+  const name = botConfig.name;
   if (!botConfig.wikiDir) {
     log.warn("Wiki-gardener: bot \"{name}\" has no wikiDir configured — skipping", {
       botName: name,

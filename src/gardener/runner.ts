@@ -136,8 +136,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     validDocKeys,
     minClusterSize: deps.minClusterSize,
     maxProposalsPerRun: deps.maxProposalsPerRun,
-    liveTopicKeys: new Set(liveKeys),
-    rejectedTopicKeys: new Set(rejectedKeys),
+    skipTopicKeys: new Set([...liveKeys, ...rejectedKeys]),
   });
   tracer?.end("cluster", { clusters: clusters.length });
 

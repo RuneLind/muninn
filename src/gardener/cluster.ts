@@ -10,18 +10,14 @@
 import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc } from "./types.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
+import { stripFrontmatter } from "../wiki/render.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "cluster");
 
 /** First ~2 lines / 200 chars of the doc body, heading + frontmatter stripped. */
 export function excerptOf(text: string, maxChars = 200): string {
-  let body = text;
-  // Strip a leading YAML frontmatter fence.
-  if (body.startsWith("---")) {
-    const end = body.indexOf("\n---", 3);
-    if (end !== -1) body = body.slice(body.indexOf("\n", end + 1) + 1);
-  }
+  const body = stripFrontmatter(text);
   // Drop leading markdown headings + blank lines.
   const lines = body
     .split("\n")
@@ -129,9 +125,11 @@ export function parseClusters(raw: string): Cluster[] {
  * Pure skip/size/cap filter, applied BEFORE any draft call is spent:
  *  1. drop docIds not in the harvested set (model hallucination / stale ref),
  *  2. drop clusters below `minClusterSize`,
- *  3. drop clusters whose topicKey has a prior `rejected` OR a live `draft`/
- *     `approved` proposal (one topic = at most one live proposal),
- *  4. cap at `maxProposalsPerRun` (largest clusters first).
+ *  3. drop clusters whose topicKey is in `skipTopicKeys` (prior `rejected` OR a
+ *     live `draft`/`approved` proposal — one topic = at most one live proposal),
+ *  4. dedupe repeated topicKeys within the run (first wins — a duplicate would
+ *     waste a full draft call and then die on the insert's ON CONFLICT),
+ *  5. cap at `maxProposalsPerRun` (largest clusters first).
  */
 export function filterClusters(
   clusters: Cluster[],
@@ -139,8 +137,7 @@ export function filterClusters(
     validDocKeys: Set<string>;
     minClusterSize: number;
     maxProposalsPerRun: number;
-    liveTopicKeys: Set<string>;
-    rejectedTopicKeys: Set<string>;
+    skipTopicKeys: Set<string>;
   },
 ): Cluster[] {
   const kept = clusters
@@ -149,9 +146,19 @@ export function filterClusters(
       docIds: [...new Set(c.docIds.filter((id) => opts.validDocKeys.has(id)))],
     }))
     .filter((c) => c.docIds.length >= opts.minClusterSize)
-    .filter((c) => !opts.liveTopicKeys.has(c.topicKey) && !opts.rejectedTopicKeys.has(c.topicKey));
+    .filter((c) => !opts.skipTopicKeys.has(c.topicKey));
+
+  const seen = new Set<string>();
+  const deduped = kept.filter((c) => {
+    if (seen.has(c.topicKey)) {
+      log.info("Dropping duplicate cluster for topicKey {topic} within the run", { topic: c.topicKey });
+      return false;
+    }
+    seen.add(c.topicKey);
+    return true;
+  });
 
   // Largest clusters first, then cap.
-  kept.sort((a, b) => b.docIds.length - a.docIds.length);
-  return kept.slice(0, opts.maxProposalsPerRun);
+  deduped.sort((a, b) => b.docIds.length - a.docIds.length);
+  return deduped.slice(0, opts.maxProposalsPerRun);
 }

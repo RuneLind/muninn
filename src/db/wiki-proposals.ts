@@ -164,7 +164,7 @@ export async function getConsumedDocIds(botName: string): Promise<Set<string>> {
 
 function mapRow(r: Record<string, any>): WikiProposal {
   return {
-    id: String(r.id),
+    id: r.id,
     botName: r.bot_name,
     topicKey: r.topic_key,
     kind: r.kind as WikiProposalKind,

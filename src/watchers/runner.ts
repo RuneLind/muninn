@@ -210,7 +210,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       setConnectorInfo(requestId, botConfig);
 
       const alerts = await withWatcherTimeout(
-        runChecker(watcher, botConfig.dir, tag),
+        runChecker(watcher, botConfig),
         watcher.name,
         computeWatcherTimeoutMs(watcher),
       );
@@ -344,7 +344,9 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
   }
 }
 
-async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
+async function runChecker(watcher: Watcher, botConfig: BotConfig): Promise<WatcherAlert[]> {
+  const cwd = botConfig.dir;
+  const botName = botConfig.name;
   switch (watcher.type) {
     case "email":
       return await checkEmail(watcher, cwd, botName);
@@ -355,7 +357,9 @@ async function runChecker(watcher: Watcher, cwd?: string, botName?: string): Pro
     case "anthropic":
       return await checkAnthropic(watcher);
     case "wiki-gardener":
-      return await checkWikiGardener(watcher, cwd, botName);
+      // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
+      // for executeOneShot — passed through instead of re-running bot discovery.
+      return await checkWikiGardener(watcher, botConfig);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];

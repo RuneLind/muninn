@@ -701,7 +701,7 @@ CREATE TRIGGER message_feedback_updated_at
 -- (from migration 057-wiki-proposals.sql).
 -- ============================================================================
 CREATE TABLE wiki_proposals (
-  id            BIGSERIAL PRIMARY KEY,
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_name      TEXT NOT NULL,
   topic_key     TEXT NOT NULL,           -- stable slug for dedup across runs
   kind          TEXT NOT NULL,           -- concept | entity

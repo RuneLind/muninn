@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { shapeGate, isPathConfined, buildDraftPrompt } from "./draft.ts";
+import { shapeGate, isPathConfined, buildDraftPrompt, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
 import type { Cluster, HarvestedDoc } from "./types.ts";
 
 const WIKI = "/tmp/wiki-root";
@@ -72,6 +72,18 @@ describe("shapeGate", () => {
   test("rejects a path-confinement violation", () => {
     expect(shapeGate(draftFile(), { ...okOpts, targetPath: "../evil.md" }).ok).toBe(false);
   });
+
+  test("rejects a type value with a trailing inline comment (prompt regression guard)", () => {
+    // parseFrontmatter does NOT strip trailing comments — `type: concept # …`
+    // parses to the literal string and fails the kind match. The conventions
+    // digest must therefore never show inline comments in its example (it did
+    // once, and drafts imitating it were silently dropped here).
+    const draft = draftFile({ type: 'concept # "concept" for an idea' });
+    const result = shapeGate(draft, okOpts);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("does not match cluster kind");
+    expect(WIKI_CONVENTIONS_DIGEST).not.toMatch(/^type: concept\s+#/m);
+  });
 });
 
 describe("buildDraftPrompt", () => {
@@ -89,5 +101,25 @@ describe("buildDraftPrompt", () => {
     const p = buildDraftPrompt({ cluster, mode: "update", docs, today: "2026-07-08", currentBody: "existing content" });
     expect(p).toContain("BEGIN CURRENT PAGE");
     expect(p).toContain("existing content");
+  });
+
+  test("bounds the prompt: caps docs (most recent first) and per-doc length", () => {
+    const many: HarvestedDoc[] = Array.from({ length: 15 }, (_, i) => ({
+      key: `c/2026-07-${String(i + 1).padStart(2, "0")}_d.md`,
+      collection: "c",
+      id: `2026-07-${String(i + 1).padStart(2, "0")}_d.md`,
+      url: "",
+      title: `Doc ${i + 1}`,
+      text: i === 14 ? "x".repeat(7000) : `body ${i + 1}`,
+    }));
+    const bigCluster = { ...cluster, docIds: many.map((d) => d.key) };
+    const p = buildDraftPrompt({ cluster: bigCluster, mode: "create", docs: many, today: "2026-07-08" });
+    // 12-doc cap, most recent first: the 3 OLDEST (Doc 1–3) are dropped.
+    expect(p).toContain("Doc 15");
+    expect(p).toContain("Doc 4");
+    expect(p).not.toContain("Doc 3:");
+    // The 7000-char doc (Doc 15, kept as most recent) is truncated with a marker.
+    expect(p).toContain("[… truncated for length]");
+    expect(p).not.toContain("x".repeat(6500));
   });
 });

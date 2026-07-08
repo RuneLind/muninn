@@ -81,8 +81,6 @@ export interface HarvestedDoc {
   author?: string;
   /** Full body text (heading + prose), used in the draft prompt. */
   text: string;
-  /** Epoch ms the doc was dated, or undefined when undeterminable. */
-  dateMs?: number;
 }
 
 /** One cluster proposed by the cluster model. */

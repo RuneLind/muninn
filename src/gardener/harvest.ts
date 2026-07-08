@@ -75,7 +75,6 @@ function normalizeDoc(collection: string, listed: ListedDoc, raw: RawFetchedDoc)
     category: raw.metadata?.category,
     author: raw.metadata?.author,
     text,
-    dateMs: docDateMs({ id: listed.id, date: raw.metadata?.date ?? listed.date }),
   };
 }
 

@@ -3,7 +3,7 @@
 -- rows here; PR 2 adds the web review gate + apply step. Mirrored in init.sql
 -- (schema-drift.test.ts requires both sides to converge).
 CREATE TABLE wiki_proposals (
-  id            BIGSERIAL PRIMARY KEY,
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_name      TEXT NOT NULL,
   topic_key     TEXT NOT NULL,           -- stable slug for dedup across runs
   kind          TEXT NOT NULL,           -- concept | entity

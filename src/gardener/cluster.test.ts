@@ -39,8 +39,7 @@ describe("filterClusters", () => {
     validDocKeys,
     minClusterSize: 3,
     maxProposalsPerRun: 3,
-    liveTopicKeys: new Set<string>(),
-    rejectedTopicKeys: new Set<string>(),
+    skipTopicKeys: new Set<string>(),
   };
 
   test("drops unknown docIds then applies minClusterSize", () => {
@@ -48,14 +47,16 @@ describe("filterClusters", () => {
     expect(filterClusters([c], opts)).toHaveLength(0); // only 2 valid < 3
   });
 
-  test("skips clusters with a rejected topicKey", () => {
-    const out = filterClusters([base], { ...opts, rejectedTopicKeys: new Set(["t"]) });
+  test("skips clusters whose topicKey is in skipTopicKeys (rejected or live)", () => {
+    const out = filterClusters([base], { ...opts, skipTopicKeys: new Set(["t"]) });
     expect(out).toHaveLength(0);
   });
 
-  test("skips clusters with a live (draft/approved) topicKey", () => {
-    const out = filterClusters([base], { ...opts, liveTopicKeys: new Set(["t"]) });
-    expect(out).toHaveLength(0);
+  test("dedupes repeated topicKeys within the run (first wins)", () => {
+    const dup = { ...base, docIds: ["c/1", "c/2", "c/3", "c/4"] }; // larger, but second
+    const out = filterClusters([base, dup], opts);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.docIds).toEqual(base.docIds); // the FIRST occurrence survived
   });
 
   test("caps at maxProposalsPerRun, largest first", () => {

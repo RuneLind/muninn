@@ -11,13 +11,22 @@
 import path from "node:path";
 import type { Cluster, ClusterKind, HarvestedDoc } from "./types.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
+import { stripFrontmatter } from "../wiki/render.ts";
 import { expectedDir } from "./target-resolve.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("gardener", "draft");
+
+/** Max docs inlined into one draft prompt (most recent first — doc ids are date-prefixed). */
+const MAX_DRAFT_DOCS = 12;
+/** Per-doc char cap in the draft prompt — a long transcript summary must not blow the context window. */
+const MAX_DOC_CHARS = 6000;
 
 /** A short, literal digest of the wiki conventions inlined into the draft prompt. */
 export const WIKI_CONVENTIONS_DIGEST = `The knowledge wiki is a set of Markdown pages with YAML frontmatter. Every page follows this exact shape:
 
 ---
-type: concept            # "concept" for an idea/technique/framework, "entity" for a named person/company/product/tool
+type: concept
 title: Human Readable Title
 aliases: [Alternate Name, Acronym]
 created: YYYY-MM-DD
@@ -37,7 +46,8 @@ Prose with [[Wikilinks]] to related pages (link by page title).
 - [[Related Page]]
 
 Rules:
-- Frontmatter keys are exactly: type, title, aliases, created, updated, tags, sources. Arrays are single-line inline arrays like [a, b].
+- Frontmatter keys are exactly: type, title, aliases, created, updated, tags, sources. Arrays are single-line inline arrays like [a, b]. Values are BARE values — never append trailing comments after a value.
+- "type:" is "concept" for an idea/technique/framework, "entity" for a named person/company/product/tool.
 - On CREATE set both created: and updated: to today's date. On UPDATE bump updated: to today, keep created: as-is.
 - "sources:" lists the source summary URLs (or existing [[source pages]] when you reference one).
 - Use [[Wikilinks]] for cross-references; the page MUST end with a "## See also" section.
@@ -53,10 +63,33 @@ export function buildDraftPrompt(opts: {
 }): string {
   const { cluster, mode, docs, today, currentBody } = opts;
 
-  const summaries = docs
+  // Bound the prompt: cap docs per cluster (most recent first — doc ids carry a
+  // YYYY-MM-DD prefix, so a descending id sort is a recency sort) and cap each
+  // doc's inlined text. Unbounded, a large cluster of long transcript summaries
+  // can blow the context window / the 180s draft timeout.
+  const bounded = [...docs].sort((a, b) => b.id.localeCompare(a.id)).slice(0, MAX_DRAFT_DOCS);
+  if (bounded.length < docs.length) {
+    log.info("Draft prompt for {topic}: capped {total} docs to {kept} (most recent)", {
+      topic: cluster.topicKey,
+      total: docs.length,
+      kept: bounded.length,
+    });
+  }
+
+  const summaries = bounded
     .map((d, i) => {
       const header = `### Summary ${i + 1}: ${d.title}${d.url ? ` (${d.url})` : ""}`;
-      return `${header}\n${d.text.trim()}`;
+      let text = d.text.trim();
+      if (text.length > MAX_DOC_CHARS) {
+        const cut = text.lastIndexOf(" ", MAX_DOC_CHARS);
+        text = `${text.slice(0, cut > 0 ? cut : MAX_DOC_CHARS)}\n\n[… truncated for length]`;
+        log.info("Draft prompt for {topic}: truncated doc {docId} to {cap} chars", {
+          topic: cluster.topicKey,
+          docId: d.key,
+          cap: MAX_DOC_CHARS,
+        });
+      }
+      return `${header}\n${text}`;
     })
     .join("\n\n");
 
@@ -164,10 +197,9 @@ export function shapeGate(
     return { ok: false, reason: `type "${type}" does not match cluster kind "${opts.kind}"` };
   }
 
-  // Body = everything after the closing `---` line. When the closing fence is
-  // the last line (no trailing content) there's no newline after it → empty body.
-  const afterFence = trimmed.indexOf("\n", fenceEnd + 4);
-  const body = afterFence === -1 ? "" : trimmed.slice(afterFence + 1).trim();
+  // Body = everything after the closing `---` line (the wiki's shared slicer).
+  // The explicit fence checks above stay for their distinct diagnostics.
+  const body = stripFrontmatter(trimmed).trim();
   if (!body) return { ok: false, reason: "empty body" };
 
   if (
