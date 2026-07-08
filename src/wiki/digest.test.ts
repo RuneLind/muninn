@@ -11,6 +11,7 @@ import {
   renderEntriesBlock,
   markPageMentions,
   readLogMtimeMs,
+  newestLogEntryDate,
   generateWikiDigest,
   DIGEST_MAX_BYTES,
   type LogEntry,
@@ -71,15 +72,66 @@ describe("selectRecentEntries", () => {
     expect(selected.map((e) => e.date)).toEqual(["2026-05-01", "2026-05-10", "2026-05-14"]);
   });
 
-  test("caps entry count to the newest N", () => {
+  test("caps entry count to the newest N, dropping the oldest", () => {
+    // 40 unique ascending dates (2026-04-01 … 2026-05-10, all in the past).
     const entries = Array.from({ length: 40 }, (_, i) => {
-      const day = String((i % 28) + 1).padStart(2, "0");
-      return entry(`2026-05-${day}`);
+      const d = new Date(Date.UTC(2026, 3, 1 + i)).toISOString().slice(0, 10);
+      return entry(d);
     });
     const selected = selectRecentEntries(entries, { windowDays: 3650, maxEntries: 30 });
     expect(selected.length).toBe(30);
-    // Newest kept: the last 30 of the oldest-first list.
+    // Oldest 10 dropped: the newest 30 survive, still oldest→newest.
     expect(selected[0]!.date).toBe(entries[10]!.date);
+    expect(selected[selected.length - 1]!.date).toBe(entries[39]!.date);
+  });
+
+  test("is order-independent: newest-first input yields the same oldest→newest window", () => {
+    const asc = [entry("2026-05-01"), entry("2026-05-02"), entry("2026-05-03")];
+    const desc = [...asc].reverse(); // newest-first, as bot wikis prepend
+    const fromAsc = selectRecentEntries(asc, { windowDays: 30 }).map((e) => e.date);
+    const fromDesc = selectRecentEntries(desc, { windowDays: 30 }).map((e) => e.date);
+    expect(fromAsc).toEqual(["2026-05-01", "2026-05-02", "2026-05-03"]);
+    expect(fromDesc).toEqual(fromAsc);
+  });
+
+  test("a future-dated typo does not collapse the window or leak into the range", () => {
+    const entries = [
+      entry("2026-05-01"),
+      entry("2099-01-01"), // typo'd year — far future
+      entry("2026-05-12"),
+      entry("2026-05-14"),
+    ];
+    // now() pinned so 2099 is unambiguously future; anchor = 2026-05-14.
+    const now = () => Date.parse("2026-05-20T00:00:00Z");
+    const selected = selectRecentEntries(entries, { windowDays: 14, now });
+    expect(selected.map((e) => e.date)).toEqual(["2026-05-01", "2026-05-12", "2026-05-14"]);
+  });
+
+  test("all-future entries fall back to the max date as the anchor", () => {
+    const entries = [entry("2099-01-01"), entry("2099-01-10"), entry("2099-01-15")];
+    const now = () => Date.parse("2026-05-20T00:00:00Z");
+    const selected = selectRecentEntries(entries, { windowDays: 14, now });
+    // Anchor falls back to 2099-01-15; window keeps the last fortnight of it.
+    expect(selected.map((e) => e.date)).toEqual(["2099-01-01", "2099-01-10", "2099-01-15"]);
+  });
+
+  test("skips invalid calendar dates (would otherwise crash shiftDate)", () => {
+    const entries = [
+      entry("2026-13-45"), // impossible date — parse regex matches, calendar rejects
+      entry("2026-05-10"),
+      entry("2026-05-11"),
+    ];
+    const selected = selectRecentEntries(entries, { windowDays: 30 });
+    expect(selected.map((e) => e.date)).toEqual(["2026-05-10", "2026-05-11"]);
+  });
+
+  test("truncates a lone oversized entry rather than shipping it whole", () => {
+    const huge = "z".repeat(20_000);
+    const selected = selectRecentEntries([entry("2026-05-12", huge)], { windowDays: 30, maxBytes: 8000 });
+    expect(selected.length).toBe(1);
+    const rendered = renderEntriesBlock(selected);
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(8000);
+    expect(rendered).toContain("truncated");
   });
 
   test("trims oldest entries until under the byte cap", () => {
@@ -124,6 +176,18 @@ describe("markPageMentions", () => {
   test("leaves unresolvable backtick/quote mentions untouched", () => {
     const input = "Ran `bun test` and edited \"some prose\".";
     expect(markPageMentions(input, resolve)).toBe(input);
+  });
+
+  test("does not rewrite mentions inside a fenced code block", () => {
+    const input =
+      "See `knowledge-graph`.\n\n```\nconst knowledge-graph = load(`knowledge-graph`);\n```\n\nAlso `knowledge-graph`.";
+    const out = markPageMentions(input, resolve);
+    // Inline mentions outside the fence are linked…
+    expect(out).toContain("See [[knowledge-graph]].");
+    expect(out).toContain("Also [[knowledge-graph]].");
+    // …but the fenced code ships verbatim (no wikilink rewriting inside).
+    expect(out).toContain("const knowledge-graph = load(`knowledge-graph`);");
+    expect(out).not.toContain("load([[knowledge-graph]])");
   });
 });
 
@@ -198,6 +262,45 @@ describe("readLogMtimeMs", () => {
       expect(await readLogMtimeMs(root)).toBeNull();
       await Bun.write(path.join(root, "log.md"), "# Log");
       expect(await readLogMtimeMs(root)).toBeGreaterThan(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("newestLogEntryDate", () => {
+  test("returns the max header date regardless of log ordering", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-newest-"));
+    try {
+      // No log.md yet → null.
+      expect(await newestLogEntryDate(root)).toBeNull();
+      // Newest-first log (bot-wiki style): max is at the top.
+      await Bun.write(
+        path.join(root, "log.md"),
+        [
+          "# Log",
+          "## [2026-07-08] update | latest",
+          "body",
+          "## [2026-07-01] note | older",
+          "body",
+        ].join("\n"),
+      );
+      expect(await newestLogEntryDate(root)).toBe("2026-07-08");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores invalid calendar dates and returns null with no headers", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wiki-newest2-"));
+    try {
+      await Bun.write(path.join(root, "log.md"), "# Log\n\nNo entry headers here.");
+      expect(await newestLogEntryDate(root)).toBeNull();
+      await Bun.write(
+        path.join(root, "log.md"),
+        "# Log\n## [2026-13-45] note | impossible\n## [2026-06-30] note | real",
+      );
+      expect(await newestLogEntryDate(root)).toBe("2026-06-30");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

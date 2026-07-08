@@ -30,6 +30,10 @@ export const DIGEST_WINDOW_DAYS = 14;
 export const DIGEST_MAX_ENTRIES = 30;
 /** Byte budget for the entries block handed to the model. */
 export const DIGEST_MAX_BYTES = 15_000;
+/** Timeout for the single digest connector call. Kept well under the global
+ *  `CLAUDE_TIMEOUT_MS` (120s) so a cold connector can't hold the GET open — the
+ *  route degrades to `{ digest: null, error }` on timeout. */
+export const DIGEST_TIMEOUT_MS = 45_000;
 
 /** One parsed `## [date] kind | title` log entry with its body. */
 export interface LogEntry {
@@ -64,7 +68,9 @@ const ENTRY_HEADER_RE = /^##\s+\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$/;
  * Split raw `log.md` text into entries. Everything before the first
  * `## [date]` header (the file's intro) is ignored. A header's remainder is
  * `kind | title`; when the `|` is absent the whole remainder is the title and
- * kind is empty. Entries are returned in file order (oldest-first, as logs append).
+ * kind is empty. Entries are returned in file order — which differs by wiki
+ * (mimir appends oldest-first, bot wikis prepend newest-first), so downstream
+ * {@link selectRecentEntries} sorts by date rather than trusting file order.
  */
 export function parseLogEntries(logText: string): LogEntry[] {
   const lines = logText.split("\n");
@@ -99,39 +105,88 @@ export function parseLogEntries(logText: string): LogEntry[] {
   return entries;
 }
 
+/** True when `s` is a real calendar date `YYYY-MM-DD` — round-trips through
+ *  `Date`, so a syntactically-plausible-but-impossible header like `2026-13-45`
+ *  (which the entry regex still matches, and which would make `shiftDate` throw)
+ *  is rejected rather than allowed to anchor or crash the window selection. */
+export function isValidCalendarDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
 /**
- * Select the recent window to summarize, applying three bounds in order:
- *  1. **days** — entries dated within {@link DIGEST_WINDOW_DAYS} of the newest
- *     entry (anchored to the log's own newest date, not wall-clock now, so a
- *     quiet wiki still yields its last active fortnight deterministically).
- *  2. **count** — at most {@link DIGEST_MAX_ENTRIES}, newest kept.
- *  3. **bytes** — trimmed oldest-first until the rendered block is ≤
- *     {@link DIGEST_MAX_BYTES}.
+ * Select the recent window to summarize. **Order-independent**: bot knowledge
+ * wikis prepend to `log.md` (newest-first) while mimir appends (oldest-first),
+ * so the entries are first validated + sorted ascending before any cap applies.
+ *
+ *  0. **validate** — entries whose date isn't a real calendar date are dropped
+ *     (a `2026-13-45` typo must neither anchor the window nor crash `shiftDate`).
+ *  1. **anchor** — the window is anchored to the newest *non-future* valid date
+ *     (so a typo'd `2099-…` entry can't collapse it); if every date is future,
+ *     fall back to the max present. Entries after the anchor are excluded, so a
+ *     future outlier never leaks into `fromDate`/`toDate`.
+ *  2. **days** — entries within {@link DIGEST_WINDOW_DAYS} of the anchor.
+ *  3. **count** — at most {@link DIGEST_MAX_ENTRIES}; the oldest are dropped.
+ *  4. **bytes** — oldest dropped until the block is ≤ {@link DIGEST_MAX_BYTES};
+ *     a lone entry still over budget is truncated (noted inline) rather than
+ *     shipped whole.
  * Returns entries oldest→newest (reading order for the prompt).
  */
 export function selectRecentEntries(
   entries: LogEntry[],
-  opts: { windowDays?: number; maxEntries?: number; maxBytes?: number } = {},
+  opts: { windowDays?: number; maxEntries?: number; maxBytes?: number; now?: () => number } = {},
 ): LogEntry[] {
-  if (entries.length === 0) return [];
   const windowDays = opts.windowDays ?? DIGEST_WINDOW_DAYS;
   const maxEntries = opts.maxEntries ?? DIGEST_MAX_ENTRIES;
   const maxBytes = opts.maxBytes ?? DIGEST_MAX_BYTES;
+  const now = opts.now ?? Date.now;
 
-  // Anchor the window to the newest entry date present (logs append oldest-first,
-  // but a stray out-of-order date shouldn't shrink the window, so scan for max).
-  const newest = entries.reduce((acc, e) => (e.date > acc ? e.date : acc), entries[0]!.date);
-  const cutoff = shiftDate(newest, -windowDays);
+  const valid = entries
+    .filter((e) => isValidCalendarDate(e.date))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (valid.length === 0) return [];
 
-  let selected = entries.filter((e) => e.date >= cutoff);
-  // Count cap: keep the newest N (tail of the oldest-first list).
+  const today = new Date(now()).toISOString().slice(0, 10);
+  const nonFuture = valid.filter((e) => e.date <= today);
+  const anchorSet = nonFuture.length ? nonFuture : valid;
+  const anchor = anchorSet[anchorSet.length - 1]!.date;
+  const cutoff = shiftDate(anchor, -windowDays);
+
+  // Window is [cutoff, anchor] — the upper bound excludes future outliers.
+  let selected = valid.filter((e) => e.date >= cutoff && e.date <= anchor);
+  // Count cap: keep the newest N (drop the oldest — the head of the sorted list).
   if (selected.length > maxEntries) selected = selected.slice(selected.length - maxEntries);
 
   // Byte cap: drop oldest until the rendered block fits.
   while (selected.length > 1 && Buffer.byteLength(renderEntriesBlock(selected), "utf8") > maxBytes) {
     selected = selected.slice(1);
   }
+  // A single remaining entry that still blows the budget is truncated in place
+  // (with an inline note) so an oversized entry never ships whole to the model.
+  if (
+    selected.length === 1 &&
+    Buffer.byteLength(renderEntriesBlock(selected), "utf8") > maxBytes
+  ) {
+    selected = [truncateEntryToBudget(selected[0]!, maxBytes)];
+  }
   return selected;
+}
+
+const TRUNCATION_NOTE = "\n\n…[entry truncated to fit the digest budget]";
+
+/** Truncate a single entry's body so its rendered block fits `maxBytes`, leaving
+ *  an inline note so the model knows the text was cut. */
+function truncateEntryToBudget(entry: LogEntry, maxBytes: number): LogEntry {
+  const headBytes = Buffer.byteLength(renderEntriesBlock([{ ...entry, body: "" }]), "utf8");
+  // Room for the body = budget − header − the "\n" join − the note.
+  const room = maxBytes - headBytes - 1 - Buffer.byteLength(TRUNCATION_NOTE, "utf8");
+  if (room <= 0 || !entry.body) return { ...entry, body: TRUNCATION_NOTE.trimStart() };
+  let body = entry.body.slice(0, room);
+  while (body.length > 0 && Buffer.byteLength(body, "utf8") > room) {
+    body = body.slice(0, Math.floor(body.length * 0.95));
+  }
+  return { ...entry, body: body + TRUNCATION_NOTE };
 }
 
 /** Shift a `YYYY-MM-DD` date by `days` (UTC), returning `YYYY-MM-DD`. */
@@ -139,6 +194,40 @@ function shiftDate(date: string, days: number): string {
   const d = new Date(date + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The newest `## [YYYY-MM-DD]` header date in a wiki's `log.md`, or null when
+ * there's no readable log / no parseable header. Used for the picker's freshness
+ * label — it matches the dates the digest shows and, unlike the file's mtime,
+ * can't drift a day near midnight. Bounded read: the whole file when small, else
+ * the first + last 8 KB (covers both orderings — newest-first logs carry the max
+ * at the top, oldest-first logs at the bottom).
+ */
+export async function newestLogEntryDate(root: string): Promise<string | null> {
+  const file = Bun.file(path.join(root, "log.md"));
+  let text: string;
+  try {
+    const size = file.size;
+    if (size <= 16_384) {
+      text = await file.text();
+    } else {
+      const head = await file.slice(0, 8_192).text();
+      const tail = await file.slice(size - 8_192).text();
+      text = head + "\n" + tail;
+    }
+  } catch {
+    return null;
+  }
+  let max: string | null = null;
+  for (const line of text.split("\n")) {
+    const m = line.match(ENTRY_HEADER_RE);
+    if (!m) continue;
+    const d = m[1]!;
+    if (!isValidCalendarDate(d)) continue;
+    if (max === null || d > max) max = d;
+  }
+  return max;
 }
 
 /** Render selected entries as the plain-text block fed to the model. */
@@ -167,7 +256,22 @@ export function markPageMentions(
   bullets: string,
   resolve: (target: string) => WikiPageMeta | undefined,
 ): string {
-  let out = bullets.replace(WIKILINK_RE, (m, target: string) => {
+  // Never rewrite tokens inside a fenced ``` code block — a code sample must
+  // ship verbatim. Split on fences (capturing group ⇒ odd indices are the fenced
+  // blocks, kept as-is); only rewrite the outside segments. Inline single-
+  // backtick spans stay eligible — they're the intended mention marker.
+  return bullets
+    .split(/(```[\s\S]*?```)/g)
+    .map((seg, i) => (i % 2 === 1 ? seg : markMentionsInSegment(seg, resolve)))
+    .join("");
+}
+
+/** Rewrite the three mention shapes in a fence-free segment (see {@link markPageMentions}). */
+function markMentionsInSegment(
+  segment: string,
+  resolve: (target: string) => WikiPageMeta | undefined,
+): string {
+  let out = segment.replace(WIKILINK_RE, (m, target: string) => {
     const meta = resolve(target.trim());
     return meta ? `[[${meta.name}]]` : m;
   });
@@ -203,8 +307,10 @@ export async function readLogMtimeMs(root: string): Promise<number | null> {
 export interface GenerateDigestOptions {
   /** Injectable one-shot seam (tests pass a fake to avoid a real connector run). */
   oneShot?: typeof executeOneShot;
-  /** Clock override for `generatedAt` (tests). */
+  /** Clock override for `generatedAt` + the future-date guard in selection (tests). */
   now?: () => number;
+  /** Connector timeout for the single digest call. Defaults to {@link DIGEST_TIMEOUT_MS}. */
+  timeoutMs?: number;
 }
 
 /**
@@ -223,6 +329,7 @@ export async function generateWikiDigest(
 ): Promise<WikiDigest | null> {
   const oneShot = opts.oneShot ?? executeOneShot;
   const now = opts.now ?? Date.now;
+  const timeoutMs = opts.timeoutMs ?? DIGEST_TIMEOUT_MS;
 
   const logMtimeMs = await readLogMtimeMs(root);
   if (logMtimeMs === null) return null;
@@ -234,7 +341,7 @@ export async function generateWikiDigest(
     return null;
   }
 
-  const entries = selectRecentEntries(parseLogEntries(logText));
+  const entries = selectRecentEntries(parseLogEntries(logText), { now });
   if (entries.length === 0) return null;
 
   const fromDate = entries[0]!.date;
@@ -250,6 +357,7 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
 
   const result = await oneShot(userPrompt, config, botConfig, {
     systemPrompt: DIGEST_SYSTEM_PROMPT,
+    timeoutMs,
   });
   const raw = (result.result ?? "").trim();
   if (!raw) return null;

@@ -315,6 +315,19 @@ export async function renderWikiPage(opts?: {
     .wiki-wn-bullets li { margin: 3px 0; }
     .wiki-wn-bullets p { margin: 4px 0; }
     .wiki-wn-gen { font-size: 10.5px; color: var(--text-faint); margin-top: 8px; }
+    .wiki-wn-error { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+    .wiki-wn-retry {
+      background: transparent;
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1;
+      padding: 3px 9px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-wn-retry:hover { color: var(--accent-light); border-color: var(--accent); }
 
     /* ── Right: connections + ask pane ─────────────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
