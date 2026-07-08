@@ -350,20 +350,32 @@ export async function renderWikiPage(opts?: {
     .wiki-conn-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .wiki-conn-body { flex: 1; overflow-y: auto; padding: 10px; }
 
-    /* Ask tab */
+    /* Ask tab — the controls live here; the answer renders in the article pane. */
     .wiki-ask-body { display: flex; flex-direction: column; }
-    .wiki-ask-turns { display: flex; flex-direction: column; gap: 14px; }
     .wiki-ask-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
-    .wiki-ask-card { border-bottom: 1px solid var(--border-primary); padding-bottom: 12px; }
-    .wiki-ask-card:last-child { border-bottom: none; }
-    .wiki-ask-q { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.45; margin-bottom: 8px; }
-    .wiki-ask-q::before { content: '› '; color: var(--accent); font-weight: 700; }
-    .wiki-ask-status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+    /* Session history — one clickable line per asked question, newest first. */
+    .wiki-ask-history { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+    .wiki-ask-hist-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); margin: 4px 4px 4px; }
+    .wiki-ask-hist-item {
+      font-size: 12.5px; color: var(--text-secondary); line-height: 1.4;
+      padding: 6px 9px; border-radius: 6px; cursor: pointer;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .wiki-ask-hist-item::before { content: '› '; color: var(--accent); font-weight: 700; }
+    .wiki-ask-hist-item:hover { background: var(--bg-surface); color: var(--text-primary); }
+    .wiki-ask-status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); margin: 6px 4px; }
     .wiki-ask-status .spinner { width: 12px; height: 12px; border: 2px solid var(--border-secondary); border-top-color: var(--accent); border-radius: 50%; animation: wikiAskSpin 0.7s linear infinite; }
     @keyframes wikiAskSpin { to { transform: rotate(360deg); } }
     .wiki-ask-status.done .spinner { display: none; }
     .wiki-ask-status.error { color: var(--status-error); }
-    .wiki-ask-answer { font-size: 13px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-wrap: break-word; }
+    /* Answer rendered in the article pane — reuses .wiki-article typography. */
+    .wiki-ask-article { margin-top: 4px; }
+    /* Interim streamed text (whitespace-preserved) before answer_html swaps in. */
+    .wiki-ask-streaming {
+      font-size: 13.5px; line-height: 1.6; color: var(--text-secondary);
+      white-space: pre-wrap; word-wrap: break-word;
+      background: none; padding: 0; margin: 0; font-family: inherit;
+    }
     .wiki-ask-cite {
       display: inline-block; cursor: pointer; color: var(--accent-light);
       font-size: 0.78em; font-weight: 600; vertical-align: super; line-height: 0; padding: 0 1px;
@@ -383,7 +395,7 @@ export async function renderWikiPage(opts?: {
     .wiki-ask-src-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); }
     .wiki-ask-src-title { flex: 1; font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-ask-src-page { flex-shrink: 0; font-size: 10px; color: var(--accent-light); }
-    .wiki-ask-compose { display: flex; gap: 6px; margin-top: 12px; }
+    .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {
       flex: 1; padding: 8px 10px; border-radius: 7px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
@@ -457,12 +469,13 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-conn-empty">Select a page to see its connections.</div>
       </div>
       <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
-        <div class="wiki-ask-turns" id="wikiAskTurns"></div>
-        <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers with citations you can open as pages.</div>
         <div class="wiki-ask-compose">
           <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
           <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
         </div>
+        <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
+        <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>
+        <div class="wiki-ask-history" id="wikiAskHistory"></div>
       </div>
     </div>
   </div>

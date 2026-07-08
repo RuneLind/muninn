@@ -590,6 +590,10 @@ window.addEventListener("popstate", () => {
 });
 
 // ── Ask tab: research-style Q&A scoped to this wiki ───────────────────
+// The controls (question box · status line · history list) live in the right
+// column's Ask tab; the ANSWER renders as a formatted article in the main pane
+// (articleWrap). Answer HTML is server-rendered (`answer_html` event) so the
+// reader shows real markdown, not raw "## …"/"**…**" text.
 interface AskCitation {
   n: number;
   collection: string;
@@ -601,18 +605,18 @@ interface AskCitation {
   wikiName?: string;
   pageName?: string;
 }
-interface AskCard {
+interface AskTurn {
   question: string;
+  answer: string; // final plain-text answer (history context + streaming fallback)
   citations: AskCitation[];
-  buffer: string;
-  statusWrap: HTMLElement;
-  statusEl: HTMLElement;
-  bodyEl: HTMLElement;
-  sourcesEl: HTMLElement;
+  cited: number[];
+  html: string | null; // server-rendered answer body HTML (null until answer_html)
+  askedAt: number;
 }
-const askTurns: { question: string; answer: string }[] = [];
+const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
-let askActive: AskCard | null = null;
+let askActive: AskTurn | null = null; // the turn currently streaming, or null
+let askBuffer = ""; // streamed plain-text accumulator for askActive
 const ASK_MAX_HISTORY = 4;
 const ASK_ANSWER_CHARS = 700;
 
@@ -638,31 +642,25 @@ function switchConnTab(tab: string): void {
   if (ask) (document.getElementById("wikiAskInput") as HTMLTextAreaElement).focus();
 }
 
-function setAskStatus(a: AskCard, text: string, state: string): void {
-  a.statusWrap.className = "wiki-ask-status" + (state ? " " + state : "");
-  a.statusEl.textContent = text;
+/** Update the single status line in the Ask controls. Empty text hides it. */
+function setAskStatus(text: string, state: string): void {
+  const wrap = document.getElementById("wikiAskStatus");
+  if (!wrap) return;
+  wrap.className = "wiki-ask-status" + (state ? " " + state : "");
+  wrap.style.display = text ? "flex" : "none";
+  const st = wrap.querySelector(".st") as HTMLElement | null;
+  if (st) st.textContent = text;
 }
 
-function startAskCard(question: string): AskCard {
-  document.getElementById("wikiAskHint")!.style.display = "none";
-  const card = document.createElement("div");
-  card.className = "wiki-ask-card";
-  card.innerHTML =
-    '<div class="wiki-ask-q"></div>' +
-    '<div class="wiki-ask-status"><span class="spinner"></span><span class="st">Searching…</span></div>' +
-    '<div class="wiki-ask-answer"></div>' +
-    '<div class="wiki-ask-sources"></div>';
-  card.querySelector(".wiki-ask-q")!.textContent = question;
-  document.getElementById("wikiAskTurns")!.appendChild(card);
-  return {
-    question,
-    citations: [],
-    buffer: "",
-    statusWrap: card.querySelector(".wiki-ask-status") as HTMLElement,
-    statusEl: card.querySelector(".wiki-ask-status .st") as HTMLElement,
-    bodyEl: card.querySelector(".wiki-ask-answer") as HTMLElement,
-    sourcesEl: card.querySelector(".wiki-ask-sources") as HTMLElement,
-  };
+/** Relative "asked …" label for the answer's meta row. */
+function relTime(ms: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 45) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.round(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.round(h / 24) + "d ago";
 }
 
 /** Render the citation list — matched pages become in-reader links (data-page,
@@ -691,42 +689,68 @@ function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
   return '<div class="wiki-ask-src-head">Sources</div>' + rows;
 }
 
-/** Turn [n] markers in the answer text into clickable page links (matched
- *  citations only); leaves out-of-range or unmatched markers as plain text. */
-function linkifyAskCites(root: HTMLElement, citations: AskCitation[]): void {
-  const maxN = citations.length;
-  if (maxN === 0) return;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-  const targets: Text[] = [];
-  let node: Node | null;
-  while ((node = walker.nextNode())) {
-    if (/\[\d+\]/.test(node.nodeValue || "")) targets.push(node as Text);
+/** Meta line under the answer's headline: "Asked … · wiki: X · N sources". */
+function askMetaText(turn: AskTurn): string {
+  const n = turn.citations.length;
+  return (
+    "Asked " + relTime(turn.askedAt) +
+    (WIKI ? " · wiki: " + WIKI : "") +
+    " · " + n + " source" + (n === 1 ? "" : "s")
+  );
+}
+
+/** Whitespace-preserving interim block shown while the answer streams (before
+ *  the server-rendered `answer_html` arrives / if it never does). */
+function streamingBodyHtml(text: string): string {
+  return '<pre class="wiki-ask-streaming">' + esc(text) + "</pre>";
+}
+
+/** Full article-pane HTML for one Ask turn: question headline, meta row, answer
+ *  body (rendered HTML once available, else the streaming block), then Sources. */
+function askArticleHtml(turn: AskTurn, buffer: string): string {
+  const body = turn.html || streamingBodyHtml(buffer || turn.answer || "");
+  return (
+    '<div class="wiki-article-head"><h1>' + esc(turn.question) + "</h1>" +
+    '<div class="wiki-meta-row"><span class="wiki-dates" id="askAnswerMeta">' +
+    esc(askMetaText(turn)) + "</span></div></div>" +
+    '<div class="wiki-article wiki-ask-article" id="askAnswerBody">' + body + "</div>" +
+    '<div class="wiki-ask-sources" id="askAnswerSources">' +
+    askSourcesHtml(turn.citations, turn.cited) + "</div>"
+  );
+}
+
+/** Paint an Ask turn into the main article pane (replaces the page/start view). */
+function showAskAnswer(turn: AskTurn, buffer: string): void {
+  currentName = null;
+  document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
+  document.getElementById("articleWrap")!.scrollTop = 0;
+  document.getElementById("connBody")!.innerHTML =
+    '<div class="wiki-conn-empty">Showing an Ask answer — sources are listed under it.</div>';
+  renderList();
+}
+
+/** Refresh the meta count + sources block of the on-screen answer in place
+ *  (used when the `sources`/`done` events land while the body still streams). */
+function refreshAskSources(turn: AskTurn): void {
+  const meta = document.getElementById("askAnswerMeta");
+  if (meta) meta.textContent = askMetaText(turn);
+  const s = document.getElementById("askAnswerSources");
+  if (s) s.innerHTML = askSourcesHtml(turn.citations, turn.cited);
+}
+
+/** History list in the Ask controls — one clickable line per committed turn,
+ *  newest first. Clicking re-renders that turn's stored answer in the main pane. */
+function renderAskHistory(): void {
+  const el = document.getElementById("wikiAskHistory");
+  if (!el) return;
+  if (!askTurns.length) { el.innerHTML = ""; return; }
+  let html = '<div class="wiki-ask-hist-head">This session</div>';
+  for (let i = askTurns.length - 1; i >= 0; i--) {
+    html +=
+      '<div class="wiki-ask-hist-item" data-ask-idx="' + i + '">' +
+      esc(askTurns[i]!.question) + "</div>";
   }
-  targets.forEach((textNode) => {
-    const frag = document.createDocumentFragment();
-    const text = textNode.nodeValue || "";
-    const re = /\[(\d+)\]/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    let replaced = false;
-    while ((m = re.exec(text))) {
-      const n = parseInt(m[1]!, 10);
-      const c = citations[n - 1];
-      if (n < 1 || n > maxN || !c || !c.pageName) continue;
-      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-      const sup = document.createElement("sup");
-      sup.className = "wiki-ask-cite";
-      sup.textContent = "[" + n + "]";
-      sup.title = c.title || "";
-      sup.setAttribute("data-page", c.pageName);
-      frag.appendChild(sup);
-      last = m.index + m[0].length;
-      replaced = true;
-    }
-    if (!replaced) return;
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
-    textNode.parentNode!.replaceChild(frag, textNode);
-  });
+  el.innerHTML = html;
 }
 
 function askQuestion(): void {
@@ -734,16 +758,20 @@ function askQuestion(): void {
   const q = input.value.trim();
   if (!q) return;
 
-  // Supersede any in-flight ask: close its stream and drop its (uncommitted) card.
+  // Supersede any in-flight ask: close its stream so late events are ignored.
   if (askConn) { askConn.close(); askConn = null; }
-  if (askActive && askActive.statusWrap.closest(".wiki-ask-card")) {
-    askActive.statusWrap.closest(".wiki-ask-card")!.remove();
-  }
   askActive = null;
   input.value = "";
+  const hint = document.getElementById("wikiAskHint");
+  if (hint) hint.style.display = "none";
 
-  const a = startAskCard(q);
-  askActive = a;
+  const turn: AskTurn = {
+    question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
+  };
+  askActive = turn;
+  askBuffer = "";
+  showAskAnswer(turn, "");
+  setAskStatus("Searching…", "");
   const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
   btn.disabled = true;
 
@@ -755,40 +783,57 @@ function askQuestion(): void {
   const conn = sseClient(url, {
     phase: (e: MessageEvent) => {
       const d = JSON.parse((e as MessageEvent).data);
-      setAskStatus(a, d.phase === "synthesizing" ? "Synthesizing…" : "Searching…", "");
+      setAskStatus(d.phase === "synthesizing" ? "Synthesizing…" : "Searching…", "");
     },
     sources: (e: MessageEvent) => {
       // Guard against a superseded connection whose late events would clobber the
       // active turn (a follow-up ask swaps askConn before the old stream drains).
       if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
-      a.citations = d.citations || [];
-      a.sourcesEl.innerHTML = askSourcesHtml(a.citations, []);
+      turn.citations = d.citations || [];
+      refreshAskSources(turn);
     },
     delta: (e: MessageEvent) => {
       if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
-      a.buffer += d.text || "";
-      a.bodyEl.textContent = a.buffer;
+      askBuffer += d.text || "";
+      const b = document.getElementById("askAnswerBody");
+      if (b && !turn.html) b.innerHTML = streamingBodyHtml(askBuffer);
     },
     done: (e: MessageEvent) => {
       if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
-      a.buffer = d.answer || a.buffer || "";
-      a.bodyEl.textContent = a.buffer;
-      linkifyAskCites(a.bodyEl, a.citations);
-      a.sourcesEl.innerHTML = askSourcesHtml(a.citations, d.cited || []);
+      turn.answer = d.answer || askBuffer || "";
+      turn.cited = d.cited || [];
+      askBuffer = turn.answer;
+      // Keep the streamed plain text visible until (and unless) `answer_html`
+      // arrives; refresh sources + the meta count with the final `cited` set.
+      const b = document.getElementById("askAnswerBody");
+      if (b && !turn.html) b.innerHTML = streamingBodyHtml(turn.answer);
+      refreshAskSources(turn);
       let statusText: string;
       if (d.lowConfidence) statusText = "No strong match — closest sources below";
       else if (d.noHits) statusText = "No matching sources";
-      else statusText = "Answered from " + a.citations.length + " source" + (a.citations.length === 1 ? "" : "s");
-      setAskStatus(a, statusText, "done");
-      askTurns.push({ question: a.question, answer: a.buffer });
-      askActive = null;
+      else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+      setAskStatus(statusText, "done");
+      askTurns.push(turn);
+      renderAskHistory();
       btn.disabled = false;
-      // Close on `done`: the turn is complete, so drop the stream now rather than
-      // wait for the `end` sentinel. If the connection dropped between `done` and
-      // `end`, EventSource would auto-reconnect and re-run the whole expensive ask.
+      // Do NOT close here — the server emits a trailing `answer_html` after `done`.
+      // We close on `answer_html` (or the `end` fallback if it never comes).
+    },
+    answer_html: (e: MessageEvent) => {
+      if (askConn !== conn) return;
+      const d = JSON.parse((e as MessageEvent).data);
+      turn.html = d.html || null;
+      if (typeof d.cited !== "undefined") turn.cited = d.cited || [];
+      // Swap the streamed text for the rendered article — but only if this turn's
+      // answer is still the one on screen (the user may have navigated away, in
+      // which case it's reachable via the history list).
+      const b = document.getElementById("askAnswerBody");
+      if (b && turn.html) b.innerHTML = turn.html;
+      refreshAskSources(turn);
+      askActive = null;
       conn.close();
       askConn = null;
     },
@@ -796,7 +841,7 @@ function askQuestion(): void {
       if (askConn !== conn) return;
       let msg = "Something went wrong.";
       try { msg = JSON.parse((e as MessageEvent).data).message || msg; } catch {}
-      setAskStatus(a, msg, "error");
+      setAskStatus(msg, "error");
       askActive = null;
       btn.disabled = false;
       // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
@@ -804,11 +849,12 @@ function askQuestion(): void {
       askConn = null;
     },
     end: () => {
-      // Redundant for the wiki client now that `done`/`app_error` close the
-      // stream, but handled defensively in case it arrives first (or alone).
+      // Fallback close if `answer_html` never arrived (older server / render error):
+      // the streamed plain text stands.
       if (askConn !== conn) return;
       askConn.close();
       askConn = null;
+      askActive = null;
       btn.disabled = false;
     },
     onerror: () => {
@@ -817,8 +863,9 @@ function askQuestion(): void {
       askConn = null;
       askActive = null;
       btn.disabled = false;
-      if (!a.statusWrap.classList.contains("done") && !a.statusWrap.classList.contains("error")) {
-        setAskStatus(a, "Connection lost", "error");
+      const wrap = document.getElementById("wikiAskStatus");
+      if (wrap && !wrap.classList.contains("done") && !wrap.classList.contains("error")) {
+        setAskStatus("Connection lost", "error");
       }
     },
   });
@@ -833,6 +880,14 @@ document.getElementById("wikiAskBtn")?.addEventListener("click", askQuestion);
 document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;
   if (ke.key === "Enter" && !ke.shiftKey) { e.preventDefault(); askQuestion(); }
+});
+// Re-open a stored answer from the session history (no re-ask).
+document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
+  const item = (e.target as HTMLElement).closest("[data-ask-idx]");
+  if (!item) return;
+  const idx = parseInt(item.getAttribute("data-ask-idx") || "-1", 10);
+  const turn = askTurns[idx];
+  if (turn) showAskAnswer(turn, "");
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────
