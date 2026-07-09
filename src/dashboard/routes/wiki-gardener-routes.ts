@@ -18,17 +18,14 @@ import {
   markWikiProposalError,
   listAllWikiProposals,
   getWikiProposalById,
-  getConsumedDocIds,
-  getPendingDocIds,
+  DEFAULT_COVERAGE_DEPS,
+  type CoverageDeps,
   type WikiProposal,
 } from "../../db/wiki-proposals.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
-import {
-  collectWikiUrls,
-  computeIngestBacklog,
-  type ListedDoc,
-  type CollectionBacklog,
-} from "../../wiki/ingest-backlog.ts";
+import { listSummaryCollections } from "../../summaries/list-collections.ts";
+import type { StatsError } from "../../summaries/stats.ts";
+import { collectWikiUrls, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
@@ -134,21 +131,23 @@ async function finishProposal(
 
 // ── Ingest backlog (report-only "queued up" counter) ────────────────────────
 
-/** Injectable coverage lookups so the route test can drive them without a DB. */
-export interface IngestBacklogDeps {
-  getConsumed: (botName: string) => Promise<Set<string>>;
-  getPending: (botName: string) => Promise<Set<string>>;
-}
+/** Injectable coverage lookups so the route test can drive them without a DB —
+ *  the shared {@link CoverageDeps} shape (also used by the summaries Stats route). */
+export type IngestBacklogDeps = CoverageDeps;
 
-const DEFAULT_BACKLOG_DEPS: IngestBacklogDeps = {
-  getConsumed: getConsumedDocIds,
-  getPending: getPendingDocIds,
-};
-
-/** Per-collection backlog decorated with its summary-source id + label for the UI. */
-interface BacklogCollection extends CollectionBacklog {
+/**
+ * Per-collection backlog counts decorated with the summary-source id + label for
+ * the UI. Deliberately count-only: the module's per-collection `queuedDocs` list
+ * (up to ~hundreds of doc objects) stays server-side — no client consumes it, and
+ * PR 2's drain uses the module directly, not this HTTP payload.
+ */
+interface BacklogCollection {
+  collection: string;
   source: string;
   label: string;
+  total: number;
+  ingested: number;
+  queued: number;
 }
 
 /** The full `/api/wiki/ingest-backlog` payload (the cached, expensive part). */
@@ -161,7 +160,7 @@ interface IngestBacklogResponse {
   wikiUrlCount: number;
   generatedAt: number;
   /** Present only when ≥1 collection failed to load (partial data). */
-  errors?: { source: string; collection: string; error: string }[];
+  errors?: StatsError[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -183,48 +182,45 @@ export function __resetIngestBacklogCacheForTest(): void {
 
 /**
  * Compute the backlog for a bot's wiki root: sweep the wiki for referenced URLs,
- * list every summary collection SEQUENTIALLY (never fan unbounded concurrency at
- * huginn's Python server), pull the consumed/pending sets, and partition. A
- * collection that fails contributes nothing and lands in `errors` — never a
- * page-breaking throw (huginn unreachable ⇒ partial/empty data + errors).
+ * list every summary collection (via the shared sequential listing helper — never
+ * unbounded concurrency at huginn's Python server), pull the consumed/pending
+ * sets, and partition. A collection that fails contributes nothing and lands in
+ * `errors` — never a page-breaking throw (huginn unreachable ⇒ partial/empty
+ * data + errors).
  */
 export async function computeIngestBacklogResponse(
   root: string,
   botName: string,
   deps: IngestBacklogDeps,
 ): Promise<IngestBacklogResponse> {
-  const listedBySource: Record<string, ListedDoc[]> = {};
-  const errors: { source: string; collection: string; error: string }[] = [];
+  const { byCollection: listedRaw, errors } = await listSummaryCollections(KNOWLEDGE_API_URL);
 
+  const listedBySource: Record<string, ListedDoc[]> = {};
   for (const source of SUMMARY_SOURCES) {
-    try {
-      const data = await fetchKnowledgeApi(
-        KNOWLEDGE_API_URL,
-        `/api/collection/${source.collection}/documents?include_dates=1`,
-        { timeoutMs: 10_000 },
-      );
-      const listed = (data?.documents ?? []) as { id: string; url?: string; date?: string }[];
-      listedBySource[source.collection] = listed.map((d) => ({
-        collection: source.collection,
-        id: d.id,
-        ...(d.url ? { url: d.url } : {}),
-        ...(d.date ? { date: d.date } : {}),
-      }));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn("Ingest backlog fetch failed for {source}: {error}", { source: source.id, error: message });
-      errors.push({ source: source.id, collection: source.collection, error: message });
-      listedBySource[source.collection] = [];
-    }
+    listedBySource[source.collection] = (listedRaw[source.collection] ?? []).map((d) => ({
+      collection: source.collection,
+      id: d.id,
+      ...(d.url ? { url: d.url } : {}),
+      ...(d.date ? { date: d.date } : {}),
+    }));
   }
 
   const wikiUrls = await collectWikiUrls(root);
   const [consumed, pending] = await Promise.all([deps.getConsumed(botName), deps.getPending(botName)]);
   const backlog = computeIngestBacklog(listedBySource, wikiUrls, consumed, pending);
 
+  // Counts only over the wire — queuedDocs stays in the module's return for
+  // server-side consumers (PR 2's drain), never in the HTTP payload.
   const byCollection: BacklogCollection[] = backlog.byCollection.map((c) => {
     const src = SUMMARY_SOURCES.find((s) => s.collection === c.collection);
-    return { ...c, source: src?.id ?? c.collection, label: src?.label ?? c.collection };
+    return {
+      collection: c.collection,
+      source: src?.id ?? c.collection,
+      label: src?.label ?? c.collection,
+      total: c.total,
+      ingested: c.ingested,
+      queued: c.queued,
+    };
   });
 
   return {
@@ -243,7 +239,8 @@ export async function computeIngestBacklogResponse(
  * the cache read; concurrent misses share one computation; a degraded (errors)
  * payload is never cached so a recovered huginn is picked up on the next request.
  * This caches ONLY the expensive computation — the route merges any per-request
- * live fields (PR 2) OUTSIDE this seam.
+ * live fields (PR 2) OUTSIDE this seam. NOTE: the returned object IS the cached
+ * entry (by reference) — callers must never mutate it (spread/clone instead).
  */
 export async function getIngestBacklogCached(
   root: string,
@@ -275,7 +272,7 @@ export async function getIngestBacklogCached(
 
 export function registerWikiGardenerRoutes(
   app: Hono,
-  backlogDeps: IngestBacklogDeps = DEFAULT_BACKLOG_DEPS,
+  backlogDeps: IngestBacklogDeps = DEFAULT_COVERAGE_DEPS,
 ): void {
   // Review page.
   app.get("/wiki/gardener", async (c) => {
@@ -420,7 +417,9 @@ export function registerWikiGardenerRoutes(
     try {
       const data = await getIngestBacklogCached(root, bot.name, backlogDeps, refresh);
       // SEAM (PR 2): merge per-request live fields (e.g. an in-flight drain's
-      // progress) into `data` HERE — outside the cached computation above.
+      // progress) HERE — outside the cached computation above. `data` is the
+      // cached object BY REFERENCE: spread/clone (`{ ...data, ...liveFields }`),
+      // never mutate it in place, or the cached entry is corrupted for the TTL.
       return c.json(data);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

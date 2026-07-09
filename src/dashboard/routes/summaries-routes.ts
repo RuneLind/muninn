@@ -5,8 +5,9 @@ import { renderSummariesPage } from "../views/summaries-page.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { docDateMs } from "../../gardener/harvest.ts";
-import { buildStats, type StatsDoc, type StatsError, type SummariesStats } from "../../summaries/stats.ts";
-import { getConsumedDocIds, getPendingDocIds } from "../../db/wiki-proposals.ts";
+import { buildStats, type StatsDoc, type SummariesStats } from "../../summaries/stats.ts";
+import { listSummaryCollections } from "../../summaries/list-collections.ts";
+import { DEFAULT_COVERAGE_DEPS, type CoverageDeps } from "../../db/wiki-proposals.ts";
 
 const log = getLog("dashboard");
 
@@ -18,16 +19,9 @@ interface SummaryDocumentMeta {
   [key: string]: unknown;
 }
 
-/** Injectable coverage lookups so the route test can drive them without a DB. */
-export interface SummariesStatsDeps {
-  getConsumed: (botName: string) => Promise<Set<string>>;
-  getPending: (botName: string) => Promise<Set<string>>;
-}
-
-const DEFAULT_STATS_DEPS: SummariesStatsDeps = {
-  getConsumed: getConsumedDocIds,
-  getPending: getPendingDocIds,
-};
+/** Injectable coverage lookups so the route test can drive them without a DB —
+ *  the shared {@link CoverageDeps} shape (also used by the wiki ingest backlog). */
+export type SummariesStatsDeps = CoverageDeps;
 
 const STATS_MONTHS_BACK = 8;
 const STATS_WINDOW_DAYS = 30;
@@ -53,10 +47,10 @@ export function __resetSummariesStatsCacheForTest(): void {
 }
 
 /**
- * Fetch every summary collection (sequentially — do NOT fan unbounded concurrency
- * at huginn's Python server), parse dates the way the gardener does, and assemble
- * the stats payload. A collection that fails contributes nothing and lands in the
- * `errors` array — never a page-breaking throw.
+ * Fetch every summary collection (via the shared sequential listing helper —
+ * never unbounded concurrency at huginn's Python server), parse dates the way
+ * the gardener does, and assemble the stats payload. A collection that fails
+ * contributes nothing and lands in the `errors` array — never a page-breaking throw.
  */
 async function computeSummariesStats(
   knowledgeApiUrl: string,
@@ -64,34 +58,19 @@ async function computeSummariesStats(
   deps: SummariesStatsDeps,
   now: number = Date.now(),
 ): Promise<SummariesStats> {
-  const docs: StatsDoc[] = [];
-  const errors: StatsError[] = [];
+  const { byCollection, errors } = await listSummaryCollections(knowledgeApiUrl);
 
+  const docs: StatsDoc[] = [];
   for (const source of SUMMARY_SOURCES) {
-    try {
-      const data = await fetchKnowledgeApi(
-        knowledgeApiUrl,
-        `/api/collection/${source.collection}/documents?include_dates=1`,
-        { timeoutMs: 10000 },
-      );
-      const listed = (data?.documents ?? []) as SummaryDocumentMeta[];
-      for (const d of listed) {
-        docs.push({
-          collection: source.collection,
-          id: d.id,
-          source: source.id,
-          dateMs: docDateMs({ id: d.id, date: d.date }),
-          ...(d.title ? { title: d.title } : {}),
-          ...(d.url ? { url: d.url } : {}),
-        });
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn("Summaries stats fetch failed for {source}: {error}", {
+    for (const d of byCollection[source.collection] ?? []) {
+      docs.push({
+        collection: source.collection,
+        id: d.id,
         source: source.id,
-        error: message,
+        dateMs: docDateMs({ id: d.id, date: d.date }),
+        ...(d.title ? { title: d.title } : {}),
+        ...(d.url ? { url: d.url } : {}),
       });
-      errors.push({ source: source.id, collection: source.collection, error: message });
     }
   }
 
@@ -120,7 +99,7 @@ async function computeSummariesStats(
 export function registerSummariesRoutes(
   app: Hono,
   config: Config,
-  deps: SummariesStatsDeps = DEFAULT_STATS_DEPS,
+  deps: SummariesStatsDeps = DEFAULT_COVERAGE_DEPS,
 ): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
 

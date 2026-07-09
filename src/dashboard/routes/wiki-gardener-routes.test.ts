@@ -156,9 +156,9 @@ describe("ingest-backlog pipeline + cache", () => {
     expect(yt.total).toBe(3);
     expect(yt.ingested).toBe(2); // y1 (url-referenced) + y2 (consumed)
     expect(yt.queued).toBe(1); // y3
-    expect(yt.queuedDocs).toEqual([
-      { collection: "youtube-summaries", id: "y3", url: "https://youtu.be/y3", date: "2026-06-03" },
-    ]);
+    // Counts only over the wire — the module's queuedDocs list (PR 2's drain
+    // input, up to ~hundreds of doc objects) must NOT ship in the HTTP payload.
+    expect("queuedDocs" in yt).toBe(false);
 
     const x = data.byCollection.find((c) => c.collection === "x-articles")!;
     expect(x.total).toBe(1);

@@ -273,6 +273,22 @@ export async function getPendingDocIds(botName: string): Promise<Set<string>> {
   return pending;
 }
 
+/**
+ * Injectable consumed/pending lookups — the shared deps shape for routes that
+ * partition summary docs against the proposals table (summaries Stats coverage,
+ * wiki ingest backlog), so their tests can drive the sets without a DB.
+ */
+export interface CoverageDeps {
+  getConsumed: (botName: string) => Promise<Set<string>>;
+  getPending: (botName: string) => Promise<Set<string>>;
+}
+
+/** The real DB-backed {@link CoverageDeps}. */
+export const DEFAULT_COVERAGE_DEPS: CoverageDeps = {
+  getConsumed: getConsumedDocIds,
+  getPending: getPendingDocIds,
+};
+
 function mapRow(r: Record<string, any>): WikiProposal {
   return {
     id: r.id,
