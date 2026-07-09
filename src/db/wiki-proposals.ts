@@ -250,6 +250,29 @@ export async function getConsumedDocIds(botName: string): Promise<Set<string>> {
   return consumed;
 }
 
+/**
+ * Doc ids referenced by `draft` or `approved` proposals — the "pending review"
+ * set for the summaries Stats coverage view. Keyed as `<collection>/<docId>` to
+ * match {@link getConsumedDocIds}. A doc in this set has been clustered into a
+ * live proposal but not yet applied (so it isn't consumed yet, but also isn't
+ * "never clustered").
+ */
+export async function getPendingDocIds(botName: string): Promise<Set<string>> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT source_docs FROM wiki_proposals
+    WHERE bot_name = ${botName} AND status IN ('draft', 'approved')
+  `;
+  const pending = new Set<string>();
+  for (const row of rows) {
+    const docs = (row.source_docs ?? []) as WikiProposalSourceDoc[];
+    for (const d of docs) {
+      if (d?.collection && d?.docId) pending.add(`${d.collection}/${d.docId}`);
+    }
+  }
+  return pending;
+}
+
 function mapRow(r: Record<string, any>): WikiProposal {
   return {
     id: r.id,
