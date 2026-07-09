@@ -121,17 +121,24 @@ describe("partitionCoverage", () => {
     expect(cov.consumed).toBe(1);
     expect(cov.pending).toBe(0);
   });
+
+  test("carries the undated count through (default 0)", () => {
+    expect(partitionCoverage(windowDocs, new Set(), new Set(), 30).undated).toBe(0);
+    expect(partitionCoverage(windowDocs, new Set(), new Set(), 30, 3).undated).toBe(3);
+  });
 });
 
 describe("docsInWindow", () => {
-  test("keeps dated docs at/after the cutoff and all undated docs", () => {
+  test("keeps dated docs at/after the cutoff and EXCLUDES undated docs", () => {
     const docs: StatsDoc[] = [
       doc({ id: "recent", dateMs: NOW - 5 * DAY }),
       doc({ id: "old", dateMs: NOW - 40 * DAY }),
       doc({ id: "undated" }),
     ];
-    const kept = docsInWindow(docs, 30, NOW).map((d) => d.id).sort();
-    expect(kept).toEqual(["recent", "undated"]);
+    // Undated docs can't be windowed — including them would let arbitrarily old
+    // docs inflate coverage.total while the monthly chart excludes them.
+    const kept = docsInWindow(docs, 30, NOW).map((d) => d.id);
+    expect(kept).toEqual(["recent"]);
   });
 });
 
@@ -141,6 +148,7 @@ describe("buildStats", () => {
       doc({ collection: "youtube-summaries", id: "yt1", dateMs: NOW - 2 * DAY }),
       doc({ collection: "youtube-summaries", id: "yt2", dateMs: NOW - 3 * DAY }),
       doc({ collection: "anthropic-summaries", id: "an-old", source: "anthropic", dateMs: NOW - 200 * DAY }),
+      doc({ collection: "tiktok-summaries", id: "tt-undated", source: "tiktok" }), // no date
     ];
     const stats = buildStats({
       docs,
@@ -153,9 +161,12 @@ describe("buildStats", () => {
     });
 
     expect(stats.months).toHaveLength(8);
-    expect(stats.coverage.total).toBe(2); // an-old is out of the 30d window
+    // an-old is out of the 30d window; tt-undated has no date so it's excluded
+    // from the coverage partition and reported via coverage.undated instead.
+    expect(stats.coverage.total).toBe(2);
     expect(stats.coverage.consumed).toBe(1);
     expect(stats.coverage.neverClustered).toHaveLength(1);
+    expect(stats.coverage.undated).toBe(1);
     expect(stats.errors).toEqual([
       { source: "tiktok", collection: "tiktok-summaries", error: "unreachable" },
     ]);

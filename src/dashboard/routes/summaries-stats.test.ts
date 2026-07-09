@@ -90,12 +90,14 @@ test("returns months (8) + per-source rollup + reconciling coverage", async () =
 
   expect(body.months).toHaveLength(8);
 
-  // Window docs: yt1, yt2, xa1 (dated in window) + tt-undated (kept) = 4;
-  // an-old is 200d ago so excluded.
-  expect(body.coverage.total).toBe(4);
+  // Window docs: yt1, yt2, xa1 (dated in window) = 3; an-old is 200d ago so
+  // excluded, and tt-undated has no date so it's excluded from the coverage
+  // window too (reported via coverage.undated instead of inflating the totals).
+  expect(body.coverage.total).toBe(3);
   expect(body.coverage.consumed).toBe(1);
   expect(body.coverage.pending).toBe(1);
-  expect(body.coverage.neverClustered).toHaveLength(2);
+  expect(body.coverage.neverClustered).toHaveLength(1);
+  expect(body.coverage.undated).toBe(1);
   expect(body.coverage.total).toBe(
     body.coverage.consumed + body.coverage.pending + body.coverage.neverClustered.length,
   );
@@ -134,6 +136,26 @@ test("caches within the TTL (no re-fetch) and ?refresh=1 bypasses the cache read
 
   await app.request("/api/summaries/stats?refresh=1");
   expect(fetchCalls.length).toBe(afterFirst + 4); // refresh re-fetched
+});
+
+test("a degraded (errors) payload is NOT cached — the next request re-fetches", async () => {
+  failCollections = new Set(["anthropic-summaries"]);
+  const app = appWith(fakeDeps());
+
+  const first = await (await app.request("/api/summaries/stats")).json();
+  expect(first.errors).toBeDefined();
+  const afterFirst = fetchCalls.length;
+
+  // Huginn recovers — a plain (non-refresh) request must not be served the
+  // stale degraded payload from cache for the whole TTL.
+  failCollections = new Set();
+  const second = await (await app.request("/api/summaries/stats")).json();
+  expect(fetchCalls.length).toBe(afterFirst + 4); // re-fetched all collections
+  expect(second.errors).toBeUndefined();
+
+  // The now-clean result IS cached.
+  await app.request("/api/summaries/stats");
+  expect(fetchCalls.length).toBe(afterFirst + 4);
 });
 
 test("passes ?bot= through to the coverage lookups (default jarvis)", async () => {

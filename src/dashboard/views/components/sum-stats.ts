@@ -208,15 +208,17 @@ export function sumStatsHtml(): string {
 
 export function sumStatsScript(): string {
   return `
-    // Chart series colors keyed by source id. Falls back to a neutral swatch for
-    // an unknown source (e.g. a new collection not yet in the palette).
+    // Chart series colors keyed by source id — theme-aware shared CSS vars (the
+    // light theme darkens these in shared-styles.ts, so hardcoded hex would
+    // render the dark palette on a light background). Falls back to a neutral
+    // swatch for an unknown source (e.g. a new collection not yet mapped).
     var STATS_COLORS = {
-      youtube: '#f87171',
-      'x-article': '#60a5fa',
-      anthropic: '#c084fc',
-      tiktok: '#22d3ee',
+      youtube: 'var(--status-error)',
+      'x-article': 'var(--status-info)',
+      anthropic: 'var(--status-magenta)',
+      tiktok: 'var(--status-cyan)',
     };
-    function statsColor(sourceId) { return STATS_COLORS[sourceId] || '#8b8bcd'; }
+    function statsColor(sourceId) { return STATS_COLORS[sourceId] || 'var(--accent-muted)'; }
     function statsSourceLabel(sourceId) {
       var s = (typeof SOURCES !== 'undefined') ? SOURCES[sourceId] : null;
       return s ? s.label : sourceId;
@@ -289,12 +291,16 @@ export function sumStatsScript(): string {
         '<span><span class="num pending">' + cov.pending + '</span> pending review</span>' +
         '<span class="sep">&middot;</span>' +
         '<span><span class="num never">' + never.length + '</span> never clustered</span>' +
+        (cov.undated
+          ? '<span class="sep">&middot;</span><span><span class="num">' + cov.undated + '</span> undated (not windowed)</span>'
+          : '') +
         '</div>';
 
       var details = '';
       if (never.length) {
         var rows = never.map(function(d) {
-          var link = d.url
+          // Only linkify http(s) urls — esc() doesn't neutralize a javascript: scheme.
+          var link = (d.url && /^https?:\\/\\//i.test(d.url))
             ? '<a class="stats-never-link" href="' + esc(d.url) + '" target="_blank" rel="noopener">open &#8599;</a>'
             : '';
           return '<div class="stats-never-row">' +

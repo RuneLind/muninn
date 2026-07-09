@@ -76,6 +76,13 @@ export interface CoverageResult {
   pending: number;
   /** Neither consumed nor pending — the gardener has not touched these. */
   neverClustered: NeverClusteredDoc[];
+  /**
+   * Docs with no parseable date across the whole listing. They can't be placed
+   * inside (or outside) the window, so they're excluded from `total` and the
+   * partition — reported here so they're visible rather than silently inflating
+   * the coverage numbers with arbitrarily old docs.
+   */
+  undated: number;
 }
 
 /** Per-collection fetch failure surfaced to the client (non-fatal). */
@@ -119,6 +126,7 @@ export function buildStats(opts: {
     opts.consumed,
     opts.pending,
     windowDays,
+    opts.docs.filter((d) => d.dateMs === undefined).length,
   );
   const result: SummariesStats = { months, bySource, coverage };
   if (opts.errors && opts.errors.length) result.errors = opts.errors;
@@ -146,16 +154,6 @@ export function lastMonths(now: number, count: number): string[] {
     }
   }
   return keys;
-}
-
-/**
- * Whether a doc falls in the coverage window. Mirrors the gardener's
- * `filterWindow`: an undated doc is kept (best-effort — summaries always carry a
- * date, so this only guards a malformed row), a dated doc must be at/after the
- * cutoff.
- */
-export function inWindow(dateMs: number | undefined, cutoff: number): boolean {
-  return dateMs === undefined || dateMs >= cutoff;
 }
 
 /**
@@ -204,6 +202,7 @@ export function partitionCoverage(
   consumed: Set<string>,
   pending: Set<string>,
   windowDays: number,
+  undated = 0,
 ): CoverageResult {
   let consumedCount = 0;
   let pendingCount = 0;
@@ -230,11 +229,18 @@ export function partitionCoverage(
     consumed: consumedCount,
     pending: pendingCount,
     neverClustered,
+    undated,
   };
 }
 
-/** Docs whose date puts them inside the `windowDays` window ending at `now`. */
+/**
+ * Docs whose date puts them inside the `windowDays` window ending at `now`.
+ * Undated docs are excluded — they can't be windowed, so keeping them (as the
+ * gardener's best-effort `filterWindow` does for harvesting) would let
+ * arbitrarily old docs inflate the coverage totals while the monthly chart
+ * excludes them. They're surfaced via `CoverageResult.undated` instead.
+ */
 export function docsInWindow(docs: StatsDoc[], windowDays: number, now: number): StatsDoc[] {
   const cutoff = now - windowDays * DAY_MS;
-  return docs.filter((d) => inWindow(d.dateMs, cutoff));
+  return docs.filter((d) => d.dateMs !== undefined && d.dateMs >= cutoff);
 }

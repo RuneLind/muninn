@@ -58,7 +58,7 @@ export function __resetSummariesStatsCacheForTest(): void {
  * the stats payload. A collection that fails contributes nothing and lands in the
  * `errors` array — never a page-breaking throw.
  */
-export async function computeSummariesStats(
+async function computeSummariesStats(
   knowledgeApiUrl: string,
   botName: string,
   deps: SummariesStatsDeps,
@@ -149,7 +149,11 @@ export function registerSummariesRoutes(
 
     try {
       const data = await pending;
-      statsCache.set(botName, { data, at: Date.now() });
+      // Only cache fully-successful results — a degraded payload (a collection
+      // down) must not be served for the whole TTL once huginn recovers.
+      if (!data.errors || data.errors.length === 0) {
+        statsCache.set(botName, { data, at: Date.now() });
+      }
       return c.json(data);
     } catch (err) {
       // computeSummariesStats swallows per-collection fetch errors, so a throw
@@ -163,7 +167,7 @@ export function registerSummariesRoutes(
       const fallback: SummariesStats = {
         months: [],
         bySource: {},
-        coverage: { windowDays: STATS_WINDOW_DAYS, total: 0, consumed: 0, pending: 0, neverClustered: [] },
+        coverage: { windowDays: STATS_WINDOW_DAYS, total: 0, consumed: 0, pending: 0, neverClustered: [], undated: 0 },
         errors: [{ source: "coverage", collection: "wiki_proposals", error: message }],
       };
       return c.json(fallback);
