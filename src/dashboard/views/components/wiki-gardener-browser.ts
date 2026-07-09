@@ -399,13 +399,17 @@ function loadBacklog(): void {
 
 // Poll the backlog GET while a run is in flight; on completion do one final
 // ?refresh=1 fetch (to pick up newly-consumed docs) and reload the proposal list.
+// A single transient GET failure must NOT stop the loop mid-run (a drain takes
+// minutes) — only give up after 3 consecutive failures.
 function pollBacklogUntilDone(): void {
   if (backlogPolling) return;
   backlogPolling = true;
+  let consecutiveFailures = 0;
   const tick = (): void => {
     fetch(withBot("/api/wiki/ingest-backlog"))
       .then((r) => r.json())
       .then((data: IngestBacklogResponse) => {
+        consecutiveFailures = 0;
         renderBacklog(data);
         if (data.running) {
           setTimeout(tick, 3000);
@@ -420,6 +424,11 @@ function pollBacklogUntilDone(): void {
         loadProposals();
       })
       .catch(() => {
+        consecutiveFailures++;
+        if (consecutiveFailures < 3) {
+          setTimeout(tick, 3000);
+          return;
+        }
         backlogPolling = false;
       });
   };

@@ -5,6 +5,7 @@ import {
   runExclusive,
   gardenerRunInFlight,
   startBacklogRun,
+  resetBacklogOffered,
   draftedCount,
   __resetGardenerMutexForTest,
   BACKLOG_BATCH_SIZE,
@@ -290,5 +291,42 @@ describe("startBacklogRun", () => {
     expect(recorded).not.toBeNull();
     expect(recorded!.error).toContain("draft blew up");
     expect(gardenerRunInFlight("jarvis")).toBe(false);
+  });
+});
+
+// ── resetBacklogOffered (mutex-guarded reset) ────────────────────────────────
+
+describe("resetBacklogOffered", () => {
+  beforeEach(() => __resetGardenerMutexForTest());
+
+  test("writes the empty set when no run is in flight", async () => {
+    let persisted = false;
+    const outcome = await resetBacklogOffered("jarvis", async () => {
+      persisted = true;
+    });
+    expect(outcome.ok).toBe(true);
+    expect(persisted).toBe(true);
+  });
+
+  test("refuses while a run is in flight — the run's persistOffered would clobber the reset", async () => {
+    let release!: () => void;
+    runExclusive("jarvis", () => new Promise<void>((r) => (release = r)));
+
+    let persisted = false;
+    const outcome = await resetBacklogOffered("jarvis", async () => {
+      persisted = true;
+    });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain("in flight");
+    expect(persisted).toBe(false);
+
+    // After the run settles, the reset goes through.
+    release();
+    await new Promise((res) => setTimeout(res, 5));
+    const after = await resetBacklogOffered("jarvis", async () => {
+      persisted = true;
+    });
+    expect(after.ok).toBe(true);
+    expect(persisted).toBe(true);
   });
 });

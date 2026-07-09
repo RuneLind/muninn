@@ -223,7 +223,6 @@ export interface StartBacklogRunDeps {
   persistOffered: (keys: string[]) => Promise<void>;
   runGardener: (assembled: AssembledBacklog) => Promise<WatcherAlert[]>;
   recordLastRun: (r: LastBacklogRun) => void;
-  now?: () => number;
 }
 
 export type StartBacklogRunResult = { state: "started" | "running" | "no-watcher" | "disabled" };
@@ -254,13 +253,31 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   });
   if (run === null) return { state: "running" };
 
-  const now = deps.now ?? (() => Date.now());
   void run
-    .then((r) => deps.recordLastRun({ finishedAt: now(), offered: r.offered, drafted: r.drafted }))
+    .then((r) =>
+      deps.recordLastRun({ finishedAt: Date.now(), offered: r.offered, drafted: r.drafted }),
+    )
     .catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       log.error("Backlog run failed for {bot}: {error}", { botName: deps.botName, error: message });
-      deps.recordLastRun({ finishedAt: now(), offered: 0, drafted: 0, error: message });
+      deps.recordLastRun({ finishedAt: Date.now(), offered: 0, drafted: 0, error: message });
     });
   return { state: "started" };
+}
+
+/**
+ * Reset the offered memory (write an empty offered set) — but ONLY when no
+ * gardener run is in flight for the bot. A reset during a drain would be
+ * silently clobbered: the run's `persistOffered` was computed from a pre-reset
+ * read and would overwrite the empty set moments later.
+ */
+export async function resetBacklogOffered(
+  botName: string,
+  persistEmpty: () => Promise<void>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (gardenerRunInFlight(botName)) {
+    return { ok: false, error: "reset unavailable while a run is in flight" };
+  }
+  await persistEmpty();
+  return { ok: true };
 }

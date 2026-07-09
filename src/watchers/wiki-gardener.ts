@@ -156,6 +156,11 @@ export async function checkWikiGardener(
   );
 
   if (run === null) {
+    // KNOWN/ACCEPTED: this also swallows a manual force-trigger that collides
+    // with an in-flight backlog drain — the runner treats the returned [] as a
+    // completed run, advances last_run_at, and clears force_next_run. Accepted
+    // because the in-flight drain already covers the newest docs, and queueing
+    // or erroring here would complicate the runner for a rare manual collision.
     log.info("Wiki-gardener: a backlog run is in flight for \"{name}\" — skipping this weekly run", {
       botName: name,
       name,

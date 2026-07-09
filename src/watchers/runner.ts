@@ -263,6 +263,12 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Concurrent-duplicate guard: an earlier tick's checker may still be in
       // flight (it outran the tick timeout, and last_run_at/force_next_run only
       // change at run END). Skip the duplicate dispatch until it settles.
+      // KNOWN/ACCEPTED: a force_next_run set MID-run is effectively dropped —
+      // the skipped forced dispatch never runs, and the in-flight run's
+      // completion clears the flag. Before this guard the same scenario
+      // produced a redundant CONCURRENT duplicate instead; the silent drop is
+      // the lesser evil, and it's only reachable for checkers that outlive the
+      // 10-min scheduler tick.
       const timeoutMs = computeWatcherTimeoutMs(watcher);
       const claim = claimChecker(watcher.id, timeoutMs);
       if (!claim) {
