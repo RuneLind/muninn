@@ -22,6 +22,7 @@ Scheduler tick (every 60s)
 | `x` | `x.ts` | Huginn x-feed collection (knowledge API) | Configurable, Sonnet recommended |
 | `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (Highlights) / Sonnet digest (Daily/Weekly) |
 | `wiki-gardener` | `wiki-gardener.ts` | Recent summary collections (knowledge API) | Haiku cluster + bot-connector draft |
+| `wiki-linter` | `wiki-linter.ts` | The bot's on-disk wiki tree (no AI) | — |
 
 ## Interest-profile personalization (gate/capture prompts)
 
@@ -304,6 +305,56 @@ a timed-out run advances last_run_at and loses the week).
 
 Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`); the
 `watchers.type` CHECK gains `'wiki-gardener'` (migration `056`).
+
+## Wiki Linter (wiki-linter.ts + src/wiki/lint.ts)
+
+A weekly **report-only** sibling of the gardener that checks a bot's knowledge
+wiki for hygiene issues and emits ONE summarizing Telegram alert (🧹) pointing at
+`/wiki/gardener`, which hosts a **Lint findings** section. Findings are
+**transient** — recomputed on demand from the wiki tree via `getWikiIndex` + the
+`lintWiki` engine; there is **no DB table, no migration, and zero writes** to the
+wiki or DB. v1 is purely a report.
+
+- **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
+  plus per-file content reads. Each finding is `{ check, relPath, message,
+  detail? }`. Four checks:
+  1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
+     page and resolves against the index (the store's builder silently drops
+     unresolved targets, so resolution is recomputed here); `../`-escapes are
+     external refs, not broken.
+  2. **orphan** — pages with no inbound `backlinks`; reserved basenames
+     (`log.md`/`index.md`/`CLAUDE.md`, same set as `src/gardener/draft.ts`) are
+     skipped as subjects AND discounted as sole-linkers (an index-of-contents
+     must not mask a page nothing else references). Explainers (`.html`) never
+     join the graph, so they're excluded as subjects.
+  3. **stale-updated** — a frontmatter page (`---` fence) missing `updated:` or
+     whose `updated:` is unparseable. Plain no-frontmatter files are skipped
+     (not the gardener's page shape); "older than mtime" is NOT flagged.
+  4. **missing-sources** — a `concept` page that cites no sources. **Scoping
+     note:** the gardener's own draft convention (`draft.ts`) uses a `sources:`
+     frontmatter list + a `## See also` section, NOT a `## Sources` heading — so
+     the check accepts EITHER a `## Sources` heading OR a non-empty `sources:`
+     frontmatter (the conservative reading; a literal `## Sources`-only check
+     would flag every gardener-written page). `entity` stubs + reserved files
+     are out of scope.
+- **Route**: `GET /api/wiki/linter-findings?bot=` (in `wiki-gardener-routes.ts`)
+  resolves the bot's `wikiDir` like the proposals route, runs `lintWiki` on
+  demand, and returns `{ findings, counts, generatedAt }`. A missing/unreadable
+  wiki degrades to a 200 with an `error` field, never a 5xx. `getWikiIndex`
+  already TTL-caches, so no extra cache.
+- **Watcher** (`wiki-linter.ts`): skips (returns []) when `wikiDir` is unset or
+  the wiki is unreadable; otherwise summarizes the counts into one `WatcherAlert`
+  (`Wiki lint: 3 broken links, 2 orphans, … — review at /wiki/gardener`) with a
+  per-day-stable id `wiki-lint-<YYYY-MM-DD>` (`todayOslo`). The runner's
+  `skipContentHash` is extended to `wiki-linter` — the dated id dedups same-day
+  re-runs, and skipping content-hash lets an identical count next week still
+  notify (content-hash would false-drop a recurring report).
+- **Seed**: `bun scripts/setup-wiki-linter.ts [--apply]` — weekly interval,
+  `config.hour: 11` (one hour after the gardener's hour-10 slot so the two wiki
+  watchers don't fire in the same tick), `config.timeoutMs: 300000` (lint is
+  fast — fs + parsing). Idempotent: skips if a `wiki-linter` row already exists.
+- Schema: the `watchers.type` CHECK gains `'wiki-linter'` (migration `058`,
+  mirrored in `db/init.sql`).
 
 ## Configurable prompts
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
+import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "./wiki-routes.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
@@ -195,6 +196,44 @@ export function registerWikiGardenerRoutes(app: Hono): void {
       }),
     );
     return c.json({ proposals });
+  });
+
+  // Report-only wiki lint findings, recomputed on demand from the wiki tree (no
+  // DB table, no writes). Same bot resolution as `/api/wiki/proposals`; a
+  // missing/unreadable wiki degrades to a 200 with an `error` field, never a 5xx.
+  app.get("/api/wiki/linter-findings", async (c) => {
+    const empty = { findings: [], counts: {}, generatedAt: Date.now() };
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki) {
+      return c.json({ ...empty, error: "no wiki configured for that name" });
+    }
+    if (entry && entry.source !== "bot") {
+      return c.json({ ...empty, error: "the linter is only available for bot wikis" });
+    }
+    const root = entry?.root;
+    const bot = entry
+      ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)
+      : undefined;
+    if (!bot) return c.json({ ...empty, error: "no wiki bot resolved" });
+
+    // Never-5xx contract: any unexpected throw (index build, file reads) degrades
+    // to a 200 with an `error` field, like the resolution failures above.
+    try {
+      const index = await getWikiIndex({ root });
+      if (!index) return c.json({ ...empty, error: "wiki directory is not readable" });
+
+      const report = await lintWiki(index);
+      return c.json(report);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log.warn("Wiki-linter: lint run failed for {bot}: {error}", { bot: bot.name, error: reason });
+      return c.json({ ...empty, error: `lint failed: ${reason}` });
+    }
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.
