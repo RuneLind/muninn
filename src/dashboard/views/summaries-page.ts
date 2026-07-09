@@ -8,6 +8,7 @@ import { sumSubmitFormStyles, sumSubmitFormHtml, sumSubmitFormScript } from "./c
 import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components/sum-job-card.ts";
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./components/sum-outcomes.ts";
+import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
 import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 import {
@@ -27,6 +28,7 @@ const SUMMARIES_TABS: SectionTabsConfig = {
     { id: "recently", label: "Recently Added" },
     { id: "library", label: "Library" },
     { id: "calibration", label: "Calibration" },
+    { id: "stats", label: "Stats" },
   ],
   storageKey: "muninn-active-tab-summaries",
   defaultTab: "candidates",
@@ -63,6 +65,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumRecentlyAddedStyles()}
     ${sumArticleLibraryStyles()}
     ${sumOutcomesStyles()}
+    ${sumStatsStyles()}
 
     .duplicate-banner {
       display: none;
@@ -111,6 +114,9 @@ export async function renderSummariesPage(): Promise<string> {
 
       <!-- Gate-outcome calibration (display-only) -->
       <div data-section="calibration">${sumOutcomesHtml()}</div>
+
+      <!-- Ingest volume + gardener coverage (display-only) -->
+      <div data-section="stats">${sumStatsHtml()}</div>
     </div>
   </div>
 
@@ -134,6 +140,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumRecentlyAddedScript()}
     ${sumArticleLibraryScript()}
     ${sumOutcomesScript()}
+    ${sumStatsScript()}
     ${sumSubmitFormScript()}
 
     function showDuplicateBanner() {
@@ -156,6 +163,10 @@ export async function renderSummariesPage(): Promise<string> {
       loadLibrary();
       loadOutcomes();
       renderDomainFilter();
+
+      // Stats is heavier (hits huginn per collection + the proposals table), so
+      // load it lazily the first time its tab is opened rather than on page load.
+      onSectionActivate('stats', function() { loadStats(); });
 
       // Mount the tab bar (picks the initial tab from hash > localStorage > default).
       initSectionTabs();
