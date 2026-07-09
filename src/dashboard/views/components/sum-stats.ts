@@ -294,6 +294,10 @@ export function sumStatsScript(): string {
         (cov.undated
           ? '<span class="sep">&middot;</span><span><span class="num">' + cov.undated + '</span> undated (not windowed)</span>'
           : '') +
+        // All-time ingest backlog (across every collection, not just the 30d window),
+        // fetched separately from /api/wiki/ingest-backlog and filled in below.
+        '<span class="sep">&middot;</span>' +
+        '<span>all-time backlog: <span class="num never" id="statsBacklogNum">&hellip;</span></span>' +
         '</div>';
 
       var details = '';
@@ -317,6 +321,20 @@ export function sumStatsScript(): string {
         strip + details + '</div>';
     }
 
+    // Fill the coverage strip's all-time backlog number from /api/wiki/ingest-backlog.
+    // Uses the same bot default (jarvis) as the stats route. Best-effort — a failed
+    // load just shows a dash, never breaks the strip.
+    async function loadBacklogNum() {
+      var el = document.getElementById('statsBacklogNum');
+      if (!el) return;
+      try {
+        var bk = await getJson('/api/wiki/ingest-backlog?bot=jarvis');
+        el.textContent = (bk && typeof bk.queued === 'number' && !bk.error) ? String(bk.queued) : '—';
+      } catch (err) {
+        el.textContent = '—';
+      }
+    }
+
     function renderStats(stats) {
       var body = document.getElementById('statsBody');
       if (!body) return;
@@ -332,6 +350,7 @@ export function sumStatsScript(): string {
         return;
       }
       body.innerHTML = errChip + body2;
+      loadBacklogNum();
     }
 
     async function loadStats(force) {

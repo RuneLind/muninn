@@ -50,6 +50,24 @@ interface LintResponse {
   generatedAt: number;
   error?: string;
 }
+interface BacklogCollection {
+  collection: string;
+  source: string;
+  label: string;
+  total: number;
+  ingested: number;
+  queued: number;
+}
+interface IngestBacklogResponse {
+  byCollection: BacklogCollection[];
+  total: number;
+  ingested: number;
+  queued: number;
+  wikiUrlCount: number;
+  generatedAt: number;
+  errors?: { source: string; collection: string; error: string }[];
+  error?: string;
+}
 
 const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
 const BOT =
@@ -297,6 +315,42 @@ function loadLint(): void {
 
 document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
 
+// ── Ingest backlog strip (report-only "queued up" counter) ──────────────────
+
+function renderBacklog(data: IngestBacklogResponse): void {
+  const el = document.getElementById("gardBacklog");
+  if (!el) return;
+  if (data.error) {
+    // A resolution error (non-bot/unknown wiki) — stay quiet, the body already
+    // explains the situation.
+    el.innerHTML = "";
+    return;
+  }
+  // Per-source queued counts, in the byCollection (SUMMARY_SOURCES) order.
+  const parts = (data.byCollection || [])
+    .map((c) => `<span class="bk-src">${esc(c.label)} <span class="bk-n">${c.queued}</span></span>`)
+    .join('<span class="bk-sep">·</span>');
+  const errNote = data.errors && data.errors.length
+    ? ` <span class="bk-err">(some sources unavailable)</span>`
+    : "";
+  el.innerHTML =
+    `<span class="bk-label">Ingest backlog:</span> <span class="bk-total">${data.queued}</span>` +
+    ` summaries never ingested into the wiki` +
+    (parts ? ` <span class="bk-sep">—</span> ${parts}` : "") +
+    errNote;
+}
+
+function loadBacklog(): void {
+  fetch(withBot("/api/wiki/ingest-backlog"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .catch(() => {
+      // Best-effort strip — a failed load just leaves it empty, never breaks the page.
+      const el = document.getElementById("gardBacklog");
+      if (el) el.innerHTML = "";
+    });
+}
+
 const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
 if (wikiBotSel) {
   wikiBotSel.addEventListener("change", () => {
@@ -309,6 +363,7 @@ if (wikiBotSel) {
 // "unavailable" notice into #gardList, so skip the fetch and leave it in place.
 const unavailable = (window as unknown as { __WIKI_GARDENER_UNAVAILABLE__?: unknown })
   .__WIKI_GARDENER_UNAVAILABLE__ === true;
+if (!unavailable) loadBacklog();
 if (!unavailable) loadLint();
 else {
   const lintEl = document.getElementById("lintList");

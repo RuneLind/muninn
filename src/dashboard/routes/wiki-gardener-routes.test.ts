@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
+import {
+  registerWikiGardenerRoutes,
+  computeIngestBacklogResponse,
+  getIngestBacklogCached,
+  __resetIngestBacklogCacheForTest,
+  type IngestBacklogDeps,
+} from "./wiki-gardener-routes.ts";
 import { __resetWikiRegistryForTest } from "./wiki-routes.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 
@@ -54,5 +60,173 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     const body = (await res.json()) as { findings: unknown[]; error?: string };
     expect(body.error).toContain("no wiki configured");
     expect(body.findings).toEqual([]);
+  });
+
+  // The ingest-backlog route shares the linter route's resolution + never-5xx
+  // contract, so its deterministic resolution branches are exercised the same way.
+  test("ingest-backlog: standalone (non-bot) wiki → 200 with a bot-only error", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=lintwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { byCollection: unknown[]; queued: number; error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+    expect(body.byCollection).toEqual([]);
+    expect(body.queued).toBe(0);
+  });
+
+  test("ingest-backlog: unknown wiki → 200 with a not-configured error", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=does-not-exist");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { byCollection: unknown[]; error?: string };
+    expect(body.error).toContain("no wiki configured");
+    expect(body.byCollection).toEqual([]);
+  });
+});
+
+/**
+ * End-to-end backlog pipeline (wiki URL sweep + huginn listings + partition) and
+ * the TTL cache/single-flight/refresh mechanics — driven directly against the
+ * exported compute + cache helpers with a temp wiki dir, a stubbed huginn fetch,
+ * and injected coverage deps (no DB, no real bot discovery, no `claude` spawn).
+ */
+describe("ingest-backlog pipeline + cache", () => {
+  let root: string;
+  let fetchCalls: string[] = [];
+  let origFetch: typeof fetch;
+  let failCollections = new Set<string>();
+
+  /** Per-collection listing fixtures — all docs carry a url (huginn omits url-less). */
+  const listings: Record<string, Array<{ id: string; url: string; date?: string }>> = {
+    "youtube-summaries": [
+      { id: "y1", url: "https://youtu.be/y1", date: "2026-06-01" }, // referenced in wiki
+      { id: "y2", url: "https://youtu.be/y2", date: "2026-06-02" }, // consumed
+      { id: "y3", url: "https://youtu.be/y3", date: "2026-06-03" }, // queued
+    ],
+    "x-articles": [{ id: "x1", url: "https://x.com/a/1" }], // referenced in wiki
+    "anthropic-summaries": [],
+    "tiktok-summaries": [],
+  };
+
+  function deps(overrides?: { consumed?: string[]; pending?: string[] }): IngestBacklogDeps {
+    return {
+      getConsumed: async () => new Set(overrides?.consumed ?? []),
+      getPending: async () => new Set(overrides?.pending ?? []),
+    };
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-backlog-"));
+    // A wiki page that cites y1 (with a timestamp — normalization must collapse
+    // it) and x1. anthropic/tiktok are cited nowhere.
+    await Bun.write(
+      path.join(root, "notes.md"),
+      "# Notes\nWatch [it](https://youtu.be/y1?t=42s) and read https://x.com/a/1 for context.\n",
+    );
+    fetchCalls = [];
+    failCollections = new Set();
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchCalls.push(url);
+      const m = url.match(/\/api\/collection\/([^/]+)\/documents/);
+      const collection = m ? m[1]! : "";
+      if (failCollections.has(collection)) return new Response("nope", { status: 500 });
+      return new Response(JSON.stringify({ documents: listings[collection] ?? [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    __resetIngestBacklogCacheForTest();
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __resetIngestBacklogCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("reconciles: URL-referenced + consumed count as ingested, the rest queued", async () => {
+    const data = await computeIngestBacklogResponse(root, "jarvis", deps({ consumed: ["youtube-summaries/y2"] }));
+
+    // Two distinct normalized URLs swept from the wiki (y1 timestamp stripped).
+    expect(data.wikiUrlCount).toBe(2);
+
+    const yt = data.byCollection.find((c) => c.collection === "youtube-summaries")!;
+    expect(yt.source).toBe("youtube");
+    expect(yt.label).toBe("YouTube");
+    expect(yt.total).toBe(3);
+    expect(yt.ingested).toBe(2); // y1 (url-referenced) + y2 (consumed)
+    expect(yt.queued).toBe(1); // y3
+    expect(yt.queuedDocs).toEqual([
+      { collection: "youtube-summaries", id: "y3", url: "https://youtu.be/y3", date: "2026-06-03" },
+    ]);
+
+    const x = data.byCollection.find((c) => c.collection === "x-articles")!;
+    expect(x.total).toBe(1);
+    expect(x.queued).toBe(0); // x1 referenced by url in the wiki
+
+    // byCollection is in SUMMARY_SOURCES order and covers all four collections.
+    expect(data.byCollection.map((c) => c.source)).toEqual(["youtube", "x-article", "anthropic", "tiktok"]);
+
+    expect(data.total).toBe(4);
+    expect(data.ingested).toBe(3);
+    expect(data.queued).toBe(1);
+    expect(data.total).toBe(data.ingested + data.queued);
+    expect(data.errors).toBeUndefined();
+  });
+
+  test("fetches each collection SEQUENTIALLY, one request per collection", async () => {
+    await computeIngestBacklogResponse(root, "jarvis", deps());
+    expect(fetchCalls.length).toBe(4);
+  });
+
+  test("a failed collection lands in errors with partial data (never a throw)", async () => {
+    failCollections = new Set(["anthropic-summaries"]);
+    const data = await computeIngestBacklogResponse(root, "jarvis", deps());
+    expect(data.errors).toBeDefined();
+    expect(data.errors!.map((e) => e.source)).toContain("anthropic");
+    // The other collections still partitioned.
+    expect(data.byCollection.find((c) => c.collection === "youtube-summaries")!.total).toBe(3);
+  });
+
+  test("caches within the TTL and ?refresh bypasses; single-flights concurrent misses", async () => {
+    const d = deps({ consumed: ["youtube-summaries/y2"] });
+
+    await getIngestBacklogCached(root, "jarvis", d, false);
+    expect(fetchCalls.length).toBe(4);
+
+    // Served from cache — no new fetches.
+    await getIngestBacklogCached(root, "jarvis", d, false);
+    expect(fetchCalls.length).toBe(4);
+
+    // refresh bypasses the cache read.
+    await getIngestBacklogCached(root, "jarvis", d, true);
+    expect(fetchCalls.length).toBe(8);
+
+    // Concurrent misses share one computation (single-flight).
+    __resetIngestBacklogCacheForTest();
+    fetchCalls = [];
+    await Promise.all([
+      getIngestBacklogCached(root, "jarvis", d, false),
+      getIngestBacklogCached(root, "jarvis", d, false),
+    ]);
+    expect(fetchCalls.length).toBe(4);
+  });
+
+  test("a degraded (errors) result is NOT cached — the next request re-fetches", async () => {
+    const d = deps();
+    failCollections = new Set(["anthropic-summaries"]);
+    const first = await getIngestBacklogCached(root, "jarvis", d, false);
+    expect(first.errors).toBeDefined();
+    expect(fetchCalls.length).toBe(4);
+
+    // Huginn recovers — a plain request must re-fetch (not serve the degraded cache).
+    failCollections = new Set();
+    const second = await getIngestBacklogCached(root, "jarvis", d, false);
+    expect(second.errors).toBeUndefined();
+    expect(fetchCalls.length).toBe(8);
+
+    // The clean result IS cached now.
+    await getIngestBacklogCached(root, "jarvis", d, false);
+    expect(fetchCalls.length).toBe(8);
   });
 });

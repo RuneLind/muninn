@@ -66,6 +66,20 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-sub { font-size: 12.5px; color: var(--text-muted); margin-bottom: 18px; }
     .wiki-sort { background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 6px; color: var(--text-tertiary); font-size: 12px; font-family: inherit; padding: 4px 6px; }
 
+    /* Ingest backlog strip (report-only "queued up" counter) */
+    .gard-backlog {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
+      padding: 11px 15px; margin-bottom: 16px;
+      background: var(--bg-panel); border: 1px solid var(--border-primary); border-radius: 10px;
+      font-size: 13px; color: var(--text-secondary);
+    }
+    .gard-backlog .bk-label { color: var(--text-muted); }
+    .gard-backlog .bk-total { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .gard-backlog .bk-src { color: var(--text-secondary); }
+    .gard-backlog .bk-src .bk-n { font-weight: 600; color: var(--accent-light); font-variant-numeric: tabular-nums; }
+    .gard-backlog .bk-sep { color: var(--text-dim); }
+    .gard-backlog .bk-err { color: var(--text-dim); font-size: 12px; }
+
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {
       padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border-secondary);
@@ -196,6 +210,7 @@ export async function renderWikiGardenerPage(opts?: {
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
+    <div id="gardBacklog"></div>
     <div class="gard-filter-row" id="gardFilters">
       <button class="gard-filter active" data-status="">All</button>
       <button class="gard-filter" data-status="draft">Pending</button>
