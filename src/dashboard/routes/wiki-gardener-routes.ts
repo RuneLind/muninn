@@ -221,11 +221,19 @@ export function registerWikiGardenerRoutes(app: Hono): void {
       : undefined;
     if (!bot) return c.json({ ...empty, error: "no wiki bot resolved" });
 
-    const index = await getWikiIndex({ root });
-    if (!index) return c.json({ ...empty, error: "wiki directory is not readable" });
+    // Never-5xx contract: any unexpected throw (index build, file reads) degrades
+    // to a 200 with an `error` field, like the resolution failures above.
+    try {
+      const index = await getWikiIndex({ root });
+      if (!index) return c.json({ ...empty, error: "wiki directory is not readable" });
 
-    const report = await lintWiki(index);
-    return c.json(report);
+      const report = await lintWiki(index);
+      return c.json(report);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log.warn("Wiki-linter: lint run failed for {bot}: {error}", { bot: bot.name, error: reason });
+      return c.json({ ...empty, error: `lint failed: ${reason}` });
+    }
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.

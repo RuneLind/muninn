@@ -64,6 +64,17 @@ describe("extractWikilinks", () => {
     );
     expect(links).toEqual(["Claude Code", "Skills System"]);
   });
+
+  test("strips #anchor fragments; skips bare [[#anchor]] self-references", () => {
+    const links = extractWikilinks(
+      "See [[Claude Code#Hooks]] and [[Claude Code]] plus [[#local-section]].",
+    );
+    expect(links).toEqual(["Claude Code"]);
+  });
+
+  test("drops backslash escapes so targets match the page name", () => {
+    expect(extractWikilinks("Escaped [[Claude Code\\]] here.")).toEqual(["Claude Code"]);
+  });
 });
 
 describe("extractMarkdownLinks", () => {
@@ -317,6 +328,23 @@ describe("buildWikiIndex", () => {
     expect(index.backlinks.get("index.md")).toContain("repos/overview.md");
     // The out-of-root target never created a phantom page or edge.
     expect(index.resolve("passwd")).toBeUndefined();
+  });
+
+  test("[[Page#Section]] resolves to the page and records a backlink", async () => {
+    await Bun.write(
+      path.join(root, "concepts/Anchor Linker.md"),
+      "---\ntype: concept\n---\n\nDeep link to [[Harness Engineering#Origins]] only.",
+    );
+    const index = await buildWikiIndex(root);
+    // The anchor link joins the outgoing graph as an edge to the page itself…
+    expect(index.outgoing.get("concepts/anchor linker.md")).toEqual([
+      "concepts/harness engineering.md",
+    ]);
+    // …and the target gains the backlink (an anchor-only-referenced page is not
+    // an orphan).
+    expect(index.backlinks.get("concepts/harness engineering.md")).toContain(
+      "concepts/anchor linker.md",
+    );
   });
 
   test("readWikiPage returns raw markdown", async () => {

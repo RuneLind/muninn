@@ -114,6 +114,54 @@ describe("lintWiki", () => {
     expect(broken[0]!.detail).toBe("markdown");
   });
 
+  test("[[Page#Section]] to an existing page is not broken; the linked page is not an orphan", async () => {
+    await write(
+      "concepts/Sidekick.md",
+      [
+        "---",
+        "type: concept",
+        "title: Sidekick",
+        "updated: 2026-06-03",
+        "sources: [x]",
+        "---",
+        "",
+        "Deep link to [[Good Concept#Sources]] and a self-anchor [[#top]].",
+      ].join("\n"),
+    );
+    const findings = await lint();
+    // Neither the anchor form nor the bare self-anchor is a broken link.
+    expect(relPathsFor(findings, "broken-link")).not.toContain("concepts/Sidekick.md");
+    // Good Concept's only real inbound link is the anchor one — still not an orphan.
+    expect(relPathsFor(findings, "orphan")).not.toContain("concepts/Good Concept.md");
+  });
+
+  test("literal [[wikilinks]] inside code fences and inline code are not broken links", async () => {
+    await write(
+      "concepts/Sidekick.md",
+      [
+        "---",
+        "type: concept",
+        "title: Sidekick",
+        "updated: 2026-06-03",
+        "sources: [x]",
+        "---",
+        "",
+        "Real link: [[Good Concept]].",
+        "",
+        "```",
+        "Use [[Some Fake Page]] syntax like this.",
+        "```",
+        "",
+        "Inline meta-mention: `[[Another Fake]]` stays code.",
+      ].join("\n"),
+    );
+    const findings = await lint();
+    const broken = findings.filter(
+      (f) => f.check === "broken-link" && f.relPath === "concepts/Sidekick.md",
+    );
+    expect(broken).toEqual([]);
+  });
+
   test("orphan page fires orphan; index/log-only linkers don't rescue it", async () => {
     // An orphan concept nobody links to except index.md (which is discounted).
     await write(

@@ -75,9 +75,21 @@ function hasFrontmatterFence(content: string): boolean {
   return content.startsWith("---") && content.indexOf("\n---", 3) !== -1;
 }
 
+/**
+ * Strip fenced code blocks and inline code spans before link extraction —
+ * LINTER PATH ONLY. A literal `[[wikilink]]` inside code is a meta-mention
+ * (docs about wikilink syntax), not a link, so flagging it is pure noise. The
+ * store's extractors deliberately don't do this (the graph tolerates the extra
+ * edges); the linter must not report them as broken.
+ */
+function stripCodeSpans(content: string): string {
+  return content.replace(/```[\s\S]*?(?:```|$)/g, "").replace(/`[^`\n]*`/g, "");
+}
+
 /** Broken [[wikilinks]] + relative .md links on one page, resolved against the index. */
-function checkBrokenLinks(page: WikiPageMeta, content: string, index: WikiIndex): LintFinding[] {
+function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiIndex): LintFinding[] {
   const out: LintFinding[] = [];
+  const content = stripCodeSpans(rawContent);
 
   // Wikilinks resolve by name/alias/path-form (index.resolve) — a self-link
   // ([[Own Name]]) resolves to the page itself and is therefore not broken.

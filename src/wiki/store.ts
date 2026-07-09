@@ -136,11 +136,21 @@ export function splitInlineArray(body: string): string[] {
   return items;
 }
 
-/** Extract deduped [[wikilink]] targets from raw file content (frontmatter included). */
+/**
+ * Extract deduped [[wikilink]] targets from raw file content (frontmatter
+ * included). Obsidian-style `#anchor` fragments are stripped — `[[Page#Section]]`
+ * targets the page (mirroring extractMarkdownLinks' anchor handling), and a bare
+ * `[[#anchor]]` is a same-page reference, not a link. Backslash escapes that
+ * markdown processors leave in the raw text (e.g. `Page\` from an escaped `\]]`)
+ * are dropped so the target matches the page name it refers to.
+ */
 export function extractWikilinks(content: string): string[] {
   const targets = new Set<string>();
   for (const m of content.matchAll(WIKILINK_RE)) {
-    const target = m[1]!.trim();
+    let target = m[1]!.replace(/\\/g, "").trim();
+    const hash = target.indexOf("#");
+    if (hash === 0) continue; // bare [[#anchor]] — same-page, not a link
+    if (hash > 0) target = target.slice(0, hash).trim();
     if (target) targets.add(target);
   }
   return [...targets];
