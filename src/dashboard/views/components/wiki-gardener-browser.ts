@@ -38,6 +38,18 @@ interface ProposalsResponse {
   proposals: ProposalView[];
   error?: string;
 }
+interface LintFinding {
+  check: string;
+  relPath: string;
+  message: string;
+  detail?: string;
+}
+interface LintResponse {
+  findings: LintFinding[];
+  counts: Record<string, number>;
+  generatedAt: number;
+  error?: string;
+}
 
 const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
 const BOT =
@@ -232,6 +244,59 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
   }
 });
 
+// ── Lint findings (report-only) ─────────────────────────────────────────────
+
+// Grouped display order + labels; keys mirror the lint engine's check names.
+const LINT_LABELS: Record<string, string> = {
+  "broken-link": "Broken links",
+  orphan: "Orphan pages",
+  "stale-updated": "Stale/missing updated:",
+  "missing-sources": "Missing sources",
+};
+
+function renderLint(findings: LintFinding[]): void {
+  const el = document.getElementById("lintList");
+  if (!el) return;
+  if (!findings.length) {
+    el.innerHTML = '<div class="gard-empty">No lint findings — the wiki is clean.</div>';
+    return;
+  }
+  let html = "";
+  for (const check of Object.keys(LINT_LABELS)) {
+    const items = findings.filter((f) => f.check === check);
+    if (!items.length) continue;
+    html +=
+      '<div class="lint-group"><div class="lint-group-head">' +
+      esc(LINT_LABELS[check] || check) +
+      ` <span class="lint-count">${items.length}</span></div><ul class="lint-items">`;
+    items.forEach((f) => {
+      html +=
+        `<li><span class="lint-path">${esc(f.relPath)}</span><span class="lint-msg">${esc(f.message)}</span></li>`;
+    });
+    html += "</ul></div>";
+  }
+  el.innerHTML = html;
+}
+
+function loadLint(): void {
+  const el = document.getElementById("lintList");
+  if (el) el.innerHTML = '<div class="gard-empty">Loading lint findings…</div>';
+  fetch(withBot("/api/wiki/linter-findings"))
+    .then((r) => r.json())
+    .then((data: LintResponse) => {
+      if (data.error) {
+        if (el) el.innerHTML = `<div class="gard-empty">${esc(data.error)}</div>`;
+        return;
+      }
+      renderLint(data.findings || []);
+    })
+    .catch((err: Error) => {
+      if (el) el.innerHTML = `<div class="gard-empty">Failed to load lint findings: ${esc(err.message)}</div>`;
+    });
+}
+
+document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
+
 const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
 if (wikiBotSel) {
   wikiBotSel.addEventListener("change", () => {
@@ -244,6 +309,13 @@ if (wikiBotSel) {
 // "unavailable" notice into #gardList, so skip the fetch and leave it in place.
 const unavailable = (window as unknown as { __WIKI_GARDENER_UNAVAILABLE__?: unknown })
   .__WIKI_GARDENER_UNAVAILABLE__ === true;
+if (!unavailable) loadLint();
+else {
+  const lintEl = document.getElementById("lintList");
+  if (lintEl)
+    lintEl.innerHTML =
+      '<div class="gard-empty">The linter is only available for bot wikis.</div>';
+}
 if (!unavailable)
   fetch(withBot("/api/wiki/proposals"))
   .then((r) => r.json())

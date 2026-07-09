@@ -8,6 +8,7 @@ import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
+import { checkWikiLinter } from "./wiki-linter.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -226,8 +227,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Anthropic ids are stable canonical URLs; the wiki-gardener alert id is
       // already per-run-unique (embeds the persisted proposal ids) and its
       // summary names the same topic labels across runs — content-hash dedup
-      // would false-drop a legitimate weekly notification. Skip it for both.
-      const skipContentHash = watcher.type === "anthropic" || watcher.type === "wiki-gardener";
+      // would false-drop a legitimate weekly notification. The wiki-linter's
+      // alert id is per-day-stable and its summary (identical counts) can repeat
+      // across weekly runs, so content-hash would wrongly suppress a recurring
+      // report — skip it for all three.
+      const skipContentHash =
+        watcher.type === "anthropic" ||
+        watcher.type === "wiki-gardener" ||
+        watcher.type === "wiki-linter";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
@@ -360,6 +367,10 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig): Promise<Watch
       // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
       // for executeOneShot — passed through instead of re-running bot discovery.
       return await checkWikiGardener(watcher, botConfig);
+    case "wiki-linter":
+      // Report-only lint over the bot's wikiDir — needs the full BotConfig for
+      // its wikiDir; never writes to the wiki or DB.
+      return await checkWikiLinter(watcher, botConfig);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -368,7 +379,7 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig): Promise<Watch
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

@@ -155,6 +155,34 @@ export async function renderWikiGardenerPage(opts?: {
 
     .gard-empty { padding: 48px; text-align: center; color: var(--text-muted); font-size: 13.5px; }
     .gard-empty code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
+
+    /* Lint findings (report-only) */
+    .lint-section { margin-top: 36px; }
+    .lint-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+    .lint-head h2 { font-size: 16px; color: var(--text-primary); }
+    .lint-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 14px; }
+    .lint-refresh {
+      background: none; border: 1px solid var(--border-secondary); border-radius: 6px;
+      color: var(--text-muted); font-size: 11.5px; font-family: inherit; padding: 4px 10px; cursor: pointer;
+    }
+    .lint-refresh:hover { color: var(--text-primary); border-color: var(--accent); }
+    .lint-group {
+      background: var(--bg-panel); border: 1px solid var(--border-primary); border-radius: 10px;
+      margin-bottom: 12px; overflow: hidden;
+    }
+    .lint-group-head {
+      display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+      border-bottom: 1px solid var(--border-primary); font-size: 13px; color: var(--text-primary); font-weight: 600;
+    }
+    .lint-count {
+      font-size: 11px; padding: 1px 8px; border-radius: 999px;
+      background: var(--tint-neutral); color: var(--text-muted); font-weight: 600;
+    }
+    .lint-items { list-style: none; margin: 0; padding: 6px 0; }
+    .lint-items li { padding: 5px 16px; font-size: 12.5px; display: flex; gap: 10px; flex-wrap: wrap; }
+    .lint-items li:hover { background: var(--bg-surface); }
+    .lint-path { color: var(--text-secondary); font-family: var(--font-mono, monospace); font-size: 11.5px; }
+    .lint-msg { color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -176,6 +204,15 @@ export async function renderWikiGardenerPage(opts?: {
       <button class="gard-filter" data-status="stale">Stale</button>
     </div>
     <div id="gardList">${gardListInit}</div>
+
+    <div class="lint-section">
+      <div class="lint-head">
+        <h2>🧹 Lint findings</h2>
+        <button id="lintRefresh" class="lint-refresh">Refresh</button>
+      </div>
+      <div class="lint-sub">Report-only wiki hygiene — broken links, orphan pages, missing <code>updated:</code>, and concepts citing no sources. Recomputed on demand; nothing is written.</div>
+      <div id="lintList"><div class="gard-empty">Loading lint findings…</div></div>
+    </div>
   </div>
 
   <script>
