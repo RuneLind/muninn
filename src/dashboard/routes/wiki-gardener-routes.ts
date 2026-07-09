@@ -26,6 +26,29 @@ import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
 import { collectWikiUrls, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
+import { resolveGardenerConfig } from "../../gardener/types.ts";
+import { runGardener, type GardenerDeps } from "../../gardener/runner.ts";
+import {
+  assembleBacklog,
+  startBacklogRun,
+  resetBacklogOffered,
+  draftedCount,
+  gardenerRunInFlight,
+  BACKLOG_MAX_PROPOSALS,
+  BACKLOG_LOOKBACK_DAYS,
+  DRAFT_TIMEOUT_MS,
+  WIKI_GARDENER_OFFERED_KEY,
+  type AssembledBacklog,
+  type LastBacklogRun,
+} from "../../gardener/backlog.ts";
+import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
+import {
+  getWikiGardenerWatcher,
+  getWatcherSnapshot,
+  setWatcherSnapshot,
+} from "../../db/watchers.ts";
+import { loadConfig } from "../../config.ts";
+import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
@@ -135,6 +158,70 @@ async function finishProposal(
  *  the shared {@link CoverageDeps} shape (also used by the summaries Stats route). */
 export type IngestBacklogDeps = CoverageDeps;
 
+/** A minimal `wiki-gardener` watcher projection — just the FK the offered memory needs. */
+export interface GardenerWatcherRef {
+  id: string;
+}
+
+/**
+ * The wider deps the backlog-run routes need on top of {@link CoverageDeps}: the
+ * bot's `wiki-gardener` watcher row (offered memory's `watcher_id`) plus the
+ * offered-set snapshot read/write. All injectable so the routes test without a DB.
+ */
+export interface BacklogRouteDeps extends CoverageDeps {
+  getWikiGardenerWatcher: (botName: string) => Promise<GardenerWatcherRef | null>;
+  getOffered: (watcherId: string) => Promise<Set<string>>;
+  setOffered: (watcherId: string, keys: string[]) => Promise<void>;
+}
+
+export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
+  ...DEFAULT_COVERAGE_DEPS,
+  getWikiGardenerWatcher: async (botName) => {
+    const w = await getWikiGardenerWatcher(botName);
+    return w ? { id: w.id } : null;
+  },
+  getOffered: async (watcherId) => {
+    const snap = await getWatcherSnapshot(watcherId, WIKI_GARDENER_OFFERED_KEY);
+    return new Set(Array.isArray(snap) ? (snap as string[]) : []);
+  },
+  setOffered: (watcherId, keys) => setWatcherSnapshot(watcherId, WIKI_GARDENER_OFFERED_KEY, keys),
+};
+
+/**
+ * Per-bot record of the most recent manual backlog run's outcome (in-memory —
+ * a dashboard convenience, not durable). Surfaced by the extended GET so the UI
+ * can render the "run finished — nothing clustered" / "drafted N" line.
+ */
+const lastBacklogRuns = new Map<string, LastBacklogRun>();
+function setLastBacklogRun(botName: string, r: LastBacklogRun): void {
+  lastBacklogRuns.set(botName, r);
+}
+function getLastBacklogRun(botName: string): LastBacklogRun | null {
+  return lastBacklogRuns.get(botName) ?? null;
+}
+
+/** The per-request live fields merged onto the cached backlog payload. */
+export interface BacklogLiveFields {
+  running: boolean;
+  offered: number;
+  remaining: number;
+  lastBacklogRun: LastBacklogRun | null;
+  watcherSeeded: boolean;
+}
+
+/**
+ * Merge the per-request live fields onto the cached (by-reference) backlog
+ * payload WITHOUT mutating the cached object: strip the server-only `queuedKeys`
+ * and spread a fresh object. Exported so the non-mutation contract is unit-tested.
+ */
+export function mergeBacklogLiveFields(
+  data: IngestBacklogResponse,
+  live: BacklogLiveFields,
+): Record<string, unknown> {
+  const { queuedKeys: _drop, ...rest } = data;
+  return { ...rest, ...live };
+}
+
 /**
  * Per-collection backlog counts decorated with the summary-source id + label for
  * the UI. Deliberately count-only: the module's per-collection `queuedDocs` list
@@ -151,7 +238,7 @@ interface BacklogCollection {
 }
 
 /** The full `/api/wiki/ingest-backlog` payload (the cached, expensive part). */
-interface IngestBacklogResponse {
+export interface IngestBacklogResponse {
   byCollection: BacklogCollection[];
   total: number;
   ingested: number;
@@ -161,6 +248,12 @@ interface IngestBacklogResponse {
   generatedAt: number;
   /** Present only when ≥1 collection failed to load (partial data). */
   errors?: StatsError[];
+  /**
+   * Server-only: `<collection>/<id>` keys of every queued doc. Cached alongside
+   * the counts so the extended GET can compute `remaining` (queued minus the
+   * offered set) precisely, but STRIPPED before the wire by {@link mergeBacklogLiveFields}.
+   */
+  queuedKeys?: string[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -223,6 +316,12 @@ export async function computeIngestBacklogResponse(
     };
   });
 
+  // Server-only queued keys (stripped before the wire) — used by the extended GET
+  // to compute `remaining` against the offered set.
+  const queuedKeys = backlog.byCollection.flatMap((c) =>
+    c.queuedDocs.map((d) => `${d.collection}/${d.id}`),
+  );
+
   return {
     byCollection,
     total: backlog.total,
@@ -230,6 +329,7 @@ export async function computeIngestBacklogResponse(
     queued: backlog.queued,
     wikiUrlCount: wikiUrls.size,
     generatedAt: Date.now(),
+    queuedKeys,
     ...(errors.length ? { errors } : {}),
   };
 }
@@ -270,9 +370,80 @@ export async function getIngestBacklogCached(
   return data;
 }
 
+/**
+ * Assemble the full `GardenerDeps` for a manual backlog run from an
+ * {@link AssembledBacklog}: the consumed-complement (harvest cap), the memoized
+ * per-collection `listDocs` (huginn listed once during assembly — never re-listed),
+ * an all-time lookback, and the raised proposal cap. Every other seam is IDENTICAL
+ * to the weekly checker's via `buildGardenerSeams`, so the two paths can't drift.
+ */
+function buildBacklogGardenerDeps(
+  assembled: AssembledBacklog,
+  ctx: {
+    bot: BotConfig;
+    config: ReturnType<typeof loadConfig>;
+    apiUrl: string;
+    root: string;
+    tracer: Tracer;
+  },
+): GardenerDeps {
+  const { bot, config, apiUrl, root, tracer } = ctx;
+  return {
+    botName: bot.name,
+    wikiDir: root,
+    collections: SUMMARY_SOURCES.map((s) => s.collection),
+    minClusterSize: resolveGardenerConfig(bot.gardener).minClusterSize,
+    lookbackDays: BACKLOG_LOOKBACK_DAYS,
+    maxProposalsPerRun: BACKLOG_MAX_PROPOSALS,
+    draftTimeoutMs: DRAFT_TIMEOUT_MS,
+    now: () => Date.now(),
+    tracer,
+    // Serve harvest's listing from the memoized snapshot (huginn listed once in
+    // assembleBacklog) — the gardener ListedDoc shape is id/url/date (no collection).
+    listDocs: async (collection) =>
+      (assembled.listedBySource[collection] ?? []).map((d) => ({
+        id: d.id,
+        ...(d.url ? { url: d.url } : {}),
+        ...(d.date ? { date: d.date } : {}),
+      })),
+    // consumed-complement: everything except the batch is "consumed", so harvest
+    // caps to exactly the selected batch.
+    consumedDocIds: async () => assembled.consumedComplement,
+    ...buildGardenerSeams({ botConfig: bot, config, apiUrl, wikiDir: root }),
+  };
+}
+
+/**
+ * Shared resolve/guard prologue for the two backlog POSTs: resolve the wiki
+ * request against the full registry, reject unknown / non-bot wikis, and find
+ * the matching wikiDir-bearing bot. Returns the resolved bot + root or a
+ * `{ error, status }` the handler returns verbatim.
+ */
+function resolveBacklogBot(
+  wikiQuery: string | undefined,
+  botQuery: string | undefined,
+): { bot: BotConfig; root: string } | { error: string; status: 400 | 404 } {
+  const { entry, unknownWiki } = resolveWikiRequest(
+    getWikiRegistry(),
+    wikiQuery,
+    botQuery,
+    process.env.WIKI_DIR,
+  );
+  if (unknownWiki) return { error: "no wiki configured for that name", status: 404 };
+  if (entry && entry.source !== "bot") {
+    return { error: "the ingest backlog is only available for bot wikis", status: 400 };
+  }
+  const root = entry?.root;
+  const bot = entry
+    ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)
+    : undefined;
+  if (!bot || !root) return { error: "no wiki bot resolved", status: 404 };
+  return { bot, root };
+}
+
 export function registerWikiGardenerRoutes(
   app: Hono,
-  backlogDeps: IngestBacklogDeps = DEFAULT_COVERAGE_DEPS,
+  backlogDeps: BacklogRouteDeps = DEFAULT_BACKLOG_ROUTE_DEPS,
 ): void {
   // Review page.
   app.get("/wiki/gardener", async (c) => {
@@ -416,11 +587,22 @@ export function registerWikiGardenerRoutes(
     // to a 200 with empty data + an error note rather than a 5xx.
     try {
       const data = await getIngestBacklogCached(root, bot.name, backlogDeps, refresh);
-      // SEAM (PR 2): merge per-request live fields (e.g. an in-flight drain's
-      // progress) HERE — outside the cached computation above. `data` is the
-      // cached object BY REFERENCE: spread/clone (`{ ...data, ...liveFields }`),
-      // never mutate it in place, or the cached entry is corrupted for the TTL.
-      return c.json(data);
+      // Per-request live fields (backlog-run state) are merged HERE — outside the
+      // cached computation above. `mergeBacklogLiveFields` spreads a fresh object
+      // (and strips the server-only `queuedKeys`), never mutating the cached entry.
+      const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+      const offeredSet = watcher ? await backlogDeps.getOffered(watcher.id) : new Set<string>();
+      const queuedKeys = data.queuedKeys ?? [];
+      const remaining = queuedKeys.filter((k) => !offeredSet.has(k)).length;
+      return c.json(
+        mergeBacklogLiveFields(data, {
+          running: gardenerRunInFlight(bot.name),
+          offered: offeredSet.size,
+          remaining,
+          lastBacklogRun: getLastBacklogRun(bot.name),
+          watcherSeeded: !!watcher,
+        }),
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn("Ingest backlog computation failed for {bot}: {error}", { bot: bot.name, error: message });
@@ -429,6 +611,83 @@ export function registerWikiGardenerRoutes(
         errors: [{ source: "backlog", collection: "", error: message }],
       });
     }
+  });
+
+  // Manual "ingest backlog" drain — kicks a DETACHED gardener run over a bounded
+  // batch of never-ingested summary docs (URL-referenced docs are never drafted),
+  // routed through the SAME pipeline so every draft is a reviewable proposal. No
+  // Telegram alert (the user is at the dashboard). Responds immediately with the
+  // run state; the client polls the GET while `running`.
+  app.post("/api/wiki/gardener/backlog-run", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot, root } = resolved;
+
+    const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    const config = loadConfig();
+
+    const result = startBacklogRun({
+      botName: bot.name,
+      gardenerEnabled: bot.gardener?.enabled !== false,
+      hasWatcher: !!watcher,
+      assemble: () =>
+        assembleBacklog({
+          botName: bot.name,
+          wikiDir: root,
+          apiUrl: KNOWLEDGE_API_URL,
+          listCollections: listSummaryCollections,
+          sweepWikiUrls: collectWikiUrls,
+          getConsumed: backlogDeps.getConsumed,
+          getPending: backlogDeps.getPending,
+          getOffered: () => backlogDeps.getOffered(watcher!.id),
+        }),
+      persistOffered: (keys) => backlogDeps.setOffered(watcher!.id, keys),
+      // The tracer root span must be finished HERE — runGardener only creates
+      // sub-spans (the weekly checker finishes its own tracer the same way);
+      // without this every drain leaves a malformed open trace in the waterfall.
+      runGardener: async (assembled) => {
+        const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
+        try {
+          const alerts = await runGardener(
+            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }),
+          );
+          tracer.finish("ok", {
+            offered: assembled.batchKeys.length,
+            drafted: draftedCount(alerts),
+          });
+          return alerts;
+        } catch (err) {
+          tracer.error(err instanceof Error ? err : String(err));
+          throw err;
+        }
+      },
+      recordLastRun: (r) => setLastBacklogRun(bot.name, r),
+    });
+
+    if (result.state === "no-watcher") {
+      return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
+    }
+    if (result.state === "disabled") {
+      return c.json({ error: "the wiki gardener is disabled for this bot" }, 400);
+    }
+    return c.json({ state: result.state });
+  });
+
+  // Reset the offered memory — writes an empty offered snapshot so every queued
+  // doc is eligible again (the recovery path for rejected-but-still-offered docs).
+  // Refused while a run is in flight: the run's persistOffered was computed from
+  // a pre-reset read and would silently clobber the empty set.
+  app.post("/api/wiki/gardener/backlog-reset", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot } = resolved;
+
+    const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
+
+    const outcome = await resetBacklogOffered(bot.name, () => backlogDeps.setOffered(watcher.id, []));
+    if (!outcome.ok) return c.json({ state: "running", error: outcome.error }, 409);
+    return c.json({ ok: true });
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.

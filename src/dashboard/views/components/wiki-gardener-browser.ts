@@ -58,6 +58,12 @@ interface BacklogCollection {
   ingested: number;
   queued: number;
 }
+interface LastBacklogRun {
+  finishedAt: number;
+  offered: number;
+  drafted: number;
+  error?: string;
+}
 interface IngestBacklogResponse {
   byCollection: BacklogCollection[];
   total: number;
@@ -67,6 +73,12 @@ interface IngestBacklogResponse {
   generatedAt: number;
   errors?: { source: string; collection: string; error: string }[];
   error?: string;
+  // Live fields (PR 2) — merged fresh on every response, outside the TTL cache.
+  running?: boolean;
+  offered?: number;
+  remaining?: number;
+  watcherSeeded?: boolean;
+  lastBacklogRun?: LastBacklogRun | null;
 }
 
 const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
@@ -317,6 +329,34 @@ document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
 
 // ── Ingest backlog strip (report-only "queued up" counter) ──────────────────
 
+let backlogPolling = false;
+
+function backlogOutcome(run: LastBacklogRun | null | undefined): string {
+  if (!run) return "";
+  if (run.error) {
+    return ` <span class="bk-err">last run failed: ${esc(run.error)}</span>`;
+  }
+  if (run.drafted > 0) {
+    return ` <span class="bk-run-note">last run: ${run.drafted} draft(s) from ${run.offered} docs — see proposals below</span>`;
+  }
+  return ` <span class="bk-run-note">last run finished — nothing clustered; ${run.offered} docs offered</span>`;
+}
+
+function backlogControl(data: IngestBacklogResponse): string {
+  // Hide the whole control when there's no wiki-gardener watcher (no offered-memory FK).
+  if (data.watcherSeeded === false) return "";
+  if (data.running) {
+    return `<button class="gard-btn bk-run" disabled>Running…</button>`;
+  }
+  const remaining = typeof data.remaining === "number" ? data.remaining : data.queued;
+  if (remaining <= 0 && data.queued > 0) {
+    // Everything queued has already been offered — offer a reset to re-run.
+    return `<span class="bk-run-note">all offered</span> <button class="gard-btn bk-reset" data-backlog-action="reset">Reset to re-run</button>`;
+  }
+  if (remaining <= 0) return ""; // nothing queued at all
+  return `<button class="gard-btn bk-run" data-backlog-action="run">Ingest backlog (${remaining})</button>`;
+}
+
 function renderBacklog(data: IngestBacklogResponse): void {
   const el = document.getElementById("gardBacklog");
   if (!el) return;
@@ -337,13 +377,19 @@ function renderBacklog(data: IngestBacklogResponse): void {
     `<span class="bk-label">Ingest backlog:</span> <span class="bk-total">${data.queued}</span>` +
     ` summaries never ingested into the wiki` +
     (parts ? ` <span class="bk-sep">—</span> ${parts}` : "") +
-    errNote;
+    errNote +
+    ` <span class="bk-control">${backlogControl(data)}</span>` +
+    backlogOutcome(data.lastBacklogRun);
 }
 
 function loadBacklog(): void {
   fetch(withBot("/api/wiki/ingest-backlog"))
     .then((r) => r.json())
-    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .then((data: IngestBacklogResponse) => {
+      renderBacklog(data);
+      // A run already in flight (e.g. page reloaded mid-drain) — resume polling.
+      if (data.running) pollBacklogUntilDone();
+    })
     .catch(() => {
       // Best-effort strip — a failed load just leaves it empty, never breaks the page.
       const el = document.getElementById("gardBacklog");
@@ -351,12 +397,110 @@ function loadBacklog(): void {
     });
 }
 
+// Poll the backlog GET while a run is in flight; on completion do one final
+// ?refresh=1 fetch (to pick up newly-consumed docs) and reload the proposal list.
+// A single transient GET failure must NOT stop the loop mid-run (a drain takes
+// minutes) — only give up after 3 consecutive failures.
+function pollBacklogUntilDone(): void {
+  if (backlogPolling) return;
+  backlogPolling = true;
+  let consecutiveFailures = 0;
+  const tick = (): void => {
+    fetch(withBot("/api/wiki/ingest-backlog"))
+      .then((r) => r.json())
+      .then((data: IngestBacklogResponse) => {
+        consecutiveFailures = 0;
+        renderBacklog(data);
+        if (data.running) {
+          setTimeout(tick, 3000);
+          return;
+        }
+        backlogPolling = false;
+        // Final refresh so the strip reflects the newly-drafted (now pending) docs.
+        fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
+          .then((r) => r.json())
+          .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+          .catch(() => {});
+        loadProposals();
+      })
+      .catch(() => {
+        consecutiveFailures++;
+        if (consecutiveFailures < 3) {
+          setTimeout(tick, 3000);
+          return;
+        }
+        backlogPolling = false;
+      });
+  };
+  setTimeout(tick, 2000);
+}
+
+async function startBacklogRun(): Promise<void> {
+  try {
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-run"), { method: "POST" });
+    const data = await res.json();
+    if (res.ok && (data.state === "started" || data.state === "running")) {
+      pollBacklogUntilDone();
+    } else if (data.error) {
+      const el = document.getElementById("gardBacklog");
+      if (el) {
+        const note = document.createElement("span");
+        note.className = "bk-err";
+        note.textContent = " " + data.error;
+        el.appendChild(note);
+      }
+    }
+  } catch {
+    // Best-effort — leave the strip as-is.
+  }
+}
+
+async function resetBacklog(): Promise<void> {
+  try {
+    await fetch(withBot("/api/wiki/gardener/backlog-reset"), { method: "POST" });
+  } catch {
+    // ignore
+  }
+  fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .catch(() => {});
+}
+
+// Delegated backlog controls (run / reset) — the strip's innerHTML is replaced
+// on every render, so listen on the stable container.
+document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("[data-backlog-action]");
+  if (!btn) return;
+  const action = btn.getAttribute("data-backlog-action");
+  if (action === "run") void startBacklogRun();
+  else if (action === "reset") void resetBacklog();
+});
+
 const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
 if (wikiBotSel) {
   wikiBotSel.addEventListener("change", () => {
     const value = wikiBotSel.value;
     location.href = value ? "/wiki/gardener?bot=" + encodeURIComponent(value) : "/wiki/gardener";
   });
+}
+
+function loadProposals(): void {
+  fetch(withBot("/api/wiki/proposals"))
+    .then((r) => r.json())
+    .then((data: ProposalsResponse) => {
+      if (data.error && !(data.proposals || []).length) {
+        document.getElementById("gardList")!.innerHTML =
+          `<div class="gard-empty">${esc(data.error)}</div>`;
+        return;
+      }
+      allProposals = data.proposals || [];
+      render();
+    })
+    .catch((err: Error) => {
+      document.getElementById("gardList")!.innerHTML =
+        `<div class="gard-empty">Failed to load proposals: ${esc(err.message)}</div>`;
+    });
 }
 
 // Boot. A non-bot (extra) wiki has no proposals — the server already rendered the
@@ -371,19 +515,4 @@ else {
     lintEl.innerHTML =
       '<div class="gard-empty">The linter is only available for bot wikis.</div>';
 }
-if (!unavailable)
-  fetch(withBot("/api/wiki/proposals"))
-  .then((r) => r.json())
-  .then((data: ProposalsResponse) => {
-    if (data.error && !(data.proposals || []).length) {
-      document.getElementById("gardList")!.innerHTML =
-        `<div class="gard-empty">${esc(data.error)}</div>`;
-      return;
-    }
-    allProposals = data.proposals || [];
-    render();
-  })
-  .catch((err: Error) => {
-    document.getElementById("gardList")!.innerHTML =
-      `<div class="gard-empty">Failed to load proposals: ${esc(err.message)}</div>`;
-  });
+if (!unavailable) loadProposals();

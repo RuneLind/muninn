@@ -50,6 +50,61 @@ export function computeWatcherTimeoutMs(watcher: Watcher): number {
   return Math.max(WATCHER_TIMEOUT_FLOOR_MS, base);
 }
 
+// ── In-flight checker guard (concurrent-duplicate prevention) ────────────────
+//
+// The scheduler tick races `runWatchers` against TICK_TIMEOUT_MS (10 min) and
+// releases `tickRunning` when the RACE settles — but an orphaned checker (a
+// 20-min gardener, a wedged MCP subprocess) keeps running past that. Because
+// `force_next_run`/`last_run_at` only change at run END, the next tick re-selects
+// the same watcher and would dispatch a CONCURRENT duplicate. This module-level
+// guard, keyed on the RAW `runChecker(...)` promise (released in that promise's
+// own `.finally`, NOT the timeout-raced one — that would release while the
+// orphan still runs), skips the duplicate dispatch until the real work settles.
+
+interface InFlightEntry {
+  startedAt: number;
+  token: number;
+}
+const checkerInFlight = new Map<string, InFlightEntry>();
+let checkerTokenSeq = 0;
+
+/** Test-only: clear the in-flight guard between cases. */
+export function __resetCheckerGuardForTest(): void {
+  checkerInFlight.clear();
+  checkerTokenSeq = 0;
+}
+
+/**
+ * Try to claim the in-flight slot for a watcher's checker. Returns a `token`
+ * (pass to {@link releaseChecker} from the raw checker's `.finally`) plus a
+ * `forced` flag, or `null` when a live dispatch already holds the slot (caller
+ * must skip). A slot older than 2× the watcher timeout is force-reclaimed with
+ * `forced: true` — an escape hatch for a never-settling checker (wedged MCP
+ * subprocess) that would otherwise park that watcher until restart. The reclaim
+ * mints a fresh token, so the stale checker's late `.finally` (old token) becomes
+ * a no-op and can't free the new dispatch's slot.
+ */
+export function claimChecker(
+  watcherId: string,
+  timeoutMs: number,
+  now: number = Date.now(),
+): { token: number; forced: boolean } | null {
+  const existing = checkerInFlight.get(watcherId);
+  if (existing && now - existing.startedAt < 2 * timeoutMs) {
+    return null;
+  }
+  const token = ++checkerTokenSeq;
+  checkerInFlight.set(watcherId, { startedAt: now, token });
+  return { token, forced: !!existing };
+}
+
+/** Release the in-flight slot, but only if `token` still owns it (a stale
+ *  orphan's late release is a no-op after a force-reclaim). */
+export function releaseChecker(watcherId: string, token: number): void {
+  const cur = checkerInFlight.get(watcherId);
+  if (cur && cur.token === token) checkerInFlight.delete(watcherId);
+}
+
 /**
  * Races `work` against a timeout, clearing the timer when either settles. After
  * a timeout the orphaned `work` keeps running (a checker subprocess can't be
@@ -205,15 +260,48 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         }
       }
 
+      // Concurrent-duplicate guard: an earlier tick's checker may still be in
+      // flight (it outran the tick timeout, and last_run_at/force_next_run only
+      // change at run END). Skip the duplicate dispatch until it settles.
+      // KNOWN/ACCEPTED: a force_next_run set MID-run is effectively dropped —
+      // the skipped forced dispatch never runs, and the in-flight run's
+      // completion clears the flag. Before this guard the same scenario
+      // produced a redundant CONCURRENT duplicate instead; the silent drop is
+      // the lesser evil, and it's only reachable for checkers that outlive the
+      // 10-min scheduler tick.
+      const timeoutMs = computeWatcherTimeoutMs(watcher);
+      const claim = claimChecker(watcher.id, timeoutMs);
+      if (!claim) {
+        log.warn("Watcher \"{name}\" still in flight from an earlier tick — skipping duplicate dispatch", {
+          botName: tag,
+          name: watcher.name,
+        });
+        wt?.finish("ok", { type: watcher.type, skippedInFlight: true });
+        return;
+      }
+      if (claim.forced) {
+        log.error("Watcher \"{name}\" checker never settled within 2× its timeout — force-reclaiming the in-flight guard (wedged subprocess/MCP?) and re-dispatching", {
+          botName: tag,
+          name: watcher.name,
+          watcherId: watcher.id,
+        });
+      }
+
       if (forced) log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
       agentStatus.set("running_watcher", watcher.name);
       requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
       setConnectorInfo(requestId, botConfig);
 
+      // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
+      // and released in its OWN .finally — keying the timeout-raced promise would
+      // free the slot while an orphaned checker keeps running.
+      const raw = runChecker(watcher, botConfig);
+      void raw.finally(() => releaseChecker(watcher.id, claim.token));
+
       const alerts = await withWatcherTimeout(
-        runChecker(watcher, botConfig),
+        raw,
         watcher.name,
-        computeWatcherTimeoutMs(watcher),
+        timeoutMs,
       );
 
       // Filter out already-notified: by message ID and by content hash

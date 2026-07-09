@@ -27,15 +27,82 @@ import {
   insertWikiProposal,
 } from "../db/wiki-proposals.ts";
 import { resolveGardenerConfig } from "../gardener/types.ts";
-import { runGardener } from "../gardener/runner.ts";
+import { runGardener, type GardenerDeps } from "../gardener/runner.ts";
+import { DRAFT_TIMEOUT_MS, runExclusive } from "../gardener/backlog.ts";
+import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-gardener");
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
-const DRAFT_TIMEOUT_MS = 300_000;
 const DRAFT_THINKING_MAX_TOKENS = 8_000;
 const DOC_FETCH_TIMEOUT_MS = 15_000;
+
+/** The seams shared by the weekly checker and the manual backlog run — the
+ *  gardener wiring that both paths must keep identical (fetch, cluster, draft,
+ *  wiki index, DB reads, proposal insert). Only harvest's `listDocs`/`consumed`
+ *  and the run-shape numbers differ between the two callers. */
+export type SharedGardenerSeams = Pick<
+  GardenerDeps,
+  | "fetchDoc"
+  | "callCluster"
+  | "loadInterestProfile"
+  | "getWikiIndex"
+  | "callDraft"
+  | "readWikiFile"
+  | "liveTopicKeys"
+  | "rejectedTopicKeys"
+  | "insertProposal"
+>;
+
+export interface GardenerSeamContext {
+  botConfig: BotConfig;
+  config: Config;
+  apiUrl: string;
+  wikiDir: string;
+}
+
+export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeams {
+  const { botConfig, config, apiUrl, wikiDir } = ctx;
+  const name = botConfig.name;
+  return {
+    fetchDoc: async (collection, id) =>
+      fetchKnowledgeApi(
+        apiUrl,
+        `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        { timeoutMs: DOC_FETCH_TIMEOUT_MS },
+      ),
+    callCluster: async (prompt) => {
+      const { result } = await callHaikuWithFallback(prompt, {
+        source: "wiki_gardener_cluster",
+        entrypoint: `${name}-watcher`,
+        botName: name,
+        connector: botConfig.connector,
+        haikuBackend: botConfig.haikuBackend,
+      });
+      return result;
+    },
+    loadInterestProfile: () => loadInterestProfileForBot(name),
+    getWikiIndex: () => getWikiIndex({ root: wikiDir }),
+    callDraft: async (prompt, timeoutMs) => {
+      // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
+      // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
+      const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
+      const { result } = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
+      return result;
+    },
+    readWikiFile: async (absPath) => {
+      try {
+        return await Bun.file(absPath).text();
+      } catch {
+        return null;
+      }
+    },
+    liveTopicKeys: () => getLiveTopicKeys(name),
+    rejectedTopicKeys: () => getRejectedTopicKeys(name),
+    insertProposal: (params) => insertWikiProposal(params),
+  };
+}
 
 export async function checkWikiGardener(
   watcher: Watcher,
@@ -61,8 +128,11 @@ export async function checkWikiGardener(
 
   const tracer = new Tracer("wiki-gardener", { botName: name, userId: watcher.userId });
 
-  try {
-    const alerts = await runGardener({
+  // Acquire the per-bot gardener mutex — if a manual backlog run is draining the
+  // same wiki, skip this weekly fire (the in-flight batch covers the newest docs).
+  // The runner still advances last_run_at, so that week's organic run is skipped.
+  const run = runExclusive(name, () =>
+    runGardener({
       botName: name,
       wikiDir,
       collections: SUMMARY_SOURCES.map((s) => s.collection),
@@ -80,49 +150,27 @@ export async function checkWikiGardener(
         );
         return Array.isArray(data?.documents) ? data.documents : [];
       },
-      fetchDoc: async (collection, id) => {
-        return await fetchKnowledgeApi(
-          apiUrl,
-          `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
-          { timeoutMs: DOC_FETCH_TIMEOUT_MS },
-        );
-      },
-
-      callCluster: async (prompt) => {
-        const { result } = await callHaikuWithFallback(prompt, {
-          source: "wiki_gardener_cluster",
-          entrypoint: `${name}-watcher`,
-          botName: name,
-          connector: botConfig.connector,
-          haikuBackend: botConfig.haikuBackend,
-        });
-        return result;
-      },
-      loadInterestProfile: () => loadInterestProfileForBot(name),
-
-      getWikiIndex: () => getWikiIndex({ root: wikiDir }),
-
-      callDraft: async (prompt, timeoutMs) => {
-        // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
-        // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
-        const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
-        const { result } = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
-        return result;
-      },
-      readWikiFile: async (absPath) => {
-        try {
-          return await Bun.file(absPath).text();
-        } catch {
-          return null;
-        }
-      },
-
-      liveTopicKeys: () => getLiveTopicKeys(name),
-      rejectedTopicKeys: () => getRejectedTopicKeys(name),
       consumedDocIds: () => getConsumedDocIds(name),
-      insertProposal: (params) => insertWikiProposal(params),
-    });
+      ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir }),
+    }),
+  );
 
+  if (run === null) {
+    // KNOWN/ACCEPTED: this also swallows a manual force-trigger that collides
+    // with an in-flight backlog drain — the runner treats the returned [] as a
+    // completed run, advances last_run_at, and clears force_next_run. Accepted
+    // because the in-flight drain already covers the newest docs, and queueing
+    // or erroring here would complicate the runner for a rare manual collision.
+    log.info("Wiki-gardener: a backlog run is in flight for \"{name}\" — skipping this weekly run", {
+      botName: name,
+      name,
+    });
+    tracer.finish("ok", { skippedForBacklogRun: true });
+    return [];
+  }
+
+  try {
+    const alerts = await run;
     tracer.finish("ok", { alertsSent: alerts.length });
     return alerts;
   } catch (err) {

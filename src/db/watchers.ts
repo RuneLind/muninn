@@ -117,6 +117,23 @@ export async function getWatcherById(id: string): Promise<Watcher | null> {
   return row ? mapRow(row) : null;
 }
 
+/**
+ * The bot's `wiki-gardener` watcher row (oldest wins if somehow duplicated). The
+ * manual backlog run needs its `id` — the `watcher_snapshots` offered-memory FK
+ * is NOT NULL / ON DELETE CASCADE, so a missing row means the backlog feature is
+ * unavailable for the bot.
+ */
+export async function getWikiGardenerWatcher(botName: string): Promise<Watcher | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT * FROM watchers
+    WHERE bot_name = ${botName} AND type = 'wiki-gardener'
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  return row ? mapRow(row) : null;
+}
+
 export async function deleteWatcher(id: string): Promise<void> {
   const sql = getDb();
   await sql`DELETE FROM watchers WHERE id = ${id}`;
