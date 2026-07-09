@@ -7,8 +7,10 @@ import {
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   getIngestBacklogCached,
+  mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   type IngestBacklogDeps,
+  type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { __resetWikiRegistryForTest } from "./wiki-routes.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
@@ -79,6 +81,75 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     const body = (await res.json()) as { byCollection: unknown[]; error?: string };
     expect(body.error).toContain("no wiki configured");
     expect(body.byCollection).toEqual([]);
+  });
+
+  // The backlog-run + reset POSTs share the same resolution guards.
+  test("backlog-run: standalone (non-bot) wiki → 400 bot-only error", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+  });
+
+  test("backlog-run: unknown wiki → 404 not-configured", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=does-not-exist", { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+
+  test("backlog-reset: standalone (non-bot) wiki → 400 bot-only error", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-reset?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+  });
+});
+
+/**
+ * The extended GET merges per-request live fields OUTSIDE the TTL cache. This
+ * pins the non-mutation contract: `mergeBacklogLiveFields` must never touch the
+ * cached (by-reference) payload, so a second merge with fresh `running` reflects
+ * the new value while the cached object is unchanged (and never leaks `queuedKeys`).
+ */
+describe("mergeBacklogLiveFields — live fields outside the cache", () => {
+  const cached: IngestBacklogResponse = {
+    byCollection: [],
+    total: 3,
+    ingested: 1,
+    queued: 2,
+    wikiUrlCount: 5,
+    generatedAt: 111,
+    queuedKeys: ["c/a", "c/b"],
+  };
+
+  test("merges live fields without mutating the cached payload; strips queuedKeys", () => {
+    const first = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+    });
+    expect(first.running).toBe(false);
+    expect(first.queued).toBe(2);
+    expect("queuedKeys" in first).toBe(false); // server-only, never on the wire
+
+    // A later request sees fresh `running: true` from the SAME cached object.
+    const second = mergeBacklogLiveFields(cached, {
+      running: true,
+      offered: 2,
+      remaining: 0,
+      lastBacklogRun: { finishedAt: 222, offered: 2, drafted: 1 },
+      watcherSeeded: true,
+    });
+    expect(second.running).toBe(true);
+    expect(second.remaining).toBe(0);
+    expect(second.lastBacklogRun).toEqual({ finishedAt: 222, offered: 2, drafted: 1 });
+
+    // The cached object was never mutated by either merge.
+    expect(cached.queuedKeys).toEqual(["c/a", "c/b"]);
+    expect("running" in cached).toBe(false);
   });
 });
 

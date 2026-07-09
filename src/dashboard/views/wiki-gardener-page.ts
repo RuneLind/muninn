@@ -78,7 +78,21 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-src { color: var(--text-secondary); }
     .gard-backlog .bk-src .bk-n { font-weight: 600; color: var(--accent-light); font-variant-numeric: tabular-nums; }
     .gard-backlog .bk-sep { color: var(--text-dim); }
-    .gard-backlog .bk-err { color: var(--text-dim); font-size: 12px; }
+    .gard-backlog .bk-err { color: var(--status-magenta); font-size: 12px; }
+    .gard-backlog .bk-run-note { color: var(--text-muted); font-size: 12px; }
+    .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
+    .gard-backlog .gard-btn.bk-run {
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      border: 1px solid var(--accent); color: var(--accent-light);
+      font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-run:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+    .gard-backlog .gard-btn.bk-run:disabled { opacity: 0.55; cursor: default; }
+    .gard-backlog .gard-btn.bk-reset {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-muted);
+      font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-reset:hover { border-color: var(--accent); color: var(--text-primary); }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {

@@ -150,6 +150,10 @@ Each watcher's `runChecker` call is wrapped in `withWatcherTimeout` so a hung ch
 
 Due watchers now run **concurrently**: `runWatchers` fans the due list out through `Promise.allSettled(dueWatchers.map(async (watcher) => …))`. This is safe because each watcher owns its own `requestId` (`agentStatus` is per-`requestId` since the Map rework, so parallel runs don't clobber each other's progress), its own `Tracer`, and its own per-watcher timeout + catch — one slow or failing watcher can't block or skip the others. `allSettled` (not `all`) because each iteration is self-contained error-wise; a rejection must never abort the batch.
 
+### Concurrent-duplicate guard (`claimChecker`/`releaseChecker`)
+
+The scheduler tick races `runWatchers` against `TICK_TIMEOUT_MS` (10 min) and releases `tickRunning` when the race settles — but an orphaned checker (a 20-min gardener, a wedged MCP subprocess) keeps running past that. Because `force_next_run`/`last_run_at` only change at run **END**, the next tick re-selects the same watcher and would dispatch a **concurrent duplicate** (the seeded 20-min weekly gardener already exceeds the 10-min tick, so this is a live bug). A module-level in-flight set keyed on the watcher id — claimed BEFORE `runChecker` and released in the RAW checker promise's own `.finally` (NOT the timeout-raced one, which would free the slot while an orphan still runs) — skips the duplicate dispatch until the real work settles. **Escape hatch:** a slot older than `2 × computeWatcherTimeoutMs(watcher)` is force-reclaimed with a loud `log.error` (a never-settling checker would otherwise park that watcher until restart); the reclaim mints a fresh token, so the stale checker's late `.finally` (old token) is a no-op and can't free the new dispatch's slot.
+
 Caveats of the parallel model:
 - The **phase dial** (`agentStatus.set("running_watcher")` / `set("sending_telegram")`) is a coarse global indicator and races under parallelism — that's expected. The real per-watcher progress lives in the per-`requestId` waterfall. The dial is reset to `idle` **once** after the whole batch settles (not per-watcher), so an early finisher doesn't flip it to idle while siblings still run.
 - Concurrency is **unbounded over the due set**, which is naturally small (watchers due in one tick after the interval + time-of-day filters — typically 1–5). DB writes serialize harmlessly on the pool; the parallelism win is in `runChecker` (Haiku/MCP/HTTP), which doesn't hold a DB connection. If a deployment ever has many watchers firing in the same tick (e.g. first tick after long downtime), add a small bounded-concurrency limiter here.
@@ -294,9 +298,47 @@ header carries a 🌱 Gardener link + pending-draft count badge.
   same `target_path` resolve one `applied` / one `stale`. Every terminal CAS
   result is checked — a lost CAS is surfaced as 409, never reported as success.
 
+**Manual "Ingest backlog" drain (PR 2).** The weekly run only clusters a *recent*
+window, so the all-time tail of never-ingested summaries grows unbounded (measured
+by `src/wiki/ingest-backlog.ts`). The **"Ingest backlog (N)"** button on
+`/wiki/gardener` drains that tail through the SAME `runGardener` pipeline in bounded
+batches — one click replaces a manual ingest session, every judgment call becomes a
+reviewable proposal. Mechanics live in `src/gardener/backlog.ts`:
+- **Shared constants** (`BACKLOG_BATCH_SIZE 40`, `BACKLOG_MAX_PROPOSALS 8`,
+  `DRAFT_TIMEOUT_MS` — hoisted here from the checker; the weekly checker imports it
+  back) so route, helper, and checker can't drift.
+- **consumed-complement trick**: rather than teach `harvestDocs` an "only these ids"
+  option, the run marks every listed doc EXCEPT the selected batch as consumed, so
+  harvest's existing consumed-filter caps to exactly the batch; `lookbackDays` is
+  `BACKLOG_LOOKBACK_DAYS` (~10y) so the window filter never drops an old doc. Huginn
+  is listed ONCE per run (`assembleBacklog`) and `runGardener.listDocs` is served
+  from that memoized snapshot.
+- **Batch selection**: newest-first over queued docs, minus already-**offered** keys,
+  capped at the batch size. Offered memory is a per-watcher `watcher_snapshots` set
+  (`backlog:offered`) persisted **BEFORE** `runGardener` runs (at-most-once — a
+  crashed run skips its batch rather than re-offering it and starving the tail). A
+  rejected proposal's docs re-enter the queued COUNT but stay offered (never
+  re-offered); recovered only by the **Reset** affordance (`backlog-reset` writes an
+  empty snapshot). The offered set needs the `wiki-gardener` watcher_id (the
+  snapshot FK) — no row ⇒ the feature is unavailable (button hidden / 404).
+- **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
+  `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
+  a weekly fire during a backlog run returns `[]` (logged) — the runner still advances
+  `last_run_at`, so that week's organic run is skipped (the in-flight batch covers the
+  newest docs). The inline backlog path **never** writes `last_run_at`/`force_next_run`
+  and drops `runGardener`'s alerts (no Telegram — the user is at the dashboard).
+- **Routes** (`wiki-gardener-routes.ts`): `POST /api/wiki/gardener/backlog-run`,
+  `POST /api/wiki/gardener/backlog-reset`, and the extended
+  `GET /api/wiki/ingest-backlog` (adds `running`/`offered`/`remaining`/`lastBacklogRun`/
+  `watcherSeeded`, merged fresh OUTSIDE the 5-min cache — never mutating the cached
+  object). The shared gardener seams are factored into `buildGardenerSeams` (exported
+  from `wiki-gardener.ts`) so the weekly checker and the backlog run wire identical
+  fetch/cluster/draft/DB seams.
+
 **Config** (per-bot `config.json` `gardener` block, validated at discovery):
 `{ enabled?, minClusterSize?, lookbackDays?, maxProposalsPerRun? }`. Requires the
-bot to have `wikiDir` set (a missing `wikiDir` warns and returns no alerts).
+bot to have `wikiDir` set (a missing `wikiDir` warns and returns no alerts). The
+backlog run reuses `minClusterSize` but overrides `lookbackDays`/`maxProposalsPerRun`.
 
 **Seed**: `bun scripts/setup-wiki-gardener.ts [--apply]` creates the jarvis
 `wiki-gardener` row — weekly interval, `config.hour: 10` (daytime, clear of quiet

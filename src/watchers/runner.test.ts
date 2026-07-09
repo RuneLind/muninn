@@ -1,5 +1,14 @@
-import { test, expect, describe } from "bun:test";
-import { contentHash, extractProperNouns, formatAlerts, computeWatcherTimeoutMs, withWatcherTimeout } from "./runner.ts";
+import { test, expect, describe, beforeEach } from "bun:test";
+import {
+  contentHash,
+  extractProperNouns,
+  formatAlerts,
+  computeWatcherTimeoutMs,
+  withWatcherTimeout,
+  claimChecker,
+  releaseChecker,
+  __resetCheckerGuardForTest,
+} from "./runner.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
@@ -350,5 +359,57 @@ describe("dedup via contentHash", () => {
     // The exact match depends on proper noun extraction details
     expect(hash1).not.toBeNull();
     expect(hash2).not.toBeNull();
+  });
+});
+
+// ── claimChecker / releaseChecker (concurrent-duplicate guard) ────────────
+
+describe("checker in-flight guard", () => {
+  beforeEach(() => __resetCheckerGuardForTest());
+
+  const TIMEOUT = 120_000;
+
+  test("first claim succeeds; a second while in flight is skipped", () => {
+    const first = claimChecker("w1", TIMEOUT, 1000);
+    expect(first).not.toBeNull();
+    expect(first!.forced).toBe(false);
+
+    const second = claimChecker("w1", TIMEOUT, 1000);
+    expect(second).toBeNull(); // duplicate dispatch blocked
+  });
+
+  test("release frees the slot for the next tick", () => {
+    const first = claimChecker("w1", TIMEOUT, 1000)!;
+    releaseChecker("w1", first.token);
+    const again = claimChecker("w1", TIMEOUT, 2000);
+    expect(again).not.toBeNull();
+    expect(again!.forced).toBe(false);
+  });
+
+  test("a slot older than 2× the timeout is force-reclaimed", () => {
+    claimChecker("w1", TIMEOUT, 0);
+    // Still held just under 2× the timeout.
+    expect(claimChecker("w1", TIMEOUT, 2 * TIMEOUT - 1)).toBeNull();
+    // Past 2× the timeout → force-reclaim (a never-settling checker).
+    const forced = claimChecker("w1", TIMEOUT, 2 * TIMEOUT + 1);
+    expect(forced).not.toBeNull();
+    expect(forced!.forced).toBe(true);
+  });
+
+  test("a stale orphan's late release does NOT free the reclaimed slot", () => {
+    const first = claimChecker("w1", TIMEOUT, 0)!;
+    const forced = claimChecker("w1", TIMEOUT, 2 * TIMEOUT + 1)!;
+    // The old orphan finally settles and releases with its stale token — no-op.
+    releaseChecker("w1", first.token);
+    // The reclaimed slot is still held, so a fresh dispatch is skipped.
+    expect(claimChecker("w1", TIMEOUT, 2 * TIMEOUT + 2)).toBeNull();
+    // Releasing with the reclaim's token frees it.
+    releaseChecker("w1", forced.token);
+    expect(claimChecker("w1", TIMEOUT, 2 * TIMEOUT + 3)).not.toBeNull();
+  });
+
+  test("different watcher ids don't block each other", () => {
+    expect(claimChecker("w1", TIMEOUT, 1000)).not.toBeNull();
+    expect(claimChecker("w2", TIMEOUT, 1000)).not.toBeNull();
   });
 });
