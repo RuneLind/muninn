@@ -123,6 +123,14 @@ export interface BotConfig {
    *  (a string array). Unset ⇒ the Ask tab has no corpus and returns a clean
    *  "no collection connected" error. Plumbed onto the wiki registry entry. */
   wikiCollections?: string[];
+  /** Explicit per-wiki synthesis-bot pin for this bot's OWN wiki. Names the bot
+   *  that answers the wiki's Ask / What's-new digest, beating both the owner
+   *  fast-gate and the research-bot fallback (see `resolveWikiSynthesisBot`).
+   *  Configured in config.json as `wikiSynthesisBot` (a string). Plumbed onto the
+   *  wiki registry entry. Unset ⇒ owner/fallback routing. Deliberately bypasses
+   *  the opus fast-gate — e.g. capra pinning its own opus bot is an informed
+   *  choice. A pin naming no discovered bot is warned + ignored at resolve time. */
+  wikiSynthesisBot?: string;
   /** Context window size in tokens — used to show usage percentage (e.g. 32768 for local models) */
   contextWindow?: number;
   /** Per-tool-group user restrictions — tools not listed here are available to all */
@@ -382,7 +390,14 @@ export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
  * Picks the bot that synthesizes a *wiki's* Ask answer / What's-new digest.
  * Owner-routing: the bot that owns the wiki answers its own wiki (jarvis wiki →
  * jarvis, nav wiki → melosys), so retrieval + synthesis run under the correct
- * identity instead of the single global research bot. Resolution:
+ * identity instead of the single global research bot. Resolution, in order:
+ *   - **Explicit pin** (`entry.synthesisBot`, from a bot's `wikiSynthesisBot`
+ *     config field or a `WIKI_EXTRA` fourth segment) naming a DISCOVERED bot
+ *     (case-insensitive) → `{ bot: pinned, origin: "pinned" }`. A pin
+ *     deliberately BYPASSES the opus fast-gate — pinning capra's own opus bot
+ *     for capra's wiki, or keeping melosys-kode-wiki on melosys, is an informed
+ *     choice. A pin naming no discovered bot is warned + ignored, falling
+ *     through to owner/fallback below.
  *   - A bot-owned wiki (`entry.source === "bot"`, its `name` IS the owning bot's
  *     name) whose owner is discovered AND fast enough for interactive Q&A
  *     (`isFastResearchBot`, skips opus) → `{ bot: owner, origin: "owner" }`.
@@ -398,7 +413,15 @@ export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
 export function resolveWikiSynthesisBot(
   entry: WikiRegistryEntry | undefined,
   bots: BotConfig[],
-): { bot: BotConfig | undefined; origin: "owner" | "fallback" } {
+): { bot: BotConfig | undefined; origin: "pinned" | "owner" | "fallback" } {
+  if (entry?.synthesisBot) {
+    const pinned = bots.find((b) => b.name.toLowerCase() === entry.synthesisBot!.toLowerCase());
+    if (pinned) return { bot: pinned, origin: "pinned" };
+    log.warn(
+      "Wiki \"{wiki}\" pins synthesisBot \"{pin}\" — no discovered bot by that name; ignoring pin, falling back to owner/research",
+      { wiki: entry.name, pin: entry.synthesisBot },
+    );
+  }
   if (entry?.source === "bot") {
     const owner = bots.find((b) => b.name.toLowerCase() === entry.name.toLowerCase());
     if (owner && isFastResearchBot(owner)) return { bot: owner, origin: "owner" };
@@ -559,7 +582,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "gardener"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -573,6 +596,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateScalarField(botSettings, "baseUrl", "string", name);
         validateScalarField(botSettings, "wikiDir", "string", name);
         validateStringArrayField(botSettings, "wikiCollections", name);
+        validateScalarField(botSettings, "wikiSynthesisBot", "string", name);
         validateScalarField(botSettings, "thinkingMaxTokens", "number", name);
         validateScalarField(botSettings, "timeoutMs", "number", name);
         validateScalarField(botSettings, "contextWindow", "number", name);
@@ -640,6 +664,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
           ? resolve(dir, botSettings.wikiDir)
           : undefined,
       wikiCollections: botSettings.wikiCollections as string[] | undefined,
+      wikiSynthesisBot: botSettings.wikiSynthesisBot as string | undefined,
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,

@@ -46,6 +46,7 @@ export type Origin =
   | "legacy"
   | "fixed"
   | "none"
+  | "pinned"
   | "owner"
   | "fallback";
 
@@ -107,15 +108,21 @@ export interface PipelineEntry {
 }
 
 /** One registered wiki + the bot that synthesizes its Ask answer / What's-new
- *  digest, with an origin chip: `owner` (the owning bot answers its own wiki) or
- *  `fallback` (standalone / opus-owned wiki → the research bot). Read-only. */
+ *  digest, with an origin chip: `pinned` (explicit per-wiki `synthesisBot` pin),
+ *  `owner` (the owning bot answers its own wiki), or `fallback` (standalone /
+ *  opus-owned wiki → the research bot). Read-only. */
 export interface WikiSynthesisEntry {
   wiki: string;
   source: WikiRegistryEntry["source"];
   bot: string | null;
   connector: string;
   model: string;
-  origin: Extract<Origin, "owner" | "fallback">;
+  origin: Extract<Origin, "pinned" | "owner" | "fallback">;
+  /** Set when the wiki carries a `synthesisBot` pin that matched no discovered
+   *  bot — the pin was ignored and routing fell back to owner/fallback. Renders
+   *  a red "pin '<name>' matches no bot — ignored" note (mirrors the
+   *  stale-override/env-ignored pattern). */
+  ignoredPin?: string;
 }
 
 export interface ModelsOverview {
@@ -417,6 +424,9 @@ export async function assembleModelsOverview(
   }
   const wikiSynthesis: WikiSynthesisEntry[] = wikiRegistry.map((entry) => {
     const { bot, origin } = resolveWikiSynthesisBot(entry, bots);
+    // A pin that didn't win (origin !== "pinned") named no discovered bot and
+    // was ignored — surface it as an error note, like a stale role override.
+    const ignoredPin = entry.synthesisBot && origin !== "pinned" ? entry.synthesisBot : undefined;
     return {
       wiki: entry.name,
       source: entry.source,
@@ -424,6 +434,7 @@ export async function assembleModelsOverview(
       connector: bot?.connector ?? "claude-cli",
       model: bot?.model ?? globalModelDefault,
       origin,
+      ...(ignoredPin ? { ignoredPin } : {}),
     };
   });
 

@@ -58,8 +58,12 @@ function deps(over: Partial<ModelsOverviewDeps> & {
 }
 
 /** Minimal WikiRegistryEntry factory. */
-function wiki(name: string, source: WikiRegistryEntry["source"] = "bot"): WikiRegistryEntry {
-  return { name, root: `/wikis/${name}`, source };
+function wiki(
+  name: string,
+  source: WikiRegistryEntry["source"] = "bot",
+  synthesisBot?: string,
+): WikiRegistryEntry {
+  return { name, root: `/wikis/${name}`, source, ...(synthesisBot ? { synthesisBot } : {}) };
 }
 
 // Isolate env knobs the assembly reads.
@@ -286,6 +290,35 @@ test("wiki synthesis: RESEARCH_BOT override steers the fallback branch", async (
   const bots = [bot("jarvis"), bot("melosys", { connector: "copilot-sdk" })];
   const o = await assembleModelsOverview("jarvis", deps({ bots, wikiRegistry: [wiki("mimir", "extra")] }));
   expect(o.wikiSynthesis[0]).toMatchObject({ wiki: "mimir", bot: "melosys", origin: "fallback" });
+});
+
+test("wiki synthesis: explicit pin → pinned chip (beats owner-gate + fallback, no ignoredPin)", async () => {
+  const bots = [
+    bot("capra", { model: "opus", connector: "copilot-sdk" }),
+    bot("jarvis", { connector: "claude-sdk" }),
+    bot("melosys", { connector: "copilot-sdk" }),
+  ];
+  const wikiRegistry = [
+    wiki("capra", "bot", "capra"), // opus owner pinned to itself ⇒ pinned (bypasses gate)
+    wiki("melosys-kode-wiki", "extra", "melosys"), // standalone pinned ⇒ pinned, not fallback
+  ];
+  const o = await assembleModelsOverview("jarvis", deps({ bots, wikiRegistry }));
+  const rows = Object.fromEntries(o.wikiSynthesis.map((w) => [w.wiki, w]));
+  expect(rows.capra).toMatchObject({ bot: "capra", origin: "pinned", connector: "copilot-sdk", model: "opus" });
+  expect(rows.capra!.ignoredPin).toBeUndefined();
+  expect(rows["melosys-kode-wiki"]).toMatchObject({ bot: "melosys", origin: "pinned", source: "extra" });
+});
+
+test("wiki synthesis: pin matching no bot → ignoredPin note + owner/fallback routing", async () => {
+  const bots = [bot("jarvis", { connector: "claude-sdk" }), bot("melosys", { connector: "copilot-sdk" })];
+  const wikiRegistry = [
+    wiki("jarvis", "bot", "ghost"), // bad pin on owner wiki ⇒ falls through to owner
+    wiki("mimir", "extra", "ghost"), // bad pin on standalone ⇒ falls through to fallback
+  ];
+  const o = await assembleModelsOverview("jarvis", deps({ bots, wikiRegistry }));
+  const rows = Object.fromEntries(o.wikiSynthesis.map((w) => [w.wiki, w]));
+  expect(rows.jarvis).toMatchObject({ bot: "jarvis", origin: "owner", ignoredPin: "ghost" });
+  expect(rows.mimir).toMatchObject({ bot: "jarvis", origin: "fallback", ignoredPin: "ghost" });
 });
 
 test("degraded sources are collected, never thrown", async () => {

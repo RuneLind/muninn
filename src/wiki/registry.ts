@@ -31,6 +31,14 @@ export interface WikiRegistryEntry {
    *  segment (`name=path=coll1+coll2`). Absent/empty ⇒ the Ask tab has no corpus
    *  and the ask route returns a clean "no collection connected" error. */
   collections?: string[];
+  /** Explicit per-wiki synthesis-bot pin. Names the bot that answers this wiki's
+   *  Ask / What's-new digest, BEATING the owner fast-gate and the research-bot
+   *  fallback (see `resolveWikiSynthesisBot`). Bot wikis get it from the OWNING
+   *  bot's `config.json` `wikiSynthesisBot`; standalone wikis from the optional
+   *  fourth `WIKI_EXTRA` segment (`name=path=coll1+coll2=botname`, or
+   *  `name=path==botname` for a pin with no collections). Unset ⇒ owner/fallback
+   *  routing. A pin naming no discovered bot is warned + ignored at resolve time. */
+  synthesisBot?: string;
 }
 
 /** Repo root: import.meta.dir = <root>/src/wiki → two levels up. Relative
@@ -60,45 +68,79 @@ export function buildWikiRegistry(
   const entries: WikiRegistryEntry[] = [];
   const seen = new Set<string>();
 
-  const add = (name: string, root: string, source: WikiSource, collections?: string[]): boolean => {
+  const add = (
+    name: string,
+    root: string,
+    source: WikiSource,
+    collections?: string[],
+    synthesisBot?: string,
+  ): boolean => {
     const key = name.toLowerCase();
     if (seen.has(key)) return false;
     seen.add(key);
     const entry: WikiRegistryEntry = { name, root, source };
     if (collections && collections.length > 0) entry.collections = collections;
+    if (synthesisBot) entry.synthesisBot = synthesisBot;
     entries.push(entry);
     return true;
   };
 
   for (const b of bots) {
-    if (b.wikiDir) add(b.name, b.wikiDir, "bot", b.wikiCollections);
+    if (b.wikiDir) add(b.name, b.wikiDir, "bot", b.wikiCollections, b.wikiSynthesisBot);
   }
 
   for (const rawPair of (extraRaw ?? "").split(",")) {
     const pair = rawPair.trim();
     if (!pair) continue;
-    // `name=path` or `name=path=coll1+coll2` (third segment optional). The name
-    // is everything before the FIRST `=`. For the remainder we only peel off a
-    // trailing `=coll+coll` segment when the text after the LAST `=` is a bare
-    // collection list (charset `[A-Za-z0-9][A-Za-z0-9+_-]*`, `+` = list sep) or
-    // empty (a trailing `=`) — otherwise the whole remainder is the path, so a
-    // path that itself contains `=` round-trips intact (2-segment form).
+    // `name=path`, `name=path=coll1+coll2`, or `name=path=coll1+coll2=botpin`
+    // (third + fourth segments optional). The name is everything before the FIRST
+    // `=`. We then peel, right-to-left:
+    //   1. an optional trailing `=botpin` synthesis-bot pin — a BARE bot name
+    //      (charset `[A-Za-z0-9][A-Za-z0-9_-]*`, deliberately NO `+`, which marks
+    //      a collection LIST) — but ONLY when removing it still leaves a
+    //      collections segment behind (another `=` whose tail is a valid
+    //      collection list or empty). That guard keeps `name=path=coll` parsing
+    //      `coll` as collections (not a pin) and keeps a `=`-containing path with
+    //      a trailing collection list (no pin) round-tripping unchanged.
+    //   2. an optional trailing `=coll+coll` collection list (or empty `=`).
+    // Anything left is the path, so a path that itself contains `=` round-trips.
     const eq = pair.indexOf("=");
     const name = (eq === -1 ? pair : pair.slice(0, eq)).trim();
-    const remainder = eq === -1 ? "" : pair.slice(eq + 1);
+    let remainder = eq === -1 ? "" : pair.slice(eq + 1);
+
+    const COLL_TAIL_RE = /^[A-Za-z0-9][A-Za-z0-9+_-]*$/;
+    const BOT_PIN_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+    let rawPin: string | undefined;
+    {
+      const pinEq = remainder.lastIndexOf("=");
+      if (pinEq !== -1) {
+        const pinTail = remainder.slice(pinEq + 1).trim();
+        const head = remainder.slice(0, pinEq); // path[=coll]
+        const headEq = head.lastIndexOf("=");
+        if (BOT_PIN_RE.test(pinTail) && headEq !== -1) {
+          const collsTail = head.slice(headEq + 1).replace(/\s+/g, "");
+          if (collsTail === "" || COLL_TAIL_RE.test(collsTail)) {
+            rawPin = pinTail;
+            remainder = head;
+          }
+        }
+      }
+    }
+
     let rawPath = remainder.trim();
     let rawColls: string | undefined;
     const lastEq = remainder.lastIndexOf("=");
     if (lastEq !== -1) {
       // Strip whitespace so a spaced-out `a + b` still reads as a collection list.
       const compact = remainder.slice(lastEq + 1).replace(/\s+/g, "");
-      if (compact === "" || /^[A-Za-z0-9][A-Za-z0-9+_-]*$/.test(compact)) {
+      if (compact === "" || COLL_TAIL_RE.test(compact)) {
         rawPath = remainder.slice(0, lastEq).trim();
         rawColls = compact || undefined;
       }
     }
     if (!name || !rawPath) {
-      log.warn("WIKI_EXTRA: skipping malformed entry {pair} (expected name=path[=coll+coll])", { pair });
+      log.warn("WIKI_EXTRA: skipping malformed entry {pair} (expected name=path[=coll+coll[=botpin]])", { pair });
       continue;
     }
     const collections = rawColls
@@ -106,7 +148,7 @@ export function buildWikiRegistry(
       : undefined;
     const absPath = expandTilde(rawPath);
     const root = path.isAbsolute(absPath) ? absPath : path.resolve(repoRoot, absPath);
-    if (!add(name, root, "extra", collections)) {
+    if (!add(name, root, "extra", collections, rawPin)) {
       log.warn("WIKI_EXTRA: skipping {name} — name collides with an existing wiki", { name });
     }
   }

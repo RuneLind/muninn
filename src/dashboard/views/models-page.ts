@@ -60,6 +60,7 @@ export async function renderModelsPage(): Promise<string> {
     .chip-none     { background: var(--tint-neutral); color: var(--text-disabled); }
     .chip-owner    { background: color-mix(in srgb, var(--status-success) 22%, transparent); color: var(--status-success); }
     .chip-fallback { background: color-mix(in srgb, var(--status-warning) 18%, transparent); color: var(--status-warning); }
+    .chip-pinned   { background: color-mix(in srgb, var(--status-magenta) 22%, transparent); color: var(--status-magenta); }
 
     .note { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
     .note.ok { color: var(--status-success); }
@@ -150,7 +151,7 @@ export async function renderModelsPage(): Promise<string> {
 
     <div class="section">
       <h2>Wiki synthesis</h2>
-      <div class="sub">Which bot synthesizes each wiki's <strong>Ask</strong> answer + <strong>What's new</strong> digest. <span class="chip chip-owner">owner</span> = the owning bot answers its own wiki; <span class="chip chip-fallback">fallback</span> = standalone or opus-owned wiki → the research bot. Read-only — steered by the owner's <code>config.json</code> and the Research override.</div>
+      <div class="sub">Which bot synthesizes each wiki's <strong>Ask</strong> answer + <strong>What's new</strong> digest. <span class="chip chip-pinned">pinned</span> = explicit <code>synthesisBot</code> pin (beats the gate); <span class="chip chip-owner">owner</span> = the owning bot answers its own wiki; <span class="chip chip-fallback">fallback</span> = standalone or opus-owned wiki → the research bot. Read-only — steered by the wiki's <code>wikiSynthesisBot</code> / <code>WIKI_EXTRA</code> pin, the owner's <code>config.json</code>, and the Research override.</div>
       <div class="scroll"><table class="m-table">
         <thead><tr><th>Wiki</th><th>Synthesis bot</th><th>Connector</th><th>Model</th><th>Routing</th></tr></thead>
         <tbody id="wikiSynthBody"><tr><td colspan="5" class="empty-msg">Loading…</td></tr></tbody>
@@ -297,7 +298,9 @@ export async function renderModelsPage(): Promise<string> {
           '<td><code>' + esc(w.connector) + '</code></td>' +
           '<td><code>' + esc(w.model) + '</code></td>' +
           '<td>' + chip(w.origin) +
+            (w.origin === 'pinned' ? '<div class="note">explicit synthesisBot pin</div>' : '') +
             (w.origin === 'fallback' ? '<div class="note">follows Research synthesizer (RESEARCH_BOT)</div>' : '') +
+            (w.ignoredPin ? '<div class="note bad">pin \'' + esc(w.ignoredPin) + '\' matches no bot — ignored</div>' : '') +
           '</td>' +
         '</tr>'
       ).join('') || '<tr><td colspan="5" class="empty-msg">No wikis registered</td></tr>';
