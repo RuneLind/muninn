@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import { Hono } from "hono";
 import type { BotConfig } from "../../bots/config.ts";
 import { registerModelsRoutes } from "./models-routes.ts";
@@ -21,6 +21,20 @@ const DEPS: ModelsOverviewDeps = {
   getHaikuUsage: async () => [],
   getChatModels: async () => [],
 };
+
+// Isolate env knobs the assembly reads (Bun auto-loads the developer's .env,
+// where e.g. HAIKU_DIRECT_ENABLED may be set).
+const SAVED = { ...process.env };
+beforeEach(() => {
+  delete process.env.SUMMARIZER_BOT;
+  delete process.env.RESEARCH_BOT;
+  delete process.env.HAIKU_BACKEND;
+  delete process.env.HAIKU_DIRECT_ENABLED;
+  delete process.env.CLAUDE_MODEL;
+});
+afterEach(() => {
+  process.env = { ...SAVED };
+});
 
 function appWith(deps: ModelsOverviewDeps): Hono {
   const app = new Hono();

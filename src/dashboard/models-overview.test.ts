@@ -120,8 +120,9 @@ test("research bot skips opus (non-opus rule); summarizer takes first discovered
   expect(summarizer.bot).toBe("capra");
   expect(summarizer.origin).toBe("default");
 
-  // Research = first NON-opus (jarvis), not capra.
+  // Research = first NON-opus (jarvis), not capra — a derivation, not a bare default.
   expect(research.bot).toBe("jarvis");
+  expect(research.origin).toBe("derived");
   // What's-new digest rides the research bot.
   expect(digest.bot).toBe("jarvis");
 });
@@ -145,6 +146,23 @@ test("env overrides mark role origin as env", async () => {
   expect(o.roles.find((r) => r.role.startsWith("Summarizer"))!.origin).toBe("env");
   expect(o.roles.find((r) => r.role.startsWith("Research"))!.origin).toBe("env");
   expect(o.roles.find((r) => r.role.startsWith("What's-new"))!.origin).toBe("env");
+});
+
+test("env var naming a nonexistent bot is NOT labeled env — resolver fallback is surfaced", async () => {
+  process.env.SUMMARIZER_BOT = "typo-bot";
+  process.env.RESEARCH_BOT = "typo-bot";
+  const o = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis")] }));
+  const summarizer = o.roles.find((r) => r.role.startsWith("Summarizer"))!;
+  const research = o.roles.find((r) => r.role.startsWith("Research"))!;
+  // The resolvers ignored the env var and fell back to jarvis.
+  expect(summarizer.bot).toBe("jarvis");
+  expect(summarizer.origin).toBe("default");
+  expect(summarizer.noteOk).toBe(false);
+  expect(summarizer.note).toContain("matches no bot");
+  expect(research.origin).toBe("derived");
+  expect(research.noteOk).toBe(false);
+  expect(research.note).toContain("matches no bot");
+  expect(o.roles.find((r) => r.role.startsWith("What's-new"))!.origin).toBe("derived");
 });
 
 test("watcher gate model: per-watcher config.model, else Haiku default", async () => {

@@ -250,9 +250,20 @@ export async function assembleModelsOverview(
   const research = resolveResearchBot(bots);
   const roles: RoleEntry[] = [];
 
+  // An env role var only wins when it actually matched a discovered bot —
+  // the resolvers warn and fall back on a typo, and showing "env" next to the
+  // fallback bot would hide exactly the misconfig class this page surfaces.
+  const envMatchesBot = (envValue: string | undefined, resolved: { name: string } | undefined) =>
+    Boolean(envValue && resolved && envValue.trim().toLowerCase() === resolved.name.toLowerCase());
+  const summarizerEnvWon = envMatchesBot(process.env.SUMMARIZER_BOT, summarizer);
+  const summarizerEnvIgnored = Boolean(process.env.SUMMARIZER_BOT) && !summarizerEnvWon;
+  const researchEnvWon = envMatchesBot(process.env.RESEARCH_BOT, research);
+  const researchEnvIgnored = Boolean(process.env.RESEARCH_BOT) && !researchEnvWon;
+  const researchOrigin: Origin = researchEnvWon ? "env" : "derived";
+
   // Summarizer + its TikTok constraint chip.
   {
-    const origin: Origin = process.env.SUMMARIZER_BOT ? "env" : "default";
+    const origin: Origin = summarizerEnvWon ? "env" : "default";
     let note: string | undefined;
     let noteOk = true;
     if (summarizer) {
@@ -261,6 +272,10 @@ export async function assembleModelsOverview(
         ? "TikTok frames OK (--add-dir)"
         : `TikTok frames blocked — connector "${summarizer.connector ?? "claude-cli"}" lacks --add-dir`;
       noteOk = ok;
+    }
+    if (summarizerEnvIgnored) {
+      note = `SUMMARIZER_BOT="${process.env.SUMMARIZER_BOT}" matches no bot — env ignored, fell back${note ? `; ${note}` : ""}`;
+      noteOk = false;
     }
     roles.push({
       role: "Summarizer (YouTube / X / TikTok / anthropic)",
@@ -271,19 +286,25 @@ export async function assembleModelsOverview(
     });
   }
 
-  // Research synthesizer.
+  // Research synthesizer. Unset env means the non-opus derivation picked the
+  // bot, so the chip is "derived" (with the env-ignored warning on a typo).
   roles.push({
     role: "Research synthesizer (/research)",
     bot: research?.name ?? null,
-    origin: process.env.RESEARCH_BOT ? "env" : "default",
-    note: research ? "non-opus fast default" : undefined,
+    origin: researchOrigin,
+    note: researchEnvIgnored
+      ? `RESEARCH_BOT="${process.env.RESEARCH_BOT}" matches no bot — env ignored, fell back`
+      : research
+        ? "non-opus fast default"
+        : undefined,
+    ...(researchEnvIgnored ? { noteOk: false } : {}),
   });
 
   // What's-new wiki digest runs on the research bot (generateWikiDigest → executeOneShot).
   roles.push({
     role: "What's-new wiki digest",
     bot: research?.name ?? null,
-    origin: process.env.RESEARCH_BOT ? "env" : "derived",
+    origin: researchEnvWon ? "env" : "derived",
     note: "runs on the research bot",
   });
 
