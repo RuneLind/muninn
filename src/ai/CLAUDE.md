@@ -5,7 +5,7 @@
 | File | Role |
 |---|---|
 | `connector.ts` | `AiConnector` type + `resolveConnector()` — selects the right AI backend for a bot |
-| `one-shot.ts` | `executeOneShot()` — one-shot (batch/background) prompt→text seam that routes through `resolveConnector`, so summarizers + research synthesis honor the bot's connector (not a raw CLI spawn). Plus `connectorCapabilities()` — `supportsExtraDirs` (CLI-only `--add-dir`, used by the TikTok frame-reading pre-flight). |
+| `one-shot.ts` | `executeOneShot()` — one-shot (batch/background) prompt→text seam that routes through `resolveConnector`, so summarizers + research synthesis honor the bot's connector (not a raw CLI spawn). Plus `connectorCapabilities()` — `supportsExtraDirs` (`claude-cli` via `--add-dir` **and** `claude-sdk` via `additionalDirectories`, used by the TikTok frame-reading pre-flight; delivered per-connector — CLI folds `extraDirs` into `--add-dir` spawnArgs, SDK reads them off `botConfig.extraDirs`). |
 | `executor.ts` | Claude CLI executor — spawns `claude` process, reads NDJSON stdout, handles timeout |
 | `prompt-builder.ts` | Assembles system + user prompts from persona, memories, goals, tasks, history |
 | `stream-parser.ts` | `StreamParser` class — parses NDJSON stream events, extracts tool calls with timing |
@@ -37,7 +37,7 @@ AiConnector = (prompt, config, botConfig, systemPrompt?, onProgress?) => Promise
 | `connectors/claude-cli.ts` | `claude-cli` | Spawns `claude` CLI with `--output-format stream-json --verbose`. Reads NDJSON. CWD = bot dir for MCP/settings discovery. |
 | `connectors/copilot-sdk.ts` | `copilot-sdk` | Shared CopilotClient singleton, per-request sessions. Reads `.mcp.json` and converts to SDK format. Emits intent events. |
 | `connectors/openai-compat.ts` | `openai-compat` | Calls any OpenAI-compatible API. Agent loop with MCP tool execution. Handles Qwen3 thinking tokens. |
-| `connectors/claude-sdk.ts` | `claude-sdk` | Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable. Per-request lifecycle, `bypassPermissions` (trusts MCP servers), `settingSources: []` (full prompt comes from prompt-builder). Auth from `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` — same env surface as `haiku-direct.ts`. Use for bots that want a direct Anthropic chat transport without the Claude CLI subprocess or a Copilot subscription. |
+| `connectors/claude-sdk.ts` | `claude-sdk` | Anthropic's `@anthropic-ai/claude-agent-sdk` `query()` iterable. Per-request lifecycle, `bypassPermissions` (trusts MCP servers), `settingSources: []` (full prompt comes from prompt-builder). Auth from `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` — same env surface as `haiku-direct.ts`. Maps `thinkingMaxTokens`→`thinking` (`resolveThinking`: `0`⇒`{type:"disabled"}`, else `{type:"enabled",budgetTokens}`), `extraDirs`→`additionalDirectories` (TikTok frame-reading — see `connectorCapabilities`), `allowedTools`/`excludedTools`→`allowedTools`/`disallowedTools`. Use for bots that want a direct Anthropic chat transport without the Claude CLI subprocess or a Copilot subscription. |
 
 Supporting files: `copilot-mcp.ts` (MCP config → Copilot shape), `claude-sdk-mcp.ts` (MCP config → Agent SDK shape — strips per-server `cwd` since the SDK has no field for it), `openai-compat-tools.ts` (MCP tool execution), `openai-compat-stream.ts` (streaming response handling).
 

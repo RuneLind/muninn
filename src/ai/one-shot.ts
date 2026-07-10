@@ -64,8 +64,9 @@ export interface OneShotOptions {
 export interface ConnectorCapabilities {
   /**
    * Whether the connector can grant read access to directories outside the bot
-   * folder (Claude CLI `--add-dir`). Only `claude-cli` can — the SDK/HTTP
-   * connectors have no equivalent knob.
+   * folder. `claude-cli` expresses this via `--add-dir`; `claude-sdk` via the
+   * Agent SDK's `additionalDirectories`. The Copilot / OpenAI-compat connectors
+   * have no equivalent knob.
    */
   supportsExtraDirs: boolean;
 }
@@ -74,7 +75,7 @@ export interface ConnectorCapabilities {
 export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabilities {
   const connector: ConnectorType = botConfig.connector ?? "claude-cli";
   return {
-    supportsExtraDirs: connector === "claude-cli",
+    supportsExtraDirs: connector === "claude-cli" || connector === "claude-sdk",
   };
 }
 
@@ -103,18 +104,25 @@ export async function executeOneShot(
   }
 
   if (extraDirs && extraDirs.length > 0) {
+    const connector: ConnectorType = botConfig.connector ?? "claude-cli";
     if (!connectorCapabilities(botConfig).supportsExtraDirs) {
-      const connector = botConfig.connector ?? "claude-cli";
       throw new Error(
-        `Connector "${connector}" does not support extraDirs — only claude-cli can grant --add-dir access.`,
+        `Connector "${connector}" does not support extraDirs — only claude-cli (--add-dir) ` +
+          `and claude-sdk (additionalDirectories) can grant read access outside the bot folder.`,
       );
     }
-    // The CLI connector reads extra --add-dir flags from spawnArgs.
-    const addDirArgs = extraDirs.flatMap((dir) => ["--add-dir", dir]);
-    effective = {
-      ...effective,
-      spawnArgs: [...(effective.spawnArgs ?? []), ...addDirArgs],
-    };
+    if (connector === "claude-sdk") {
+      // The SDK connector reads absolute dirs from botConfig.extraDirs and maps
+      // them to Options.additionalDirectories.
+      effective = { ...effective, extraDirs };
+    } else {
+      // The CLI connector reads extra --add-dir flags from spawnArgs.
+      const addDirArgs = extraDirs.flatMap((dir) => ["--add-dir", dir]);
+      effective = {
+        ...effective,
+        spawnArgs: [...(effective.spawnArgs ?? []), ...addDirArgs],
+      };
+    }
   }
 
   const connector = resolveConnector(effective);
