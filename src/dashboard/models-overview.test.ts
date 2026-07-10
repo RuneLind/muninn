@@ -8,6 +8,7 @@ import {
   type HaikuUsageRow,
   type ChatModelRow,
 } from "./models-overview.ts";
+import { _resetSnapshotForTests } from "../db/role-overrides.ts";
 
 /** Minimal BotConfig factory — only the fields the overview reads. */
 function bot(name: string, over: Partial<BotConfig> = {}): BotConfig {
@@ -61,9 +62,11 @@ beforeEach(() => {
   delete process.env.HAIKU_BACKEND;
   delete process.env.HAIKU_DIRECT_ENABLED;
   delete process.env.CLAUDE_MODEL;
+  _resetSnapshotForTests();
 });
 afterEach(() => {
   process.env = { ...SAVED };
+  _resetSnapshotForTests();
 });
 
 test("bot row: connector + model default origins when unset", async () => {
@@ -146,6 +149,28 @@ test("env overrides mark role origin as env", async () => {
   expect(o.roles.find((r) => r.role.startsWith("Summarizer"))!.origin).toBe("env");
   expect(o.roles.find((r) => r.role.startsWith("Research"))!.origin).toBe("env");
   expect(o.roles.find((r) => r.role.startsWith("What's-new"))!.origin).toBe("env");
+});
+
+test("DB override marks role origin as override and beats env", async () => {
+  process.env.SUMMARIZER_BOT = "jarvis";
+  process.env.RESEARCH_BOT = "jarvis";
+  _resetSnapshotForTests({ SUMMARIZER_BOT: "capra", RESEARCH_BOT: "capra", HAIKU_BACKEND: "anthropic" });
+  const o = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis"), bot("capra", { model: "opus" })] }),
+  );
+  const summarizer = o.roles.find((r) => r.role.startsWith("Summarizer"))!;
+  const research = o.roles.find((r) => r.role.startsWith("Research"))!;
+  const haiku = o.roles.find((r) => r.role.startsWith("Global Haiku"))!;
+  expect(summarizer.bot).toBe("capra");
+  expect(summarizer.origin).toBe("override");
+  expect(summarizer.overrideKey).toBe("SUMMARIZER_BOT");
+  expect(research.bot).toBe("capra");
+  expect(research.origin).toBe("override");
+  expect(haiku.origin).toBe("override");
+  expect(haiku.bot).toBe("anthropic");
+  // Per-bot haiku backend column also reflects the override.
+  expect(o.bots.find((b) => b.name === "jarvis")!.haikuBackend).toEqual({ value: "anthropic", origin: "override" });
 });
 
 test("env var naming a nonexistent bot is NOT labeled env — resolver fallback is surfaced", async () => {

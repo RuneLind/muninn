@@ -459,6 +459,21 @@ CREATE TABLE bot_default_user (
 );
 
 -- ============================================================================
+-- Role overrides: DB-backed overrides for the process-wide role assignments
+-- that are otherwise env-only (SUMMARIZER_BOT, RESEARCH_BOT, HAIKU_BACKEND).
+-- Edited from the /models dashboard page; beat the matching env var at
+-- resolution time. HOT — the resolvers read an in-memory snapshot
+-- (src/db/role-overrides.ts) refreshed on every write, so changes take effect
+-- without a restart. One row per role. Mirror of
+-- db/migrations/059-role-overrides.sql.
+-- ============================================================================
+CREATE TABLE role_overrides (
+  role       TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
 -- Interest profiles: a persistent, periodically-refreshed distillation of what
 -- a user cares about following/reading, derived from their active goals +
 -- recent memories by a cheap Haiku call (src/profile/generator.ts). Templated

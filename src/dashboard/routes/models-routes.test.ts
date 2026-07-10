@@ -76,3 +76,65 @@ test("defaults bot to jarvis when ?bot= omitted", async () => {
   const body = await res.json();
   expect(body.selectedBot).toBe("jarvis");
 });
+
+// ---- Edit endpoints: validation (400) paths (no DB / no file writes) -------
+
+async function post(app: Hono, path: string, body: unknown) {
+  const res = await app.request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as any };
+}
+
+test("POST /api/models/role rejects an unknown role", async () => {
+  const { status, body } = await post(appWith(DEPS), "/api/models/role", { role: "NOPE", value: "jarvis" });
+  expect(status).toBe(400);
+  expect(body.error).toContain("unknown role");
+});
+
+test("POST /api/models/role rejects an invalid HAIKU_BACKEND value", async () => {
+  const { status, body } = await post(appWith(DEPS), "/api/models/role", { role: "HAIKU_BACKEND", value: "gemini" });
+  expect(status).toBe(400);
+  expect(body.error).toContain("unknown HAIKU_BACKEND");
+});
+
+test("POST /api/models/role rejects a bot-role value naming no discovered bot", async () => {
+  // discoverAllBots() reads the real bots/ dir; "definitely-not-a-bot" won't match.
+  const { status, body } = await post(appWith(DEPS), "/api/models/role", {
+    role: "SUMMARIZER_BOT",
+    value: "definitely-not-a-bot",
+  });
+  expect(status).toBe(400);
+  expect(body.error).toContain("no bot named");
+});
+
+test("POST /api/models/bot-config rejects an invalid connector with discovery's message", async () => {
+  // Validation happens before the bot-folder check, so any bot name reaches it.
+  const { status, body } = await post(appWith(DEPS), "/api/models/bot-config", {
+    bot: "jarvis",
+    field: "connector",
+    value: "gpt-cli",
+  });
+  expect(status).toBe(400);
+  expect(body.error).toBe(
+    'Bot "jarvis" has unknown connector "gpt-cli" — valid values: claude-cli, copilot-sdk, openai-compat, claude-sdk',
+  );
+});
+
+test("POST /api/models/bot-config rejects an unknown editable field", async () => {
+  const { status, body } = await post(appWith(DEPS), "/api/models/bot-config", {
+    bot: "jarvis",
+    field: "timeoutMs",
+    value: 999,
+  });
+  expect(status).toBe(400);
+  expect(body.error).toContain("Unknown editable field");
+});
+
+test("POST /api/models/bot-config requires bot + field", async () => {
+  const { status, body } = await post(appWith(DEPS), "/api/models/bot-config", { field: "model", value: "x" });
+  expect(status).toBe(400);
+  expect(body.error).toContain("required");
+});
