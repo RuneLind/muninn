@@ -23,6 +23,13 @@ import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
+import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import {
+  buildIndexCoverageResponse,
+  type CoverageListing,
+  type IndexCoverageResponse,
+} from "../../wiki/index-coverage.ts";
+import type { StatsError } from "../../summaries/stats.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -283,6 +290,74 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     return c.json({
       digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve) },
     });
+  });
+
+  // Read-only index-coverage overview for the reader start view: compares the
+  // wiki's on-disk `.md` pages against the deduped union of its backing search
+  // collections' document ids (huginn doc `id` IS the wiki-relative path). Reports
+  // `missing` (pages in no collection), `ghosts` (indexed ids with no file), and
+  // `htmlPages` (explainers — informational, never counted as missing). A wiki
+  // with no `collections` returns a clean `{ error }` (Ask-tab precedent). Never
+  // 5xx: a failed collection listing degrades to 200 + `errors[]` AND suppresses
+  // the coverage fields (a partial union would flag really-indexed pages as
+  // missing). `?refresh=1` busts the page-index TTL cache only — the collection
+  // listings are 1–2 cheap calls and aren't muninn-side cached in v1.
+  app.get("/api/wiki/index-coverage", async (c) => {
+    const nullCoverage = (extra: Partial<IndexCoverageResponse> & { error?: string }) =>
+      c.json({
+        collections: [] as string[],
+        totalMd: null,
+        indexed: null,
+        missing: null,
+        ghosts: null,
+        htmlPages: 0,
+        generatedAt: Date.now(),
+        ...extra,
+      });
+
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) {
+      return nullCoverage({ error: "no wiki configured for that name" });
+    }
+    const collections = entry.collections ?? [];
+    if (collections.length === 0) {
+      return nullCoverage({ error: "no search collection connected for this wiki" });
+    }
+    const index = await getWikiIndex({ root: entry.root, refresh: c.req.query("refresh") === "1" });
+    if (!index) {
+      return nullCoverage({ collections, error: "wiki directory not found" });
+    }
+
+    const pageRelPaths = index.pages.map((p) => p.relPath);
+    // List each collection sequentially — never fan unbounded concurrency at
+    // huginn's Python server. A listing that fails contributes an error entry
+    // (empty ids), which the pure builder turns into the suppress-coverage path.
+    const listings: CoverageListing[] = [];
+    for (const collection of collections) {
+      try {
+        const data = await fetchKnowledgeApi(
+          config.knowledgeApiUrl,
+          `/api/collection/${collection}/documents`,
+          { timeoutMs: 10_000 },
+        );
+        const ids = ((data?.documents ?? []) as { id?: unknown }[])
+          .map((d) => d.id)
+          .filter((id): id is string => typeof id === "string");
+        listings.push({ ids });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn("Index-coverage listing failed for {collection}: {error}", { collection, error: message });
+        const statError: StatsError = { source: collection, collection, error: message };
+        listings.push({ ids: [], error: statError });
+      }
+    }
+
+    return c.json(buildIndexCoverageResponse(collections, pageRelPaths, listings));
   });
 
   // One page: rendered HTML + connections (outgoing links and backlinks).

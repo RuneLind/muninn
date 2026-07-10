@@ -344,6 +344,42 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-wn-retry:hover { color: var(--accent-light); border-color: var(--accent); }
 
+    /* Index coverage card (start view) */
+    .wiki-index-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-primary);
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin: 6px 0 6px;
+    }
+    .wiki-ix-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .wiki-ix-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+    .wiki-ix-refresh {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-ix-refresh:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-ix-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
+    .wiki-ix-summary b { color: var(--text-primary); }
+    .wiki-ix-details { margin-top: 6px; }
+    .wiki-ix-details summary { font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 2px 0; }
+    .wiki-ix-details summary:hover { color: var(--accent-light); }
+    .wiki-ix-details[open] summary { color: var(--text-secondary); }
+    .wiki-ix-list { margin: 4px 0 4px 18px; max-height: 200px; overflow-y: auto; }
+    .wiki-ix-list li { font-size: 12px; color: var(--text-muted); margin: 2px 0; }
+    .wiki-ix-list code { font-size: 11.5px; background: var(--bg-inset); padding: 1px 5px; border-radius: 4px; }
+    .wiki-ix-link { color: var(--accent-light); cursor: pointer; text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+    .wiki-ix-link:hover { color: var(--accent); }
+    .wiki-ix-unavailable { font-size: 12px; color: var(--text-dim); }
+
     /* ── Right: connections + ask pane ─────────────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
     .wiki-conn-tabs { display: flex; border-bottom: 1px solid var(--border-primary); }

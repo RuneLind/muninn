@@ -188,6 +188,125 @@ function loadDigest(refresh: boolean): void {
     });
 }
 
+// ── Index coverage card (start view) ──────────────────────────────────
+interface IndexCoverage {
+  collections: string[];
+  totalMd: number | null;
+  indexed: number | null;
+  missing: string[] | null;
+  ghosts: string[] | null;
+  htmlPages: number;
+  generatedAt: number;
+  error?: string;
+  errors?: { source: string; collection: string; error: string }[];
+}
+/** Cached rendered card body — reused across renderStart calls (tab switches). */
+let indexCovHtml: string | null = null;
+/** Set once the first auto-load is dispatched; reset on failure so a later tab
+ *  switch re-fetches instead of leaving the card permanently blank. */
+let indexCovAttempted = false;
+
+/** Map a coverage relPath back to a wiki page name so a missing page can link
+ *  into the reader (loadPage keys off the stem name). Matches on the same posix
+ *  + lowercase rule the store uses (NFC differences fall back to plain text). */
+function relPathToName(relPath: string): string | null {
+  const key = relPath.replace(/\\/g, "/").toLowerCase();
+  const hit = allPages.find((p) => (p.relPath || "").replace(/\\/g, "/").toLowerCase() === key);
+  return hit ? hit.name : null;
+}
+
+/** A quiet "unavailable" card body — used on a degraded (errors[]) response or a
+ *  network failure, so a transient hiccup never breaks the reader. */
+function indexCovUnavailableHtml(): string {
+  return (
+    '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
+    '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
+    '<div class="wiki-ix-unavailable">Index status unavailable.</div>'
+  );
+}
+
+/** Build the card's inner HTML from a fully-populated coverage response. */
+function buildIndexCovInner(cov: IndexCoverage): string {
+  const missing = cov.missing || [];
+  const ghosts = cov.ghosts || [];
+  const summary =
+    "<b>" + cov.indexed + "</b> of <b>" + cov.totalMd + "</b> pages indexed" +
+    " · <b>" + missing.length + "</b> missing" +
+    " · <b>" + ghosts.length + "</b> ghost" + (ghosts.length === 1 ? "" : "s") +
+    (cov.htmlPages
+      ? " · " + cov.htmlPages + " explainer" + (cov.htmlPages === 1 ? "" : "s") + " (not indexed)"
+      : "");
+  let html =
+    '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
+    '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
+    '<div class="wiki-ix-summary">' + summary + "</div>";
+  if (missing.length) {
+    html +=
+      '<details class="wiki-ix-details"><summary>' + missing.length +
+      " missing (not in search)</summary><ul class=\"wiki-ix-list\">";
+    missing.forEach((rp) => {
+      const name = relPathToName(rp);
+      html += name
+        ? '<li><span class="wiki-ix-link" data-page="' + esc(name) + '">' + esc(rp) + "</span></li>"
+        : "<li><code>" + esc(rp) + "</code></li>";
+    });
+    html += "</ul></details>";
+  }
+  if (ghosts.length) {
+    html +=
+      '<details class="wiki-ix-details"><summary>' + ghosts.length +
+      " ghost (indexed, no file)</summary><ul class=\"wiki-ix-list\">";
+    ghosts.forEach((id) => { html += "<li><code>" + esc(id) + "</code></li>"; });
+    html += "</ul></details>";
+  }
+  return html;
+}
+
+/** Fetch (or refresh) the coverage overview and paint the card. Hidden entirely
+ *  when the wiki has no backing collections (or is unknown / dir missing) — a
+ *  no-corpus wiki has no index to report. A degraded/failed fetch leaves a quiet
+ *  "unavailable" line, never breaks the reader. */
+function loadIndexCoverage(refresh: boolean): void {
+  const el = document.getElementById("wikiIndexCard");
+  if (!el) return;
+  const spin = document.getElementById("wikiIndexRefresh");
+  if (spin) (spin as HTMLButtonElement).disabled = true;
+  let url = "/api/wiki/index-coverage";
+  if (refresh) url += "?refresh=1";
+  fetch(withWiki(url))
+    .then((r) => r.json())
+    .then((cov: IndexCoverage) => {
+      const cur = document.getElementById("wikiIndexCard");
+      if (!cur) return;
+      // No wiki / no collections / dir missing — hide the card (no index to show).
+      if (cov.error) {
+        indexCovHtml = null;
+        cur.innerHTML = "";
+        cur.style.display = "none";
+        return;
+      }
+      // Degraded (a collection listing failed) — coverage fields suppressed.
+      if (cov.totalMd === null || cov.indexed === null) {
+        indexCovHtml = indexCovUnavailableHtml();
+        cur.innerHTML = indexCovHtml;
+        cur.style.display = "";
+        return;
+      }
+      indexCovHtml = buildIndexCovInner(cov);
+      cur.innerHTML = indexCovHtml;
+      cur.style.display = "";
+    })
+    .catch(() => {
+      // Transient network error — reset so a tab switch retries, show unavailable.
+      indexCovAttempted = false;
+      const cur = document.getElementById("wikiIndexCard");
+      if (cur) {
+        cur.innerHTML = indexCovUnavailableHtml();
+        cur.style.display = "";
+      }
+    });
+}
+
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;
 }
@@ -336,6 +455,7 @@ function renderStart(): void {
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
     '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
+    '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
     '<div class="wiki-start-stats">';
   TYPE_ORDER.forEach((t) => {
     if (!counts[t]) return;
@@ -362,6 +482,18 @@ function renderStart(): void {
     } else if (!digestAttempted) {
       digestAttempted = true;
       loadDigest(false);
+    }
+  }
+  // Re-attach the index-coverage card the same way: reuse the cached render on a
+  // tab switch, otherwise lazily fetch it once so it never blocks the page list.
+  const ix = document.getElementById("wikiIndexCard");
+  if (ix) {
+    if (indexCovHtml) {
+      ix.innerHTML = indexCovHtml;
+      ix.style.display = "";
+    } else if (!indexCovAttempted) {
+      indexCovAttempted = true;
+      loadIndexCoverage(false);
     }
   }
   renderList();
@@ -524,6 +656,10 @@ document.body.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (target.closest && target.closest("#wikiWhatsNewRefresh, #wikiWhatsNewRetry")) {
     loadDigest(true);
+    return;
+  }
+  if (target.closest && target.closest("#wikiIndexRefresh")) {
+    loadIndexCoverage(true);
     return;
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
