@@ -243,13 +243,23 @@ apply**.
 - **Cluster** (`cluster.ts`): one Haiku call (`callHaikuWithFallback`, `source:
   "wiki_gardener_cluster"`) with the interest profile injected augment-only.
   Output JSON clusters `{topicKey, kind, domain, label, docIds[], rationale}`.
+  The prompt also inlines the **existing concept/entity page titles + aliases**
+  (from the wiki index, loaded pre-cluster; source pages excluded, capped at
+  500, marked as data not instructions) with a rule to reuse the canonical
+  title verbatim for an already-covered topic — that exact-title label is what
+  flips target-resolve to `update` instead of creating a near-synonym duplicate
+  (the 2026-07-08/07-10 orphan-duplicate defect, fixed in PR #242).
   A pure skip/size/cap filter runs **before any draft call**: unknown docIds
   dropped, `docIds.length >= minClusterSize` (default 3), skip topicKeys with a
   prior `rejected` OR a live `draft`/`approved` proposal, cap at
   `maxProposalsPerRun` (default 3).
 - **Target-resolve** (`target-resolve.ts`): the LOCAL wiki store
-  (`getWikiIndex({root: wikiDir})`) is the oracle — `update` on a normalized
-  title/alias near-match, else `create` (huginn scores are never consulted).
+  (`getWikiIndex({root: wikiDir})`, loaded before clustering and reused) is the
+  oracle — `update` on a normalized title/alias near-match **among pages of the
+  cluster's kind AND domain only** (a title collision with a source/analysis or
+  cross-domain page stays a `create` — nothing downstream re-checks the existing
+  page's type before an update overwrites it), else `create` (huginn scores are
+  never consulted).
 - **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
   (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
   **untrusted** delimited data. The **shape-gate** rejects a draft unless the
