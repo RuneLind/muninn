@@ -302,7 +302,7 @@ export async function renderModelsPage(): Promise<string> {
           '<td>' + chip(w.origin) +
             (w.origin === 'pinned' ? '<div class="note">explicit synthesisBot pin</div>' : '') +
             (w.origin === 'fallback' ? '<div class="note">follows Research synthesizer (RESEARCH_BOT)</div>' : '') +
-            (w.ignoredPin ? '<div class="note bad">pin \'' + esc(w.ignoredPin) + '\' matches no bot — ignored</div>' : '') +
+            (w.ignoredPin ? '<div class="note bad">pin \\'' + esc(w.ignoredPin) + '\\' matches no bot — ignored</div>' : '') +
           '</td>' +
         '</tr>'
       ).join('') || '<tr><td colspan="5" class="empty-msg">No wikis registered</td></tr>';
