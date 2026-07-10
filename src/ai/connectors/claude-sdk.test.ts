@@ -30,7 +30,7 @@ mock.module("../mcp-status.ts", () => ({
 }));
 
 // Now import the connector under test.
-import { executePrompt, assertHaveAuth } from "./claude-sdk.ts";
+import { executePrompt, assertHaveAuth, resolveThinking } from "./claude-sdk.ts";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 
@@ -418,6 +418,81 @@ describe("claude-sdk executePrompt", () => {
         },
       }));
     }
+  });
+
+  const successOnly = [
+    {
+      type: "result",
+      subtype: "success",
+      result: "",
+      num_turns: 1,
+      duration_ms: 0,
+      duration_api_ms: 0,
+      total_cost_usd: 0,
+      is_error: false,
+      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    },
+  ];
+
+  test("maps thinkingMaxTokens to an enabled thinking budget option", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), thinkingMaxTokens: 40_000 });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.thinking).toEqual({ type: "enabled", budgetTokens: 40_000 });
+  });
+
+  test("maps thinkingMaxTokens: 0 to a disabled thinking option", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), thinkingMaxTokens: 0 });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.thinking).toEqual({ type: "disabled" });
+  });
+
+  test("omits the thinking option when thinkingMaxTokens is unset", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, baseBot());
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect("thinking" in opts).toBe(false);
+  });
+
+  test("maps extraDirs to additionalDirectories", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), extraDirs: ["/tmp/frames", "/tmp/more"] });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect(opts.additionalDirectories).toEqual(["/tmp/frames", "/tmp/more"]);
+  });
+
+  test("omits additionalDirectories when extraDirs is unset", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, baseBot());
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    expect("additionalDirectories" in opts).toBe(false);
+  });
+
+  test("maps allowedTools to the SDK tools option (real restriction under bypassPermissions)", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), allowedTools: ["Bash", "Read"] });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    // NOT the SDK `allowedTools` option — that only suppresses permission
+    // prompts and cannot restrict the surface under bypassPermissions.
+    expect(opts.tools).toEqual(["Bash", "Read"]);
+    expect("allowedTools" in opts).toBe(false);
+  });
+
+  test("empty allowedTools array means full surface, not allow-nothing", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), allowedTools: [] });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    // tools: [] would disable ALL built-in tools — an empty config array must
+    // be dropped, leaving the default (full) surface.
+    expect("tools" in opts).toBe(false);
+    expect("allowedTools" in opts).toBe(false);
+  });
+
+  test("resolveThinking helper: unset ⇒ undefined, 0 ⇒ disabled, N ⇒ enabled+budget", () => {
+    expect(resolveThinking(undefined)).toBeUndefined();
+    expect(resolveThinking(0)).toEqual({ type: "disabled" });
+    expect(resolveThinking(8_000)).toEqual({ type: "enabled", budgetTokens: 8_000 });
   });
 
   test("forwards excludedTools as disallowedTools", async () => {

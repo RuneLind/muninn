@@ -1,4 +1,4 @@
-import { query, type Options, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type SDKMessage, type ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 import type {
   BetaContentBlock,
   BetaTextBlock,
@@ -36,6 +36,19 @@ interface PendingTool {
  * from process.env directly (same surface as `haiku-direct.ts`). Throw early so
  * a misconfigured bot fails with a clear message instead of cryptic SDK errors.
  */
+/**
+ * Map a bot's `thinkingMaxTokens` to the SDK's `thinking` option. The CLI honors
+ * this via the `MAX_THINKING_TOKENS` env; the SDK exposes it as a structured
+ * option instead. Without this, flipping a bot from claude-cli to claude-sdk
+ * would silently drop its thinking budget (e.g. jarvis's 40k chat budget, the
+ * gardener's 8k draft cap). `undefined` ⇒ leave the SDK default; `0` ⇒ disabled.
+ */
+export function resolveThinking(maxTokens: number | undefined): ThinkingConfig | undefined {
+  if (maxTokens === undefined) return undefined;
+  if (maxTokens === 0) return { type: "disabled" };
+  return { type: "enabled", budgetTokens: maxTokens };
+}
+
 export function assertHaveAuth(): void {
   if (hasHaikuDirectAuth()) return;
   throw new Error(
@@ -59,6 +72,7 @@ export async function executePrompt(
 
   const mcpServers = parseMcpConfig(botConfig.dir);
   const hasMcp = Object.keys(mcpServers).length > 0;
+  const thinking = resolveThinking(botConfig.thinkingMaxTokens);
 
   if (hasMcp) {
     await preflightMcpForRequest(botConfig, onProgress);
@@ -104,7 +118,15 @@ export async function executePrompt(
       ? { systemPrompt }
       : { systemPrompt: { type: "preset", preset: "claude_code" } }),
     settingSources: [],
+    ...(thinking ? { thinking } : {}),
     ...(hasMcp ? { mcpServers } : {}),
+    ...(botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
+    // Under bypassPermissions the SDK's `allowedTools` option only suppresses
+    // permission prompts — it cannot restrict the surface ("To restrict which
+    // tools are available, use the `tools` option instead", sdk.d.ts). So the
+    // allow-list maps to `tools` (the built-in base set; MCP tools are fenced
+    // via excludedTools → disallowedTools). Empty/unset ⇒ full surface.
+    ...(botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
   };
 

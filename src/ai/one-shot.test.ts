@@ -39,10 +39,11 @@ beforeEach(() => {
   connectorArgs = undefined;
 });
 
-test("connectorCapabilities: only claude-cli (and the unset default) supports extraDirs", () => {
+test("connectorCapabilities: claude-cli and claude-sdk (and the unset default) support extraDirs", () => {
   expect(connectorCapabilities(stubBot()).supportsExtraDirs).toBe(true); // unset ⇒ claude-cli
   expect(connectorCapabilities(stubBot({ connector: "claude-cli" })).supportsExtraDirs).toBe(true);
-  for (const c of ["copilot-sdk", "openai-compat", "claude-sdk"] as ConnectorType[]) {
+  expect(connectorCapabilities(stubBot({ connector: "claude-sdk" })).supportsExtraDirs).toBe(true);
+  for (const c of ["copilot-sdk", "openai-compat"] as ConnectorType[]) {
     expect(connectorCapabilities(stubBot({ connector: c })).supportsExtraDirs).toBe(false);
   }
 });
@@ -77,7 +78,16 @@ test("extraDirs append --add-dir spawnArgs for the CLI connector (preserving exi
   expect(bot.spawnArgs).toEqual(["--strict-mcp-config"]); // original untouched
 });
 
-test("extraDirs on a non-CLI connector throws before the connector runs", async () => {
+test("extraDirs are passed through as botConfig.extraDirs for the claude-sdk connector", async () => {
+  const bot = stubBot({ connector: "claude-sdk" });
+  await executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] });
+
+  expect(connectorArgs?.botConfig.extraDirs).toEqual(["/tmp/frames"]);
+  expect(connectorArgs?.botConfig.spawnArgs).toBeUndefined(); // SDK path, no --add-dir args
+  expect(bot.extraDirs).toBeUndefined(); // original untouched
+});
+
+test("extraDirs on a connector without the capability throws before the connector runs", async () => {
   const bot = stubBot({ connector: "copilot-sdk" });
   await expect(
     executeOneShot("p", config, bot, { extraDirs: ["/tmp/frames"] }),

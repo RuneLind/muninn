@@ -86,12 +86,30 @@ export interface BotConfig {
    */
   spawnArgs?: string[];
   /**
+   * Extra directories the run may read from, as **absolute** paths. Set per-call
+   * by `executeOneShot` from its `extraDirs` option (never in config.json). The
+   * claude-sdk connector maps this to `options.additionalDirectories`; the CLI
+   * connector expresses the same grant via `--add-dir` spawnArgs instead (so it
+   * never reads this field). Used by the TikTok summarizer to grant Read access
+   * to the tmp frame dir. See `connectorCapabilities().supportsExtraDirs`.
+   */
+  extraDirs?: string[];
+  /**
    * Tool names to exclude from the AI session. Set dynamically per-request
    * (e.g. for jira-analysis flows to block native tools and force MCP usage).
    * For copilot-sdk: passed as `excludedTools` to `createSession`.
    * For claude-cli: converted to `--disallowedTools` spawn args.
    */
   excludedTools?: string[];
+  /**
+   * Tool names to allow (allow-list). For claude-sdk: mapped to the SDK
+   * `tools` option (the built-in base set) — under `bypassPermissions` the
+   * SDK's own `allowedTools` option only suppresses prompts and cannot
+   * restrict the surface. MCP tools are fenced via `excludedTools`
+   * (→ `disallowedTools`). Empty/unset ⇒ full surface. Other connectors
+   * ignore it today.
+   */
+  allowedTools?: string[];
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */
