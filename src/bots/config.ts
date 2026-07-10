@@ -47,11 +47,13 @@ export function isEditableBotField(key: string): key is EditableBotField {
 }
 
 /**
- * Validate a single editable config.json field against the SAME rules — and the
- * SAME messages — discovery logs (see `validateEnumField` / `validateScalarField`
- * below), so a value the editor accepts is a value discovery would keep, and a
- * value it rejects is rejected with the message discovery would have logged.
- * Returns null when valid, otherwise the human-readable rejection message.
+ * Validate a single editable config.json field with discovery-aligned rules
+ * (enum lists shared via `CONNECTOR_VALUES`/`HAIKU_BACKEND_VALUES`; message
+ * phrasing modeled on `validateEnumField`/`validateScalarField` below). The
+ * editor is deliberately STRICTER than discovery for scalar fields: it rejects
+ * an empty `model` and a negative/non-integer `thinkingMaxTokens`, which
+ * discovery would keep silently — never write a value discovery merely
+ * tolerates. Returns null when valid, otherwise the rejection message.
  * `value === null` means "clear the field" (revert to default) — always valid.
  */
 export function validateBotConfigField(name: string, field: EditableBotField, value: unknown): string | null {
@@ -536,8 +538,8 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
             : "";
           log.warn("Bot \"{name}\" config.json has unknown keys: {keys} — possible typo?" + hint, { name, keys: unknownKeys.join(", ") });
         }
-        validateEnumField(botSettings, "connector", ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const, name);
-        validateEnumField(botSettings, "haikuBackend", ["cli", "anthropic", "copilot"] as const, name);
+        validateEnumField(botSettings, "connector", CONNECTOR_VALUES, name);
+        validateEnumField(botSettings, "haikuBackend", HAIKU_BACKEND_VALUES, name);
         validateScalarField(botSettings, "model", "string", name);
         validateScalarField(botSettings, "baseUrl", "string", name);
         validateScalarField(botSettings, "wikiDir", "string", name);

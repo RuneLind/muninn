@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { isEditableBotField, validateBotConfigField, type EditableBotField } from "./config.ts";
@@ -62,7 +62,12 @@ export function writeBotConfigField(
   if (cleared) delete obj[editableField];
   else obj[editableField] = value;
 
-  writeFileSync(configPath, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  // Atomic write (temp + rename) — config.json is the git-synced source of
+  // truth and discovery JSON.parses it at startup; a crash mid-write must not
+  // leave it truncated.
+  const tmpPath = `${configPath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  renameSync(tmpPath, configPath);
   log.info("Wrote bot \"{name}\" config.json field {field} ({action})", {
     botName: name,
     name,

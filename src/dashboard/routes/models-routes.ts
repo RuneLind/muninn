@@ -5,7 +5,7 @@ import {
   DEFAULT_MODELS_OVERVIEW_DEPS,
   type ModelsOverviewDeps,
 } from "../models-overview.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { discoverAllBots, HAIKU_BACKEND_VALUES } from "../../bots/config.ts";
 import { writeBotConfigField } from "../../bots/config-edit.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import {
@@ -59,30 +59,36 @@ export function registerModelsRoutes(
     if (!bot || !field) {
       return c.json({ ok: false, error: "bot and field are required" }, 400);
     }
+    // Only discovered bots are editable (mirrors the role route) — this also
+    // keeps a raw request `bot` value from ever reaching a filesystem join.
+    const discovered = deps.discoverBots().find((b) => b.name.toLowerCase() === bot.toLowerCase());
+    if (!discovered) {
+      return c.json({ ok: false, error: `no bot named "${bot}"` }, 400);
+    }
 
     let result: { path: string; cleared: boolean };
     try {
-      result = writeBotConfigField(bot, field, value);
+      result = writeBotConfigField(discovered.name, field, value);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, error: message }, 400);
     }
 
     // Warn (don't block) if the summarizer's connector loses TikTok frame support.
+    // Re-discover AFTER the write so the capability check sees the new connector.
     let warning: string | undefined;
     if (field === "connector" && !result.cleared) {
-      const bots = discoverAllBots();
-      const target = bots.find((b) => b.name === bot);
+      const target = deps.discoverBots().find((b) => b.name === discovered.name);
       if (target && !connectorCapabilities(target).supportsExtraDirs) {
-        warning = `Connector "${String(value)}" lacks extra-dirs support — if ${bot} is the summarizer, TikTok frame-reading will 503.`;
+        warning = `Connector "${String(value)}" lacks extra-dirs support — if ${discovered.name} is the summarizer, TikTok frame-reading will 503.`;
       }
     }
 
-    activityLog.push("system", `Models: set ${bot} ${field} = ${result.cleared ? "(cleared)" : JSON.stringify(value)}`, {
-      botName: bot,
+    activityLog.push("system", `Models: set ${discovered.name} ${field} = ${result.cleared ? "(cleared)" : JSON.stringify(value)}`, {
+      botName: discovered.name,
       metadata: { source: "models-page", field, value, cleared: result.cleared },
     });
-    log.info("Edited {bot} config.json field {field}", { botName: bot, bot, field });
+    log.info("Edited {bot} config.json field {field}", { botName: discovered.name, bot: discovered.name, field });
 
     return c.json({
       ok: true,
@@ -120,10 +126,9 @@ export function registerModelsRoutes(
     let warning: string | undefined;
 
     if (roleKey === "HAIKU_BACKEND") {
-      const valid = ["cli", "anthropic", "copilot"];
       const v = rawValue.toLowerCase();
-      if (!valid.includes(v)) {
-        return c.json({ ok: false, error: `unknown HAIKU_BACKEND "${rawValue}" — valid values: ${valid.join(", ")}` }, 400);
+      if (!(HAIKU_BACKEND_VALUES as readonly string[]).includes(v)) {
+        return c.json({ ok: false, error: `unknown HAIKU_BACKEND "${rawValue}" — valid values: ${HAIKU_BACKEND_VALUES.join(", ")}` }, 400);
       }
       canonicalValue = v;
     } else {

@@ -286,6 +286,10 @@ export async function assembleModelsOverview(
   const researchOverride = getRoleOverride("RESEARCH_BOT");
   const summarizerOverrideWon = matchesBot(summarizerOverride, summarizer);
   const researchOverrideWon = matchesBot(researchOverride, research);
+  // Stale override (bot removed after the override was written): surface it as
+  // an error note like an ignored env var — it silently suppresses env too.
+  const summarizerOverrideIgnored = Boolean(summarizerOverride) && !summarizerOverrideWon;
+  const researchOverrideIgnored = Boolean(researchOverride) && !researchOverrideWon;
   const summarizerEnvWon = !summarizerOverrideWon && matchesBot(process.env.SUMMARIZER_BOT, summarizer);
   const summarizerEnvIgnored = Boolean(process.env.SUMMARIZER_BOT) && !summarizerEnvWon && !summarizerOverrideWon;
   const researchEnvWon = !researchOverrideWon && matchesBot(process.env.RESEARCH_BOT, research);
@@ -309,6 +313,10 @@ export async function assembleModelsOverview(
       note = `SUMMARIZER_BOT="${process.env.SUMMARIZER_BOT}" matches no bot — env ignored, fell back${note ? `; ${note}` : ""}`;
       noteOk = false;
     }
+    if (summarizerOverrideIgnored) {
+      note = `Override "${summarizerOverride}" matches no bot — ignored (and it suppresses the env fallback); clear it${note ? `; ${note}` : ""}`;
+      noteOk = false;
+    }
     roles.push({
       role: "Summarizer (YouTube / X / TikTok / anthropic)",
       bot: summarizer?.name ?? null,
@@ -327,12 +335,14 @@ export async function assembleModelsOverview(
     role: "Research synthesizer (/research)",
     bot: research?.name ?? null,
     origin: researchOrigin,
-    note: researchEnvIgnored
-      ? `RESEARCH_BOT="${process.env.RESEARCH_BOT}" matches no bot — env ignored, fell back`
-      : research
-        ? "non-opus fast default"
-        : undefined,
-    ...(researchEnvIgnored ? { noteOk: false } : {}),
+    note: researchOverrideIgnored
+      ? `Override "${researchOverride}" matches no bot — ignored (and it suppresses the env fallback); clear it`
+      : researchEnvIgnored
+        ? `RESEARCH_BOT="${process.env.RESEARCH_BOT}" matches no bot — env ignored, fell back`
+        : research
+          ? "non-opus fast default"
+          : undefined,
+    ...(researchEnvIgnored || researchOverrideIgnored ? { noteOk: false } : {}),
     overrideKey: "RESEARCH_BOT",
     overrideValue: researchOverride,
     editKind: "bot",
