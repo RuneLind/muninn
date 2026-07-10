@@ -177,6 +177,68 @@ describe("GET /api/wiki/index-coverage — resolution branches", () => {
   });
 });
 
+/**
+ * `/api/wiki/reindex` + `/api/wiki/reindex-status` resolution branches that never
+ * hit huginn: an unknown wiki and a registered wiki with no backing collections
+ * both return a clean 200 + `{ collections: [], error }` (never a 5xx). The huginn
+ * fan-out + 409/unknown mapping is covered at the unit level on `src/wiki/reindex.ts`.
+ */
+describe("wiki reindex routes — resolution branches", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-reindex-route-"));
+    await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
+    prevExtra = process.env.WIKI_EXTRA;
+    // Standalone wiki with NO third segment ⇒ no collections.
+    process.env.WIKI_EXTRA = `rixwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:0" } as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("POST reindex, wiki with no collections → 200 + clean error, empty collections", async () => {
+    const res = await app.request("/api/wiki/reindex?wiki=rixwiki", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string; collections: unknown[] };
+    expect(body.error).toContain("no search collection connected");
+    expect(body.collections).toEqual([]);
+  });
+
+  test("POST reindex, unknown wiki → 200 + clean error", async () => {
+    const res = await app.request("/api/wiki/reindex?wiki=does-not-exist", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+
+  test("GET reindex-status, wiki with no collections → 200 + clean error", async () => {
+    const res = await app.request("/api/wiki/reindex-status?wiki=rixwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string; collections: unknown[] };
+    expect(body.error).toContain("no search collection connected");
+    expect(body.collections).toEqual([]);
+  });
+
+  test("GET reindex-status, unknown wiki → 200 + clean error", async () => {
+    const res = await app.request("/api/wiki/reindex-status?wiki=does-not-exist");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+});
+
 describe("digestCacheDecision", () => {
   const digest = { logMtimeMs: 1000 } as WikiDigest;
 

@@ -23,8 +23,14 @@ import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
-import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { listCollections } from "../../summaries/list-collections.ts";
+import {
+  buildReindexResponse,
+  buildReindexStatusResponse,
+  type PostOutcome,
+  type StatusOutcome,
+} from "../../wiki/reindex.ts";
 import {
   buildIndexCoverageResponse,
   type CollectionPatterns,
@@ -168,6 +174,61 @@ async function fetchCollectionPatterns(
     });
   }
   return out;
+}
+
+/**
+ * POST huginn's `/api/collections/<c>/update` for one collection, normalizing the
+ * outcome for the pure reindex assembler. huginn's CAS 409 (a rebuild — nightly
+ * job or a prior trigger — already in flight) maps to `conflict` (⇒ the honest
+ * `already-running` state), not an error. An unreachable huginn / any other status
+ * maps to `error`. Never throws.
+ */
+async function postCollectionUpdate(
+  knowledgeApiUrl: string,
+  collection: string,
+): Promise<PostOutcome> {
+  try {
+    await fetchKnowledgeApi(
+      knowledgeApiUrl,
+      `/api/collections/${encodeURIComponent(collection)}/update`,
+      { method: "POST", timeoutMs: 10_000 },
+    );
+    return { kind: "ok" };
+  } catch (err) {
+    if (err instanceof KnowledgeApiError && err.upstreamStatus === 409) {
+      return { kind: "conflict" };
+    }
+    return { kind: "error", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * GET huginn's `/api/collections/<c>/update-status` for one collection, normalizing
+ * the outcome for the pure status assembler. An unexpected/absent status value or a
+ * failed fetch maps to `error` (⇒ the client-facing `unknown` state). Never throws.
+ */
+async function getCollectionUpdateStatus(
+  knowledgeApiUrl: string,
+  collection: string,
+): Promise<StatusOutcome> {
+  try {
+    const data = await fetchKnowledgeApi(
+      knowledgeApiUrl,
+      `/api/collections/${encodeURIComponent(collection)}/update-status`,
+      { timeoutMs: 10_000 },
+    );
+    const status = data?.status;
+    if (status === "idle" || status === "running" || status === "succeeded" || status === "failed") {
+      return {
+        kind: "ok",
+        status,
+        error: typeof data?.error === "string" ? data.error : undefined,
+      };
+    }
+    return { kind: "error", error: `unexpected status: ${String(status)}` };
+  } catch (err) {
+    return { kind: "error", error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Dashboard /wiki reader: a named knowledge wiki as a browsable site.
@@ -395,6 +456,57 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     });
 
     return c.json(buildIndexCoverageResponse(collections, pageRelPaths, listings));
+  });
+
+  // Manual reindex trigger for the reader's Index card. Resolves the wiki exactly
+  // like index-coverage, then POSTs huginn's `/api/collections/<c>/update` for
+  // EACH backing collection. huginn's CAS 409 (a rebuild already in flight — the
+  // nightly job may be running) maps to the honest `already-running` state, NOT a
+  // failure. There is no muninn-side mutex — huginn's CAS is the serialization
+  // point. Never 5xx: an unknown / collection-less wiki returns 200 + `{ error }`;
+  // an unreachable huginn returns 200 with per-collection `error` entries.
+  app.post("/api/wiki/reindex", async (c) => {
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) {
+      return c.json({ collections: [], error: "no wiki configured for that name" });
+    }
+    const collections = entry.collections ?? [];
+    if (collections.length === 0) {
+      return c.json({ collections: [], error: "no search collection connected for this wiki" });
+    }
+    const response = await buildReindexResponse(collections, (name) =>
+      postCollectionUpdate(config.knowledgeApiUrl, name),
+    );
+    return c.json(response);
+  });
+
+  // Reindex status proxy for the Index card's poll loop: same resolution, then
+  // proxies each collection's huginn `/api/collections/<c>/update-status`. A failed
+  // status fetch degrades to `status: "unknown"` + error for that entry (never
+  // 5xx). Same unknown / collection-less contract as the trigger route.
+  app.get("/api/wiki/reindex-status", async (c) => {
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) {
+      return c.json({ collections: [], error: "no wiki configured for that name" });
+    }
+    const collections = entry.collections ?? [];
+    if (collections.length === 0) {
+      return c.json({ collections: [], error: "no search collection connected for this wiki" });
+    }
+    const response = await buildReindexStatusResponse(collections, (name) =>
+      getCollectionUpdateStatus(config.knowledgeApiUrl, name),
+    );
+    return c.json(response);
   });
 
   // One page: rendered HTML + connections (outgoing links and backlinks).

@@ -222,6 +222,19 @@ function relPathToName(relPath: string): string | null {
   return hit ? hit.name : null;
 }
 
+/** Card head (title + Reindex-now + recompute buttons) + the reindex-status slot.
+ *  Shared by the full and the "unavailable" card bodies so both carry the manual
+ *  reindex trigger; the slot is (re)populated by `applyReindexUi` after any render
+ *  so an in-flight reindex's status survives a cached-HTML reuse (tab switch). */
+function indexCovHeadHtml(): string {
+  return (
+    '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
+    '<button class="wiki-ix-reindex" id="wikiIndexReindex" title="Rebuild this wiki’s search index now">Reindex now</button>' +
+    '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
+    '<div class="wiki-ix-reindex-status" id="wikiIndexReindexStatus"></div>'
+  );
+}
+
 /** A quiet "unavailable" card body — used on a degraded (errors[]) response or a
  *  network failure, so a transient hiccup never breaks the reader. Still-valid
  *  informational counts (htmlPages, and excludedByRule when the builder kept it)
@@ -237,8 +250,7 @@ function indexCovUnavailableHtml(cov?: IndexCoverage): string {
   }
   const tail = extras.length ? " · " + extras.join(" · ") : "";
   return (
-    '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
-    '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
+    indexCovHeadHtml() +
     '<div class="wiki-ix-unavailable">Index status unavailable.' + esc(tail) + "</div>"
   );
 }
@@ -271,10 +283,7 @@ function buildIndexCovInner(cov: IndexCoverage): string {
     (cov.htmlPages
       ? " · " + cov.htmlPages + " explainer" + (cov.htmlPages === 1 ? "" : "s") + " (not indexed)"
       : "");
-  let html =
-    '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
-    '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
-    '<div class="wiki-ix-summary">' + summary + "</div>";
+  let html = indexCovHeadHtml() + '<div class="wiki-ix-summary">' + summary + "</div>";
   if (missing.length) {
     html += indexCovList("", "missing (not in search)", missing, true);
   }
@@ -328,11 +337,13 @@ function loadIndexCoverage(refresh: boolean): void {
         indexCovHtml = indexCovUnavailableHtml(cov);
         cur.innerHTML = indexCovHtml;
         cur.style.display = "";
+        applyReindexUi();
         return;
       }
       indexCovHtml = buildIndexCovInner(cov);
       cur.innerHTML = indexCovHtml;
       cur.style.display = "";
+      applyReindexUi();
     })
     .catch(() => {
       if (myId !== indexCovFetchId) return;
@@ -343,7 +354,259 @@ function loadIndexCoverage(refresh: boolean): void {
       if (cur) {
         cur.innerHTML = indexCovUnavailableHtml();
         cur.style.display = "";
+        applyReindexUi();
       }
+    });
+}
+
+// ── Manual reindex trigger (Index card) ───────────────────────────────
+interface ReindexCollResult {
+  name: string;
+  state: "started" | "already-running" | "error";
+  error?: string;
+}
+interface ReindexResponse {
+  collections: ReindexCollResult[];
+  error?: string;
+}
+interface ReindexStatusColl {
+  name: string;
+  status: "idle" | "running" | "succeeded" | "failed" | "unknown";
+  error?: string;
+}
+interface ReindexStatusResponse {
+  collections: ReindexStatusColl[];
+  error?: string;
+}
+
+/** True while a reindex POST + its status poll cycle is in flight — drives the
+ *  button's disabled state (re-applied after every card render). */
+let reindexActive = false;
+/** Pending status-poll timer handle (0 = none). */
+let reindexPollTimer = 0;
+/** Consecutive poll-fetch failures — give up quietly after 3 (gardener-strip
+ *  tolerance) so a transient huginn blip doesn't wedge the poll forever. */
+let reindexPollFailures = 0;
+/** Persisted status markup, re-injected into the card's slot after any render so
+ *  an in-flight reindex survives a cached-HTML reuse (tab switch). */
+let reindexStatusHtml = "";
+/** True when a poll bailed because the card left the DOM mid-run (user navigated
+ *  to a page) — the next card render resumes polling so the UI never freezes on
+ *  a stale "rebuilding…" for a run that has long since settled. */
+let reindexAbandoned = false;
+/** When the last run settled (0 = never / still running). Settled rows stay
+ *  visible briefly, then a later card render clears them instead of repainting
+ *  an old "rebuilt" forever. */
+let reindexSettledAt = 0;
+const REINDEX_POLL_MS = 3000;
+const REINDEX_MAX_POLL_FAILURES = 3;
+const REINDEX_SETTLED_TTL_MS = 60_000;
+
+/** Set the persisted reindex-status markup and paint it into the live slot. */
+function setReindexStatus(html: string): void {
+  reindexStatusHtml = html;
+  const el = document.getElementById("wikiIndexReindexStatus");
+  if (el) el.innerHTML = html;
+}
+
+/** Re-apply the persisted status + button-disabled state after any card (re)render
+ *  so a cached-HTML reuse (tab switch) or a post-settle coverage refresh doesn't
+ *  drop an in-flight reindex's status or leave the button in the wrong state. */
+function applyReindexUi(): void {
+  // A run abandoned mid-poll (card left the DOM) resumes now that the card is
+  // back — mark active again here, poll immediately below after painting. Only
+  // the abandoned flag triggers a resume, so a tab-switch repaint during a live
+  // poll cycle can never start a second concurrent poll chain.
+  const resume = reindexAbandoned;
+  if (resume) {
+    reindexAbandoned = false;
+    reindexActive = true;
+    reindexPollFailures = 0;
+  }
+  // Settled rows outlive their usefulness after a minute — clear instead of
+  // repainting an old "rebuilt" on every later tab switch.
+  if (
+    !reindexActive &&
+    reindexStatusHtml &&
+    reindexSettledAt &&
+    Date.now() - reindexSettledAt > REINDEX_SETTLED_TTL_MS
+  ) {
+    reindexStatusHtml = "";
+    reindexSettledAt = 0;
+  }
+  const el = document.getElementById("wikiIndexReindexStatus");
+  if (el) el.innerHTML = reindexStatusHtml;
+  const btn = document.getElementById("wikiIndexReindex") as HTMLButtonElement | null;
+  if (btn) btn.disabled = reindexActive;
+  // An immediate poll repaints reality (and settles + refreshes coverage if the
+  // rebuild finished while we were away).
+  if (resume) pollReindexStatus();
+}
+
+/** Stop the poll cycle and re-enable the button (leaves the last status visible
+ *  briefly — cleared after `REINDEX_SETTLED_TTL_MS` by `applyReindexUi`). */
+function stopReindex(): void {
+  if (reindexPollTimer) {
+    clearTimeout(reindexPollTimer);
+    reindexPollTimer = 0;
+  }
+  reindexActive = false;
+  reindexAbandoned = false;
+  reindexSettledAt = Date.now();
+  const btn = document.getElementById("wikiIndexReindex") as HTMLButtonElement | null;
+  if (btn) btn.disabled = false;
+}
+
+/** Render a per-collection status list into the card's reindex slot. */
+function renderReindexRows(rows: { name: string; text: string; cls: string }[]): void {
+  if (!rows.length) {
+    setReindexStatus("");
+    return;
+  }
+  let html = '<div class="wiki-ix-reindex-list">';
+  rows.forEach((r) => {
+    html +=
+      '<div class="wiki-ix-reindex-row ' + r.cls + '"><code>' + esc(r.name) + "</code>" +
+      "<span>" + esc(r.text) + "</span></div>";
+  });
+  setReindexStatus(html + "</div>");
+}
+
+/** Row text/colour for a POST trigger result. `already-running` is honest, not an
+ *  error — huginn's CAS refused because a rebuild (often the nightly job) is live. */
+function reindexResultRow(r: ReindexCollResult): { name: string; text: string; cls: string } {
+  if (r.state === "started") return { name: r.name, text: "rebuild started", cls: "running" };
+  if (r.state === "already-running") {
+    return { name: r.name, text: "a rebuild is already in progress — watching it", cls: "running" };
+  }
+  return { name: r.name, text: "error" + (r.error ? ": " + r.error : ""), cls: "error" };
+}
+
+/** Row text/colour for a `/update-status` poll entry. A `failed` status surfaces
+ *  huginn's error text — the first visibility into a silently failing nightly job. */
+function reindexStatusRow(c: ReindexStatusColl): { name: string; text: string; cls: string } {
+  switch (c.status) {
+    case "running":
+      return { name: c.name, text: "rebuilding…", cls: "running" };
+    case "succeeded":
+      return { name: c.name, text: "rebuilt", cls: "ok" };
+    case "idle":
+      return { name: c.name, text: "idle", cls: "ok" };
+    case "failed":
+      return { name: c.name, text: "failed" + (c.error ? ": " + c.error : ""), cls: "error" };
+    default:
+      return {
+        name: c.name,
+        text: "status unavailable" + (c.error ? " (" + c.error + ")" : ""),
+        cls: "warn",
+      };
+  }
+}
+
+/** Schedule the next status poll (3 s), replacing any pending one. */
+function scheduleReindexPoll(): void {
+  if (reindexPollTimer) clearTimeout(reindexPollTimer);
+  reindexPollTimer = window.setTimeout(pollReindexStatus, REINDEX_POLL_MS);
+}
+
+/** Poll each collection's rebuild status; stop (and refresh coverage) once none
+ *  is still `running`. Survives the card disappearing mid-poll (navigate away):
+ *  bail quietly, unwedge the flags, let the next start-view render show reality. */
+function pollReindexStatus(): void {
+  reindexPollTimer = 0;
+  if (!document.getElementById("wikiIndexCard")) {
+    // Card left the DOM (user opened a page) — mark abandoned so the next card
+    // render resumes the poll instead of freezing on a stale "rebuilding…".
+    reindexActive = false;
+    reindexAbandoned = true;
+    return;
+  }
+  fetch(withWiki("/api/wiki/reindex-status"))
+    .then((r) => r.json())
+    .then((data: ReindexStatusResponse) => {
+      if (!document.getElementById("wikiIndexCard")) {
+        reindexActive = false;
+        reindexAbandoned = true;
+        return;
+      }
+      if (data.error) {
+        // Wiki/collection resolution error mid-run (shouldn't happen) — stop.
+        setReindexStatus('<div class="wiki-ix-reindex-msg">' + esc(data.error) + "</div>");
+        stopReindex();
+        return;
+      }
+      reindexPollFailures = 0;
+      const colls = data.collections || [];
+      renderReindexRows(colls.map(reindexStatusRow));
+      if (colls.some((c) => c.status === "running")) {
+        scheduleReindexPoll();
+      } else {
+        // Settled — re-fetch coverage so missing/ghosts reflect the fresh index.
+        // The final per-collection statuses (incl. any `failed` error) ride along
+        // via applyReindexUi when the rebuilt card paints.
+        stopReindex();
+        loadIndexCoverage(true);
+      }
+    })
+    .catch(() => {
+      if (!document.getElementById("wikiIndexCard")) {
+        reindexActive = false;
+        reindexAbandoned = true;
+        return;
+      }
+      reindexPollFailures += 1;
+      if (reindexPollFailures >= REINDEX_MAX_POLL_FAILURES) {
+        setReindexStatus(
+          '<div class="wiki-ix-reindex-msg">Lost track of the rebuild — recompute with ↻.</div>',
+        );
+        stopReindex();
+      } else {
+        scheduleReindexPoll();
+      }
+    });
+}
+
+/** Kick a manual reindex: POST the trigger, render per-collection state, then poll
+ *  until every collection settles. Button is disabled for the whole cycle. */
+function startReindex(): void {
+  if (reindexActive || !document.getElementById("wikiIndexCard")) return;
+  reindexActive = true;
+  reindexPollFailures = 0;
+  const btn = document.getElementById("wikiIndexReindex") as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  setReindexStatus('<div class="wiki-ix-reindex-msg">Starting reindex…</div>');
+  fetch(withWiki("/api/wiki/reindex"), { method: "POST" })
+    .then((r) => r.json())
+    .then((data: ReindexResponse) => {
+      if (!document.getElementById("wikiIndexCard")) {
+        reindexActive = false;
+        return;
+      }
+      if (data.error) {
+        setReindexStatus(
+          '<div class="wiki-ix-reindex-msg">Reindex unavailable — ' + esc(data.error) + ".</div>",
+        );
+        stopReindex();
+        return;
+      }
+      const colls = data.collections || [];
+      renderReindexRows(colls.map(reindexResultRow));
+      // Poll while any collection may still be rebuilding (started, or an
+      // already-running nightly job we're now watching). All-errored ⇒ nothing to
+      // watch: re-enable and leave the errors visible.
+      if (colls.some((r) => r.state === "started" || r.state === "already-running")) {
+        scheduleReindexPoll();
+      } else {
+        stopReindex();
+      }
+    })
+    .catch(() => {
+      if (!document.getElementById("wikiIndexCard")) {
+        reindexActive = false;
+        return;
+      }
+      setReindexStatus('<div class="wiki-ix-reindex-msg">Couldn’t start reindex.</div>');
+      stopReindex();
     });
 }
 
@@ -531,6 +794,7 @@ function renderStart(): void {
     if (indexCovHtml) {
       ix.innerHTML = indexCovHtml;
       ix.style.display = "";
+      applyReindexUi();
     } else if (!indexCovAttempted) {
       indexCovAttempted = true;
       loadIndexCoverage(false);
@@ -696,6 +960,10 @@ document.body.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (target.closest && target.closest("#wikiWhatsNewRefresh, #wikiWhatsNewRetry")) {
     loadDigest(true);
+    return;
+  }
+  if (target.closest && target.closest("#wikiIndexReindex")) {
+    startReindex();
     return;
   }
   if (target.closest && target.closest("#wikiIndexRefresh")) {

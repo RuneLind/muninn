@@ -300,6 +300,10 @@ header carries a 🌱 Gardener link + pending-draft count badge.
   reindex (collection derived from `target_path`: `life/**` → `wiki-life`, else
   `wiki`; failures warn, never fail or delay the apply) → mark `applied`. `stale`
   rows show an explanation and become eligible again on the next weekly run.
+  (A **manual** counterpart to this fire-and-forget reindex now exists on the
+  `/wiki` reader's Index card — `POST /api/wiki/reindex` fans huginn's per-collection
+  `/update` over every backing collection and polls `/update-status`; see the
+  wiki-routes row in `src/dashboard/CLAUDE.md`.)
 - **Recovery + races**: apply is **re-run safe** (target already == draft ⇒
   `applied` without rewriting or duplicating the log entry), and the approve
   endpoint also accepts rows stuck at `approved` (crash between the approve CAS
