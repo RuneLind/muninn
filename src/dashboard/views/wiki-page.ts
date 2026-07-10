@@ -31,6 +31,15 @@ export async function renderWikiPage(opts?: {
   unknownWiki?: boolean;
   gardenerPending?: number;
   gardener?: boolean;
+  /** Resolved synthesis bot for this wiki's Ask tab + What's-new digest
+   *  (owner-routing, `resolveWikiSynthesisBot`). Null ⇒ no line rendered
+   *  (env-override / unknown wiki / no bots discovered). */
+  askBot?: {
+    bot: string;
+    connector: string;
+    model: string;
+    origin: "owner" | "fallback";
+  } | null;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -40,6 +49,12 @@ export async function renderWikiPage(opts?: {
   const unknownWiki = opts?.unknownWiki ?? false;
   const gardenerPending = opts?.gardenerPending ?? 0;
   const gardener = opts?.gardener ?? true;
+  const askBot = opts?.askBot ?? null;
+  // "Answered by …" line under the Ask hint — who synthesizes this wiki's
+  // answers and why (wiki owner vs the shared research-bot fallback).
+  const askBotLine = askBot
+    ? `<div class="wiki-ask-bot">Answered by <strong>${escHtml(askBot.bot)}</strong> <code>${escHtml(askBot.connector)} · ${escHtml(askBot.model)}</code> — ${askBot.origin === "owner" ? "this wiki's owner" : "research-bot fallback (steered by the Research synthesizer role on /models)"}</div>`
+    : "";
   const gardenerHref = `/wiki/gardener${selected ? "?wiki=" + encodeURIComponent(selected) : ""}`;
   const gardenerLink = gardener
     ? `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
@@ -353,6 +368,8 @@ export async function renderWikiPage(opts?: {
     /* Ask tab — the controls live here; the answer renders in the article pane. */
     .wiki-ask-body { display: flex; flex-direction: column; }
     .wiki-ask-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
+    .wiki-ask-bot { font-size: 11px; color: var(--text-dim); padding: 0 4px 6px; line-height: 1.5; }
+    .wiki-ask-bot code { font-size: 10px; background: var(--bg-hover); padding: 1px 4px; border-radius: 4px; }
     /* Session history — one clickable line per asked question, newest first. */
     .wiki-ask-history { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
     .wiki-ask-hist-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); margin: 4px 4px 4px; }
@@ -469,6 +486,7 @@ export async function renderWikiPage(opts?: {
         </div>
         <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
         <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>
+        ${askBotLine}
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
       </div>
     </div>

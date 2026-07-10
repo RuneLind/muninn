@@ -296,7 +296,9 @@ export async function renderModelsPage(): Promise<string> {
           '<td>' + (w.bot ? '<strong>' + esc(w.bot) + '</strong>' : '<span class="empty">— none —</span>') + '</td>' +
           '<td><code>' + esc(w.connector) + '</code></td>' +
           '<td><code>' + esc(w.model) + '</code></td>' +
-          '<td>' + chip(w.origin) + '</td>' +
+          '<td>' + chip(w.origin) +
+            (w.origin === 'fallback' ? '<div class="note">follows Research synthesizer (RESEARCH_BOT)</div>' : '') +
+          '</td>' +
         '</tr>'
       ).join('') || '<tr><td colspan="5" class="empty-msg">No wikis registered</td></tr>';
 
