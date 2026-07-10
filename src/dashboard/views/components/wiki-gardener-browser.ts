@@ -429,6 +429,21 @@ async function resetBacklog(): Promise<void> {
     .catch(() => {});
 }
 
+// Soft-cancel an in-flight drain. The POST just flips the run's cancel flag; the
+// existing 3s poll keeps running and reports the cancelled outcome on settle. A
+// fresh GET right after flips the button to "Cancelling…" without waiting a tick.
+async function cancelBacklogRun(): Promise<void> {
+  try {
+    await fetch(withBot("/api/wiki/gardener/backlog-cancel"), { method: "POST" });
+  } catch {
+    // Best-effort — the poll still reflects the run's real state.
+  }
+  fetch(withBot("/api/wiki/ingest-backlog"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .catch(() => {});
+}
+
 // Delegated backlog controls (run / reset) — the strip's innerHTML is replaced
 // on every render, so listen on the stable container.
 document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
@@ -451,6 +466,9 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     void startBacklogRun();
   } else if (action === "reset") {
     void resetBacklog();
+  } else if (action === "cancel-run") {
+    // Soft-cancel the in-flight drain (distinct from the confirm panel's "cancel").
+    void cancelBacklogRun();
   }
 });
 

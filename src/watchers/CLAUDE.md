@@ -334,6 +334,29 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   `Reset offered (0)`; the all-offered state keeps its "all offered / Reset to re-run"
   wording. The offered set needs the `wiki-gardener` watcher_id (the
   snapshot FK) — no row ⇒ the feature is unavailable (control hidden / 404).
+- **Progress + soft cancel** (PR 2): `startBacklogRun` seeds a per-bot
+  `BacklogProgress` (`getBacklogProgress`) synchronously when the mutex is acquired
+  (`stage: assembling → harvesting → clustering → resolving → drafting`, plus
+  `draftsDone`/`draftsTotal`/`currentTopic`) and clears it when the run settles. The
+  work fn (under the mutex) threads three optional seams into `runGardener` —
+  `onProgress` (writes the progress map at the same points the tracer marks),
+  `shouldAbort` (reads `cancelRequested`), `onAborted` (captures the skipped keys).
+  `runGardener`'s return type is unchanged (`Promise<WatcherAlert[]>`); the weekly
+  checker passes none of these, so its behavior is byte-identical. `shouldAbort` is
+  polled at the top of each draft iteration AND once right after clustering (so a
+  cancel during harvest/cluster doesn't wait for resolve + the first draft). On abort
+  the loop `break`s — already-persisted proposals are kept — and `onAborted` returns
+  the not-yet-drafted clusters' docs **minus the docs of clusters that already
+  produced a proposal** (clusters may share a doc). The work fn then re-persists the
+  offered set = `offeredWithBatch − skippedKeys`, so exactly the cancel-prevented
+  docs return to the queue while declined/never-clustered docs stay offered (at-most-
+  once preserved — re-offering the ≤8 surviving-but-declined docs would starve the
+  tail). `requestBacklogCancel` returns false when no run is in flight (the likely
+  cancel-racing-settle case). Deliberate non-goals: no hard-abort of an in-flight
+  draft (soft cancel bounds stop latency at ≤ one draft), no SSE (progress rides the
+  existing 3s GET poll), no offering-after-drafting. The last-run record grows an
+  optional `cancelled: {drafted, of}` field (`of` = `draftsTotal` from the last
+  `onProgress`) — distinct from `error`.
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances
@@ -341,13 +364,19 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   newest docs). The inline backlog path **never** writes `last_run_at`/`force_next_run`
   and drops `runGardener`'s alerts (no Telegram — the user is at the dashboard).
 - **Routes** (`wiki-gardener-routes.ts`): `POST /api/wiki/gardener/backlog-run`,
-  `POST /api/wiki/gardener/backlog-reset`, and the extended
-  `GET /api/wiki/ingest-backlog` (adds `running`/`offered`/`remaining`/`lastBacklogRun`/
-  `watcherSeeded` + the batch constants `batchSize`/`maxProposals` so the confirm panel
-  never hardcodes them, merged fresh OUTSIDE the 5-min cache — never mutating the cached
-  object). The shared gardener seams are factored into `buildGardenerSeams` (exported
-  from `wiki-gardener.ts`) so the weekly checker and the backlog run wire identical
-  fetch/cluster/draft/DB seams.
+  `POST /api/wiki/gardener/backlog-cancel`, `POST /api/wiki/gardener/backlog-reset`,
+  and the extended `GET /api/wiki/ingest-backlog` (adds `running`/`offered`/`remaining`/
+  `lastBacklogRun`/`watcherSeeded`/`progress` + the batch constants `batchSize`/
+  `maxProposals` so the confirm panel never hardcodes them, merged fresh OUTSIDE the
+  5-min cache — never mutating the cached object). The shared gardener seams are
+  factored into `buildGardenerSeams` (exported from `wiki-gardener.ts`) so the weekly
+  checker and the backlog run wire identical fetch/cluster/draft/DB seams. The client
+  strip (PR 2) replaces the disabled `Running…` button with a live progress line
+  ("⏳ Drafting 3/6 — *topic* · started 14:32 · 2 drafts ready below `[Cancel]`") while
+  `progress` is present; a weekly run (`running` true, `progress` null) keeps the plain
+  disabled `Running…`. The pure progress-line/outcome builders live in
+  `views/components/wiki-gardener-strip.ts` (DOM-free, unit-tested); DOM writes stay in
+  `wiki-gardener-browser.ts`.
 
 **Config** (per-bot `config.json` `gardener` block, validated at discovery):
 `{ enabled?, minClusterSize?, lookbackDays?, maxProposalsPerRun? }`. Requires the
