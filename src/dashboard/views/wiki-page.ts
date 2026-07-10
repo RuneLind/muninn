@@ -355,7 +355,6 @@ export async function renderWikiPage(opts?: {
     .wiki-ix-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
     .wiki-ix-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
     .wiki-ix-refresh {
-      margin-left: auto;
       background: transparent;
       border: 1px solid var(--border-secondary);
       border-radius: 6px;
@@ -367,6 +366,29 @@ export async function renderWikiPage(opts?: {
       font-family: inherit;
     }
     .wiki-ix-refresh:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-ix-reindex {
+      margin-left: auto;
+      background: transparent;
+      border: 1px solid var(--border-secondary);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1;
+      padding: 4px 8px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-ix-reindex:hover:not(:disabled) { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-ix-reindex:disabled { opacity: 0.55; cursor: default; }
+    .wiki-ix-reindex-status:not(:empty) { margin: 6px 0 2px; }
+    .wiki-ix-reindex-msg { font-size: 12px; color: var(--text-muted); }
+    .wiki-ix-reindex-list { display: flex; flex-direction: column; gap: 3px; }
+    .wiki-ix-reindex-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .wiki-ix-reindex-row code { font-size: 11.5px; background: var(--bg-inset); padding: 1px 5px; border-radius: 4px; color: var(--text-secondary); }
+    .wiki-ix-reindex-row.running span { color: var(--accent-light); }
+    .wiki-ix-reindex-row.ok span { color: var(--status-success); }
+    .wiki-ix-reindex-row.error span { color: var(--status-error); }
+    .wiki-ix-reindex-row.warn span { color: var(--status-warning); }
     .wiki-ix-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
     .wiki-ix-summary b { color: var(--text-primary); }
     .wiki-ix-details { margin-top: 6px; }

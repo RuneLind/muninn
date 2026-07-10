@@ -9,6 +9,10 @@ export class KnowledgeApiError extends Error {
   constructor(
     message: string,
     public readonly statusCode: number,
+    /** The upstream HTTP status when the failure was an API response (not a
+     *  transport error) — lets callers distinguish e.g. a 409 CAS conflict from a
+     *  generic 502. Undefined when the API was unreachable. */
+    public readonly upstreamStatus?: number,
   ) {
     super(message);
     this.name = "KnowledgeApiError";
@@ -46,7 +50,7 @@ export async function fetchKnowledgeApi(
     const res = await fetch(`${baseUrl}${path}`, fetchOptions);
     clearTimeout(timeout);
     if (!res.ok) {
-      throw new KnowledgeApiError("API returned " + res.status, 502);
+      throw new KnowledgeApiError("API returned " + res.status, 502, res.status);
     }
     return await res.json();
   } catch (err) {
