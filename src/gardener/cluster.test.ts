@@ -92,7 +92,7 @@ describe("buildClusterPrompt", () => {
     });
     expect(prompt).toContain("The wiki ALREADY has pages");
     expect(prompt).toContain("Agent Loops (aliases: AI Agent Loops)");
-    expect(prompt).toContain("EXACT title");
+    expect(prompt).toContain("exact title (WITHOUT any aliases annotation)");
   });
 
   test("omits the existing-pages block when the wiki index is empty", () => {
