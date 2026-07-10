@@ -312,6 +312,12 @@ let backlogPolling = false;
 // proposals the page already loaded — not on the backlog payload).
 let lastBacklogData: IngestBacklogResponse | null = null;
 
+// The consent panel's open/closed state lives here (not only in the DOM class):
+// the strip's innerHTML is replaced wholesale on every render (proposal
+// approve/reject, poll ticks), which would otherwise silently collapse a panel
+// the user is reading.
+let backlogConfirmOpen = false;
+
 function pendingDraftCount(): number {
   return allProposals.filter((p) => p.status === "draft").length;
 }
@@ -329,6 +335,13 @@ function renderBacklog(data: IngestBacklogResponse): void {
   lastBacklogData = data;
   const model = backlogStripModel(data, pendingDraftCount());
   el.innerHTML = backlogStripHtml(model, data.errors) + backlogOutcomeHtml(data.lastBacklogRun);
+  const confirm = el.querySelector(".bk-confirm");
+  if (confirm) {
+    if (backlogConfirmOpen) confirm.classList.add("open");
+  } else {
+    // The run control (and its panel) left the strip — running/all-offered/etc.
+    backlogConfirmOpen = false;
+  }
 }
 
 function loadBacklog(): void {
@@ -426,11 +439,15 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
   const confirm = strip?.querySelector(".bk-confirm") as HTMLElement | null;
   if (action === "confirm") {
     // Expand the inline informed-consent panel (no POST yet).
+    backlogConfirmOpen = true;
     if (confirm) confirm.classList.add("open");
   } else if (action === "cancel") {
+    backlogConfirmOpen = false;
     if (confirm) confirm.classList.remove("open");
   } else if (action === "run") {
     // [Start batch] — the panel's confirmed run.
+    backlogConfirmOpen = false;
+    if (confirm) confirm.classList.remove("open");
     void startBacklogRun();
   } else if (action === "reset") {
     void resetBacklog();

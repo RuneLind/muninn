@@ -245,7 +245,7 @@ export async function renderWikiGardenerPage(opts?: {
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
-    <div id="gardBacklog"></div>
+    <div id="gardBacklog" class="gard-backlog"></div>
     <div class="gard-filter-row" id="gardFilters">
       <button class="gard-filter active" data-status="">All</button>
       <button class="gard-filter" data-status="draft">Pending</button>
