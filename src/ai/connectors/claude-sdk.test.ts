@@ -469,11 +469,24 @@ describe("claude-sdk executePrompt", () => {
     expect("additionalDirectories" in opts).toBe(false);
   });
 
-  test("forwards allowedTools as an allow-list", async () => {
+  test("maps allowedTools to the SDK tools option (real restriction under bypassPermissions)", async () => {
     fakeEvents = successOnly;
-    await executePrompt("hi", baseConfig, { ...baseBot(), allowedTools: ["mcp__knowledge__search", "Read"] });
+    await executePrompt("hi", baseConfig, { ...baseBot(), allowedTools: ["Bash", "Read"] });
     const opts = queryCalls[0]!.options as Record<string, unknown>;
-    expect(opts.allowedTools).toEqual(["mcp__knowledge__search", "Read"]);
+    // NOT the SDK `allowedTools` option — that only suppresses permission
+    // prompts and cannot restrict the surface under bypassPermissions.
+    expect(opts.tools).toEqual(["Bash", "Read"]);
+    expect("allowedTools" in opts).toBe(false);
+  });
+
+  test("empty allowedTools array means full surface, not allow-nothing", async () => {
+    fakeEvents = successOnly;
+    await executePrompt("hi", baseConfig, { ...baseBot(), allowedTools: [] });
+    const opts = queryCalls[0]!.options as Record<string, unknown>;
+    // tools: [] would disable ALL built-in tools — an empty config array must
+    // be dropped, leaving the default (full) surface.
+    expect("tools" in opts).toBe(false);
+    expect("allowedTools" in opts).toBe(false);
   });
 
   test("resolveThinking helper: unset ⇒ undefined, 0 ⇒ disabled, N ⇒ enabled+budget", () => {

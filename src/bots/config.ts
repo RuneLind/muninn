@@ -102,10 +102,12 @@ export interface BotConfig {
    */
   excludedTools?: string[];
   /**
-   * Tool names to allow (allow-list). For claude-sdk: passed as `allowedTools`
-   * to mirror the CLI-mode permission surface (the SDK runs with
-   * `bypassPermissions`, so without this it would grant every tool). Other
-   * connectors ignore it today.
+   * Tool names to allow (allow-list). For claude-sdk: mapped to the SDK
+   * `tools` option (the built-in base set) — under `bypassPermissions` the
+   * SDK's own `allowedTools` option only suppresses prompts and cannot
+   * restrict the surface. MCP tools are fenced via `excludedTools`
+   * (→ `disallowedTools`). Empty/unset ⇒ full surface. Other connectors
+   * ignore it today.
    */
   allowedTools?: string[];
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */

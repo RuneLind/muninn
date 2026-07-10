@@ -121,7 +121,12 @@ export async function executePrompt(
     ...(thinking ? { thinking } : {}),
     ...(hasMcp ? { mcpServers } : {}),
     ...(botConfig.extraDirs?.length ? { additionalDirectories: botConfig.extraDirs } : {}),
-    ...(botConfig.allowedTools?.length ? { allowedTools: botConfig.allowedTools } : {}),
+    // Under bypassPermissions the SDK's `allowedTools` option only suppresses
+    // permission prompts — it cannot restrict the surface ("To restrict which
+    // tools are available, use the `tools` option instead", sdk.d.ts). So the
+    // allow-list maps to `tools` (the built-in base set; MCP tools are fenced
+    // via excludedTools → disallowedTools). Empty/unset ⇒ full surface.
+    ...(botConfig.allowedTools?.length ? { tools: botConfig.allowedTools } : {}),
     ...(botConfig.excludedTools?.length ? { disallowedTools: botConfig.excludedTools } : {}),
   };
 

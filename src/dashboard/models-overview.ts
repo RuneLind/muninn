@@ -268,9 +268,10 @@ export async function assembleModelsOverview(
     let noteOk = true;
     if (summarizer) {
       const ok = connectorCapabilities(summarizer).supportsExtraDirs;
+      const mechanism = (summarizer.connector ?? "claude-cli") === "claude-sdk" ? "additionalDirectories" : "--add-dir";
       note = ok
-        ? "TikTok frames OK (--add-dir)"
-        : `TikTok frames blocked — connector "${summarizer.connector ?? "claude-cli"}" lacks --add-dir`;
+        ? `TikTok frames OK (${mechanism})`
+        : `TikTok frames blocked — connector "${summarizer.connector ?? "claude-cli"}" lacks extra-dirs support`;
       noteOk = ok;
     }
     if (summarizerEnvIgnored) {

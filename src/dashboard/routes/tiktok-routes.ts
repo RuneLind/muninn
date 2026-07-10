@@ -149,7 +149,7 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
     if (!connectorCapabilities(summarizerBot).supportsExtraDirs) {
       return c.json(
         {
-          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted TikTok frames (no --add-dir support). Set SUMMARIZER_BOT to a claude-cli bot.`,
+          error: `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector}", which cannot read the extracted TikTok frames (no extra-dirs support). Set SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
         },
         503,
       );
