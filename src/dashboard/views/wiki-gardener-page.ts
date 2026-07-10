@@ -123,6 +123,26 @@ export async function renderWikiGardenerPage(opts?: {
     }
     .gard-backlog .gard-btn.bk-cancel-run:hover:not(:disabled) { border-color: var(--status-magenta); color: var(--text-primary); }
     .gard-backlog .gard-btn.bk-cancel-run:disabled { opacity: 0.55; cursor: default; }
+    /* Interrupted-run recovery banner (PR 3) — full-width row above the strip. */
+    .gard-backlog .bk-banner {
+      flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+      margin-bottom: 4px; padding: 9px 13px;
+      background: color-mix(in srgb, var(--status-warning, #d0a000) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--status-warning, #d0a000) 45%, transparent);
+      border-radius: 8px;
+    }
+    .gard-backlog .bk-banner-msg { color: var(--text-secondary); font-size: 12.5px; }
+    .gard-backlog .bk-banner-actions { display: inline-flex; gap: 8px; }
+    .gard-backlog .gard-btn.bk-recover {
+      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      font-size: 12px; font-weight: 600; padding: 4px 13px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-recover:hover { background: var(--accent-light); border-color: var(--accent-light); }
+    .gard-backlog .gard-btn.bk-dismiss {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-muted);
+      font-size: 12px; padding: 4px 13px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-dismiss:hover { border-color: var(--accent); color: var(--text-primary); }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {
