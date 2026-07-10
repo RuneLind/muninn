@@ -337,6 +337,7 @@ function loadIndexCoverage(refresh: boolean): void {
         indexCovHtml = indexCovUnavailableHtml(cov);
         cur.innerHTML = indexCovHtml;
         cur.style.display = "";
+        applyReindexUi();
         return;
       }
       indexCovHtml = buildIndexCovInner(cov);
@@ -389,8 +390,17 @@ let reindexPollFailures = 0;
 /** Persisted status markup, re-injected into the card's slot after any render so
  *  an in-flight reindex survives a cached-HTML reuse (tab switch). */
 let reindexStatusHtml = "";
+/** True when a poll bailed because the card left the DOM mid-run (user navigated
+ *  to a page) — the next card render resumes polling so the UI never freezes on
+ *  a stale "rebuilding…" for a run that has long since settled. */
+let reindexAbandoned = false;
+/** When the last run settled (0 = never / still running). Settled rows stay
+ *  visible briefly, then a later card render clears them instead of repainting
+ *  an old "rebuilt" forever. */
+let reindexSettledAt = 0;
 const REINDEX_POLL_MS = 3000;
 const REINDEX_MAX_POLL_FAILURES = 3;
+const REINDEX_SETTLED_TTL_MS = 60_000;
 
 /** Set the persisted reindex-status markup and paint it into the live slot. */
 function setReindexStatus(html: string): void {
@@ -403,19 +413,46 @@ function setReindexStatus(html: string): void {
  *  so a cached-HTML reuse (tab switch) or a post-settle coverage refresh doesn't
  *  drop an in-flight reindex's status or leave the button in the wrong state. */
 function applyReindexUi(): void {
+  // A run abandoned mid-poll (card left the DOM) resumes now that the card is
+  // back — mark active again here, poll immediately below after painting. Only
+  // the abandoned flag triggers a resume, so a tab-switch repaint during a live
+  // poll cycle can never start a second concurrent poll chain.
+  const resume = reindexAbandoned;
+  if (resume) {
+    reindexAbandoned = false;
+    reindexActive = true;
+    reindexPollFailures = 0;
+  }
+  // Settled rows outlive their usefulness after a minute — clear instead of
+  // repainting an old "rebuilt" on every later tab switch.
+  if (
+    !reindexActive &&
+    reindexStatusHtml &&
+    reindexSettledAt &&
+    Date.now() - reindexSettledAt > REINDEX_SETTLED_TTL_MS
+  ) {
+    reindexStatusHtml = "";
+    reindexSettledAt = 0;
+  }
   const el = document.getElementById("wikiIndexReindexStatus");
   if (el) el.innerHTML = reindexStatusHtml;
   const btn = document.getElementById("wikiIndexReindex") as HTMLButtonElement | null;
   if (btn) btn.disabled = reindexActive;
+  // An immediate poll repaints reality (and settles + refreshes coverage if the
+  // rebuild finished while we were away).
+  if (resume) pollReindexStatus();
 }
 
-/** Stop the poll cycle and re-enable the button (leaves the last status visible). */
+/** Stop the poll cycle and re-enable the button (leaves the last status visible
+ *  briefly — cleared after `REINDEX_SETTLED_TTL_MS` by `applyReindexUi`). */
 function stopReindex(): void {
   if (reindexPollTimer) {
     clearTimeout(reindexPollTimer);
     reindexPollTimer = 0;
   }
   reindexActive = false;
+  reindexAbandoned = false;
+  reindexSettledAt = Date.now();
   const btn = document.getElementById("wikiIndexReindex") as HTMLButtonElement | null;
   if (btn) btn.disabled = false;
 }
@@ -478,7 +515,10 @@ function scheduleReindexPoll(): void {
 function pollReindexStatus(): void {
   reindexPollTimer = 0;
   if (!document.getElementById("wikiIndexCard")) {
+    // Card left the DOM (user opened a page) — mark abandoned so the next card
+    // render resumes the poll instead of freezing on a stale "rebuilding…".
     reindexActive = false;
+    reindexAbandoned = true;
     return;
   }
   fetch(withWiki("/api/wiki/reindex-status"))
@@ -486,6 +526,7 @@ function pollReindexStatus(): void {
     .then((data: ReindexStatusResponse) => {
       if (!document.getElementById("wikiIndexCard")) {
         reindexActive = false;
+        reindexAbandoned = true;
         return;
       }
       if (data.error) {
@@ -510,6 +551,7 @@ function pollReindexStatus(): void {
     .catch(() => {
       if (!document.getElementById("wikiIndexCard")) {
         reindexActive = false;
+        reindexAbandoned = true;
         return;
       }
       reindexPollFailures += 1;
