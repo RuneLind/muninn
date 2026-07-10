@@ -31,6 +31,7 @@ Routes are split by domain in `routes/`:
 | `youtube-routes.ts` | YouTube transcript fetch + summarization API. `/youtube` now 301-redirects to `/summaries?source=youtube`; the page lives in the merged view |
 | `x-article-routes.ts` | X/Twitter article summarization API (Chrome extension backend). `/x-articles` now 301-redirects to `/summaries?source=x-article` |
 | `anthropic-routes.ts` | Claude Learning Center **Curate** layer (Candidates → Summaries). The candidate inbox (`GET /api/anthropic/candidates`, `POST …/:id/{summarize,dismiss}`) + the summarizer vertical (`/api/anthropic/{stream,jobs,document,similar}`, mirroring youtube-routes against the `anthropic-summaries` collection). Summarizes a watcher-captured candidate by pulling its content from Huginn `anthropic-knowledge`; renders on `/summaries` badged "Claude". Also `GET /api/anthropic/candidates/stats` — read-only gate-outcome calibration (per-kind + per-score-band acceptance + suggested `candidateMinScoreByKind`) backing the `/summaries` **Calibration** tab; never writes watcher config. See `src/anthropic/{state,summarizer}.ts` + `src/watchers/anthropic.ts` (capture + ≥0.9 auto-promote) + `candidateOutcomeStats` in `src/db/summary-candidates.ts`. |
+| `models-routes.ts` | `/models` page + `GET /api/models/overview` (JSON) — the effective model / connector / Haiku backend for every AI job after all defaults, next to the models actually used in the last 7 days. Assembly is the pure, DB-injectable `src/dashboard/models-overview.ts` (`assembleModelsOverview` over `resolveBackendWithReason` + `resolveSummarizerBot`/`resolveResearchBot` + `connectorCapabilities` + the `watchers` table + `haiku_usage`/`traces`). Read-only diagnostic — surfaces the #191 silent-fallback class. Assembled fresh per request (no cache); degraded sources land in `errors[]`, never a 5xx. |
 | `route-utils.ts` | Shared helpers: UUID validation, pagination parsing |
 
 ## View System
@@ -54,7 +55,7 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 
 ### Pages
 
-`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `summaries-page.ts` (unified YouTube + X-article summaries; composes the `sum-*` components, injects the `SOURCES` registry).
+`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `summaries-page.ts` (unified YouTube + X-article summaries; composes the `sum-*` components, injects the `SOURCES` registry), `models-page.ts` (models overview — three grouped tables: Bots · Role assignments · Pipeline jobs; client-fetches `/api/models/overview`, bot selector re-scopes only the per-bot Pipeline rows).
 
 ## Real-Time Updates
 
