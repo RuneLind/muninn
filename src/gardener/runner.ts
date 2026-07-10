@@ -61,6 +61,25 @@ export interface GardenerDeps {
   rejectedTopicKeys: () => Promise<string[]>;
   consumedDocIds: () => Promise<Set<string>>;
   insertProposal: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
+
+  // Progress + soft-cancel seams (backlog drain only — the weekly checker passes
+  // none, so behavior is byte-identical). `onProgress` reports at the same points
+  // the tracer already marks; `shouldAbort` is polled at the top of each draft
+  // iteration (and once right after clustering) — a true value breaks the draft
+  // loop, keeping already-persisted proposals; `onAborted` fires once on that
+  // break with the doc keys the cancel prevented from drafting (minus docs whose
+  // cluster already produced a proposal, since clusters may share a doc).
+  onProgress?: (p: GardenerProgress) => void;
+  shouldAbort?: () => boolean;
+  onAborted?: (skippedClusterDocKeys: string[]) => void;
+}
+
+/** One progress report emitted by a run (drafts fields present only while drafting). */
+export interface GardenerProgress {
+  stage: "harvesting" | "clustering" | "resolving" | "drafting";
+  draftsDone?: number;
+  draftsTotal?: number;
+  currentTopic?: string;
 }
 
 function sourceDocsFor(cluster: Cluster, byKey: Map<string, HarvestedDoc>): WikiProposalSourceDoc[] {
@@ -84,6 +103,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   // --- Harvest ---
   tracer?.start("harvest");
+  deps.onProgress?.({ stage: "harvesting" });
   const consumed = await deps.consumedDocIds();
   const docs = await harvestDocs(deps.collections, deps, {
     lookbackDays: deps.lookbackDays,
@@ -107,6 +127,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   // --- Cluster ---
   tracer?.start("cluster");
+  deps.onProgress?.({ stage: "clustering" });
   const [interestProfile, liveKeys, rejectedKeys] = await Promise.all([
     deps.loadInterestProfile(),
     deps.liveTopicKeys(),
@@ -131,8 +152,23 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     return [];
   }
 
+  // Cancel checkpoint right after clustering — a cancel during harvest/clustering
+  // shouldn't wait for resolve + the first draft. `resolved` doesn't exist yet, so
+  // the skipped set is the union of every surviving cluster's docs (nothing drafted
+  // to subtract); `draftsTotal = clusters.length` so the outcome records k/n, not 0/0.
+  if (deps.shouldAbort?.()) {
+    deps.onProgress?.({ stage: "drafting", draftsDone: 0, draftsTotal: clusters.length });
+    deps.onAborted?.([...new Set(clusters.flatMap((c) => c.docIds))]);
+    log.info("Gardener run cancelled after 0/{n} drafts (before drafting)", {
+      botName,
+      n: clusters.length,
+    });
+    return [];
+  }
+
   // --- Target-resolve ---
   tracer?.start("resolve");
+  deps.onProgress?.({ stage: "resolving" });
   const index = await deps.getWikiIndex();
   const resolved = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
   tracer?.end("resolve", {
@@ -142,8 +178,44 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   // --- Draft + persist (each proposal persisted as its draft completes) ---
   tracer?.start("draft");
+  // Emit the total before the loop: a cancel that lands during the resolve await
+  // aborts at iteration 0, before any per-iteration progress has carried
+  // `draftsTotal` — without this the outcome would record 0/0.
+  deps.onProgress?.({ stage: "drafting", draftsDone: 0, draftsTotal: resolved.length });
   const persisted: WikiProposal[] = [];
-  for (const { cluster, target } of resolved) {
+  // Docs whose cluster already produced a proposal — subtracted from the aborted
+  // set so a doc a proposal already covers never returns to the queue on cancel.
+  const draftedDocKeys = new Set<string>();
+  for (let i = 0; i < resolved.length; i++) {
+    const { cluster, target } = resolved[i]!;
+
+    // Soft cancel: honor a cancel request at the top of each iteration. The
+    // in-flight draft (if any) already finished; we keep every persisted proposal
+    // and return the not-yet-drafted clusters' docs (minus already-drafted docs)
+    // to the queue via `onAborted`, then fall through to the normal notify path.
+    if (deps.shouldAbort?.()) {
+      const skipped = new Set<string>();
+      for (let j = i; j < resolved.length; j++) {
+        for (const k of resolved[j]!.cluster.docIds) {
+          if (!draftedDocKeys.has(k)) skipped.add(k);
+        }
+      }
+      deps.onAborted?.([...skipped]);
+      log.info("Gardener run cancelled after {k}/{n} drafts", {
+        botName,
+        k: persisted.length,
+        n: resolved.length,
+      });
+      break;
+    }
+
+    deps.onProgress?.({
+      stage: "drafting",
+      draftsDone: persisted.length,
+      draftsTotal: resolved.length,
+      currentTopic: cluster.label,
+    });
+
     const clusterDocs = cluster.docIds
       .map((k) => byKey.get(k))
       .filter((d): d is HarvestedDoc => !!d);
@@ -207,6 +279,13 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
       if (row) {
         persisted.push(row);
+        for (const k of cluster.docIds) draftedDocKeys.add(k);
+        deps.onProgress?.({
+          stage: "drafting",
+          draftsDone: persisted.length,
+          draftsTotal: resolved.length,
+          currentTopic: cluster.label,
+        });
         log.info("Gardener persisted proposal {id} for topic {topic} ({mode})", {
           botName,
           id: row.id,

@@ -31,6 +31,18 @@ export interface LastBacklogRun {
   offered: number;
   drafted: number;
   error?: string;
+  /** Set when the run was soft-cancelled — `drafted` of `of` clusters drafted. */
+  cancelled?: { drafted: number; of: number };
+}
+
+/** Live progress of an in-flight backlog drain (mirrors the server shape). */
+export interface BacklogProgress {
+  stage: "assembling" | "harvesting" | "clustering" | "resolving" | "drafting";
+  draftsDone: number;
+  draftsTotal: number;
+  currentTopic?: string;
+  startedAt: number;
+  cancelRequested: boolean;
 }
 
 export interface IngestBacklogResponse {
@@ -48,6 +60,8 @@ export interface IngestBacklogResponse {
   remaining?: number;
   watcherSeeded?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
+  /** Live drain progress (null when idle / a weekly run holds the mutex). */
+  progress?: BacklogProgress | null;
   // Batch constants (PR 1) — echoed from src/gardener/backlog.ts so the confirm
   // panel renders "drain a batch of N … up to M drafts" without hardcoding.
   batchSize?: number;
@@ -62,6 +76,8 @@ export interface BacklogStripModel {
   offeredStillQueued: number;
   draftsAwaitingReview: number;
   running: boolean;
+  /** Live drain progress when this bot's own drain holds the mutex (else null). */
+  progress: BacklogProgress | null;
   /** No wiki-gardener watcher seeded ⇒ hide the run/reset control entirely. */
   controlHidden: boolean;
   showRun: boolean;
@@ -103,6 +119,7 @@ export function backlogStripModel(
     offeredStillQueued,
     draftsAwaitingReview: Math.max(0, numOr(pendingDraftCount, 0)),
     running,
+    progress: data.progress ?? null,
     controlHidden,
     showRun: !controlHidden && !running && remaining > 0,
     // Reset whenever offered-and-still-queued > 0 (not the raw all-time offered):
@@ -140,10 +157,56 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
   return `<span class="bk-sentence">${segs.join('<span class="bk-sep"> · </span>')}</span>`;
 }
 
+/** Friendly stage text for a live drain (drafting shows k/n + the current topic). */
+export function backlogProgressText(p: BacklogProgress): string {
+  switch (p.stage) {
+    case "assembling":
+      return "Selecting batch…";
+    case "harvesting":
+      return "Fetching docs…";
+    case "clustering":
+      return "Clustering…";
+    case "resolving":
+      return "Resolving targets…";
+    case "drafting": {
+      const base = p.draftsTotal > 0 ? `Drafting ${p.draftsDone}/${p.draftsTotal}` : "Drafting…";
+      return p.currentTopic ? `${base} — ${p.currentTopic}` : base;
+    }
+    default:
+      return "Working…";
+  }
+}
+
+/** Local HH:MM from an epoch-ms start time (best-effort; empty on a bad value). */
+function fmtClock(ms: number): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** The live-drain progress line + a soft-cancel button (replaces "Running…"). */
+export function backlogProgressHtml(p: BacklogProgress): string {
+  const parts: string[] = [`⏳ ${esc(backlogProgressText(p))}`];
+  const clock = fmtClock(p.startedAt);
+  if (clock) parts.push(`started ${esc(clock)}`);
+  if (p.draftsDone > 0) {
+    parts.push(`${p.draftsDone} draft${p.draftsDone === 1 ? "" : "s"} ready below`);
+  }
+  const line = parts.join('<span class="bk-sep"> · </span>');
+  const cancelLabel = p.cancelRequested ? "Cancelling…" : "Cancel";
+  const cancelBtn =
+    `<button class="gard-btn bk-cancel-run" data-backlog-action="cancel-run"` +
+    `${p.cancelRequested ? " disabled" : ""}>${cancelLabel}</button>`;
+  return `<span class="bk-control bk-progress"><span class="bk-progress-line">${line}</span>${cancelBtn}</span>`;
+}
+
 /** The run/reset control + the (hidden) informed-consent confirm panel. */
 export function backlogControlHtml(model: BacklogStripModel): string {
   if (model.controlHidden) return "";
   if (model.running) {
+    // A live drain (this bot's own run) shows progress + soft-cancel; a weekly run
+    // holds the mutex with no progress → keep the plain disabled "Running…".
+    if (model.progress) return backlogProgressHtml(model.progress);
     return `<span class="bk-control"><button class="gard-btn bk-run" disabled>Running…</button></span>`;
   }
   let inner = "";
@@ -185,6 +248,13 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   if (!run) return "";
   if (run.error) {
     return ` <span class="bk-err">last run failed: ${esc(run.error)}</span>`;
+  }
+  if (run.cancelled) {
+    const { drafted, of } = run.cancelled;
+    if (drafted === 0) {
+      return ` <span class="bk-run-note">last run cancelled before drafting — batch docs returned to the queue</span>`;
+    }
+    return ` <span class="bk-run-note">last run cancelled after ${drafted}/${of} drafts — undrafted docs returned to the queue</span>`;
   }
   if (run.drafted > 0) {
     return ` <span class="bk-run-note">last run: ${run.drafted} draft(s) from ${run.offered} docs — see proposals below</span>`;

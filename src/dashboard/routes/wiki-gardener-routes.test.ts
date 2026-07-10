@@ -104,6 +104,21 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("only available for bot wikis");
   });
+
+  // backlog-cancel shares the same resolution guards as reset.
+  test("backlog-cancel: standalone (non-bot) wiki → 400 bot-only error", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+  });
+
+  test("backlog-cancel: unknown wiki → 404 not-configured", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-cancel?wiki=does-not-exist", { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
 });
 
 /**
@@ -130,22 +145,40 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       lastBacklogRun: null,
       watcherSeeded: true,
+      progress: null,
     });
     expect(first.running).toBe(false);
     expect(first.queued).toBe(2);
+    expect(first.progress).toBeNull();
     expect("queuedKeys" in first).toBe(false); // server-only, never on the wire
 
-    // A later request sees fresh `running: true` from the SAME cached object.
+    // A later request sees fresh `running: true` + live progress from the SAME cached object.
     const second = mergeBacklogLiveFields(cached, {
       running: true,
       offered: 2,
       remaining: 0,
       lastBacklogRun: { finishedAt: 222, offered: 2, drafted: 1 },
       watcherSeeded: true,
+      progress: {
+        stage: "drafting",
+        draftsDone: 1,
+        draftsTotal: 3,
+        currentTopic: "ai-agents",
+        startedAt: 999,
+        cancelRequested: false,
+      },
     });
     expect(second.running).toBe(true);
     expect(second.remaining).toBe(0);
     expect(second.lastBacklogRun).toEqual({ finishedAt: 222, offered: 2, drafted: 1 });
+    expect(second.progress).toEqual({
+      stage: "drafting",
+      draftsDone: 1,
+      draftsTotal: 3,
+      currentTopic: "ai-agents",
+      startedAt: 999,
+      cancelRequested: false,
+    });
 
     // The cached object was never mutated by either merge.
     expect(cached.queuedKeys).toEqual(["c/a", "c/b"]);
@@ -159,6 +192,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       lastBacklogRun: null,
       watcherSeeded: true,
+      progress: null,
     });
     // Sourced from src/gardener/backlog.ts — the client never hardcodes them.
     expect(merged.batchSize).toBe(40);

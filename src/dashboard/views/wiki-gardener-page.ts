@@ -114,6 +114,15 @@ export async function renderWikiGardenerPage(opts?: {
       font-size: 13px; padding: 7px 16px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-cancel:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Live-drain progress line (replaces the disabled "Running…" while a drain runs). */
+    .gard-backlog .bk-progress { flex-wrap: wrap; gap: 6px 10px; }
+    .gard-backlog .bk-progress-line { color: var(--text-secondary); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .gard-backlog .gard-btn.bk-cancel-run {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-muted);
+      font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-cancel-run:hover:not(:disabled) { border-color: var(--status-magenta); color: var(--text-primary); }
+    .gard-backlog .gard-btn.bk-cancel-run:disabled { opacity: 0.55; cursor: default; }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {

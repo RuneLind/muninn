@@ -21,6 +21,7 @@
  */
 
 import type { WatcherAlert } from "../types.ts";
+import type { GardenerProgress } from "./runner.ts";
 import type { QueuedDoc, ListedDoc as WikiListedDoc } from "../wiki/ingest-backlog.ts";
 import type { SummaryCollectionListings } from "../summaries/list-collections.ts";
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
@@ -73,6 +74,53 @@ export function runExclusive<T>(botName: string, work: () => Promise<T>): Promis
 /** Test-only: clear the gardener mutex between cases. */
 export function __resetGardenerMutexForTest(): void {
   gardenerRuns.clear();
+  backlogProgress.clear();
+}
+
+// ── Per-bot backlog progress + soft cancel ───────────────────────────────────
+//
+// A live, pollable projection of the in-flight backlog run (seeded synchronously
+// when the mutex is acquired, cleared when the run settles) plus a cooperative
+// cancel flag the runner's `shouldAbort` seam reads. In-memory only — a dashboard
+// convenience surfaced by the extended GET, never durable.
+
+/** Live progress of an in-flight backlog drain (null when none is running). */
+export interface BacklogProgress {
+  stage: "assembling" | "harvesting" | "clustering" | "resolving" | "drafting";
+  /** Proposals persisted so far this run. */
+  draftsDone: number;
+  /** Clusters that survived filtering (0 until clustering resolves them). */
+  draftsTotal: number;
+  /** Cluster label currently drafting. */
+  currentTopic?: string;
+  startedAt: number;
+  cancelRequested: boolean;
+}
+
+const backlogProgress = new Map<string, BacklogProgress>();
+
+/** The live progress of a bot's in-flight backlog drain, or null when idle. */
+export function getBacklogProgress(botName: string): BacklogProgress | null {
+  return backlogProgress.get(botName) ?? null;
+}
+
+/**
+ * Request a soft cancel of a bot's in-flight backlog drain. Returns false when no
+ * run is in flight (a cancel click racing the run's natural settle — the likely
+ * case). The runner stops after at most one more draft (bounded latency).
+ */
+export function requestBacklogCancel(botName: string): boolean {
+  const p = backlogProgress.get(botName);
+  if (!p) return false;
+  p.cancelRequested = true;
+  return true;
+}
+
+/** The optional progress/cancel seams the work fn threads into `runGardener`. */
+export interface GardenerRunHooks {
+  onProgress?: (p: GardenerProgress) => void;
+  shouldAbort?: () => boolean;
+  onAborted?: (skippedClusterDocKeys: string[]) => void;
 }
 
 // ── Batch selection ──────────────────────────────────────────────────────────
@@ -201,6 +249,8 @@ export interface LastBacklogRun {
   offered: number;
   drafted: number;
   error?: string;
+  /** Set when the run was soft-cancelled — `drafted` of `of` clusters drafted. */
+  cancelled?: { drafted: number; of: number };
 }
 
 /** The number of proposals a gardener run drafted, from its alert id. */
@@ -221,7 +271,13 @@ export interface StartBacklogRunDeps {
   assemble: () => Promise<AssembledBacklog>;
   /** Persist the new offered set (called BEFORE runGardener — at-most-once). */
   persistOffered: (keys: string[]) => Promise<void>;
-  runGardener: (assembled: AssembledBacklog) => Promise<WatcherAlert[]>;
+  /**
+   * Run the gardener, threading the progress/cancel hooks the work fn constructs.
+   * The route's closure merely forwards these into `runGardener`'s optional deps —
+   * all hook logic (progress-map writes, `cancelRequested` read, skipped-key
+   * capture) lives here, under the mutex.
+   */
+  runGardener: (assembled: AssembledBacklog, hooks: GardenerRunHooks) => Promise<WatcherAlert[]>;
   recordLastRun: (r: LastBacklogRun) => void;
 }
 
@@ -245,19 +301,78 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   if (!deps.gardenerEnabled) return { state: "disabled" };
 
   const run = runExclusive(deps.botName, async () => {
+    // Seeded synchronously (before the first await) so the entry — and the cancel
+    // flag `requestBacklogCancel` reads — exists the moment the mutex is acquired.
+    backlogProgress.set(deps.botName, {
+      stage: "assembling",
+      draftsDone: 0,
+      draftsTotal: 0,
+      startedAt: Date.now(),
+      cancelRequested: false,
+    });
+
     const assembled = await deps.assemble();
     // Persist BEFORE running — a crash after this skips the batch, never re-offers it.
-    await deps.persistOffered([...new Set([...assembled.offeredBefore, ...assembled.batchKeys])]);
-    const alerts = await deps.runGardener(assembled);
-    return { offered: assembled.batchKeys.length, drafted: draftedCount(alerts) };
+    const offeredWithBatch = [...new Set([...assembled.offeredBefore, ...assembled.batchKeys])];
+    await deps.persistOffered(offeredWithBatch);
+
+    // The hooks write the live progress map, read the cancel flag, and capture the
+    // skipped keys on abort — all here, under the mutex, so the offered-set
+    // subtraction (below) sees them.
+    let aborted = false;
+    let skippedKeys: string[] = [];
+    let lastTotal = 0;
+    const hooks: GardenerRunHooks = {
+      onProgress: (p) => {
+        const prog = backlogProgress.get(deps.botName);
+        if (!prog) return;
+        prog.stage = p.stage;
+        if (p.draftsDone !== undefined) prog.draftsDone = p.draftsDone;
+        if (p.draftsTotal !== undefined) {
+          prog.draftsTotal = p.draftsTotal;
+          lastTotal = p.draftsTotal;
+        }
+        prog.currentTopic = p.currentTopic;
+      },
+      shouldAbort: () => backlogProgress.get(deps.botName)?.cancelRequested === true,
+      onAborted: (keys) => {
+        aborted = true;
+        skippedKeys = keys;
+      },
+    };
+
+    const alerts = await deps.runGardener(assembled, hooks);
+    const drafted = draftedCount(alerts);
+
+    // On cancel, return exactly the not-yet-drafted clusters' docs to the offered
+    // set — declined/never-clustered docs stay offered (at-most-once). Subtract the
+    // skipped keys from the offered-with-batch union persisted above.
+    if (aborted && skippedKeys.length) {
+      const offeredAfter = new Set(offeredWithBatch);
+      for (const k of skippedKeys) offeredAfter.delete(k);
+      await deps.persistOffered([...offeredAfter]);
+    }
+
+    return {
+      offered: assembled.batchKeys.length,
+      drafted,
+      ...(aborted ? { cancelled: { drafted, of: lastTotal } } : {}),
+    };
   });
   if (run === null) return { state: "running" };
 
   void run
-    .then((r) =>
-      deps.recordLastRun({ finishedAt: Date.now(), offered: r.offered, drafted: r.drafted }),
-    )
+    .then((r) => {
+      backlogProgress.delete(deps.botName);
+      deps.recordLastRun({
+        finishedAt: Date.now(),
+        offered: r.offered,
+        drafted: r.drafted,
+        ...(r.cancelled ? { cancelled: r.cancelled } : {}),
+      });
+    })
     .catch((err) => {
+      backlogProgress.delete(deps.botName);
       const message = err instanceof Error ? err.message : String(err);
       log.error("Backlog run failed for {bot}: {error}", { botName: deps.botName, error: message });
       deps.recordLastRun({ finishedAt: Date.now(), offered: 0, drafted: 0, error: message });

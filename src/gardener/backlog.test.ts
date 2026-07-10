@@ -7,6 +7,8 @@ import {
   startBacklogRun,
   resetBacklogOffered,
   draftedCount,
+  getBacklogProgress,
+  requestBacklogCancel,
   __resetGardenerMutexForTest,
   BACKLOG_BATCH_SIZE,
   type AssembleBacklogDeps,
@@ -291,6 +293,126 @@ describe("startBacklogRun", () => {
     expect(recorded).not.toBeNull();
     expect(recorded!.error).toContain("draft blew up");
     expect(gardenerRunInFlight("jarvis")).toBe(false);
+  });
+});
+
+// ── progress + soft cancel ───────────────────────────────────────────────────
+
+describe("backlog progress + soft cancel", () => {
+  beforeEach(() => __resetGardenerMutexForTest());
+
+  const assembled: AssembledBacklog = {
+    listedBySource: {},
+    batchKeys: ["c/a", "c/b", "c/c", "c/d"],
+    consumedComplement: new Set(),
+    offeredBefore: new Set(["c/z"]),
+    queuedCount: 10,
+  };
+
+  test("requestBacklogCancel is false when no run is in flight", () => {
+    expect(requestBacklogCancel("nobody")).toBe(false);
+  });
+
+  test("progress is seeded synchronously on start and cleared on settle", async () => {
+    let releaseRun!: () => void;
+    const gate = new Promise<WatcherAlert[]>((res) => (releaseRun = () => res([])));
+
+    const r = startBacklogRun({
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async () => {},
+      runGardener: async () => gate,
+      recordLastRun: () => {},
+    });
+    expect(r.state).toBe("started");
+    // Seeded synchronously (before the work fn's first await).
+    const prog = getBacklogProgress("jarvis");
+    expect(prog).not.toBeNull();
+    expect(prog!.stage).toBe("assembling");
+    // A run in flight ⇒ cancel is accepted.
+    expect(requestBacklogCancel("jarvis")).toBe(true);
+    expect(getBacklogProgress("jarvis")!.cancelRequested).toBe(true);
+
+    releaseRun();
+    await new Promise((res) => setTimeout(res, 10));
+    expect(getBacklogProgress("jarvis")).toBeNull();
+  });
+
+  test("cancelled run returns exactly the skipped clusters' docs to offered; declined stay offered", async () => {
+    const persistCalls: string[][] = [];
+    const r = startBacklogRun({
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async (keys) => {
+        persistCalls.push([...keys].sort());
+      },
+      runGardener: async (_a, hooks) => {
+        // Drafted c/a,c/b; cancel left c/c,c/d undrafted (declined docs are neither).
+        hooks.onProgress?.({ stage: "drafting", draftsDone: 2, draftsTotal: 4 });
+        hooks.onAborted?.(["c/c", "c/d"]);
+        return [{ id: "wiki-gardener:p1,p2", source: "wiki-gardener", summary: "", urgency: "low" }];
+      },
+      recordLastRun: () => {},
+    });
+    expect(r.state).toBe("started");
+    await new Promise((res) => setTimeout(res, 10));
+
+    // First persist BEFORE the run: offeredBefore(c/z) ∪ batch(c/a..c/d).
+    expect(persistCalls[0]).toEqual(["c/a", "c/b", "c/c", "c/d", "c/z"]);
+    // Second persist AFTER cancel: minus the skipped c/c,c/d → declined stay offered.
+    expect(persistCalls[1]).toEqual(["c/a", "c/b", "c/z"]);
+    expect(persistCalls).toHaveLength(2);
+  });
+
+  test("records the cancelled outcome (drafted/of) from the hooks", async () => {
+    let recorded: { cancelled?: { drafted: number; of: number } } | null = null;
+    startBacklogRun({
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async () => {},
+      runGardener: async (_a, hooks) => {
+        hooks.onProgress?.({ stage: "drafting", draftsDone: 1, draftsTotal: 3 });
+        hooks.onAborted?.(["c/c"]);
+        return [{ id: "wiki-gardener:p1", source: "wiki-gardener", summary: "", urgency: "low" }];
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(recorded).not.toBeNull();
+    // drafted = draftedCount(alerts) = 1; of = draftsTotal from the last onProgress = 3.
+    expect(recorded!.cancelled).toEqual({ drafted: 1, of: 3 });
+  });
+
+  test("a run that is not cancelled records no `cancelled` field and persists once", async () => {
+    const persistCalls: string[][] = [];
+    let recorded: { cancelled?: unknown } | null = null;
+    startBacklogRun({
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async (keys) => {
+        persistCalls.push([...keys].sort());
+      },
+      runGardener: async (_a, hooks) => {
+        hooks.onProgress?.({ stage: "drafting", draftsDone: 4, draftsTotal: 4 });
+        return [{ id: "wiki-gardener:a,b,c,d", source: "wiki-gardener", summary: "", urgency: "low" }];
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(persistCalls).toHaveLength(1); // no post-run re-persist without a cancel
+    expect(recorded!.cancelled).toBeUndefined();
   });
 });
 

@@ -34,12 +34,16 @@ import {
   resetBacklogOffered,
   draftedCount,
   gardenerRunInFlight,
+  getBacklogProgress,
+  requestBacklogCancel,
   BACKLOG_BATCH_SIZE,
   BACKLOG_MAX_PROPOSALS,
   BACKLOG_LOOKBACK_DAYS,
   DRAFT_TIMEOUT_MS,
   WIKI_GARDENER_OFFERED_KEY,
   type AssembledBacklog,
+  type BacklogProgress,
+  type GardenerRunHooks,
   type LastBacklogRun,
 } from "../../gardener/backlog.ts";
 import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
@@ -208,6 +212,8 @@ export interface BacklogLiveFields {
   remaining: number;
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
+  /** Live progress of an in-flight drain (null when idle — including weekly runs). */
+  progress: BacklogProgress | null;
 }
 
 /**
@@ -396,9 +402,15 @@ function buildBacklogGardenerDeps(
     root: string;
     tracer: Tracer;
   },
+  hooks: GardenerRunHooks,
 ): GardenerDeps {
   const { bot, config, apiUrl, root, tracer } = ctx;
   return {
+    // Progress + soft-cancel seams (owned by the backlog work fn; the route only
+    // forwards them). Undefined on the weekly path — behavior is byte-identical.
+    onProgress: hooks.onProgress,
+    shouldAbort: hooks.shouldAbort,
+    onAborted: hooks.onAborted,
     botName: bot.name,
     wikiDir: root,
     collections: SUMMARY_SOURCES.map((s) => s.collection),
@@ -611,6 +623,7 @@ export function registerWikiGardenerRoutes(
           remaining,
           lastBacklogRun: getLastBacklogRun(bot.name),
           watcherSeeded: !!watcher,
+          progress: getBacklogProgress(bot.name),
         }),
       );
     } catch (err) {
@@ -655,11 +668,11 @@ export function registerWikiGardenerRoutes(
       // The tracer root span must be finished HERE — runGardener only creates
       // sub-spans (the weekly checker finishes its own tracer the same way);
       // without this every drain leaves a malformed open trace in the waterfall.
-      runGardener: async (assembled) => {
+      runGardener: async (assembled, hooks) => {
         const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
         try {
           const alerts = await runGardener(
-            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }),
+            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
           );
           tracer.finish("ok", {
             offered: assembled.batchKeys.length,
@@ -698,6 +711,22 @@ export function registerWikiGardenerRoutes(
     const outcome = await resetBacklogOffered(bot.name, () => backlogDeps.setOffered(watcher.id, []));
     if (!outcome.ok) return c.json({ state: "running", error: outcome.error }, 409);
     return c.json({ ok: true });
+  });
+
+  // Soft-cancel an in-flight backlog drain — flips the run's cancel flag; the
+  // runner stops after at most one more draft, keeping every persisted proposal
+  // and returning the undrafted docs to the queue. Same resolution/watcher guards
+  // as backlog-reset. No run in flight (a cancel racing the natural settle — the
+  // likely case) is a no-op 200 `{cancelled:false}`, not an error.
+  app.post("/api/wiki/gardener/backlog-cancel", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot } = resolved;
+
+    const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
+
+    return c.json({ cancelled: requestBacklogCancel(bot.name) });
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.

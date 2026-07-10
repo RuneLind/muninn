@@ -3,6 +3,10 @@ import {
   backlogStripModel,
   backlogControlHtml,
   backlogConfirmHtml,
+  backlogProgressText,
+  backlogProgressHtml,
+  backlogOutcomeHtml,
+  type BacklogProgress,
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
 
@@ -117,6 +121,74 @@ describe("backlogStripModel — control gating", () => {
     expect(m.showRun).toBe(false);
     expect(m.showReset).toBe(false);
     expect(backlogControlHtml(m)).toBe("");
+  });
+});
+
+describe("backlog progress line (live drain)", () => {
+  function prog(over: Partial<BacklogProgress> = {}): BacklogProgress {
+    return {
+      stage: "drafting",
+      draftsDone: 3,
+      draftsTotal: 6,
+      currentTopic: "ai-agents",
+      startedAt: Date.parse("2026-07-10T14:32:00"),
+      cancelRequested: false,
+      ...over,
+    };
+  }
+
+  test("stage text maps each stage to friendly copy", () => {
+    expect(backlogProgressText(prog({ stage: "assembling" }))).toBe("Selecting batch…");
+    expect(backlogProgressText(prog({ stage: "harvesting" }))).toBe("Fetching docs…");
+    expect(backlogProgressText(prog({ stage: "clustering" }))).toBe("Clustering…");
+    expect(backlogProgressText(prog({ stage: "resolving" }))).toBe("Resolving targets…");
+    expect(backlogProgressText(prog())).toBe("Drafting 3/6 — ai-agents");
+    // No total yet (draft loop not reached, no topic) → plain "Drafting…".
+    expect(backlogProgressText(prog({ draftsTotal: 0, currentTopic: undefined }))).toBe("Drafting…");
+  });
+
+  test("running with progress renders the progress line + a live Cancel button", () => {
+    const m = backlogStripModel(base({ running: true, progress: prog() }), 0);
+    expect(m.progress).not.toBeNull();
+    const html = backlogControlHtml(m);
+    expect(html).toContain("Drafting 3/6 — ai-agents");
+    expect(html).toContain("started 14:32");
+    expect(html).toContain("3 drafts ready below");
+    expect(html).toContain('data-backlog-action="cancel-run"');
+    expect(html).not.toContain("Running…"); // progress replaces the plain disabled button
+  });
+
+  test("cancel requested → button reads Cancelling… and is disabled", () => {
+    const html = backlogProgressHtml(prog({ cancelRequested: true }));
+    expect(html).toContain("Cancelling…");
+    expect(html).toContain("disabled");
+  });
+
+  test("running WITHOUT progress (a weekly run holds the mutex) → plain disabled Running…", () => {
+    const m = backlogStripModel(base({ running: true, progress: null }), 0);
+    expect(m.progress).toBeNull();
+    const html = backlogControlHtml(m);
+    expect(html).toContain("Running…");
+    expect(html).not.toContain("data-backlog-action"); // not cancellable
+  });
+
+  test("currentTopic is HTML-escaped in the progress line", () => {
+    const html = backlogProgressHtml(prog({ currentTopic: "<b>x</b>" }));
+    expect(html).not.toContain("<b>x</b>");
+    expect(html).toContain("&lt;b&gt;");
+  });
+});
+
+describe("backlogOutcomeHtml — cancelled runs", () => {
+  test("cancelled after k drafts → 'undrafted docs returned to the queue'", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 40, drafted: 2, cancelled: { drafted: 2, of: 6 } });
+    expect(html).toContain("cancelled after 2/6 drafts");
+    expect(html).toContain("undrafted docs returned to the queue");
+  });
+
+  test("cancelled before drafting (drafted 0) → special-cased copy", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 40, drafted: 0, cancelled: { drafted: 0, of: 5 } });
+    expect(html).toContain("cancelled before drafting — batch docs returned to the queue");
   });
 });
 
