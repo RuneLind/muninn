@@ -35,12 +35,19 @@ export function sanitizeFilename(label: string): string {
  * normalized near-match of an existing page's title or alias; otherwise `create`
  * (the default for anything ambiguous — a duplicate page is recoverable at the
  * human gate, a wrong-page update wastes the cluster).
+ *
+ * Only pages of the SAME type and domain are match candidates: a title
+ * collision with e.g. a source page (or a life/ page for an ai cluster) must
+ * not turn into an update that overwrites it — nothing downstream re-checks
+ * the existing page's type (shapeGate judges the draft's own frontmatter, and
+ * isPathConfined's update branch is pure path equality).
  */
 export function resolveTarget(cluster: Cluster, index: WikiIndex | null): ResolvedTarget {
   const wanted = normalizeLabel(cluster.label);
 
   if (index) {
     for (const page of index.pages) {
+      if (page.type !== cluster.kind || page.domain !== cluster.domain) continue;
       const candidates = [page.title, page.name, ...page.aliases].map(normalizeLabel);
       if (candidates.includes(wanted)) {
         return { mode: "update", targetPath: page.relPath, existingRelPath: page.relPath };

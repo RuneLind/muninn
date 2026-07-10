@@ -85,4 +85,18 @@ describe("buildClusterPrompt", () => {
     expect(prompt).toContain("UNTRUSTED source material");
     expect(prompt).toContain("old-topic");
   });
+
+  test("lists existing pages with the exact-title reuse rule", () => {
+    const prompt = buildClusterPrompt([doc("c/1")], {
+      existingPages: ["Agent Loops (aliases: AI Agent Loops)", "Context Engineering"],
+    });
+    expect(prompt).toContain("The wiki ALREADY has pages");
+    expect(prompt).toContain("Agent Loops (aliases: AI Agent Loops)");
+    expect(prompt).toContain("exact title (WITHOUT any aliases annotation)");
+  });
+
+  test("omits the existing-pages block when the wiki index is empty", () => {
+    const prompt = buildClusterPrompt([doc("c/1")], { existingPages: [] });
+    expect(prompt).not.toContain("The wiki ALREADY has pages");
+  });
 });

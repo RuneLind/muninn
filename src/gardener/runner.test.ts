@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { runGardener, type GardenerDeps, type GardenerProgress } from "./runner.ts";
 import type { WikiProposal, InsertWikiProposalParams } from "../db/wiki-proposals.ts";
 import type { ListedDoc, RawFetchedDoc } from "./types.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 
 const WIKI = "/tmp/wiki-root";
 const NOW = Date.parse("2026-07-08T12:00:00Z");
@@ -124,6 +125,47 @@ describe("runGardener", () => {
     const alerts = await runGardener(deps);
     expect(inserted).toHaveLength(0);
     expect(alerts).toEqual([]);
+  });
+
+  test("existing concept/entity titles reach the cluster prompt; exact title match becomes an update", async () => {
+    const page = (over: Partial<WikiPageMeta>): WikiPageMeta => ({
+      name: "x", title: "X", type: "concept", domain: "ai", tags: [], aliases: [], relPath: "concepts/x.md",
+      ...over,
+    });
+    const index: WikiIndex = {
+      pages: [
+        page({ name: "Context Compaction", title: "Context Compaction", aliases: ["Compaction"], relPath: "concepts/Context Compaction.md" }),
+        page({ name: "Some Video", title: "Some Video Title", type: "source", relPath: "sources/Some Video.md" }),
+      ],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    let clusterPrompt = "";
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => index,
+      callCluster: async (prompt) => {
+        clusterPrompt = prompt;
+        // The model labels the cluster with the existing page's exact title.
+        return JSON.stringify([
+          { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
+        ]);
+      },
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+    });
+    await runGardener(deps);
+
+    // Concept titles (with aliases) are inlined; source-page titles are not.
+    expect(clusterPrompt).toContain("Context Compaction (aliases: Compaction)");
+    expect(clusterPrompt).not.toContain("Some Video Title");
+    // The exact-title label resolves to an UPDATE of the canonical page.
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
+    expect(inserted[0]!.baseHash).toBeTruthy();
   });
 });
 

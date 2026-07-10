@@ -128,15 +128,28 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // --- Cluster ---
   tracer?.start("cluster");
   deps.onProgress?.({ stage: "clustering" });
-  const [interestProfile, liveKeys, rejectedKeys] = await Promise.all([
+  // The wiki index is loaded BEFORE clustering (not just for target-resolve):
+  // the cluster model must know which pages already exist so it labels an
+  // already-covered topic with the canonical title verbatim — that exact match
+  // is what flips target-resolve to UPDATE instead of creating a near-duplicate
+  // sibling page ("AI-Assisted Coding Workflows" next to "AI Coding Workflows").
+  const [interestProfile, liveKeys, rejectedKeys, index] = await Promise.all([
     deps.loadInterestProfile(),
     deps.liveTopicKeys(),
     deps.rejectedTopicKeys(),
+    deps.getWikiIndex(),
   ]);
   const rejectedHint = [...new Set([...rejectedKeys, ...liveKeys])];
+  // Concept/entity pages only — the kinds the gardener drafts. Source pages
+  // (hundreds of video/article titles) would bloat the prompt without ever
+  // being a duplicate target.
+  const existingPages = (index?.pages ?? [])
+    .filter((p) => p.type === "concept" || p.type === "entity")
+    .map((p) => (p.aliases.length > 0 ? `${p.title} (aliases: ${p.aliases.join(", ")})` : p.title));
   const clusterPrompt = buildClusterPrompt(docs, {
     interestProfile,
     rejectedLabels: rejectedHint,
+    existingPages,
   });
   const clusterRaw = await deps.callCluster(clusterPrompt);
   const clusters = filterClusters(parseClusters(clusterRaw), {
@@ -166,10 +179,9 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     return [];
   }
 
-  // --- Target-resolve ---
+  // --- Target-resolve (reuses the index loaded before clustering) ---
   tracer?.start("resolve");
   deps.onProgress?.({ stage: "resolving" });
-  const index = await deps.getWikiIndex();
   const resolved = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
   tracer?.end("resolve", {
     creates: resolved.filter((r) => r.target.mode === "create").length,
