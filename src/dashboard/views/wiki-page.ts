@@ -370,12 +370,6 @@ export async function renderWikiPage(opts?: {
     .wiki-ask-status.error { color: var(--status-error); }
     /* Answer rendered in the article pane — reuses .wiki-article typography. */
     .wiki-ask-article { margin-top: 4px; }
-    /* Interim streamed text (whitespace-preserved) before answer_html swaps in. */
-    .wiki-ask-streaming {
-      font-size: 13.5px; line-height: 1.6; color: var(--text-secondary);
-      white-space: pre-wrap; word-wrap: break-word;
-      background: none; padding: 0; margin: 0; font-family: inherit;
-    }
     .wiki-ask-cite {
       display: inline-block; cursor: pointer; color: var(--accent-light);
       font-size: 0.78em; font-weight: 600; vertical-align: super; line-height: 0; padding: 0 1px;

@@ -13,6 +13,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
+import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import {
   filterPages,
   hasTypedHubs,
@@ -606,8 +607,11 @@ window.addEventListener("popstate", () => {
 // ── Ask tab: research-style Q&A scoped to this wiki ───────────────────
 // The controls (question box · status line · history list) live in the right
 // column's Ask tab; the ANSWER renders as a formatted article in the main pane
-// (articleWrap). Answer HTML is server-rendered (`answer_html` event) so the
-// reader shows real markdown, not raw "## …"/"**…**" text.
+// (articleWrap). The streaming buffer is rendered progressively through the same
+// `formatWebHtml` markdown pipeline (throttled to one frame per rAF), so headings/
+// lists/code grow formatted during the stream rather than as a wall of plain text;
+// the trailing server-rendered `answer_html` (with resolved citations) then swaps
+// in as the final article.
 interface AskCitation {
   n: number;
   collection: string;
@@ -631,8 +635,33 @@ const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askActive: AskTurn | null = null; // the turn currently streaming, or null
 let askBuffer = ""; // streamed plain-text accumulator for askActive
+let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
 const ASK_ANSWER_CHARS = 700;
+
+/** Throttle progressive markdown renders of the streaming buffer to one per
+ *  animation frame (as the web chat does), coalescing bursts of deltas. The
+ *  frame re-checks identity + final-HTML at FIRE time: a frame scheduled just
+ *  before `answer_html` lands (or before a follow-up ask swaps `askConn`) must
+ *  not repaint over the final article or clobber the newer turn's pane. */
+function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
+  if (askRenderRaf) return;
+  askRenderRaf = requestAnimationFrame(() => {
+    askRenderRaf = 0;
+    if (askConn !== conn) return; // superseded by a newer ask
+    if (turn.html) return; // final article already swapped in
+    const b = document.getElementById("askAnswerBody");
+    if (b) b.innerHTML = renderStreamingBody(askBuffer);
+  });
+}
+
+/** Cancel any pending progressive-render frame (on supersede / done / final swap). */
+function cancelAskStreamRender(): void {
+  if (askRenderRaf) {
+    cancelAnimationFrame(askRenderRaf);
+    askRenderRaf = 0;
+  }
+}
 
 /** Compact, bounded replay of committed turns sent as context on each follow-up. */
 function askHistoryParam(): string {
@@ -713,16 +742,11 @@ function askMetaText(turn: AskTurn): string {
   );
 }
 
-/** Whitespace-preserving interim block shown while the answer streams (before
- *  the server-rendered `answer_html` arrives / if it never does). */
-function streamingBodyHtml(text: string): string {
-  return '<pre class="wiki-ask-streaming">' + esc(text) + "</pre>";
-}
-
 /** Full article-pane HTML for one Ask turn: question headline, meta row, answer
- *  body (rendered HTML once available, else the streaming block), then Sources. */
+ *  body (rendered final article once available, else the progressively-formatted
+ *  streaming buffer), then Sources. */
 function askArticleHtml(turn: AskTurn, buffer: string): string {
-  const body = turn.html || streamingBodyHtml(buffer || turn.answer || "");
+  const body = askAnswerBodyHtml(turn.html, buffer, turn.answer);
   return (
     '<div class="wiki-article-head"><h1>' + esc(turn.question) + "</h1>" +
     '<div class="wiki-meta-row"><span class="wiki-dates" id="askAnswerMeta">' +
@@ -772,8 +796,10 @@ function askQuestion(): void {
   const q = input.value.trim();
   if (!q) return;
 
-  // Supersede any in-flight ask: close its stream so late events are ignored.
+  // Supersede any in-flight ask: close its stream so late events are ignored, and
+  // drop any pending progressive-render frame so it can't repaint the new pane.
   if (askConn) { askConn.close(); askConn = null; }
+  cancelAskStreamRender();
   askActive = null;
   input.value = "";
   const hint = document.getElementById("wikiAskHint");
@@ -811,8 +837,7 @@ function askQuestion(): void {
       if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
       askBuffer += d.text || "";
-      const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) b.innerHTML = streamingBodyHtml(askBuffer);
+      if (!turn.html) scheduleAskStreamRender(turn, conn);
     },
     done: (e: MessageEvent) => {
       if (askConn !== conn) return;
@@ -820,10 +845,13 @@ function askQuestion(): void {
       turn.answer = d.answer || askBuffer || "";
       turn.cited = d.cited || [];
       askBuffer = turn.answer;
-      // Keep the streamed plain text visible until (and unless) `answer_html`
-      // arrives; refresh sources + the meta count with the final `cited` set.
+      // Keep the streamed (now fully-formatted) answer visible until (and unless)
+      // `answer_html` arrives; render the final buffer directly and drop any
+      // pending frame so it can't repaint stale text afterward. Refresh sources +
+      // the meta count with the final `cited` set.
+      cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) b.innerHTML = streamingBodyHtml(turn.answer);
+      if (b && !turn.html) b.innerHTML = renderStreamingBody(turn.answer);
       refreshAskSources(turn);
       let statusText: string;
       if (d.lowConfidence) statusText = "No strong match — closest sources below";
@@ -841,9 +869,11 @@ function askQuestion(): void {
       const d = JSON.parse((e as MessageEvent).data);
       turn.html = d.html || null;
       if (typeof d.cited !== "undefined") turn.cited = d.cited || [];
-      // Swap the streamed text for the rendered article — but only if this turn's
-      // answer is still the one on screen (the user may have navigated away, in
-      // which case it's reachable via the history list).
+      // Swap the streamed markdown for the final rendered article — but only if
+      // this turn's answer is still the one on screen (the user may have navigated
+      // away, in which case it's reachable via the history list). Drop any pending
+      // progressive-render frame so it can't repaint over the final article.
+      cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
       if (b && turn.html) b.innerHTML = turn.html;
       refreshAskSources(turn);
