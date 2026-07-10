@@ -9,6 +9,7 @@ import {
   type SpawnHaikuOptions,
 } from "../scheduler/executor.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import { getRoleOverride } from "../db/role-overrides.ts";
 
 const log = getLog("ai", "haiku-router");
 
@@ -45,10 +46,20 @@ export function hasHaikuDirectAuth(): boolean {
   return !!(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_CODE_OAUTH_TOKEN);
 }
 
-function parseHaikuBackendEnv(): HaikuBackend | null {
-  const raw = process.env.HAIKU_BACKEND?.trim().toLowerCase();
-  if (raw === "cli" || raw === "anthropic" || raw === "copilot") return raw;
+function parseHaikuBackendValue(raw: string | undefined): HaikuBackend | null {
+  const v = raw?.trim().toLowerCase();
+  if (v === "cli" || v === "anthropic" || v === "copilot") return v;
   return null;
+}
+
+function parseHaikuBackendEnv(): HaikuBackend | null {
+  return parseHaikuBackendValue(process.env.HAIKU_BACKEND);
+}
+
+/** DB override (edited from /models) for the process-wide Haiku backend. Beats
+ *  the HAIKU_BACKEND env var; read from the sync in-memory snapshot. */
+function parseHaikuBackendOverride(): HaikuBackend | null {
+  return parseHaikuBackendValue(getRoleOverride("HAIKU_BACKEND"));
 }
 
 export interface BackendResolutionInput {
@@ -68,14 +79,17 @@ export interface BackendResolution {
  * backend plus a human-readable reason. `resolveBackend` and the startup
  * diagnostic both delegate here, so the order lives in exactly one place:
  *   1. explicit opts.backend
- *   2. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
- *   3. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
- *   4. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
- *   5. opts.connector === "copilot-sdk" → copilot
- *   6. floor → cli
+ *   2. HAIKU_BACKEND DB override (edited from /models) — hot, beats env
+ *   3. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
+ *   4. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
+ *   5. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
+ *   6. opts.connector === "copilot-sdk" → copilot
+ *   7. floor → cli
  */
 export function resolveBackendWithReason(opts: BackendResolutionInput): BackendResolution {
   if (opts.backend) return { backend: opts.backend, reason: "explicit override" };
+  const fromOverride = parseHaikuBackendOverride();
+  if (fromOverride) return { backend: fromOverride, reason: "HAIKU_BACKEND override" };
   const fromEnv = parseHaikuBackendEnv();
   if (fromEnv) return { backend: fromEnv, reason: "HAIKU_BACKEND env" };
   if (opts.haikuBackend) return { backend: opts.haikuBackend, reason: "bot config haikuBackend" };

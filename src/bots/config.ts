@@ -6,6 +6,7 @@ import type { McpStatusConfig } from "../ai/mcp-status.ts";
 import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
+import { getRoleOverride } from "../db/role-overrides.ts";
 
 const log = getLog("bots");
 
@@ -31,6 +32,57 @@ export interface ChannelListeningConfig {
 }
 
 export type ConnectorType = "claude-cli" | "copilot-sdk" | "openai-compat" | "claude-sdk";
+
+/** Valid `connector` values — shared by discovery validation + the /models editor. */
+export const CONNECTOR_VALUES = ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const;
+/** Valid `haikuBackend` values — shared by discovery validation + the /models editor. */
+export const HAIKU_BACKEND_VALUES = ["cli", "anthropic", "copilot"] as const;
+
+/** The per-bot config.json fields editable from the /models dashboard page. */
+export const EDITABLE_BOT_FIELDS = ["connector", "model", "thinkingMaxTokens", "haikuBackend"] as const;
+export type EditableBotField = (typeof EDITABLE_BOT_FIELDS)[number];
+
+export function isEditableBotField(key: string): key is EditableBotField {
+  return (EDITABLE_BOT_FIELDS as readonly string[]).includes(key);
+}
+
+/**
+ * Validate a single editable config.json field against the SAME rules — and the
+ * SAME messages — discovery logs (see `validateEnumField` / `validateScalarField`
+ * below), so a value the editor accepts is a value discovery would keep, and a
+ * value it rejects is rejected with the message discovery would have logged.
+ * Returns null when valid, otherwise the human-readable rejection message.
+ * `value === null` means "clear the field" (revert to default) — always valid.
+ */
+export function validateBotConfigField(name: string, field: EditableBotField, value: unknown): string | null {
+  if (value === null) return null;
+  switch (field) {
+    case "connector":
+      if (typeof value !== "string" || !(CONNECTOR_VALUES as readonly string[]).includes(value)) {
+        return `Bot "${name}" has unknown connector "${String(value)}" — valid values: ${CONNECTOR_VALUES.join(", ")}`;
+      }
+      return null;
+    case "haikuBackend":
+      if (typeof value !== "string" || !(HAIKU_BACKEND_VALUES as readonly string[]).includes(value)) {
+        return `Bot "${name}" has unknown haikuBackend "${String(value)}" — valid values: ${HAIKU_BACKEND_VALUES.join(", ")}`;
+      }
+      return null;
+    case "model":
+      if (typeof value !== "string") {
+        return `Bot "${name}" config.json field "model" should be a string but is ${typeof value} (${String(value)})`;
+      }
+      if (value.trim().length === 0) return `Bot "${name}" config.json field "model" must not be empty`;
+      return null;
+    case "thinkingMaxTokens":
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        return `Bot "${name}" config.json field "thinkingMaxTokens" should be a number but is ${typeof value} (${String(value)})`;
+      }
+      if (!Number.isInteger(value) || value < 0) {
+        return `Bot "${name}" config.json field "thinkingMaxTokens" must be a non-negative integer`;
+      }
+      return null;
+  }
+}
 
 export interface BotConfig {
   name: string;
@@ -270,7 +322,9 @@ export function discoverAllBots(): BotConfig[] {
  */
 export function resolveSummarizerBot(bots: BotConfig[]): BotConfig | undefined {
   if (bots.length === 0) return undefined;
-  const wanted = process.env.SUMMARIZER_BOT?.trim().toLowerCase();
+  // A DB override (edited from /models) beats the env var. The snapshot is
+  // primed at startup and refreshed on every write, so this stays sync + hot.
+  const wanted = (getRoleOverride("SUMMARIZER_BOT") ?? process.env.SUMMARIZER_BOT)?.trim().toLowerCase();
   if (wanted) {
     const match = bots.find((b) => b.name.toLowerCase() === wanted);
     if (match) return match;
@@ -308,7 +362,9 @@ function isFastResearchBot(bot: BotConfig): boolean {
  */
 export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
   if (bots.length === 0) return undefined;
-  const wanted = process.env.RESEARCH_BOT?.trim().toLowerCase();
+  // A DB override (edited from /models) beats the env var — see the note in
+  // resolveSummarizerBot for why this reads a sync in-memory snapshot.
+  const wanted = (getRoleOverride("RESEARCH_BOT") ?? process.env.RESEARCH_BOT)?.trim().toLowerCase();
   if (wanted) {
     const match = bots.find((b) => b.name.toLowerCase() === wanted);
     if (match) return match;

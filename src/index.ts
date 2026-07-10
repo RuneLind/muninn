@@ -90,6 +90,14 @@ try {
 // Load persisted activity events from DB
 await activityLog.loadFromDb();
 
+// Prime the role-override snapshot so the sync resolvers see DB overrides.
+try {
+  const { loadRoleOverrides } = await import("./db/role-overrides.ts");
+  await loadRoleOverrides();
+} catch (err) {
+  log.warn("Failed to load role overrides: {error}", { error: err instanceof Error ? err.message : String(err) });
+}
+
 // Migrate chat.config.json to DB (one-time, best-effort)
 try {
   const { migrateChatConfigFile } = await import("./chat/chat-config.ts");

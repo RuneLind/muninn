@@ -24,6 +24,7 @@ import { DEFAULT_MODEL as HAIKU_DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { getAllWatchers } from "../db/watchers.ts";
 import type { Watcher } from "../types.ts";
 import { getDb } from "../db/client.ts";
+import { getRoleOverride, type RoleKey } from "../db/role-overrides.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("dashboard", "models");
@@ -34,7 +35,7 @@ const EMBEDDINGS_MODEL = "Xenova/all-MiniLM-L6-v2";
 const GARDENER_DRAFT_THINKING_MAX_TOKENS = 8_000;
 
 /** Where an effective value came from, shown as a small chip on the page. */
-export type Origin = "config" | "env" | "default" | "derived" | "legacy" | "fixed" | "none";
+export type Origin = "config" | "env" | "override" | "default" | "derived" | "legacy" | "fixed" | "none";
 
 export interface EffectiveValue {
   value: string;
@@ -53,6 +54,14 @@ export interface BotEntry {
   usedChatModels: string[];
   /** Distinct Haiku models seen across all sources over the last window. */
   usedHaikuModels: string[];
+  /** Raw config.json values (undefined = unset) — the editor writes these, not
+   *  the resolved effective values above. */
+  rawConfig: {
+    connector?: string;
+    model?: string;
+    haikuBackend?: string;
+    thinkingMaxTokens?: number;
+  };
 }
 
 export interface RoleEntry {
@@ -63,6 +72,14 @@ export interface RoleEntry {
   note?: string;
   /** false ⇒ render the note as an error chip (constraint violated). */
   noteOk?: boolean;
+  /** When set, this row is editable — the override key it writes (`POST
+   *  /api/models/role`). Rows without it (e.g. the derived What's-new digest)
+   *  render read-only. */
+  overrideKey?: RoleKey;
+  /** The current DB override value, if any (pre-selects the editor). */
+  overrideValue?: string;
+  /** What the editor picks: a bot name (`bot`) or a Haiku backend (`backend`). */
+  editKind?: "bot" | "backend";
 }
 
 export interface PipelineEntry {
@@ -157,6 +174,7 @@ function uniqSorted(models: Iterable<string>): string[] {
  * them for the UI.
  */
 function haikuBackendOrigin(reason: string): Origin {
+  if (reason.includes("HAIKU_BACKEND override")) return "override";
   if (reason.includes("HAIKU_BACKEND env")) return "env";
   if (reason.includes("bot config")) return "config";
   if (reason.includes("legacy")) return "legacy";
@@ -242,6 +260,12 @@ export async function assembleModelsOverview(
       haikuBackendReason: reason,
       usedChatModels: uniqSorted(chatByBot.get(bot.name) ?? []),
       usedHaikuModels: uniqSorted(haikuByBot.get(bot.name) ?? []),
+      rawConfig: {
+        connector: bot.connector,
+        model: bot.model,
+        haikuBackend: bot.haikuBackend,
+        thinkingMaxTokens: bot.thinkingMaxTokens,
+      },
     };
   });
 
@@ -253,17 +277,24 @@ export async function assembleModelsOverview(
   // An env role var only wins when it actually matched a discovered bot —
   // the resolvers warn and fall back on a typo, and showing "env" next to the
   // fallback bot would hide exactly the misconfig class this page surfaces.
-  const envMatchesBot = (envValue: string | undefined, resolved: { name: string } | undefined) =>
-    Boolean(envValue && resolved && envValue.trim().toLowerCase() === resolved.name.toLowerCase());
-  const summarizerEnvWon = envMatchesBot(process.env.SUMMARIZER_BOT, summarizer);
-  const summarizerEnvIgnored = Boolean(process.env.SUMMARIZER_BOT) && !summarizerEnvWon;
-  const researchEnvWon = envMatchesBot(process.env.RESEARCH_BOT, research);
-  const researchEnvIgnored = Boolean(process.env.RESEARCH_BOT) && !researchEnvWon;
-  const researchOrigin: Origin = researchEnvWon ? "env" : "derived";
+  const matchesBot = (value: string | undefined, resolved: { name: string } | undefined) =>
+    Boolean(value && resolved && value.trim().toLowerCase() === resolved.name.toLowerCase());
+  // A DB override (edited from /models) beats env — mirror the resolver order so
+  // the chip reflects what actually won. Written overrides are validated against
+  // a real bot, so "set but ignored" only happens if the bot was later removed.
+  const summarizerOverride = getRoleOverride("SUMMARIZER_BOT");
+  const researchOverride = getRoleOverride("RESEARCH_BOT");
+  const summarizerOverrideWon = matchesBot(summarizerOverride, summarizer);
+  const researchOverrideWon = matchesBot(researchOverride, research);
+  const summarizerEnvWon = !summarizerOverrideWon && matchesBot(process.env.SUMMARIZER_BOT, summarizer);
+  const summarizerEnvIgnored = Boolean(process.env.SUMMARIZER_BOT) && !summarizerEnvWon && !summarizerOverrideWon;
+  const researchEnvWon = !researchOverrideWon && matchesBot(process.env.RESEARCH_BOT, research);
+  const researchEnvIgnored = Boolean(process.env.RESEARCH_BOT) && !researchEnvWon && !researchOverrideWon;
+  const researchOrigin: Origin = researchOverrideWon ? "override" : researchEnvWon ? "env" : "derived";
 
   // Summarizer + its TikTok constraint chip.
   {
-    const origin: Origin = summarizerEnvWon ? "env" : "default";
+    const origin: Origin = summarizerOverrideWon ? "override" : summarizerEnvWon ? "env" : "default";
     let note: string | undefined;
     let noteOk = true;
     if (summarizer) {
@@ -284,6 +315,9 @@ export async function assembleModelsOverview(
       origin,
       note,
       noteOk,
+      overrideKey: "SUMMARIZER_BOT",
+      overrideValue: summarizerOverride,
+      editKind: "bot",
     });
   }
 
@@ -299,14 +333,35 @@ export async function assembleModelsOverview(
         ? "non-opus fast default"
         : undefined,
     ...(researchEnvIgnored ? { noteOk: false } : {}),
+    overrideKey: "RESEARCH_BOT",
+    overrideValue: researchOverride,
+    editKind: "bot",
   });
 
   // What's-new wiki digest runs on the research bot (generateWikiDigest → executeOneShot).
   roles.push({
     role: "What's-new wiki digest",
     bot: research?.name ?? null,
-    origin: researchEnvWon ? "env" : "derived",
+    origin: researchOrigin,
     note: "runs on the research bot",
+  });
+
+  // Global Haiku backend — the process-wide HAIKU_BACKEND knob (override beats
+  // env beats the per-bot connector default). Editable; empty value clears it.
+  const haikuOverride = getRoleOverride("HAIKU_BACKEND");
+  const haikuEnv = process.env.HAIKU_BACKEND?.trim();
+  roles.push({
+    role: "Global Haiku backend (HAIKU_BACKEND)",
+    bot: haikuOverride ?? (haikuEnv || null),
+    origin: haikuOverride ? "override" : haikuEnv ? "env" : "default",
+    note: haikuOverride
+      ? "DB override — forces every bot's Haiku backend"
+      : haikuEnv
+        ? "env — forces every bot's Haiku backend"
+        : "unset — each bot uses its connector default (see Bots table)",
+    overrideKey: "HAIKU_BACKEND",
+    overrideValue: haikuOverride,
+    editKind: "backend",
   });
 
   // ---- Pipeline jobs -------------------------------------------------------
