@@ -42,6 +42,19 @@ export const BACKLOG_LOOKBACK_DAYS = 3650;
 
 /** The `watcher_snapshots` key holding a bot's already-offered backlog keys. */
 export const WIKI_GARDENER_OFFERED_KEY = "backlog:offered";
+/**
+ * The `watcher_snapshots` key holding the in-flight run journal (PR 3). Written
+ * BEFORE the offered set is persisted, cleared only on a success/cancel settle
+ * (deliberately KEPT on the error settle), so a crash — or a `runGardener` throw —
+ * mid-run leaves a durable record the recovery banner routes through Recover/Dismiss.
+ */
+export const WIKI_GARDENER_RUN_KEY = "backlog:run";
+/**
+ * The `watcher_snapshots` key holding the most recent run's {@link LastBacklogRun}
+ * (PR 3) — the durable fallback the extended GET reads after a restart drops the
+ * in-memory `lastBacklogRuns` map.
+ */
+export const WIKI_GARDENER_LAST_RUN_KEY = "backlog:lastRun";
 
 // ── Per-bot gardener mutex ───────────────────────────────────────────────────
 //
@@ -253,6 +266,52 @@ export interface LastBacklogRun {
   cancelled?: { drafted: number; of: number };
 }
 
+// ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
+
+/**
+ * The durable record of an in-flight backlog run, persisted to `backlog:run`
+ * (see {@link WIKI_GARDENER_RUN_KEY}). Written BEFORE the batch is offered so a
+ * crash between the journal and the offer recovers as a harmless no-op (it
+ * subtracts keys never offered), never the reverse — which would recreate today's
+ * unjournaled strand in that window.
+ */
+export interface RunJournal {
+  startedAt: number;
+  batchKeys: string[];
+}
+
+/** The minimal proposal projection {@link draftedKeysSince} scans (DB-shape subset). */
+export interface DraftedScanProposal {
+  sourceDocs: { collection: string; docId: string }[];
+  createdAt: number;
+}
+
+/**
+ * The keys of `batchKeys` that a run actually turned into drafts: a batch key is
+ * "drafted" when it appears in the `source_docs` of a proposal created **at or
+ * after** `startedAt`. The time bound is load-bearing — `source_docs` persist on
+ * terminal (rejected/applied) rows too, so after a Reset a re-batched doc could
+ * match an OLDER run's rejected proposal and be wrongly counted as drafted (and so
+ * never returned to the pool). Pure + DOM/DB-free — the single scan behind BOTH the
+ * GET-side `interrupted` count and the in-mutex auto-recover.
+ */
+export function draftedKeysSince(
+  proposals: DraftedScanProposal[],
+  startedAt: number,
+  batchKeys: string[],
+): Set<string> {
+  const batch = new Set(batchKeys);
+  const drafted = new Set<string>();
+  for (const p of proposals) {
+    if (p.createdAt < startedAt) continue;
+    for (const d of p.sourceDocs) {
+      const key = `${d.collection}/${d.docId}`;
+      if (batch.has(key)) drafted.add(key);
+    }
+  }
+  return drafted;
+}
+
 /** The number of proposals a gardener run drafted, from its alert id. */
 export function draftedCount(alerts: WatcherAlert[]): number {
   if (!alerts.length) return 0;
@@ -271,6 +330,16 @@ export interface StartBacklogRunDeps {
   assemble: () => Promise<AssembledBacklog>;
   /** Persist the new offered set (called BEFORE runGardener — at-most-once). */
   persistOffered: (keys: string[]) => Promise<void>;
+  /** Read the current offered set — used by the in-mutex auto-recover only. */
+  getOffered: () => Promise<Set<string>>;
+  /** Read the pending run journal (null when none) — first step of the work fn. */
+  readRunJournal: () => Promise<RunJournal | null>;
+  /** Write this run's journal — called BEFORE {@link persistOffered}. */
+  writeRunJournal: (j: RunJournal) => Promise<void>;
+  /** Clear the journal — on a success/cancel settle; KEPT on the error settle. */
+  clearRunJournal: () => Promise<void>;
+  /** The §3b proposal scan (fetch + {@link draftedKeysSince}) for the auto-recover. */
+  draftedKeysSince: (startedAt: number, batchKeys: string[]) => Promise<Set<string>>;
   /**
    * Run the gardener, threading the progress/cancel hooks the work fn constructs.
    * The route's closure merely forwards these into `runGardener`'s optional deps —
@@ -301,17 +370,43 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   if (!deps.gardenerEnabled) return { state: "disabled" };
 
   const run = runExclusive(deps.botName, async () => {
+    const startedAt = Date.now();
     // Seeded synchronously (before the first await) so the entry — and the cancel
     // flag `requestBacklogCancel` reads — exists the moment the mutex is acquired.
     backlogProgress.set(deps.botName, {
       stage: "assembling",
       draftsDone: 0,
       draftsTotal: 0,
-      startedAt: Date.now(),
+      startedAt,
       cancelRequested: false,
     });
 
+    // Auto-recover a pending journal (a prior crash / `runGardener` throw stranded
+    // its batch) BEFORE assembling the new one. Under the mutex — NOT a route
+    // pre-flight — so a near-simultaneous second Ingest click can't interleave this
+    // recover's offered-write between the other run's offered read and its persist
+    // (the lost-update TOCTOU class the reset guard documents). Recovered docs are
+    // newest-first candidates for the very batch we're about to select, so this is
+    // strictly safe. A journal-aware start also means a fresh Ingest never clobbers
+    // a pending journal and orphans that batch permanently.
+    const pending = await deps.readRunJournal();
+    if (pending) {
+      const drafted = await deps.draftedKeysSince(pending.startedAt, pending.batchKeys);
+      const undrafted = pending.batchKeys.filter((k) => !drafted.has(k));
+      if (undrafted.length) {
+        const offered = await deps.getOffered();
+        for (const k of undrafted) offered.delete(k);
+        await deps.persistOffered([...offered]);
+      }
+      // Clear before selecting the new batch — if assemble throws below, the strand
+      // is already returned to the pool and the journal must not linger as a ghost.
+      await deps.clearRunJournal();
+    }
+
     const assembled = await deps.assemble();
+    // Journal BEFORE offering — a crash between the two recovers as a harmless no-op
+    // (subtracting keys never offered); the reverse order would recreate the strand.
+    await deps.writeRunJournal({ startedAt, batchKeys: assembled.batchKeys });
     // Persist BEFORE running — a crash after this skips the batch, never re-offers it.
     const offeredWithBatch = [...new Set([...assembled.offeredBefore, ...assembled.batchKeys])];
     await deps.persistOffered(offeredWithBatch);
@@ -361,22 +456,40 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   });
   if (run === null) return { state: "running" };
 
-  void run
-    .then((r) => {
+  // Two-arg `then` (not `.then().catch()`): the rejection handler must catch only
+  // the RUN's failure, never a clearRunJournal failure inside the success handler —
+  // otherwise a journal-clear hiccup would wrongly record an error outcome.
+  void run.then(
+    async (r) => {
       backlogProgress.delete(deps.botName);
+      // Success OR cancel (a cancel returns normally) — clear the journal. A clear
+      // failure must not swallow recordLastRun, so it's guarded independently.
+      try {
+        await deps.clearRunJournal();
+      } catch (err) {
+        log.warn("Backlog run: clearing journal failed for {bot}: {error}", {
+          botName: deps.botName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       deps.recordLastRun({
         finishedAt: Date.now(),
         offered: r.offered,
         drafted: r.drafted,
         ...(r.cancelled ? { cancelled: r.cancelled } : {}),
       });
-    })
-    .catch((err) => {
+    },
+    (err) => {
       backlogProgress.delete(deps.botName);
+      // KEEP the journal on the error settle — a `runGardener` throw strands its
+      // batch exactly like a crash, so leaving `backlog:run` in place routes the
+      // errored batch through the same Recover/Dismiss banner (detection is
+      // `journal exists && !running`, which holds after an error settle too).
       const message = err instanceof Error ? err.message : String(err);
       log.error("Backlog run failed for {bot}: {error}", { botName: deps.botName, error: message });
       deps.recordLastRun({ finishedAt: Date.now(), offered: 0, drafted: 0, error: message });
-    });
+    },
+  );
   return { state: "started" };
 }
 

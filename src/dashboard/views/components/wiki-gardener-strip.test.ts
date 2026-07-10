@@ -6,6 +6,8 @@ import {
   backlogProgressText,
   backlogProgressHtml,
   backlogOutcomeHtml,
+  backlogBannerHtml,
+  backlogStripHtml,
   type BacklogProgress,
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
@@ -228,5 +230,32 @@ describe("backlogStripModel — degraded response (live fields absent)", () => {
     const copy = backlogConfirmHtml(m);
     expect(copy).not.toContain("NaN");
     expect(copy).not.toContain("undefined");
+  });
+});
+
+describe("backlogBannerHtml — interrupted-run recovery (PR 3)", () => {
+  test("absent when no interrupted run", () => {
+    const m = backlogStripModel(base(), 0);
+    expect(m.interrupted).toBeNull();
+    expect(backlogBannerHtml(m)).toBe("");
+  });
+
+  test("renders the drafted/of counts + Recover/Dismiss actions", () => {
+    const m = backlogStripModel(base({ interrupted: { at: 0, batchSize: 40, drafted: 0 } }), 0);
+    const html = backlogBannerHtml(m);
+    expect(html).toContain("was interrupted");
+    expect(html).toContain(">0<"); // drafted
+    expect(html).toContain(">40<"); // of batchSize
+    expect(html).toContain('data-backlog-action="recover"');
+    expect(html).toContain('data-backlog-action="dismiss"');
+    // The banner is prepended to the full strip.
+    expect(backlogStripHtml(m)).toStartWith('<div class="bk-banner">');
+  });
+
+  test("shows k of n when some drafts landed", () => {
+    const m = backlogStripModel(base({ interrupted: { at: 0, batchSize: 40, drafted: 3 } }), 0);
+    const html = backlogBannerHtml(m);
+    expect(html).toContain(">3<");
+    expect(html).toContain(">40<");
   });
 });

@@ -119,6 +119,35 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
   });
+
+  // backlog-recover / backlog-dismiss (PR 3) share the same resolution guards.
+  test("backlog-recover: standalone (non-bot) wiki → 400 bot-only error", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+  });
+
+  test("backlog-recover: unknown wiki → 404 not-configured", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-recover?wiki=does-not-exist", { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+
+  test("backlog-dismiss: standalone (non-bot) wiki → 400 bot-only error", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=lintwiki", { method: "POST" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("only available for bot wikis");
+  });
+
+  test("backlog-dismiss: unknown wiki → 404 not-configured", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-dismiss?wiki=does-not-exist", { method: "POST" });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
 });
 
 /**
@@ -197,6 +226,31 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     // Sourced from src/gardener/backlog.ts — the client never hardcodes them.
     expect(merged.batchSize).toBe(40);
     expect(merged.maxProposals).toBe(8);
+  });
+
+  test("carries the interrupted-run field through to the wire (PR 3 recovery banner)", () => {
+    const merged = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 2,
+      remaining: 0,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+      progress: null,
+      interrupted: { at: 1700, batchSize: 40, drafted: 0 },
+    });
+    expect(merged.interrupted).toEqual({ at: 1700, batchSize: 40, drafted: 0 });
+
+    // Absent/null interrupted still merges cleanly (no banner).
+    const clean = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+      progress: null,
+      interrupted: null,
+    });
+    expect(clean.interrupted).toBeNull();
   });
 });
 

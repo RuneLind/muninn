@@ -357,6 +357,38 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   existing 3s GET poll), no offering-after-drafting. The last-run record grows an
   optional `cancelled: {drafted, of}` field (`of` = `draftsTotal` from the last
   `onProgress`) — distinct from `error`.
+- **Crash safety — run journal + recovery** (PR 3): before offering a batch the
+  work fn persists a **run journal** to `watcher_snapshots` key `backlog:run`
+  (`{startedAt, batchKeys}`), and the settled outcome to `backlog:lastRun` (a durable
+  fallback the extended GET reads after a restart drops the in-memory `lastBacklogRuns`
+  map). Journal order matters: written **BEFORE** `persistOffered` (a crash between the
+  two recovers as a harmless no-op — subtracting keys never offered — whereas the
+  reverse would recreate the unjournaled strand). The journal is cleared on a
+  success/cancel settle but **deliberately KEPT on the error settle** — a `runGardener`
+  throw (huginn 500 mid-harvest, draft-timeout escalation) strands its batch exactly
+  like a process crash, so leaving `backlog:run` in place routes the errored batch
+  through the same Recover/Dismiss banner (detection is `journal exists && !running`,
+  which holds after an error settle too). The settle uses a two-arg `then(onFulfilled,
+  onRejected)` so a clear-journal hiccup in the success path can't be miscaught as an
+  error outcome. **Interrupted-run detection** (GET, outside the cache): when a journal
+  exists and no run is in flight, the GET adds `interrupted: {at, batchSize, drafted}`,
+  where `drafted` = journal batch keys found in the bot's proposals' `source_docs` with
+  `created_at ≥ startedAt` (the shared pure `draftedKeysSince(proposals, startedAt,
+  batchKeys)` scan — the **time bound is load-bearing**: `source_docs` persist on
+  terminal rows, so after a Reset a re-batched doc could match an OLDER run's rejected
+  proposal and be wrongly counted as drafted, hence never returned). **Recovery**:
+  `backlog-recover` returns the undrafted docs (`batchKeys − draftedKeys` — the coarse
+  math, chosen because a crash may predate clustering so no cluster info exists) to the
+  offered pool and clears the journal; `backlog-dismiss` clears only. A fresh Ingest
+  **auto-recovers a pending journal in-mutex as the work fn's first step** (before
+  `assemble()`), NOT as a route pre-flight — a check-then-recover in the route is the
+  same lost-update TOCTOU class the reset guard documents (two near-simultaneous clicks
+  can interleave a recover's offered-write between another run's offered read and its
+  union persist). Under the mutex, recover and the new run's read/persist serialize by
+  construction; recovered docs are newest-first candidates for the very batch being
+  started, so auto-recover (vs a 409) keeps the one-click UX and is strictly safe. The
+  banner's Recover/Dismiss buttons (`data-backlog-action="recover"/"dismiss"`) render
+  from the pure `backlogBannerHtml` in `wiki-gardener-strip.ts`.
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances
@@ -365,10 +397,14 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   and drops `runGardener`'s alerts (no Telegram — the user is at the dashboard).
 - **Routes** (`wiki-gardener-routes.ts`): `POST /api/wiki/gardener/backlog-run`,
   `POST /api/wiki/gardener/backlog-cancel`, `POST /api/wiki/gardener/backlog-reset`,
+  `POST /api/wiki/gardener/backlog-recover`, `POST /api/wiki/gardener/backlog-dismiss`,
   and the extended `GET /api/wiki/ingest-backlog` (adds `running`/`offered`/`remaining`/
-  `lastBacklogRun`/`watcherSeeded`/`progress` + the batch constants `batchSize`/
-  `maxProposals` so the confirm panel never hardcodes them, merged fresh OUTSIDE the
-  5-min cache — never mutating the cached object). The shared gardener seams are
+  `lastBacklogRun`/`watcherSeeded`/`progress`/`interrupted` + the batch constants
+  `batchSize`/`maxProposals` so the confirm panel never hardcodes them, merged fresh
+  OUTSIDE the 5-min cache — never mutating the cached object). `BacklogRouteDeps`'
+  offered read/write is generalized to per-key `getSnapshot`/`setSnapshot` (the offered
+  set, run journal, and last-run all share `watcher_snapshots`), plus `listProposals`
+  for the interrupted-run scan. The shared gardener seams are
   factored into `buildGardenerSeams` (exported from `wiki-gardener.ts`) so the weekly
   checker and the backlog run wire identical fetch/cluster/draft/DB seams. The client
   strip (PR 2) replaces the disabled `Running…` button with a live progress line

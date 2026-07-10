@@ -7,15 +7,30 @@ import {
   startBacklogRun,
   resetBacklogOffered,
   draftedCount,
+  draftedKeysSince,
   getBacklogProgress,
   requestBacklogCancel,
   __resetGardenerMutexForTest,
   BACKLOG_BATCH_SIZE,
   type AssembleBacklogDeps,
   type AssembledBacklog,
+  type RunJournal,
 } from "./backlog.ts";
 import type { QueuedDoc } from "../wiki/ingest-backlog.ts";
 import type { WatcherAlert } from "../types.ts";
+
+/**
+ * No-op journal seams (PR 3) — every `startBacklogRun` case that doesn't exercise
+ * the run journal spreads these so the work fn's readRunJournal (top) and
+ * clearRunJournal (settle) are harmless. `readRunJournal: null` ⇒ no auto-recover.
+ */
+const NOOP_JOURNAL = {
+  getOffered: async () => new Set<string>(),
+  readRunJournal: async (): Promise<RunJournal | null> => null,
+  writeRunJournal: async () => {},
+  clearRunJournal: async () => {},
+  draftedKeysSince: async () => new Set<string>(),
+};
 
 // ── selectBacklogBatch ───────────────────────────────────────────────────────
 
@@ -182,6 +197,7 @@ describe("startBacklogRun", () => {
 
   test("no watcher → no-watcher (offered memory needs the FK)", () => {
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: false,
@@ -195,6 +211,7 @@ describe("startBacklogRun", () => {
 
   test("gardener disabled → disabled", () => {
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: false,
       hasWatcher: true,
@@ -206,18 +223,27 @@ describe("startBacklogRun", () => {
     expect(r.state).toBe("disabled");
   });
 
-  test("persists the offered union BEFORE running the gardener, records the outcome", async () => {
+  test("journals BEFORE offering, persists the offered union BEFORE running, records + clears on success", async () => {
     const calls: string[] = [];
     let persistedKeys: string[] = [];
+    let journalled: RunJournal | null = null;
     let recorded: { offered: number; drafted: number } | null = null;
 
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
       assemble: async () => {
         calls.push("assemble");
         return assembled;
+      },
+      writeRunJournal: async (j) => {
+        calls.push("journal");
+        journalled = j;
+      },
+      clearRunJournal: async () => {
+        calls.push("clear");
       },
       persistOffered: async (keys) => {
         calls.push("persist");
@@ -236,7 +262,12 @@ describe("startBacklogRun", () => {
     // Let the detached run settle.
     await new Promise((res) => setTimeout(res, 10));
 
-    expect(calls).toEqual(["assemble", "persist", "run"]);
+    // Journal is written AFTER assemble (needs batchKeys) but BEFORE persistOffered;
+    // the journal is cleared on the success settle.
+    expect(calls).toEqual(["assemble", "journal", "persist", "run", "clear"]);
+    expect(journalled).not.toBeNull();
+    expect(journalled!.batchKeys).toEqual(["c/a", "c/b"]);
+    expect(typeof journalled!.startedAt).toBe("number");
     // Union of offeredBefore (c/z) + the batch keys (c/a, c/b), deduped.
     expect([...persistedKeys].sort()).toEqual(["c/a", "c/b", "c/z"]);
     expect(recorded).not.toBeNull();
@@ -251,6 +282,7 @@ describe("startBacklogRun", () => {
     let runCount = 0;
 
     const deps = {
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
@@ -273,13 +305,19 @@ describe("startBacklogRun", () => {
     expect(runCount).toBe(1);
   });
 
-  test("records an error outcome + releases the mutex when the run throws", async () => {
+  test("records an error outcome + releases the mutex + KEEPS the journal when the run throws", async () => {
     let recorded: { error?: string } | null = null;
+    let cleared = false;
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
       assemble: async () => assembled,
+      writeRunJournal: async () => {},
+      clearRunJournal: async () => {
+        cleared = true;
+      },
       persistOffered: async () => {},
       runGardener: async () => {
         throw new Error("draft blew up");
@@ -293,6 +331,103 @@ describe("startBacklogRun", () => {
     expect(recorded).not.toBeNull();
     expect(recorded!.error).toContain("draft blew up");
     expect(gardenerRunInFlight("jarvis")).toBe(false);
+    // The journal is deliberately NOT cleared — the errored batch routes through
+    // the same Recover/Dismiss banner as a crash.
+    expect(cleared).toBe(false);
+  });
+
+  test("auto-recovers a pending journal (returns undrafted docs) BEFORE offering the new batch", async () => {
+    // A prior run journalled c/p1..c/p4; only c/p1 produced a draft (drafted set).
+    // The offered set still carries all four (persisted before the crash). Recover
+    // must return c/p2,c/p3,c/p4 to the pool, then clear the journal, THEN assemble.
+    const calls: string[] = [];
+    const persists: string[][] = [];
+    let cleared = 0;
+
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      readRunJournal: async () => {
+        calls.push("readJournal");
+        return { startedAt: 1000, batchKeys: ["c/p1", "c/p2", "c/p3", "c/p4"] };
+      },
+      draftedKeysSince: async () => new Set(["c/p1"]),
+      getOffered: async () => new Set(["c/p1", "c/p2", "c/p3", "c/p4", "c/z"]),
+      clearRunJournal: async () => {
+        calls.push("clearJournal");
+        cleared++;
+      },
+      assemble: async () => {
+        calls.push("assemble");
+        return assembled;
+      },
+      writeRunJournal: async () => {
+        calls.push("writeJournal");
+      },
+      persistOffered: async (keys) => {
+        calls.push("persist");
+        persists.push([...keys].sort());
+      },
+      runGardener: async () => [],
+      recordLastRun: () => {},
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The recover reads the journal, persists offered − undrafted, clears the old
+    // journal, THEN assembles + writes the new journal + persists the new offer;
+    // the success settle clears the (fresh) journal a final time.
+    expect(calls).toEqual([
+      "readJournal",
+      "persist",
+      "clearJournal",
+      "assemble",
+      "writeJournal",
+      "persist",
+      "clearJournal",
+    ]);
+    // First persist = recover: offered minus the 3 undrafted docs (c/p1 stays — it
+    // drafted; c/z is unrelated and stays).
+    expect(persists[0]).toEqual(["c/p1", "c/z"]);
+    // Second persist = the new batch's offered union (offeredBefore c/z ∪ c/a,c/b).
+    expect(persists[1]).toEqual(["c/a", "c/b", "c/z"]);
+    // The old journal is cleared exactly once by the recover (the success settle
+    // clears again on its own; that's a separate no-op clear on the fresh journal).
+    expect(cleared).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── draftedKeysSince (interrupted-run scan) ──────────────────────────────────
+
+describe("draftedKeysSince", () => {
+  function prop(createdAt: number, ...keys: string[]) {
+    return {
+      createdAt,
+      sourceDocs: keys.map((k) => {
+        const [collection, docId] = k.split("/");
+        return { collection: collection!, docId: docId! };
+      }),
+    };
+  }
+
+  test("counts batch keys that appear in proposals created at/after startedAt", () => {
+    const proposals = [prop(2000, "c/a", "c/x"), prop(3000, "c/b")];
+    const drafted = draftedKeysSince(proposals, 1500, ["c/a", "c/b", "c/c"]);
+    expect([...drafted].sort()).toEqual(["c/a", "c/b"]);
+  });
+
+  test("time-bound: an OLDER proposal matching a batch key is NOT counted", () => {
+    // c/a is a batch key, but the only proposal citing it predates the run start
+    // (e.g. a rejected proposal from a previous run, re-batched after a Reset).
+    const proposals = [prop(500, "c/a"), prop(2500, "c/b")];
+    const drafted = draftedKeysSince(proposals, 1000, ["c/a", "c/b"]);
+    expect([...drafted]).toEqual(["c/b"]); // c/a excluded by the time bound
+  });
+
+  test("empty when no proposal cites a batch key", () => {
+    const drafted = draftedKeysSince([prop(9000, "c/other")], 0, ["c/a", "c/b"]);
+    expect(drafted.size).toBe(0);
   });
 });
 
@@ -318,6 +453,7 @@ describe("backlog progress + soft cancel", () => {
     const gate = new Promise<WatcherAlert[]>((res) => (releaseRun = () => res([])));
 
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
@@ -340,13 +476,18 @@ describe("backlog progress + soft cancel", () => {
     expect(getBacklogProgress("jarvis")).toBeNull();
   });
 
-  test("cancelled run returns exactly the skipped clusters' docs to offered; declined stay offered", async () => {
+  test("cancelled run returns exactly the skipped clusters' docs to offered; declined stay offered; clears journal", async () => {
     const persistCalls: string[][] = [];
+    let cleared = false;
     const r = startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
       assemble: async () => assembled,
+      clearRunJournal: async () => {
+        cleared = true;
+      },
       persistOffered: async (keys) => {
         persistCalls.push([...keys].sort());
       },
@@ -366,11 +507,14 @@ describe("backlog progress + soft cancel", () => {
     // Second persist AFTER cancel: minus the skipped c/c,c/d → declined stay offered.
     expect(persistCalls[1]).toEqual(["c/a", "c/b", "c/z"]);
     expect(persistCalls).toHaveLength(2);
+    // A cancel settles via the fulfilled path, so the journal IS cleared.
+    expect(cleared).toBe(true);
   });
 
   test("records the cancelled outcome (drafted/of) from the hooks", async () => {
     let recorded: { cancelled?: { drafted: number; of: number } } | null = null;
     startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,
@@ -395,6 +539,7 @@ describe("backlog progress + soft cancel", () => {
     const persistCalls: string[][] = [];
     let recorded: { cancelled?: unknown } | null = null;
     startBacklogRun({
+      ...NOOP_JOURNAL,
       botName: "jarvis",
       gardenerEnabled: true,
       hasWatcher: true,

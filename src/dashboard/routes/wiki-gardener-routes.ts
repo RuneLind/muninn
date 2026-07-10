@@ -32,7 +32,9 @@ import {
   assembleBacklog,
   startBacklogRun,
   resetBacklogOffered,
+  runExclusive,
   draftedCount,
+  draftedKeysSince,
   gardenerRunInFlight,
   getBacklogProgress,
   requestBacklogCancel,
@@ -41,10 +43,14 @@ import {
   BACKLOG_LOOKBACK_DAYS,
   DRAFT_TIMEOUT_MS,
   WIKI_GARDENER_OFFERED_KEY,
+  WIKI_GARDENER_RUN_KEY,
+  WIKI_GARDENER_LAST_RUN_KEY,
   type AssembledBacklog,
   type BacklogProgress,
+  type DraftedScanProposal,
   type GardenerRunHooks,
   type LastBacklogRun,
+  type RunJournal,
 } from "../../gardener/backlog.ts";
 import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
 import {
@@ -170,13 +176,16 @@ export interface GardenerWatcherRef {
 
 /**
  * The wider deps the backlog-run routes need on top of {@link CoverageDeps}: the
- * bot's `wiki-gardener` watcher row (offered memory's `watcher_id`) plus the
- * offered-set snapshot read/write. All injectable so the routes test without a DB.
+ * bot's `wiki-gardener` watcher row (offered memory's `watcher_id`), a generic
+ * per-key snapshot read/write (offered / run journal / last-run all live in the
+ * same `watcher_snapshots` table), and the bot's proposal list (for the
+ * interrupted-run scan). All injectable so the routes test without a DB.
  */
 export interface BacklogRouteDeps extends CoverageDeps {
   getWikiGardenerWatcher: (botName: string) => Promise<GardenerWatcherRef | null>;
-  getOffered: (watcherId: string) => Promise<Set<string>>;
-  setOffered: (watcherId: string, keys: string[]) => Promise<void>;
+  getSnapshot: (watcherId: string, key: string) => Promise<unknown>;
+  setSnapshot: (watcherId: string, key: string, value: unknown) => Promise<void>;
+  listProposals: (botName: string) => Promise<DraftedScanProposal[]>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -185,12 +194,25 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
     const w = await getWikiGardenerWatcher(botName);
     return w ? { id: w.id } : null;
   },
-  getOffered: async (watcherId) => {
-    const snap = await getWatcherSnapshot(watcherId, WIKI_GARDENER_OFFERED_KEY);
-    return new Set(Array.isArray(snap) ? (snap as string[]) : []);
-  },
-  setOffered: (watcherId, keys) => setWatcherSnapshot(watcherId, WIKI_GARDENER_OFFERED_KEY, keys),
+  getSnapshot: (watcherId, key) => getWatcherSnapshot(watcherId, key),
+  setSnapshot: (watcherId, key, value) => setWatcherSnapshot(watcherId, key, value),
+  listProposals: (botName) => listAllWikiProposals(botName),
 };
+
+/** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
+async function readOffered(deps: BacklogRouteDeps, watcherId: string): Promise<Set<string>> {
+  const snap = await deps.getSnapshot(watcherId, WIKI_GARDENER_OFFERED_KEY);
+  return new Set(Array.isArray(snap) ? (snap as string[]) : []);
+}
+
+/** Read the run-journal snapshot, validating its shape (null when absent/cleared). */
+async function readRunJournal(deps: BacklogRouteDeps, watcherId: string): Promise<RunJournal | null> {
+  const snap = await deps.getSnapshot(watcherId, WIKI_GARDENER_RUN_KEY);
+  if (snap && typeof snap === "object" && Array.isArray((snap as { batchKeys?: unknown }).batchKeys)) {
+    return snap as RunJournal;
+  }
+  return null;
+}
 
 /**
  * Per-bot record of the most recent manual backlog run's outcome (in-memory —
@@ -214,6 +236,12 @@ export interface BacklogLiveFields {
   watcherSeeded: boolean;
   /** Live progress of an in-flight drain (null when idle — including weekly runs). */
   progress: BacklogProgress | null;
+  /**
+   * Set when a run journal survived a crash / error settle AND no run is in flight
+   * (PR 3) — backs the recovery banner. `drafted` = journal batch keys that produced
+   * proposals since `at`. Absent/null when there is no stranded run.
+   */
+  interrupted?: { at: number; batchSize: number; drafted: number } | null;
 }
 
 /**
@@ -613,17 +641,40 @@ export function registerWikiGardenerRoutes(
       // cached computation above. `mergeBacklogLiveFields` spreads a fresh object
       // (and strips the server-only `queuedKeys`), never mutating the cached entry.
       const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
-      const offeredSet = watcher ? await backlogDeps.getOffered(watcher.id) : new Set<string>();
+      const offeredSet = watcher ? await readOffered(backlogDeps, watcher.id) : new Set<string>();
       const queuedKeys = data.queuedKeys ?? [];
       const remaining = queuedKeys.filter((k) => !offeredSet.has(k)).length;
+      const running = gardenerRunInFlight(bot.name);
+
+      // Last-run: the in-memory record wins; after a restart it's gone, so fall back
+      // to the durable `backlog:lastRun` snapshot written alongside it.
+      let lastBacklogRun = getLastBacklogRun(bot.name);
+      if (!lastBacklogRun && watcher) {
+        const snap = await backlogDeps.getSnapshot(watcher.id, WIKI_GARDENER_LAST_RUN_KEY);
+        if (snap && typeof snap === "object") lastBacklogRun = snap as LastBacklogRun;
+      }
+
+      // Interrupted-run detection: a journal that outlived its run (a crash or an
+      // error settle KEEPS it) with no run currently in flight ⇒ surface a banner.
+      let interrupted: BacklogLiveFields["interrupted"] = null;
+      if (watcher && !running) {
+        const journal = await readRunJournal(backlogDeps, watcher.id);
+        if (journal) {
+          const proposals = await backlogDeps.listProposals(bot.name);
+          const drafted = draftedKeysSince(proposals, journal.startedAt, journal.batchKeys);
+          interrupted = { at: journal.startedAt, batchSize: journal.batchKeys.length, drafted: drafted.size };
+        }
+      }
+
       return c.json(
         mergeBacklogLiveFields(data, {
-          running: gardenerRunInFlight(bot.name),
+          running,
           offered: offeredSet.size,
           remaining,
-          lastBacklogRun: getLastBacklogRun(bot.name),
+          lastBacklogRun,
           watcherSeeded: !!watcher,
           progress: getBacklogProgress(bot.name),
+          interrupted,
         }),
       );
     } catch (err) {
@@ -662,9 +713,17 @@ export function registerWikiGardenerRoutes(
           sweepWikiUrls: collectWikiUrls,
           getConsumed: backlogDeps.getConsumed,
           getPending: backlogDeps.getPending,
-          getOffered: () => backlogDeps.getOffered(watcher!.id),
+          getOffered: () => readOffered(backlogDeps, watcher!.id),
         }),
-      persistOffered: (keys) => backlogDeps.setOffered(watcher!.id, keys),
+      persistOffered: (keys) => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_OFFERED_KEY, keys),
+      // Journal seams (PR 3) — the auto-recover + crash-safety record all ride the
+      // same watcher_snapshots table, keyed by `backlog:run`.
+      getOffered: () => readOffered(backlogDeps, watcher!.id),
+      readRunJournal: () => readRunJournal(backlogDeps, watcher!.id),
+      writeRunJournal: (j) => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_RUN_KEY, j),
+      clearRunJournal: () => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_RUN_KEY, null),
+      draftedKeysSince: async (startedAt, batchKeys) =>
+        draftedKeysSince(await backlogDeps.listProposals(bot.name), startedAt, batchKeys),
       // The tracer root span must be finished HERE — runGardener only creates
       // sub-spans (the weekly checker finishes its own tracer the same way);
       // without this every drain leaves a malformed open trace in the waterfall.
@@ -684,7 +743,19 @@ export function registerWikiGardenerRoutes(
           throw err;
         }
       },
-      recordLastRun: (r) => setLastBacklogRun(bot.name, r),
+      recordLastRun: (r) => {
+        setLastBacklogRun(bot.name, r);
+        // Durable fallback for the extended GET after a restart drops the in-memory
+        // map. Best-effort — a snapshot-write failure must not fail the settled run.
+        if (watcher) {
+          void backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_LAST_RUN_KEY, r).catch((err) => {
+            log.warn("Backlog run: persisting last-run snapshot failed for {bot}: {error}", {
+              bot: bot.name,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+      },
     });
 
     if (result.state === "no-watcher") {
@@ -708,7 +779,9 @@ export function registerWikiGardenerRoutes(
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
     if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
 
-    const outcome = await resetBacklogOffered(bot.name, () => backlogDeps.setOffered(watcher.id, []));
+    const outcome = await resetBacklogOffered(bot.name, () =>
+      backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY, []),
+    );
     if (!outcome.ok) return c.json({ state: "running", error: outcome.error }, 409);
     return c.json({ ok: true });
   });
@@ -727,6 +800,53 @@ export function registerWikiGardenerRoutes(
     if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
 
     return c.json({ cancelled: requestBacklogCancel(bot.name) });
+  });
+
+  // Recover an interrupted (crashed / errored) drain — return its undrafted batch
+  // docs to the offered pool so they're eligible again, then clear the journal. The
+  // math is DELIBERATELY the coarse `batchKeys − draftedKeys` (not PR 2's cancel
+  // math that subtracts only skipped clusters' docs): a crash may predate clustering
+  // so no cluster info exists, and the user explicitly chose Recover over Dismiss.
+  // Held under the per-bot mutex so a recover click racing an Ingest click serializes
+  // rather than interleaving (the same check-then-persist TOCTOU §3a rejects for
+  // run-start). No journal (a refresh race) ⇒ a clean no-op 200 `{recovered:0}`.
+  app.post("/api/wiki/gardener/backlog-recover", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot } = resolved;
+
+    const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
+
+    const run = runExclusive(bot.name, async () => {
+      const journal = await readRunJournal(backlogDeps, watcher.id);
+      if (!journal) return { recovered: 0 };
+      const proposals = await backlogDeps.listProposals(bot.name);
+      const drafted = draftedKeysSince(proposals, journal.startedAt, journal.batchKeys);
+      const undrafted = journal.batchKeys.filter((k) => !drafted.has(k));
+      const offered = await readOffered(backlogDeps, watcher.id);
+      for (const k of undrafted) offered.delete(k);
+      await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY, [...offered]);
+      await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null);
+      return { recovered: undrafted.length };
+    });
+    if (run === null) return c.json({ error: "a run is in flight" }, 409);
+    return c.json(await run);
+  });
+
+  // Dismiss an interrupted drain — leave the batch skipped (offered), just clear the
+  // journal so the banner goes away. No journal is a clean no-op (refresh-race
+  // friendly). Same resolution/watcher guards as the other backlog POSTs.
+  app.post("/api/wiki/gardener/backlog-dismiss", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot } = resolved;
+
+    const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
+
+    await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null);
+    return c.json({ ok: true });
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.

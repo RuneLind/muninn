@@ -62,6 +62,8 @@ export interface IngestBacklogResponse {
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
   progress?: BacklogProgress | null;
+  /** Interrupted (crashed/errored) run awaiting Recover/Dismiss (PR 3). */
+  interrupted?: { at: number; batchSize: number; drafted: number } | null;
   // Batch constants (PR 1) — echoed from src/gardener/backlog.ts so the confirm
   // panel renders "drain a batch of N … up to M drafts" without hardcoding.
   batchSize?: number;
@@ -78,6 +80,8 @@ export interface BacklogStripModel {
   running: boolean;
   /** Live drain progress when this bot's own drain holds the mutex (else null). */
   progress: BacklogProgress | null;
+  /** An interrupted run awaiting Recover/Dismiss (null when none) — banner source. */
+  interrupted: { at: number; batchSize: number; drafted: number } | null;
   /** No wiki-gardener watcher seeded ⇒ hide the run/reset control entirely. */
   controlHidden: boolean;
   showRun: boolean;
@@ -120,6 +124,7 @@ export function backlogStripModel(
     draftsAwaitingReview: Math.max(0, numOr(pendingDraftCount, 0)),
     running,
     progress: data.progress ?? null,
+    interrupted: data.interrupted ?? null,
     controlHidden,
     showRun: !controlHidden && !running && remaining > 0,
     // Reset whenever offered-and-still-queued > 0 (not the raw all-time offered):
@@ -262,12 +267,35 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   return ` <span class="bk-run-note">last run finished — nothing clustered; ${run.offered} docs offered</span>`;
 }
 
+/**
+ * The interrupted-run recovery banner (pure HTML). Rendered above the strip when
+ * the GET carries an `interrupted` field — a run journal that outlived its run (a
+ * crash or an error settle) with nothing in flight. Offers Recover (return the
+ * undrafted batch to the pool) or Dismiss (leave it skipped). Empty when none.
+ */
+export function backlogBannerHtml(model: BacklogStripModel): string {
+  const i = model.interrupted;
+  if (!i) return "";
+  const clock = fmtClock(i.at);
+  const when = clock ? ` started ${esc(clock)}` : "";
+  return (
+    '<div class="bk-banner">' +
+    `<span class="bk-banner-msg">⚠ A drain${when} was interrupted — ` +
+    `${strong(i.drafted)} of ${strong(i.batchSize)} docs produced drafts.</span>` +
+    '<span class="bk-banner-actions">' +
+    '<button class="gard-btn bk-recover" data-backlog-action="recover">Recover batch</button>' +
+    '<button class="gard-btn bk-dismiss" data-backlog-action="dismiss">Dismiss</button>' +
+    "</span></div>"
+  );
+}
+
 /** Full strip innerHTML (pure). renderBacklog just assigns this to the element. */
 export function backlogStripHtml(model: BacklogStripModel, errors?: unknown[]): string {
   const errNote = errors && errors.length
     ? ` <span class="bk-err">(some sources unavailable)</span>`
     : "";
   return (
+    backlogBannerHtml(model) +
     `<span class="bk-label">Ingest backlog:</span> ` +
     backlogSentenceHtml(model) +
     errNote +

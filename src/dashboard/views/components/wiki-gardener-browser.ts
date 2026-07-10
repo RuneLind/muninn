@@ -444,8 +444,36 @@ async function cancelBacklogRun(): Promise<void> {
     .catch(() => {});
 }
 
-// Delegated backlog controls (run / reset) — the strip's innerHTML is replaced
-// on every render, so listen on the stable container.
+// Recover an interrupted (crashed/errored) drain — return its undrafted batch docs
+// to the pool, then re-fetch the strip so eligible-now grows back + the banner clears.
+async function recoverBacklog(): Promise<void> {
+  try {
+    await fetch(withBot("/api/wiki/gardener/backlog-recover"), { method: "POST" });
+  } catch {
+    // Best-effort — the follow-up GET reflects the real state either way.
+  }
+  fetch(withBot("/api/wiki/ingest-backlog"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .catch(() => {});
+}
+
+// Dismiss an interrupted drain — leave the batch skipped, just clear the journal so
+// the banner disappears on the next render.
+async function dismissBacklog(): Promise<void> {
+  try {
+    await fetch(withBot("/api/wiki/gardener/backlog-dismiss"), { method: "POST" });
+  } catch {
+    // ignore
+  }
+  fetch(withBot("/api/wiki/ingest-backlog"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .catch(() => {});
+}
+
+// Delegated backlog controls (run / reset / recover / dismiss) — the strip's
+// innerHTML is replaced on every render, so listen on the stable container.
 document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("[data-backlog-action]");
   if (!btn) return;
@@ -469,6 +497,10 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
   } else if (action === "cancel-run") {
     // Soft-cancel the in-flight drain (distinct from the confirm panel's "cancel").
     void cancelBacklogRun();
+  } else if (action === "recover") {
+    void recoverBacklog();
+  } else if (action === "dismiss") {
+    void dismissBacklog();
   }
 });
 
