@@ -60,7 +60,9 @@ export async function renderModelsPage(): Promise<string> {
     .chip-none     { background: var(--tint-neutral); color: var(--text-disabled); }
     .chip-owner    { background: color-mix(in srgb, var(--status-success) 22%, transparent); color: var(--status-success); }
     .chip-fallback { background: color-mix(in srgb, var(--status-warning) 18%, transparent); color: var(--status-warning); }
-    .chip-pinned   { background: color-mix(in srgb, var(--status-magenta) 22%, transparent); color: var(--status-magenta); }
+    /* Same hue as chip-config: a pin IS explicit config — and distinct from the
+       magenta chip-fixed pipeline rows. */
+    .chip-pinned   { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent-light); }
 
     .note { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
     .note.ok { color: var(--status-success); }

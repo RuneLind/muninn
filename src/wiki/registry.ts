@@ -103,7 +103,12 @@ export function buildWikiRegistry(
     //      `coll` as collections (not a pin) and keeps a `=`-containing path with
     //      a trailing collection list (no pin) round-tripping unchanged.
     //   2. an optional trailing `=coll+coll` collection list (or empty `=`).
-    // Anything left is the path, so a path that itself contains `=` round-trips.
+    // Anything left is the path, so a path that itself contains `=` round-trips —
+    // with ONE known limitation: a `=`-containing path followed by a SINGLE
+    // (`+`-less) collection (e.g. `w=/a=b=coll`) is inherently ambiguous with a
+    // 4-segment pin form; the peel treats `coll` as a pin and steals `b` as the
+    // collection. Paths with `=` are pathological (no real config uses them);
+    // use a `+`-list (or rename the path) if you ever hit this. Pinned by test.
     const eq = pair.indexOf("=");
     const name = (eq === -1 ? pair : pair.slice(0, eq)).trim();
     let remainder = eq === -1 ? "" : pair.slice(eq + 1);

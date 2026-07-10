@@ -141,6 +141,17 @@ describe("buildWikiRegistry", () => {
     ]);
   });
 
+  test("KNOWN LIMITATION: '='-in-path + a single '+'-less collection parses as a pin", () => {
+    // `w=/abs/a=b=coll` is inherently ambiguous with the 4-segment pin form —
+    // the peel treats `coll` as a pin and `b` as the collection (see the parse
+    // comment in registry.ts). No real config uses '=' in a path; this test
+    // pins the documented behavior so it isn't mistaken for byte-compat.
+    const reg = buildWikiRegistry([], "weird=/abs/a=b=coll", REPO);
+    expect(reg).toEqual([
+      { name: "weird", root: "/abs/a", source: "extra", collections: ["b"], synthesisBot: "coll" },
+    ]);
+  });
+
   test("WIKI_EXTRA 3-segment normal: name before first '=', path, +-separated collections", () => {
     const reg = buildWikiRegistry([], "mimir=../mimir=mimir+notes", REPO);
     expect(reg).toEqual([
