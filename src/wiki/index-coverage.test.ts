@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   computeIndexCoverage,
   buildIndexCoverageResponse,
+  type CollectionPatterns,
   type CoverageListing,
 } from "./index-coverage.ts";
 
@@ -107,6 +108,145 @@ describe("computeIndexCoverage", () => {
   });
 });
 
+describe("computeIndexCoverage — excludePattern / includePattern partition", () => {
+  // Mirrors huginn's `wiki` manifest reader block.
+  const wikiPatterns: CollectionPatterns = {
+    includePatterns: [".*"],
+    excludePatterns: ["^index\\.md$", "^log\\.md$", "^CLAUDE\\.md$", "^plans/.*"],
+  };
+
+  test("exclude patterns demote meta pages to excludedByRule, not missing", () => {
+    const pages = ["concepts/A.md", "index.md", "log.md", "plans/README.md"];
+    const cov = computeIndexCoverage(pages, [["concepts/A.md"]], [wikiPatterns]);
+    expect(cov.indexed).toBe(1);
+    expect(cov.missing).toEqual([]); // meta pages are NOT actionable gaps
+    expect(cov.excludedByRule).toEqual(["index.md", "log.md", "plans/README.md"]);
+    expect(cov.totalMd).toBe(4);
+  });
+
+  test("include-pattern scoping: out-of-scope pages under a sole ^life/.* collection are excludedByRule", () => {
+    const pages = ["life/X.md", "concepts/Y.md"];
+    const patterns: CollectionPatterns = { includePatterns: ["^life/.*"], excludePatterns: [] };
+    const cov = computeIndexCoverage(pages, [["life/X.md"]], [patterns]);
+    expect(cov.indexed).toBe(1); // life/X.md
+    expect(cov.missing).toEqual([]); // concepts/Y.md is out of scope, not a gap
+    expect(cov.excludedByRule).toEqual(["concepts/Y.md"]);
+  });
+
+  test("an indexed page stays indexed even if a rule would exclude it", () => {
+    const cov = computeIndexCoverage(["index.md"], [["index.md"]], [wikiPatterns]);
+    expect(cov.indexed).toBe(1);
+    expect(cov.missing).toEqual([]);
+    expect(cov.excludedByRule).toEqual([]);
+  });
+
+  test("absent patterns: no excludedByRule partition, meta stays in missing (degrade)", () => {
+    const pages = ["concepts/A.md", "index.md"];
+    const cov = computeIndexCoverage(pages, [["concepts/A.md"]]); // no patterns arg
+    expect(cov.missing).toEqual(["index.md"]);
+    expect(cov.excludedByRule).toEqual([]);
+  });
+
+  test("empty include array is treated as unknown (never demotes) — not index-nothing", () => {
+    const pages = ["concepts/A.md"];
+    const patterns: CollectionPatterns = { includePatterns: [], excludePatterns: [] };
+    const cov = computeIndexCoverage(pages, [[]], [patterns]);
+    expect(cov.missing).toEqual(["concepts/A.md"]); // stays missing, not excludedByRule
+    expect(cov.excludedByRule).toEqual([]);
+  });
+
+  test("partial patterns (one collection unknown) blocks demotion", () => {
+    const pages = ["index.md"];
+    const patterns = [wikiPatterns, undefined];
+    const cov = computeIndexCoverage(pages, [[], []], patterns);
+    expect(cov.excludedByRule).toEqual([]);
+    expect(cov.missing).toEqual(["index.md"]);
+  });
+
+  test("excludedByRule requires EVERY collection to never-index (wiki + wiki-life)", () => {
+    const pages = ["index.md", "concepts/A.md"];
+    const patterns: (CollectionPatterns | undefined)[] = [
+      wikiPatterns,
+      { includePatterns: ["^life/.*"], excludePatterns: [] },
+    ];
+    const cov = computeIndexCoverage(pages, [["concepts/A.md"], []], patterns);
+    // index.md: excluded by wiki, out-of-scope for wiki-life ⇒ excludedByRule.
+    expect(cov.excludedByRule).toEqual(["index.md"]);
+    expect(cov.indexed).toBe(1); // concepts/A.md indexed by wiki
+    expect(cov.missing).toEqual([]);
+  });
+
+  test("a page one collection WOULD index is missing, not excludedByRule", () => {
+    // wiki-life scopes to ^life/.* and would index life/Z.md — so if it's not in
+    // the union it's a genuine gap (missing), never excludedByRule.
+    const pages = ["life/Z.md"];
+    const patterns: (CollectionPatterns | undefined)[] = [
+      wikiPatterns, // .* includes life/Z.md
+      { includePatterns: ["^life/.*"], excludePatterns: [] }, // also includes it
+    ];
+    const cov = computeIndexCoverage(pages, [[], []], patterns);
+    expect(cov.missing).toEqual(["life/Z.md"]);
+    expect(cov.excludedByRule).toEqual([]);
+  });
+});
+
+describe("computeIndexCoverage — non-md/html ids + case-only collisions", () => {
+  test("non-md/html indexed ids are ignored — not ghosts, not counted (mimir case)", () => {
+    const pages = ["concepts/A.md"];
+    const cov = computeIndexCoverage(pages, [
+      ["concepts/A.md", ".gitignore", "notes.txt", "data.json", "run.sh"],
+    ]);
+    expect(cov.indexed).toBe(1);
+    expect(cov.ghosts).toEqual([]); // the non-md/html ids never become ghosts
+  });
+
+  test("case-only-distinct pages both count (per-file, not per-key)", () => {
+    const pages = ["Foo.md", "foo.md"]; // collide on normalized key
+    const cov = computeIndexCoverage(pages, [["foo.md"]]);
+    expect(cov.totalMd).toBe(2); // both files counted
+    expect(cov.indexed).toBe(2); // both match the indexed key
+    expect(cov.missing).toEqual([]);
+    expect(cov.indexed + cov.missing.length + cov.excludedByRule.length).toBe(cov.totalMd);
+  });
+
+  test("case-only-distinct with none indexed: both variants stay visible as missing", () => {
+    const cov = computeIndexCoverage(["Foo.md", "foo.md", "Bar.md"], [[]]);
+    expect(cov.totalMd).toBe(3);
+    expect(cov.indexed).toBe(0);
+    expect(cov.missing).toEqual(["Bar.md", "Foo.md", "foo.md"]);
+  });
+});
+
+describe("computeIndexCoverage — count invariant", () => {
+  const cases: Array<{
+    pages: string[];
+    ids: string[][];
+    patterns?: (CollectionPatterns | undefined)[];
+  }> = [
+    { pages: ["a.md", "b.md"], ids: [["a.md"]] },
+    {
+      pages: ["index.md", "c.md"],
+      ids: [["c.md"]],
+      patterns: [{ includePatterns: [".*"], excludePatterns: ["^index\\.md$"] }],
+    },
+    { pages: ["Foo.md", "foo.md"], ids: [["foo.md"]] },
+    {
+      pages: ["life/X.md", "concepts/Y.md"],
+      ids: [["life/X.md"]],
+      patterns: [{ includePatterns: ["^life/.*"], excludePatterns: [] }],
+    },
+    { pages: [], ids: [["ghost.md"]] },
+    { pages: ["blogs/Ex.html", "a.md"], ids: [["a.md"]] },
+  ];
+
+  test("indexed + missing.length + excludedByRule.length === totalMd", () => {
+    for (const { pages, ids, patterns } of cases) {
+      const cov = computeIndexCoverage(pages, ids, patterns);
+      expect(cov.indexed + cov.missing.length + cov.excludedByRule.length).toBe(cov.totalMd);
+    }
+  });
+});
+
 describe("buildIndexCoverageResponse", () => {
   const pages = ["concepts/A.md", "concepts/B.md", "blogs/Ex.html"];
 
@@ -117,10 +257,27 @@ describe("buildIndexCoverageResponse", () => {
     expect(res.totalMd).toBe(2);
     expect(res.indexed).toBe(1);
     expect(res.missing).toEqual(["concepts/B.md"]);
+    expect(res.excludedByRule).toEqual([]); // no patterns ⇒ no partition
     expect(res.ghosts).toEqual([]);
     expect(res.htmlPages).toBe(1);
     expect(res.errors).toBeUndefined();
     expect(typeof res.generatedAt).toBe("number");
+  });
+
+  test("threads per-collection patterns into the excludedByRule partition", () => {
+    const listings: CoverageListing[] = [
+      {
+        ids: ["concepts/A.md"],
+        patterns: { includePatterns: [".*"], excludePatterns: ["^index\\.md$"] },
+      },
+    ];
+    const res = buildIndexCoverageResponse(
+      ["wiki"],
+      ["concepts/A.md", "concepts/B.md", "index.md"],
+      listings,
+    );
+    expect(res.missing).toEqual(["concepts/B.md"]);
+    expect(res.excludedByRule).toEqual(["index.md"]);
   });
 
   test("suppresses coverage fields when ANY collection listing failed", () => {
@@ -132,6 +289,7 @@ describe("buildIndexCoverageResponse", () => {
     expect(res.totalMd).toBeNull();
     expect(res.indexed).toBeNull();
     expect(res.missing).toBeNull();
+    expect(res.excludedByRule).toBeNull();
     expect(res.ghosts).toBeNull();
     // htmlPages stays (a page-index fact, independent of collections).
     expect(res.htmlPages).toBe(1);

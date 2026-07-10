@@ -194,6 +194,7 @@ interface IndexCoverage {
   totalMd: number | null;
   indexed: number | null;
   missing: string[] | null;
+  excludedByRule: string[] | null;
   ghosts: string[] | null;
   htmlPages: number;
   generatedAt: number;
@@ -205,6 +206,12 @@ let indexCovHtml: string | null = null;
 /** Set once the first auto-load is dispatched; reset on failure so a later tab
  *  switch re-fetches instead of leaving the card permanently blank. */
 let indexCovAttempted = false;
+/** Guards a single lazy first fetch and any in-flight refresh (mirrors the
+ *  What's-new digest guard) so a manual refresh racing the lazy load can't
+ *  double-fetch. */
+let indexCovLoading = false;
+/** Monotonic token so a superseded (older) fetch's late result is ignored. */
+let indexCovFetchId = 0;
 
 /** Map a coverage relPath back to a wiki page name so a missing page can link
  *  into the reader (loadPage keys off the stem name). Matches on the same posix
@@ -216,23 +223,51 @@ function relPathToName(relPath: string): string | null {
 }
 
 /** A quiet "unavailable" card body — used on a degraded (errors[]) response or a
- *  network failure, so a transient hiccup never breaks the reader. */
-function indexCovUnavailableHtml(): string {
+ *  network failure, so a transient hiccup never breaks the reader. Still-valid
+ *  informational counts (htmlPages, and excludedByRule when the builder kept it)
+ *  are rendered on the line so a failed collection listing doesn't discard the
+ *  page-index facts the builder deliberately preserves. */
+function indexCovUnavailableHtml(cov?: IndexCoverage): string {
+  const extras: string[] = [];
+  if (cov && cov.htmlPages) {
+    extras.push(cov.htmlPages + " explainer" + (cov.htmlPages === 1 ? "" : "s") + " (not indexed)");
+  }
+  if (cov && cov.excludedByRule && cov.excludedByRule.length) {
+    extras.push(cov.excludedByRule.length + " meta (not indexed)");
+  }
+  const tail = extras.length ? " · " + extras.join(" · ") : "";
   return (
     '<div class="wiki-ix-head"><span class="wiki-ix-title">Index</span>' +
     '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
-    '<div class="wiki-ix-unavailable">Index status unavailable.</div>'
+    '<div class="wiki-ix-unavailable">Index status unavailable.' + esc(tail) + "</div>"
   );
+}
+
+/** A collapsible list of relPaths — missing pages link into the reader (when the
+ *  relPath resolves to a page name), everything else is plain code. */
+function indexCovList(cssClass: string, label: string, items: string[], linkable: boolean): string {
+  let html =
+    '<details class="wiki-ix-details ' + cssClass + '"><summary>' + items.length +
+    " " + label + "</summary><ul class=\"wiki-ix-list\">";
+  items.forEach((rp) => {
+    const name = linkable ? relPathToName(rp) : null;
+    html += name
+      ? '<li><span class="wiki-ix-link" data-page="' + esc(name) + '">' + esc(rp) + "</span></li>"
+      : "<li><code>" + esc(rp) + "</code></li>";
+  });
+  return html + "</ul></details>";
 }
 
 /** Build the card's inner HTML from a fully-populated coverage response. */
 function buildIndexCovInner(cov: IndexCoverage): string {
   const missing = cov.missing || [];
+  const excludedByRule = cov.excludedByRule || [];
   const ghosts = cov.ghosts || [];
   const summary =
     "<b>" + cov.indexed + "</b> of <b>" + cov.totalMd + "</b> pages indexed" +
     " · <b>" + missing.length + "</b> missing" +
     " · <b>" + ghosts.length + "</b> ghost" + (ghosts.length === 1 ? "" : "s") +
+    (excludedByRule.length ? " · " + excludedByRule.length + " meta (not indexed)" : "") +
     (cov.htmlPages
       ? " · " + cov.htmlPages + " explainer" + (cov.htmlPages === 1 ? "" : "s") + " (not indexed)"
       : "");
@@ -241,23 +276,13 @@ function buildIndexCovInner(cov: IndexCoverage): string {
     '<button class="wiki-ix-refresh" id="wikiIndexRefresh" title="Recompute coverage">↻</button></div>' +
     '<div class="wiki-ix-summary">' + summary + "</div>";
   if (missing.length) {
-    html +=
-      '<details class="wiki-ix-details"><summary>' + missing.length +
-      " missing (not in search)</summary><ul class=\"wiki-ix-list\">";
-    missing.forEach((rp) => {
-      const name = relPathToName(rp);
-      html += name
-        ? '<li><span class="wiki-ix-link" data-page="' + esc(name) + '">' + esc(rp) + "</span></li>"
-        : "<li><code>" + esc(rp) + "</code></li>";
-    });
-    html += "</ul></details>";
+    html += indexCovList("", "missing (not in search)", missing, true);
+  }
+  if (excludedByRule.length) {
+    html += indexCovList("meta", "meta (excluded by rule)", excludedByRule, true);
   }
   if (ghosts.length) {
-    html +=
-      '<details class="wiki-ix-details"><summary>' + ghosts.length +
-      " ghost (indexed, no file)</summary><ul class=\"wiki-ix-list\">";
-    ghosts.forEach((id) => { html += "<li><code>" + esc(id) + "</code></li>"; });
-    html += "</ul></details>";
+    html += indexCovList("ghost", "ghost (indexed, no file)", ghosts, false);
   }
   return html;
 }
@@ -269,6 +294,11 @@ function buildIndexCovInner(cov: IndexCoverage): string {
 function loadIndexCoverage(refresh: boolean): void {
   const el = document.getElementById("wikiIndexCard");
   if (!el) return;
+  // Coalesce: a load already in flight is not double-fetched. An explicit refresh
+  // is allowed through (it supersedes the in-flight fetch via the fetch-id token).
+  if (indexCovLoading && !refresh) return;
+  indexCovLoading = true;
+  const myId = ++indexCovFetchId;
   const spin = document.getElementById("wikiIndexRefresh");
   if (spin) (spin as HTMLButtonElement).disabled = true;
   let url = "/api/wiki/index-coverage";
@@ -276,8 +306,15 @@ function loadIndexCoverage(refresh: boolean): void {
   fetch(withWiki(url))
     .then((r) => r.json())
     .then((cov: IndexCoverage) => {
+      if (myId !== indexCovFetchId) return; // superseded by a newer fetch
+      indexCovLoading = false;
       const cur = document.getElementById("wikiIndexCard");
-      if (!cur) return;
+      if (!cur) {
+        // The user navigated away before this resolved — reset so the next
+        // start-view render retries instead of leaving the card blank forever.
+        indexCovAttempted = false;
+        return;
+      }
       // No wiki / no collections / dir missing — hide the card (no index to show).
       if (cov.error) {
         indexCovHtml = null;
@@ -285,9 +322,10 @@ function loadIndexCoverage(refresh: boolean): void {
         cur.style.display = "none";
         return;
       }
-      // Degraded (a collection listing failed) — coverage fields suppressed.
+      // Degraded (a collection listing failed) — coverage fields suppressed, but
+      // the still-valid informational counts (htmlPages / excludedByRule) render.
       if (cov.totalMd === null || cov.indexed === null) {
-        indexCovHtml = indexCovUnavailableHtml();
+        indexCovHtml = indexCovUnavailableHtml(cov);
         cur.innerHTML = indexCovHtml;
         cur.style.display = "";
         return;
@@ -297,6 +335,8 @@ function loadIndexCoverage(refresh: boolean): void {
       cur.style.display = "";
     })
     .catch(() => {
+      if (myId !== indexCovFetchId) return;
+      indexCovLoading = false;
       // Transient network error — reset so a tab switch retries, show unavailable.
       indexCovAttempted = false;
       const cur = document.getElementById("wikiIndexCard");

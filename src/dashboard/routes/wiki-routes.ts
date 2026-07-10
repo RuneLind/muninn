@@ -24,12 +24,13 @@ import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { listCollections } from "../../summaries/list-collections.ts";
 import {
   buildIndexCoverageResponse,
+  type CollectionPatterns,
   type CoverageListing,
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
-import type { StatsError } from "../../summaries/stats.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -131,6 +132,41 @@ async function computeWikiFreshness(
       if (newest) out[entry.name] = newest;
     }),
   );
+  return out;
+}
+
+/**
+ * Fetch each collection's reader include/exclude regex patterns from huginn's
+ * `GET /api/collections`, keyed by collection name. Degrade-tolerant and
+ * best-effort: an unreachable huginn, or an OLDER huginn whose response lacks the
+ * pattern fields, yields an empty map — the coverage pure layer then skips the
+ * excludedByRule partition and meta pages stay in `missing` (documented degrade).
+ * Only entries carrying BOTH pattern arrays are kept (no hardcoded pattern copies
+ * live in muninn — the denylist is sourced entirely from huginn's manifests).
+ */
+async function fetchCollectionPatterns(
+  knowledgeApiUrl: string,
+): Promise<Map<string, CollectionPatterns>> {
+  const out = new Map<string, CollectionPatterns>();
+  try {
+    const data = await fetchKnowledgeApi(knowledgeApiUrl, "/api/collections", { timeoutMs: 10_000 });
+    const collections = (data?.collections ?? []) as Record<string, unknown>[];
+    for (const c of collections) {
+      const name = c?.name;
+      const inc = c?.includePatterns;
+      const exc = c?.excludePatterns;
+      if (typeof name === "string" && Array.isArray(inc) && Array.isArray(exc)) {
+        out.set(name, {
+          includePatterns: inc.filter((p): p is string => typeof p === "string"),
+          excludePatterns: exc.filter((p): p is string => typeof p === "string"),
+        });
+      }
+    }
+  } catch (err) {
+    log.warn("Index-coverage: /api/collections patterns fetch failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   return out;
 }
 
@@ -309,6 +345,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         totalMd: null,
         indexed: null,
         missing: null,
+        excludedByRule: null,
         ghosts: null,
         htmlPages: 0,
         generatedAt: Date.now(),
@@ -334,28 +371,28 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     }
 
     const pageRelPaths = index.pages.map((p) => p.relPath);
+
+    // Best-effort source of each collection's reader include/exclude patterns —
+    // one degrade-tolerant `/api/collections` call. Present only on a huginn that
+    // exposes the pattern fields; absent (older huginn / unreachable) ⇒ no
+    // excludedByRule partition (meta pages stay in `missing`). Never blocks the
+    // main coverage: a failure here just omits the partition, it doesn't error.
+    const patternsByCollection = await fetchCollectionPatterns(config.knowledgeApiUrl);
+
     // List each collection sequentially — never fan unbounded concurrency at
-    // huginn's Python server. A listing that fails contributes an error entry
-    // (empty ids), which the pure builder turns into the suppress-coverage path.
-    const listings: CoverageListing[] = [];
-    for (const collection of collections) {
-      try {
-        const data = await fetchKnowledgeApi(
-          config.knowledgeApiUrl,
-          `/api/collection/${collection}/documents`,
-          { timeoutMs: 10_000 },
-        );
-        const ids = ((data?.documents ?? []) as { id?: unknown }[])
-          .map((d) => d.id)
-          .filter((id): id is string => typeof id === "string");
-        listings.push({ ids });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log.warn("Index-coverage listing failed for {collection}: {error}", { collection, error: message });
-        const statError: StatsError = { source: collection, collection, error: message };
-        listings.push({ ids: [], error: statError });
-      }
-    }
+    // huginn's Python server (shared `listCollections` helper). A listing that
+    // fails contributes an error entry (empty ids), which the pure builder turns
+    // into the suppress-coverage path.
+    const { byCollection, errors } = await listCollections(config.knowledgeApiUrl, collections);
+    const errorByCollection = new Map(errors.map((e) => [e.collection, e]));
+    const listings: CoverageListing[] = collections.map((collection) => {
+      const err = errorByCollection.get(collection);
+      if (err) return { ids: [], error: err };
+      const ids = (byCollection[collection] ?? [])
+        .map((d) => d.id)
+        .filter((id): id is string => typeof id === "string");
+      return { ids, patterns: patternsByCollection.get(collection) };
+    });
 
     return c.json(buildIndexCoverageResponse(collections, pageRelPaths, listings));
   });
