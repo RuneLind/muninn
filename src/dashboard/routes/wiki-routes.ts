@@ -5,11 +5,11 @@ import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
-  buildWikiRegistry,
   listWikis,
   resolveWikiRequest,
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
@@ -18,35 +18,14 @@ import {
   newestLogEntryDate,
   type WikiDigest,
 } from "../../wiki/digest.ts";
-import { discoverAllBots, resolveResearchBot } from "../../bots/config.ts";
+import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
+import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
-
-/**
- * The wiki registry (bot wikis + `WIKI_EXTRA` standalone wikis) is static until
- * restart, so build it once and memoize — otherwise every /api/wiki request
- * re-runs bot discovery and re-logs config/env-validation warnings on each click.
- */
-let cachedRegistry: WikiRegistryEntry[] | null = null;
-
-/**
- * The full wiki registry (bot wikis + `WIKI_EXTRA` standalone wikis), memoized.
- * Exported so the gardener shares this one seam (filtering to `source === "bot"`)
- * instead of re-running bot discovery + env parsing behind a second memo.
- */
-export function getWikiRegistry(): WikiRegistryEntry[] {
-  return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
-}
-
-/** Test-only: drop the memoized registry so a test can re-derive it from a
- *  freshly-set `WIKI_EXTRA` (mirrors `__resetWikiCacheForTest` in the store). */
-export function __resetWikiRegistryForTest(): void {
-  cachedRegistry = null;
-}
 
 /**
  * In-memory "what's new" digest cache, keyed by canonical wiki name. A digest is
@@ -249,7 +228,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
     let digest: WikiDigest | null = cached ?? null;
     if (digestCacheDecision(cached, logMtimeMs, refresh) === "regenerate") {
-      const botConfig = resolveResearchBot(discoverAllBots());
+      // Owner-routing: the owning bot synthesizes its own wiki's digest (jarvis
+      // wiki → jarvis, nav → melosys); standalone / opus-owned wikis fall back to
+      // the research bot. See resolveWikiSynthesisBot.
+      const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
       if (!botConfig) return c.json({ digest: null, error: "no bot available to summarize" });
       // Single-flight: reuse an in-flight generation for this wiki (a second tab
       // or a refresh racing the auto-load joins it) rather than spawning a
@@ -371,7 +353,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       process.env.WIKI_DIR,
     );
     const history = parseResearchHistory(c.req.query("history"));
-    const botConfig = resolveResearchBot(discoverAllBots());
+    // Owner-routing: the owning bot answers its own wiki's Ask (jarvis wiki →
+    // jarvis, nav → melosys); standalone / opus-owned wikis fall back to the
+    // research bot. `entry` may be undefined here (resolved before the unknown-
+    // wiki preflight below) — the resolver's fallback branch covers that.
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
     // Corpus is pinned to this wiki's collections. Compute the wiki/collection
     // preflight errors here; the shared helper handles the "no bots" case. The
@@ -399,6 +385,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       history,
       collections,
       preflightError,
+      // Per-wiki framing so the answer is scoped to this wiki's corpus. The same
+      // line is used on owner- and fallback-routed wikis (no "for its owner"
+      // phrasing — an owner claim would be false on a fallback/standalone wiki).
+      systemPrompt: entry
+        ? buildSynthesisSystemPrompt(
+            `You answer questions about the "${entry.name}" knowledge wiki, using ONLY the numbered sources provided in the user message.`,
+          )
+        : undefined,
       // Pin enrichment to the resolved wiki (not the whole registry) so a
       // collection shared by two wikis can't attribute a citation to the wrong
       // one. `entry` is guaranteed set whenever enrich runs (preflightError

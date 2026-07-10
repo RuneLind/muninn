@@ -3,9 +3,9 @@ import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import {
   registerWikiRoutes,
-  __resetWikiRegistryForTest,
   __resetWikiDigestCacheForTest,
   __seedWikiDigestForTest,
   digestCacheDecision,

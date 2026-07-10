@@ -12,7 +12,7 @@ import {
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
-import { __resetWikiRegistryForTest } from "./wiki-routes.ts";
+import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 
 /**

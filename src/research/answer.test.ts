@@ -13,6 +13,8 @@ import {
   NO_HITS_MESSAGE,
   DEFAULT_MAX_SOURCES,
   MAX_HISTORY_TURNS,
+  SYNTHESIS_SYSTEM_PROMPT,
+  buildSynthesisSystemPrompt,
   type ResearchTurn,
 } from "./answer.ts";
 
@@ -220,4 +222,34 @@ test("coverageMessage maps the non-answer verdicts to distinct canned replies", 
   expect(coverageMessage("low_confidence")).toBe(LOW_CONFIDENCE_MESSAGE);
   expect(LOW_CONFIDENCE_MESSAGE.length).toBeGreaterThan(20);
   expect(LOW_CONFIDENCE_MESSAGE.toLowerCase()).toContain("don't confidently cover");
+});
+
+// --- buildSynthesisSystemPrompt / SYNTHESIS_SYSTEM_PROMPT ------------------
+
+// Regression pin: the /research (Learning Center) prompt must stay byte-for-byte
+// identical after the refactor extracted the shared rules body. If this fails,
+// the extraction changed the /research behavior — not allowed.
+const LC_SYNTHESIS_PROMPT_PIN = `You answer questions about Anthropic and the Claude ecosystem for a personal learning center, using ONLY the numbered sources provided in the user message.
+
+Rules:
+- Ground every claim in the sources. After each claim, cite the source(s) you used with bracketed numbers like [1] or [2][3]. Cite the specific source, not a range.
+- Do NOT use any tools or outside knowledge — answer solely from the provided sources.
+- If the sources do not actually answer the question, say so plainly in one sentence instead of guessing. Never invent details, URLs, or version numbers.
+- This may be a follow-up in an ongoing conversation. When a "Conversation so far" block is present, use it ONLY to resolve what the new question refers to (pronouns, "that", "it") — still ground every claim in the numbered sources, never cite or treat the prior turns as fact.
+- Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.`;
+
+test("SYNTHESIS_SYSTEM_PROMPT is byte-for-byte unchanged (regression pin)", () => {
+  expect(SYNTHESIS_SYSTEM_PROMPT).toBe(LC_SYNTHESIS_PROMPT_PIN);
+});
+
+test("buildSynthesisSystemPrompt lands the framing line first, shares the rules body", () => {
+  const framing = 'You answer questions about the "jarvis" knowledge wiki, using ONLY the numbered sources provided in the user message.';
+  const prompt = buildSynthesisSystemPrompt(framing);
+  // Framing is the opening sentence.
+  expect(prompt.startsWith(framing + "\n\n")).toBe(true);
+  // The rules body is identical to the LC prompt's (only the first line differs).
+  const rulesOf = (p: string) => p.slice(p.indexOf("Rules:"));
+  expect(rulesOf(prompt)).toBe(rulesOf(SYNTHESIS_SYSTEM_PROMPT));
+  // Wiki framing carries no false "for its owner" claim.
+  expect(prompt).not.toContain("for its owner");
 });

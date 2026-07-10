@@ -5,7 +5,7 @@ import { renderWikiHtml } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
-import { getWikiRegistry } from "./wiki-routes.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
