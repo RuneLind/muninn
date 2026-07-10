@@ -157,6 +157,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         });
       }
     }
+    // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
+    // owner-routing the ask/digest handlers use, computed at render time so
+    // the tab can say who will answer before a question is asked.
+    let askBot: { bot: string; connector: string; model: string; origin: "owner" | "fallback" } | null = null;
+    if (entry) {
+      const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      if (bot) {
+        askBot = {
+          bot: bot.name,
+          connector: bot.connector ?? "claude-cli",
+          model: bot.model ?? (process.env.CLAUDE_MODEL || "sonnet"),
+          origin,
+        };
+      }
+    }
     // Per-wiki freshness dates for the picker labels (best-effort — a failure
     // just omits dates, never blocks the reader).
     let wikiDates: Record<string, string> = {};
@@ -176,6 +191,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         unknownWiki,
         gardenerPending,
         gardener: isBotWiki,
+        askBot,
       }),
     );
   });

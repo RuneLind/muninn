@@ -30,4 +30,23 @@ test("renderWikiPage embeds the bundled script and the pane skeleton", async () 
   expect(html).toContain("/api/wiki/pages");
   // The old local esc() helper is gone (replaced by the shared escHtml).
   expect(html).not.toContain("function esc(s)");
+  // No askBot ⇒ no "Answered by" line in the Ask tab.
+  expect(html).not.toContain("Answered by");
+});
+
+test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
+  const owner = await renderWikiPage({
+    selected: "jarvis",
+    askBot: { bot: "jarvis", connector: "claude-sdk", model: "claude-sonnet-5", origin: "owner" },
+  });
+  expect(owner).toContain("Answered by <strong>jarvis</strong>");
+  expect(owner).toContain("claude-sdk · claude-sonnet-5");
+  expect(owner).toContain("this wiki's owner");
+
+  const fallback = await renderWikiPage({
+    selected: "mimir",
+    askBot: { bot: "melosys", connector: "copilot-sdk", model: "claude-sonnet", origin: "fallback" },
+  });
+  expect(fallback).toContain("Answered by <strong>melosys</strong>");
+  expect(fallback).toContain("research-bot fallback");
 });
