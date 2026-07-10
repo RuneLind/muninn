@@ -20,6 +20,7 @@ const DEPS: ModelsOverviewDeps = {
   getWatchers: async () => [],
   getHaikuUsage: async () => [],
   getChatModels: async () => [],
+  getWikiRegistry: () => [],
 };
 
 // Isolate env knobs the assembly reads (Bun auto-loads the developer's .env,

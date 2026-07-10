@@ -1,5 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import type { BotConfig } from "../bots/config.ts";
+import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import type { Watcher } from "../types.ts";
 import {
   assembleModelsOverview,
@@ -45,13 +46,20 @@ function deps(over: Partial<ModelsOverviewDeps> & {
   watchers?: Watcher[];
   haiku?: HaikuUsageRow[];
   chat?: ChatModelRow[];
+  wikiRegistry?: WikiRegistryEntry[];
 }): ModelsOverviewDeps {
   return {
     discoverBots: over.discoverBots ?? (() => over.bots ?? []),
     getWatchers: over.getWatchers ?? (async () => over.watchers ?? []),
     getHaikuUsage: over.getHaikuUsage ?? (async () => over.haiku ?? []),
     getChatModels: over.getChatModels ?? (async () => over.chat ?? []),
+    getWikiRegistry: over.getWikiRegistry ?? (() => over.wikiRegistry ?? []),
   };
+}
+
+/** Minimal WikiRegistryEntry factory. */
+function wiki(name: string, source: WikiRegistryEntry["source"] = "bot"): WikiRegistryEntry {
+  return { name, root: `/wikis/${name}`, source };
 }
 
 // Isolate env knobs the assembly reads.
@@ -126,8 +134,10 @@ test("research bot skips opus (non-opus rule); summarizer takes first discovered
   // Research = first NON-opus (jarvis), not capra — a derivation, not a bare default.
   expect(research.bot).toBe("jarvis");
   expect(research.origin).toBe("derived");
-  // What's-new digest rides the research bot.
-  expect(digest.bot).toBe("jarvis");
+  // What's-new digest now routes per-wiki — no single bot, points at Wiki synthesis.
+  expect(digest.bot).toBeNull();
+  expect(digest.origin).toBe("derived");
+  expect(digest.note).toContain("Wiki synthesis");
 });
 
 test("summarizer TikTok constraint chip flips red for a non-CLI connector", async () => {
@@ -148,7 +158,8 @@ test("env overrides mark role origin as env", async () => {
   const o = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis"), bot("capra", { model: "opus" })] }));
   expect(o.roles.find((r) => r.role.startsWith("Summarizer"))!.origin).toBe("env");
   expect(o.roles.find((r) => r.role.startsWith("Research"))!.origin).toBe("env");
-  expect(o.roles.find((r) => r.role.startsWith("What's-new"))!.origin).toBe("env");
+  // The digest row no longer tracks the research bot — it's a static per-wiki pointer.
+  expect(o.roles.find((r) => r.role.startsWith("What's-new"))!.origin).toBe("derived");
 });
 
 test("DB override marks role origin as override and beats env", async () => {
@@ -246,6 +257,35 @@ test("embeddings + gardener draft cap rows are present and fixed", async () => {
   const draft = o.pipeline.find((p) => p.job.startsWith("Gardener drafts"))!;
   expect(draft.model.value).toBe("claude-sonnet-4-6"); // bot model
   expect(draft.note).toContain("8,000");
+});
+
+test("wiki synthesis: owner-fast → owner, opus owner + standalone → fallback", async () => {
+  const bots = [
+    bot("capra", { model: "opus", connector: "copilot-sdk" }),
+    bot("jarvis", { connector: "claude-sdk" }),
+    bot("melosys", { connector: "copilot-sdk" }),
+  ];
+  const wikiRegistry = [
+    wiki("jarvis", "bot"), // fast owner ⇒ owner
+    wiki("melosys", "bot"), // fast owner ⇒ owner
+    wiki("capra", "bot"), // opus owner ⇒ fallback (research bot)
+    wiki("mimir", "extra"), // standalone ⇒ fallback
+  ];
+  const o = await assembleModelsOverview("jarvis", deps({ bots, wikiRegistry }));
+  const rows = Object.fromEntries(o.wikiSynthesis.map((w) => [w.wiki, w]));
+
+  expect(rows.jarvis).toMatchObject({ bot: "jarvis", origin: "owner", connector: "claude-sdk" });
+  expect(rows.melosys).toMatchObject({ bot: "melosys", origin: "owner", connector: "copilot-sdk" });
+  // Research fallback bot = first non-opus discovered = jarvis.
+  expect(rows.capra).toMatchObject({ bot: "jarvis", origin: "fallback" });
+  expect(rows.mimir).toMatchObject({ bot: "jarvis", origin: "fallback", source: "extra" });
+});
+
+test("wiki synthesis: RESEARCH_BOT override steers the fallback branch", async () => {
+  process.env.RESEARCH_BOT = "melosys";
+  const bots = [bot("jarvis"), bot("melosys", { connector: "copilot-sdk" })];
+  const o = await assembleModelsOverview("jarvis", deps({ bots, wikiRegistry: [wiki("mimir", "extra")] }));
+  expect(o.wikiSynthesis[0]).toMatchObject({ wiki: "mimir", bot: "melosys", origin: "fallback" });
 });
 
 test("degraded sources are collected, never thrown", async () => {

@@ -61,6 +61,9 @@ export interface ResearchAnswerOptions {
   /** Override the corpus (tests / future scoping). Defaults to RESEARCH_COLLECTIONS. */
   collections?: string[];
   maxSources?: number;
+  /** Synthesis system prompt. Defaults to {@link SYNTHESIS_SYSTEM_PROMPT} (the
+   *  Learning-Center framing); the wiki Ask route passes a per-wiki framing. */
+  systemPrompt?: string;
 }
 
 /**
@@ -153,7 +156,7 @@ export async function streamResearchAnswer(
       userPrompt,
       config,
       botConfig,
-      { systemPrompt: SYNTHESIS_SYSTEM_PROMPT, onProgress },
+      { systemPrompt: opts.systemPrompt ?? SYNTHESIS_SYSTEM_PROMPT, onProgress },
     );
 
     const answer = (claude.result ?? "").trim();

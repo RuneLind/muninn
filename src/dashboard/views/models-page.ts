@@ -58,6 +58,8 @@ export async function renderModelsPage(): Promise<string> {
     .chip-default  { background: var(--tint-neutral); color: var(--text-muted); }
     .chip-fixed    { background: color-mix(in srgb, var(--status-magenta) 18%, transparent); color: var(--status-magenta); }
     .chip-none     { background: var(--tint-neutral); color: var(--text-disabled); }
+    .chip-owner    { background: color-mix(in srgb, var(--status-success) 22%, transparent); color: var(--status-success); }
+    .chip-fallback { background: color-mix(in srgb, var(--status-warning) 18%, transparent); color: var(--status-warning); }
 
     .note { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
     .note.ok { color: var(--status-success); }
@@ -143,6 +145,15 @@ export async function renderModelsPage(): Promise<string> {
       <div class="scroll"><table class="m-table">
         <thead><tr><th>Role</th><th>Bot / value</th><th>Origin</th><th>Note</th><th>Override</th></tr></thead>
         <tbody id="rolesBody"><tr><td colspan="5" class="empty-msg">Loading…</td></tr></tbody>
+      </table></div>
+    </div>
+
+    <div class="section">
+      <h2>Wiki synthesis</h2>
+      <div class="sub">Which bot synthesizes each wiki's <strong>Ask</strong> answer + <strong>What's new</strong> digest. <span class="chip chip-owner">owner</span> = the owning bot answers its own wiki; <span class="chip chip-fallback">fallback</span> = standalone or opus-owned wiki → the research bot. Read-only — steered by the owner's <code>config.json</code> and the Research override.</div>
+      <div class="scroll"><table class="m-table">
+        <thead><tr><th>Wiki</th><th>Synthesis bot</th><th>Connector</th><th>Model</th><th>Routing</th></tr></thead>
+        <tbody id="wikiSynthBody"><tr><td colspan="5" class="empty-msg">Loading…</td></tr></tbody>
       </table></div>
     </div>
 
@@ -276,6 +287,18 @@ export async function renderModelsPage(): Promise<string> {
           '<td>' + roleEditor(r) + '</td>' +
         '</tr>';
       }).join('') || '<tr><td colspan="5" class="empty-msg">No roles</td></tr>';
+
+      // Wiki synthesis.
+      const wikiSynthBody = document.getElementById('wikiSynthBody');
+      wikiSynthBody.innerHTML = (data.wikiSynthesis || []).map(w =>
+        '<tr>' +
+          '<td><strong>' + esc(w.wiki) + '</strong></td>' +
+          '<td>' + (w.bot ? '<strong>' + esc(w.bot) + '</strong>' : '<span class="empty">— none —</span>') + '</td>' +
+          '<td><code>' + esc(w.connector) + '</code></td>' +
+          '<td><code>' + esc(w.model) + '</code></td>' +
+          '<td>' + chip(w.origin) + '</td>' +
+        '</tr>'
+      ).join('') || '<tr><td colspan="5" class="empty-msg">No wikis registered</td></tr>';
 
       // Pipeline.
       const pipelineBody = document.getElementById('pipelineBody');

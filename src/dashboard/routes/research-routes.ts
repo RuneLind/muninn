@@ -7,7 +7,7 @@ import { streamResearchSSE } from "./research-sse.ts";
 import { resolveProfile } from "../../research/corpus.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
-import { getWikiRegistry } from "./wiki-routes.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";

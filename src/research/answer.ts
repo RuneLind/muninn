@@ -157,14 +157,31 @@ function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
-export const SYNTHESIS_SYSTEM_PROMPT = `You answer questions about Anthropic and the Claude ecosystem for a personal learning center, using ONLY the numbered sources provided in the user message.
-
-Rules:
+/**
+ * The shared rules body appended after the (corpus-specific) framing line. Kept
+ * verbatim across every consumer so only the opening sentence changes per corpus.
+ */
+const SYNTHESIS_RULES_BODY = `Rules:
 - Ground every claim in the sources. After each claim, cite the source(s) you used with bracketed numbers like [1] or [2][3]. Cite the specific source, not a range.
 - Do NOT use any tools or outside knowledge — answer solely from the provided sources.
 - If the sources do not actually answer the question, say so plainly in one sentence instead of guessing. Never invent details, URLs, or version numbers.
 - This may be a follow-up in an ongoing conversation. When a "Conversation so far" block is present, use it ONLY to resolve what the new question refers to (pronouns, "that", "it") — still ground every claim in the numbered sources, never cite or treat the prior turns as fact.
 - Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.`;
+
+/**
+ * Build a synthesis system prompt: a corpus-specific `framingLine` (the opening
+ * sentence naming what the sources cover) followed by the shared rules body. The
+ * wiki Ask route passes a per-wiki framing so the answer is scoped to that wiki;
+ * `/research` uses {@link SYNTHESIS_SYSTEM_PROMPT} (the Learning-Center framing).
+ */
+export function buildSynthesisSystemPrompt(framingLine: string): string {
+  return `${framingLine}\n\n${SYNTHESIS_RULES_BODY}`;
+}
+
+/** The `/research` (Claude Learning Center) synthesis prompt — the default. */
+export const SYNTHESIS_SYSTEM_PROMPT = buildSynthesisSystemPrompt(
+  "You answer questions about Anthropic and the Claude ecosystem for a personal learning center, using ONLY the numbered sources provided in the user message.",
+);
 
 /**
  * Retrieval query for a turn. With no history it's the question verbatim, so the

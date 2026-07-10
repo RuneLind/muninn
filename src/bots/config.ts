@@ -7,6 +7,7 @@ import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
+import type { WikiRegistryEntry } from "../wiki/registry.ts";
 
 const log = getLog("bots");
 
@@ -375,6 +376,34 @@ export function resolveResearchBot(bots: BotConfig[]): BotConfig | undefined {
     });
   }
   return bots.find(isFastResearchBot) ?? resolveSummarizerBot(bots);
+}
+
+/**
+ * Picks the bot that synthesizes a *wiki's* Ask answer / What's-new digest.
+ * Owner-routing: the bot that owns the wiki answers its own wiki (jarvis wiki →
+ * jarvis, nav wiki → melosys), so retrieval + synthesis run under the correct
+ * identity instead of the single global research bot. Resolution:
+ *   - A bot-owned wiki (`entry.source === "bot"`, its `name` IS the owning bot's
+ *     name) whose owner is discovered AND fast enough for interactive Q&A
+ *     (`isFastResearchBot`, skips opus) → `{ bot: owner, origin: "owner" }`.
+ *   - Everything else — a standalone (`WIKI_EXTRA`) wiki, an unknown/undefined
+ *     entry (the ask handler resolves before its unknown-wiki preflight), an
+ *     owner missing from discovery, or an *opus* owner (capra) too slow for
+ *     interactive answers → `resolveResearchBot` fallback (so the hot
+ *     `RESEARCH_BOT` override still steers it), tagged `origin: "fallback"`.
+ * Reason-carrying shape mirrors `resolveBackendWithReason`. Takes `bots` (like
+ * the other role resolvers) so callers inject discovery and the registry module
+ * keeps its "no bot discovery at import" property.
+ */
+export function resolveWikiSynthesisBot(
+  entry: WikiRegistryEntry | undefined,
+  bots: BotConfig[],
+): { bot: BotConfig | undefined; origin: "owner" | "fallback" } {
+  if (entry?.source === "bot") {
+    const owner = bots.find((b) => b.name.toLowerCase() === entry.name.toLowerCase());
+    if (owner && isFastResearchBot(owner)) return { bot: owner, origin: "owner" };
+  }
+  return { bot: resolveResearchBot(bots), origin: "fallback" };
 }
 
 /**

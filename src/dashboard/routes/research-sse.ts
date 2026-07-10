@@ -39,6 +39,9 @@ export interface ResearchSseOptions {
    *  formatted article in the main pane; `/research` leaves it unset (it renders
    *  client-side). A throw here is swallowed — the streamed plain text stands. */
   renderAnswerHtml?: (answer: string, citations: Citation[]) => string;
+  /** Synthesis system prompt override (per-wiki framing). Unset ⇒ the research
+   *  default (`SYNTHESIS_SYSTEM_PROMPT`); `/research` leaves it unset. */
+  systemPrompt?: string;
 }
 
 /**
@@ -80,6 +83,7 @@ export function streamResearchSSE(c: Context, opts: ResearchSseOptions): Respons
             botConfig: opts.botConfig,
             history: opts.history,
             collections: opts.collections,
+            systemPrompt: opts.systemPrompt,
           },
           async (event) => {
             let out: typeof event = event;

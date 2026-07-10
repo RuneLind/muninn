@@ -17,7 +17,9 @@
  */
 
 import type { BotConfig } from "../bots/config.ts";
-import { discoverAllBots, resolveResearchBot, resolveSummarizerBot } from "../bots/config.ts";
+import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
+import type { WikiRegistryEntry } from "../wiki/registry.ts";
+import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import { resolveBackendWithReason } from "../ai/haiku-direct.ts";
 import { connectorCapabilities } from "../ai/one-shot.ts";
 import { DEFAULT_MODEL as HAIKU_DEFAULT_MODEL } from "../scheduler/executor.ts";
@@ -35,7 +37,17 @@ const EMBEDDINGS_MODEL = "Xenova/all-MiniLM-L6-v2";
 const GARDENER_DRAFT_THINKING_MAX_TOKENS = 8_000;
 
 /** Where an effective value came from, shown as a small chip on the page. */
-export type Origin = "config" | "env" | "override" | "default" | "derived" | "legacy" | "fixed" | "none";
+export type Origin =
+  | "config"
+  | "env"
+  | "override"
+  | "default"
+  | "derived"
+  | "legacy"
+  | "fixed"
+  | "none"
+  | "owner"
+  | "fallback";
 
 export interface EffectiveValue {
   value: string;
@@ -94,11 +106,24 @@ export interface PipelineEntry {
   used: string[];
 }
 
+/** One registered wiki + the bot that synthesizes its Ask answer / What's-new
+ *  digest, with an origin chip: `owner` (the owning bot answers its own wiki) or
+ *  `fallback` (standalone / opus-owned wiki → the research bot). Read-only. */
+export interface WikiSynthesisEntry {
+  wiki: string;
+  source: WikiRegistryEntry["source"];
+  bot: string | null;
+  connector: string;
+  model: string;
+  origin: Extract<Origin, "owner" | "fallback">;
+}
+
 export interface ModelsOverview {
   selectedBot: string;
   generatedAt: number;
   bots: BotEntry[];
   roles: RoleEntry[];
+  wikiSynthesis: WikiSynthesisEntry[];
   pipeline: PipelineEntry[];
   errors?: string[];
 }
@@ -122,6 +147,9 @@ export interface ModelsOverviewDeps {
   getWatchers: () => Promise<Watcher[]>;
   getHaikuUsage: () => Promise<HaikuUsageRow[]>;
   getChatModels: () => Promise<ChatModelRow[]>;
+  /** Registered wikis (shared memo in prod; fabricated in tests). Drives the
+   *  read-only Wiki synthesis group — one row per wiki with its resolved bot. */
+  getWikiRegistry: () => WikiRegistryEntry[];
 }
 
 const USAGE_WINDOW_DAYS = 7;
@@ -161,6 +189,7 @@ export const DEFAULT_MODELS_OVERVIEW_DEPS: ModelsOverviewDeps = {
   getWatchers: () => getAllWatchers(),
   getHaikuUsage: defaultGetHaikuUsage,
   getChatModels: defaultGetChatModels,
+  getWikiRegistry,
 };
 
 /** Sorted, de-duplicated model list — stable output for tests + rendering. */
@@ -348,12 +377,14 @@ export async function assembleModelsOverview(
     editKind: "bot",
   });
 
-  // What's-new wiki digest runs on the research bot (generateWikiDigest → executeOneShot).
+  // What's-new wiki digest + wiki Ask now route per-wiki to the owning bot (see
+  // resolveWikiSynthesisBot) — no single bot governs it. Point at the Wiki
+  // synthesis group below rather than naming one bot.
   roles.push({
     role: "What's-new wiki digest",
-    bot: research?.name ?? null,
-    origin: researchOrigin,
-    note: "runs on the research bot",
+    bot: null,
+    origin: "derived",
+    note: "per-wiki owner — see Wiki synthesis",
   });
 
   // Global Haiku backend — the process-wide HAIKU_BACKEND knob (override beats
@@ -372,6 +403,28 @@ export async function assembleModelsOverview(
     overrideKey: "HAIKU_BACKEND",
     overrideValue: haikuOverride,
     editKind: "backend",
+  });
+
+  // ---- Wiki synthesis (per-wiki owner routing) -----------------------------
+  // One row per registered wiki: which bot answers its Ask / What's-new digest,
+  // and whether that's the owning bot (`owner`) or the research-bot fallback
+  // (`fallback`, for standalone or opus-owned wikis). Read-only diagnostic.
+  let wikiRegistry: WikiRegistryEntry[] = [];
+  try {
+    wikiRegistry = deps.getWikiRegistry();
+  } catch (err) {
+    errors.push(`wiki_registry: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const wikiSynthesis: WikiSynthesisEntry[] = wikiRegistry.map((entry) => {
+    const { bot, origin } = resolveWikiSynthesisBot(entry, bots);
+    return {
+      wiki: entry.name,
+      source: entry.source,
+      bot: bot?.name ?? null,
+      connector: bot?.connector ?? "claude-cli",
+      model: bot?.model ?? globalModelDefault,
+      origin,
+    };
   });
 
   // ---- Pipeline jobs -------------------------------------------------------
@@ -471,6 +524,7 @@ export async function assembleModelsOverview(
     generatedAt: now,
     bots: botEntries,
     roles,
+    wikiSynthesis,
     pipeline,
     ...(errors.length > 0 ? { errors } : {}),
   };

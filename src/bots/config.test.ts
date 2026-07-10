@@ -51,7 +51,8 @@ function cleanTestBots() {
   createdDirs.length = 0;
 }
 
-import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, resolveResearchBot, type BotConfig, type ConnectorType } from "./config.ts";
+import { discoverAllBots, discoverActiveBots, resolveSummarizerBot, resolveResearchBot, resolveWikiSynthesisBot, type BotConfig, type ConnectorType } from "./config.ts";
+import type { WikiRegistryEntry } from "../wiki/registry.ts";
 
 function stubBot(name: string, overrides: Partial<BotConfig> = {}): BotConfig {
   return {
@@ -614,5 +615,70 @@ describe("resolveResearchBot", () => {
     process.env.RESEARCH_BOT = "ghost";
     const bots = [stubBot("capra", { model: "claude-opus-4-6" }), stubBot("jarvis", { model: "claude-sonnet-4-6" })];
     expect(resolveResearchBot(bots)?.name).toBe("jarvis");
+  });
+});
+
+describe("resolveWikiSynthesisBot", () => {
+  const prevResearch = process.env.RESEARCH_BOT;
+  const prevSummarizer = process.env.SUMMARIZER_BOT;
+  beforeEach(() => {
+    delete process.env.RESEARCH_BOT;
+    delete process.env.SUMMARIZER_BOT;
+  });
+  afterEach(() => {
+    if (prevResearch === undefined) delete process.env.RESEARCH_BOT;
+    else process.env.RESEARCH_BOT = prevResearch;
+    if (prevSummarizer === undefined) delete process.env.SUMMARIZER_BOT;
+    else process.env.SUMMARIZER_BOT = prevSummarizer;
+  });
+
+  const wikiEntry = (name: string, source: WikiRegistryEntry["source"] = "bot"): WikiRegistryEntry => ({
+    name,
+    root: `/wikis/${name}`,
+    source,
+  });
+  // Prod-like discovery order: capra (opus) first, then a fast jarvis + melosys.
+  const bots = () => [
+    stubBot("capra", { model: "claude-opus-4-6" }),
+    stubBot("jarvis", { connector: "claude-sdk", model: "claude-sonnet-4-6" }),
+    stubBot("melosys", { connector: "copilot-sdk", model: "claude-sonnet-4.6" }),
+  ];
+
+  test("owner-owned wiki whose owner is fast → the owning bot (owner)", () => {
+    // Case-insensitive owner match (registry name IS the bot name).
+    const res = resolveWikiSynthesisBot(wikiEntry("Jarvis"), bots());
+    expect(res.origin).toBe("owner");
+    expect(res.bot?.name).toBe("jarvis");
+  });
+
+  test("opus owner (capra) → research-bot fallback, never opus", () => {
+    const res = resolveWikiSynthesisBot(wikiEntry("capra"), bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("jarvis"); // first non-opus
+  });
+
+  test("standalone (extra) wiki → fallback", () => {
+    const res = resolveWikiSynthesisBot(wikiEntry("mimir", "extra"), bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("jarvis");
+  });
+
+  test("undefined entry (resolved before unknown-wiki preflight) → fallback", () => {
+    const res = resolveWikiSynthesisBot(undefined, bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("jarvis");
+  });
+
+  test("owner not among discovered bots → fallback", () => {
+    const res = resolveWikiSynthesisBot(wikiEntry("ghost"), bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("jarvis");
+  });
+
+  test("RESEARCH_BOT override still steers the fallback branch", () => {
+    process.env.RESEARCH_BOT = "melosys";
+    const res = resolveWikiSynthesisBot(wikiEntry("mimir", "extra"), bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("melosys");
   });
 });
