@@ -141,10 +141,69 @@ describe("buildWikiRegistry", () => {
     ]);
   });
 
+  test("KNOWN LIMITATION: '='-in-path + a single '+'-less collection parses as a pin", () => {
+    // `w=/abs/a=b=coll` is inherently ambiguous with the 4-segment pin form —
+    // the peel treats `coll` as a pin and `b` as the collection (see the parse
+    // comment in registry.ts). No real config uses '=' in a path; this test
+    // pins the documented behavior so it isn't mistaken for byte-compat.
+    const reg = buildWikiRegistry([], "weird=/abs/a=b=coll", REPO);
+    expect(reg).toEqual([
+      { name: "weird", root: "/abs/a", source: "extra", collections: ["b"], synthesisBot: "coll" },
+    ]);
+  });
+
   test("WIKI_EXTRA 3-segment normal: name before first '=', path, +-separated collections", () => {
     const reg = buildWikiRegistry([], "mimir=../mimir=mimir+notes", REPO);
     expect(reg).toEqual([
       { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir", "notes"] },
+    ]);
+  });
+
+  test("WIKI_EXTRA 4-segment: name=path=coll+coll=botpin parses the synthesis-bot pin", () => {
+    const reg = buildWikiRegistry([], "mimir=../mimir=mimir=jarvis, kode=/abs/k=nav-wiki+kode=melosys", REPO);
+    expect(reg).toEqual([
+      { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir"], synthesisBot: "jarvis" },
+      { name: "kode", root: "/abs/k", source: "extra", collections: ["nav-wiki", "kode"], synthesisBot: "melosys" },
+    ]);
+  });
+
+  test("WIKI_EXTRA 4-segment with empty 3rd (name=path==bot): pin, no collections", () => {
+    const reg = buildWikiRegistry([], "kode=/abs/k==melosys", REPO);
+    expect(reg).toEqual([{ name: "kode", root: "/abs/k", source: "extra", synthesisBot: "melosys" }]);
+    expect(reg[0]!.collections).toBeUndefined();
+  });
+
+  test("WIKI_EXTRA 4-segment trims whitespace around the pin", () => {
+    const reg = buildWikiRegistry([], "  mimir = ../mimir = mimir = jarvis ", REPO);
+    expect(reg).toEqual([
+      { name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir"], synthesisBot: "jarvis" },
+    ]);
+  });
+
+  test("WIKI_EXTRA 3-segment single collection is NOT mistaken for a pin (byte-compatible)", () => {
+    // `../mimir=mimir` has one bare tail; without a collections segment behind it,
+    // the tail stays collections, never a pin.
+    const reg = buildWikiRegistry([], "mimir=../mimir=mimir", REPO);
+    expect(reg).toEqual([{ name: "mimir", root: "/repo/mimir", source: "extra", collections: ["mimir"] }]);
+    expect(reg[0]!.synthesisBot).toBeUndefined();
+  });
+
+  test("WIKI_EXTRA 3-segment with '+' collection list is never a pin (pin charset excludes '+')", () => {
+    // `nav-wiki+kode` contains '+' (a list separator), so it can't be a bot pin —
+    // it round-trips as collections with a '='-containing path (existing behavior).
+    const reg = buildWikiRegistry([], "weird=/abs/a=b=nav-wiki+kode", REPO);
+    expect(reg).toEqual([
+      { name: "weird", root: "/abs/a=b", source: "extra", collections: ["nav-wiki", "kode"] },
+    ]);
+    expect(reg[0]!.synthesisBot).toBeUndefined();
+  });
+
+  test("bot wiki carries its config wikiSynthesisBot onto the entry", () => {
+    const b = bot("capra", "/w", ["nav-wiki"]);
+    (b as { wikiSynthesisBot?: string }).wikiSynthesisBot = "capra";
+    const reg = buildWikiRegistry([b], undefined, REPO);
+    expect(reg).toEqual([
+      { name: "capra", root: "/w", source: "bot", collections: ["nav-wiki"], synthesisBot: "capra" },
     ]);
   });
 });

@@ -454,6 +454,28 @@ describe("bot discovery", () => {
       expect(found).toBeDefined();
       expect(found!.wikiCollections).toBeUndefined();
     });
+
+    test("keeps a valid wikiSynthesisBot string and flows it through discovery", () => {
+      setupTestBot("_test_wikisynth", {
+        config: { wikiSynthesisBot: "melosys" },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikisynth");
+      expect(found).toBeDefined();
+      expect(found!.wikiSynthesisBot).toBe("melosys");
+    });
+
+    test("drops wikiSynthesisBot when it is not a string (warn+drop)", () => {
+      setupTestBot("_test_wikisynth_bad", {
+        config: { wikiSynthesisBot: 42 },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_wikisynth_bad");
+      expect(found).toBeDefined();
+      expect(found!.wikiSynthesisBot).toBeUndefined();
+    });
   });
 
   // ── environment variable parsing ─────────────────────────────────────
@@ -632,10 +654,15 @@ describe("resolveWikiSynthesisBot", () => {
     else process.env.SUMMARIZER_BOT = prevSummarizer;
   });
 
-  const wikiEntry = (name: string, source: WikiRegistryEntry["source"] = "bot"): WikiRegistryEntry => ({
+  const wikiEntry = (
+    name: string,
+    source: WikiRegistryEntry["source"] = "bot",
+    synthesisBot?: string,
+  ): WikiRegistryEntry => ({
     name,
     root: `/wikis/${name}`,
     source,
+    ...(synthesisBot ? { synthesisBot } : {}),
   });
   // Prod-like discovery order: capra (opus) first, then a fast jarvis + melosys.
   const bots = () => [
@@ -680,5 +707,45 @@ describe("resolveWikiSynthesisBot", () => {
     const res = resolveWikiSynthesisBot(wikiEntry("mimir", "extra"), bots());
     expect(res.origin).toBe("fallback");
     expect(res.bot?.name).toBe("melosys");
+  });
+
+  test("explicit pin beats the owner branch (case-insensitive)", () => {
+    // jarvis wiki would owner-route to jarvis, but the pin wins → melosys.
+    const res = resolveWikiSynthesisBot(wikiEntry("jarvis", "bot", "Melosys"), bots());
+    expect(res.origin).toBe("pinned");
+    expect(res.bot?.name).toBe("melosys");
+  });
+
+  test("explicit pin beats the fallback branch (standalone wiki)", () => {
+    // A standalone NAV wiki pinned to melosys instead of the research fallback.
+    const res = resolveWikiSynthesisBot(wikiEntry("melosys-kode-wiki", "extra", "melosys"), bots());
+    expect(res.origin).toBe("pinned");
+    expect(res.bot?.name).toBe("melosys");
+  });
+
+  test("pin to an opus bot works — bypasses the fast-gate (informed choice)", () => {
+    // capra is opus (would fail owner fast-gate), but an explicit pin honors it.
+    const res = resolveWikiSynthesisBot(wikiEntry("capra", "bot", "capra"), bots());
+    expect(res.origin).toBe("pinned");
+    expect(res.bot?.name).toBe("capra");
+  });
+
+  test("pin to the hot RESEARCH_BOT is honored even when it names an opus bot", () => {
+    process.env.RESEARCH_BOT = "jarvis";
+    const res = resolveWikiSynthesisBot(wikiEntry("capra", "extra", "capra"), bots());
+    expect(res.origin).toBe("pinned");
+    expect(res.bot?.name).toBe("capra");
+  });
+
+  test("pin naming an unknown bot → warn + fall through to owner", () => {
+    const res = resolveWikiSynthesisBot(wikiEntry("jarvis", "bot", "ghost"), bots());
+    expect(res.origin).toBe("owner");
+    expect(res.bot?.name).toBe("jarvis");
+  });
+
+  test("pin naming an unknown bot on a standalone wiki → fall through to fallback", () => {
+    const res = resolveWikiSynthesisBot(wikiEntry("mimir", "extra", "ghost"), bots());
+    expect(res.origin).toBe("fallback");
+    expect(res.bot?.name).toBe("jarvis");
   });
 });

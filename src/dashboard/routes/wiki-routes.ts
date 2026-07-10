@@ -160,7 +160,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
     // owner-routing the ask/digest handlers use, computed at render time so
     // the tab can say who will answer before a question is asked.
-    let askBot: { bot: string; connector: string; model: string; origin: "owner" | "fallback" } | null = null;
+    let askBot: { bot: string; connector: string; model: string; origin: "pinned" | "owner" | "fallback" } | null = null;
     if (entry) {
       const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
       if (bot) {

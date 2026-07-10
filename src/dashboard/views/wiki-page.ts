@@ -38,7 +38,7 @@ export async function renderWikiPage(opts?: {
     bot: string;
     connector: string;
     model: string;
-    origin: "owner" | "fallback";
+    origin: "pinned" | "owner" | "fallback";
   } | null;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
@@ -53,7 +53,7 @@ export async function renderWikiPage(opts?: {
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
-    ? `<div class="wiki-ask-bot">Answered by <strong>${escHtml(askBot.bot)}</strong> <code>${escHtml(askBot.connector)} · ${escHtml(askBot.model)}</code> — ${askBot.origin === "owner" ? "this wiki's owner" : "research-bot fallback (steered by the Research synthesizer role on /models)"}</div>`
+    ? `<div class="wiki-ask-bot">Answered by <strong>${escHtml(askBot.bot)}</strong> <code>${escHtml(askBot.connector)} · ${escHtml(askBot.model)}</code> — ${askBot.origin === "pinned" ? "explicit synthesisBot pin" : askBot.origin === "owner" ? "this wiki's owner" : "research-bot fallback (steered by the Research synthesizer role on /models)"}</div>`
     : "";
   const gardenerHref = `/wiki/gardener${selected ? "?wiki=" + encodeURIComponent(selected) : ""}`;
   const gardenerLink = gardener
