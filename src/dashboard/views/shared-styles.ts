@@ -198,7 +198,7 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "benchmark",
+  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "benchmark" | "models",
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
   return `
@@ -249,6 +249,7 @@ export function renderNav(
         <a href="/wiki" class="nav-link${activePage === "wiki" ? " active" : ""}">Wiki</a>
         <a href="/graph" class="nav-link${activePage === "graph" ? " active" : ""}">Graph</a>
         <a href="/benchmark" class="nav-link${activePage === "benchmark" ? " active" : ""}">Benchmark</a>
+        <a href="/models" class="nav-link${activePage === "models" ? " active" : ""}">Models</a>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>

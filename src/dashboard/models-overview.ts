@@ -1,0 +1,394 @@
+/**
+ * Models overview — server-side assembly of the EFFECTIVE model / connector /
+ * Haiku backend for every AI job in muninn, after all the defaults resolve.
+ *
+ * The point is misconfiguration visibility: the #191 class of bug (a bot's
+ * Copilot model silently downgrading to Sonnet) is invisible until you can put
+ * "what the config says will run" next to "what actually ran recently". This
+ * module builds exactly that pairing for the `/models` dashboard page — a
+ * read-only diagnostic, it adds no new tracking.
+ *
+ * Everything is derived from the SAME sources of truth the runtime uses:
+ *   - `resolveBackendWithReason` (haiku-direct.ts) for the Haiku backend + why,
+ *   - `resolveSummarizerBot` / `resolveResearchBot` (bots/config.ts) for roles,
+ *   - `connectorCapabilities` for the TikTok `--add-dir` constraint,
+ *   - the `watchers` table for per-watcher gate models,
+ *   - `haiku_usage` + `traces` for the "actually used" column.
+ */
+
+import type { BotConfig } from "../bots/config.ts";
+import { discoverAllBots, resolveResearchBot, resolveSummarizerBot } from "../bots/config.ts";
+import { resolveBackendWithReason } from "../ai/haiku-direct.ts";
+import { connectorCapabilities } from "../ai/one-shot.ts";
+import { DEFAULT_MODEL as HAIKU_DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { getAllWatchers } from "../db/watchers.ts";
+import type { Watcher } from "../types.ts";
+import { getDb } from "../db/client.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("dashboard", "models");
+
+/** Local embeddings model (ai/embeddings.ts) — never a remote call. */
+const EMBEDDINGS_MODEL = "Xenova/all-MiniLM-L6-v2";
+/** Gardener draft thinking cap — mirror of DRAFT_THINKING_MAX_TOKENS (wiki-gardener.ts). */
+const GARDENER_DRAFT_THINKING_MAX_TOKENS = 8_000;
+
+/** Where an effective value came from, shown as a small chip on the page. */
+export type Origin = "config" | "env" | "default" | "derived" | "legacy" | "fixed" | "none";
+
+export interface EffectiveValue {
+  value: string;
+  origin: Origin;
+}
+
+export interface BotEntry {
+  name: string;
+  connector: EffectiveValue;
+  model: EffectiveValue;
+  thinkingMaxTokens: number | null;
+  haikuBackend: EffectiveValue;
+  /** Human-readable reason from `resolveBackendWithReason` (the winning rule). */
+  haikuBackendReason: string;
+  /** Distinct chat models seen in traces over the last window ("—" when empty). */
+  usedChatModels: string[];
+  /** Distinct Haiku models seen across all sources over the last window. */
+  usedHaikuModels: string[];
+}
+
+export interface RoleEntry {
+  role: string;
+  bot: string | null;
+  origin: Origin;
+  /** Optional secondary note (e.g. the TikTok constraint chip). */
+  note?: string;
+  /** false ⇒ render the note as an error chip (constraint violated). */
+  noteOk?: boolean;
+}
+
+export interface PipelineEntry {
+  job: string;
+  /** Effective backend/router label — e.g. "Claude CLI", "Haiku router", "local". */
+  backend: string;
+  /** Effective model (after defaults). */
+  model: EffectiveValue;
+  /** Optional extra note (thinking cap, scope, "report-only"). */
+  note?: string;
+  /** Distinct models actually seen for this job over the last window. */
+  used: string[];
+}
+
+export interface ModelsOverview {
+  selectedBot: string;
+  generatedAt: number;
+  bots: BotEntry[];
+  roles: RoleEntry[];
+  pipeline: PipelineEntry[];
+  errors?: string[];
+}
+
+/** A distinct (source, bot, model) tuple from `haiku_usage` in the window. */
+export interface HaikuUsageRow {
+  source: string;
+  botName: string | null;
+  model: string;
+}
+
+/** A distinct (bot, model) tuple from the `claude` chat spans in the window. */
+export interface ChatModelRow {
+  botName: string | null;
+  model: string;
+}
+
+/** Injectable seams so the route test drives the assembly without a live DB. */
+export interface ModelsOverviewDeps {
+  discoverBots: () => BotConfig[];
+  getWatchers: () => Promise<Watcher[]>;
+  getHaikuUsage: () => Promise<HaikuUsageRow[]>;
+  getChatModels: () => Promise<ChatModelRow[]>;
+}
+
+const USAGE_WINDOW_DAYS = 7;
+
+async function defaultGetHaikuUsage(): Promise<HaikuUsageRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT source, bot_name, model
+    FROM haiku_usage
+    WHERE created_at >= now() - ${`${USAGE_WINDOW_DAYS} days`}::interval
+      AND model IS NOT NULL
+  `;
+  return rows.map((r) => ({
+    source: r.source as string,
+    botName: (r.bot_name as string | null) ?? null,
+    model: r.model as string,
+  }));
+}
+
+async function defaultGetChatModels(): Promise<ChatModelRow[]> {
+  const sql = getDb();
+  // The main chat model lives on the child `claude` span's attributes; join it
+  // to its root so we can attribute the model to a bot.
+  const rows = await sql`
+    SELECT DISTINCT t.bot_name AS bot_name, c.attributes->>'model' AS model
+    FROM traces t
+    JOIN traces c ON c.trace_id = t.trace_id AND c.parent_id = t.id AND c.name = 'claude'
+    WHERE t.parent_id IS NULL
+      AND t.created_at >= now() - ${`${USAGE_WINDOW_DAYS} days`}::interval
+      AND c.attributes->>'model' IS NOT NULL
+  `;
+  return rows.map((r) => ({ botName: (r.bot_name as string | null) ?? null, model: r.model as string }));
+}
+
+export const DEFAULT_MODELS_OVERVIEW_DEPS: ModelsOverviewDeps = {
+  discoverBots: discoverAllBots,
+  getWatchers: () => getAllWatchers(),
+  getHaikuUsage: defaultGetHaikuUsage,
+  getChatModels: defaultGetChatModels,
+};
+
+/** Sorted, de-duplicated model list — stable output for tests + rendering. */
+function uniqSorted(models: Iterable<string>): string[] {
+  return [...new Set([...models].filter((m) => m && m.length > 0))].sort();
+}
+
+/**
+ * Map the winning `resolveBackendWithReason` rule to an origin chip. The reason
+ * strings are the single source of truth (haiku-direct.ts) — this only recolors
+ * them for the UI.
+ */
+function haikuBackendOrigin(reason: string): Origin {
+  if (reason.includes("HAIKU_BACKEND env")) return "env";
+  if (reason.includes("bot config")) return "config";
+  if (reason.includes("legacy")) return "legacy";
+  if (reason.includes("connector default")) return "derived";
+  if (reason.includes("explicit")) return "config";
+  return "default"; // "default" (cli floor)
+}
+
+/** Add a model to a `key → Set<model>` map, creating the set on first use. */
+function addModel(map: Map<string, Set<string>>, key: string, model: string): void {
+  let set = map.get(key);
+  if (!set) {
+    set = new Set();
+    map.set(key, set);
+  }
+  set.add(model);
+}
+
+/**
+ * Assemble the full overview. Pure over its injected deps — the route wires the
+ * DB-backed defaults, the test wires fabricated ones.
+ */
+export async function assembleModelsOverview(
+  selectedBot: string,
+  deps: ModelsOverviewDeps = DEFAULT_MODELS_OVERVIEW_DEPS,
+  now: number = Date.now(),
+): Promise<ModelsOverview> {
+  const bots = deps.discoverBots();
+  const globalModelDefault = process.env.CLAUDE_MODEL || "sonnet";
+  const errors: string[] = [];
+
+  const [watchers, haikuUsage, chatModels] = await Promise.all([
+    deps.getWatchers().catch((err) => {
+      errors.push(`watchers: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as Watcher[];
+    }),
+    deps.getHaikuUsage().catch((err) => {
+      errors.push(`haiku_usage: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as HaikuUsageRow[];
+    }),
+    deps.getChatModels().catch((err) => {
+      errors.push(`traces: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as ChatModelRow[];
+    }),
+  ]);
+
+  // Index usage for the "actually used" column.
+  const haikuBySourceBot = new Map<string, Set<string>>(); // `${source}|${bot}` → models
+  const haikuBySource = new Map<string, Set<string>>(); // source → models (any bot)
+  const haikuByBot = new Map<string, Set<string>>(); // bot → models (any source)
+  for (const row of haikuUsage) {
+    const bot = row.botName ?? "";
+    addModel(haikuBySourceBot, `${row.source}|${bot}`, row.model);
+    addModel(haikuBySource, row.source, row.model);
+    addModel(haikuByBot, bot, row.model);
+  }
+  const chatByBot = new Map<string, Set<string>>();
+  for (const row of chatModels) {
+    addModel(chatByBot, row.botName ?? "", row.model);
+  }
+
+  const usedHaikuForSource = (source: string, bot?: string): string[] =>
+    uniqSorted(bot ? (haikuBySourceBot.get(`${source}|${bot}`) ?? []) : (haikuBySource.get(source) ?? []));
+
+  // ---- Bots table ----------------------------------------------------------
+  const botEntries: BotEntry[] = bots.map((bot) => {
+    const { backend, reason } = resolveBackendWithReason({
+      connector: bot.connector,
+      haikuBackend: bot.haikuBackend,
+    });
+    return {
+      name: bot.name,
+      connector: {
+        value: bot.connector ?? "claude-cli",
+        origin: bot.connector ? "config" : "default",
+      },
+      model: {
+        value: bot.model ?? globalModelDefault,
+        origin: bot.model ? "config" : "default",
+      },
+      thinkingMaxTokens: bot.thinkingMaxTokens ?? null,
+      haikuBackend: { value: backend, origin: haikuBackendOrigin(reason) },
+      haikuBackendReason: reason,
+      usedChatModels: uniqSorted(chatByBot.get(bot.name) ?? []),
+      usedHaikuModels: uniqSorted(haikuByBot.get(bot.name) ?? []),
+    };
+  });
+
+  // ---- Role assignments ----------------------------------------------------
+  const summarizer = resolveSummarizerBot(bots);
+  const research = resolveResearchBot(bots);
+  const roles: RoleEntry[] = [];
+
+  // Summarizer + its TikTok constraint chip.
+  {
+    const origin: Origin = process.env.SUMMARIZER_BOT ? "env" : "default";
+    let note: string | undefined;
+    let noteOk = true;
+    if (summarizer) {
+      const ok = connectorCapabilities(summarizer).supportsExtraDirs;
+      note = ok
+        ? "TikTok frames OK (--add-dir)"
+        : `TikTok frames blocked — connector "${summarizer.connector ?? "claude-cli"}" lacks --add-dir`;
+      noteOk = ok;
+    }
+    roles.push({
+      role: "Summarizer (YouTube / X / TikTok / anthropic)",
+      bot: summarizer?.name ?? null,
+      origin,
+      note,
+      noteOk,
+    });
+  }
+
+  // Research synthesizer.
+  roles.push({
+    role: "Research synthesizer (/research)",
+    bot: research?.name ?? null,
+    origin: process.env.RESEARCH_BOT ? "env" : "default",
+    note: research ? "non-opus fast default" : undefined,
+  });
+
+  // What's-new wiki digest runs on the research bot (generateWikiDigest → executeOneShot).
+  roles.push({
+    role: "What's-new wiki digest",
+    bot: research?.name ?? null,
+    origin: process.env.RESEARCH_BOT ? "env" : "derived",
+    note: "runs on the research bot",
+  });
+
+  // ---- Pipeline jobs -------------------------------------------------------
+  const selected = bots.find((b) => b.name === selectedBot) ?? bots[0];
+  const selectedName = selected?.name ?? selectedBot;
+  const selectedBackend = selected
+    ? resolveBackendWithReason({ connector: selected.connector, haikuBackend: selected.haikuBackend }).backend
+    : "cli";
+  const selectedModel = selected?.model ?? globalModelDefault;
+
+  const pipeline: PipelineEntry[] = [];
+
+  // Haiku router jobs (per selected bot).
+  const haikuRouterLabel = `Haiku router (${selectedBackend})`;
+  for (const [job, source] of [
+    ["research_knowledge decomposer", "knowledge-decompose"],
+    ["Memory extractor", "memory"],
+    ["Goal detector", "goals"],
+    ["Schedule detector", "schedule"],
+    ["Gardener clustering", "wiki_gardener_cluster"],
+  ] as const) {
+    pipeline.push({
+      job: `${job} · ${selectedName}`,
+      backend: haikuRouterLabel,
+      model: { value: HAIKU_DEFAULT_MODEL, origin: "default" },
+      note: "backend picked per bot connector",
+      used: usedHaikuForSource(source, selectedName),
+    });
+  }
+
+  // Gardener drafts run on the bot's own connector + model, thinking capped 8k.
+  pipeline.push({
+    job: `Gardener drafts · ${selectedName}`,
+    backend: `${selected?.connector ?? "claude-cli"} (bot connector)`,
+    model: { value: selectedModel, origin: selected?.model ? "config" : "default" },
+    note: `thinking capped ${GARDENER_DRAFT_THINKING_MAX_TOKENS.toLocaleString()} tokens`,
+    used: [],
+  });
+
+  // Embeddings — always local, never a remote model call.
+  pipeline.push({
+    job: "Embeddings (hybrid memory search)",
+    backend: "local (@huggingface/transformers)",
+    model: { value: EMBEDDINGS_MODEL, origin: "fixed" },
+    note: "384-dim, quantized, on-device",
+    used: [],
+  });
+
+  // Watcher gates — backend fixed to CLI (they need Gmail MCP), MODEL per-watcher.
+  const gateSourceByType: Partial<Record<Watcher["type"], string>> = {
+    email: "watcher-email",
+    x: "watcher-x",
+    anthropic: "watcher-anthropic",
+    "wiki-gardener": "wiki_gardener_cluster",
+  };
+  for (const w of watchers) {
+    if (w.type === "wiki-linter" || w.type === "news") {
+      // Report-only / no-AI watchers.
+      pipeline.push({
+        job: `Watcher: ${w.name} · ${w.botName}`,
+        backend: "none",
+        model: { value: "—", origin: "none" },
+        note: w.type === "wiki-linter" ? "report-only (no AI)" : "no AI (RSS)",
+        used: [],
+      });
+      continue;
+    }
+    const configModel = typeof w.config?.model === "string" ? (w.config.model as string) : null;
+    const source = gateSourceByType[w.type];
+    pipeline.push({
+      job: `Watcher: ${w.name} · ${w.botName}`,
+      backend: w.type === "wiki-gardener" ? `Haiku router / ${w.botName} bot connector` : "Claude CLI (Gmail MCP)",
+      model: {
+        value: configModel ?? HAIKU_DEFAULT_MODEL,
+        origin: configModel ? "config" : "default",
+      },
+      note: w.type === "wiki-gardener" ? "cluster: Haiku · draft: bot model" : "backend fixed to CLI",
+      used: source ? usedHaikuForSource(source, w.botName) : [],
+    });
+  }
+
+  // Report-only counters with no model.
+  pipeline.push({
+    job: "Wiki linter / ingest-backlog counter",
+    backend: "none",
+    model: { value: "—", origin: "none" },
+    note: "report-only, no AI",
+    used: [],
+  });
+
+  if (errors.length > 0) {
+    log.warn("models overview assembled with {count} degraded source(s)", { count: errors.length });
+  }
+
+  return {
+    selectedBot: selectedName,
+    generatedAt: now,
+    bots: botEntries,
+    roles,
+    pipeline,
+    ...(errors.length > 0 ? { errors } : {}),
+  };
+}
+
+export function _internalsForTest() {
+  return { haikuBackendOrigin, uniqSorted, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+}
