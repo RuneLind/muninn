@@ -8,6 +8,12 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import {
+  backlogStripModel,
+  backlogStripHtml,
+  backlogOutcomeHtml,
+  type IngestBacklogResponse,
+} from "./wiki-gardener-strip.ts";
 
 interface SourceDoc {
   collection: string;
@@ -50,37 +56,6 @@ interface LintResponse {
   generatedAt: number;
   error?: string;
 }
-interface BacklogCollection {
-  collection: string;
-  source: string;
-  label: string;
-  total: number;
-  ingested: number;
-  queued: number;
-}
-interface LastBacklogRun {
-  finishedAt: number;
-  offered: number;
-  drafted: number;
-  error?: string;
-}
-interface IngestBacklogResponse {
-  byCollection: BacklogCollection[];
-  total: number;
-  ingested: number;
-  queued: number;
-  wikiUrlCount: number;
-  generatedAt: number;
-  errors?: { source: string; collection: string; error: string }[];
-  error?: string;
-  // Live fields (PR 2) — merged fresh on every response, outside the TTL cache.
-  running?: boolean;
-  offered?: number;
-  remaining?: number;
-  watcherSeeded?: boolean;
-  lastBacklogRun?: LastBacklogRun | null;
-}
-
 const injectedBot = (window as unknown as { __WIKI_BOT__?: unknown }).__WIKI_BOT__;
 const BOT =
   typeof injectedBot === "string"
@@ -235,6 +210,8 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
       p.resolvedAt = Date.now();
     }
     render();
+    // A draft that just got applied/rejected changes "drafts awaiting review".
+    if (lastBacklogData) renderBacklog(lastBacklogData);
   } catch (err) {
     setOutcome(card, "Network error: " + (err as Error).message, "err");
     buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
@@ -330,31 +307,19 @@ document.getElementById("lintRefresh")?.addEventListener("click", loadLint);
 // ── Ingest backlog strip (report-only "queued up" counter) ──────────────────
 
 let backlogPolling = false;
+// Last backlog GET payload, kept so the strip can re-render when the proposal
+// list loads/refreshes (the pending-draft count is a client-side count of the
+// proposals the page already loaded — not on the backlog payload).
+let lastBacklogData: IngestBacklogResponse | null = null;
 
-function backlogOutcome(run: LastBacklogRun | null | undefined): string {
-  if (!run) return "";
-  if (run.error) {
-    return ` <span class="bk-err">last run failed: ${esc(run.error)}</span>`;
-  }
-  if (run.drafted > 0) {
-    return ` <span class="bk-run-note">last run: ${run.drafted} draft(s) from ${run.offered} docs — see proposals below</span>`;
-  }
-  return ` <span class="bk-run-note">last run finished — nothing clustered; ${run.offered} docs offered</span>`;
-}
+// The consent panel's open/closed state lives here (not only in the DOM class):
+// the strip's innerHTML is replaced wholesale on every render (proposal
+// approve/reject, poll ticks), which would otherwise silently collapse a panel
+// the user is reading.
+let backlogConfirmOpen = false;
 
-function backlogControl(data: IngestBacklogResponse): string {
-  // Hide the whole control when there's no wiki-gardener watcher (no offered-memory FK).
-  if (data.watcherSeeded === false) return "";
-  if (data.running) {
-    return `<button class="gard-btn bk-run" disabled>Running…</button>`;
-  }
-  const remaining = typeof data.remaining === "number" ? data.remaining : data.queued;
-  if (remaining <= 0 && data.queued > 0) {
-    // Everything queued has already been offered — offer a reset to re-run.
-    return `<span class="bk-run-note">all offered</span> <button class="gard-btn bk-reset" data-backlog-action="reset">Reset to re-run</button>`;
-  }
-  if (remaining <= 0) return ""; // nothing queued at all
-  return `<button class="gard-btn bk-run" data-backlog-action="run">Ingest backlog (${remaining})</button>`;
+function pendingDraftCount(): number {
+  return allProposals.filter((p) => p.status === "draft").length;
 }
 
 function renderBacklog(data: IngestBacklogResponse): void {
@@ -363,23 +328,20 @@ function renderBacklog(data: IngestBacklogResponse): void {
   if (data.error) {
     // A resolution error (non-bot/unknown wiki) — stay quiet, the body already
     // explains the situation.
+    lastBacklogData = null;
     el.innerHTML = "";
     return;
   }
-  // Per-source queued counts, in the byCollection (SUMMARY_SOURCES) order.
-  const parts = (data.byCollection || [])
-    .map((c) => `<span class="bk-src">${esc(c.label)} <span class="bk-n">${c.queued}</span></span>`)
-    .join('<span class="bk-sep">·</span>');
-  const errNote = data.errors && data.errors.length
-    ? ` <span class="bk-err">(some sources unavailable)</span>`
-    : "";
-  el.innerHTML =
-    `<span class="bk-label">Ingest backlog:</span> <span class="bk-total">${data.queued}</span>` +
-    ` summaries never ingested into the wiki` +
-    (parts ? ` <span class="bk-sep">—</span> ${parts}` : "") +
-    errNote +
-    ` <span class="bk-control">${backlogControl(data)}</span>` +
-    backlogOutcome(data.lastBacklogRun);
+  lastBacklogData = data;
+  const model = backlogStripModel(data, pendingDraftCount());
+  el.innerHTML = backlogStripHtml(model, data.errors) + backlogOutcomeHtml(data.lastBacklogRun);
+  const confirm = el.querySelector(".bk-confirm");
+  if (confirm) {
+    if (backlogConfirmOpen) confirm.classList.add("open");
+  } else {
+    // The run control (and its panel) left the strip — running/all-offered/etc.
+    backlogConfirmOpen = false;
+  }
 }
 
 function loadBacklog(): void {
@@ -473,8 +435,23 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest("[data-backlog-action]");
   if (!btn) return;
   const action = btn.getAttribute("data-backlog-action");
-  if (action === "run") void startBacklogRun();
-  else if (action === "reset") void resetBacklog();
+  const strip = document.getElementById("gardBacklog");
+  const confirm = strip?.querySelector(".bk-confirm") as HTMLElement | null;
+  if (action === "confirm") {
+    // Expand the inline informed-consent panel (no POST yet).
+    backlogConfirmOpen = true;
+    if (confirm) confirm.classList.add("open");
+  } else if (action === "cancel") {
+    backlogConfirmOpen = false;
+    if (confirm) confirm.classList.remove("open");
+  } else if (action === "run") {
+    // [Start batch] — the panel's confirmed run.
+    backlogConfirmOpen = false;
+    if (confirm) confirm.classList.remove("open");
+    void startBacklogRun();
+  } else if (action === "reset") {
+    void resetBacklog();
+  }
 });
 
 const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;
@@ -496,6 +473,9 @@ function loadProposals(): void {
       }
       allProposals = data.proposals || [];
       render();
+      // The strip's "drafts awaiting review" count + re-render depend on the
+      // proposal list — refresh it now that the count is known.
+      if (lastBacklogData) renderBacklog(lastBacklogData);
     })
     .catch((err: Error) => {
       document.getElementById("gardList")!.innerHTML =

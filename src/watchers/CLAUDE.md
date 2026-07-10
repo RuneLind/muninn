@@ -300,10 +300,19 @@ header carries a 🌱 Gardener link + pending-draft count badge.
 
 **Manual "Ingest backlog" drain (PR 2).** The weekly run only clusters a *recent*
 window, so the all-time tail of never-ingested summaries grows unbounded (measured
-by `src/wiki/ingest-backlog.ts`). The **"Ingest backlog (N)"** button on
+by `src/wiki/ingest-backlog.ts`). The **"Drain a batch (N)"** button on
 `/wiki/gardener` drains that tail through the SAME `runGardener` pipeline in bounded
 batches — one click replaces a manual ingest session, every judgment call becomes a
-reviewable proposal. Mechanics live in `src/gardener/backlog.ts`:
+reviewable proposal. Clicking the primary button expands an inline informed-consent
+confirm panel (`[Start batch] / [Cancel]`, PR 1) — it explains that a click drains a
+bounded batch of `min(batchSize, remaining)` (not all N) as a ~10–20 min background AI
+job — before any POST fires. The strip renders one honest labeled sentence (total never
+ingested · per-source · **eligible now** = `remaining` · **offered in past runs** =
+`queued − remaining`, the offered-and-still-queued count that makes the sentence add up,
+NOT the raw all-time `offered` · **drafts awaiting review** = client-side count of
+`status === "draft"` proposals) from the pure `backlogStripModel` in
+`views/components/wiki-gardener-strip.ts` (unit-tested, DOM-free). Mechanics live in
+`src/gardener/backlog.ts`:
 - **Shared constants** (`BACKLOG_BATCH_SIZE 40`, `BACKLOG_MAX_PROPOSALS 8`,
   `DRAFT_TIMEOUT_MS` — hoisted here from the checker; the weekly checker imports it
   back) so route, helper, and checker can't drift.
@@ -319,8 +328,12 @@ reviewable proposal. Mechanics live in `src/gardener/backlog.ts`:
   crashed run skips its batch rather than re-offering it and starving the tail). A
   rejected proposal's docs re-enter the queued COUNT but stay offered (never
   re-offered); recovered only by the **Reset** affordance (`backlog-reset` writes an
-  empty snapshot). The offered set needs the `wiki-gardener` watcher_id (the
-  snapshot FK) — no row ⇒ the feature is unavailable (button hidden / 404).
+  empty snapshot). The `Reset offered (N)` button shows whenever `queued − remaining > 0
+  && !running` (PR 1 — no longer only in the fully-drained "all offered" state), gated +
+  labelled on the SAME offered-and-still-queued count as the strip so it never renders
+  `Reset offered (0)`; the all-offered state keeps its "all offered / Reset to re-run"
+  wording. The offered set needs the `wiki-gardener` watcher_id (the
+  snapshot FK) — no row ⇒ the feature is unavailable (control hidden / 404).
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances
@@ -330,7 +343,8 @@ reviewable proposal. Mechanics live in `src/gardener/backlog.ts`:
 - **Routes** (`wiki-gardener-routes.ts`): `POST /api/wiki/gardener/backlog-run`,
   `POST /api/wiki/gardener/backlog-reset`, and the extended
   `GET /api/wiki/ingest-backlog` (adds `running`/`offered`/`remaining`/`lastBacklogRun`/
-  `watcherSeeded`, merged fresh OUTSIDE the 5-min cache — never mutating the cached
+  `watcherSeeded` + the batch constants `batchSize`/`maxProposals` so the confirm panel
+  never hardcodes them, merged fresh OUTSIDE the 5-min cache — never mutating the cached
   object). The shared gardener seams are factored into `buildGardenerSeams` (exported
   from `wiki-gardener.ts`) so the weekly checker and the backlog run wire identical
   fetch/cluster/draft/DB seams.

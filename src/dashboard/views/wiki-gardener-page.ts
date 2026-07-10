@@ -74,25 +74,46 @@ export async function renderWikiGardenerPage(opts?: {
       font-size: 13px; color: var(--text-secondary);
     }
     .gard-backlog .bk-label { color: var(--text-muted); }
-    .gard-backlog .bk-total { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
-    .gard-backlog .bk-src { color: var(--text-secondary); }
-    .gard-backlog .bk-src .bk-n { font-weight: 600; color: var(--accent-light); font-variant-numeric: tabular-nums; }
+    .gard-backlog .bk-sentence { color: var(--text-secondary); }
+    .gard-backlog .bk-strong { font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .gard-backlog .bk-n { font-weight: 600; color: var(--accent-light); font-variant-numeric: tabular-nums; }
     .gard-backlog .bk-sep { color: var(--text-dim); }
     .gard-backlog .bk-err { color: var(--status-magenta); font-size: 12px; }
     .gard-backlog .bk-run-note { color: var(--text-muted); font-size: 12px; }
     .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
+    /* Primary run button — deliberately reads as a button, not inline stat text. */
     .gard-backlog .gard-btn.bk-run {
-      background: color-mix(in srgb, var(--accent) 20%, transparent);
-      border: 1px solid var(--accent); color: var(--accent-light);
-      font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
+      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: 7px;
+      font-family: inherit; cursor: pointer;
     }
-    .gard-backlog .gard-btn.bk-run:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+    .gard-backlog .gard-btn.bk-run:hover:not(:disabled) { background: var(--accent-light); border-color: var(--accent-light); }
     .gard-backlog .gard-btn.bk-run:disabled { opacity: 0.55; cursor: default; }
     .gard-backlog .gard-btn.bk-reset {
       background: transparent; border: 1px solid var(--border-secondary); color: var(--text-muted);
       font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-reset:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Inline informed-consent panel — full-width row below the strip, hidden until confirm. */
+    .gard-backlog .bk-confirm {
+      display: none; flex-basis: 100%; flex-direction: column; gap: 10px;
+      margin-top: 4px; padding: 12px 14px;
+      background: var(--bg-inset); border: 1px solid var(--border-primary); border-radius: 8px;
+    }
+    .gard-backlog .bk-confirm.open { display: flex; }
+    .gard-backlog .bk-confirm-copy { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+    .gard-backlog .bk-confirm-copy strong { color: var(--text-primary); font-weight: 700; }
+    .gard-backlog .bk-confirm-actions { display: flex; gap: 8px; }
+    .gard-backlog .gard-btn.bk-start {
+      background: var(--accent); border: 1px solid var(--accent); color: #fff;
+      font-size: 13px; font-weight: 600; padding: 7px 16px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-start:hover { background: var(--accent-light); border-color: var(--accent-light); }
+    .gard-backlog .gard-btn.bk-cancel {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-muted);
+      font-size: 13px; padding: 7px 16px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-cancel:hover { border-color: var(--accent); color: var(--text-primary); }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {
@@ -224,7 +245,7 @@ export async function renderWikiGardenerPage(opts?: {
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
-    <div id="gardBacklog"></div>
+    <div id="gardBacklog" class="gard-backlog"></div>
     <div class="gard-filter-row" id="gardFilters">
       <button class="gard-filter active" data-status="">All</button>
       <button class="gard-filter" data-status="draft">Pending</button>

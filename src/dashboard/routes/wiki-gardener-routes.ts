@@ -34,6 +34,7 @@ import {
   resetBacklogOffered,
   draftedCount,
   gardenerRunInFlight,
+  BACKLOG_BATCH_SIZE,
   BACKLOG_MAX_PROPOSALS,
   BACKLOG_LOOKBACK_DAYS,
   DRAFT_TIMEOUT_MS,
@@ -213,13 +214,22 @@ export interface BacklogLiveFields {
  * Merge the per-request live fields onto the cached (by-reference) backlog
  * payload WITHOUT mutating the cached object: strip the server-only `queuedKeys`
  * and spread a fresh object. Exported so the non-mutation contract is unit-tested.
+ *
+ * The batch constants (`batchSize`/`maxProposals`) are always emitted from the
+ * shared `src/gardener/backlog.ts` source so the client confirm panel can render
+ * "drain a batch of N … up to M drafts" without hardcoding the numbers.
  */
 export function mergeBacklogLiveFields(
   data: IngestBacklogResponse,
   live: BacklogLiveFields,
 ): Record<string, unknown> {
   const { queuedKeys: _drop, ...rest } = data;
-  return { ...rest, ...live };
+  return {
+    ...rest,
+    ...live,
+    batchSize: BACKLOG_BATCH_SIZE,
+    maxProposals: BACKLOG_MAX_PROPOSALS,
+  };
 }
 
 /**
