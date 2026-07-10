@@ -178,6 +178,10 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   // --- Draft + persist (each proposal persisted as its draft completes) ---
   tracer?.start("draft");
+  // Emit the total before the loop: a cancel that lands during the resolve await
+  // aborts at iteration 0, before any per-iteration progress has carried
+  // `draftsTotal` — without this the outcome would record 0/0.
+  deps.onProgress?.({ stage: "drafting", draftsDone: 0, draftsTotal: resolved.length });
   const persisted: WikiProposal[] = [];
   // Docs whose cluster already produced a proposal — subtracted from the aborted
   // set so a doc a proposal already covers never returns to the queue on cancel.

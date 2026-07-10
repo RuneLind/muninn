@@ -372,7 +372,7 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   factored into `buildGardenerSeams` (exported from `wiki-gardener.ts`) so the weekly
   checker and the backlog run wire identical fetch/cluster/draft/DB seams. The client
   strip (PR 2) replaces the disabled `Running…` button with a live progress line
-  ("⏳ Drafting 3/6 — *topic* · started 14:32 · 2 drafts ready below `[Cancel]`") while
+  ("⏳ Drafting 3/6 — *topic* · started 14:32 · 3 drafts ready below `[Cancel]`") while
   `progress` is present; a weekly run (`running` true, `progress` null) keeps the plain
   disabled `Running…`. The pure progress-line/outcome builders live in
   `views/components/wiki-gardener-strip.ts` (DOM-free, unit-tested); DOM writes stay in

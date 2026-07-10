@@ -203,21 +203,23 @@ describe("runGardener — progress + soft cancel", () => {
     const { deps } = makeTwoClusterDeps({ onProgress: (p) => seen.push({ ...p }) });
     await runGardener(deps);
 
-    // harvest → cluster → resolve, then per cluster: before-draft + after-persist.
+    // harvest → cluster → resolve, then the pre-loop total emit, then per
+    // cluster: before-draft + after-persist.
     expect(seen.map((p) => p.stage)).toEqual([
       "harvesting",
       "clustering",
       "resolving",
+      "drafting", // pre-loop total emit (0/n)
       "drafting", // before c1
       "drafting", // after c1 persist
       "drafting", // before c2
       "drafting", // after c2 persist
     ]);
     const drafting = seen.filter((p) => p.stage === "drafting");
-    expect(drafting.map((p) => p.draftsDone)).toEqual([0, 1, 1, 2]);
+    expect(drafting.map((p) => p.draftsDone)).toEqual([0, 0, 1, 1, 2]);
     expect(drafting.every((p) => p.draftsTotal === 2)).toBe(true);
-    expect(drafting[0]!.currentTopic).toBe("Topic One");
-    expect(drafting[2]!.currentTopic).toBe("Topic Two");
+    expect(drafting[1]!.currentTopic).toBe("Topic One");
+    expect(drafting[3]!.currentTopic).toBe("Topic Two");
   });
 
   test("shouldAbort after draft 1 → 1 persisted, no 2nd draft, onAborted has cluster 2's docs", async () => {
@@ -302,6 +304,30 @@ describe("runGardener — progress + soft cancel", () => {
     expect(abortedKeys.slice().sort()).toEqual([...c1Keys, ...c2Keys].sort());
     // The checkpoint emits draftsTotal = clusters.length so the outcome records k/n.
     expect(total).toContain(2);
+  });
+
+  test("cancel during resolve → aborts at iteration 0 with a real draftsTotal, not 0/0", async () => {
+    // The cancel flag flips true AFTER the post-cluster checkpoint (first
+    // shouldAbort call) but before the first draft iteration — i.e. during the
+    // resolve await. The pre-loop progress emit must still carry
+    // draftsTotal = resolved.length so the outcome never records 0/0.
+    let abortChecks = 0;
+    let abortedKeys: string[] = [];
+    const totals: number[] = [];
+    const { deps, inserted, c1Keys, c2Keys } = makeTwoClusterDeps({
+      shouldAbort: () => ++abortChecks >= 2, // post-cluster check passes; iteration 0 aborts
+      onAborted: (k) => {
+        abortedKeys = k;
+      },
+      onProgress: (p) => {
+        if (p.draftsTotal !== undefined) totals.push(p.draftsTotal);
+      },
+    });
+    const alerts = await runGardener(deps);
+    expect(inserted).toHaveLength(0);
+    expect(alerts).toEqual([]);
+    expect(abortedKeys.slice().sort()).toEqual([...c1Keys, ...c2Keys].sort());
+    expect(totals).toContain(2); // the pre-loop emit carried the real total
   });
 
   test("all three seams omitted → identical behavior (one proposal, one alert)", async () => {
