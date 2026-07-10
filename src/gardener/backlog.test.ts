@@ -8,6 +8,7 @@ import {
   resetBacklogOffered,
   draftedCount,
   draftedKeysSince,
+  recoverRunJournal,
   getBacklogProgress,
   requestBacklogCancel,
   __resetGardenerMutexForTest,
@@ -395,6 +396,68 @@ describe("startBacklogRun", () => {
     // The old journal is cleared exactly once by the recover (the success settle
     // clears again on its own; that's a separate no-op clear on the fresh journal).
     expect(cleared).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── recoverRunJournal (shared recover body) ──────────────────────────────────
+
+describe("recoverRunJournal", () => {
+  test("no journal → 0, nothing persisted or cleared", async () => {
+    let persisted = 0;
+    let cleared = 0;
+    const n = await recoverRunJournal({
+      readRunJournal: async () => null,
+      draftedKeysSince: async () => new Set<string>(),
+      getOffered: async () => new Set<string>(),
+      persistOffered: async () => {
+        persisted++;
+      },
+      clearRunJournal: async () => {
+        cleared++;
+      },
+    });
+    expect(n).toBe(0);
+    expect(persisted).toBe(0);
+    expect(cleared).toBe(0);
+  });
+
+  test("drafted subset stays offered; undrafted returned; count = actual deletions", async () => {
+    const persists: string[][] = [];
+    let cleared = 0;
+    const n = await recoverRunJournal({
+      readRunJournal: async () => ({ startedAt: 1000, batchKeys: ["c/p1", "c/p2", "c/p3"] }),
+      draftedKeysSince: async () => new Set(["c/p1"]),
+      getOffered: async () => new Set(["c/p1", "c/p2", "c/p3", "c/z"]),
+      persistOffered: async (keys) => {
+        persists.push([...keys].sort());
+      },
+      clearRunJournal: async () => {
+        cleared++;
+      },
+    });
+    expect(n).toBe(2); // c/p2 + c/p3 actually left the offered set
+    expect(persists).toEqual([["c/p1", "c/z"]]);
+    expect(cleared).toBe(1);
+  });
+
+  test("journal-written-but-never-offered crash window → recovered 0, no persist, journal cleared", async () => {
+    let persisted = 0;
+    let cleared = 0;
+    const n = await recoverRunJournal({
+      readRunJournal: async () => ({ startedAt: 1000, batchKeys: ["c/p1", "c/p2"] }),
+      draftedKeysSince: async () => new Set<string>(),
+      // The crash hit between writeRunJournal and persistOffered — batch never offered.
+      getOffered: async () => new Set(["c/z"]),
+      persistOffered: async () => {
+        persisted++;
+      },
+      clearRunJournal: async () => {
+        cleared++;
+      },
+    });
+    expect(n).toBe(0);
+    expect(persisted).toBe(0); // deleting keys never offered is a no-op — skip the write
+    expect(cleared).toBe(1);
   });
 });
 

@@ -353,6 +353,36 @@ export interface StartBacklogRunDeps {
 export type StartBacklogRunResult = { state: "started" | "running" | "no-watcher" | "disabled" };
 
 /**
+ * Recover a pending run journal: return the batch's undrafted keys to the pool
+ * (drafted subset stays offered) and clear the journal. Returns how many keys
+ * actually left the offered set — 0 for the journal-written-but-never-offered
+ * crash window, where deleting keys never offered is a harmless no-op. The ONE
+ * body behind both the in-mutex auto-recover in {@link startBacklogRun} and the
+ * manual `backlog-recover` endpoint; callers must hold the per-bot mutex.
+ */
+export async function recoverRunJournal(
+  deps: Pick<
+    StartBacklogRunDeps,
+    "readRunJournal" | "draftedKeysSince" | "getOffered" | "persistOffered" | "clearRunJournal"
+  >,
+): Promise<number> {
+  const pending = await deps.readRunJournal();
+  if (!pending) return 0;
+  const drafted = await deps.draftedKeysSince(pending.startedAt, pending.batchKeys);
+  const undrafted = pending.batchKeys.filter((k) => !drafted.has(k));
+  let recovered = 0;
+  if (undrafted.length) {
+    const offered = await deps.getOffered();
+    for (const k of undrafted) {
+      if (offered.delete(k)) recovered++;
+    }
+    if (recovered) await deps.persistOffered([...offered]);
+  }
+  await deps.clearRunJournal();
+  return recovered;
+}
+
+/**
  * Kick a detached backlog drain under the per-bot mutex. Returns immediately:
  *  - `no-watcher` — no `wiki-gardener` row (offered memory has no watcher_id FK);
  *  - `disabled`   — the bot's gardener is turned off;
@@ -389,19 +419,10 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // newest-first candidates for the very batch we're about to select, so this is
     // strictly safe. A journal-aware start also means a fresh Ingest never clobbers
     // a pending journal and orphans that batch permanently.
-    const pending = await deps.readRunJournal();
-    if (pending) {
-      const drafted = await deps.draftedKeysSince(pending.startedAt, pending.batchKeys);
-      const undrafted = pending.batchKeys.filter((k) => !drafted.has(k));
-      if (undrafted.length) {
-        const offered = await deps.getOffered();
-        for (const k of undrafted) offered.delete(k);
-        await deps.persistOffered([...offered]);
-      }
-      // Clear before selecting the new batch — if assemble throws below, the strand
-      // is already returned to the pool and the journal must not linger as a ghost.
-      await deps.clearRunJournal();
-    }
+    // (Clears the journal before selecting the new batch — if assemble throws
+    // below, the strand is already returned to the pool and the journal must not
+    // linger as a ghost.)
+    await recoverRunJournal(deps);
 
     const assembled = await deps.assemble();
     // Journal BEFORE offering — a crash between the two recovers as a harmless no-op

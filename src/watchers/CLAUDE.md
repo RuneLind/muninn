@@ -379,7 +379,9 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   proposal and be wrongly counted as drafted, hence never returned). **Recovery**:
   `backlog-recover` returns the undrafted docs (`batchKeys − draftedKeys` — the coarse
   math, chosen because a crash may predate clustering so no cluster info exists) to the
-  offered pool and clears the journal; `backlog-dismiss` clears only. A fresh Ingest
+  offered pool and clears the journal; `backlog-dismiss` clears only. Both run under
+  the per-bot mutex (run in flight ⇒ 409) — a stale banner's Dismiss in another tab
+  must not null a live run's journal. A fresh Ingest
   **auto-recovers a pending journal in-mutex as the work fn's first step** (before
   `assemble()`), NOT as a route pre-flight — a check-then-recover in the route is the
   same lost-update TOCTOU class the reset guard documents (two near-simultaneous clicks

@@ -38,6 +38,7 @@ import {
   gardenerRunInFlight,
   getBacklogProgress,
   requestBacklogCancel,
+  recoverRunJournal,
   BACKLOG_BATCH_SIZE,
   BACKLOG_MAX_PROPOSALS,
   BACKLOG_LOOKBACK_DAYS,
@@ -659,7 +660,10 @@ export function registerWikiGardenerRoutes(
       let interrupted: BacklogLiveFields["interrupted"] = null;
       if (watcher && !running) {
         const journal = await readRunJournal(backlogDeps, watcher.id);
-        if (journal) {
+        // Re-probe after the read: an Ingest that started during the awaits above
+        // may have just written ITS journal — that's a live run, not an interrupted
+        // one (would flash a false banner for one poll).
+        if (journal && !gardenerRunInFlight(bot.name)) {
           const proposals = await backlogDeps.listProposals(bot.name);
           const drafted = draftedKeysSince(proposals, journal.startedAt, journal.batchKeys);
           interrupted = { at: journal.startedAt, batchSize: journal.batchKeys.length, drafted: drafted.size };
@@ -818,25 +822,27 @@ export function registerWikiGardenerRoutes(
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
     if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
 
-    const run = runExclusive(bot.name, async () => {
-      const journal = await readRunJournal(backlogDeps, watcher.id);
-      if (!journal) return { recovered: 0 };
-      const proposals = await backlogDeps.listProposals(bot.name);
-      const drafted = draftedKeysSince(proposals, journal.startedAt, journal.batchKeys);
-      const undrafted = journal.batchKeys.filter((k) => !drafted.has(k));
-      const offered = await readOffered(backlogDeps, watcher.id);
-      for (const k of undrafted) offered.delete(k);
-      await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY, [...offered]);
-      await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null);
-      return { recovered: undrafted.length };
-    });
+    const run = runExclusive(bot.name, () =>
+      // The ONE recover body, shared with startBacklogRun's in-mutex auto-recover.
+      recoverRunJournal({
+        readRunJournal: () => readRunJournal(backlogDeps, watcher.id),
+        draftedKeysSince: async (startedAt, batchKeys) =>
+          draftedKeysSince(await backlogDeps.listProposals(bot.name), startedAt, batchKeys),
+        getOffered: async () => readOffered(backlogDeps, watcher.id),
+        persistOffered: (keys) => backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY, keys),
+        clearRunJournal: () => backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null),
+      }),
+    );
     if (run === null) return c.json({ error: "a run is in flight" }, 409);
-    return c.json(await run);
+    return c.json({ recovered: await run });
   });
 
   // Dismiss an interrupted drain — leave the batch skipped (offered), just clear the
   // journal so the banner goes away. No journal is a clean no-op (refresh-race
-  // friendly). Same resolution/watcher guards as the other backlog POSTs.
+  // friendly). Same resolution/watcher guards as the other backlog POSTs. Held under
+  // the per-bot mutex like recover — a stale banner's Dismiss (e.g. another tab)
+  // racing a fresh Ingest must NOT null the live run's journal, which would strand
+  // that batch unrecoverably if it crashed.
   app.post("/api/wiki/gardener/backlog-dismiss", async (c) => {
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
@@ -845,7 +851,11 @@ export function registerWikiGardenerRoutes(
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
     if (!watcher) return c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404);
 
-    await backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null);
+    const run = runExclusive(bot.name, () =>
+      backlogDeps.setSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY, null),
+    );
+    if (run === null) return c.json({ error: "a run is in flight" }, 409);
+    await run;
     return c.json({ ok: true });
   });
 
