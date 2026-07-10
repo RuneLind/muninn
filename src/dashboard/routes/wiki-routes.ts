@@ -23,6 +23,14 @@ import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { countDraftWikiProposals } from "../../db/wiki-proposals.ts";
+import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
+import { listCollections } from "../../summaries/list-collections.ts";
+import {
+  buildIndexCoverageResponse,
+  type CollectionPatterns,
+  type CoverageListing,
+  type IndexCoverageResponse,
+} from "../../wiki/index-coverage.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -124,6 +132,41 @@ async function computeWikiFreshness(
       if (newest) out[entry.name] = newest;
     }),
   );
+  return out;
+}
+
+/**
+ * Fetch each collection's reader include/exclude regex patterns from huginn's
+ * `GET /api/collections`, keyed by collection name. Degrade-tolerant and
+ * best-effort: an unreachable huginn, or an OLDER huginn whose response lacks the
+ * pattern fields, yields an empty map — the coverage pure layer then skips the
+ * excludedByRule partition and meta pages stay in `missing` (documented degrade).
+ * Only entries carrying BOTH pattern arrays are kept (no hardcoded pattern copies
+ * live in muninn — the denylist is sourced entirely from huginn's manifests).
+ */
+async function fetchCollectionPatterns(
+  knowledgeApiUrl: string,
+): Promise<Map<string, CollectionPatterns>> {
+  const out = new Map<string, CollectionPatterns>();
+  try {
+    const data = await fetchKnowledgeApi(knowledgeApiUrl, "/api/collections", { timeoutMs: 10_000 });
+    const collections = (data?.collections ?? []) as Record<string, unknown>[];
+    for (const c of collections) {
+      const name = c?.name;
+      const inc = c?.includePatterns;
+      const exc = c?.excludePatterns;
+      if (typeof name === "string" && Array.isArray(inc) && Array.isArray(exc)) {
+        out.set(name, {
+          includePatterns: inc.filter((p): p is string => typeof p === "string"),
+          excludePatterns: exc.filter((p): p is string => typeof p === "string"),
+        });
+      }
+    }
+  } catch (err) {
+    log.warn("Index-coverage: /api/collections patterns fetch failed: {error}", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   return out;
 }
 
@@ -283,6 +326,75 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     return c.json({
       digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve) },
     });
+  });
+
+  // Read-only index-coverage overview for the reader start view: compares the
+  // wiki's on-disk `.md` pages against the deduped union of its backing search
+  // collections' document ids (huginn doc `id` IS the wiki-relative path). Reports
+  // `missing` (pages in no collection), `ghosts` (indexed ids with no file), and
+  // `htmlPages` (explainers — informational, never counted as missing). A wiki
+  // with no `collections` returns a clean `{ error }` (Ask-tab precedent). Never
+  // 5xx: a failed collection listing degrades to 200 + `errors[]` AND suppresses
+  // the coverage fields (a partial union would flag really-indexed pages as
+  // missing). `?refresh=1` busts the page-index TTL cache only — the collection
+  // listings are 1–2 cheap calls and aren't muninn-side cached in v1.
+  app.get("/api/wiki/index-coverage", async (c) => {
+    const nullCoverage = (extra: Partial<IndexCoverageResponse> & { error?: string }) =>
+      c.json({
+        collections: [] as string[],
+        totalMd: null,
+        indexed: null,
+        missing: null,
+        excludedByRule: null,
+        ghosts: null,
+        htmlPages: 0,
+        generatedAt: Date.now(),
+        ...extra,
+      });
+
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) {
+      return nullCoverage({ error: "no wiki configured for that name" });
+    }
+    const collections = entry.collections ?? [];
+    if (collections.length === 0) {
+      return nullCoverage({ error: "no search collection connected for this wiki" });
+    }
+    const index = await getWikiIndex({ root: entry.root, refresh: c.req.query("refresh") === "1" });
+    if (!index) {
+      return nullCoverage({ collections, error: "wiki directory not found" });
+    }
+
+    const pageRelPaths = index.pages.map((p) => p.relPath);
+
+    // Best-effort source of each collection's reader include/exclude patterns —
+    // one degrade-tolerant `/api/collections` call. Present only on a huginn that
+    // exposes the pattern fields; absent (older huginn / unreachable) ⇒ no
+    // excludedByRule partition (meta pages stay in `missing`). Never blocks the
+    // main coverage: a failure here just omits the partition, it doesn't error.
+    const patternsByCollection = await fetchCollectionPatterns(config.knowledgeApiUrl);
+
+    // List each collection sequentially — never fan unbounded concurrency at
+    // huginn's Python server (shared `listCollections` helper). A listing that
+    // fails contributes an error entry (empty ids), which the pure builder turns
+    // into the suppress-coverage path.
+    const { byCollection, errors } = await listCollections(config.knowledgeApiUrl, collections);
+    const errorByCollection = new Map(errors.map((e) => [e.collection, e]));
+    const listings: CoverageListing[] = collections.map((collection) => {
+      const err = errorByCollection.get(collection);
+      if (err) return { ids: [], error: err };
+      const ids = (byCollection[collection] ?? [])
+        .map((d) => d.id)
+        .filter((id): id is string => typeof id === "string");
+      return { ids, patterns: patternsByCollection.get(collection) };
+    });
+
+    return c.json(buildIndexCoverageResponse(collections, pageRelPaths, listings));
   });
 
   // One page: rendered HTML + connections (outgoing links and backlinks).

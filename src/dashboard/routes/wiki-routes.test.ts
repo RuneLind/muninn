@@ -129,6 +129,54 @@ describe("GET /api/wiki/ask — resolution errors", () => {
   });
 });
 
+/**
+ * `/api/wiki/index-coverage` resolution branches that never hit huginn: an
+ * unknown wiki and a registered wiki with no backing collections both return a
+ * clean 200 + `{ error }` with null coverage fields (never a 5xx). The happy path
+ * (real collection listings) is covered at the unit level on `buildIndexCoverageResponse`.
+ */
+describe("GET /api/wiki/index-coverage — resolution branches", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-idxcov-route-"));
+    await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
+    prevExtra = process.env.WIKI_EXTRA;
+    // Standalone wiki with NO third segment ⇒ no collections.
+    process.env.WIKI_EXTRA = `covwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:0" } as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("registered wiki with no collections → 200 + clean error, null coverage", async () => {
+    const res = await app.request("/api/wiki/index-coverage?wiki=covwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string; totalMd: number | null; indexed: number | null };
+    expect(body.error).toContain("no search collection connected");
+    expect(body.totalMd).toBeNull();
+    expect(body.indexed).toBeNull();
+  });
+
+  test("unknown wiki → 200 + clean error", async () => {
+    const res = await app.request("/api/wiki/index-coverage?wiki=does-not-exist");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+});
+
 describe("digestCacheDecision", () => {
   const digest = { logMtimeMs: 1000 } as WikiDigest;
 

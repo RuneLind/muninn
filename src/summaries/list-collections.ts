@@ -25,37 +25,67 @@ export interface ListedCollectionDoc {
   [key: string]: unknown;
 }
 
-export interface SummaryCollectionListings {
+export interface CollectionListings {
   /** Collection name → its listed docs (empty when the fetch failed). */
   byCollection: Record<string, ListedCollectionDoc[]>;
   /** One entry per collection that failed to load (partial data, non-fatal). */
   errors: StatsError[];
 }
 
-export async function listSummaryCollections(
+/** Alias kept for the summaries call sites. */
+export type SummaryCollectionListings = CollectionListings;
+
+/**
+ * Generic sequential collection listing — the shared fetch + degrade layer. Lists
+ * each named collection from huginn SEQUENTIALLY (never fan unbounded concurrency
+ * at huginn's Python server); a collection that fails contributes an empty list
+ * and a `StatsError` (`source` = collection name) — never a throw. Both the
+ * summaries listing (`listSummaryCollections`) and the wiki index-coverage route
+ * delegate here.
+ */
+export async function listCollections(
   knowledgeApiUrl: string,
-): Promise<SummaryCollectionListings> {
+  names: string[],
+  opts?: { includeDates?: boolean },
+): Promise<CollectionListings> {
   const byCollection: Record<string, ListedCollectionDoc[]> = {};
   const errors: StatsError[] = [];
+  const suffix = opts?.includeDates ? "?include_dates=1" : "";
 
-  for (const source of SUMMARY_SOURCES) {
+  for (const name of names) {
     try {
       const data = await fetchKnowledgeApi(
         knowledgeApiUrl,
-        `/api/collection/${source.collection}/documents?include_dates=1`,
+        `/api/collection/${name}/documents${suffix}`,
         { timeoutMs: 10_000 },
       );
-      byCollection[source.collection] = (data?.documents ?? []) as ListedCollectionDoc[];
+      byCollection[name] = (data?.documents ?? []) as ListedCollectionDoc[];
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log.warn("Summary collection listing failed for {source}: {error}", {
-        source: source.id,
+      log.warn("Collection listing failed for {collection}: {error}", {
+        collection: name,
         error: message,
       });
-      errors.push({ source: source.id, collection: source.collection, error: message });
-      byCollection[source.collection] = [];
+      errors.push({ source: name, collection: name, error: message });
+      byCollection[name] = [];
     }
   }
 
   return { byCollection, errors };
+}
+
+export async function listSummaryCollections(
+  knowledgeApiUrl: string,
+): Promise<SummaryCollectionListings> {
+  const { byCollection, errors } = await listCollections(
+    knowledgeApiUrl,
+    SUMMARY_SOURCES.map((s) => s.collection),
+    { includeDates: true },
+  );
+  // Keep the summaries error shape byte-identical (its consumers key off the
+  // source id, not the collection name): remap each error's `source` back to the
+  // owning SUMMARY_SOURCES id. `byCollection` (keyed by collection) is unchanged.
+  const idByCollection = new Map(SUMMARY_SOURCES.map((s) => [s.collection, s.id]));
+  const remapped = errors.map((e) => ({ ...e, source: idByCollection.get(e.collection) ?? e.source }));
+  return { byCollection, errors: remapped };
 }
