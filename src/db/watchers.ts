@@ -207,6 +207,15 @@ export async function getWatcherSnapshot(watcherId: string, key: string): Promis
 
 export async function setWatcherSnapshot(watcherId: string, key: string, value: unknown): Promise<void> {
   const sql = getDb();
+  // A null/undefined snapshot means "no snapshot" — delete the row instead of
+  // upserting. postgres.js sends sql.json(null) as SQL NULL, which violates the
+  // column's NOT NULL constraint; getWatcherSnapshot already reports a missing
+  // row as null, so delete round-trips identically (the gardener drain clears
+  // its run journal this way).
+  if (value === null || value === undefined) {
+    await sql`DELETE FROM watcher_snapshots WHERE watcher_id = ${watcherId} AND key = ${key}`;
+    return;
+  }
   await sql`
     INSERT INTO watcher_snapshots (watcher_id, key, value, updated_at)
     VALUES (${watcherId}, ${key}, ${sql.json(value as any)}, now())
