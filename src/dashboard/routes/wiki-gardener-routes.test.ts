@@ -151,6 +151,19 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     expect(cached.queuedKeys).toEqual(["c/a", "c/b"]);
     expect("running" in cached).toBe(false);
   });
+
+  test("always emits the shared batch constants for the client confirm panel", () => {
+    const merged = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+    });
+    // Sourced from src/gardener/backlog.ts — the client never hardcodes them.
+    expect(merged.batchSize).toBe(40);
+    expect(merged.maxProposals).toBe(8);
+  });
 });
 
 /**
