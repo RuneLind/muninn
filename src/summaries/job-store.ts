@@ -1,4 +1,5 @@
 import { getLog } from "../logging.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 
 // Generic in-memory job store shared by the capture verticals (youtube,
 // x-article, tiktok, anthropic). Each vertical's `state.ts` instantiates this
@@ -106,6 +107,28 @@ export function createJobStore<S extends string, F>(
   const jobs = new Map<string, Job<S, F>>();
   const subscribers = new Map<string, Set<JobSubscriber<S>>>();
 
+  // AgentRun registry mirror (/agents dashboard). One hook in the shared factory
+  // covers all four capture verticals (youtube / x-article / tiktok / anthropic):
+  // createJob → startRequest(kind "capture"), the terminal completeJob/failJob →
+  // completeRequest. `jobRuns` maps jobId → requestId for the completion lookup.
+  // Capture jobs aren't bot-scoped, so the run carries an empty botName (the card
+  // renders no bot chip); `opts.label` is the vertical name shown in the run name.
+  const jobRuns = new Map<string, string>();
+
+  /** Short, single-line run name: "YouTube: <title-or-url>", capped for the card. */
+  function runName(fields: { title?: string; url: string }): string {
+    const subject = (fields.title || fields.url || "").trim();
+    const short = subject.length > 60 ? `${subject.slice(0, 57)}…` : subject;
+    return short ? `${opts.label}: ${short}` : opts.label;
+  }
+
+  function completeRun(jobId: string): void {
+    const reqId = jobRuns.get(jobId);
+    if (!reqId) return;
+    jobRuns.delete(jobId);
+    agentStatus.completeRequest(reqId, {});
+  }
+
   // --- Pub/Sub ---
 
   function publish(jobId: string, event: JobEvent<S>): void {
@@ -145,6 +168,11 @@ export function createJobStore<S extends string, F>(
       ...fields,
     } as Job<S, F>;
     jobs.set(id, job);
+    const reqId = agentStatus.startRequest("", "running_task", undefined, {
+      kind: "capture",
+      name: runName(fields),
+    });
+    jobRuns.set(id, reqId);
     return id;
   }
 
@@ -199,6 +227,7 @@ export function createJobStore<S extends string, F>(
     } else {
       publish(jobId, { type: "complete" });
     }
+    completeRun(jobId);
     log.info(`${opts.label} job {jobId} completed, category: {category}`, { jobId, category });
   }
 
@@ -208,6 +237,7 @@ export function createJobStore<S extends string, F>(
     job.status = "error" as S;
     job.error = error;
     publish(jobId, { type: "error", message: error });
+    completeRun(jobId);
     log.error(`${opts.label} job {jobId} failed: {error}`, { jobId, error });
   }
 
@@ -220,6 +250,9 @@ export function createJobStore<S extends string, F>(
       if (now - job.createdAt > ttlMs) {
         jobs.delete(id);
         subscribers.delete(id);
+        // Safety net: a job that never reached a terminal state would otherwise
+        // leak its registry run (auto-clear only fires on completeRequest).
+        completeRun(id);
       }
     }
   }, opts.cleanupIntervalMs ?? CLEANUP_INTERVAL_MS);

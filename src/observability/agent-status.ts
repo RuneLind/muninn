@@ -12,7 +12,18 @@ export type AgentPhase =
   | "synthesizing_voice"
   | "running_task"
   | "checking_goals"
-  | "running_watcher";
+  | "running_watcher"
+  // Research (/research + wiki Ask) — mirrors streamResearchAnswer's phases.
+  | "searching"
+  | "synthesizing"
+  // Gardener backlog-drain stages — mirror `BacklogProgress.stage` so the
+  // `/agents` card can render "Drain: <stage>". Additive: no existing consumer
+  // switches exhaustively on AgentPhase (label maps fall back to the raw value).
+  | "assembling"
+  | "harvesting"
+  | "clustering"
+  | "resolving"
+  | "drafting";
 
 export interface AgentStatus {
   phase: AgentPhase;
@@ -44,6 +55,13 @@ export type AgentKind =
   | "research"
   | "extractor"
   | "profile";
+
+/**
+ * Kinds eligible for the single-pane waterfall (`getProgress`/`subscribeProgress`
+ * → the `request_progress` SSE event). Exactly the producers that existed before
+ * the AgentRun registry — background kinds surface only via `getAll`/`subscribeAll`.
+ */
+const WATERFALL_KINDS = new Set<AgentKind | undefined>(["chat", "scheduled_task", "watcher", undefined]);
 
 /** Discrete work counter for runs that expose real progress (n of m). */
 export interface RunProgress {
@@ -287,14 +305,18 @@ class AgentStatusTracker {
 
     this.notifyProgress();
 
-    // Auto-clear this request after 30 seconds (user can dismiss earlier via × button)
+    // Auto-clear this request after completion (user can dismiss earlier via ×
+    // button). Extractors are frequent + short (memory/goals/schedule fire on
+    // nearly every turn), so a 30s window piles up dozens of just-finished rows —
+    // clear those far sooner. Every other kind keeps the 30s dwell.
+    const clearMs = req.kind === "extractor" ? 5_000 : 30_000;
     const existing = this.completionTimers.get(requestId);
     if (existing) clearTimeout(existing);
     this.completionTimers.set(requestId, setTimeout(() => {
       this.requests.delete(requestId);
       this.completionTimers.delete(requestId);
       this.notifyProgress();
-    }, 30_000));
+    }, clearMs));
   }
 
   /** Clear one request (by id) or, with no id, every request — used for reset
@@ -395,10 +417,18 @@ class AgentStatusTracker {
 
   /** The request the single-pane waterfall should display: the most recently
    *  started request still being tracked (Map preserves insertion order, so the
-   *  last entry is the newest). Null when nothing is in flight. */
+   *  last entry is the newest). Null when nothing is in flight.
+   *
+   *  Only the kinds that populated the waterfall before the AgentRun registry
+   *  existed are eligible — background kinds (extractor/research/gardener_drain/
+   *  capture/profile) live only in getAll()/subscribeAll(). Without this filter
+   *  the post-turn extractors would hijack the primary slot on every chat turn,
+   *  masking the completed chat card and cancelling its auto-dismiss. */
   private primaryRequest(): RequestProgress | null {
     let primary: RequestProgress | null = null;
-    for (const req of this.requests.values()) primary = req;
+    for (const req of this.requests.values()) {
+      if (WATERFALL_KINDS.has(req.kind)) primary = req;
+    }
     return primary;
   }
 

@@ -181,7 +181,11 @@ export async function renderAgentsPage(): Promise<string> {
       building_prompt: 'Building prompt', calling_claude: 'Calling model',
       saving_response: 'Saving', sending_telegram: 'Sending', sending_slack: 'Sending',
       synthesizing_voice: 'Voice', running_task: 'Running task',
-      checking_goals: 'Checking goals', running_watcher: 'Running watcher'
+      checking_goals: 'Checking goals', running_watcher: 'Running watcher',
+      // Research phases + gardener drain stages (mirror the server AgentPhase union).
+      searching: 'Searching', synthesizing: 'Synthesizing',
+      assembling: 'Assembling', harvesting: 'Harvesting', clustering: 'Clustering',
+      resolving: 'Resolving', drafting: 'Drafting'
     };
     // Mirror of the server kindLabel() in dashboard/agents-overview.ts — a new
     // AgentKind must be added to BOTH.
@@ -266,6 +270,9 @@ export async function renderAgentsPage(): Promise<string> {
       var kind = r.kind || 'chat';
       var name = r.name || kindLabels[kind] || 'Run';
       var phase = phaseLabels[r.phase] || r.phase || '';
+      // Gardener drain: the card title tracks the live stage ("Drain: Clustering"),
+      // while the server-side run name stays the stable "Backlog drain" (Recent).
+      if (kind === 'gardener_drain') name = 'Drain: ' + (phase || 'running');
       var done = !!r.completed;
       var elapsedMs = (done && r.completedAt ? r.completedAt : Date.now()) - r.startedAt;
 

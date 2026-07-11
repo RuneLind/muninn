@@ -1,6 +1,7 @@
 import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { runTrackedExtraction } from "./extraction-tracker.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
 import type { Logger } from "@logtape/logtape";
 import type { ConnectorType } from "../bots/config.ts";
@@ -53,46 +54,60 @@ export function runHaikuExtraction<T>(opts: HaikuExtractionOptions<T>): void {
 }
 
 async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
-  let tracer: Tracer | undefined;
-  if (opts.traceContext) {
-    tracer = new Tracer(opts.spanName, {
-      botName: opts.botName,
-      userId: opts.userId,
-      traceId: opts.traceContext.traceId,
-      parentId: opts.traceContext.parentId,
-    });
-  }
-
-  const haiku = await callHaikuWithFallback(opts.prompt, {
-    source: opts.source,
-    entrypoint: opts.entrypoint,
-    cwd: opts.cwd,
-    botName: opts.botName,
-    connector: opts.connector,
-    haikuBackend: opts.haikuBackend,
+  // AgentRun registry mirror (/agents dashboard). Registered on entry, completed
+  // in the `finally` wrapping the WHOLE body — doExtract has three exits (success
+  // via onResult, the JSON parse-failure early `return`, and an onResult throw);
+  // only a finally completes on all three, so the run never leaks (auto-clear only
+  // fires on completeRequest). No meta is readable here (the tracer is a local and
+  // only exists when traceContext is set) — extractor Recent comes from haiku_usage.
+  const reqId = agentStatus.startRequest(opts.botName, "calling_claude", undefined, {
+    kind: "extractor",
+    name: `Extractor: ${opts.source}`,
   });
-
-  let result: T;
   try {
-    result = extractJson<T>(haiku.result);
-  } catch {
-    opts.log.error(`${opts.spanName}: failed to parse result: {raw}`, {
+    let tracer: Tracer | undefined;
+    if (opts.traceContext) {
+      tracer = new Tracer(opts.spanName, {
+        botName: opts.botName,
+        userId: opts.userId,
+        traceId: opts.traceContext.traceId,
+        parentId: opts.traceContext.parentId,
+      });
+    }
+
+    const haiku = await callHaikuWithFallback(opts.prompt, {
+      source: opts.source,
+      entrypoint: opts.entrypoint,
+      cwd: opts.cwd,
       botName: opts.botName,
-      raw: haiku.result.slice(0, 300),
+      connector: opts.connector,
+      haikuBackend: opts.haikuBackend,
     });
-    tracer?.finish("error", {
-      error: "parse_failed",
-      rawResult: haiku.result.slice(0, 300),
-    });
-    return;
-  }
 
-  try {
-    await opts.onResult(result, tracer);
-  } catch (err) {
-    tracer?.finish("error", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
+    let result: T;
+    try {
+      result = extractJson<T>(haiku.result);
+    } catch {
+      opts.log.error(`${opts.spanName}: failed to parse result: {raw}`, {
+        botName: opts.botName,
+        raw: haiku.result.slice(0, 300),
+      });
+      tracer?.finish("error", {
+        error: "parse_failed",
+        rawResult: haiku.result.slice(0, 300),
+      });
+      return;
+    }
+
+    try {
+      await opts.onResult(result, tracer);
+    } catch (err) {
+      tracer?.finish("error", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  } finally {
+    agentStatus.completeRequest(reqId, {});
   }
 }

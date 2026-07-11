@@ -60,6 +60,13 @@ export function agentStatusScript(): string {
       running_task: 'Running scheduled task',
       checking_goals: 'Checking goals',
       running_watcher: 'Running watcher',
+      searching: 'Searching knowledge',
+      synthesizing: 'Synthesizing answer',
+      assembling: 'Assembling batch',
+      harvesting: 'Harvesting summaries',
+      clustering: 'Clustering topics',
+      resolving: 'Resolving targets',
+      drafting: 'Drafting pages',
     };
 
     // Last known connector info — kept across status/progress events
