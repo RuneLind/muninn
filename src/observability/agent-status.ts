@@ -30,7 +30,36 @@ export interface ToolProgress {
   input?: string;
 }
 
-export interface RequestProgress {
+/**
+ * The surface an agent run originates from. Every in-flight (or scheduled) AI
+ * job in muninn maps to exactly one kind — the `/agents` dashboard groups and
+ * sources Recent per kind (see `assembleAgentsOverview`).
+ */
+export type AgentKind =
+  | "chat"
+  | "scheduled_task"
+  | "watcher"
+  | "gardener_drain"
+  | "capture"
+  | "research"
+  | "extractor"
+  | "profile";
+
+/** Discrete work counter for runs that expose real progress (n of m). */
+export interface RunProgress {
+  done: number;
+  total: number;
+  currentItem?: string;
+}
+
+/**
+ * One tracked agent run. Formerly `RequestProgress` (kept as an alias for
+ * existing consumers). The single-pane waterfall reads a subset of these fields;
+ * the `/agents` registry read side (`getAll`/`getRecentCompleted`) reads them
+ * all. All new fields are optional and shape-additive — the `request_progress`
+ * SSE contract is unchanged.
+ */
+export interface AgentRun {
   requestId: string;
   botName: string;
   username?: string;
@@ -46,10 +75,27 @@ export interface RequestProgress {
   outputTokens?: number;
   numTurns?: number;
   toolCount?: number;
+  // --- AgentRun registry fields (additive, /agents dashboard) ---------------
+  /** Origin surface — defaults to `"chat"` at `startRequest`. */
+  kind?: AgentKind;
+  /** Stable run name (watcher name/type, task title) — ETA identity in PR 3. */
+  name?: string;
+  /** Discrete work progress where the producer can report it. */
+  progress?: RunProgress;
+  /** Estimated total duration (ms) — fed by the ETA estimator in PR 3. */
+  expectedDurationMs?: number;
+  /** Deep link to the surface that owns this run (e.g. `/wiki/gardener`). */
+  sourcePage?: string;
+  /** Set when a soft-cancel has been requested (gardener drain). */
+  cancelRequested?: boolean;
 }
 
+/** @deprecated Alias for {@link AgentRun}, kept for existing consumers. */
+export type RequestProgress = AgentRun;
+
 type StatusSubscriber = (status: AgentStatus) => void;
-type ProgressSubscriber = (progress: RequestProgress | null) => void;
+type ProgressSubscriber = (progress: AgentRun | null) => void;
+type AllSubscriber = (runs: AgentRun[]) => void;
 
 let nextRequestId = 1;
 
@@ -72,12 +118,25 @@ let nextRequestId = 1;
  * global: it's a coarse "what is the bot doing right now" indicator, not
  * per-request waterfall data.
  */
+/** Cap on tools serialized per run in the `agent_runs` SSE snapshot (keeps the
+ *  fan-out payload bounded — a long chat turn can accumulate dozens). */
+const SNAPSHOT_TOOLS_CAP = 20;
+/** Completed-runs ring size — feeds Recent for kinds with no durable source. */
+const COMPLETED_RING_MAX = 50;
+/** Minimum interval between `agent_runs` snapshot emissions (throttle). */
+const ALL_THROTTLE_MS = 1000;
+
 class AgentStatusTracker {
   private current: AgentStatus = { phase: "idle" };
   private subscribers = new Set<StatusSubscriber>();
-  private requests = new Map<string, RequestProgress>();
+  private requests = new Map<string, AgentRun>();
   private progressSubscribers = new Set<ProgressSubscriber>();
   private completionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Registry read side (/agents dashboard).
+  private allSubscribers = new Set<AllSubscriber>();
+  private completedRing: AgentRun[] = [];
+  private allNotifyTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastAllNotifyAt = 0;
 
   set(phase: AgentPhase, username?: string, detail?: string) {
     this.current = {
@@ -102,7 +161,12 @@ class AgentStatusTracker {
 
   // --- Request Progress ---
 
-  startRequest(botName: string, phase: AgentPhase, username?: string): string {
+  startRequest(
+    botName: string,
+    phase: AgentPhase,
+    username?: string,
+    opts?: { kind?: AgentKind; name?: string },
+  ): string {
     const requestId = `req_${nextRequestId++}`;
     this.requests.set(requestId, {
       requestId,
@@ -111,9 +175,43 @@ class AgentStatusTracker {
       phase,
       startedAt: Date.now(),
       tools: [],
+      kind: opts?.kind ?? "chat",
+      ...(opts?.name ? { name: opts.name } : {}),
     });
     this.notifyProgress();
     return requestId;
+  }
+
+  /** Set the discrete work progress (n of m + current item) for a run. */
+  updateProgress(requestId: string, progress: RunProgress) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.progress = progress;
+    this.notifyProgress();
+  }
+
+  /** Set the estimated total duration (ms) for a run (ETA estimator). */
+  setExpectedDuration(requestId: string, expectedDurationMs: number) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.expectedDurationMs = expectedDurationMs;
+    this.notifyProgress();
+  }
+
+  /** Set the deep-link source page for a run. */
+  setSourcePage(requestId: string, sourcePage: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.sourcePage = sourcePage;
+    this.notifyProgress();
+  }
+
+  /** Mark that a soft-cancel has been requested for a run. */
+  setCancelRequested(requestId: string, cancelRequested: boolean) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.cancelRequested = cancelRequested;
+    this.notifyProgress();
   }
 
   updatePhase(requestId: string, phase: AgentPhase) {
@@ -180,6 +278,13 @@ class AgentStatusTracker {
     req.outputTokens = meta.outputTokens;
     req.numTurns = meta.numTurns;
     req.toolCount = meta.toolCount;
+
+    // Snapshot into the completed-runs ring — this survives the 30s auto-clear
+    // below, so Recent can source kinds that have no durable trace/usage row
+    // (gardener drains, capture jobs, research, per-task granularity).
+    this.completedRing.push({ ...req });
+    if (this.completedRing.length > COMPLETED_RING_MAX) this.completedRing.shift();
+
     this.notifyProgress();
 
     // Auto-clear this request after 30 seconds (user can dismiss earlier via × button)
@@ -199,6 +304,14 @@ class AgentStatusTracker {
       for (const timer of this.completionTimers.values()) clearTimeout(timer);
       this.completionTimers.clear();
       this.requests.clear();
+      // Full reset also drops the completed-runs ring + throttle state so tests
+      // (and the reset path) start clean. No production caller passes no id.
+      this.completedRing = [];
+      if (this.allNotifyTimer) {
+        clearTimeout(this.allNotifyTimer);
+        this.allNotifyTimer = undefined;
+      }
+      this.lastAllNotifyAt = 0;
       this.notifyProgress();
       return;
     }
@@ -211,13 +324,73 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
-  getProgress(): RequestProgress | null {
+  getProgress(): AgentRun | null {
     return this.primaryRequest();
   }
 
   subscribeProgress(fn: ProgressSubscriber): () => void {
     this.progressSubscribers.add(fn);
     return () => this.progressSubscribers.delete(fn);
+  }
+
+  // --- Registry read side (/agents dashboard) -------------------------------
+
+  /** Every tracked run (live + completed-but-not-yet-cleared). The set is tiny;
+   *  the `/agents` overview filters non-completed for its `running[]`. */
+  getAll(): AgentRun[] {
+    return [...this.requests.values()];
+  }
+
+  /** The completed-runs ring (last {@link COMPLETED_RING_MAX}), newest last. */
+  getRecentCompleted(): AgentRun[] {
+    return this.completedRing.map((r) => ({ ...r }));
+  }
+
+  /**
+   * Subscribe to full-snapshot updates of all runs. Emissions are throttled to
+   * ~1/s **in the tracker** (not in subscribers) because the SSE route fans each
+   * snapshot to every connected dashboard page. The snapshot caps tools per run
+   * at {@link SNAPSHOT_TOOLS_CAP} to bound the payload. The route is responsible
+   * for sending an initial snapshot on connect (via `getAll()`).
+   */
+  subscribeAll(fn: AllSubscriber): () => void {
+    this.allSubscribers.add(fn);
+    return () => this.allSubscribers.delete(fn);
+  }
+
+  /** Serializable snapshot for the `agent_runs` SSE event — tools capped at
+   *  {@link SNAPSHOT_TOOLS_CAP}. Public so the SSE route's initial write uses the
+   *  same capped shape as the live `subscribeAll` fan-out (not uncapped
+   *  `getAll()`). */
+  snapshotAll(): AgentRun[] {
+    return [...this.requests.values()].map((r) =>
+      r.tools.length > SNAPSHOT_TOOLS_CAP
+        ? { ...r, tools: r.tools.slice(-SNAPSHOT_TOOLS_CAP) }
+        : { ...r },
+    );
+  }
+
+  /** Throttled fan-out of the all-runs snapshot to `subscribeAll` listeners. */
+  private notifyAll(): void {
+    if (this.allSubscribers.size === 0) return;
+    const now = Date.now();
+    const elapsed = now - this.lastAllNotifyAt;
+    if (elapsed >= ALL_THROTTLE_MS) {
+      this.emitAll();
+    } else if (!this.allNotifyTimer) {
+      this.allNotifyTimer = setTimeout(() => {
+        this.allNotifyTimer = undefined;
+        this.emitAll();
+      }, ALL_THROTTLE_MS - elapsed);
+      // Don't keep the process alive just for a pending throttle flush.
+      this.allNotifyTimer.unref?.();
+    }
+  }
+
+  private emitAll(): void {
+    this.lastAllNotifyAt = Date.now();
+    const snapshot = this.snapshotAll();
+    for (const sub of this.allSubscribers) sub(snapshot);
   }
 
   /** The request the single-pane waterfall should display: the most recently
@@ -234,6 +407,8 @@ class AgentStatusTracker {
     for (const sub of this.progressSubscribers) {
       sub(snapshot);
     }
+    // Registry read side rides the same mutation points (throttled internally).
+    this.notifyAll();
   }
 }
 

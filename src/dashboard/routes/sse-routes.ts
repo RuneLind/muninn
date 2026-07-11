@@ -16,6 +16,10 @@ export function registerSSERoutes(app: Hono): void {
       await stream.writeSSE({ event: "stats", data: JSON.stringify(activityLog.stats) });
       await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get()) });
       await stream.writeSSE({ event: "request_progress", data: JSON.stringify(agentStatus.getProgress()) });
+      // Initial full snapshot of all runs for the /agents dashboard. Uses the
+      // same tools-capped snapshot as the live fan-out (subscribeAll below,
+      // throttled ~1/s in the tracker) so the initial write isn't uncapped.
+      await stream.writeSSE({ event: "agent_runs", data: JSON.stringify(agentStatus.snapshotAll()) });
 
       // Subscribe to live updates
       let alive = true;
@@ -23,6 +27,14 @@ export function registerSSERoutes(app: Hono): void {
         if (!alive) return;
         try {
           await stream.writeSSE({ event: "request_progress", data: JSON.stringify(progress) });
+        } catch {
+          alive = false;
+        }
+      });
+      const unsubscribeAllRuns = agentStatus.subscribeAll(async (runs) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "agent_runs", data: JSON.stringify(runs) });
         } catch {
           alive = false;
         }
@@ -61,6 +73,7 @@ export function registerSSERoutes(app: Hono): void {
         unsubscribe();
         unsubscribeStatus();
         unsubscribeProgress();
+        unsubscribeAllRuns();
         clearInterval(heartbeat);
       });
 

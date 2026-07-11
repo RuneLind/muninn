@@ -29,7 +29,15 @@ Tracks the lifecycle of in-flight requests (the waterfall/progress overlay sourc
 6. `setConnectorInfo(requestId, …)` / `getConnectorLabel()` — connector display label (mirrored verbatim by `dashboard/views/components/traces-list.ts`)
 7. `createProgressCallback(requestId, …)` — adapts a `StreamProgressCallback` into status updates for that request (used by core + scheduler)
 
-**Read side is unchanged:** `getProgress()` / `subscribeProgress()` still surface a single `RequestProgress | null` — the *primary* (most-recently-started) live request — because the dashboard/chat waterfall is a single-pane view. This keeps the SSE contract (`sse-routes.ts`) and the UI untouched while the data layer stays correct under concurrency.
+**Single-pane read side (unchanged):** `getProgress()` / `subscribeProgress()` still surface a single `RequestProgress | null` — the *primary* (most-recently-started) live request — because the chat waterfall is a single-pane view. This keeps the `request_progress` SSE contract (`sse-routes.ts`) and the waterfall UI untouched.
+
+**AgentRun registry read side (multi-run, `/agents` dashboard).** `RequestProgress` is now `AgentRun` (alias kept for compat) with additive optional fields — `kind` (`chat`/`scheduled_task`/`watcher`/`gardener_drain`/`capture`/`research`/`extractor`/`profile`, defaulted to `"chat"` at `startRequest`), `name`, `progress {done,total,currentItem?}`, `expectedDurationMs`, `sourcePage`, `cancelRequested`. New read side:
+- `getAll()` — every tracked run (live + completed-but-not-yet-cleared); the `/agents` overview filters non-completed for its `running[]`.
+- `getRecentCompleted()` — the **completed-runs ring** (last ~50 `AgentRun` clones, populated in `completeRequest`, surviving the 30s auto-clear). Feeds Recent for kinds with no durable trace/usage row (gardener_drain/capture/research/per-task).
+- `subscribeAll(fn)` — full-snapshot updates, **throttled to ~1/s in the tracker** (not in subscribers — the SSE route fans each snapshot to every dashboard page); the snapshot caps tools per run at 20. The route sends the initial snapshot via `getAll()` on connect. Emits the `agent_runs` SSE event.
+- `startRequest(bot, phase, username?, { kind?, name? })` — 4th arg is additive; existing 3-arg callers get `kind: "chat"`. `updateProgress`/`setExpectedDuration`/`setSourcePage`/`setCancelRequested` are request-scoped mutators like the rest.
+
+`clearRequest()` (no id) is a full reset: it also drops the ring + throttle state (tests only — no production caller passes no id). New fields are shape-additive: the `request_progress` payload keeps all existing keys.
 
 The dashboard renders this via SSE `/agent-status` (phase) and `/request-progress` (full waterfall); the UI component itself stays in `dashboard/views/components/agent-status-ui.ts`.
 

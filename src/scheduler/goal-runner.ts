@@ -22,7 +22,10 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
     let requestId: string | undefined;
     try {
       agentStatus.set("checking_goals", goal.title);
-      requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, {
+        kind: "scheduled_task",
+        name: `Goal reminder: ${goal.title}`,
+      });
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const markdown = await generateReminderMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
@@ -57,7 +60,10 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
     let requestId: string | undefined;
     try {
       agentStatus.set("checking_goals", goal.title);
-      requestId = agentStatus.startRequest(botConfig.name, "checking_goals");
+      requestId = agentStatus.startRequest(botConfig.name, "checking_goals", undefined, {
+        kind: "scheduled_task",
+        name: `Goal check-in: ${goal.title}`,
+      });
       setConnectorInfo(requestId, botConfig, config.claudeModel);
       const markdown = await generateCheckinMessage(goal, botConfig);
       agentStatus.set("sending_telegram", goal.title);
