@@ -1,6 +1,7 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { gardenerClientScript } from "./components/wiki-gardener-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
+import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 
 /**
  * /wiki/gardener — the wiki-gardener review gate.
@@ -57,6 +58,7 @@ export async function renderWikiGardenerPage(opts?: {
   <title>Wiki Gardener — Muninn</title>
   <style>
     ${SHARED_STYLES}
+    ${agentPresenceStyles()}
 
     .gard-wrap { max-width: 980px; margin: 0 auto; padding: 20px 24px 60px; }
     .gard-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
@@ -269,6 +271,7 @@ export async function renderWikiGardenerPage(opts?: {
     <div class="gard-head">
       <h1>🌱 Wiki Gardener</h1>
       <div style="display:flex; gap:10px; align-items:center;">
+        ${agentPresenceHtml("gardPresence")}
         ${wikiSelector}
         <a href="/wiki${selected ? "?wiki=" + escAttr(selected) : ""}">← Wiki reader</a>
       </div>
@@ -300,6 +303,9 @@ export async function renderWikiGardenerPage(opts?: {
   </script>
   <script>
     ${clientScript}
+  </script>
+  <script>
+    ${agentPresenceScript("gardPresence", { kinds: ["gardener_drain", "watcher"], ...(selected ? { bot: selected } : {}) })}
   </script>
 </body>
 </html>`;

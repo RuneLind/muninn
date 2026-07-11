@@ -1,6 +1,7 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
+import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -494,6 +495,7 @@ export async function renderWikiPage(opts?: {
       .wiki-layout { grid-template-columns: 260px minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
+    ${agentPresenceStyles()}
   </style>
 </head>
 <body>
@@ -503,6 +505,7 @@ export async function renderWikiPage(opts?: {
       <div class="wiki-browse-head">
         ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
         ${gardenerLink ? `<div class="wiki-sort-row">${gardenerLink}</div>` : ""}
+        <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
         <div class="wiki-chip-row" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
@@ -555,6 +558,9 @@ export async function renderWikiPage(opts?: {
   </script>
   <script>
     ${clientScript}
+  </script>
+  <script>
+    ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
   </script>
 </body>
 </html>`;
