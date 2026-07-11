@@ -194,6 +194,38 @@ export const SHARED_STYLES = `
     }
     .error-banner.visible { display: block; }
     .error-banner code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+    /* --- Live-activity animation primitives (shared) ------------------------
+       Promoted out of /agents so the chat + gardener live strips can adopt the
+       same pulse-ring dot and shimmer bar later. Consumers set the color via the
+       element's own background; the pulse can be stopped via --pulse-anim: none.
+       Keyframes are global. */
+    @keyframes pulse-ring {
+      0%   { transform: scale(0.6); opacity: 0.6; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+    @keyframes shimmer { 0% { left: -35%; } 100% { left: 100%; } }
+
+    /* A small live dot with an expanding ring. Color follows its own background
+       (override per-kind); a done/paused variant sets --pulse-anim: none. */
+    .pulse-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--status-success);
+      position: relative; flex-shrink: 0;
+    }
+    .pulse-dot::after {
+      content: ''; position: absolute; inset: -4px; border-radius: 50%;
+      background: inherit; opacity: 0.5;
+      animation: pulse-ring 1.6s ease-out infinite;
+      animation-name: var(--pulse-anim, pulse-ring);
+    }
+
+    /* Indeterminate shimmer sweep — drop inside a clipped, positioned track. */
+    .shimmer-bar {
+      position: absolute; top: 0; left: 0; height: 100%; width: 35%; border-radius: 3px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: shimmer 1.4s linear infinite;
+    }
 `;
 
 /** Shared header HTML with nav links */
