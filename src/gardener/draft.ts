@@ -42,7 +42,7 @@ export function buildRelatedBlock(related: RelatedPage[] | undefined | null): st
   if (items.length === 0) return "";
   let body = "";
   for (const r of items) {
-    const snippet = (r.snippet ?? "").replace(/\s+/g, " ").trim();
+    const snippet = (r.snippet ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
     const entry = `### ${r.title}\n${snippet}\n`;
     if (body.length + entry.length > MAX_RELATED_CHARS) break;
     body += entry;
@@ -248,11 +248,15 @@ function unquoteItem(raw: string): string {
  * `[[wikilink]]` refs to pages that DON'T resolve against the wiki index are
  * dropped and replaced with the cluster's real `source_docs` URLs — the drafter
  * can't see which source pages exist, so an invented `[[source page]]` ref ships
- * a broken frontmatter link. Resolved wikilinks and plain URLs are preserved RAW
- * (same lossless edit pattern as `stripOwnedAliases`; only unresolved wikilink
- * items are ever deleted). Any `urls` not already present are appended so the
- * page keeps a real citation trail. A null index treats every wikilink as
- * unresolved (no wiki ⇒ no page exists ⇒ the ref is broken).
+ * a broken frontmatter link. A line whose wikilinks ALL resolve is preserved RAW
+ * (same lossless edit pattern as `stripOwnedAliases`); only a line with at least
+ * one unresolved wikilink is rebuilt — plain URLs and resolved links survive the
+ * rebuild (a resolved `[[Page|label]]` is re-serialized without its display
+ * label). Any `urls` not already present are appended so the page keeps a real
+ * citation trail. A null index treats every wikilink as unresolved (no wiki ⇒
+ * no page exists ⇒ the ref is broken). Wikilinks are scanned on the whole line,
+ * so the scalar form `sources: [[Page]]`, the array form `[[[Page]]]`, and
+ * multi-link lists all count.
  */
 export function replaceUnresolvedSourceLinks(
   draft: string,
@@ -270,18 +274,26 @@ export function replaceUnresolvedSourceLinks(
     .map((line) => {
       const m = line.match(/^(sources:\s*)\[(.*)\]\s*$/);
       if (!m) return line;
-      const raw = rawInlineItems(m[2]!);
+      // Scan wikilinks on the WHOLE line, not per array item: the outer [(.*)]
+      // regex eats one bracket pair, so the scalar form `sources: [[Page]]`
+      // splits into non-wikilink fragments and would slip past an item-level
+      // match. Pipe-aware: `[[Page|label]]` resolves by its target.
+      const wlTargets: string[] = [];
+      for (const wl of line.matchAll(/\[\[([^\[\]|]+)(?:\|[^\[\]]*)?\]\]/g)) {
+        const target = wl[1]!.trim();
+        if (target && !wlTargets.includes(target)) wlTargets.push(target);
+      }
+      if (wlTargets.length === 0) return line; // plain URL list — preserved raw
       let hadUnresolved = false;
       const kept: string[] = [];
-      for (const item of raw) {
-        const wl = unquoteItem(item).match(/^\[\[(.+?)\]\]$/);
-        if (!wl) {
-          kept.push(item); // plain URL or other literal — always preserved raw
-          continue;
-        }
-        const target = wl[1]!.trim();
+      for (const item of rawInlineItems(m[2]!)) {
+        // Plain literals (URLs) carry no brackets; bracket-bearing fragments are
+        // wikilink debris from the outer regex and are re-serialized below.
+        if (!/[\[\]]/.test(unquoteItem(item))) kept.push(item);
+      }
+      for (const target of wlTargets) {
         if (opts.index?.resolve(target)) {
-          kept.push(item); // a resolved [[source page]] survives (guard (a) softens, not bans)
+          kept.push(`[[${target}]]`); // a resolved [[source page]] survives (guard (a) softens, not bans)
         } else {
           hadUnresolved = true;
           replaced.push(target);

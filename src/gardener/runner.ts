@@ -344,9 +344,8 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     // frontmatter `sources:` list with the cluster's real source_docs URLs — the
     // drafter can't see which source pages exist, so an invented ref is a broken
     // link. Mutates the stored draft, so it must run before insert.
-    const sourceUrls = sourceDocsFor(cluster, byKey)
-      .map((d) => d.url)
-      .filter((u): u is string => !!u);
+    const sourceDocs = sourceDocsFor(cluster, byKey);
+    const sourceUrls = sourceDocs.map((d) => d.url).filter((u): u is string => !!u);
     const relinked = replaceUnresolvedSourceLinks(dealiased.draft, { index, urls: sourceUrls });
     if (relinked.replaced.length > 0) {
       log.warn("Gardener draft for {topic}: replaced unresolved source link(s) with URLs: {links}", {
@@ -365,7 +364,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         targetPath: target.targetPath,
         baseHash,
         draft: relinked.draft.trim(),
-        sourceDocs: sourceDocsFor(cluster, byKey),
+        sourceDocs,
         rationale: cluster.rationale ?? null,
       });
       if (row) {

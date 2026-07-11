@@ -274,6 +274,33 @@ describe("replaceUnresolvedSourceLinks", () => {
     expect(out.replaced).toEqual(["Anything"]);
     expect(out.draft).toContain("sources: [https://a.com/x]");
   });
+
+  test("scalar form `sources: [[Phantom]]` (no array wrapper) is caught too", () => {
+    // The outer [(.*)] regex eats one bracket pair, so item-level matching sees
+    // only single-bracket fragments — the whole-line scan must still catch it.
+    const draft = `---\ntype: concept\ntitle: New Page\nsources: [[Phantom Page]]\n---\n\n# New Page\n\nBody.`;
+    const out = replaceUnresolvedSourceLinks(draft, { index: index([]), urls: ["https://a.com/x"] });
+    expect(out.replaced).toEqual(["Phantom Page"]);
+    expect(out.draft).toContain("sources: [https://a.com/x]");
+  });
+
+  test("piped [[Real Page|label]] resolves by target and survives a rebuild", () => {
+    const idx = index([page({ title: "Real Page" })]);
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`[[Real Page|nice label]], [[Phantom]]`),
+      { index: idx, urls: ["https://a.com/x"] },
+    );
+    expect(out.replaced).toEqual(["Phantom"]);
+    // Re-serialized without the display label, but the valid citation is kept.
+    expect(out.draft).toContain("sources: [[[Real Page]], https://a.com/x]");
+  });
+
+  test("multi-link scalar list `[[A]], [[B]]` replaces both phantoms", () => {
+    const draft = `---\ntype: concept\ntitle: New Page\nsources: [[A]], [[B]]\n---\n\n# New Page\n\nBody.`;
+    const out = replaceUnresolvedSourceLinks(draft, { index: index([]), urls: ["https://a.com/x"] });
+    expect(out.replaced).toEqual(["A", "B"]);
+    expect(out.draft).toContain("sources: [https://a.com/x]");
+  });
 });
 
 describe("scanUnresolvedBodyLinks", () => {
