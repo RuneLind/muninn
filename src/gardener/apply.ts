@@ -26,7 +26,7 @@
 import path from "node:path";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
-import { isPathConfined } from "./draft.ts";
+import { isPathConfined, stripOwnedAliases } from "./draft.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
@@ -135,13 +135,16 @@ export function applyWikiProposal(proposal: WikiProposal, deps: ApplyDeps): Prom
 async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<ApplyOutcome> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
 
+  // The fresh index backs both the update-target check (1a) and the apply-time
+  // alias re-strip (1c) — create mode needs it too now.
+  const index = await deps.getWikiIndex();
+
   // 1a. Update mode: the target must be a REAL indexed wiki page — look it up in
   //     the local store rather than trusting the row (passing the row's own
   //     targetPath as existingRelPath would make the confinement check a
   //     tautology).
   let existingRelPath: string | undefined;
   if (proposal.mode === "update") {
-    const index = await deps.getWikiIndex();
     const page = index?.pages.find((p) => p.relPath === proposal.targetPath);
     if (!page) {
       return {
@@ -165,8 +168,25 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
     return { outcome: "error", reason: `path confinement failed for "${proposal.targetPath}"` };
   }
 
+  // 1c. Alias-hijack re-strip against the FRESH index (defense in depth — the
+  //     runner stripped at persist time, but a canonical page created while the
+  //     proposal awaited review must still win its aliases). The target path
+  //     itself is always "self": on a create re-run after a crash-after-write,
+  //     the target's own first write is indexed and must not strip the draft's
+  //     aliases (a FOREIGN file at the target is caught by the stale check).
+  const dealiased = stripOwnedAliases(proposal.draft, {
+    index,
+    selfRelPath: existingRelPath ?? proposal.targetPath,
+  });
+  if (dealiased.stripped.length > 0) {
+    log.warn("Apply: stripped alias(es) owned by other pages from proposal {id}: {aliases}", {
+      id: proposal.id,
+      aliases: dealiased.stripped.join(", "),
+    });
+  }
+
   const absTarget = path.join(deps.wikiDir, proposal.targetPath);
-  const finalContent = withTrailingNewline(proposal.draft);
+  const finalContent = withTrailingNewline(dealiased.draft);
   const current = await deps.readFile(absTarget);
 
   // 2a. Re-run safety: the target already IS the draft — a crash after the file

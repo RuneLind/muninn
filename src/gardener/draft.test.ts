@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { shapeGate, isPathConfined, buildDraftPrompt, normalizeDraftOutput, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
+import { shapeGate, isPathConfined, buildDraftPrompt, normalizeDraftOutput, stripOwnedAliases, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { Cluster, HarvestedDoc } from "./types.ts";
 
 const WIKI = "/tmp/wiki-root";
@@ -161,5 +162,98 @@ describe("normalizeDraftOutput", () => {
     // A stray `---` divider with no closing fence is not mistaken for frontmatter.
     const divider = "Intro\n---\nno closing fence here";
     expect(normalizeDraftOutput(divider)).toBe(divider);
+  });
+});
+
+describe("stripOwnedAliases", () => {
+  const page = (over: Partial<WikiPageMeta>): WikiPageMeta => ({
+    name: "x",
+    title: "X",
+    type: "concept",
+    domain: "ai",
+    tags: [],
+    aliases: [],
+    relPath: "concepts/x.md",
+    ...over,
+  });
+  const index = (pages: WikiPageMeta[]): WikiIndex => ({
+    pages,
+    outgoing: new Map(),
+    backlinks: new Map(),
+    resolve: () => undefined,
+    resolveRelPath: () => undefined,
+    scannedAt: 0,
+    root: WIKI,
+  });
+  const draftWith = (aliases: string) =>
+    `---\ntype: concept\ntitle: New Page\naliases: [${aliases}]\ncreated: 2026-07-11\nupdated: 2026-07-11\ntags: []\nsources: []\n---\n\n# New Page\n\nBody.\n\n## See also\n- [[X]]`;
+
+  test("strips an alias another page owns as its TITLE (case-insensitive)", () => {
+    const idx = index([page({ title: "Context Engineering", relPath: "concepts/Context Engineering.md" })]);
+    const out = stripOwnedAliases(draftWith("context engineering, Fresh Alias"), { index: idx });
+    expect(out.stripped).toEqual(["context engineering"]);
+    expect(out.draft).toContain("aliases: [Fresh Alias]");
+  });
+
+  test("strips an alias another page owns as an ALIAS or its name", () => {
+    const idx = index([
+      page({ title: "Agent Loops", name: "Agent Loops", aliases: ["Loops"], relPath: "concepts/Agent Loops.md" }),
+    ]);
+    const out = stripOwnedAliases(draftWith("Loops, agent loops, Mine"), { index: idx });
+    expect(out.stripped).toEqual(["Loops", "agent loops"]);
+    expect(out.draft).toContain("aliases: [Mine]");
+  });
+
+  test("update mode keeps the page's OWN aliases via selfRelPath", () => {
+    const idx = index([
+      page({ title: "Agent Loops", aliases: ["Loops"], relPath: "concepts/Agent Loops.md" }),
+    ]);
+    const out = stripOwnedAliases(draftWith("Loops"), {
+      index: idx,
+      selfRelPath: "concepts/Agent Loops.md",
+    });
+    expect(out.stripped).toEqual([]);
+    expect(out.draft).toContain("aliases: [Loops]");
+  });
+
+  test("no collisions, no aliases line, or null index → draft unchanged", () => {
+    const idx = index([page({ title: "Unrelated" })]);
+    const clean = draftWith("Fresh One, Fresh Two");
+    expect(stripOwnedAliases(clean, { index: idx }).draft).toBe(clean);
+    expect(stripOwnedAliases(clean, { index: null }).stripped).toEqual([]);
+    const noAliases = clean.replace(/^aliases:.*\n/m, "");
+    expect(stripOwnedAliases(noAliases, { index: idx }).draft).toBe(noAliases);
+  });
+
+  test("all aliases stripped → empty inline array; body 'aliases:' lines untouched", () => {
+    const idx = index([page({ title: "Taken" })]);
+    const draft = draftWith("Taken") + "\n\naliases: [in body, not frontmatter]";
+    const out = stripOwnedAliases(draft, { index: idx });
+    expect(out.draft).toContain("aliases: []\ncreated:");
+    expect(out.draft).toContain("aliases: [in body, not frontmatter]");
+  });
+
+  test("kept aliases survive RAW — apostrophes and quoting are never rewritten", () => {
+    const idx = index([page({ title: "Taken" })]);
+    const out = stripOwnedAliases(draftWith(`Taken, "Say, hi", Conway's Law`), { index: idx });
+    expect(out.stripped).toEqual(["Taken"]);
+    expect(out.draft).toContain(`aliases: ["Say, hi", Conway's Law]`);
+  });
+
+  test("quoted owned alias is stripped (comparison unquotes)", () => {
+    const idx = index([page({ title: "Context Engineering" })]);
+    const out = stripOwnedAliases(draftWith(`"Context Engineering", Mine`), { index: idx });
+    expect(out.stripped).toEqual(["Context Engineering"]);
+    expect(out.draft).toContain("aliases: [Mine]");
+  });
+
+  test("duplicate aliases: lines are BOTH processed — no smuggling past the guard", () => {
+    const idx = index([page({ title: "Taken" })]);
+    const draft = `---\ntype: concept\ntitle: New Page\naliases: [Fresh]\naliases: [Taken]\n---\n\n# New Page\n\nBody.`;
+    const out = stripOwnedAliases(draft, { index: idx });
+    expect(out.stripped).toEqual(["Taken"]);
+    expect(out.draft).toContain("aliases: [Fresh]");
+    expect(out.draft).toContain("aliases: []");
+    expect(out.draft).not.toContain("aliases: [Taken]");
   });
 });

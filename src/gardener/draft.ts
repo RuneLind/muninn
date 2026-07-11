@@ -10,9 +10,10 @@
 
 import path from "node:path";
 import type { Cluster, ClusterKind, HarvestedDoc } from "./types.ts";
+import type { WikiIndex } from "../wiki/store.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
-import { expectedDir } from "./target-resolve.ts";
+import { expectedDir, normalizeLabel } from "./target-resolve.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "draft");
@@ -122,6 +123,87 @@ ${summaries}
 --- END SOURCE SUMMARIES ---
 
 Now output the complete Markdown file for the page. Output ONLY the raw file content: the first line MUST be the opening \`---\` of the frontmatter — no introduction, no commentary, and no \`\`\` code fences around it.`;
+}
+
+/**
+ * Strip aliases the draft claims but an existing DIFFERENT page already owns
+ * (as its title, name, or alias) — the "alias hijack" defect: a new create
+ * page declaring e.g. `aliases: [Context Engineering]` steals wikilink
+ * resolution from the canonical page. For updates, `selfRelPath` excludes the
+ * page's own identity so it keeps its existing aliases. Purely deterministic;
+ * runs after the shape-gate so the human reviews the cleaned draft.
+ */
+export function stripOwnedAliases(
+  draft: string,
+  opts: { index: WikiIndex | null; selfRelPath?: string },
+): { draft: string; stripped: string[] } {
+  if (!opts.index || !draft.startsWith("---")) return { draft, stripped: [] };
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return { draft, stripped: [] };
+
+  const owned = new Set<string>();
+  for (const page of opts.index.pages) {
+    if (opts.selfRelPath && page.relPath === opts.selfRelPath) continue;
+    for (const c of [page.title, page.name, ...page.aliases]) owned.add(normalizeLabel(c));
+  }
+
+  // Kept items are preserved RAW (quotes and all) — the strip only ever DELETES
+  // segments, never re-encodes them, so a legitimate alias can't be corrupted
+  // by a lossy parse→rejoin round-trip. Every inline-array `aliases:` line in
+  // the frontmatter is processed (a duplicate key must not smuggle one past).
+  // A non-inline aliases shape (YAML block list) is left untouched — best
+  // effort; the conventions digest mandates inline arrays.
+  const stripped: string[] = [];
+  const head = draft
+    .slice(0, fenceEnd)
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^(aliases:\s*)\[(.*)\]\s*$/);
+      if (!m) return line;
+      const raw = rawInlineItems(m[2]!);
+      const kept = raw.filter((item) => {
+        const isOwned = owned.has(normalizeLabel(unquoteItem(item)));
+        if (isOwned) stripped.push(unquoteItem(item));
+        return !isOwned;
+      });
+      return kept.length === raw.length ? line : `${m[1]}[${kept.join(", ")}]`;
+    })
+    .join("\n");
+
+  if (stripped.length === 0) return { draft, stripped: [] };
+  return { draft: head + draft.slice(fenceEnd), stripped };
+}
+
+/**
+ * Split an inline-array body on top-level commas, keeping each item's RAW text
+ * (quotes included) — the lossless sibling of the wiki store's
+ * `splitInlineArray`, which unquotes and therefore can't round-trip.
+ */
+function rawInlineItems(body: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (const ch of body) {
+    if (ch === "," && !quote) {
+      if (current.trim()) items.push(current.trim());
+      current = "";
+      continue;
+    }
+    if (!quote && (ch === '"' || ch === "'")) quote = ch;
+    else if (quote === ch) quote = null;
+    current += ch;
+  }
+  if (current.trim()) items.push(current.trim());
+  return items;
+}
+
+/** The comparison view of a raw item: surrounding matching quotes removed. */
+function unquoteItem(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
 }
 
 export interface ShapeGateResult {

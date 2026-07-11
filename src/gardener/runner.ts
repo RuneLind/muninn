@@ -21,7 +21,7 @@ import type { Cluster, HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts
 import { harvestDocs } from "./harvest.ts";
 import { buildClusterPrompt, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
-import { buildDraftPrompt, normalizeDraftOutput, shapeGate } from "./draft.ts";
+import { buildDraftPrompt, normalizeDraftOutput, shapeGate, stripOwnedAliases } from "./draft.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -277,6 +277,20 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       continue;
     }
 
+    // Alias-hijack guard: drop aliases another page already owns, so a new
+    // page can't steal wikilink resolution from the canonical one.
+    const dealiased = stripOwnedAliases(draftText, {
+      index,
+      selfRelPath: target.existingRelPath,
+    });
+    if (dealiased.stripped.length > 0) {
+      log.warn("Gardener draft for {topic}: stripped alias(es) owned by other pages: {aliases}", {
+        botName,
+        topic: cluster.topicKey,
+        aliases: dealiased.stripped.join(", "),
+      });
+    }
+
     try {
       const row = await deps.insertProposal({
         botName,
@@ -285,7 +299,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         mode: target.mode,
         targetPath: target.targetPath,
         baseHash,
-        draft: draftText.trim(),
+        draft: dealiased.draft.trim(),
         sourceDocs: sourceDocsFor(cluster, byKey),
         rationale: cluster.rationale ?? null,
       });
