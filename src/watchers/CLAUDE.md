@@ -266,7 +266,14 @@ apply**.
   frontmatter parses with required keys, `type` matches the cluster kind, the body
   is non-empty, and `target_path` is **path-confined** (relative, `..`-free,
   inside `wikiDir` under `concepts/`/`entities/`/`life/**` matching the domain, or
-  the update target's existing dir).
+  the update target's existing dir). After the gate, an **alias-hijack guard**
+  (`stripOwnedAliases`, PR #246) deletes any alias an existing DIFFERENT page
+  already owns as title/name/alias (kept aliases preserved raw, never
+  re-encoded; update drafts keep their own page's aliases; warn-logged). The
+  same strip re-runs at **apply time** against a fresh index (a canonical page
+  created while the proposal awaited review still wins its aliases; the target
+  path counts as self so create re-runs after a crash-after-write stay
+  idempotent).
 - **Persist + notify**: each proposal is persisted **as its drafting completes**
   (a mid-run timeout can't strand undrafted proposals). One alert with a
   **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
