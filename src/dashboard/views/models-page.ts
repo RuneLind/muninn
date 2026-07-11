@@ -68,6 +68,18 @@ export async function renderModelsPage(): Promise<string> {
     .note.ok { color: var(--status-success); }
     .note.bad { color: var(--status-error); }
 
+    /* --- Pipeline runtime chips (live from /api/agents/overview) --- */
+    .rt-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    .rt-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600;
+      letter-spacing: 0.2px; white-space: nowrap;
+    }
+    .rt-chip.rt-run { background: color-mix(in srgb, var(--status-success) 16%, transparent); color: var(--status-success); }
+    .rt-chip.rt-run .pulse-dot { width: 7px; height: 7px; background: var(--status-success); }
+    .rt-chip.rt-next { background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--status-warning); }
+    .rt-chip.rt-last { background: var(--tint-neutral); color: var(--text-muted); font-weight: 500; }
+
     .used { display: flex; flex-direction: column; gap: 2px; }
     .used code { font-size: 11px; }
     .used .empty { color: var(--text-disabled); }
@@ -180,6 +192,54 @@ export async function renderModelsPage(): Promise<string> {
 
     let botNames = [];      // all discovered bot names (for role selectors)
     let lastData = null;    // last overview payload (for editor rendering)
+    let agentsData = null;  // last /api/agents/overview payload (runtime chips)
+
+    // --- Runtime merge (hand-mirror of src/dashboard/models-runtime.ts) ---
+    function rowMatches(row, kind, bot, name) {
+      if (!row.matchKind) return false;
+      if ((kind || 'chat') !== row.matchKind) return false;
+      if (row.matchBot != null && (bot || '') !== row.matchBot) return false;
+      if (row.matchName != null) {
+        var n = name || '';
+        if (n !== row.matchName && (row.matchRecentName == null || n !== row.matchRecentName)) return false;
+      }
+      return true;
+    }
+    function computeRowRuntime(row, agents) {
+      const out = { runningNow: false };
+      if (!row.matchKind || !agents) return out;
+      out.runningNow = (agents.running || []).some(r => !r.completed && rowMatches(row, r.kind, r.botName, r.name));
+      let earliest;
+      for (const u of (agents.upNext || [])) {
+        if (rowMatches(row, u.kind, u.bot, u.name) && (earliest == null || u.nextRunAt < earliest)) earliest = u.nextRunAt;
+      }
+      if (earliest != null) out.nextRunAt = earliest;
+      let newest;
+      for (const rec of (agents.recent || [])) {
+        if (rec.durationMs == null) continue;
+        if (rowMatches(row, rec.kind, rec.bot, rec.name) && (newest == null || rec.finishedAt > newest.finishedAt)) newest = rec;
+      }
+      if (newest && newest.durationMs != null) out.lastDurationMs = newest.durationMs;
+      return out;
+    }
+    function fmtUntilShort(ts) {
+      const diff = ts - Date.now();
+      if (diff <= 0) return 'due now';
+      const mins = Math.round(diff / 60000);
+      if (mins < 1) return 'in <1m';
+      if (mins < 60) return 'in ' + mins + 'm';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return 'in ' + hrs + 'h ' + (mins % 60) + 'm';
+      return new Date(ts).toLocaleDateString();
+    }
+    function runtimeChips(row) {
+      const rt = computeRowRuntime(row, agentsData);
+      const chips = [];
+      if (rt.runningNow) chips.push('<span class="rt-chip rt-run"><span class="pulse-dot"></span>running now</span>');
+      else if (rt.nextRunAt != null) chips.push('<span class="rt-chip rt-next">next: ' + esc(fmtUntilShort(rt.nextRunAt)) + '</span>');
+      if (rt.lastDurationMs != null) chips.push('<span class="rt-chip rt-last">last ' + esc(fmtMs(rt.lastDurationMs)) + '</span>');
+      return chips.length ? '<div class="rt-row">' + chips.join('') + '</div>' : '';
+    }
 
     const CONNECTORS = ['claude-cli', 'copilot-sdk', 'openai-compat', 'claude-sdk'];
     const BACKENDS = ['cli', 'anthropic', 'copilot'];
@@ -242,7 +302,10 @@ export async function renderModelsPage(): Promise<string> {
     async function load() {
       try {
         const url = '/api/models/overview' + (selectedBot ? '?bot=' + encodeURIComponent(selectedBot) : '');
-        const data = await fetch(url).then(r => r.json());
+        const [data] = await Promise.all([
+          fetch(url).then(r => r.json()),
+          refreshAgents(),
+        ]);
         lastData = data;
         render(data);
       } catch (e) {
@@ -250,6 +313,18 @@ export async function renderModelsPage(): Promise<string> {
           '<div class="err-note">Failed to load overview: ' + esc(String(e)) + '</div>';
       }
     }
+
+    // Fetch the live runtime (cheap; degraded/failed fetch just drops the chips).
+    async function refreshAgents() {
+      try { agentsData = await fetch('/api/agents/overview').then(r => r.json()); }
+      catch { agentsData = null; }
+    }
+
+    // Keep the runtime chips fresh without re-fetching the whole models overview.
+    setInterval(async () => {
+      await refreshAgents();
+      if (lastData) renderPipeline(lastData);
+    }, 15000);
 
     function render(data) {
       document.getElementById('errBox').innerHTML = (data.errors && data.errors.length)
@@ -307,11 +382,16 @@ export async function renderModelsPage(): Promise<string> {
         '</tr>'
       ).join('') || '<tr><td colspan="5" class="empty-msg">No wikis registered</td></tr>';
 
-      // Pipeline.
+      // Pipeline (job rows + live runtime chips).
+      renderPipeline(data);
+    }
+
+    function renderPipeline(data) {
       const pipelineBody = document.getElementById('pipelineBody');
+      if (!pipelineBody) return;
       pipelineBody.innerHTML = (data.pipeline || []).map(p =>
         '<tr>' +
-          '<td>' + esc(p.job) + '</td>' +
+          '<td>' + esc(p.job) + runtimeChips(p) + '</td>' +
           '<td><code>' + esc(p.backend) + '</code></td>' +
           '<td><code>' + esc(p.model.value) + '</code>' + chip(p.model.origin) +
             (p.note ? '<div class="note">' + esc(p.note) + '</div>' : '') + '</td>' +

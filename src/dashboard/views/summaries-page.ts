@@ -11,6 +11,7 @@ import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./compone
 import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
 import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
+import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 import {
   sectionTabsStyles,
   sectionTabsHtml,
@@ -66,6 +67,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumArticleLibraryStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
+    ${agentPresenceStyles()}
 
     .duplicate-banner {
       display: none;
@@ -94,6 +96,9 @@ export async function renderSummariesPage(): Promise<string> {
   </div>
 
   <div class="page-content">
+    <!-- Live presence: a capture job or gardener drain running/about to run. -->
+    <div style="margin-bottom:14px;">${agentPresenceHtml("sumPresence")}</div>
+
     <!-- Manual submit form (YouTube; X comes from the Chrome extension) -->
     ${sumSubmitFormHtml()}
 
@@ -230,6 +235,9 @@ export async function renderSummariesPage(): Promise<string> {
     }
 
     init();
+  </script>
+  <script>
+    ${agentPresenceScript("sumPresence", { kinds: ["capture", "gardener_drain"] })}
   </script>
 </body>
 </html>`;

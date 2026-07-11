@@ -27,6 +27,7 @@ import { getAllWatchers } from "../db/watchers.ts";
 import type { Watcher } from "../types.ts";
 import { getDb } from "../db/client.ts";
 import { getRoleOverride, type RoleKey } from "../db/role-overrides.ts";
+import type { AgentKind } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("dashboard", "models");
@@ -105,6 +106,20 @@ export interface PipelineEntry {
   note?: string;
   /** Distinct models actually seen for this job over the last window. */
   used: string[];
+  /**
+   * Additive runtime-match hints (PR 4) — let the `/models` page merge live
+   * `/api/agents/overview` runs onto this row WITHOUT parsing the `job` string
+   * client-side. Only rows that map to a trackable `AgentKind` set them (today:
+   * watcher rows and the gardener-drain row); rows with no `matchKind` never
+   * show a runtime chip. See `mergePipelineRuntime` in `models-runtime.ts`.
+   */
+  matchKind?: AgentKind;
+  matchBot?: string;
+  /** Stable run name to disambiguate same-kind rows (watcher rows). */
+  matchName?: string;
+  /** Alternate accepted name — watcher TYPE, matching trace-sourced `recent[]`
+   *  entries (named by `watcher:<type>` span, not display name). */
+  matchRecentName?: string;
 }
 
 /** One registered wiki + the bot that synthesizes its Ask answer / What's-new
@@ -467,12 +482,18 @@ export async function assembleModelsOverview(
   }
 
   // Gardener drafts run on the bot's own connector + model, thinking capped 8k.
+  // A manual backlog drain registers a `gardener_drain` run under this bot, so
+  // this row can light up "running now" (the weekly watcher runs as a `watcher`
+  // kind — matched by its own watcher row below, not here).
   pipeline.push({
     job: `Gardener drafts · ${selectedName}`,
     backend: `${selected?.connector ?? "claude-cli"} (bot connector)`,
     model: { value: selectedModel, origin: selected?.model ? "config" : "default" },
     note: `thinking capped ${GARDENER_DRAFT_THINKING_MAX_TOKENS.toLocaleString()} tokens`,
     used: [],
+    matchKind: "gardener_drain",
+    matchBot: selectedName,
+    matchName: "Backlog drain",
   });
 
   // Embeddings — always local, never a remote model call.
@@ -500,6 +521,10 @@ export async function assembleModelsOverview(
         model: { value: "—", origin: "none" },
         note: w.type === "wiki-linter" ? "report-only (no AI)" : "no AI (RSS)",
         used: [],
+        matchKind: "watcher",
+        matchBot: w.botName,
+        matchName: w.name,
+        matchRecentName: w.type,
       });
       continue;
     }
@@ -514,6 +539,10 @@ export async function assembleModelsOverview(
       },
       note: w.type === "wiki-gardener" ? "cluster: Haiku · draft: bot model" : "backend fixed to CLI",
       used: source ? usedHaikuForSource(source, w.botName) : [],
+      matchKind: "watcher",
+      matchBot: w.botName,
+      matchName: w.name,
+      matchRecentName: w.type,
     });
   }
 
