@@ -21,7 +21,13 @@ import type { Cluster, HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts
 import { harvestDocs } from "./harvest.ts";
 import { buildClusterPrompt, existingPageLines, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
-import { buildDraftPrompt, normalizeDraftOutput, shapeGate, stripOwnedAliases } from "./draft.ts";
+import {
+  buildDraftPrompt,
+  normalizeDraftOutput,
+  replaceUnresolvedSourceLinks,
+  shapeGate,
+  stripOwnedAliases,
+} from "./draft.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -55,6 +61,14 @@ export interface GardenerDeps {
   // Draft seams.
   callDraft: (prompt: string, timeoutMs: number) => Promise<string>;
   readWikiFile: (absPath: string) => Promise<string | null>;
+  /**
+   * Optional content-dedup seam: return existing wiki pages possibly related to a
+   * query (huginn search over the bot's `wikiCollections`), inlined into the draft
+   * prompt so the drafter folds into / See-also's them instead of duplicating.
+   * Omitted entirely when the bot has no `wikiCollections` (absent ⇒ no block,
+   * never an unscoped search). Errors degrade to no block — never abort the draft.
+   */
+  searchRelated?: (query: string) => Promise<{ title: string; snippet: string }[]>;
 
   // DB seams.
   liveTopicKeys: () => Promise<string[]>;
@@ -255,12 +269,33 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       if (currentBody !== null) baseHash = sha256(currentBody);
     }
 
+    // Content-dedup visibility: surface possibly-related existing pages so the
+    // drafter folds into them. Best-effort — an absent seam or any error yields
+    // no block and never aborts the draft.
+    let related: { title: string; snippet: string }[] = [];
+    if (deps.searchRelated) {
+      const query = [effective.label, ...clusterDocs.slice(0, 3).map((d) => d.title)]
+        .filter((s) => s && s.trim())
+        .join(" ")
+        .slice(0, 200);
+      try {
+        related = await deps.searchRelated(query);
+      } catch (err) {
+        log.warn("Gardener searchRelated failed for topic {topic}: {error}", {
+          botName,
+          topic: cluster.topicKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const prompt = buildDraftPrompt({
       cluster: effective,
       mode: target.mode,
       docs: clusterDocs,
       today: todayOslo(runStart),
       currentBody,
+      related,
     });
 
     let draftText: string;
@@ -305,6 +340,21 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
     }
 
+    // Source-link guard: replace unresolved `[[source page]]` refs in the
+    // frontmatter `sources:` list with the cluster's real source_docs URLs — the
+    // drafter can't see which source pages exist, so an invented ref is a broken
+    // link. Mutates the stored draft, so it must run before insert.
+    const sourceDocs = sourceDocsFor(cluster, byKey);
+    const sourceUrls = sourceDocs.map((d) => d.url).filter((u): u is string => !!u);
+    const relinked = replaceUnresolvedSourceLinks(dealiased.draft, { index, urls: sourceUrls });
+    if (relinked.replaced.length > 0) {
+      log.warn("Gardener draft for {topic}: replaced unresolved source link(s) with URLs: {links}", {
+        botName,
+        topic: cluster.topicKey,
+        links: relinked.replaced.join(", "),
+      });
+    }
+
     try {
       const row = await deps.insertProposal({
         botName,
@@ -313,8 +363,8 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         mode: target.mode,
         targetPath: target.targetPath,
         baseHash,
-        draft: dealiased.draft.trim(),
-        sourceDocs: sourceDocsFor(cluster, byKey),
+        draft: relinked.draft.trim(),
+        sourceDocs,
         rationale: cluster.rationale ?? null,
       });
       if (row) {

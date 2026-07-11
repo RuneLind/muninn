@@ -39,6 +39,7 @@ interface ProposalView {
   sourceDocs: SourceDoc[];
   previewHtml: string;
   diff: DiffLine[] | null;
+  unresolvedLinks?: string[];
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -116,6 +117,11 @@ function cardHtml(p: ProposalView): string {
   html += `<span class="gard-badge badge-${esc(p.kind)}">${esc(p.kind)}</span>`;
   html += `<span class="gard-badge badge-${esc(p.mode)}">${esc(p.mode)}</span>`;
   html += chip(p.status);
+  const unresolved = p.unresolvedLinks || [];
+  if (unresolved.length) {
+    const label = unresolved.length + (unresolved.length === 1 ? " unresolved link" : " unresolved links");
+    html += `<span class="gard-badge chip-unresolved" title="Body links to pages that don't exist yet: ${esc(unresolved.join(", "))}">${esc(label)}</span>`;
+  }
   html += "</div>";
   html += `<div class="gard-meta-row"><span class="gard-path">${esc(p.targetPath)}</span><span>·</span><span>${esc(fmtDate(p.createdAt))}</span></div>`;
   html += "</div>";

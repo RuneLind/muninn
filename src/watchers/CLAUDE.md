@@ -279,6 +279,31 @@ apply**.
   created while the proposal awaited review still wins its aliases; the target
   path counts as self so create re-runs after a crash-after-write stay
   idempotent).
+- **Phantom-source containment (PR 4).** The drafter sees only the target body +
+  doc summaries, so it invents `[[source pages]]` that don't exist. Three parts:
+  (a) the conventions digest tells it to list source **URLs verbatim**, prefer
+  URLs over `[[source page]]` refs, and never fabricate source-page names (a
+  resolved `[[ref]]` surviving guard (b) is intentional — softened, not banned);
+  (b) a deterministic guard in two halves — *persist-time* `replaceUnresolvedSourceLinks`
+  (`draft.ts`, run in the runner after `stripOwnedAliases`, before insert) drops
+  frontmatter `sources:` entries that are unresolved `[[wikilinks]]` and appends
+  the cluster's real `source_docs` URLs (same raw-preserving edit as the alias
+  strip; null index ⇒ every wikilink treated as broken), and *read-time*
+  `scanUnresolvedBodyLinks` (`draft.ts`, called by the `/api/wiki/proposals`
+  builder off the live index `resolve`) surfaces the **body**'s unresolved
+  `[[links]]` as an amber `N unresolved links` review chip — SURFACED not stripped
+  (a mentioned-but-missing link is a wiki feature), read-time so a page created
+  while the proposal awaited review clears it, and the draft's own title is never
+  flagged (no DB column / migration); (c) an optional `searchRelated` seam
+  (`GardenerDeps` → `SharedGardenerSeams` → `buildGardenerSeams`, one huginn
+  `/api/search` per `wikiCollections` collection in brief mode / corrective off,
+  merged + capped top-3) inlines a "POSSIBLY-RELATED EXISTING PAGES" block into
+  the draft prompt so the model folds into / See-also's siblings instead of
+  duplicating. The seam is **omitted entirely when `wikiCollections` is empty**
+  (absent seam ⇒ no block, never an unscoped search) — extending the
+  `SharedGardenerSeams` Pick is load-bearing (without it the optional seam never
+  threads through and the feature silently no-ops). Any `searchRelated` error
+  degrades to no block, never aborts the draft.
 - **Persist + notify**: each proposal is persisted **as its drafting completes**
   (a mid-run timeout can't strand undrafted proposals). One alert with a
   **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
