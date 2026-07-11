@@ -8,6 +8,7 @@
  */
 
 import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc } from "./types.ts";
+import type { WikiIndex } from "../wiki/store.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
@@ -45,6 +46,19 @@ Return ONLY a JSON array of these objects, no prose and no markdown fences. If n
 
 /** Max existing-page lines inlined into the cluster prompt. */
 const MAX_EXISTING_PAGES = 500;
+
+/**
+ * The existing-page lines both the cluster prompt and the backlog-triage prompt
+ * inline as "topics the wiki already covers": one line per concept/entity page,
+ * `"<Title> (aliases: …)"` when the page has aliases. Source/analysis pages are
+ * excluded — they're never a gardener draft target and would bloat the prompt.
+ * Shared so the two callers can't drift on the projection.
+ */
+export function existingPageLines(index: WikiIndex | null | undefined): string[] {
+  return (index?.pages ?? [])
+    .filter((p) => p.type === "concept" || p.type === "entity")
+    .map((p) => (p.aliases.length > 0 ? `${p.title} (aliases: ${p.aliases.join(", ")})` : p.title));
+}
 
 /**
  * Build the cluster prompt. Rejected labels are surfaced so the model reuses

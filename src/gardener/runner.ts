@@ -19,7 +19,7 @@ import type {
 } from "../db/wiki-proposals.ts";
 import type { Cluster, HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts";
 import { harvestDocs } from "./harvest.ts";
-import { buildClusterPrompt, filterClusters, parseClusters } from "./cluster.ts";
+import { buildClusterPrompt, existingPageLines, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
 import { buildDraftPrompt, normalizeDraftOutput, shapeGate, stripOwnedAliases } from "./draft.ts";
 import { sha256, todayOslo } from "./util.ts";
@@ -143,9 +143,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // Concept/entity pages only — the kinds the gardener drafts. Source pages
   // (hundreds of video/article titles) would bloat the prompt without ever
   // being a duplicate target.
-  const existingPages = (index?.pages ?? [])
-    .filter((p) => p.type === "concept" || p.type === "entity")
-    .map((p) => (p.aliases.length > 0 ? `${p.title} (aliases: ${p.aliases.join(", ")})` : p.title));
+  const existingPages = existingPageLines(index);
   const clusterPrompt = buildClusterPrompt(docs, {
     interestProfile,
     rejectedLabels: rejectedHint,
