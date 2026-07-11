@@ -32,7 +32,7 @@ import { loadConfig } from "../src/config.ts";
 import { initDb, closeDb } from "../src/db/client.ts";
 import { discoverAllBots } from "../src/bots/config.ts";
 import { getWikiGardenerWatcher, getWatcherSnapshot, setWatcherSnapshot } from "../src/db/watchers.ts";
-import { getConsumedDocIds } from "../src/db/wiki-proposals.ts";
+import { getConsumedDocIds, getPendingDocIds } from "../src/db/wiki-proposals.ts";
 import { listSummaryCollections } from "../src/summaries/list-collections.ts";
 import { getWikiIndex } from "../src/wiki/store.ts";
 import { loadInterestProfileForBot } from "../src/profile/generator.ts";
@@ -88,6 +88,10 @@ const explicitUnofferKeys =
   unofferKeysRaw !== undefined
     ? unofferKeysRaw.split(",").map((s) => s.trim()).filter(Boolean)
     : undefined;
+if (explicitUnofferKeys !== undefined && explicitUnofferKeys.length === 0) {
+  console.error("--unoffer got an empty key list — nothing to do.");
+  process.exit(1);
+}
 const isUnoffer = unofferTop !== undefined || explicitUnofferKeys !== undefined;
 
 // The report lands in the mimir wiki (sibling of the muninn repo), resolved from
@@ -99,7 +103,7 @@ const REPORT_PATH = path.resolve(
   "mimir",
   "archive",
   "muninn",
-  "2026-07-11-backlog-triage-report.md",
+  `${new Date().toISOString().slice(0, 10)}-backlog-triage-report.md`,
 );
 
 async function main() {
@@ -144,8 +148,10 @@ async function main() {
   );
   console.log();
 
-  // ── Guards (unoffer modes only — a report-only/dry-run run writes nothing) ───
-  if (isUnoffer) {
+  // ── Guards (unoffer modes only — a report-only/dry-run run writes nothing).
+  // Re-run right before the write too: the harvest+score phase takes minutes,
+  // long enough for a drain to start after the initial check.
+  const refuseIfDrainActive = async () => {
     const journal = await getWatcherSnapshot(watcher.id, WIKI_GARDENER_RUN_KEY);
     if (journal !== null) {
       console.error(
@@ -176,7 +182,8 @@ async function main() {
           `(${err instanceof Error ? err.message : String(err)}) — relying on the DB journal check.`,
       );
     }
-  }
+  };
+  if (isUnoffer) await refuseIfDrainActive();
 
   // ── Assemble the tail: offered − consumed, intersected with the live listing ─
   const { byCollection: listedRaw, errors } = await listSummaryCollections(config.knowledgeApiUrl);
@@ -207,16 +214,22 @@ async function main() {
   const offeredSnap = await getWatcherSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY);
   const offered = new Set(Array.isArray(offeredSnap) ? (offeredSnap as string[]) : []);
   const consumed = await getConsumedDocIds(bot.name);
+  const pending = await getPendingDocIds(bot.name);
 
-  // Tail = offered & !consumed, restricted to keys still in the listing (only
-  // those can be harvested + scored).
-  const tailKeys = [...offered].filter((k) => !consumed.has(k) && listedKeys.has(k));
+  // Tail = offered & !consumed & !pending, restricted to keys still in the
+  // listing (only those can be harvested + scored). Pending docs sit in an open
+  // draft/approved proposal — unoffering one would let the next drain create a
+  // duplicate proposal, so they are not "passed over".
+  const tailKeys = [...offered].filter(
+    (k) => !consumed.has(k) && !pending.has(k) && listedKeys.has(k),
+  );
   const tailSet = new Set(tailKeys);
   const N = tailKeys.length;
 
   console.log(`Offered set size:            ${offered.size}`);
   console.log(`Consumed (applied) docs:     ${consumed.size}`);
-  console.log(`Retired tail to triage (N):  ${N}  (offered − consumed, still listed)`);
+  console.log(`Pending (in-review) docs:    ${pending.size}`);
+  console.log(`Retired tail to triage (N):  ${N}  (offered − consumed − pending, still listed)`);
   console.log();
 
   // ── Cost honesty — BEFORE the expensive fetch ────────────────────────────────
@@ -359,7 +372,13 @@ async function main() {
     console.log(`Unoffering ${keysToRemove.length} explicit key(s).`);
   }
 
-  const { newOffered, removed } = computeUnoffer(offered, keysToRemove);
+  // Re-guard + re-read: the initial offered read is minutes stale by now (harvest
+  // + scoring), and a drain that ran in between may have unioned new keys into
+  // the snapshot — computing from the stale set would silently drop them.
+  await refuseIfDrainActive();
+  const freshSnap = await getWatcherSnapshot(watcher.id, WIKI_GARDENER_OFFERED_KEY);
+  const freshOffered = new Set(Array.isArray(freshSnap) ? (freshSnap as string[]) : []);
+  const { newOffered, removed } = computeUnoffer(freshOffered, keysToRemove);
   if (removed.length === 0) {
     console.log("No matching keys were in the offered set — nothing to unoffer. No write.");
     return;

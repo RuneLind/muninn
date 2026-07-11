@@ -120,7 +120,7 @@ export function parseTriage(raw: string, validKeys?: Set<string>): TriageResult[
     if (!key) continue;
     if (validKeys && !validKeys.has(key)) continue;
     if (seen.has(key)) continue; // first score wins on a duplicate
-    const rawScore = typeof o.score === "number" ? o.score : Number(o.score);
+    const rawScore = typeof o.score === "number" ? o.score : typeof o.score === "string" ? Number(o.score) : NaN;
     if (!Number.isFinite(rawScore)) continue;
     const score = Math.max(0, Math.min(5, Math.round(rawScore)));
     seen.add(key);
