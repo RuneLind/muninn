@@ -17,7 +17,8 @@ Routes are split by domain in `routes/`:
 | File | Endpoints |
 |---|---|
 | `data-routes.ts` | Main CRUD: messages, memories, goals, tasks, watchers, users, threads, connectors |
-| `sse-routes.ts` | SSE streams: `/events` (activity), `/agent-status` (phase), `/request-progress` (waterfall) |
+| `sse-routes.ts` | SSE streams on `/api/events`: `activity`, `stats`, `agent_status` (phase), `request_progress` (single-pane waterfall), and `agent_runs` (full snapshot of ALL AgentRuns for `/agents` — initial via `agentStatus.getAll()`, live via `subscribeAll`, throttled ~1/s in the tracker, tools capped at 20 per run) |
+| `agents-routes.ts` | `/agents` live-agent dashboard page + `GET /api/agents/overview` (JSON: `running` + `upNext` + `recent`). Assembly is the pure, injectable `src/dashboard/agents-overview.ts` (`assembleAgentsOverview`). `running` from the AgentRun registry; `upNext` from `scheduled_tasks.next_run_at` + watchers (next fire mirrors `isScheduledTimeDue` — time-of-day slot dominates a naive `last_run_at + interval`; `computeWatcherNextRun`); `recent` is a four-source UNION keyed by span NAME (chat `%_message`/`telegram_voice` roots + `watcher:%` child spans via `src/db/agent-activity.ts`, extractor `haiku_usage` rows, and the registry completed-runs ring for gardener_drain/capture/research/per-task only — per-kind source-of-truth prevents double-counting). Never 5xx — degraded sources land in `errors[]`. |
 | `traces-routes.ts` | Trace spans: list, detail, waterfall data, cleanup |
 | `search-routes.ts` | Knowledge base document search and management |
 | `research-routes.ts` | `/research` page: cited Q&A over the shelf corpus (`GET /api/research/ask` SSE — retrieve via `researchKnowledge`, synthesize one cited answer; see `src/research/{corpus,answer,ask}.ts`) + the browse `/api/research/*` endpoints. Also the Jira research flow (`/api/research/chat`: trigger analysis, post to chat). |
@@ -55,15 +56,13 @@ Pages (`views/*.ts`) compose components by calling all three and concatenating i
 
 ### Pages
 
-`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `summaries-page.ts` (unified YouTube + X-article summaries; composes the `sum-*` components, injects the `SOURCES` registry), `models-page.ts` (models overview — three grouped tables: Bots · Role assignments · Pipeline jobs; client-fetches `/api/models/overview`, bot selector re-scopes only the per-bot Pipeline rows).
+`page.ts` (main dashboard), `traces-page.ts`, `search-page.ts`, `search-document-page.ts`, `research-page.ts`, `logs-page.ts`, `mcp-debug-page.ts`, `serena-page.ts`, `summaries-page.ts` (unified YouTube + X-article summaries; composes the `sum-*` components, injects the `SOURCES` registry), `models-page.ts` (models overview — three grouped tables: Bots · Role assignments · Pipeline jobs; client-fetches `/api/models/overview`, bot selector re-scopes only the per-bot Pipeline rows), `agents-page.ts` (unified live-agent dashboard — Running zone re-renders on the `agent_runs` SSE event + rAF-ticks elapsed timers/bar widths [two-tier pattern from `request-progress-ui.ts`]; Up next + Recently finished from `/api/agents/overview`; reuses `traces-prompt-modal.ts` for prompt inspection and the bot selector for filtering).
 
 ## Real-Time Updates
 
 ### SSE Endpoints (sse-routes.ts)
 
-- `/events` — activity feed events (message_in, message_out, memory, error, etc.)
-- `/agent-status` — phase changes (idle, calling_claude, transcribing, etc.)
-- `/request-progress` — full waterfall data (tools with timing, tokens, model)
+- `/api/events` — activity feed events (message_in, message_out, memory, error, etc.), plus `agent_status` (phase), `request_progress` (single-pane waterfall), and `agent_runs` (full AgentRun snapshot for `/agents`, throttled ~1/s)
 
 ### Agent Status (`src/observability/agent-status.ts`)
 
