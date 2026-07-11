@@ -305,10 +305,14 @@ export async function assembleAgentsOverview(
   ]);
 
   const running = deps.getRunning();
+  // A live watcher run's name is its DISPLAY name (`watcher.name || watcher.type`),
+  // but the durable durations bucket by TYPE — map display → type so the lookup hits.
+  const watcherTypeByName: Record<string, string> = {};
+  for (const w of watchers) watcherTypeByName[w.name || w.type] = w.type;
   // ETA estimates for the live runs — watchers from the durable trace source,
   // everything else from the in-memory ring; a degraded watcher_durations source
   // just means watcher runs fall back to elapsed-only.
-  const estimates = buildRunEstimates(running, deps.getCompletedRing(), watcherDurations);
+  const estimates = buildRunEstimates(running, deps.getCompletedRing(), watcherDurations, watcherTypeByName);
 
   // ---- upNext --------------------------------------------------------------
   const upNext: UpNextEntry[] = [];

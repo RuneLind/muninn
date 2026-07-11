@@ -70,20 +70,29 @@ export interface WatcherDurationRow {
  * restart, unlike the in-memory completed-runs ring). Skip spans are NOT filtered
  * in SQL: the two `attributes ? '…'` flags are returned so the pure grouping step
  * (`groupWatcherDurations`) can exclude them (keeps that exclusion unit-testable).
- * Capped generously; per-type capping to the newest ~20 happens in the pure layer.
+ *
+ * Windowed PER TYPE (`ROW_NUMBER() OVER (PARTITION BY name …)` capped at
+ * `perTypeLimit`), NOT a single global `LIMIT` — otherwise a 5-min-interval
+ * watcher would flood a weekly one out of the window within days. The cap sits a
+ * bit above the pure layer's ~20 median cap so skip-span exclusion still leaves
+ * enough real rows.
  */
-export async function getWatcherRunDurations(windowDays = 30, limit = 500): Promise<WatcherDurationRow[]> {
+export async function getWatcherRunDurations(windowDays = 30, perTypeLimit = 25): Promise<WatcherDurationRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT name, duration_ms,
-           (attributes ? 'quietHoursSkipped') AS quiet_skip,
-           (attributes ? 'skippedInFlight')   AS inflight_skip
-    FROM traces
-    WHERE name LIKE 'watcher:%'
-      AND duration_ms IS NOT NULL
-      AND created_at >= now() - make_interval(days => ${windowDays})
-    ORDER BY started_at DESC
-    LIMIT ${limit}
+    SELECT name, duration_ms, quiet_skip, inflight_skip
+    FROM (
+      SELECT name, duration_ms, started_at,
+             (attributes ? 'quietHoursSkipped') AS quiet_skip,
+             (attributes ? 'skippedInFlight')   AS inflight_skip,
+             ROW_NUMBER() OVER (PARTITION BY name ORDER BY started_at DESC) AS rn
+      FROM traces
+      WHERE name LIKE 'watcher:%'
+        AND duration_ms IS NOT NULL
+        AND created_at >= now() - make_interval(days => ${windowDays})
+    ) t
+    WHERE rn <= ${perTypeLimit}
+    ORDER BY name, started_at DESC
   `;
   return rows.map((r) => ({
     name: r.name as string,

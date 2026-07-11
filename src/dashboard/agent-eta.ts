@@ -120,11 +120,22 @@ export function ringDurations(
  * the trace-derived `watcherRows`, every other kind from the completed-runs ring.
  * A run with no history (or a null median) is simply absent from the map ⇒ the
  * card renders elapsed-only.
+ *
+ * Watcher durations are bucketed by watcher TYPE (`groupWatcherDurations` strips
+ * the `watcher:<type>` prefix), but a live watcher run's `name` is its DISPLAY
+ * name (`watcher.name || watcher.type`, from `src/watchers/runner.ts`). The
+ * `watcherTypeByName` map (display name → type, built from the watchers list in
+ * `assembleAgentsOverview`) bridges the two so the type-keyed bucket lookup hits;
+ * a miss falls back to trying the run's `name` directly as a type (covers a
+ * watcher whose display name IS its type). The estimate map key stays keyed by
+ * the run's `name` — the client looks each run up by name, so that contract is
+ * unchanged.
  */
 export function buildRunEstimates(
   running: AgentRun[],
   ring: AgentRun[],
   watcherRows: WatcherDurationRow[],
+  watcherTypeByName: Record<string, string> = {},
 ): Record<string, number> {
   const watcherGroups = groupWatcherDurations(watcherRows);
   const estimates: Record<string, number> = {};
@@ -132,8 +143,14 @@ export function buildRunEstimates(
     if (r.completed) continue;
     const kind = r.kind ?? "chat";
     if (kind === "chat") continue; // chat gets NO ETA ever
-    const durations =
-      kind === "watcher" ? (watcherGroups[r.name ?? ""] ?? []) : ringDurations(ring, kind, r.name);
+    let durations: number[];
+    if (kind === "watcher") {
+      const name = r.name ?? "";
+      const type = watcherTypeByName[name] ?? name; // display name → type; fall back to name-as-type
+      durations = watcherGroups[type] ?? [];
+    } else {
+      durations = ringDurations(ring, kind, r.name);
+    }
     const m = median(durations);
     if (m != null && m > 0) estimates[estimateIdentity(kind, r.name)] = Math.round(m);
   }
@@ -169,11 +186,22 @@ export type CardEtaRun = Pick<
  * elapsed-only (`indeterminate`, no ETA line). The `· est.` qualifier is always
  * on the ETA line; past the estimate it reads "running over est." instead of a
  * frozen/overflowing bar.
+ *
+ * `pacedExpectedMs` FREEZES the pace estimate across a snapshot. Pace is
+ * `elapsed/done × total`, but `done` only advances on an SSE snapshot while
+ * `elapsed` grows every rAF tick — recomputing pace from live elapsed would make
+ * the "time left" count UPWARD (at done=1/total=40 it balloons ~39× realtime).
+ * So the render pass computes the pace once from render-time elapsed, stores it,
+ * and each tick passes it back here as `pacedExpectedMs`: the countdown then
+ * decreases against a FIXED expected until the next snapshot re-freezes it. When
+ * omitted, pace is computed once from the passed `elapsedMs` (correct for a
+ * single call; the client always supplies the frozen value on ticks).
  */
 export function computeCardEta(
   run: CardEtaRun,
   historyExpectedMs: number | null | undefined,
   now: number,
+  pacedExpectedMs?: number | null,
 ): CardEtaModel {
   const end = run.completed && run.completedAt != null ? run.completedAt : now;
   const elapsedMs = Math.max(0, end - run.startedAt);
@@ -185,8 +213,13 @@ export function computeCardEta(
 
   let expected = kind === "chat" ? undefined : (historyExpectedMs ?? undefined);
   // Pace beats the history median where real progress exists (gardener drain).
+  // Use the frozen paced expected when the caller supplies it (rAF ticks), else
+  // compute it once from the passed elapsed (render pass / single call).
   if (kind === "gardener_drain" && p && p.total > 0 && p.done > 0) {
-    expected = Math.round((elapsedMs / p.done) * p.total);
+    expected =
+      pacedExpectedMs != null && pacedExpectedMs > 0
+        ? pacedExpectedMs
+        : Math.round((elapsedMs / p.done) * p.total);
   }
 
   let barMode: CardBarMode;

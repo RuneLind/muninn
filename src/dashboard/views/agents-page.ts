@@ -210,7 +210,11 @@ export async function renderAgentsPage(): Promise<string> {
     }
     function estimateIdentity(kind, name) { return (kind || 'chat') + '\\u0000' + (name || ''); }
     // Returns { elapsedMs, barMode, barPct?, etaLabel?, expectedDurationMs? }.
-    function computeCardEta(r, historyExpectedMs, now) {
+    // pacedExpectedMs FREEZES the pace across a snapshot: the render pass computes
+    // pace once and stores it (data-paced); each rAF tick feeds it back so the
+    // countdown decreases against a fixed expected instead of ballooning as live
+    // elapsed grows while done is unchanged (mirror of src/dashboard/agent-eta.ts).
+    function computeCardEta(r, historyExpectedMs, now, pacedExpectedMs) {
       var end = (r.completed && r.completedAt != null) ? r.completedAt : now;
       var elapsedMs = Math.max(0, end - r.startedAt);
       if (r.completed) return { elapsedMs: elapsedMs, barMode: 'done' };
@@ -219,7 +223,9 @@ export async function renderAgentsPage(): Promise<string> {
       var hasDiscrete = !!(p && p.total > 0);
       var expected = kind === 'chat' ? undefined : (historyExpectedMs != null ? historyExpectedMs : undefined);
       if (kind === 'gardener_drain' && p && p.total > 0 && p.done > 0) {
-        expected = Math.round((elapsedMs / p.done) * p.total);
+        expected = (pacedExpectedMs != null && pacedExpectedMs > 0)
+          ? pacedExpectedMs
+          : Math.round((elapsedMs / p.done) * p.total);
       }
       var barMode, barPct;
       if (hasDiscrete) {
@@ -369,7 +375,11 @@ export async function renderAgentsPage(): Promise<string> {
       links.push('<a class="run-link" href="/models?bot=' + encodeURIComponent(r.botName || '') + '">Models</a>');
       if (r.sourcePage) links.push('<a class="run-link" href="' + escapeAttr(r.sourcePage) + '">Open</a>');
 
-      return '<div class="run-card' + (done ? ' done' : '') + '" data-req="' + escapeAttr(r.requestId) + '">' +
+      // Freeze the render-time expected (pace for gardener drains) so rAF ticks
+      // count DOWN against it instead of recomputing pace from growing elapsed.
+      var pacedAttr = (eta.expectedDurationMs != null) ? ' data-paced="' + eta.expectedDurationMs + '"' : '';
+
+      return '<div class="run-card' + (done ? ' done' : '') + '" data-req="' + escapeAttr(r.requestId) + '"' + pacedAttr + '>' +
         '<div class="run-top">' +
           '<span class="pulse-dot"></span>' +
           '<span class="kind-pill kind-' + esc(kind) + '">' + esc(kindLabels[kind] || kind) + '</span>' +
@@ -403,7 +413,9 @@ export async function renderAgentsPage(): Promise<string> {
         if (!card) continue;
         var el = card.querySelector('[data-elapsed]');
         if (el) el.textContent = fmtMs(now - r.startedAt);
-        var eta = computeCardEta(r, historyEstimateFor(r), now);
+        var pacedAttr = card.getAttribute('data-paced');
+        var paced = pacedAttr ? Number(pacedAttr) : null;
+        var eta = computeCardEta(r, historyEstimateFor(r), now, paced);
         if (eta.barMode === 'estimate') {
           var bar = card.querySelector('[data-bar]');
           if (bar) bar.style.width = (eta.barPct || 0) + '%';

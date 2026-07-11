@@ -147,6 +147,26 @@ describe("buildRunEstimates", () => {
     expect(est[estimateIdentity("watcher", "email")]).toBe(500); // median 400/600
   });
 
+  test("display-named watcher resolves via watcherTypeByName to the type bucket", () => {
+    // Live run carries the DISPLAY name; durations bucket by TYPE.
+    const live = run({ kind: "watcher", name: "Wiki Gardener", completed: false, completedAt: undefined });
+    const watcherRows = [
+      watcherRow({ name: "watcher:wiki-gardener", durationMs: 400 }),
+      watcherRow({ name: "watcher:wiki-gardener", durationMs: 600 }),
+    ];
+    const est = buildRunEstimates([live], [], watcherRows, { "Wiki Gardener": "wiki-gardener" });
+    // Estimate keyed by the run's NAME (client contract), sourced from the type bucket.
+    expect(est[estimateIdentity("watcher", "Wiki Gardener")]).toBe(500);
+  });
+
+  test("unknown watcher name (no mapping) falls back gracefully to no estimate", () => {
+    const live = run({ kind: "watcher", name: "Wiki Gardener", completed: false, completedAt: undefined });
+    const watcherRows = [watcherRow({ name: "watcher:wiki-gardener", durationMs: 500 })];
+    // No mapping → falls back to name-as-type ("Wiki Gardener"), which has no bucket.
+    const est = buildRunEstimates([live], [], watcherRows);
+    expect(est[estimateIdentity("watcher", "Wiki Gardener")]).toBeUndefined();
+  });
+
   test("chat is never estimated", () => {
     const live = run({ kind: "chat", name: "Chat turn", completed: false, completedAt: undefined });
     // Even if a (bogus) ring history existed under the chat identity, it's excluded.
@@ -213,6 +233,34 @@ describe("computeCardEta", () => {
     expect(m.barMode).toBe("determinate"); // n/m bar
     expect(m.barPct).toBe(25); // 2/8
     expect(m.etaLabel).toBe("~12s left · est.");
+  });
+
+  test("paced ETA is frozen per snapshot — countdown non-increasing for fixed progress", () => {
+    // done=1/total=40: without freezing, pace = elapsed/1*40 balloons ~40× realtime,
+    // so "time left" would grow between snapshots. The render pass freezes the pace;
+    // rAF ticks feed it back and the countdown must only DECREASE.
+    const r: CardEtaRun = {
+      kind: "gardener_drain",
+      name: "Backlog drain",
+      startedAt: 0,
+      completed: false,
+      progress: { done: 1, total: 40 },
+    };
+    // Render pass at elapsed=10s → frozen pace expected = 10s/1*40 = 400s.
+    const atRender = computeCardEta(r, 5000, 10_000);
+    expect(atRender.expectedDurationMs).toBe(400_000);
+    const remRender = atRender.expectedDurationMs! - atRender.elapsedMs; // 390s
+
+    // A later tick (5s on) feeding the FROZEN pace back must not change expected,
+    // and the remaining time must be smaller (countdown), never larger.
+    const laterFrozen = computeCardEta(r, 5000, 15_000, atRender.expectedDurationMs);
+    expect(laterFrozen.expectedDurationMs).toBe(400_000);
+    const remLater = laterFrozen.expectedDurationMs! - laterFrozen.elapsedMs; // 385s
+    expect(remLater).toBeLessThan(remRender);
+
+    // Regression guard: recomputing pace from live elapsed (no freeze) balloons it.
+    const laterUnfrozen = computeCardEta(r, 5000, 15_000);
+    expect(laterUnfrozen.expectedDurationMs).toBe(600_000); // 15s/1*40 → grows upward
   });
 
   test("discrete progress with done=0 falls back to history (no pace yet)", () => {
