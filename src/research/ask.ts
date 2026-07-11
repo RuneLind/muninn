@@ -13,6 +13,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
 import { persistResearchCitations } from "../db/research-citations.ts";
 import { getLog } from "../logging.ts";
@@ -81,6 +82,16 @@ export async function streamResearchAnswer(
   const collections = opts.collections ?? RESEARCH_COLLECTIONS;
   const maxSources = opts.maxSources ?? DEFAULT_MAX_SOURCES;
 
+  // AgentRun registry mirror (/agents dashboard) — one registration covers BOTH
+  // /research and the wiki Ask tab (both call streamResearchAnswer). Phases mirror
+  // the emitted searching → synthesizing arc; completed in the `finally` so it
+  // settles on the done path AND every error/abort path.
+  const reqId = agentStatus.startRequest(botConfig.name, "searching", undefined, {
+    kind: "research",
+    name: question.length > 60 ? `${question.slice(0, 57)}…` : question,
+  });
+  let traceId: string | undefined;
+
   try {
     await emit({ type: "phase", phase: "searching" });
 
@@ -105,6 +116,7 @@ export async function streamResearchAnswer(
       subSearches: result.subSearches,
       traceId: result.traceId,
     });
+    traceId = result.traceId;
 
     // Honest relevance floor: gate synthesis on Huginn's raw-score `lowConfidence`
     // signal, not the rank-based `relevance` value (see assessCoverage). On a
@@ -144,6 +156,7 @@ export async function streamResearchAnswer(
     }
 
     await emit({ type: "phase", phase: "synthesizing" });
+    agentStatus.updatePhase(reqId, "synthesizing");
 
     const userPrompt = buildSynthesisUserPrompt(question, citations, history);
     const onProgress: StreamProgressCallback = (event) => {
@@ -191,5 +204,7 @@ export async function streamResearchAnswer(
       error: message,
     });
     await emit({ type: "error", message });
+  } finally {
+    agentStatus.completeRequest(reqId, traceId ? { traceId } : {});
   }
 }

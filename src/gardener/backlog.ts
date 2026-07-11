@@ -27,6 +27,7 @@ import type { SummaryCollectionListings } from "../summaries/list-collections.ts
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
 import { docDateMs } from "./harvest.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "backlog");
@@ -411,6 +412,20 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       cancelRequested: false,
     });
 
+    // Mirror the drain into the AgentRun registry (/agents dashboard) — additive
+    // alongside the 3s-poll strip at /wiki/gardener, which is untouched. Only the
+    // MANUAL/route-driven drain flows through startBacklogRun; the weekly watcher
+    // path (checkWikiGardener) calls runGardener directly and already registers a
+    // `kind:"watcher"` run via the runner — so this never double-registers a card.
+    // The registry run is completed in the `finally` below (covers success, cancel,
+    // AND a runGardener throw), independent of the outer settle handlers.
+    const reqId = agentStatus.startRequest(deps.botName, "assembling", undefined, {
+      kind: "gardener_drain",
+      name: "Backlog drain",
+    });
+    agentStatus.setSourcePage(reqId, "/wiki/gardener");
+
+    try {
     // Auto-recover a pending journal (a prior crash / `runGardener` throw stranded
     // its batch) BEFORE assembling the new one. Under the mutex — NOT a route
     // pre-flight — so a near-simultaneous second Ingest click can't interleave this
@@ -449,8 +464,21 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
           lastTotal = p.draftsTotal;
         }
         prog.currentTopic = p.currentTopic;
+        // Mirror the stage + n/m into the registry run (the stage IS the card's
+        // phase → "Drain: <stage>"; draftsTotal is 0 until clustering resolves,
+        // which the card renders as an indeterminate bar).
+        agentStatus.updatePhase(reqId, p.stage);
+        agentStatus.updateProgress(reqId, {
+          done: prog.draftsDone,
+          total: prog.draftsTotal,
+          ...(p.currentTopic ? { currentItem: p.currentTopic } : {}),
+        });
       },
-      shouldAbort: () => backlogProgress.get(deps.botName)?.cancelRequested === true,
+      shouldAbort: () => {
+        const cancel = backlogProgress.get(deps.botName)?.cancelRequested === true;
+        if (cancel) agentStatus.setCancelRequested(reqId, true);
+        return cancel;
+      },
       onAborted: (keys) => {
         aborted = true;
         skippedKeys = keys;
@@ -474,6 +502,13 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       drafted,
       ...(aborted ? { cancelled: { drafted, of: lastTotal } } : {}),
     };
+    } finally {
+      // Complete the registry run on EVERY exit path — success, soft-cancel
+      // (returns normally), and a runGardener/assemble throw (rethrown after this).
+      // No meta is available here (no trace/token counts on a drain); Recent sources
+      // gardener_drain from the completed-runs ring keyed on the stable name above.
+      agentStatus.completeRequest(reqId, {});
+    }
   });
   if (run === null) return { state: "running" };
 

@@ -1,4 +1,5 @@
-import { test, expect, beforeEach, mock } from "bun:test";
+import { test, expect, beforeEach, describe, mock } from "bun:test";
+import { agentStatus } from "../observability/agent-status.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ResearchHit, ResearchKnowledgeResult } from "../ai/research-knowledge.ts";
@@ -188,4 +189,37 @@ test("retrieval failure surfaces as a single error event, never throws", async (
   expect(err).toBeTruthy();
   expect(err.message).toContain("huginn down");
   expect(events.some((e) => e.type === "done")).toBe(false);
+});
+
+// ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────
+// One registration in streamResearchAnswer covers BOTH /research and wiki Ask.
+
+describe("AgentRun registry mirror", () => {
+  beforeEach(() => agentStatus.clearRequest()); // reset the singleton between cases
+
+  test("registers a research run and completes it on the done path (with traceId)", async () => {
+    await collect("What is Claude Code and does it support MCP?");
+    const runs = agentStatus.getRecentCompleted().filter((r) => r.kind === "research");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.name).toBe("What is Claude Code and does it support MCP?");
+    expect(runs[0]!.botName).toBe("jarvis");
+    expect(runs[0]!.traceId).toBe("trace-123"); // completeRequest carried the traceId
+    // No live research run leaks past completion.
+    expect(agentStatus.getAll().some((r) => r.kind === "research" && !r.completed)).toBe(false);
+  });
+
+  test("truncates a long question name to ~60 chars with an ellipsis", async () => {
+    const long = "Why ".repeat(40).trim(); // well over 60 chars
+    await collect(long);
+    const run = agentStatus.getRecentCompleted().find((r) => r.kind === "research")!;
+    expect(run.name!.length).toBeLessThanOrEqual(60);
+    expect(run.name!.endsWith("…")).toBe(true);
+  });
+
+  test("completes the run on the error path (never leaks)", async () => {
+    researchThrows = "huginn down";
+    await collect("q");
+    expect(agentStatus.getRecentCompleted().some((r) => r.kind === "research")).toBe(true);
+    expect(agentStatus.getAll().some((r) => r.kind === "research" && !r.completed)).toBe(false);
+  });
 });

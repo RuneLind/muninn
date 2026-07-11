@@ -19,6 +19,7 @@ import {
 } from "./backlog.ts";
 import type { QueuedDoc } from "../wiki/ingest-backlog.ts";
 import type { WatcherAlert } from "../types.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 
 /**
  * No-op journal seams (PR 3) — every `startBacklogRun` case that doesn't exercise
@@ -658,5 +659,121 @@ describe("resetBacklogOffered", () => {
     });
     expect(after.ok).toBe(true);
     expect(persisted).toBe(true);
+  });
+});
+
+// ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────
+
+describe("startBacklogRun — AgentRun registry mirror", () => {
+  beforeEach(() => {
+    __resetGardenerMutexForTest();
+    agentStatus.clearRequest(); // reset the singleton (drops live runs + ring)
+  });
+
+  const assembled: AssembledBacklog = {
+    listedBySource: {},
+    batchKeys: ["c/a", "c/b", "c/c"],
+    consumedComplement: new Set(),
+    offeredBefore: new Set(),
+    queuedCount: 5,
+  };
+
+  function gardenerRun(bot: string): AgentRunLike | undefined {
+    return agentStatus.getAll().find((r) => r.kind === "gardener_drain" && r.botName === bot);
+  }
+  // Minimal structural shape we read (avoids importing the full AgentRun type).
+  type AgentRunLike = ReturnType<typeof agentStatus.getAll>[number];
+
+  test("registers a gardener_drain run on start and mirrors stage + progress + cancel", async () => {
+    let release!: () => void;
+    const gate = new Promise<WatcherAlert[]>((res) => (release = () => res([])));
+    let hookRef: import("./backlog.ts").GardenerRunHooks | undefined;
+
+    const r = startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async () => {},
+      runGardener: async (_a, hooks) => {
+        hookRef = hooks;
+        return gate;
+      },
+      recordLastRun: () => {},
+    });
+    expect(r.state).toBe("started");
+
+    // Registered synchronously-ish once the work fn runs its first tick.
+    await new Promise((res) => setTimeout(res, 5));
+    const run = gardenerRun("jarvis");
+    expect(run).toBeDefined();
+    expect(run!.name).toBe("Backlog drain");
+    expect(run!.sourcePage).toBe("/wiki/gardener");
+    expect(run!.completed).toBeFalsy();
+
+    // A progress tick mirrors the stage into the run phase + n/m into progress.
+    hookRef!.onProgress?.({ stage: "drafting", draftsDone: 1, draftsTotal: 3, currentTopic: "Topic X" });
+    const mid = gardenerRun("jarvis")!;
+    expect(mid.phase).toBe("drafting");
+    expect(mid.progress).toEqual({ done: 1, total: 3, currentItem: "Topic X" });
+
+    // A cancel is mirrored onto the run once shouldAbort observes it.
+    requestBacklogCancel("jarvis");
+    expect(hookRef!.shouldAbort?.()).toBe(true);
+    expect(gardenerRun("jarvis")!.cancelRequested).toBe(true);
+
+    release();
+    await new Promise((res) => setTimeout(res, 10));
+    // Marked completed (the 30s auto-clear timer still holds it in getAll) + also
+    // snapshotted into the ring, which is what Recent sources gardener_drain from.
+    expect(gardenerRun("jarvis")!.completed).toBe(true);
+    const completed = agentStatus.getRecentCompleted().find((x) => x.kind === "gardener_drain");
+    expect(completed).toBeDefined();
+    expect(completed!.name).toBe("Backlog drain");
+  });
+
+  test("completes the registry run on a runGardener throw (never leaks)", async () => {
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async () => {},
+      runGardener: async () => {
+        throw new Error("huginn 500 mid-harvest");
+      },
+      recordLastRun: () => {},
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // No live gardener_drain run remains; it settled into the completed ring.
+    expect(agentStatus.getAll().some((x) => x.kind === "gardener_drain" && !x.completed)).toBe(false);
+    expect(agentStatus.getRecentCompleted().some((x) => x.kind === "gardener_drain")).toBe(true);
+  });
+
+  test("no registry run when the drain never starts (running / disabled / no-watcher)", async () => {
+    // A second click while one is in flight must not register a second card.
+    let release!: () => void;
+    const gate = new Promise<WatcherAlert[]>((res) => (release = () => res([])));
+    const base = {
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => assembled,
+      persistOffered: async () => {},
+      runGardener: async () => gate,
+      recordLastRun: () => {},
+    };
+    startBacklogRun(base);
+    await new Promise((res) => setTimeout(res, 5));
+    const second = startBacklogRun(base);
+    expect(second.state).toBe("running");
+    expect(agentStatus.getAll().filter((x) => x.kind === "gardener_drain").length).toBe(1);
+
+    release();
+    await new Promise((res) => setTimeout(res, 10));
   });
 });

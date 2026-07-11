@@ -12,7 +12,18 @@ export type AgentPhase =
   | "synthesizing_voice"
   | "running_task"
   | "checking_goals"
-  | "running_watcher";
+  | "running_watcher"
+  // Research (/research + wiki Ask) — mirrors streamResearchAnswer's phases.
+  | "searching"
+  | "synthesizing"
+  // Gardener backlog-drain stages — mirror `BacklogProgress.stage` so the
+  // `/agents` card can render "Drain: <stage>". Additive: no existing consumer
+  // switches exhaustively on AgentPhase (label maps fall back to the raw value).
+  | "assembling"
+  | "harvesting"
+  | "clustering"
+  | "resolving"
+  | "drafting";
 
 export interface AgentStatus {
   phase: AgentPhase;
@@ -287,14 +298,18 @@ class AgentStatusTracker {
 
     this.notifyProgress();
 
-    // Auto-clear this request after 30 seconds (user can dismiss earlier via × button)
+    // Auto-clear this request after completion (user can dismiss earlier via ×
+    // button). Extractors are frequent + short (memory/goals/schedule fire on
+    // nearly every turn), so a 30s window piles up dozens of just-finished rows —
+    // clear those far sooner. Every other kind keeps the 30s dwell.
+    const clearMs = req.kind === "extractor" ? 5_000 : 30_000;
     const existing = this.completionTimers.get(requestId);
     if (existing) clearTimeout(existing);
     this.completionTimers.set(requestId, setTimeout(() => {
       this.requests.delete(requestId);
       this.completionTimers.delete(requestId);
       this.notifyProgress();
-    }, 30_000));
+    }, clearMs));
   }
 
   /** Clear one request (by id) or, with no id, every request — used for reset

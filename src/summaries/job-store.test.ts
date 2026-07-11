@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe, beforeEach } from "bun:test";
 import { createJobStore, type JobEvent } from "./job-store.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 
 type Status = "pending" | "working" | "complete" | "error";
 
@@ -200,4 +201,85 @@ test("TTL cleanup timer evicts expired jobs and keeps fresh ones", async () => {
   const freshId = survivorStore.createJob({ videoId: "fresh", title: "T", url: "u" });
   await new Promise((r) => setTimeout(r, 30));
   expect(survivorStore.getJob(freshId)).toBeDefined();
+});
+
+// ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────
+// One hook in the shared factory covers ALL four capture verticals — the tests
+// below parametrize `label` to prove the same createJob→complete/fail lifecycle
+// registers + settles a `kind:"capture"` run whatever the vertical is.
+
+describe("createJobStore — AgentRun registry mirror", () => {
+  beforeEach(() => agentStatus.clearRequest()); // reset the singleton between cases
+
+  function labelledStore(label: string) {
+    return createJobStore<Status, { videoId: string }>({
+      subsystem: "test",
+      label,
+      initialStatus: "pending",
+    });
+  }
+
+  function captureRuns() {
+    return agentStatus.getAll().filter((r) => r.kind === "capture");
+  }
+
+  test("createJob registers a capture run named '<label>: <title>'", () => {
+    const store = labelledStore("YouTube");
+    store.createJob({ videoId: "v1", title: "Cool video", url: "https://y/1" });
+    const runs = captureRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.name).toBe("YouTube: Cool video");
+    expect(runs[0]!.completed).toBeFalsy();
+    expect(runs[0]!.botName).toBe(""); // capture jobs aren't bot-scoped
+  });
+
+  test("name falls back to the url when the job has no title", () => {
+    const store = labelledStore("X");
+    store.createJob({ videoId: "v1", title: "", url: "https://x.com/a/status/1" });
+    expect(captureRuns()[0]!.name).toBe("X: https://x.com/a/status/1");
+  });
+
+  test("completeJob settles the run into the completed ring", () => {
+    const store = labelledStore("TikTok");
+    const id = store.createJob({ videoId: "v1", title: "Clip", url: "u" });
+    expect(captureRuns()[0]!.completed).toBeFalsy();
+    store.completeJob(id, "summary text", "cat");
+    expect(captureRuns()[0]!.completed).toBe(true);
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring.some((r) => r.name === "TikTok: Clip")).toBe(true);
+  });
+
+  test("failJob also completes the run (error path)", () => {
+    const store = labelledStore("Claude");
+    const id = store.createJob({ videoId: "v1", title: "Doc", url: "u" });
+    store.failJob(id, "boom");
+    expect(captureRuns()[0]!.completed).toBe(true);
+  });
+
+  test("all four verticals register + settle via the SAME factory hook", () => {
+    for (const label of ["YouTube", "X", "TikTok", "Claude"]) {
+      const store = labelledStore(label);
+      const id = store.createJob({ videoId: "v", title: "T", url: "u" });
+      store.completeJob(id, "s", "c");
+    }
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring.map((r) => r.name).sort()).toEqual(
+      ["Claude: T", "TikTok: T", "X: T", "YouTube: T"],
+    );
+  });
+
+  test("an abandoned job's run is completed by the TTL sweep (no leak)", async () => {
+    const store = createJobStore<Status, { videoId: string }>({
+      subsystem: "test",
+      label: "YouTube",
+      initialStatus: "pending",
+      ttlMs: 5,
+      cleanupIntervalMs: 5,
+    });
+    store.createJob({ videoId: "v1", title: "T", url: "u" }); // never completed
+    expect(captureRuns()[0]!.completed).toBeFalsy();
+    await new Promise((r) => setTimeout(r, 30));
+    // The TTL cleanup dropped the job AND completed the dangling registry run.
+    expect(captureRuns().every((r) => r.completed)).toBe(true);
+  });
 });
