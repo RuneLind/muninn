@@ -289,7 +289,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       if (forced) log.info("Manual trigger: watcher \"{name}\"", { botName: tag, name: watcher.name });
       agentStatus.set("running_watcher", watcher.name);
-      requestId = agentStatus.startRequest(botConfig.name, "running_watcher");
+      requestId = agentStatus.startRequest(botConfig.name, "running_watcher", undefined, {
+        kind: "watcher",
+        name: watcher.name || watcher.type,
+      });
       setConnectorInfo(requestId, botConfig);
 
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
@@ -400,7 +403,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       ].slice(-MAX_NOTIFIED_IDS);
 
       await updateWatcherLastRun(watcher.id, updatedIds);
-      agentStatus.completeRequest(requestId, {});
+      // `wt` is a child span sharing the scheduler_tick trace id, so the card's
+      // trace link opens the whole tick — coarser than chat's per-request link,
+      // but the only handle in scope here (no exec result / no token counts).
+      agentStatus.completeRequest(requestId, { traceId: wt?.traceId });
       wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);

@@ -21,9 +21,12 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
     let requestId: string | undefined;
     try {
       agentStatus.set("running_task", task.title);
-      requestId = agentStatus.startRequest(botConfig.name, "running_task");
+      requestId = agentStatus.startRequest(botConfig.name, "running_task", undefined, {
+        kind: "scheduled_task",
+        name: task.title,
+      });
       setConnectorInfo(requestId, botConfig, config.claudeModel);
-      const markdown = await executeTask(task, config, botConfig, requestId);
+      const { markdown, meta } = await executeTask(task, config, botConfig, requestId);
       agentStatus.set("sending_telegram", task.title);
       agentStatus.updatePhase(requestId, "sending_telegram");
       await api.sendMessage(task.userId, formatTelegramHtml(markdown), { parse_mode: "HTML" });
@@ -33,7 +36,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
         source: `task:${task.taskType}`, platform: "telegram", threadId,
       });
       await updateTaskLastRun(task);
-      agentStatus.completeRequest(requestId, {});
+      agentStatus.completeRequest(requestId, meta);
       agentStatus.set("idle");
       activityLog.push(
         "system",
@@ -56,34 +59,48 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
   }
 }
 
-async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<string> {
+/** Completion metadata threaded out of a task run so the caller can pass real
+ *  token/turn counts to `completeRequest` (the briefing path is the only one
+ *  with a `ClaudeExecResult`; Haiku paths return bare strings ⇒ empty meta). */
+interface TaskResult {
+  markdown: string;
+  meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number };
+}
+
+async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<TaskResult> {
   const cwd = botConfig.dir;
   switch (task.taskType) {
     case "reminder":
-      return await callHaiku(
-        `Generate a brief, natural reminder message (2-3 sentences max). Use markdown formatting (**bold**, *italic*). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
-        `**Reminder:** ${task.title}`,
-        "reminder",
-        cwd,
-        botConfig.name,
-      );
+      return {
+        markdown: await callHaiku(
+          `Generate a brief, natural reminder message (2-3 sentences max). Use markdown formatting (**bold**, *italic*). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
+          `**Reminder:** ${task.title}`,
+          "reminder",
+          cwd,
+          botConfig.name,
+        ),
+        meta: {},
+      };
 
     case "briefing":
       return await generateBriefing(task, config, botConfig, requestId);
 
     case "custom":
-      if (!task.prompt) return `**${task.title}**`;
-      return await callHaiku(
-        `${task.prompt}\n\nRespond using markdown formatting (**bold**, *italic*). Keep it concise.`,
-        `**${task.title}**`,
-        "task",
-        cwd,
-        botConfig.name,
-      );
+      if (!task.prompt) return { markdown: `**${task.title}**`, meta: {} };
+      return {
+        markdown: await callHaiku(
+          `${task.prompt}\n\nRespond using markdown formatting (**bold**, *italic*). Keep it concise.`,
+          `**${task.title}**`,
+          "task",
+          cwd,
+          botConfig.name,
+        ),
+        meta: {},
+      };
   }
 }
 
-async function generateBriefing(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<string> {
+async function generateBriefing(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string): Promise<TaskResult> {
   const t0 = performance.now();
 
   try {
@@ -106,10 +123,21 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
       input: result.inputTokens, output: result.outputTokens, turns: result.numTurns,
     });
 
-    return result.result.trim();
+    return {
+      markdown: result.result.trim(),
+      meta: {
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        numTurns: result.numTurns,
+        toolCount: result.toolCalls?.length,
+      },
+    };
   } catch (err) {
     log.error("Briefing generation failed, using fallback: {error}", { botName: botConfig.name, error: err instanceof Error ? err.message : String(err) });
     const timeOfDay = task.scheduleHour < 12 ? "morning" : task.scheduleHour < 17 ? "afternoon" : "evening";
-    return `**Good ${timeOfDay}!**\nI wasn't able to generate your full briefing this time. Check back later!`;
+    return {
+      markdown: `**Good ${timeOfDay}!**\nI wasn't able to generate your full briefing this time. Check back later!`,
+      meta: {},
+    };
   }
 }

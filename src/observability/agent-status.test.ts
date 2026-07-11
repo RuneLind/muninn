@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { agentStatus, type AgentPhase, type AgentStatus, type RequestProgress } from "./agent-status.ts";
+import { agentStatus, type AgentPhase, type AgentStatus, type AgentRun, type RequestProgress } from "./agent-status.ts";
 
 // The class is not exported, only the singleton. We'll test through the singleton
 // but reset state between tests via clearRequest() and set("idle").
@@ -294,6 +294,167 @@ describe("AgentStatusTracker", () => {
 
       agentStatus.clearRequest();
       expect(agentStatus.getProgress()).toBeNull();
+    });
+  });
+
+  // ── AgentRun registry (/agents dashboard) ──────────────────────────────────
+
+  describe("kind tagging", () => {
+    test("defaults kind to 'chat' when no opts given", () => {
+      resetTracker();
+      agentStatus.startRequest("jarvis", "receiving", "alice");
+      expect(agentStatus.getProgress()!.kind).toBe("chat");
+    });
+
+    test("carries kind + name from opts", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "running_watcher", undefined, {
+        kind: "watcher",
+        name: "Email Watcher",
+      });
+      const run = agentStatus.getAll().find((r) => r.requestId === id)!;
+      expect(run.kind).toBe("watcher");
+      expect(run.name).toBe("Email Watcher");
+    });
+  });
+
+  describe("request_progress regression pin (shape-additive)", () => {
+    test("getProgress() keeps its existing keys; new keys are additive", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      agentStatus.completeRequest(id, { traceId: "t1", inputTokens: 10, outputTokens: 5, numTurns: 2, toolCount: 1 });
+      const p = agentStatus.getProgress()!;
+      // Existing keys unchanged.
+      expect(p.requestId).toBe(id);
+      expect(p.botName).toBe("jarvis");
+      expect(p.username).toBe("alice");
+      expect(p.phase).toBe("calling_claude");
+      expect(p.startedAt).toBeNumber();
+      expect(p.tools).toEqual([]);
+      expect(p.completed).toBe(true);
+      expect(p.traceId).toBe("t1");
+      expect(p.inputTokens).toBe(10);
+      expect(p.outputTokens).toBe(5);
+      expect(p.numTurns).toBe(2);
+      expect(p.toolCount).toBe(1);
+      // New additive key present but does not replace anything.
+      expect(p.kind).toBe("chat");
+    });
+  });
+
+  describe("getAll()", () => {
+    test("returns every tracked run, not just the primary", () => {
+      resetTracker();
+      const a = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      const b = agentStatus.startRequest("jarvis", "running_watcher", undefined, { kind: "watcher" });
+      const ids = agentStatus.getAll().map((r) => r.requestId).sort();
+      expect(ids).toEqual([a, b].sort());
+    });
+  });
+
+  describe("updateProgress()", () => {
+    test("sets discrete n/m progress on a run", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "running_watcher", undefined, { kind: "gardener_drain" });
+      agentStatus.updateProgress(id, { done: 2, total: 5, currentItem: "topic" });
+      const run = agentStatus.getAll().find((r) => r.requestId === id)!;
+      expect(run.progress).toEqual({ done: 2, total: 5, currentItem: "topic" });
+    });
+
+    test("is a no-op for an unknown id", () => {
+      resetTracker();
+      agentStatus.updateProgress("req_missing", { done: 1, total: 1 });
+      expect(agentStatus.getAll()).toHaveLength(0);
+    });
+  });
+
+  describe("completed-runs ring", () => {
+    test("captures completed runs and survives clearRequest of the live entry", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "running_task", undefined, {
+        kind: "scheduled_task",
+        name: "Morning briefing",
+      });
+      agentStatus.completeRequest(id, { inputTokens: 100, outputTokens: 40 });
+      // Removing the live entry must not drop the ring snapshot.
+      agentStatus.clearRequest(id);
+      expect(agentStatus.getAll()).toHaveLength(0);
+
+      const ring = agentStatus.getRecentCompleted();
+      expect(ring).toHaveLength(1);
+      expect(ring[0]!.requestId).toBe(id);
+      expect(ring[0]!.kind).toBe("scheduled_task");
+      expect(ring[0]!.name).toBe("Morning briefing");
+      expect(ring[0]!.completed).toBe(true);
+    });
+
+    test("caps at 50 completed runs (newest kept)", () => {
+      resetTracker();
+      for (let i = 0; i < 55; i++) {
+        const id = agentStatus.startRequest("jarvis", "running_task", undefined, { kind: "scheduled_task", name: `t${i}` });
+        agentStatus.completeRequest(id, {});
+        agentStatus.clearRequest(id);
+      }
+      const ring = agentStatus.getRecentCompleted();
+      expect(ring).toHaveLength(50);
+      expect(ring[ring.length - 1]!.name).toBe("t54");
+      expect(ring[0]!.name).toBe("t5"); // t0..t4 evicted
+    });
+
+    test("getRecentCompleted returns copies (mutation-safe)", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "running_task", undefined, { kind: "scheduled_task" });
+      agentStatus.completeRequest(id, {});
+      const first = agentStatus.getRecentCompleted();
+      first[0]!.name = "mutated";
+      expect(agentStatus.getRecentCompleted()[0]!.name).not.toBe("mutated");
+    });
+  });
+
+  describe("subscribeAll() + throttle", () => {
+    test("emits a snapshot on the first mutation, then throttles rapid ones", () => {
+      resetTracker();
+      const snaps: AgentRun[][] = [];
+      const unsub = agentStatus.subscribeAll((runs) => snaps.push(runs));
+
+      // First mutation emits immediately (lastAllNotifyAt starts at 0).
+      agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      expect(snaps).toHaveLength(1);
+      expect(snaps[0]!).toHaveLength(1);
+
+      // A rapid second mutation is throttled (trailing timer, no sync emit).
+      agentStatus.startRequest("jarvis", "running_watcher", undefined, { kind: "watcher" });
+      expect(snaps).toHaveLength(1);
+
+      unsub();
+    });
+
+    test("trailing emit flushes the final state with tools capped at 20", async () => {
+      resetTracker();
+      const snaps: AgentRun[][] = [];
+      const unsub = agentStatus.subscribeAll((runs) => snaps.push(runs));
+
+      const id = agentStatus.startRequest("jarvis", "calling_claude");
+      for (let i = 0; i < 25; i++) agentStatus.toolStart(id, `tool_${i}`, `Tool ${i}`);
+
+      // Wait past the throttle window for the trailing flush.
+      await Bun.sleep(1100);
+      const last = snaps[snaps.length - 1]!;
+      const run = last.find((r) => r.requestId === id)!;
+      expect(run.tools.length).toBe(20); // capped in the snapshot
+      // getAll keeps the full, uncapped list.
+      expect(agentStatus.getAll().find((r) => r.requestId === id)!.tools.length).toBe(25);
+
+      unsub();
+    });
+
+    test("stops notifying after unsubscribe", () => {
+      resetTracker();
+      const snaps: AgentRun[][] = [];
+      const unsub = agentStatus.subscribeAll((runs) => snaps.push(runs));
+      unsub();
+      agentStatus.startRequest("jarvis", "calling_claude");
+      expect(snaps).toHaveLength(0);
     });
   });
 });
