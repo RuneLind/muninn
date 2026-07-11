@@ -10,12 +10,20 @@ const NOW = 1_700_000_000_000;
 
 const emptyAgents: RuntimeAgents = { running: [], upNext: [], recent: [] };
 
-const watcherRow: RuntimeMatchable = { matchKind: "watcher", matchBot: "jarvis", matchName: "email" };
+// Realistic watcher row: display name ("Viktig e-post") differs from the type
+// ("email"). running/upNext carry the display name; trace-sourced recent[]
+// entries carry the TYPE — matchRecentName bridges that split.
+const watcherRow: RuntimeMatchable = {
+  matchKind: "watcher",
+  matchBot: "jarvis",
+  matchName: "Viktig e-post",
+  matchRecentName: "email",
+};
 
 test("running match: a live matching run lights runningNow", () => {
   const agents: RuntimeAgents = {
     ...emptyAgents,
-    running: [{ kind: "watcher", botName: "jarvis", name: "email" }],
+    running: [{ kind: "watcher", botName: "jarvis", name: "Viktig e-post" }],
   };
   const rt = computeRowRuntime(watcherRow, agents);
   expect(rt.runningNow).toBe(true);
@@ -25,8 +33,8 @@ test("next match: earliest matching up-next sets nextRunAt", () => {
   const agents: RuntimeAgents = {
     ...emptyAgents,
     upNext: [
-      { kind: "watcher", bot: "jarvis", name: "email", nextRunAt: NOW + 30 * 60_000 },
-      { kind: "watcher", bot: "jarvis", name: "email", nextRunAt: NOW + 5 * 60_000 },
+      { kind: "watcher", bot: "jarvis", name: "Viktig e-post", nextRunAt: NOW + 30 * 60_000 },
+      { kind: "watcher", bot: "jarvis", name: "Viktig e-post", nextRunAt: NOW + 5 * 60_000 },
     ],
   };
   const rt = computeRowRuntime(watcherRow, agents);
@@ -34,7 +42,7 @@ test("next match: earliest matching up-next sets nextRunAt", () => {
   expect(rt.nextRunAt).toBe(NOW + 5 * 60_000);
 });
 
-test("last-run duration: newest matching finished run", () => {
+test("last-run duration: newest matching finished run (type-named recent rows)", () => {
   const agents: RuntimeAgents = {
     ...emptyAgents,
     recent: [
@@ -44,6 +52,14 @@ test("last-run duration: newest matching finished run", () => {
   };
   const rt = computeRowRuntime(watcherRow, agents);
   expect(rt.lastDurationMs).toBe(2500);
+});
+
+test("recent rows with a foreign type never match via matchRecentName", () => {
+  const agents: RuntimeAgents = {
+    ...emptyAgents,
+    recent: [{ kind: "watcher", bot: "jarvis", name: "anthropic", finishedAt: NOW - 1000, durationMs: 900 }],
+  };
+  expect(computeRowRuntime(watcherRow, agents).lastDurationMs).toBeUndefined();
 });
 
 test("no match: different bot/name does not match", () => {

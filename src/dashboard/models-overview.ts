@@ -117,6 +117,9 @@ export interface PipelineEntry {
   matchBot?: string;
   /** Stable run name to disambiguate same-kind rows (watcher rows). */
   matchName?: string;
+  /** Alternate accepted name — watcher TYPE, matching trace-sourced `recent[]`
+   *  entries (named by `watcher:<type>` span, not display name). */
+  matchRecentName?: string;
 }
 
 /** One registered wiki + the bot that synthesizes its Ask answer / What's-new
@@ -521,6 +524,7 @@ export async function assembleModelsOverview(
         matchKind: "watcher",
         matchBot: w.botName,
         matchName: w.name,
+        matchRecentName: w.type,
       });
       continue;
     }
@@ -538,6 +542,7 @@ export async function assembleModelsOverview(
       matchKind: "watcher",
       matchBot: w.botName,
       matchName: w.name,
+      matchRecentName: w.type,
     });
   }
 

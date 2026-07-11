@@ -23,6 +23,11 @@ export interface RuntimeMatchable {
   matchKind?: AgentKind;
   matchBot?: string;
   matchName?: string;
+  /** Alternate name accepted alongside `matchName`. Watcher rows set this to the
+   *  watcher TYPE: trace-sourced `recent[]` watcher entries are named by type
+   *  (`watcher:<type>` spans), while running/upNext carry the display name —
+   *  without this bridge the "last <dur>" chip never matches a watcher row. */
+  matchRecentName?: string;
 }
 
 /** Live run (subset of `AgentRun`). */
@@ -74,7 +79,10 @@ function rowMatches(
   if (!row.matchKind) return false;
   if ((kind ?? "chat") !== row.matchKind) return false;
   if (row.matchBot != null && (bot ?? "") !== row.matchBot) return false;
-  if (row.matchName != null && (name ?? "") !== row.matchName) return false;
+  if (row.matchName != null) {
+    const n = name ?? "";
+    if (n !== row.matchName && (row.matchRecentName == null || n !== row.matchRecentName)) return false;
+  }
   return true;
 }
 

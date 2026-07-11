@@ -199,7 +199,10 @@ export async function renderModelsPage(): Promise<string> {
       if (!row.matchKind) return false;
       if ((kind || 'chat') !== row.matchKind) return false;
       if (row.matchBot != null && (bot || '') !== row.matchBot) return false;
-      if (row.matchName != null && (name || '') !== row.matchName) return false;
+      if (row.matchName != null) {
+        var n = name || '';
+        if (n !== row.matchName && (row.matchRecentName == null || n !== row.matchRecentName)) return false;
+      }
       return true;
     }
     function computeRowRuntime(row, agents) {
