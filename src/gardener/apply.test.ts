@@ -154,6 +154,23 @@ describe("applyWikiProposal", () => {
     expect(reindexed).toEqual(["wiki"]);
   });
 
+  test("apply re-strips an alias a page created AFTER drafting now owns (TOCTOU guard)", async () => {
+    // A canonical page owning "Compaction" appears while the proposal awaited
+    // review — the draft's persist-time strip never saw it.
+    const canonical = path.join(wikiDir, "concepts/Compaction.md");
+    await mkdir(path.dirname(canonical), { recursive: true });
+    await writeFile(
+      canonical,
+      `---\ntype: concept\ntitle: Compaction\naliases: []\n---\n\n# Compaction\n\nCanonical.\n`,
+    );
+
+    const res = await applyWikiProposal(makeProposal(), deps());
+    expect(res.outcome).toBe("applied");
+    const written = await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8");
+    expect(written).toContain("aliases: []");
+    expect(written).not.toContain("aliases: [Compaction]");
+  });
+
   test("create-mode existing DIFFERENT file ⇒ stale, no write", async () => {
     const target = path.join(wikiDir, "concepts/Context Compaction.md");
     await mkdir(path.dirname(target), { recursive: true });

@@ -232,4 +232,28 @@ describe("stripOwnedAliases", () => {
     expect(out.draft).toContain("aliases: []\ncreated:");
     expect(out.draft).toContain("aliases: [in body, not frontmatter]");
   });
+
+  test("kept aliases survive RAW — apostrophes and quoting are never rewritten", () => {
+    const idx = index([page({ title: "Taken" })]);
+    const out = stripOwnedAliases(draftWith(`Taken, "Say, hi", Conway's Law`), { index: idx });
+    expect(out.stripped).toEqual(["Taken"]);
+    expect(out.draft).toContain(`aliases: ["Say, hi", Conway's Law]`);
+  });
+
+  test("quoted owned alias is stripped (comparison unquotes)", () => {
+    const idx = index([page({ title: "Context Engineering" })]);
+    const out = stripOwnedAliases(draftWith(`"Context Engineering", Mine`), { index: idx });
+    expect(out.stripped).toEqual(["Context Engineering"]);
+    expect(out.draft).toContain("aliases: [Mine]");
+  });
+
+  test("duplicate aliases: lines are BOTH processed — no smuggling past the guard", () => {
+    const idx = index([page({ title: "Taken" })]);
+    const draft = `---\ntype: concept\ntitle: New Page\naliases: [Fresh]\naliases: [Taken]\n---\n\n# New Page\n\nBody.`;
+    const out = stripOwnedAliases(draft, { index: idx });
+    expect(out.stripped).toEqual(["Taken"]);
+    expect(out.draft).toContain("aliases: [Fresh]");
+    expect(out.draft).toContain("aliases: []");
+    expect(out.draft).not.toContain("aliases: [Taken]");
+  });
 });

@@ -137,11 +137,9 @@ export function stripOwnedAliases(
   draft: string,
   opts: { index: WikiIndex | null; selfRelPath?: string },
 ): { draft: string; stripped: string[] } {
-  if (!opts.index) return { draft, stripped: [] };
-
-  const fm = parseFrontmatter(draft);
-  const aliases = Array.isArray(fm.aliases) ? fm.aliases : fm.aliases ? [fm.aliases] : [];
-  if (aliases.length === 0) return { draft, stripped: [] };
+  if (!opts.index || !draft.startsWith("---")) return { draft, stripped: [] };
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return { draft, stripped: [] };
 
   const owned = new Set<string>();
   for (const page of opts.index.pages) {
@@ -149,22 +147,63 @@ export function stripOwnedAliases(
     for (const c of [page.title, page.name, ...page.aliases]) owned.add(normalizeLabel(c));
   }
 
-  const stripped = aliases.filter((a) => owned.has(normalizeLabel(a)));
+  // Kept items are preserved RAW (quotes and all) — the strip only ever DELETES
+  // segments, never re-encodes them, so a legitimate alias can't be corrupted
+  // by a lossy parse→rejoin round-trip. Every inline-array `aliases:` line in
+  // the frontmatter is processed (a duplicate key must not smuggle one past).
+  // A non-inline aliases shape (YAML block list) is left untouched — best
+  // effort; the conventions digest mandates inline arrays.
+  const stripped: string[] = [];
+  const head = draft
+    .slice(0, fenceEnd)
+    .split("\n")
+    .map((line) => {
+      const m = line.match(/^(aliases:\s*)\[(.*)\]\s*$/);
+      if (!m) return line;
+      const raw = rawInlineItems(m[2]!);
+      const kept = raw.filter((item) => {
+        const isOwned = owned.has(normalizeLabel(unquoteItem(item)));
+        if (isOwned) stripped.push(unquoteItem(item));
+        return !isOwned;
+      });
+      return kept.length === raw.length ? line : `${m[1]}[${kept.join(", ")}]`;
+    })
+    .join("\n");
+
   if (stripped.length === 0) return { draft, stripped: [] };
-
-  const kept = aliases.filter((a) => !owned.has(normalizeLabel(a)));
-  // Re-quote a kept alias that would break the inline array when rejoined bare.
-  const enc = (s: string) => (/[,:"']/.test(s) ? JSON.stringify(s) : s);
-
-  // Rewrite only within the frontmatter block (the body may legitimately
-  // contain a line starting with "aliases:").
-  const fenceEnd = draft.indexOf("\n---", 3);
-  if (fenceEnd === -1) return { draft, stripped: [] };
-  const head = draft.slice(0, fenceEnd).replace(
-    /^aliases:.*$/m,
-    `aliases: [${kept.map(enc).join(", ")}]`,
-  );
   return { draft: head + draft.slice(fenceEnd), stripped };
+}
+
+/**
+ * Split an inline-array body on top-level commas, keeping each item's RAW text
+ * (quotes included) — the lossless sibling of the wiki store's
+ * `splitInlineArray`, which unquotes and therefore can't round-trip.
+ */
+function rawInlineItems(body: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (const ch of body) {
+    if (ch === "," && !quote) {
+      if (current.trim()) items.push(current.trim());
+      current = "";
+      continue;
+    }
+    if (!quote && (ch === '"' || ch === "'")) quote = ch;
+    else if (quote === ch) quote = null;
+    current += ch;
+  }
+  if (current.trim()) items.push(current.trim());
+  return items;
+}
+
+/** The comparison view of a raw item: surrounding matching quotes removed. */
+function unquoteItem(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
 }
 
 export interface ShapeGateResult {
