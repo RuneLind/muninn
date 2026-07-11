@@ -10,6 +10,8 @@ import {
   deleteWatcher,
   toggleWatcher,
   updateWatcher,
+  getWatcherSnapshot,
+  setWatcherSnapshot,
 } from "./watchers.ts";
 import { getDb } from "./client.ts";
 
@@ -197,5 +199,22 @@ describe("watchers", () => {
     expect(row!.channels).toEqual(["#a", "#b"]);
     expect(row!.model).toBe("claude-sonnet-4-6");
     expect(row!.nested_k).toBe("v");
+  });
+
+  test("setWatcherSnapshot round-trips a value and null clears it (regression: NOT NULL violation)", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+
+    await setWatcherSnapshot(id, "backlog:run", { startedAt: 123, batchKeys: ["a", "b"] });
+    expect(await getWatcherSnapshot(id, "backlog:run")).toEqual({ startedAt: 123, batchKeys: ["a", "b"] });
+
+    // Clearing with null previously tried to upsert SQL NULL into the NOT NULL
+    // jsonb column (postgres.js sends sql.json(null) as SQL NULL) — the gardener
+    // drain's clearRunJournal path. It must delete instead.
+    await setWatcherSnapshot(id, "backlog:run", null);
+    expect(await getWatcherSnapshot(id, "backlog:run")).toBeNull();
+
+    // Clearing an already-missing key is a no-op, not an error.
+    await setWatcherSnapshot(id, "backlog:run", null);
+    expect(await getWatcherSnapshot(id, "backlog:run")).toBeNull();
   });
 });
