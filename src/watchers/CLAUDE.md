@@ -255,11 +255,16 @@ apply**.
   `maxProposalsPerRun` (default 3).
 - **Target-resolve** (`target-resolve.ts`): the LOCAL wiki store
   (`getWikiIndex({root: wikiDir})`, loaded before clustering and reused) is the
-  oracle — `update` on a normalized title/alias near-match **among pages of the
-  cluster's kind AND domain only** (a title collision with a source/analysis or
-  cross-domain page stays a `create` — nothing downstream re-checks the existing
-  page's type before an update overwrites it), else `create` (huginn scores are
-  never consulted).
+  oracle — `update` on a normalized title/alias match among **same-domain
+  concept/entity pages**. Same-kind matches win outright; a **cross-kind**
+  match (PR #247: entity cluster titled like an existing concept page) still
+  updates that page, returning a `kind` override the runner uses to re-kind
+  the cluster (draft prompt + shape-gate + proposal row) — the wiki's
+  classification beats the cluster model's guess. Source/analysis pages and
+  cross-domain pages are never match targets (a title collision with them
+  stays a `create` — nothing downstream re-checks the existing page's type
+  before an update overwrites it). Otherwise `create` (huginn scores are never
+  consulted).
 - **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
   (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
   **untrusted** delimited data. The **shape-gate** rejects a draft unless the
