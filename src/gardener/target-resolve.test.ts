@@ -50,13 +50,35 @@ describe("resolveTarget", () => {
     expect(resolveTarget(cluster({ label: "AI Agent Loops" }), idx).mode).toBe("update");
   });
 
-  test("title collision with a different page TYPE stays a create — never overwrite a source page", () => {
+  test("title collision with a source/analysis page stays a create — never overwrite them", () => {
     const idx = index([
       page({ title: "Context Engineering", type: "source", relPath: "sources/Context Engineering.md" }),
     ]);
     const out = resolveTarget(cluster({ label: "Context Engineering" }), idx);
     expect(out.mode).toBe("create");
     expect(out.targetPath).toBe("concepts/Context Engineering.md");
+    expect(out.kind).toBeUndefined();
+  });
+
+  test("cross-KIND title match adopts the existing page's kind — entity cluster updates the concept page", () => {
+    const idx = index([
+      page({ title: "Model Context Protocol", type: "concept", relPath: "concepts/Model Context Protocol.md" }),
+    ]);
+    const out = resolveTarget(cluster({ label: "Model Context Protocol", kind: "entity" }), idx);
+    expect(out.mode).toBe("update");
+    expect(out.existingRelPath).toBe("concepts/Model Context Protocol.md");
+    expect(out.kind).toBe("concept");
+  });
+
+  test("same-kind match wins over an earlier cross-kind match", () => {
+    const idx = index([
+      page({ title: "Claude Code", type: "concept", relPath: "concepts/claude-code.md" }),
+      page({ title: "Claude Code", type: "entity", relPath: "entities/Claude Code.md" }),
+    ]);
+    const out = resolveTarget(cluster({ label: "Claude Code", kind: "entity" }), idx);
+    expect(out.mode).toBe("update");
+    expect(out.existingRelPath).toBe("entities/Claude Code.md");
+    expect(out.kind).toBeUndefined();
   });
 
   test("title collision across DOMAINS stays a create — an ai cluster never updates a life/ page", () => {

@@ -101,4 +101,11 @@ export interface ResolvedTarget {
   targetPath: string;
   /** For update mode: the existing page's relative path (the confinement anchor). */
   existingRelPath?: string;
+  /**
+   * Set when the matched page's kind differs from the cluster's: the wiki's
+   * existing classification wins over the cluster model's guess (an "entity"
+   * cluster titled like an existing concept page updates that concept page).
+   * The runner re-kinds the cluster with this before drafting.
+   */
+  kind?: ClusterKind;
 }

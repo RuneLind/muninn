@@ -168,6 +168,45 @@ describe("runGardener", () => {
     expect(inserted[0]!.baseHash).toBeTruthy();
   });
 
+  test("cross-kind title match re-kinds the cluster and updates the canonical page", async () => {
+    const index: WikiIndex = {
+      pages: [
+        {
+          name: "Context Compaction", title: "Context Compaction", type: "concept", domain: "ai",
+          tags: [], aliases: [], relPath: "concepts/Context Compaction.md",
+        },
+      ],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    let draftPrompt = "";
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => index,
+      // The model classifies the cluster as an ENTITY, but the wiki's page is a concept.
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "context-compaction", kind: "entity", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
+        ]),
+      callDraft: async (prompt) => {
+        draftPrompt = prompt;
+        return validDraft(); // type: concept — matches the ADOPTED kind
+      },
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+    });
+    await runGardener(deps);
+
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.kind).toBe("concept");
+    expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
+    // The draft prompt asked for the page's kind, not the model's guess.
+    expect(draftPrompt).toContain(`The page's "type:" MUST be "concept"`);
+  });
+
   test("a create draft hijacking another page's alias is persisted with that alias stripped", async () => {
     const index: WikiIndex = {
       pages: [
