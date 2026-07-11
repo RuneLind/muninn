@@ -32,7 +32,13 @@ import { assembleRetireBacklog, computeRetirePlan, parseCutoffDate } from "../sr
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
-  return i !== -1 ? process.argv[i + 1] : undefined;
+  if (i === -1) return undefined;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    console.error(`${flag} requires a value (e.g. ${flag} 2026-07-01)`);
+    process.exit(1);
+  }
+  return value;
 }
 
 const apply = process.argv.includes("--apply");
