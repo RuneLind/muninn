@@ -56,6 +56,13 @@ export type AgentKind =
   | "extractor"
   | "profile";
 
+/**
+ * Kinds eligible for the single-pane waterfall (`getProgress`/`subscribeProgress`
+ * → the `request_progress` SSE event). Exactly the producers that existed before
+ * the AgentRun registry — background kinds surface only via `getAll`/`subscribeAll`.
+ */
+const WATERFALL_KINDS = new Set<AgentKind | undefined>(["chat", "scheduled_task", "watcher", undefined]);
+
 /** Discrete work counter for runs that expose real progress (n of m). */
 export interface RunProgress {
   done: number;
@@ -410,10 +417,18 @@ class AgentStatusTracker {
 
   /** The request the single-pane waterfall should display: the most recently
    *  started request still being tracked (Map preserves insertion order, so the
-   *  last entry is the newest). Null when nothing is in flight. */
+   *  last entry is the newest). Null when nothing is in flight.
+   *
+   *  Only the kinds that populated the waterfall before the AgentRun registry
+   *  existed are eligible — background kinds (extractor/research/gardener_drain/
+   *  capture/profile) live only in getAll()/subscribeAll(). Without this filter
+   *  the post-turn extractors would hijack the primary slot on every chat turn,
+   *  masking the completed chat card and cancelling its auto-dismiss. */
   private primaryRequest(): RequestProgress | null {
     let primary: RequestProgress | null = null;
-    for (const req of this.requests.values()) primary = req;
+    for (const req of this.requests.values()) {
+      if (WATERFALL_KINDS.has(req.kind)) primary = req;
+    }
     return primary;
   }
 

@@ -250,6 +250,30 @@ describe("AgentStatusTracker", () => {
       expect(agentStatus.getProgress()!.requestId).toBe(a);
     });
 
+    test("background kinds never become the waterfall primary", () => {
+      resetTracker();
+      // A completed chat turn is showing its terminal card…
+      const chat = agentStatus.startRequest("jarvis", "calling_claude", "alice");
+      agentStatus.completeRequest(chat, { traceId: "t1" });
+      expect(agentStatus.getProgress()!.requestId).toBe(chat);
+
+      // …then the post-turn extractors (and other background kinds) register.
+      // None of them may hijack the primary slot — pre-registry, nothing
+      // tracked after the chat turn, so the card auto-dismissed cleanly.
+      agentStatus.startRequest("jarvis", "calling_claude", undefined, { kind: "extractor", name: "Extractor: memory" });
+      agentStatus.startRequest("jarvis", "searching", undefined, { kind: "research", name: "q" });
+      agentStatus.startRequest("jarvis", "drafting", undefined, { kind: "gardener_drain", name: "Backlog drain" });
+      agentStatus.startRequest("jarvis", "calling_claude", undefined, { kind: "capture", name: "YouTube: x" });
+      expect(agentStatus.getProgress()!.requestId).toBe(chat);
+      // The registry read side still sees everything.
+      expect(agentStatus.getAll()).toHaveLength(5);
+
+      // Waterfall kinds do take over as before.
+      const watcher = agentStatus.startRequest("jarvis", "running_watcher", undefined, { kind: "watcher", name: "email" });
+      expect(agentStatus.getProgress()!.requestId).toBe(watcher);
+      resetTracker();
+    });
+
     test("tools accumulate per-request without clobbering", () => {
       resetTracker();
       const a = agentStatus.startRequest("jarvis", "calling_claude", "alice");
