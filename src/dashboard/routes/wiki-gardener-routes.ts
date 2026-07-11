@@ -25,7 +25,7 @@ import {
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
-import { collectWikiUrls, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
+import { collectWikiRefs, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
 import { resolveGardenerConfig } from "../../gardener/types.ts";
 import { runGardener, type GardenerDeps } from "../../gardener/runner.ts";
 import {
@@ -343,9 +343,9 @@ export async function computeIngestBacklogResponse(
     }));
   }
 
-  const wikiUrls = await collectWikiUrls(root);
+  const wikiRefs = await collectWikiRefs(root);
   const [consumed, pending] = await Promise.all([deps.getConsumed(botName), deps.getPending(botName)]);
-  const backlog = computeIngestBacklog(listedBySource, wikiUrls, consumed, pending);
+  const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
 
   // Counts only over the wire — queuedDocs stays in the module's return for
   // server-side consumers (PR 2's drain), never in the HTTP payload.
@@ -372,7 +372,7 @@ export async function computeIngestBacklogResponse(
     total: backlog.total,
     ingested: backlog.ingested,
     queued: backlog.queued,
-    wikiUrlCount: wikiUrls.size,
+    wikiUrlCount: wikiRefs.urls.size,
     generatedAt: Date.now(),
     queuedKeys,
     ...(errors.length ? { errors } : {}),
@@ -714,7 +714,7 @@ export function registerWikiGardenerRoutes(
           wikiDir: root,
           apiUrl: KNOWLEDGE_API_URL,
           listCollections: listSummaryCollections,
-          sweepWikiUrls: collectWikiUrls,
+          sweepWikiRefs: collectWikiRefs,
           getConsumed: backlogDeps.getConsumed,
           getPending: backlogDeps.getPending,
           getOffered: () => readOffered(backlogDeps, watcher!.id),

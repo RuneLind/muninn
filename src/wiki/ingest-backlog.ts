@@ -12,7 +12,12 @@
  *    of `applied` proposals) — **consumed-wins**, even if its URL isn't in a page;
  *  - its key is in the pending set (`draft`/`approved` proposals);
  *  - its normalized URL appears literally in some wiki page — **URL-referenced-wins**,
- *    even if the gardener never clustered it (a human may have cited it by hand).
+ *    even if the gardener never clustered it (a human may have cited it by hand);
+ *  - its URL-derived platform id ({@link docIdFromUrl}) was swept as an id token —
+ *    **id-referenced-wins**: the manual-ingest convention cites videos by their bare
+ *    backticked id (`` `deFvnmibzow` ``), so hundreds of processed docs carry no full
+ *    URL in any page. False-credit risk is acceptable by construction: a stray
+ *    backticked token only mis-credits if it equals a real listed doc's id.
  * Everything else is **queued**.
  *
  * LOAD-BEARING: docs without a `url` never reach this module. Huginn's collection
@@ -72,6 +77,43 @@ export interface IngestBacklog {
  */
 const URL_SWEEP_RE = /https?:\/\/[^\s)\]"'<>]+/g;
 
+/**
+ * Backtick-wrapped token sweep — the manual-ingest convention cites videos by
+ * their bare platform-native id (`` `deFvnmibzow` ``), not a full URL. Grab every
+ * `` `...` `` span; {@link isDocIdToken} keeps only the ones shaped like an id.
+ */
+const BACKTICK_TOKEN_RE = /`([^`]+)`/g;
+
+/** A YouTube-style id (`watch?v=`, `youtu.be/`, `shorts/`) — 11 url-safe chars. */
+const YT_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+/** An X/TikTok numeric status/video id — 15–20 digits. */
+const NUMERIC_ID_RE = /^\d{15,20}$/;
+
+/** Does a bare token look like a platform-native doc id worth crediting by? */
+function isDocIdToken(token: string): boolean {
+  return YT_ID_RE.test(token) || NUMERIC_ID_RE.test(token);
+}
+
+/**
+ * Extract the platform-native id from a listed doc's URL, or null when the shape
+ * carries no such id (anthropic-summaries, unknown hosts) — those stay URL-only.
+ *  - YouTube: `watch?v=<11>`, `youtu.be/<11>`, `shorts/<11>`;
+ *  - X/Twitter: `/status/<15–20 digits>`;
+ *  - TikTok: `/video/<digits>`.
+ */
+export function docIdFromUrl(url: string): string | null {
+  const yt =
+    url.match(/[?&]v=([A-Za-z0-9_-]{11})/) ??
+    url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) ??
+    url.match(/shorts\/([A-Za-z0-9_-]{11})/);
+  if (yt) return yt[1]!;
+  const status = url.match(/\/status\/(\d{15,20})/);
+  if (status) return status[1]!;
+  const tiktok = url.match(/\/video\/(\d+)/);
+  if (tiktok) return tiktok[1]!;
+  return null;
+}
+
 /** Query-param values that are noise for identity: YouTube share id + timestamp. */
 function isDroppableParam(key: string, value: string): boolean {
   const k = key.toLowerCase();
@@ -125,14 +167,36 @@ export function extractUrls(text: string): string[] {
   return out;
 }
 
+/** Every backtick-wrapped bare id token (`^[A-Za-z0-9_-]{11}$` / `^\d{15,20}$`). */
+export function extractIdTokens(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(BACKTICK_TOKEN_RE)) {
+    if (isDocIdToken(m[1]!)) out.push(m[1]!);
+  }
+  return out;
+}
+
 /**
- * Sweep every `.md` file under a wiki root for URLs and return the normalized
- * set. Plain recursive read (mirrors `src/wiki/lint.ts`) — a full scan of ~700
- * small files is well under a second and the caller TTL-caches the result.
- * Unreadable files are skipped, never fatal.
+ * The wiki-reference sweep result. `urls` are normalized http(s) URLs; `idTokens`
+ * are platform-native doc ids credited to a listed doc when its URL yields the
+ * same id via {@link docIdFromUrl} — sourced from BOTH backtick-wrapped bare ids
+ * (the manual-ingest citation convention) AND every swept URL's own id (so a
+ * full-URL citation credits by id too — one mechanism, not two).
  */
-export async function collectWikiUrls(root: string): Promise<Set<string>> {
+export interface WikiRefs {
+  urls: Set<string>;
+  idTokens: Set<string>;
+}
+
+/**
+ * Sweep every `.md` file under a wiki root for URLs + bare id tokens and return
+ * the normalized refs. Plain recursive read (mirrors `src/wiki/lint.ts`) — a full
+ * scan of ~700 small files is well under a second and the caller TTL-caches the
+ * result. Unreadable files are skipped, never fatal.
+ */
+export async function collectWikiRefs(root: string): Promise<WikiRefs> {
   const urls = new Set<string>();
+  const idTokens = new Set<string>();
   const glob = new Bun.Glob("**/*.md");
   for await (const rel of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but may still descend dot DIRS —
@@ -144,22 +208,27 @@ export async function collectWikiUrls(root: string): Promise<Set<string>> {
     } catch {
       continue;
     }
-    for (const u of extractUrls(content)) urls.add(u);
+    for (const u of extractUrls(content)) {
+      urls.add(u);
+      const id = docIdFromUrl(u);
+      if (id) idTokens.add(id);
+    }
+    for (const t of extractIdTokens(content)) idTokens.add(t);
   }
-  return urls;
+  return { urls, idTokens };
 }
 
 /**
  * Partition each collection's listed docs into ingested vs queued (pure).
  *
  * @param listedBySource  collection name → its listed docs (order preserved in output)
- * @param wikiUrls        normalized URLs referenced anywhere in the wiki
+ * @param wikiRefs        normalized URLs + platform-native id tokens swept from the wiki
  * @param consumedKeys    `<collection>/<id>` of docs in `applied` proposals
  * @param pendingKeys     `<collection>/<id>` of docs in `draft`/`approved` proposals
  */
 export function computeIngestBacklog(
   listedBySource: Record<string, ListedDoc[]>,
-  wikiUrls: Set<string>,
+  wikiRefs: WikiRefs,
   consumedKeys: Set<string>,
   pendingKeys: Set<string>,
 ): IngestBacklog {
@@ -176,10 +245,12 @@ export function computeIngestBacklog(
     for (const doc of docs) {
       cTotal += 1;
       const key = `${collection}/${doc.id}`;
+      const docId = doc.url !== undefined ? docIdFromUrl(doc.url) : null;
       const credited =
         consumedKeys.has(key) || // consumed-wins
         pendingKeys.has(key) ||
-        (doc.url !== undefined && wikiUrls.has(normalizeUrl(doc.url))); // URL-referenced-wins
+        (doc.url !== undefined && wikiRefs.urls.has(normalizeUrl(doc.url))) || // URL-referenced-wins
+        (docId !== null && wikiRefs.idTokens.has(docId)); // id-referenced-wins
       if (credited) {
         cIngested += 1;
       } else {
