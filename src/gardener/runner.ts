@@ -228,7 +228,23 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       currentTopic: cluster.label,
     });
 
-    const clusterDocs = cluster.docIds
+    // Cross-kind title match: the wiki's classification wins — re-kind the
+    // cluster so the draft (prompt + shape-gate + proposal row) matches the
+    // canonical page it updates.
+    const effective = target.kind && target.kind !== cluster.kind
+      ? { ...cluster, kind: target.kind }
+      : cluster;
+    if (effective !== cluster) {
+      log.info("Gardener re-kinded cluster {topic} {from} → {to} to match existing page {path}", {
+        botName,
+        topic: cluster.topicKey,
+        from: cluster.kind,
+        to: effective.kind,
+        path: target.existingRelPath,
+      });
+    }
+
+    const clusterDocs = effective.docIds
       .map((k) => byKey.get(k))
       .filter((d): d is HarvestedDoc => !!d);
 
@@ -242,7 +258,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     }
 
     const prompt = buildDraftPrompt({
-      cluster,
+      cluster: effective,
       mode: target.mode,
       docs: clusterDocs,
       today: todayOslo(runStart),
@@ -262,10 +278,10 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     }
 
     const gate = shapeGate(draftText, {
-      kind: cluster.kind,
+      kind: effective.kind,
       targetPath: target.targetPath,
       wikiDir: deps.wikiDir,
-      domain: cluster.domain,
+      domain: effective.domain,
       existingRelPath: target.existingRelPath,
     });
     if (!gate.ok) {
@@ -295,7 +311,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       const row = await deps.insertProposal({
         botName,
         topicKey: cluster.topicKey,
-        kind: cluster.kind,
+        kind: effective.kind,
         mode: target.mode,
         targetPath: target.targetPath,
         baseHash,

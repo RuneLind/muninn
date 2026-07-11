@@ -36,23 +36,39 @@ export function sanitizeFilename(label: string): string {
  * (the default for anything ambiguous — a duplicate page is recoverable at the
  * human gate, a wrong-page update wastes the cluster).
  *
- * Only pages of the SAME type and domain are match candidates: a title
- * collision with e.g. a source page (or a life/ page for an ai cluster) must
- * not turn into an update that overwrites it — nothing downstream re-checks
- * the existing page's type (shapeGate judges the draft's own frontmatter, and
+ * Match candidates are pages of the SAME domain whose type is concept or
+ * entity. Same-kind matches win outright; a cross-kind match (an "entity"
+ * cluster titled like an existing concept page) is still an update — the
+ * wiki's existing classification beats the cluster model's guess, and the
+ * returned `kind` re-kinds the cluster so the draft folds into the canonical
+ * page instead of creating a same-title sibling in the other folder.
+ * Other page types (source/analysis/note/explainer) and cross-domain pages
+ * are NEVER match targets: a title collision with them must not turn into an
+ * update that overwrites them — nothing downstream re-checks the existing
+ * page's type (shapeGate judges the draft's own frontmatter, and
  * isPathConfined's update branch is pure path equality).
  */
 export function resolveTarget(cluster: Cluster, index: WikiIndex | null): ResolvedTarget {
   const wanted = normalizeLabel(cluster.label);
 
   if (index) {
+    let crossKind: ResolvedTarget | null = null;
     for (const page of index.pages) {
-      if (page.type !== cluster.kind || page.domain !== cluster.domain) continue;
+      if (page.domain !== cluster.domain) continue;
+      if (page.type !== "concept" && page.type !== "entity") continue;
       const candidates = [page.title, page.name, ...page.aliases].map(normalizeLabel);
-      if (candidates.includes(wanted)) {
+      if (!candidates.includes(wanted)) continue;
+      if (page.type === cluster.kind) {
         return { mode: "update", targetPath: page.relPath, existingRelPath: page.relPath };
       }
+      crossKind ??= {
+        mode: "update",
+        targetPath: page.relPath,
+        existingRelPath: page.relPath,
+        kind: page.type,
+      };
     }
+    if (crossKind) return crossKind;
   }
 
   const stem = sanitizeFilename(cluster.label) || cluster.topicKey;
