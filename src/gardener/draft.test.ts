@@ -1,5 +1,15 @@
 import { test, expect, describe } from "bun:test";
-import { shapeGate, isPathConfined, buildDraftPrompt, normalizeDraftOutput, stripOwnedAliases, WIKI_CONVENTIONS_DIGEST } from "./draft.ts";
+import {
+  shapeGate,
+  isPathConfined,
+  buildDraftPrompt,
+  buildRelatedBlock,
+  normalizeDraftOutput,
+  stripOwnedAliases,
+  replaceUnresolvedSourceLinks,
+  scanUnresolvedBodyLinks,
+  WIKI_CONVENTIONS_DIGEST,
+} from "./draft.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { Cluster, HarvestedDoc } from "./types.ts";
 
@@ -137,6 +147,163 @@ describe("buildDraftPrompt", () => {
     // The 7000-char doc (Doc 15, kept as most recent) is truncated with a marker.
     expect(p).toContain("[… truncated for length]");
     expect(p).not.toContain("x".repeat(4500));
+  });
+});
+
+describe("WIKI_CONVENTIONS_DIGEST sources rule (URLs by default)", () => {
+  test("prefers URLs over [[source page]] refs and warns against invented refs", () => {
+    expect(WIKI_CONVENTIONS_DIGEST).toContain("prefer URLs over [[source page]] refs");
+    expect(WIKI_CONVENTIONS_DIGEST).toContain("never fabricate source-page names");
+  });
+});
+
+describe("buildRelatedBlock", () => {
+  test("empty / null → no block", () => {
+    expect(buildRelatedBlock(undefined)).toBe("");
+    expect(buildRelatedBlock(null)).toBe("");
+    expect(buildRelatedBlock([])).toBe("");
+    expect(buildRelatedBlock([{ title: "", snippet: "x" }])).toBe("");
+  });
+
+  test("renders a delimited fold-don't-duplicate block with title + snippet", () => {
+    const block = buildRelatedBlock([
+      { title: "Agent Loops", snippet: "How agents iterate." },
+      { title: "Context Engineering", snippet: "Managing the window." },
+    ]);
+    expect(block).toContain("POSSIBLY-RELATED EXISTING PAGES");
+    expect(block).toContain("don't duplicate");
+    expect(block).toContain("### Agent Loops");
+    expect(block).toContain("How agents iterate.");
+    expect(block).toContain("### Context Engineering");
+  });
+
+  test("caps total length ~2k chars", () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({
+      title: `Page ${i}`,
+      snippet: "x".repeat(200),
+    }));
+    const block = buildRelatedBlock(many);
+    expect(block.length).toBeLessThan(2500);
+    // The last pages are dropped when the cap is hit.
+    expect(block).not.toContain("### Page 39");
+  });
+});
+
+describe("buildDraftPrompt related block", () => {
+  const cluster: Cluster = { topicKey: "t", kind: "concept", domain: "ai", label: "T", docIds: ["c/1"] };
+  const docs: HarvestedDoc[] = [{ key: "c/1", collection: "c", id: "1", url: "https://x", title: "Doc", text: "body" }];
+
+  test("no related → no POSSIBLY-RELATED block", () => {
+    const p = buildDraftPrompt({ cluster, mode: "create", docs, today: "2026-07-11" });
+    expect(p).not.toContain("BEGIN POSSIBLY-RELATED EXISTING PAGES");
+  });
+
+  test("related hits → inlined block appears before source summaries", () => {
+    const p = buildDraftPrompt({
+      cluster,
+      mode: "create",
+      docs,
+      today: "2026-07-11",
+      related: [{ title: "Sibling Page", snippet: "already covers this" }],
+    });
+    expect(p).toContain("BEGIN POSSIBLY-RELATED EXISTING PAGES");
+    expect(p).toContain("### Sibling Page");
+    expect(p.indexOf("BEGIN POSSIBLY-RELATED EXISTING PAGES")).toBeLessThan(p.indexOf("BEGIN SOURCE SUMMARIES"));
+  });
+});
+
+describe("replaceUnresolvedSourceLinks", () => {
+  const page = (over: Partial<WikiPageMeta>): WikiPageMeta => ({
+    name: "x",
+    title: "X",
+    type: "concept",
+    domain: "ai",
+    tags: [],
+    aliases: [],
+    relPath: "concepts/x.md",
+    ...over,
+  });
+  const index = (pages: WikiPageMeta[]): WikiIndex => ({
+    pages,
+    outgoing: new Map(),
+    backlinks: new Map(),
+    resolve: (target: string) =>
+      pages.find((pg) => [pg.title, pg.name, ...pg.aliases].some((c) => c.toLowerCase() === target.toLowerCase())),
+    resolveRelPath: () => undefined,
+    scannedAt: 0,
+    root: WIKI,
+  });
+  const draftWithSources = (sources: string) =>
+    `---\ntype: concept\ntitle: New Page\naliases: []\ncreated: 2026-07-11\nupdated: 2026-07-11\ntags: []\nsources: [${sources}]\n---\n\n# New Page\n\nBody.`;
+
+  test("unresolved [[wikilink]] source is replaced with the cluster URLs", () => {
+    const idx = index([]);
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Phantom Page]]"), {
+      index: idx,
+      urls: ["https://a.com/x", "https://b.com/y"],
+    });
+    expect(out.replaced).toEqual(["Phantom Page"]);
+    expect(out.draft).toContain("sources: [https://a.com/x, https://b.com/y]");
+  });
+
+  test("plain URLs and RESOLVED wikilinks are preserved RAW (round-trip)", () => {
+    const idx = index([page({ title: "Real Page", relPath: "concepts/Real Page.md" })]);
+    const original = draftWithSources(`https://keep.me, [[Real Page]]`);
+    const out = replaceUnresolvedSourceLinks(original, { index: idx, urls: ["https://a.com/x"] });
+    // Nothing unresolved → draft byte-identical, no URL appended.
+    expect(out.replaced).toEqual([]);
+    expect(out.draft).toBe(original);
+  });
+
+  test("mixed: keeps URL + resolved link, drops phantom, appends missing URL", () => {
+    const idx = index([page({ title: "Real Page" })]);
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`https://keep.me, [[Real Page]], [[Phantom]]`),
+      { index: idx, urls: ["https://keep.me", "https://new.url"] },
+    );
+    expect(out.replaced).toEqual(["Phantom"]);
+    // keep.me already present (not duplicated); new.url appended; Phantom gone.
+    expect(out.draft).toContain("sources: [https://keep.me, [[Real Page]], https://new.url]");
+  });
+
+  test("null index → every wikilink is unresolved (no wiki ⇒ broken ref)", () => {
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Anything]]"), {
+      index: null,
+      urls: ["https://a.com/x"],
+    });
+    expect(out.replaced).toEqual(["Anything"]);
+    expect(out.draft).toContain("sources: [https://a.com/x]");
+  });
+});
+
+describe("scanUnresolvedBodyLinks", () => {
+  const resolveFrom = (titles: string[]) => (target: string) =>
+    titles.some((t) => t.toLowerCase() === target.toLowerCase())
+      ? ({ title: target } as unknown as WikiPageMeta)
+      : undefined;
+
+  test("returns only body links that don't resolve", () => {
+    const body = "See [[Real Page]] and [[Missing Page]].";
+    const out = scanUnresolvedBodyLinks(body, { resolve: resolveFrom(["Real Page"]) });
+    expect(out).toEqual(["Missing Page"]);
+  });
+
+  test("resolved via alias counts as resolved", () => {
+    const body = "See [[Loops]].";
+    const out = scanUnresolvedBodyLinks(body, { resolve: resolveFrom(["Loops"]) });
+    expect(out).toEqual([]);
+  });
+
+  test("the page's own title is never flagged (self-link)", () => {
+    const body = "This [[My Page]] links itself and [[Ghost]].";
+    const out = scanUnresolvedBodyLinks(body, { resolve: resolveFrom([]), selfTitle: "My Page" });
+    expect(out).toEqual(["Ghost"]);
+  });
+
+  test("deduped, first-seen order", () => {
+    const body = "[[A]] [[B]] [[A]]";
+    const out = scanUnresolvedBodyLinks(body, { resolve: resolveFrom([]) });
+    expect(out).toEqual(["A", "B"]);
   });
 });
 

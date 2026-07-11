@@ -53,7 +53,70 @@ export type SharedGardenerSeams = Pick<
   | "liveTopicKeys"
   | "rejectedTopicKeys"
   | "insertProposal"
+  // Optional content-dedup seam — threaded through here so both the weekly
+  // checker and the backlog drain wire it identically. Without this member the
+  // optional seam would silently never reach `runGardener` and the feature would
+  // no-op. `buildGardenerSeams` omits it when the bot has no `wikiCollections`.
+  | "searchRelated"
 >;
+
+const RELATED_SEARCH_TIMEOUT_MS = 8_000;
+/** Max possibly-related pages inlined per draft (merged across collections). */
+const RELATED_SEARCH_TOP_N = 3;
+
+/**
+ * Content-dedup search seam: one huginn `/api/search` per backing collection
+ * (brief mode, corrective off), merged by descending relevance and capped to the
+ * top N overall. Per-collection failures degrade silently (warn + skip that
+ * collection); an all-failed search returns [] ⇒ no block. jarvis has TWO
+ * collections (`wiki`, `wiki-life`) — searching only one would miss siblings.
+ */
+async function searchRelatedPages(
+  apiUrl: string,
+  collections: string[],
+  query: string,
+): Promise<{ title: string; snippet: string }[]> {
+  const merged: { title: string; snippet: string; relevance: number }[] = [];
+  await Promise.all(
+    collections.map(async (collection) => {
+      try {
+        const params = new URLSearchParams({
+          q: query,
+          collection,
+          brief: "1",
+          corrective: "off",
+        });
+        const data = await fetchKnowledgeApi(apiUrl, `/api/search?${params}`, {
+          timeoutMs: RELATED_SEARCH_TIMEOUT_MS,
+        });
+        for (const r of (data?.results ?? []) as any[]) {
+          if (!r?.title) continue;
+          merged.push({
+            title: String(r.title).replace(/\.md$/i, ""),
+            snippet: typeof r.snippet === "string" ? r.snippet : "",
+            relevance: typeof r.relevance === "number" ? r.relevance : 0,
+          });
+        }
+      } catch (err) {
+        log.warn("Wiki-gardener related-search failed for collection {collection}: {error}", {
+          collection,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }),
+  );
+  merged.sort((a, b) => b.relevance - a.relevance);
+  const seen = new Set<string>();
+  const out: { title: string; snippet: string }[] = [];
+  for (const r of merged) {
+    const key = r.title.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ title: r.title, snippet: r.snippet });
+    if (out.length >= RELATED_SEARCH_TOP_N) break;
+  }
+  return out;
+}
 
 export interface GardenerSeamContext {
   botConfig: BotConfig;
@@ -65,7 +128,8 @@ export interface GardenerSeamContext {
 export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeams {
   const { botConfig, config, apiUrl, wikiDir } = ctx;
   const name = botConfig.name;
-  return {
+  const collections = (botConfig.wikiCollections ?? []).filter((c) => c && c.trim());
+  const seams: SharedGardenerSeams = {
     fetchDoc: async (collection, id) =>
       fetchKnowledgeApi(
         apiUrl,
@@ -102,6 +166,13 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
     rejectedTopicKeys: () => getRejectedTopicKeys(name),
     insertProposal: (params) => insertWikiProposal(params),
   };
+
+  // Omit the seam entirely when the bot has no backing collections — an absent
+  // seam means no possibly-related block, never an unscoped (all-corpora) search.
+  if (collections.length > 0) {
+    seams.searchRelated = (query) => searchRelatedPages(apiUrl, collections, query);
+  }
+  return seams;
 }
 
 export async function checkWikiGardener(

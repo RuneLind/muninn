@@ -106,6 +106,61 @@ describe("runGardener", () => {
     expect(b).toHaveLength(1);
   });
 
+  test("searchRelated hits are inlined into the draft prompt", async () => {
+    let captured = "";
+    const { deps } = makeDeps({
+      callDraft: async (prompt) => {
+        captured = prompt;
+        return validDraft();
+      },
+      searchRelated: async () => [{ title: "Sibling Page", snippet: "already covers this" }],
+    });
+    await runGardener(deps);
+    expect(captured).toContain("POSSIBLY-RELATED EXISTING PAGES");
+    expect(captured).toContain("### Sibling Page");
+  });
+
+  test("absent searchRelated seam → no POSSIBLY-RELATED block (silent no-op)", async () => {
+    let captured = "";
+    const { deps } = makeDeps({
+      callDraft: async (prompt) => {
+        captured = prompt;
+        return validDraft();
+      },
+      // no searchRelated
+    });
+    await runGardener(deps);
+    expect(captured).not.toContain("BEGIN POSSIBLY-RELATED EXISTING PAGES");
+  });
+
+  test("searchRelated error degrades to no block, never aborts the draft", async () => {
+    let captured = "";
+    const { deps, inserted } = makeDeps({
+      callDraft: async (prompt) => {
+        captured = prompt;
+        return validDraft();
+      },
+      searchRelated: async () => {
+        throw new Error("huginn down");
+      },
+    });
+    const alerts = await runGardener(deps);
+    expect(captured).not.toContain("BEGIN POSSIBLY-RELATED EXISTING PAGES");
+    expect(inserted).toHaveLength(1); // draft still persisted
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("unresolved [[source page]] in frontmatter is replaced with source URLs at persist time", async () => {
+    const draftWithPhantom =
+      `---\ntype: concept\ntitle: Context Compaction\naliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: [[[Phantom Source]]]\n---\n\n# Context Compaction\n\nLead.\n\n## See also\n- [[X]]`;
+    const { deps, inserted } = makeDeps({ callDraft: async () => draftWithPhantom });
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    // The phantom wikilink is gone; the cluster's real source_docs URLs are in.
+    expect(inserted[0]!.draft).not.toContain("[[Phantom Source]]");
+    expect(inserted[0]!.draft).toContain("https://2026-07-07_a.md");
+  });
+
   test("drops a draft that fails the shape gate — no proposal, no alert", async () => {
     const { deps, inserted } = makeDeps({ callDraft: async () => "no frontmatter here" });
     const alerts = await runGardener(deps);

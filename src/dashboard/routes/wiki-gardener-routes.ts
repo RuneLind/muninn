@@ -1,8 +1,9 @@
 import type { Hono } from "hono";
 import path from "node:path";
 import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
-import { renderWikiHtml } from "../../wiki/render.ts";
+import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
+import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
@@ -101,6 +102,10 @@ interface ProposalView {
   /** Rendered draft preview — empty for terminal rows (applied/rejected/error). */
   previewHtml: string;
   diff: DiffLine[] | null;
+  /** Body [[wikilinks]] that don't resolve against the live index (surfaced, not
+   *  stripped). Read-time so a page created while the proposal awaited review
+   *  stops being flagged. Empty for terminal rows. */
+  unresolvedLinks: string[];
 }
 
 async function readFileOrNull(absPath: string): Promise<string | null> {
@@ -550,6 +555,11 @@ export function registerWikiGardenerRoutes(
           const current = await readFileOrNull(path.join(root, p.targetPath));
           if (current !== null) diff = lineDiff(current, p.draft);
         }
+        // Surface (don't strip) body wikilinks that don't resolve against the
+        // live index — computed read-time so a page created post-draft clears it.
+        const unresolvedLinks = reviewable
+          ? scanUnresolvedBodyLinks(stripFrontmatter(p.draft), { resolve, selfTitle: title })
+          : [];
         return {
           id: p.id,
           topicKey: p.topicKey,
@@ -564,6 +574,7 @@ export function registerWikiGardenerRoutes(
           sourceDocs: p.sourceDocs,
           previewHtml: reviewable ? renderWikiHtml(p.draft, resolve, { stripTitle: title }) : "",
           diff,
+          unresolvedLinks,
         };
       }),
     );
