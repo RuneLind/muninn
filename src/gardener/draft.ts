@@ -10,9 +10,10 @@
 
 import path from "node:path";
 import type { Cluster, ClusterKind, HarvestedDoc } from "./types.ts";
+import type { WikiIndex } from "../wiki/store.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
-import { expectedDir } from "./target-resolve.ts";
+import { expectedDir, normalizeLabel } from "./target-resolve.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "draft");
@@ -122,6 +123,48 @@ ${summaries}
 --- END SOURCE SUMMARIES ---
 
 Now output the complete Markdown file for the page. Output ONLY the raw file content: the first line MUST be the opening \`---\` of the frontmatter — no introduction, no commentary, and no \`\`\` code fences around it.`;
+}
+
+/**
+ * Strip aliases the draft claims but an existing DIFFERENT page already owns
+ * (as its title, name, or alias) — the "alias hijack" defect: a new create
+ * page declaring e.g. `aliases: [Context Engineering]` steals wikilink
+ * resolution from the canonical page. For updates, `selfRelPath` excludes the
+ * page's own identity so it keeps its existing aliases. Purely deterministic;
+ * runs after the shape-gate so the human reviews the cleaned draft.
+ */
+export function stripOwnedAliases(
+  draft: string,
+  opts: { index: WikiIndex | null; selfRelPath?: string },
+): { draft: string; stripped: string[] } {
+  if (!opts.index) return { draft, stripped: [] };
+
+  const fm = parseFrontmatter(draft);
+  const aliases = Array.isArray(fm.aliases) ? fm.aliases : fm.aliases ? [fm.aliases] : [];
+  if (aliases.length === 0) return { draft, stripped: [] };
+
+  const owned = new Set<string>();
+  for (const page of opts.index.pages) {
+    if (opts.selfRelPath && page.relPath === opts.selfRelPath) continue;
+    for (const c of [page.title, page.name, ...page.aliases]) owned.add(normalizeLabel(c));
+  }
+
+  const stripped = aliases.filter((a) => owned.has(normalizeLabel(a)));
+  if (stripped.length === 0) return { draft, stripped: [] };
+
+  const kept = aliases.filter((a) => !owned.has(normalizeLabel(a)));
+  // Re-quote a kept alias that would break the inline array when rejoined bare.
+  const enc = (s: string) => (/[,:"']/.test(s) ? JSON.stringify(s) : s);
+
+  // Rewrite only within the frontmatter block (the body may legitimately
+  // contain a line starting with "aliases:").
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return { draft, stripped: [] };
+  const head = draft.slice(0, fenceEnd).replace(
+    /^aliases:.*$/m,
+    `aliases: [${kept.map(enc).join(", ")}]`,
+  );
+  return { draft: head + draft.slice(fenceEnd), stripped };
 }
 
 export interface ShapeGateResult {

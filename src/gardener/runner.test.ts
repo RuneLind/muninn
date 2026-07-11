@@ -167,6 +167,35 @@ describe("runGardener", () => {
     expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
     expect(inserted[0]!.baseHash).toBeTruthy();
   });
+
+  test("a create draft hijacking another page's alias is persisted with that alias stripped", async () => {
+    const index: WikiIndex = {
+      pages: [
+        {
+          name: "Context Engineering", title: "Context Engineering", type: "concept", domain: "ai",
+          tags: [], aliases: [], relPath: "concepts/Context Engineering.md",
+        },
+      ],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    const hijackingDraft = validDraft().replace(
+      "aliases: []",
+      "aliases: [Context Engineering, Compaction Tricks]",
+    );
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => index,
+      callDraft: async () => hijackingDraft,
+    });
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.draft).toContain("aliases: [Compaction Tricks]");
+    expect(inserted[0]!.draft).not.toContain("Context Engineering,");
+  });
 });
 
 // ── Progress + soft-cancel seams (backlog drain) ─────────────────────────────
