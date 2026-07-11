@@ -85,6 +85,7 @@ function deps(over: Partial<AgentsOverviewDeps> = {}): AgentsOverviewDeps {
     getWatchers: over.getWatchers ?? (async () => []),
     getRecentTraces: over.getRecentTraces ?? (async () => []),
     getRecentExtractors: over.getRecentExtractors ?? (async () => []),
+    getWatcherDurations: over.getWatcherDurations ?? (async () => []),
   };
 }
 
@@ -314,5 +315,28 @@ describe("assembleAgentsOverview running + degrade", () => {
     expect(o.errors).toBeDefined();
     expect(o.errors!.some((e) => e.includes("traces") && e.includes("db down"))).toBe(true);
     expect(o.recent).toEqual([]); // degraded, not thrown
+  });
+
+  test("builds per-identity estimates for live runs + carries processStartedAt", async () => {
+    const live = run({ requestId: "l1", kind: "research", name: "Q", completed: false, completedAt: undefined, startedAt: NOW });
+    const o = await assembleAgentsOverview(deps({
+      getRunning: () => [live],
+      getCompletedRing: () => [
+        run({ kind: "research", name: "Q", startedAt: 0, completedAt: 200 }),
+        run({ kind: "research", name: "Q", startedAt: 0, completedAt: 400 }),
+      ],
+    }), NOW);
+    expect(o.estimates["research Q"]).toBe(300); // median 200/400
+    expect(typeof o.processStartedAt).toBe("number");
+  });
+
+  test("a degraded watcher_durations source doesn't throw — estimates just omit watchers", async () => {
+    const live = run({ requestId: "w1", kind: "watcher", name: "email", completed: false, completedAt: undefined, startedAt: NOW });
+    const o = await assembleAgentsOverview(deps({
+      getRunning: () => [live],
+      getWatcherDurations: async () => { throw new Error("traces down"); },
+    }), NOW);
+    expect(o.errors!.some((e) => e.includes("watcher_durations"))).toBe(true);
+    expect(o.estimates["watcher email"]).toBeUndefined();
   });
 });

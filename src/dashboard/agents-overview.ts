@@ -23,10 +23,17 @@ import { getAllWatchers } from "../db/watchers.ts";
 import {
   getRecentAgentTraces,
   getRecentExtractorUsage,
+  getWatcherRunDurations,
   type RecentExtractorRow,
   type RecentTraceRow,
+  type WatcherDurationRow,
 } from "../db/agent-activity.ts";
+import { buildRunEstimates } from "./agent-eta.ts";
 import { getLog } from "../logging.ts";
+
+/** Captured at module load (≈ server start). The `/agents` "process restarted"
+ *  empty state reads this to say when the in-memory history last reset. */
+export const PROCESS_STARTED_AT = Date.now();
 
 const log = getLog("dashboard", "agents");
 
@@ -68,9 +75,18 @@ export interface RecentEntry {
 
 export interface AgentsOverview {
   generatedAt: number;
+  /** Epoch ms the muninn process started — the "history resets on restart" note. */
+  processStartedAt: number;
   running: AgentRun[];
   upNext: UpNextEntry[];
   recent: RecentEntry[];
+  /**
+   * Per-identity `expectedDurationMs` for the LIVE runs, keyed by
+   * `estimateIdentity(kind, name)` (`src/dashboard/agent-eta.ts`). The SSE
+   * `agent_runs` cards carry no estimate; the client looks each run up here.
+   * Absent identity ⇒ no history ⇒ the card renders elapsed-only.
+   */
+  estimates: Record<string, number>;
   errors?: string[];
 }
 
@@ -82,6 +98,7 @@ export interface AgentsOverviewDeps {
   getWatchers: () => Promise<Watcher[]>;
   getRecentTraces: () => Promise<RecentTraceRow[]>;
   getRecentExtractors: () => Promise<RecentExtractorRow[]>;
+  getWatcherDurations: () => Promise<WatcherDurationRow[]>;
 }
 
 export const DEFAULT_AGENTS_OVERVIEW_DEPS: AgentsOverviewDeps = {
@@ -91,6 +108,7 @@ export const DEFAULT_AGENTS_OVERVIEW_DEPS: AgentsOverviewDeps = {
   getWatchers: () => getAllWatchers(),
   getRecentTraces: () => getRecentAgentTraces(),
   getRecentExtractors: () => getRecentExtractorUsage(),
+  getWatcherDurations: () => getWatcherRunDurations(),
 };
 
 const RECENT_LIMIT = 40;
@@ -263,7 +281,7 @@ export async function assembleAgentsOverview(
 ): Promise<AgentsOverview> {
   const errors: string[] = [];
 
-  const [tasks, watchers, traces, extractors] = await Promise.all([
+  const [tasks, watchers, traces, extractors, watcherDurations] = await Promise.all([
     deps.getScheduledTasks().catch((err) => {
       errors.push(`scheduled_tasks: ${err instanceof Error ? err.message : String(err)}`);
       return [] as ScheduledTask[];
@@ -280,9 +298,17 @@ export async function assembleAgentsOverview(
       errors.push(`haiku_usage: ${err instanceof Error ? err.message : String(err)}`);
       return [] as RecentExtractorRow[];
     }),
+    deps.getWatcherDurations().catch((err) => {
+      errors.push(`watcher_durations: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as WatcherDurationRow[];
+    }),
   ]);
 
   const running = deps.getRunning();
+  // ETA estimates for the live runs — watchers from the durable trace source,
+  // everything else from the in-memory ring; a degraded watcher_durations source
+  // just means watcher runs fall back to elapsed-only.
+  const estimates = buildRunEstimates(running, deps.getCompletedRing(), watcherDurations);
 
   // ---- upNext --------------------------------------------------------------
   const upNext: UpNextEntry[] = [];
@@ -318,9 +344,11 @@ export async function assembleAgentsOverview(
 
   return {
     generatedAt: now,
+    processStartedAt: PROCESS_STARTED_AT,
     running,
     upNext: upNext.slice(0, UP_NEXT_LIMIT),
     recent: recent.slice(0, RECENT_LIMIT),
+    estimates,
     ...(errors.length > 0 ? { errors } : {}),
   };
 }

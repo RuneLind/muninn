@@ -54,6 +54,45 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
   }));
 }
 
+/** A `watcher:<type>` child span, feeding the `/agents` ETA estimator's watcher
+ *  identity durations. Carries the two skip flags so the pure grouping step
+ *  (`groupWatcherDurations`) can exclude no-op ticks — see `src/dashboard/agent-eta.ts`. */
+export interface WatcherDurationRow {
+  name: string; // `watcher:<type>`
+  durationMs: number | null;
+  quietHoursSkipped: boolean;
+  skippedInFlight: boolean;
+}
+
+/**
+ * Watcher child-span durations (`watcher:%`) over the last `windowDays`,
+ * newest-first — the durable ETA source for watcher runs (survives a process
+ * restart, unlike the in-memory completed-runs ring). Skip spans are NOT filtered
+ * in SQL: the two `attributes ? '…'` flags are returned so the pure grouping step
+ * (`groupWatcherDurations`) can exclude them (keeps that exclusion unit-testable).
+ * Capped generously; per-type capping to the newest ~20 happens in the pure layer.
+ */
+export async function getWatcherRunDurations(windowDays = 30, limit = 500): Promise<WatcherDurationRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT name, duration_ms,
+           (attributes ? 'quietHoursSkipped') AS quiet_skip,
+           (attributes ? 'skippedInFlight')   AS inflight_skip
+    FROM traces
+    WHERE name LIKE 'watcher:%'
+      AND duration_ms IS NOT NULL
+      AND created_at >= now() - make_interval(days => ${windowDays})
+    ORDER BY started_at DESC
+    LIMIT ${limit}
+  `;
+  return rows.map((r) => ({
+    name: r.name as string,
+    durationMs: r.duration_ms ?? null,
+    quietHoursSkipped: r.quiet_skip === true,
+    skippedInFlight: r.inflight_skip === true,
+  }));
+}
+
 /** A recent extractor run, sourced from `haiku_usage`. */
 export interface RecentExtractorRow {
   source: string; // 'memory' | 'goals' | 'schedule'
