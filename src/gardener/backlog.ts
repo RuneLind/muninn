@@ -22,7 +22,7 @@
 
 import type { WatcherAlert } from "../types.ts";
 import type { GardenerProgress } from "./runner.ts";
-import type { QueuedDoc, ListedDoc as WikiListedDoc } from "../wiki/ingest-backlog.ts";
+import type { QueuedDoc, ListedDoc as WikiListedDoc, WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { SummaryCollectionListings } from "../summaries/list-collections.ts";
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
@@ -180,7 +180,7 @@ export interface AssembleBacklogDeps {
   wikiDir: string;
   apiUrl: string;
   listCollections: (apiUrl: string) => Promise<SummaryCollectionListings>;
-  sweepWikiUrls: (root: string) => Promise<Set<string>>;
+  sweepWikiRefs: (root: string) => Promise<WikiRefs>;
   getConsumed: (botName: string) => Promise<Set<string>>;
   getPending: (botName: string) => Promise<Set<string>>;
   getOffered: () => Promise<Set<string>>;
@@ -224,14 +224,14 @@ export async function assembleBacklog(deps: AssembleBacklogDeps): Promise<Assemb
     }));
   }
 
-  const [wikiUrls, consumed, pending, offeredBefore] = await Promise.all([
-    deps.sweepWikiUrls(deps.wikiDir),
+  const [wikiRefs, consumed, pending, offeredBefore] = await Promise.all([
+    deps.sweepWikiRefs(deps.wikiDir),
     deps.getConsumed(deps.botName),
     deps.getPending(deps.botName),
     deps.getOffered(),
   ]);
 
-  const backlog = computeIngestBacklog(listedBySource, wikiUrls, consumed, pending);
+  const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
   const queuedDocs = backlog.byCollection.flatMap((c) => c.queuedDocs);
   const batch = selectBacklogBatch(queuedDocs, offeredBefore);
   const batchKeys = batch.map((b) => b.key);

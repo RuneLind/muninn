@@ -2,9 +2,16 @@ import { test, expect, describe } from "bun:test";
 import {
   normalizeUrl,
   extractUrls,
+  docIdFromUrl,
   computeIngestBacklog,
   type ListedDoc,
+  type WikiRefs,
 } from "./ingest-backlog.ts";
+
+/** Build a WikiRefs from bare url + id-token lists (tests only). */
+function refs(urls: string[] = [], idTokens: string[] = []): WikiRefs {
+  return { urls: new Set(urls), idTokens: new Set(idTokens) };
+}
 
 describe("normalizeUrl — each rule pinned", () => {
   test("http → https", () => {
@@ -82,6 +89,36 @@ describe("extractUrls — regex sweep over body + frontmatter", () => {
   });
 });
 
+describe("docIdFromUrl — platform-native id extraction", () => {
+  test("YouTube watch?v=<11>", () => {
+    expect(docIdFromUrl("https://www.youtube.com/watch?v=deFvnmibzow")).toBe("deFvnmibzow");
+    expect(docIdFromUrl("https://www.youtube.com/watch?v=deFvnmibzow&t=30s")).toBe("deFvnmibzow");
+  });
+
+  test("youtu.be/<11> and shorts/<11>", () => {
+    expect(docIdFromUrl("https://youtu.be/b3jlsjOIOzs")).toBe("b3jlsjOIOzs");
+    expect(docIdFromUrl("https://www.youtube.com/shorts/b3jlsjOIOzs")).toBe("b3jlsjOIOzs");
+  });
+
+  test("X/Twitter /status/<15-20 digits>", () => {
+    expect(docIdFromUrl("https://x.com/user/status/1839283746152839471")).toBe("1839283746152839471");
+    expect(docIdFromUrl("https://twitter.com/user/status/1839283746152839471")).toBe(
+      "1839283746152839471",
+    );
+  });
+
+  test("TikTok /video/<digits>", () => {
+    expect(docIdFromUrl("https://www.tiktok.com/@user/video/7412345678901234567")).toBe(
+      "7412345678901234567",
+    );
+  });
+
+  test("anthropic-summaries and unknown shapes → null (URL-only crediting)", () => {
+    expect(docIdFromUrl("https://www.anthropic.com/news/some-post")).toBeNull();
+    expect(docIdFromUrl("https://example.com/whatever")).toBeNull();
+  });
+});
+
 function doc(collection: string, id: string, url?: string, date?: string): ListedDoc {
   return { collection, id, ...(url ? { url } : {}), ...(date ? { date } : {}) };
 }
@@ -89,8 +126,8 @@ function doc(collection: string, id: string, url?: string, date?: string): Liste
 describe("computeIngestBacklog — credit rules + partition math", () => {
   test("URL-referenced-wins: a doc only cited by url in a wiki page is ingested, not queued", () => {
     const listed = { "youtube-summaries": [doc("youtube-summaries", "a", "https://youtu.be/a")] };
-    const wikiUrls = new Set(["https://youtu.be/a"]);
-    const res = computeIngestBacklog(listed, wikiUrls, new Set(), new Set());
+    const wikiRefs = refs(["https://youtu.be/a"]);
+    const res = computeIngestBacklog(listed, wikiRefs, new Set(), new Set());
     const c = res.byCollection[0]!;
     expect(c.ingested).toBe(1);
     expect(c.queued).toBe(0);
@@ -100,8 +137,8 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
   test("URL match uses normalization (a timestamped wiki link still credits)", () => {
     const listed = { "youtube-summaries": [doc("youtube-summaries", "a", "https://youtu.be/a")] };
     // Wiki cites it with a timestamp + trailing slash — normalization must collapse it.
-    const wikiUrls = new Set([normalizeUrl("http://youtu.be/a/?t=30s")]);
-    const res = computeIngestBacklog(listed, wikiUrls, new Set(), new Set());
+    const wikiRefs = refs([normalizeUrl("http://youtu.be/a/?t=30s")]);
+    const res = computeIngestBacklog(listed, wikiRefs, new Set(), new Set());
     expect(res.byCollection[0]!.queued).toBe(0);
   });
 
@@ -109,7 +146,7 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
     const listed = { "youtube-summaries": [doc("youtube-summaries", "b", "https://youtu.be/b")] };
     const res = computeIngestBacklog(
       listed,
-      new Set(), // url not referenced anywhere
+      refs(), // url not referenced anywhere
       new Set(["youtube-summaries/b"]), // but consumed by an applied proposal
       new Set(),
     );
@@ -120,14 +157,14 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
 
   test("pending (draft/approved) doc counts ingested", () => {
     const listed = { "x-articles": [doc("x-articles", "p", "https://x.com/p")] };
-    const res = computeIngestBacklog(listed, new Set(), new Set(), new Set(["x-articles/p"]));
+    const res = computeIngestBacklog(listed, refs(), new Set(), new Set(["x-articles/p"]));
     expect(res.byCollection[0]!.queued).toBe(0);
     expect(res.byCollection[0]!.ingested).toBe(1);
   });
 
   test("a doc that is neither consumed, pending, nor url-referenced is queued", () => {
     const listed = { "anthropic-summaries": [doc("anthropic-summaries", "q", "https://a/q", "2026-07-01")] };
-    const res = computeIngestBacklog(listed, new Set(), new Set(), new Set());
+    const res = computeIngestBacklog(listed, refs(), new Set(), new Set());
     const c = res.byCollection[0]!;
     expect(c.queued).toBe(1);
     expect(c.ingested).toBe(0);
@@ -152,10 +189,10 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
         doc("x-articles", "x2", "https://x.com/x2"), // queued
       ],
     };
-    const wikiUrls = new Set(["https://youtu.be/y1"]);
+    const wikiRefs = refs(["https://youtu.be/y1"]);
     const consumed = new Set(["youtube-summaries/y2"]);
     const pending = new Set(["x-articles/x1"]);
-    const res = computeIngestBacklog(listed, wikiUrls, consumed, pending);
+    const res = computeIngestBacklog(listed, wikiRefs, consumed, pending);
 
     const yt = res.byCollection.find((c) => c.collection === "youtube-summaries")!;
     expect(yt.total).toBe(4);
@@ -174,6 +211,40 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
     expect(res.total).toBe(res.ingested + res.queued);
   });
 
+  test("id-referenced-wins: a backticked bare id credits a listed YouTube doc", () => {
+    // The manual-ingest convention cites videos as backticked ids, not full URLs.
+    // A wiki page body containing `deFvnmibzow` must credit this listed doc.
+    const listed = {
+      "youtube-summaries": [
+        doc("youtube-summaries", "vid1", "https://www.youtube.com/watch?v=deFvnmibzow"),
+      ],
+    };
+    const wikiRefs = refs([], ["deFvnmibzow"]);
+    const res = computeIngestBacklog(listed, wikiRefs, new Set(), new Set());
+    const c = res.byCollection[0]!;
+    expect(c.ingested).toBe(1);
+    expect(c.queued).toBe(0);
+  });
+
+  test("id-referenced-wins: an id derived from a full-URL citation credits too", () => {
+    // collectWikiRefs also feeds docIdFromUrl(swept url) into idTokens, so a
+    // full-URL citation credits by id even when the stored url shape differs.
+    const listed = {
+      "youtube-summaries": [doc("youtube-summaries", "vid2", "https://youtu.be/b3jlsjOIOzs")],
+    };
+    const wikiRefs = refs([], ["b3jlsjOIOzs"]);
+    const res = computeIngestBacklog(listed, wikiRefs, new Set(), new Set());
+    expect(res.byCollection[0]!.queued).toBe(0);
+  });
+
+  test("no-URL doc is unaffected by id tokens (still queued)", () => {
+    const listed = { "anthropic-summaries": [doc("anthropic-summaries", "noUrl")] };
+    const wikiRefs = refs([], ["deFvnmibzow", "123456789012345678"]);
+    const res = computeIngestBacklog(listed, wikiRefs, new Set(), new Set());
+    expect(res.byCollection[0]!.queued).toBe(1);
+    expect(res.byCollection[0]!.ingested).toBe(0);
+  });
+
   test("preserves collection insertion order in byCollection", () => {
     const listed: Record<string, ListedDoc[]> = {
       "youtube-summaries": [],
@@ -181,7 +252,7 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
       "anthropic-summaries": [],
       "tiktok-summaries": [],
     };
-    const res = computeIngestBacklog(listed, new Set(), new Set(), new Set());
+    const res = computeIngestBacklog(listed, refs(), new Set(), new Set());
     expect(res.byCollection.map((c) => c.collection)).toEqual([
       "youtube-summaries",
       "x-articles",

@@ -101,7 +101,7 @@ describe("assembleBacklog", () => {
         },
         errors: [],
       }),
-      sweepWikiUrls: async () => new Set<string>(),
+      sweepWikiRefs: async () => ({ urls: new Set<string>(), idTokens: new Set<string>() }),
       getConsumed: async () => new Set<string>(["youtube-summaries/y2"]),
       getPending: async () => new Set<string>(),
       getOffered: async () => new Set<string>(),
