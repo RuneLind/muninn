@@ -139,6 +139,56 @@ describe("computeWatcherNextRun", () => {
     expect(r.label).toBe("due now");
     expect(r.nextRunAt).toBe(NOW);
   });
+
+  test("weekly interval + hour gate: ran Sunday 10:00, asked Monday → ~next Sunday 10:00, NOT due now", () => {
+    // Seeded wiki-gardener shape: 7d interval AND config.hour 10. The interval
+    // gate must dominate — it should read next Sunday, not "due now" every day.
+    const ranSun = Date.UTC(2026, 0, 11, 9, 0, 0); // Sun 2026-01-11 10:00 Oslo
+    const mon = Date.UTC(2026, 0, 12, 13, 0, 0);   // Mon 2026-01-12 14:00 Oslo
+    const r = computeWatcherNextRun(
+      watcher({ config: { hour: 10, minute: 0 }, lastRunAt: ranSun, intervalMs: 7 * 86_400_000 }),
+      mon,
+    );
+    expect(r.label).toBeUndefined();
+    expect(r.nextRunAt).toBeGreaterThan(mon);
+    const p = osloWallParts(r.nextRunAt);
+    expect(p.hour).toBe(10);
+    expect(p.minute).toBe(0);
+    expect(p.year).toBe(2026);
+    expect(p.month).toBe(1);
+    expect(p.day).toBe(18); // Sun 2026-01-18 (a full week after the last run)
+  });
+
+  test("sub-day interval + hour gate: ran today 10:00, interval 1h, asked 14:00 → tomorrow 10:00", () => {
+    const ranToday = Date.UTC(2026, 0, 15, 9, 0, 0); // 10:00 Oslo today
+    const afternoon = Date.UTC(2026, 0, 15, 13, 0, 0); // 14:00 Oslo today
+    const r = computeWatcherNextRun(
+      watcher({ config: { hour: 10, minute: 0 }, lastRunAt: ranToday, intervalMs: 3_600_000 }),
+      afternoon,
+    );
+    // Interval gate cleared long ago, but the hour gate blocks a second run the
+    // same day → next slot is tomorrow 10:00, not today.
+    expect(r.label).toBeUndefined();
+    const p = osloWallParts(r.nextRunAt);
+    expect(p.hour).toBe(10);
+    expect(p.day).toBe(16);
+  });
+
+  test("interval floor lands past the slot on an eligible day → fires at the floor", () => {
+    // Last run Mon 12:00, interval 2d → floor Wed 12:00 (past the 10:00 slot,
+    // Wed differs from Mon) so both gates hold at the floor → fires Wed 12:00.
+    const ranMon = Date.UTC(2026, 0, 12, 11, 0, 0); // Mon 12:00 Oslo
+    const askedTue = Date.UTC(2026, 0, 13, 8, 0, 0); // Tue 09:00 Oslo
+    const r = computeWatcherNextRun(
+      watcher({ config: { hour: 10, minute: 0 }, lastRunAt: ranMon, intervalMs: 2 * 86_400_000 }),
+      askedTue,
+    );
+    expect(r.label).toBeUndefined();
+    const p = osloWallParts(r.nextRunAt);
+    expect(p.day).toBe(14); // Wed
+    expect(p.hour).toBe(12); // the interval floor, past the 10:00 slot
+    expect(r.nextRunAt).toBe(ranMon + 2 * 86_400_000);
+  });
 });
 
 // ── upNext assembly ───────────────────────────────────────────────────────────

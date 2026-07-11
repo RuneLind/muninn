@@ -358,8 +358,11 @@ class AgentStatusTracker {
     return () => this.allSubscribers.delete(fn);
   }
 
-  /** Serializable snapshot for the `agent_runs` SSE event — tools capped. */
-  private snapshotAll(): AgentRun[] {
+  /** Serializable snapshot for the `agent_runs` SSE event — tools capped at
+   *  {@link SNAPSHOT_TOOLS_CAP}. Public so the SSE route's initial write uses the
+   *  same capped shape as the live `subscribeAll` fan-out (not uncapped
+   *  `getAll()`). */
+  snapshotAll(): AgentRun[] {
     return [...this.requests.values()].map((r) =>
       r.tools.length > SNAPSHOT_TOOLS_CAP
         ? { ...r, tools: r.tools.slice(-SNAPSHOT_TOOLS_CAP) }

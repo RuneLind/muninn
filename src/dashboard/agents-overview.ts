@@ -140,25 +140,55 @@ function sameOsloDay(a: number, b: number): boolean {
 }
 
 /**
- * Next expected fire for a watcher — mirrors `isScheduledTimeDue`
- * (src/watchers/runner.ts). `force_next_run` ⇒ next tick; a time-of-day
- * (`config.hour`) watcher fires at today's hour:minute if that hasn't passed and
- * it hasn't already run today, otherwise tomorrow's slot; a slot that has passed
- * today without a run is "due now". No `config.hour` ⇒ `last_run_at + interval`.
+ * Next expected fire for a watcher — mirrors the AND of the TWO gates a watcher
+ * actually passes each tick: the DB **interval** gate (`last_run_at +
+ * interval_ms <= now()`, src/db/watchers.ts) AND `isScheduledTimeDue`
+ * (src/watchers/runner.ts). A watcher fires at the first tick where BOTH hold.
+ *
+ * `force_next_run` ⇒ next tick. No `config.hour` ⇒ pure interval
+ * (`last_run_at + interval_ms`). With `config.hour` we compute the earliest
+ * instant satisfying both gates: first the interval floor
+ * (`max(last_run_at + interval_ms, now)`), then advance to the next valid
+ * hour:minute slot ≥ that floor whose Oslo day differs from `last_run_at`'s
+ * (the "not already run that day" rule). If the floor itself is already past
+ * today's slot on an eligible day, both gates hold there ⇒ fires at the floor
+ * ("due now" when that floor ≤ now). This is why the seeded weekly gardener
+ * (interval 7d + hour 10) reads ~next Sunday 10:00, not "due now" every day —
+ * the interval gate dominates until a week has elapsed.
  */
 export function computeWatcherNextRun(w: Watcher, now: number): { nextRunAt: number; label?: string } {
   if (w.forceNextRun) return { nextRunAt: now, label: "queued for next tick" };
   const cfg = (w.config ?? {}) as { hour?: number; minute?: number };
-  if (cfg.hour != null) {
-    const minute = cfg.minute ?? 0;
-    const ranToday = w.lastRunAt != null && sameOsloDay(w.lastRunAt, now);
-    if (ranToday) return { nextRunAt: osloSlotMs(now, cfg.hour, minute, 1) };
-    const todaySlot = osloSlotMs(now, cfg.hour, minute, 0);
-    if (todaySlot > now) return { nextRunAt: todaySlot };
-    return { nextRunAt: todaySlot, label: "due now" }; // slot passed, not yet run
+
+  // Pure-interval watcher (no time-of-day gate).
+  if (cfg.hour == null) {
+    if (w.lastRunAt == null) return { nextRunAt: now, label: "due now" };
+    return { nextRunAt: w.lastRunAt + w.intervalMs };
   }
-  if (w.lastRunAt == null) return { nextRunAt: now, label: "due now" };
-  return { nextRunAt: w.lastRunAt + w.intervalMs };
+
+  // Combined interval + time-of-day gate.
+  const minute = cfg.minute ?? 0;
+  // Instant from which the interval gate is satisfied, clamped to now.
+  const intervalFloor = w.lastRunAt != null ? w.lastRunAt + w.intervalMs : now;
+  const earliest = Math.max(intervalFloor, now);
+
+  // Is the time-of-day gate ALSO already satisfied at `earliest`? (slot already
+  // passed that Oslo day, and we didn't run that day) → both gates hold there.
+  const parts = osloWallParts(earliest);
+  const pastSlotAtEarliest = parts.hour > cfg.hour || (parts.hour === cfg.hour && parts.minute >= minute);
+  const ranEarliestDay = w.lastRunAt != null && sameOsloDay(earliest, w.lastRunAt);
+  if (pastSlotAtEarliest && !ranEarliestDay) {
+    return earliest <= now ? { nextRunAt: now, label: "due now" } : { nextRunAt: earliest };
+  }
+
+  // Otherwise advance to the first slot ≥ earliest on a day we didn't run.
+  for (let addDays = 0; addDays <= 8; addDays++) {
+    const slot = osloSlotMs(earliest, cfg.hour, minute, addDays);
+    if (slot < earliest) continue; // slot already passed on this day
+    if (w.lastRunAt != null && sameOsloDay(slot, w.lastRunAt)) continue; // already ran that day
+    return { nextRunAt: slot };
+  }
+  return { nextRunAt: earliest }; // unreachable in practice
 }
 
 // ── Recent mappers ────────────────────────────────────────────────────────────
@@ -205,6 +235,8 @@ function ringToRecent(r: AgentRun): RecentEntry {
   };
 }
 
+// NB: mirror of the client `kindLabels` map in views/agents-page.ts — a new
+// AgentKind must be added to BOTH (server Recent labels + client pill labels).
 function kindLabel(kind?: AgentKind): string {
   switch (kind) {
     case "gardener_drain": return "Gardener drain";

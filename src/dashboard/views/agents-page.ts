@@ -9,9 +9,11 @@ import { helpersClientScript } from "./components/helpers-client.ts";
 
 /**
  * `/agents` — unified live-agent dashboard (PR 1 MVP). Three zones:
- *   - Running: live cards from the `agent_runs` SSE event (full re-render on
- *     each snapshot + in-place rAF tick for elapsed timers so CSS animations
- *     never restart — the two-tier pattern from `request-progress-ui.ts`).
+ *   - Running: live cards from the `agent_runs` SSE event. Each snapshot
+ *     re-renders the zone's innerHTML, so the pulse/shimmer CSS animations DO
+ *     restart ~1/s (an accepted tradeoff matching `request-progress-ui.ts`);
+ *     between snapshots an in-place rAF tick advances the elapsed timers and
+ *     active tool durations without a re-render (the two-tier pattern).
  *   - Up next: scheduled tasks + watchers from `/api/agents/overview`.
  *   - Recently finished: the four-source Recent union from the same endpoint.
  *
@@ -181,6 +183,8 @@ export async function renderAgentsPage(): Promise<string> {
       synthesizing_voice: 'Voice', running_task: 'Running task',
       checking_goals: 'Checking goals', running_watcher: 'Running watcher'
     };
+    // Mirror of the server kindLabel() in dashboard/agents-overview.ts — a new
+    // AgentKind must be added to BOTH.
     var kindLabels = {
       chat: 'Chat', scheduled_task: 'Task', watcher: 'Watcher',
       gardener_drain: 'Gardener', capture: 'Capture', research: 'Research',
@@ -346,13 +350,19 @@ export async function renderAgentsPage(): Promise<string> {
     });
 
     // --- Up next + recent (from /api/agents/overview) ---
+    // Monotonic fetch-sequence guard: a slower earlier response must never
+    // overwrite a newer render if two loads overlap.
+    var overviewSeq = 0;
     function loadOverview() {
+      var mySeq = ++overviewSeq;
       getJson('/api/agents/overview').then(function (data) {
+        if (mySeq !== overviewSeq) return; // superseded by a newer load
         document.getElementById('errBox').innerHTML = (data.errors && data.errors.length)
           ? '<div class="err-note">Degraded sources: ' + esc(data.errors.join('; ')) + '</div>' : '';
         renderUpNext(data.upNext || []);
         renderRecent(data.recent || []);
       }).catch(function (e) {
+        if (mySeq !== overviewSeq) return;
         document.getElementById('errBox').innerHTML =
           '<div class="err-note">Failed to load overview: ' + esc(String(e)) + '</div>';
       });
@@ -396,13 +406,28 @@ export async function renderAgentsPage(): Promise<string> {
       }).join('');
     }
 
+    // Signature of the currently-running requestIds, so we can refetch the
+    // overview only when a run actually starts or finishes — not on every ~1/s
+    // agent_runs snapshot (each of which hits /api/agents/overview → 4 DB queries).
+    var lastRunningKey = '';
+    function runningKey(runs) {
+      return (runs || []).filter(function (r) { return !r.completed; })
+        .map(function (r) { return r.requestId; }).sort().join(',');
+    }
+
     // --- SSE wiring ---
     sseClient('/api/events', {
       agent_runs: function (ev) {
         try {
-          renderRunning(JSON.parse(ev.data));
-          // A run just started/finished likely shifts up-next/recent too.
-          loadOverview();
+          var runs = JSON.parse(ev.data);
+          renderRunning(runs);
+          // Only a started/finished run (the running set changed) can shift
+          // up-next/recent — skip the refetch on plain progress ticks.
+          var key = runningKey(runs);
+          if (key !== lastRunningKey) {
+            lastRunningKey = key;
+            loadOverview();
+          }
         } catch (e) {}
       }
     });

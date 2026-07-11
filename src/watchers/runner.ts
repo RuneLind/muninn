@@ -188,6 +188,10 @@ function getNowParts(): TimeParts {
 /**
  * Check if a watcher with time-of-day config (hour/minute) is due now.
  * Returns false if it's too early or if it already ran today.
+ *
+ * NB: `computeWatcherNextRun` in src/dashboard/agents-overview.ts mirrors this
+ * gate (combined with the DB interval gate) to predict a watcher's next fire
+ * for the /agents dashboard — keep the two in sync.
  */
 function isScheduledTimeDue(watcher: Watcher, now: TimeParts): boolean {
   const config = watcher.config as { hour?: number; minute?: number };
