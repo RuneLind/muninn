@@ -67,6 +67,17 @@ describe("getRecentAgentTraces", () => {
     expect(ids.has(real.traceId)).toBe(true);
   });
 
+  test("surfaces token totals off a chat root's own attributes (message-processor t.finish stamp)", async () => {
+    const chat = chatRoot("telegram_message", { attributes: { inputTokens: 25111, outputTokens: 22 } });
+    await saveSpan(chat);
+
+    const rows = await getRecentAgentTraces(400);
+    const row = rows.find((r) => r.traceId === chat.traceId)!;
+    expect(row).toBeTruthy();
+    expect(row.inputTokens).toBe(25111);
+    expect(row.outputTokens).toBe(22);
+  });
+
   test("surfaces token totals + model off the watcher span's own attributes", async () => {
     const wat = watcherChild("email", { type: "email", model: "claude-haiku-4-5", inputTokens: 227000, outputTokens: 512 });
     await saveSpan(wat);

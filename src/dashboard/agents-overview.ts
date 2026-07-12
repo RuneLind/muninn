@@ -223,17 +223,25 @@ function traceToRecent(r: RecentTraceRow): RecentEntry {
     status: r.status,
     traceId: r.traceId,
     ...(r.model ? { model: r.model } : {}),
-    // Watcher rows carry token totals on their own span attributes; chat rows don't.
+    // Token totals come off the root span's own attributes — watcher spans via the
+    // runner, chat roots via message-processor's t.finish (externally-traced chat
+    // turns skip the stamp and stay tokenless).
     ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),
     ...(r.outputTokens != null ? { outputTokens: r.outputTokens } : {}),
   };
 }
 
+const GARDENER_SOURCE_LABELS: Record<string, string> = {
+  wiki_gardener_cluster: "Gardener: cluster",
+  wiki_gardener_triage: "Gardener: triage",
+  wiki_gardener_draft: "Gardener: draft",
+};
+
 function extractorToRecent(r: RecentExtractorRow): RecentEntry {
   return {
     kind: "extractor",
     bot: r.botName,
-    name: `Extractor: ${r.source}`,
+    name: GARDENER_SOURCE_LABELS[r.source] ?? `Extractor: ${r.source}`,
     finishedAt: r.createdAt,
     ...(r.model ? { model: r.model } : {}),
     inputTokens: r.inputTokens,

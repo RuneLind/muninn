@@ -21,9 +21,10 @@ export interface RecentTraceRow {
    *  (`attributes->>'model'`) or, for watcher rows, the watcher span's OWN
    *  `model` attribute. Null when no model was recorded. */
   model: string | null;
-  /** Token totals stamped on the watcher span's OWN attributes (childless spans —
-   *  the opposite lookup direction from the chat child-span join). Null for chat
-   *  rows and for watcher runs that ran no model. */
+  /** Token totals from the root span's OWN attributes. Watcher spans get them
+   *  stamped by the runner; chat roots stamp them at `t.finish` in
+   *  message-processor (externally-traced turns skip that stamp, so those chat
+   *  rows stay null). Null whenever the run recorded no tokens. */
   inputTokens: number | null;
   outputTokens: number | null;
 }
@@ -43,8 +44,8 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
            -- Chat rows: the child claude span's model. Watcher rows are childless,
            -- so fall back to the watcher span's OWN model attribute.
            COALESCE(c.model, t.attributes->>'model') AS model,
-           -- Token totals live on the watcher span's OWN attributes (stamped by the
-           -- runner); chat rows never carry them here.
+           -- Token totals live on the root span's OWN attributes — stamped by the
+           -- runner for watchers and by message-processor's t.finish for chat.
            t.attributes->>'inputTokens'  AS input_tokens,
            t.attributes->>'outputTokens' AS output_tokens
     FROM traces t
