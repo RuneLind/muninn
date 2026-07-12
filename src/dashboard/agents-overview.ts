@@ -222,6 +222,7 @@ function traceToRecent(r: RecentTraceRow): RecentEntry {
     ...(r.durationMs != null ? { durationMs: r.durationMs } : {}),
     status: r.status,
     traceId: r.traceId,
+    ...(r.model ? { model: r.model } : {}),
   };
 }
 

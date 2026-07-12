@@ -10,7 +10,9 @@ import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { activityLog } from "../observability/activity-log.ts";
-import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
+import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
+import { DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { loadConfig } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
 import { formatTelegramHtml, stripHtml } from "../bot/telegram-format.ts";
@@ -227,8 +229,55 @@ export async function getDueWatchers(botName: string): Promise<Watcher[]> {
   return candidates.filter((w) => w.forceNextRun || isScheduledTimeDue(w, now));
 }
 
+/**
+ * Truthful connector label + model for a watcher run's `/agents` card.
+ *
+ * The `email`/`x`/`anthropic` checkers all run via `spawnHaiku`, which
+ * UNCONDITIONALLY spawns the Claude CLI (`claude -p`) with `config.model ??
+ * DEFAULT_MODEL` — it never consults the Haiku router — so the CLI ("Claude
+ * Code") label is always correct regardless of the bot's *chat* connector or the
+ * `HAIKU_BACKEND` resolution. Stamping the bot's chat connector/model here (the
+ * pre-fix behaviour) was an active lie: jarvis chats on `claude-sdk` /
+ * `claude-sonnet-5` but its email watcher spawns the CLI on Haiku.
+ *
+ * `wiki-gardener` is genuinely mixed — a Haiku cluster (`callHaikuWithFallback`)
+ * plus a bot-connector draft (`executeOneShot` on `botConfig.connector`). The
+ * draft is the dominant work, so it's labelled from the bot's own
+ * connector/model (matching what `executeOneShot` actually runs).
+ *
+ * `news` + `wiki-linter` run no model at all — return `null` so no (false) chip
+ * is stamped.
+ */
+export function watcherConnectorInfo(
+  watcher: Pick<Watcher, "type" | "config">,
+  botConfig: { connector?: string; model?: string },
+  botFallbackModel?: string,
+): { label: string; model?: string } | null {
+  switch (watcher.type) {
+    case "email":
+    case "x":
+    case "anthropic": {
+      const model = (watcher.config as { model?: string } | undefined)?.model ?? DEFAULT_MODEL;
+      return { label: getConnectorLabel("claude-cli"), model };
+    }
+    case "wiki-gardener":
+      return {
+        label: getConnectorLabel(botConfig.connector ?? "claude-cli"),
+        model: botConfig.model ?? botFallbackModel,
+      };
+    default:
+      // news, wiki-linter — no AI model runs.
+      return null;
+  }
+}
+
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext, prefetchedDue?: Watcher[]): Promise<void> {
   const tag = botConfig.name;
+  // Fallback model for the wiki-gardener's bot-connector draft (mirrors every
+  // other setConnectorInfo caller passing config.claudeModel). Resolved once per
+  // batch; degrades to undefined if config can't load (botConfig.model still wins).
+  let botFallbackModel: string | undefined;
+  try { botFallbackModel = loadConfig().claudeModel; } catch { botFallbackModel = undefined; }
   const dueWatchers = prefetchedDue ?? (await getDueWatchers(tag));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
@@ -297,7 +346,11 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         kind: "watcher",
         name: watcher.name || watcher.type,
       });
-      setConnectorInfo(requestId, botConfig);
+      const cinfo = watcherConnectorInfo(watcher, botConfig, botFallbackModel);
+      if (cinfo) {
+        agentStatus.setConnectorLabel(requestId, cinfo.label);
+        if (cinfo.model) agentStatus.setModel(requestId, cinfo.model);
+      }
 
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
       // and released in its OWN .finally — keying the timeout-raced promise would

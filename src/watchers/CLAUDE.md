@@ -140,6 +140,25 @@ Watchers with `config.hour`/`config.minute` only run once per day at/after that 
 
 **Warning**: If `config.hour` is set but interval < 24h, the time-of-day constraint wins (runs once daily). The dashboard shows a warning banner for this case.
 
+### Truthful `/agents` connector + model (`watcherConnectorInfo`)
+
+The `/agents` run card shows the backend + model that **actually ran**, not the
+bot's chat connector. `watcherConnectorInfo(watcher, botConfig, botFallbackModel)`
+(pure, exported, unit-tested) derives it per type:
+
+- `email` / `x` / `anthropic` → **always the Claude CLI** (`"Claude Code"`) on
+  `config.model ?? DEFAULT_MODEL`. These checkers run via `spawnHaiku`, which
+  unconditionally spawns `claude -p` and never consults the Haiku router — so the
+  bot's chat connector (`claude-sdk`) / `HAIKU_BACKEND` resolution (`anthropic`)
+  is irrelevant. Stamping the chat connector here (the pre-fix `setConnectorInfo`
+  call) was an active lie.
+- `wiki-gardener` → labelled from the **bot's own connector/model** — its draft
+  (`executeOneShot`, the dominant work) runs there; the Haiku cluster is the
+  minor part. `botFallbackModel` (resolved once per batch from
+  `loadConfig().claudeModel`) mirrors the fallback every other `setConnectorInfo`
+  caller passes.
+- `news` / `wiki-linter` → `null` (no model runs, so no chip is stamped).
+
 ### Scheduler context
 
 `startScheduler()` stores `{ api, config, botConfig }` per bot in `schedulerContexts` Map. The dashboard's trigger endpoints use `getSchedulerContext(botName)` to get these for manual runs.

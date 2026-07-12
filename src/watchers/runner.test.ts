@@ -8,7 +8,9 @@ import {
   claimChecker,
   releaseChecker,
   __resetCheckerGuardForTest,
+  watcherConnectorInfo,
 } from "./runner.ts";
+import { DEFAULT_MODEL } from "../scheduler/executor.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
@@ -250,6 +252,50 @@ describe("formatAlerts", () => {
     // Header + two alerts joined by \n\n
     const lines = result.split("\n\n");
     expect(lines.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── watcherConnectorInfo ─────────────────────────────────────────────
+
+describe("watcherConnectorInfo", () => {
+  // spawnHaiku-based checkers ALWAYS run the Claude CLI on Haiku, regardless of
+  // the bot's chat connector — the label must not leak the chat connector.
+  const sdkBot = { connector: "claude-sdk", model: "claude-sonnet-5" };
+
+  test("email uses the CLI label + Haiku default model, never the bot's chat connector", () => {
+    expect(watcherConnectorInfo({ type: "email", config: {} }, sdkBot)).toEqual({
+      label: "Claude Code",
+      model: DEFAULT_MODEL,
+    });
+  });
+
+  test("x/anthropic honor config.model but keep the CLI label", () => {
+    expect(watcherConnectorInfo({ type: "x", config: { model: "claude-sonnet-4-6" } }, sdkBot)).toEqual({
+      label: "Claude Code",
+      model: "claude-sonnet-4-6",
+    });
+    expect(watcherConnectorInfo({ type: "anthropic", config: { model: "claude-sonnet-4-6" } }, sdkBot)).toEqual({
+      label: "Claude Code",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  test("wiki-gardener labels from the bot's own connector/model (the draft runs there)", () => {
+    expect(watcherConnectorInfo({ type: "wiki-gardener", config: {} }, sdkBot)).toEqual({
+      label: "Claude SDK",
+      model: "claude-sonnet-5",
+    });
+  });
+
+  test("wiki-gardener falls back to the bot fallback model when unset", () => {
+    expect(
+      watcherConnectorInfo({ type: "wiki-gardener", config: {} }, { connector: "claude-cli" }, "sonnet"),
+    ).toEqual({ label: "Claude Code", model: "sonnet" });
+  });
+
+  test("non-AI watchers (news, wiki-linter) stamp nothing", () => {
+    expect(watcherConnectorInfo({ type: "news", config: {} }, sdkBot)).toBeNull();
+    expect(watcherConnectorInfo({ type: "wiki-linter", config: {} }, sdkBot)).toBeNull();
   });
 });
 
