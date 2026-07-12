@@ -56,7 +56,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
 }
 
 function traceRow(over: Partial<RecentTraceRow> = {}): RecentTraceRow {
-  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, model: null, ...over };
+  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, model: null, inputTokens: null, outputTokens: null, ...over };
 }
 
 function extractorRow(over: Partial<RecentExtractorRow> = {}): RecentExtractorRow {
@@ -270,14 +270,17 @@ describe("assembleAgentsOverview recent", () => {
   test("strips the watcher: prefix and maps chat/extractor fields", async () => {
     const o = await assembleAgentsOverview(deps({
       getRecentTraces: async () => [
-        traceRow({ name: "watcher:wiki-gardener", traceId: "wt1", status: "ok", startedAt: 1000, durationMs: 300 }),
+        traceRow({ name: "watcher:email", traceId: "wt1", status: "ok", startedAt: 1000, durationMs: 300, model: "claude-haiku-4-5", inputTokens: 227000, outputTokens: 480 }),
       ],
       getRecentExtractors: async () => [extractorRow({ source: "schedule", model: "claude-haiku-4-5", inputTokens: 20, outputTokens: 8, createdAt: 2000 })],
     }), NOW);
     const w = o.recent.find((r) => r.kind === "watcher")!;
-    expect(w.name).toBe("wiki-gardener");
+    expect(w.name).toBe("email");
     expect(w.traceId).toBe("wt1");
     expect(w.durationMs).toBe(300);
+    // Watcher span token totals thread through to Recent (childless-span lookup).
+    expect(w.inputTokens).toBe(227000);
+    expect(w.outputTokens).toBe(480);
 
     const e = o.recent.find((r) => r.kind === "extractor")!;
     expect(e.name).toBe("Extractor: schedule");

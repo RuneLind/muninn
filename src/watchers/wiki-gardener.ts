@@ -16,6 +16,7 @@ import { loadConfig } from "../config.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
+import { trackUsage } from "../scheduler/executor.ts";
 import { loadInterestProfileForBot } from "../profile/generator.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
@@ -152,8 +153,14 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
       // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
       const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
-      const { result } = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
-      return result;
+      const exec = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
+      // executeOneShot / one-shot.ts never calls trackUsage (many callers —
+      // summarizers/research — where blanket usage rows would be scope creep), so
+      // the draft's tokens exist nowhere unless captured here. Write a
+      // `wiki_gardener_draft` row (allow-listed in getRecentExtractorUsage) so the
+      // gardener's dominant token cost surfaces on /agents Recent. Best-effort.
+      trackUsage("wiki_gardener_draft", exec.model, exec.inputTokens, exec.outputTokens, name);
+      return exec.result;
     },
     readWikiFile: async (absPath) => {
       try {

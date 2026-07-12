@@ -567,9 +567,10 @@ bug) drops to a legacy single-JSON parse (`parseLegacyHaikuOutput`), mirroring
 `costUsd` (the latter two optional — direct-SDK Haiku backends leave them unset).
 
 `SpawnHaikuOptions` extends an optional `HaikuTelemetry` seam
-(`{ onProgress?, tracer?, captureToolOutputs? }`). The runner builds it per run —
+(`{ onProgress?, tracer?, captureToolOutputs?, onUsage? }`). The runner builds it per run —
 `onProgress = createProgressCallback(requestId, "running_watcher")` fills the
-`/agents` Running card's tool mini-log live, and `tracer = wt` receives tool child
+`/agents` Running card's tool mini-log live (and now routes `usage_progress` events
+into the run's live token counts), and `tracer = wt` receives tool child
 spans (`attachToolSpans`; its absent `"claude"` parent label falls back to the
 `watcher:<type>` root span) so the traces waterfall + `getToolUsageStats` pick them
 up. Threaded through `runChecker` → `checkEmail` / `checkX` (both spawnHaiku sites)
@@ -579,6 +580,24 @@ no MCP tools, so their mini-log stays empty but `numTurns`/`costUsd` populate.
 `wiki-gardener` is NOT threaded — it uses `callHaikuWithFallback`/`executeOneShot`,
 not `spawnHaiku`. Checkers invoked outside the runner keep working with the seam
 absent (behavior byte-identical to before).
+
+**Token totals on `/agents` (PR3).** `onUsage` sums a checker's spawnHaiku token
+usage across its (possibly multiple, for x/anthropic) calls; the runner stamps the
+total + model onto the `watcher:<type>` span attributes and passes them to
+`completeRequest`. Because watcher spans are **childless**, `getRecentAgentTraces`
+reads `inputTokens`/`outputTokens`/`model` off the watcher span's OWN attributes
+(the opposite lookup from the chat child-`claude`-span model join) → they surface
+on `/agents` Recent + the completed Running card. The email watcher (~227k input
+tokens/run) is the headline payoff. `spawnHaiku` also stamps the telemetry Tracer's
+`traceId` onto its `haiku_usage` row (`trace_id` column, migration 060); calls
+without telemetry write NULL. The gardener is a special case: its draft
+(`executeOneShot`, which never calls `trackUsage`) writes a `wiki_gardener_draft`
+`haiku_usage` row at the `callDraft` seam so its dominant token cost isn't lost —
+surfaced via the extractor path (`getRecentExtractorUsage` allow-list, alongside
+`wiki_gardener_cluster`/`wiki_gardener_triage`), NOT the trace path. This does not
+double-count: the `gardener_drain` ring entry completes with no tokens and the
+`watcher:wiki-gardener` trace row carries none (gardener isn't wired to runner
+telemetry), so the haiku rows add the only token numbers.
 
 ## Testing
 

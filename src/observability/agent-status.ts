@@ -253,6 +253,17 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
+  /** Live token counts (from `usage_progress` stream events) so a Running card
+   *  shows growing in/out tokens before the run completes. `completeRequest`
+   *  overwrites these with the final totals. */
+  updateUsage(requestId: string, usage: { inputTokens: number; outputTokens: number }) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.inputTokens = usage.inputTokens;
+    req.outputTokens = usage.outputTokens;
+    this.notifyProgress();
+  }
+
   toolStart(requestId: string, name: string, displayName: string, input?: string) {
     const req = this.requests.get(requestId);
     if (!req) return;
@@ -471,6 +482,14 @@ export function createProgressCallback(requestId: string, phase: AgentPhase, use
     } else if (event.type === "tool_end") {
       agentStatus.set(phase, username);
       agentStatus.toolEnd(requestId, event.name, event.displayName);
+    } else if (event.type === "usage_progress") {
+      // Live in/out tokens for the Running card. Per-call cumulative (a new
+      // StreamParser per spawnHaiku), so a multi-call checker shows the current
+      // call's tokens live; completeRequest sets the true summed totals.
+      agentStatus.updateUsage(requestId, {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+      });
     }
   };
 }

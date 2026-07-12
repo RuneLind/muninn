@@ -18,10 +18,14 @@ export interface RecentTraceRow {
   startedAt: number; // epoch ms
   durationMs: number | null;
   /** Model that actually ran, from the chat root's child `claude` span
-   *  (`attributes->>'model'`). Null for watcher rows (childless — telemetry
-   *  reads the watcher span's own attributes, a PR3 concern) and for chat turns
-   *  whose child span never recorded a model. */
+   *  (`attributes->>'model'`) or, for watcher rows, the watcher span's OWN
+   *  `model` attribute. Null when no model was recorded. */
   model: string | null;
+  /** Token totals stamped on the watcher span's OWN attributes (childless spans —
+   *  the opposite lookup direction from the chat child-span join). Null for chat
+   *  rows and for watcher runs that ran no model. */
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 /**
@@ -36,7 +40,13 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
   const sql = getDb();
   const rows = await sql`
     SELECT t.trace_id, t.name, t.status, t.bot_name, t.started_at, t.duration_ms,
-           c.model
+           -- Chat rows: the child claude span's model. Watcher rows are childless,
+           -- so fall back to the watcher span's OWN model attribute.
+           COALESCE(c.model, t.attributes->>'model') AS model,
+           -- Token totals live on the watcher span's OWN attributes (stamped by the
+           -- runner); chat rows never carry them here.
+           t.attributes->>'inputTokens'  AS input_tokens,
+           t.attributes->>'outputTokens' AS output_tokens
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT cs.attributes->>'model' AS model
@@ -64,6 +74,8 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
     startedAt: new Date(r.started_at).getTime(),
     durationMs: r.duration_ms ?? null,
     model: (r.model as string | null) ?? null,
+    inputTokens: r.input_tokens != null ? Number(r.input_tokens) : null,
+    outputTokens: r.output_tokens != null ? Number(r.output_tokens) : null,
   }));
 }
 
@@ -117,7 +129,7 @@ export async function getWatcherRunDurations(windowDays = 30, perTypeLimit = 25)
 
 /** A recent extractor run, sourced from `haiku_usage`. */
 export interface RecentExtractorRow {
-  source: string; // 'memory' | 'goals' | 'schedule'
+  source: string; // 'memory' | 'goals' | 'schedule' | 'wiki_gardener_{cluster,triage,draft}'
   model: string | null;
   botName: string | null;
   inputTokens: number;
@@ -125,14 +137,35 @@ export interface RecentExtractorRow {
   createdAt: number; // epoch ms
 }
 
-/** Recent extractor Haiku calls (memory / goals / schedule) — carries model +
- *  tokens + created_at, the only completion signal these leave. */
+/**
+ * Recent extractor + gardener-Haiku calls — carries model + tokens + created_at,
+ * the only completion signal these leave.
+ *
+ * Explicit allow-list, NOT a blanket un-filter. Recent is a per-kind
+ * source-of-truth UNION (`RING_RECENT_KINDS`): watcher rows come from `traces`
+ * (their tokens stamped on the watcher span — see `getRecentAgentTraces`), and
+ * `task`/`reminder`/`briefing`/`knowledge-decompose` are deliberately excluded.
+ * Pulling `watcher-*`/`task` from `haiku_usage` too would emit a SECOND Recent
+ * row per run (the sources share no dedup key).
+ *
+ * The three `wiki_gardener_*` sources ARE included — the gardener uses
+ * `callHaikuWithFallback`/`executeOneShot`, not the runner's spawnHaiku
+ * telemetry, so its cluster/triage/draft tokens surface NOWHERE else. This is
+ * NOT double-counting against the `gardener_drain` ring entry: that ring row is
+ * completed with `{}` (no tokens — see `startBacklogRun`), so it shows the drain
+ * run's duration only, while these rows add the per-call token counts. The
+ * weekly gardener's `watcher:wiki-gardener` trace row likewise carries no tokens
+ * (gardener isn't wired to runner telemetry), so no token number is duplicated.
+ */
 export async function getRecentExtractorUsage(limit = 40, windowHours = 48): Promise<RecentExtractorRow[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT source, model, bot_name, input_tokens, output_tokens, created_at
     FROM haiku_usage
-    WHERE source IN ('memory', 'goals', 'schedule')
+    WHERE source IN (
+        'memory', 'goals', 'schedule',
+        'wiki_gardener_cluster', 'wiki_gardener_triage', 'wiki_gardener_draft'
+      )
       AND created_at >= now() - make_interval(hours => ${windowHours})
     ORDER BY created_at DESC
     LIMIT ${limit}

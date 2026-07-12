@@ -223,6 +223,9 @@ function traceToRecent(r: RecentTraceRow): RecentEntry {
     status: r.status,
     traceId: r.traceId,
     ...(r.model ? { model: r.model } : {}),
+    // Watcher rows carry token totals on their own span attributes; chat rows don't.
+    ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),
+    ...(r.outputTokens != null ? { outputTokens: r.outputTokens } : {}),
   };
 }
 
