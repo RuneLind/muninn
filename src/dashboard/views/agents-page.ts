@@ -74,6 +74,10 @@ export async function renderAgentsPage(): Promise<string> {
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .run-bot { font-size: 11px; color: var(--text-faint); background: color-mix(in srgb, var(--accent) 10%, transparent);
       padding: 1px 6px; border-radius: 4px; }
+    /* Truthful backend + model that actually ran (connector · model). */
+    .run-conn { font-size: 10px; color: var(--text-muted); background: var(--tint-neutral);
+      padding: 1px 7px; border-radius: 10px; font-variant-numeric: tabular-nums; }
+    .run-conn code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
     .run-phase { font-size: 11px; color: var(--accent-light); }
     .run-elapsed { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; margin-left: auto; }
 
@@ -335,6 +339,18 @@ export async function renderAgentsPage(): Promise<string> {
       return '<div class="shimmer-bar"></div>';
     }
 
+    // Truthful "connector · model" chip. Both fields ship on the AgentRun over
+    // the agent_runs SSE snapshot (set at startRequest time by the producer);
+    // renders whatever subset is present, nothing when neither is.
+    function connChip(r) {
+      var label = r.connectorLabel || '';
+      var model = r.model || '';
+      if (!label && !model) return '';
+      var inner = esc(label);
+      if (model) inner += (label ? ' · ' : '') + '<code>' + esc(model) + '</code>';
+      return '<span class="run-conn">' + inner + '</span>';
+    }
+
     function runCardHtml(r) {
       var kind = r.kind || 'chat';
       var name = r.name || kindLabels[kind] || 'Run';
@@ -388,6 +404,7 @@ export async function renderAgentsPage(): Promise<string> {
         '</div>' +
         '<div class="run-top">' +
           (r.botName ? '<span class="run-bot">' + esc(r.botName) + '</span>' : '') +
+          connChip(r) +
           '<span class="run-phase">' + esc(done ? 'Completed' : phase) + '</span>' +
         '</div>' +
         '<div class="' + trackCls + '" data-track>' + barHtml + '</div>' +

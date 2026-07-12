@@ -56,7 +56,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
 }
 
 function traceRow(over: Partial<RecentTraceRow> = {}): RecentTraceRow {
-  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, ...over };
+  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, model: null, ...over };
 }
 
 function extractorRow(over: Partial<RecentExtractorRow> = {}): RecentExtractorRow {
@@ -283,6 +283,22 @@ describe("assembleAgentsOverview recent", () => {
     expect(e.name).toBe("Extractor: schedule");
     expect(e.model).toBe("claude-haiku-4-5");
     expect(e.inputTokens).toBe(20);
+  });
+
+  test("chat trace row surfaces its joined model; a null model is omitted", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentTraces: async () => [
+        traceRow({ name: "telegram_message", startedAt: 1000, durationMs: 100, model: "claude-sonnet-5" }),
+        traceRow({ name: "web_message", startedAt: 2000, durationMs: 100, model: null }),
+      ],
+    }), NOW);
+    const chats = o.recent.filter((r) => r.kind === "chat");
+    const withModel = chats.find((r) => r.model === "claude-sonnet-5");
+    expect(withModel).toBeDefined();
+    // A null model must not leak an undefined `model` key onto the entry.
+    const noModel = chats.find((r) => r.model === undefined);
+    expect(noModel).toBeDefined();
+    expect("model" in noModel!).toBe(false);
   });
 
   test("sorts recent newest-first by finishedAt", async () => {

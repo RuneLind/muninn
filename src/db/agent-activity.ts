@@ -17,6 +17,11 @@ export interface RecentTraceRow {
   botName: string | null;
   startedAt: number; // epoch ms
   durationMs: number | null;
+  /** Model that actually ran, from the chat root's child `claude` span
+   *  (`attributes->>'model'`). Null for watcher rows (childless — telemetry
+   *  reads the watcher span's own attributes, a PR3 concern) and for chat turns
+   *  whose child span never recorded a model. */
+  model: string | null;
 }
 
 /**
@@ -30,18 +35,25 @@ export interface RecentTraceRow {
 export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promise<RecentTraceRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT trace_id, name, status, bot_name, started_at, duration_ms
-    FROM traces
-    WHERE created_at >= now() - make_interval(hours => ${windowHours})
+    SELECT t.trace_id, t.name, t.status, t.bot_name, t.started_at, t.duration_ms,
+           c.model
+    FROM traces t
+    LEFT JOIN LATERAL (
+      SELECT cs.attributes->>'model' AS model
+      FROM traces cs
+      WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
+      LIMIT 1
+    ) c ON true
+    WHERE t.created_at >= now() - make_interval(hours => ${windowHours})
       AND (
-        (parent_id IS NULL AND (name LIKE '%_message' OR name = 'telegram_voice'))
+        (t.parent_id IS NULL AND (t.name LIKE '%_message' OR t.name = 'telegram_voice'))
         OR (
-          name LIKE 'watcher:%'
-          AND NOT (attributes ? 'quietHoursSkipped')
-          AND NOT (attributes ? 'skippedInFlight')
+          t.name LIKE 'watcher:%'
+          AND NOT (t.attributes ? 'quietHoursSkipped')
+          AND NOT (t.attributes ? 'skippedInFlight')
         )
       )
-    ORDER BY started_at DESC
+    ORDER BY t.started_at DESC
     LIMIT ${limit}
   `;
   return rows.map((r) => ({
@@ -51,6 +63,7 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
     botName: r.bot_name ?? null,
     startedAt: new Date(r.started_at).getTime(),
     durationMs: r.duration_ms ?? null,
+    model: (r.model as string | null) ?? null,
   }));
 }
 
