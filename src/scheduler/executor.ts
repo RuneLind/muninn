@@ -133,6 +133,10 @@ export async function spawnHaiku(
     }, timeoutMs);
   });
 
+  // Drain stderr eagerly so a chatty child can't block on a full stderr pipe
+  // while we read stdout.
+  const stderrPromise = new Response(proc.stderr).text().catch(() => "");
+
   const resultPromise = (async (): Promise<HaikuResult> => {
     // Read stdout line-by-line so tool progress callbacks + tool timing are live.
     const { result: streamed, rawLines } = await readAndParseHaikuStream(
@@ -141,7 +145,7 @@ export async function spawnHaiku(
     const exitCode = await proc.exited;
 
     if (exitCode !== 0) {
-      const stderr = await new Response(proc.stderr).text().catch(() => "");
+      const stderr = await stderrPromise;
       throw new Error(`Claude Haiku exited with code ${exitCode}: ${stderr}`);
     }
 
