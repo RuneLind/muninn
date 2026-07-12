@@ -96,7 +96,12 @@ export async function getRecentTraces(
   const rows = await sql`
     SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
            t.started_at, t.duration_ms, t.attributes, t.created_at,
-           c.input_tokens, c.output_tokens, c.tool_count, c.model, c.requested_model, c.connector
+           COALESCE(c.input_tokens, w.input_tokens)   AS input_tokens,
+           COALESCE(c.output_tokens, w.output_tokens) AS output_tokens,
+           COALESCE(c.tool_count, w.tool_count)       AS tool_count,
+           COALESCE(c.model, w.model)                 AS model,
+           c.requested_model,
+           COALESCE(c.connector, w.connector)         AS connector
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -110,6 +115,32 @@ export async function getRecentTraces(
       WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
       LIMIT 1
     ) c ON true
+    -- Scheduler-tick roots carry no telemetry themselves — aggregate it up from
+    -- their watcher:<type> child spans (tokens summed across watchers in the
+    -- tick, model/connector shown when unambiguous, 'mixed' otherwise) and
+    -- count the watchers' tool child spans.
+    LEFT JOIN LATERAL (
+      SELECT
+        SUM((ws.attributes->>'inputTokens')::int)  AS input_tokens,
+        SUM((ws.attributes->>'outputTokens')::int) AS output_tokens,
+        CASE WHEN COUNT(DISTINCT ws.attributes->>'model') > 1 THEN 'mixed'
+             ELSE MIN(ws.attributes->>'model') END AS model,
+        CASE WHEN COUNT(DISTINCT ws.attributes->>'connector') > 1 THEN 'mixed'
+             ELSE MIN(ws.attributes->>'connector') END AS connector,
+        NULLIF((
+          SELECT COUNT(*)
+          FROM traces ts
+          WHERE ts.trace_id = t.trace_id
+            AND ts.parent_id IN (SELECT ws2.id FROM traces ws2
+                                 WHERE ws2.trace_id = t.trace_id
+                                   AND ws2.parent_id = t.id
+                                   AND ws2.name LIKE 'watcher:%')
+            AND ts.attributes ? 'toolName'
+        ), 0)::int AS tool_count
+      FROM traces ws
+      WHERE ws.trace_id = t.trace_id AND ws.parent_id = t.id AND ws.name LIKE 'watcher:%'
+        AND ws.attributes ? 'inputTokens'
+    ) w ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
       AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})

@@ -502,6 +502,9 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
             outputTokens: usage.outputTokens,
             ...(usage.numTurns > 0 ? { numTurns: usage.numTurns } : {}),
             ...(usage.model ? { model: usage.model } : {}),
+            // Usage comes exclusively from spawnHaiku, which is always the
+            // Claude CLI — lets the /traces Backend column label the run.
+            connector: "claude-cli",
           }
         : {};
       // `wt` is a child span sharing the scheduler_tick trace id, so the card's
