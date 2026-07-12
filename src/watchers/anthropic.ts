@@ -1,7 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { decodeEntities, extractTag } from "./news.ts";
 import { isSkipResult } from "./x.ts";
-import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
@@ -280,7 +280,7 @@ const snapBlogKey = (section: string) => `tier2:blog:${section}`;
  * one-line "why"), the rest are tracked silently. Dedup rides `last_notified_ids`
  * (the runner skips content-hash dedup for type='anthropic').
  */
-export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> {
+export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const config = (watcher.config ?? {}) as AnthropicConfig;
 
   const tier1Entries = await fetchTier1Entries(config);
@@ -362,7 +362,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // leaves the Tier-2 snapshots unadvanced and the whole window re-surfaces next run.
   if (config.digest) {
     try {
-      const digestAlerts = await runDigest(tier1Cands, tier2Cands, config, watcher, interestProfile);
+      const digestAlerts = await runDigest(tier1Cands, tier2Cands, config, watcher, interestProfile, telemetry);
       await persistTier2();
       return [...baselineAlerts, ...digestAlerts];
     } catch (err) {
@@ -393,7 +393,7 @@ export async function checkAnthropic(watcher: Watcher): Promise<WatcherAlert[]> 
   // return the Tier-1 baseline so a cold-start run makes forward progress.
   let scored: GateScore[] | "SKIP_ALL";
   try {
-    scored = await runGate(candidates, config, watcher, interestProfile);
+    scored = await runGate(candidates, config, watcher, interestProfile, telemetry);
   } catch (err) {
     log.error("Watcher \"{name}\": gate failed, suppressing {count} candidate(s) this run: {error}", {
       name: watcher.name,
@@ -748,6 +748,7 @@ async function callAnthropicModel(
   model: string,
   timeoutMs: number,
   watcher: Watcher,
+  telemetry?: HaikuTelemetry,
 ): Promise<string> {
   const { result } = await spawnHaiku(prompt, {
     source: "watcher-anthropic",
@@ -755,6 +756,7 @@ async function callAnthropicModel(
     botName: watcher.botName,
     model,
     timeoutMs,
+    ...telemetry,
   });
   return result;
 }
@@ -770,6 +772,7 @@ async function runGate(
   config: AnthropicConfig,
   watcher: Watcher,
   interestProfile: string | null,
+  telemetry?: HaikuTelemetry,
 ): Promise<GateScore[] | "SKIP_ALL"> {
   const criteria = withInterestProfile(config.prompt || DEFAULT_ANTHROPIC_GATE_PROMPT, interestProfile);
   const prompt = `${criteria}\n\nCandidates:\n\n${formatCandidateList(candidates, { withExcerpt: true })}`;
@@ -783,7 +786,7 @@ async function runGate(
     t: Math.round(timeoutMs / 1000),
   });
 
-  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher);
+  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher, telemetry);
 
   if (config.quietMode && isSkipResult(result)) return "SKIP_ALL";
 
@@ -995,6 +998,7 @@ async function runDigest(
   config: AnthropicConfig,
   watcher: Watcher,
   interestProfile: string | null,
+  telemetry?: HaikuTelemetry,
 ): Promise<WatcherAlert[]> {
   const cappedTier1 = tier1Cands.slice(0, DIGEST_MAX_TIER1);
   const dropped = tier1Cands.length - cappedTier1.length;
@@ -1024,7 +1028,7 @@ async function runDigest(
   });
 
   // Let a model error propagate — the caller catches it and skips persistTier2 (retry).
-  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher);
+  const result = await callAnthropicModel(prompt, model, timeoutMs, watcher, telemetry);
 
   // quietMode: an all-churn day suppresses the digest (the Daily prompt invites "SKIP").
   // ids are still tracked (silent) so the same items aren't re-considered next run.

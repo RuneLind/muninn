@@ -557,6 +557,29 @@ All watchers support `config.prompt`. Defaults are exported (`DEFAULT_X_PROMPT`,
 
 `spawnHaiku(prompt, opts)` accepts `opts.model`. Default is Haiku. Watchers pass `config.model` through. Set via dashboard Edit tab. Important: non-Haiku models (Sonnet) need higher `timeoutMs` — Haiku default is 60s.
 
+## Tool-call visibility for Haiku-driven checkers (`spawnHaiku` telemetry)
+
+`spawnHaiku` runs the CLI with `--output-format stream-json --verbose` and parses
+it with the same `StreamParser` the chat connector uses, so a Haiku agent's tool
+calls surface like a chat turn's. A missing final `result` event (the known CLI
+bug) drops to a legacy single-JSON parse (`parseLegacyHaikuOutput`), mirroring
+`src/ai/executor.ts`. `HaikuResult` now also carries `toolCalls`, `numTurns`, and
+`costUsd` (the latter two optional — direct-SDK Haiku backends leave them unset).
+
+`SpawnHaikuOptions` extends an optional `HaikuTelemetry` seam
+(`{ onProgress?, tracer?, captureToolOutputs? }`). The runner builds it per run —
+`onProgress = createProgressCallback(requestId, "running_watcher")` fills the
+`/agents` Running card's tool mini-log live, and `tracer = wt` receives tool child
+spans (`attachToolSpans`; its absent `"claude"` parent label falls back to the
+`watcher:<type>` root span) so the traces waterfall + `getToolUsageStats` pick them
+up. Threaded through `runChecker` → `checkEmail` / `checkX` (both spawnHaiku sites)
+/ `checkAnthropic` (→ `runGate`/`runDigest` → `callAnthropicModel`). The email
+watcher's Gmail MCP calls are the primary payoff; X/anthropic gate/digest calls run
+no MCP tools, so their mini-log stays empty but `numTurns`/`costUsd` populate.
+`wiki-gardener` is NOT threaded — it uses `callHaikuWithFallback`/`executeOneShot`,
+not `spawnHaiku`. Checkers invoked outside the runner keep working with the seam
+absent (behavior byte-identical to before).
+
 ## Testing
 
 Watcher tests: `runner.test.ts` — tests dedup logic, contentHash, extractProperNouns. Checkers with mockable seams are unit-tested next to their source (`anthropic.test.ts` covers parsing, gate, digest, and the shelf-capture policy against mocked fetch/Haiku/DB; `x.test.ts` similarly). The email checker spawns Haiku with Gmail MCP and is only testable via manual trigger from the dashboard.

@@ -10,8 +10,8 @@ import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { activityLog } from "../observability/activity-log.ts";
-import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
-import { DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
+import { DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { loadConfig } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
@@ -277,7 +277,17 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
   // other setConnectorInfo caller passing config.claudeModel). Resolved once per
   // batch; degrades to undefined if config can't load (botConfig.model still wins).
   let botFallbackModel: string | undefined;
-  try { botFallbackModel = loadConfig().claudeModel; } catch { botFallbackModel = undefined; }
+  // Whether emitted tool spans capture tool outputs (mirrors the chat path's
+  // config.tracingCaptureToolOutputs). Resolved once per batch alongside the
+  // fallback model; degrades to false if config can't load.
+  let captureToolOutputs = false;
+  try {
+    const cfg = loadConfig();
+    botFallbackModel = cfg.claudeModel;
+    captureToolOutputs = !!cfg.tracingCaptureToolOutputs;
+  } catch {
+    botFallbackModel = undefined;
+  }
   const dueWatchers = prefetchedDue ?? (await getDueWatchers(tag));
   if (dueWatchers.length > 0) {
     log.info("Running {count} due watcher(s)", { botName: tag, count: dueWatchers.length });
@@ -352,10 +362,20 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         if (cinfo.model) agentStatus.setModel(requestId, cinfo.model);
       }
 
+      // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
+      // live progress callback fills this run's `/agents` tool mini-log, and `wt`
+      // receives tool child spans (Gmail MCP calls etc.) under the `watcher:<type>`
+      // span. News/wiki-linter/wiki-gardener checkers ignore it (no spawnHaiku).
+      const telemetry: HaikuTelemetry = {
+        onProgress: createProgressCallback(requestId, "running_watcher"),
+        tracer: wt,
+        captureToolOutputs,
+      };
+
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
       // and released in its OWN .finally — keying the timeout-raced promise would
       // free the slot while an orphaned checker keeps running.
-      const raw = runChecker(watcher, botConfig);
+      const raw = runChecker(watcher, botConfig, telemetry);
       void raw.finally(() => releaseChecker(watcher.id, claim.token));
 
       const alerts = await withWatcherTimeout(
@@ -502,18 +522,18 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
   }
 }
 
-async function runChecker(watcher: Watcher, botConfig: BotConfig): Promise<WatcherAlert[]> {
+async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const cwd = botConfig.dir;
   const botName = botConfig.name;
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher, cwd, botName);
+      return await checkEmail(watcher, cwd, botName, telemetry);
     case "news":
       return await checkNews(watcher);
     case "x":
-      return await checkX(watcher, cwd, botName);
+      return await checkX(watcher, cwd, botName, telemetry);
     case "anthropic":
-      return await checkAnthropic(watcher);
+      return await checkAnthropic(watcher, telemetry);
     case "wiki-gardener":
       // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
       // for executeOneShot — passed through instead of re-running bot discovery.
