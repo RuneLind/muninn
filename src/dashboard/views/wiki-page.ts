@@ -144,6 +144,7 @@ export async function renderWikiPage(opts?: {
       font-family: inherit;
       padding: 4px 6px;
     }
+    .wiki-folder { flex: 1; }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
 
     .wiki-gardener-link {
@@ -511,6 +512,9 @@ export async function renderWikiPage(opts?: {
           <button class="wiki-chip active" data-domain="">All</button>
           <button class="wiki-chip" data-domain="ai">AI</button>
           <button class="wiki-chip" data-domain="life">Life</button>
+        </div>
+        <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
+          <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
         </div>
         <div class="wiki-chip-row" id="typeChips"></div>
         <div class="wiki-chip-row" id="tagChips"></div>
