@@ -1,5 +1,5 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { spawnHaiku } from "../scheduler/executor.ts";
+import { spawnHaiku, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { getLog } from "../logging.ts";
 
@@ -27,7 +27,7 @@ Not worth notifying:
 - Social-network noise (LinkedIn connection suggestions, follow recommendations, digests)`;
 
 
-export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string): Promise<WatcherAlert[]> {
+export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string; prompt?: string; model?: string };
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
 
@@ -47,7 +47,7 @@ Return ONLY a JSON array (no markdown fences):
 [{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
 
-  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", cwd, botName, model: config.model });
+  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", cwd, botName, model: config.model, ...telemetry });
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {

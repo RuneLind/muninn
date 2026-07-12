@@ -1,5 +1,5 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { spawnHaiku, DEFAULT_MODEL } from "../scheduler/executor.ts";
+import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore } from "../summaries/author-scores.ts";
@@ -510,6 +510,7 @@ async function runCaptureGate(
   docs: TweetDoc[],
   botName: string | undefined,
   interestProfile: string | null,
+  telemetry?: HaikuTelemetry,
 ): Promise<GateScore[]> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
   // judging whether the FULL long-form post is worth summarizing, and every eligible
@@ -526,6 +527,7 @@ async function runCaptureGate(
     botName,
     model: DEFAULT_MODEL,
     timeoutMs: CAPTURE_GATE_TIMEOUT_MS,
+    ...telemetry,
   });
 
   return parseGateScores(result);
@@ -546,6 +548,7 @@ async function captureXCandidates(
   watcher: Watcher,
   botName?: string,
   interestProfile: string | null = null,
+  telemetry?: HaikuTelemetry,
 ): Promise<void> {
   const eligible = docs.filter(isLongFormTweet);
   if (eligible.length === 0) {
@@ -555,7 +558,7 @@ async function captureXCandidates(
 
   let scored: GateScore[];
   try {
-    scored = await runCaptureGate(eligible, botName, interestProfile);
+    scored = await runCaptureGate(eligible, botName, interestProfile, telemetry);
   } catch (err) {
     log.error("Capture gate failed, proceeding with alert path ({n} long-form tweet(s) lost to inbox): {error}", {
       botName,
@@ -621,7 +624,7 @@ function silentAlert(trackingIds: string[]): WatcherAlert {
   };
 }
 
-export async function checkX(watcher: Watcher, _cwd?: string, botName?: string): Promise<WatcherAlert[]> {
+export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const config = watcher.config as XWatcherConfig;
   const known = new Set(watcher.lastNotifiedIds);
 
@@ -648,7 +651,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
   // never rejects and the alert path is never broken.
   const capturePromise: Promise<void> =
     config.captureCandidates && data.docs && data.docs.length > 0
-      ? captureXCandidates(data.docs, config, watcher, botName, interestProfile).catch((err) => {
+      ? captureXCandidates(data.docs, config, watcher, botName, interestProfile, telemetry).catch((err) => {
           log.error("Candidate capture failed (alert path unaffected): {error}", {
             botName,
             error: err instanceof Error ? err.message : String(err),
@@ -657,7 +660,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string):
       : Promise.resolve();
 
   try {
-    return await runAlertPath(data, config, watcher, botName, interestProfile);
+    return await runAlertPath(data, config, watcher, botName, interestProfile, telemetry);
   } finally {
     // Every checkX exit waits for capture to settle so the runner's timeout net and the
     // scheduler tick never leave an orphaned in-flight Haiku call behind.
@@ -672,6 +675,7 @@ async function runAlertPath(
   watcher: Watcher,
   botName?: string,
   interestProfile: string | null = null,
+  telemetry?: HaikuTelemetry,
 ): Promise<WatcherAlert[]> {
   // Score-based quality gate: if the top tweet doesn't clear the bar, track IDs silently
   // so the same tweets aren't re-evaluated, and skip the LLM call entirely.
@@ -709,7 +713,7 @@ ${userPrompt}`;
     const start = Date.now();
     const { result } = await spawnHaiku(prompt, {
       source: "watcher-x", entrypoint: `${botName ?? "jarvis"}-watcher`,
-      botName, model, timeoutMs,
+      botName, model, timeoutMs, ...telemetry,
     });
     const durationMs = Date.now() - start;
     log.info("Digest ready in {duration}s ({model}, {count} tweets)", {
