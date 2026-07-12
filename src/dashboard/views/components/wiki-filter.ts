@@ -81,12 +81,29 @@ export function pageTimeMs(p: WikiListing): number {
   return Math.max(p.mtimeMs || 0, Number.isNaN(fmMs) ? 0 : fmMs);
 }
 
-/** `YYYY-MM-DD` of `pageTimeMs` — what the list shows next to a page when it is
- *  sorted by recency, so the visible date always explains the ordering. */
+/**
+ * `YYYY-MM-DD` for `pageTimeMs` — what the list shows next to a page when it is
+ * sorted by recency, so the visible date always explains the ordering.
+ *
+ * A frontmatter date is echoed back verbatim (it was authored as a plain day, and
+ * re-deriving it from the parsed UTC instant would shift it in negative-offset
+ * timezones). An mtime is a wall-clock instant, so it renders as a LOCAL day —
+ * `toISOString()` would label a 00:30 edit in UTC+2 as the previous day, which is
+ * exactly the drift `computeWikiFreshness` avoids for `log.md`.
+ */
 export function pageDateLabel(p: WikiListing): string {
-  const ms = pageTimeMs(p);
-  if (!ms) return "";
-  return new Date(ms).toISOString().slice(0, 10);
+  const fm = p.updated || p.created || "";
+  const fmMs = fm ? Date.parse(fm) : NaN;
+  const fmValid = !Number.isNaN(fmMs);
+  if (fmValid && fmMs >= (p.mtimeMs || 0)) return fm;
+  if (!p.mtimeMs) return fmValid ? fm : "";
+  return localDay(new Date(p.mtimeMs));
+}
+
+/** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
+function localDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** Filter pages by the current domain/folder/type/tag facets and the free-text query.

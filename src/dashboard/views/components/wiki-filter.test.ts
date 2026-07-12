@@ -98,6 +98,20 @@ test("pageTimeMs: takes the newer of mtime and frontmatter", () => {
   expect(pageDateLabel(touched)).toBe("2026-07-11");
 });
 
+test("pageDateLabel: an mtime renders as a LOCAL day, not a UTC one", () => {
+  // A late-evening edit in a positive-offset timezone is already "yesterday" in
+  // UTC — labeling it from toISOString() would show a date that contradicts the
+  // page's position at the top of the recency sort.
+  const justAfterMidnightLocal = new Date(2026, 6, 12, 0, 30); // 12 Jul 00:30 local
+  expect(pageDateLabel(page({ mtimeMs: justAfterMidnightLocal.getTime() }))).toBe("2026-07-12");
+});
+
+test("pageDateLabel: a winning frontmatter date is echoed verbatim", () => {
+  // Round-tripping it through Date.parse (UTC midnight) would shift the day back
+  // in negative-offset timezones.
+  expect(pageDateLabel(page({ updated: "2026-06-01" }))).toBe("2026-06-01");
+});
+
 test("pageTimeMs: undated page is 0 and shows no date", () => {
   expect(pageTimeMs(page({}))).toBe(0);
   expect(pageDateLabel(page({}))).toBe("");

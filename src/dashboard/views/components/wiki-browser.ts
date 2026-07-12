@@ -636,6 +636,7 @@ function renderFolderSelect(): void {
   const real = folders.filter((f) => f !== ROOT_FOLDER);
   if (!real.length) {
     row.style.display = "none";
+    sel.innerHTML = "";
     filters.folder = "";
     return;
   }

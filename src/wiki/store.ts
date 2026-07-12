@@ -331,8 +331,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       }
       const abs = path.join(root, relPath);
       let content: string;
+      let mtimeMs: number | undefined;
       try {
-        content = await Bun.file(abs).text();
+        // One round-trip per file: the stat never rejects (it degrades to
+        // undefined), so a throw here is always the unreadable-file case.
+        [content, mtimeMs] = await Promise.all([Bun.file(abs).text(), fileMtimeMs(abs)]);
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
@@ -349,7 +352,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         updated: typeof fm.updated === "string" ? fm.updated : undefined,
         url: typeof fm.url === "string" ? fm.url : undefined,
         relPath,
-        mtimeMs: await fileMtimeMs(abs),
+        mtimeMs,
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
