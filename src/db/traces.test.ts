@@ -222,6 +222,82 @@ describe("traces", () => {
       expect(found.attributes.inputTokens).toBe(99999);
       expect(found.attributes.outputTokens).toBe(999);
     });
+
+    test("aggregates watcher child telemetry onto scheduler_tick roots", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick", userId: null, username: null, platform: null });
+      await saveSpan(root);
+
+      const email = {
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 95719, outputTokens: 608, model: "claude-haiku-4-5-20251001", connector: "claude-cli" },
+      };
+      const x = {
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:x",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 1000, outputTokens: 100, model: "claude-haiku-4-5-20251001", connector: "claude-cli" },
+      };
+      // A tokenless watcher (ran no model) must not affect the aggregate.
+      const news = {
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:news",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "news" },
+      };
+      await saveSpan(email);
+      await saveSpan(x);
+      await saveSpan(news);
+      // Tool child spans under the email watcher → tool_count.
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: email.id,
+        name: "search_emails (gmail)",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { toolName: "mcp__gmail__search_emails" },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(96719);
+      expect(found.attributes.outputTokens).toBe(708);
+      expect(found.attributes.model).toBe("claude-haiku-4-5-20251001");
+      expect(found.attributes.connector).toBe("claude-cli");
+      expect(found.attributes.toolCount).toBe(1);
+    });
+
+    test("tick with two watcher models shows 'mixed'", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      for (const [type, model] of [["email", "claude-haiku-4-5-20251001"], ["anthropic", "claude-sonnet-4-6"]] as const) {
+        await saveSpan({
+          id: crypto.randomUUID(),
+          traceId: root.traceId,
+          parentId: root.id,
+          name: `watcher:${type}`,
+          kind: "span" as const,
+          startedAt: new Date(),
+          attributes: { inputTokens: 10, outputTokens: 1, model, connector: "claude-cli" },
+        });
+      }
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.model).toBe("mixed");
+      expect(found.attributes.connector).toBe("claude-cli");
+    });
   });
 
   describe("mapRow attribute guard", () => {

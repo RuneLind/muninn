@@ -114,6 +114,7 @@ export function tracesListScript(): string {
       // traces list reads the same as the live status header / progress overlay.
       if (type === 'copilot-sdk') return 'Copilot SDK';
       if (type === 'openai-compat') return 'OpenAI';
+      if (type === 'mixed') return 'Mixed';
       return 'Claude Code';
     }
     function fmtBackend(attrs) {
