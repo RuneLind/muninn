@@ -185,6 +185,21 @@ describe("buildWikiIndex", () => {
     );
   });
 
+  test("stamps every markdown page with its file mtime", async () => {
+    const before = Date.now();
+    const index = await buildWikiIndex(root);
+    // `index.md` carries no frontmatter — mtime is its ONLY recency signal, and
+    // without it the reader's "Recently updated" sort has nothing to rank it by.
+    const idx = index.resolve("index")!;
+    expect(idx.created).toBeUndefined();
+    expect(idx.updated).toBeUndefined();
+    expect(idx.mtimeMs).toBeGreaterThan(before - 60_000);
+    // A frontmatter page keeps both signals.
+    const harness = index.resolve("harness engineering")!;
+    expect(harness.updated).toBe("2026-06-19");
+    expect(harness.mtimeMs).toBeGreaterThan(before - 60_000);
+  });
+
   test("indexes pages with type, domain, and skips dot-dirs", async () => {
     const index = await buildWikiIndex(root);
     expect(index.pages.length).toBe(4);

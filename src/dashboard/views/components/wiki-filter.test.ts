@@ -1,7 +1,12 @@
 import { test, expect } from "bun:test";
 import {
   filterPages,
+  folderCounts,
   hasTypedHubs,
+  pageDateLabel,
+  pageFolder,
+  pageTimeMs,
+  ROOT_FOLDER,
   sortPages,
   tagCounts,
   topPages,
@@ -25,7 +30,7 @@ function page(over: Partial<WikiListing>): WikiListing {
   };
 }
 
-const NO_FILTER: WikiFilters = { q: "", domain: "", type: "", tag: "" };
+const NO_FILTER: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "" };
 
 const PAGES: WikiListing[] = [
   page({ name: "rag", title: "Retrieval Augmented Generation", type: "concept", domain: "ai", tags: ["search", "llm"], aliases: ["RAG"], backlinkCount: 5, created: "2026-01-01", updated: "2026-03-01" }),
@@ -76,6 +81,80 @@ test("sortPages: backlinks descending", () => {
 test("sortPages: updated (falls back to created) descending", () => {
   // rag updated 2026-03-01, gym updated 2026-02-10, anthropic created 2026-01-15
   expect(sortPages(PAGES, "updated").map((p) => p.name)).toEqual(["rag", "gym", "anthropic"]);
+});
+
+test("pageTimeMs: frontmatter-less pages rank by mtime", () => {
+  const p = page({ mtimeMs: Date.parse("2026-07-11T09:00:00Z") });
+  expect(pageTimeMs(p)).toBe(Date.parse("2026-07-11T09:00:00Z"));
+  expect(pageDateLabel(p)).toBe("2026-07-11");
+});
+
+test("pageTimeMs: takes the newer of mtime and frontmatter", () => {
+  // A re-checked-out file (mtime reset to the past) keeps its frontmatter date…
+  const stale = page({ updated: "2026-06-01", mtimeMs: Date.parse("2026-01-01T00:00:00Z") });
+  expect(pageDateLabel(stale)).toBe("2026-06-01");
+  // …and a file edited after its frontmatter was last bumped ranks by mtime.
+  const touched = page({ updated: "2026-06-01", mtimeMs: Date.parse("2026-07-11T09:00:00Z") });
+  expect(pageDateLabel(touched)).toBe("2026-07-11");
+});
+
+test("pageTimeMs: undated page is 0 and shows no date", () => {
+  expect(pageTimeMs(page({}))).toBe(0);
+  expect(pageDateLabel(page({}))).toBe("");
+});
+
+test("sortPages: updated ranks a frontmatter-less mimir page above older dated ones", () => {
+  // The bug: mimir's blogs/plans/archive pages carry no frontmatter, so a
+  // frontmatter-only sort key left them below every dated page regardless of
+  // when they were actually written.
+  const blog = page({
+    name: "audit",
+    title: "Auditing the AI shipping pipeline",
+    relPath: "blogs/auditing-the-ai-shipping-pipeline.md",
+    mtimeMs: Date.parse("2026-07-11T09:00:00Z"),
+  });
+  expect(sortPages([...PAGES, blog], "updated").map((p) => p.name)).toEqual([
+    "audit",
+    "rag",
+    "gym",
+    "anthropic",
+  ]);
+});
+
+test("sortPages: equal recency falls back to title for a stable order", () => {
+  const a = page({ name: "a", title: "Bravo", updated: "2026-05-01" });
+  const b = page({ name: "b", title: "Alpha", updated: "2026-05-01" });
+  expect(sortPages([a, b], "updated").map((p) => p.name)).toEqual(["b", "a"]);
+});
+
+test("pageFolder: top-level segment, ROOT_FOLDER for wiki-root pages", () => {
+  expect(pageFolder(page({ relPath: "blogs/muninn-x.md" }))).toBe("blogs");
+  expect(pageFolder(page({ relPath: "archive/muninn/report.md" }))).toBe("archive");
+  expect(pageFolder(page({ relPath: "index.md" }))).toBe(ROOT_FOLDER);
+});
+
+test("filterPages: folder facet, including the root sentinel", () => {
+  const pages = [
+    page({ name: "blog", relPath: "blogs/a.md" }),
+    page({ name: "plan", relPath: "plans/b.md" }),
+    page({ name: "index", relPath: "index.md" }),
+  ];
+  expect(filterPages(pages, { ...NO_FILTER, folder: "blogs" }).map((p) => p.name)).toEqual(["blog"]);
+  expect(filterPages(pages, { ...NO_FILTER, folder: ROOT_FOLDER }).map((p) => p.name)).toEqual([
+    "index",
+  ]);
+  expect(filterPages(pages, { ...NO_FILTER, folder: "" })).toHaveLength(3);
+});
+
+test("folderCounts: honors the domain filter", () => {
+  const pages = [
+    page({ relPath: "blogs/a.md", domain: "ai" }),
+    page({ relPath: "blogs/b.md", domain: "ai" }),
+    page({ relPath: "life/c.md", domain: "life" }),
+    page({ relPath: "index.md", domain: "ai" }),
+  ];
+  expect(folderCounts(pages, "")).toEqual({ blogs: 2, life: 1, [ROOT_FOLDER]: 1 });
+  expect(folderCounts(pages, "ai")).toEqual({ blogs: 2, [ROOT_FOLDER]: 1 });
 });
 
 test("sortPages: does not mutate input", () => {

@@ -16,8 +16,11 @@ import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import {
   filterPages,
+  folderCounts,
   hasTypedHubs,
   HUB_TYPES,
+  pageDateLabel,
+  ROOT_FOLDER,
   sortPages,
   tagCounts,
   topPages,
@@ -67,7 +70,7 @@ function pageUrl(name: string): string {
 
 let allPages: WikiListing[] = [];
 let currentName: string | null = null;
-const filters: WikiFilters = { q: "", domain: "", type: "", tag: "" };
+const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "" };
 let startTab: "hubs" | "timeline" = "hubs";
 let tagsExpanded = false;
 
@@ -615,6 +618,37 @@ function sortMode(): WikiSortMode {
 }
 
 // ── Left pane: filter + list ──────────────────────────────────────────
+/** Populate the folder picker from the pages themselves — wikis differ wildly
+ *  (mimir has blogs/plans/archive/…, huginn-jarvis has sources/concepts/…), so
+ *  the options are derived, never hardcoded. A flat wiki (everything at the root)
+ *  gets no picker at all. Rebuilt on a domain switch so the counts stay honest;
+ *  a folder that the new domain filters away resets the facet. */
+function renderFolderSelect(): void {
+  const sel = document.getElementById("wikiFolder") as HTMLSelectElement | null;
+  const row = document.getElementById("wikiFolderRow");
+  if (!sel || !row) return;
+  const counts = folderCounts(allPages, filters.domain);
+  const folders = Object.keys(counts).sort((a, b) => {
+    if (a === ROOT_FOLDER) return 1; // root pages last — they're the odd ones out
+    if (b === ROOT_FOLDER) return -1;
+    return a.localeCompare(b);
+  });
+  const real = folders.filter((f) => f !== ROOT_FOLDER);
+  if (!real.length) {
+    row.style.display = "none";
+    filters.folder = "";
+    return;
+  }
+  row.style.display = "";
+  if (filters.folder && !counts[filters.folder]) filters.folder = "";
+  let html = `<option value="">All folders</option>`;
+  folders.forEach((f) => {
+    const label = f === ROOT_FOLDER ? "(root)" : f;
+    html += `<option value="${esc(f)}"${filters.folder === f ? " selected" : ""}>${esc(label)} ${counts[f]}</option>`;
+  });
+  sel.innerHTML = html;
+}
+
 function renderTypeChips(): void {
   const counts = typeCounts(allPages, filters.domain);
   let html = `<button class="wiki-chip${filters.type === "" ? " active" : ""}" data-type="">All types</button>`;
@@ -646,7 +680,10 @@ function renderList(): void {
   const pages = sortPages(filterPages(allPages, filters), mode);
   let html = "";
   pages.forEach((p) => {
-    const meta = mode === "backlinks" ? p.backlinkCount + " ←" : p.updated || p.created || "";
+    // In recency mode show the date we actually sorted on (mtime or frontmatter,
+    // whichever is newer) — otherwise a frontmatter-less page would show nothing
+    // while sitting at the top, which is exactly what looked broken before.
+    const meta = mode === "backlinks" ? p.backlinkCount + " ←" : pageDateLabel(p);
     html +=
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
       `<div class="wiki-type-dot type-${p.type}"></div>` +
@@ -705,6 +742,12 @@ function timelineHtml(): string {
     if (p.created) (groups[p.created] = groups[p.created] || []).push({ p, kind: "new" });
     if (p.updated && p.updated !== p.created) {
       (groups[p.updated] = groups[p.updated] || []).push({ p, kind: "upd" });
+    }
+    // No frontmatter dates at all (mimir, melosys-kode-wiki) — file it under its
+    // mtime date so a whole wiki isn't missing from its own timeline.
+    if (!p.created && !p.updated) {
+      const d = pageDateLabel(p);
+      if (d) (groups[d] = groups[d] || []).push({ p, kind: "upd" });
     }
   });
   const dates = Object.keys(groups).sort().reverse();
@@ -997,8 +1040,15 @@ document.getElementById("domainChips")!.addEventListener("click", function (this
   filters.domain = chip.getAttribute("data-domain") || "";
   this.querySelectorAll(".wiki-chip").forEach((c) => c.classList.remove("active"));
   chip.classList.add("active");
+  renderFolderSelect();
   renderTypeChips();
   renderTagChips();
+  renderList();
+  refreshStartBody();
+});
+
+document.getElementById("wikiFolder")!.addEventListener("change", function (this: HTMLSelectElement) {
+  filters.folder = this.value;
   renderList();
   refreshStartBody();
 });
@@ -1397,6 +1447,7 @@ fetch(withWiki("/api/wiki/pages"))
       return;
     }
     allPages = data.pages;
+    renderFolderSelect();
     renderTypeChips();
     renderTagChips();
     const params = new URLSearchParams(location.search);

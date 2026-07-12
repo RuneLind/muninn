@@ -18,6 +18,8 @@ export interface WikiListing {
   updated?: string;
   url?: string;
   relPath: string;
+  /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
+  mtimeMs?: number;
   linkCount: number;
   backlinkCount: number;
 }
@@ -25,9 +27,15 @@ export interface WikiListing {
 export interface WikiFilters {
   q: string;
   domain: string;
+  /** Top-level folder, `ROOT_FOLDER` for wiki-root pages, "" for all. */
+  folder: string;
   type: string;
   tag: string;
 }
+
+/** Filter sentinel for pages sitting at the wiki root — no real folder can
+ *  collide with it, so it doubles as a selectable value in the folder picker. */
+export const ROOT_FOLDER = "/";
 
 export type WikiSortMode = "updated" | "backlinks" | "title";
 
@@ -48,12 +56,46 @@ export const TYPE_LABEL: Record<WikiPageType, string> = {
   note: "Notes",
 };
 
-/** Filter pages by the current domain/type/tag facets and the free-text query.
+/** The wiki-root-relative top-level folder a page lives in (`ROOT_FOLDER` when it
+ *  sits directly in the wiki root). Nested pages report their FIRST segment, so
+ *  mimir's `archive/muninn/x.md` is filed under `archive`. */
+export function pageFolder(p: WikiListing): string {
+  const rel = (p.relPath || "").replace(/\\/g, "/");
+  const slash = rel.indexOf("/");
+  return slash === -1 ? ROOT_FOLDER : rel.slice(0, slash);
+}
+
+/**
+ * Recency of a page in epoch ms — the sort key behind "Recently updated".
+ *
+ * The larger of the file's mtime and its frontmatter `updated`/`created` date.
+ * Frontmatter-only ranking left wikis that carry no frontmatter (mimir,
+ * melosys-kode-wiki) permanently undated at the bottom of the list; mtime-only
+ * ranking would regress a wiki whose files were re-checked-out (mtime resets,
+ * frontmatter doesn't). Taking the max keeps whichever signal claims the page was
+ * touched more recently. 0 when a page has neither.
+ */
+export function pageTimeMs(p: WikiListing): number {
+  const fm = p.updated || p.created || "";
+  const fmMs = fm ? Date.parse(fm) : NaN;
+  return Math.max(p.mtimeMs || 0, Number.isNaN(fmMs) ? 0 : fmMs);
+}
+
+/** `YYYY-MM-DD` of `pageTimeMs` — what the list shows next to a page when it is
+ *  sorted by recency, so the visible date always explains the ordering. */
+export function pageDateLabel(p: WikiListing): string {
+  const ms = pageTimeMs(p);
+  if (!ms) return "";
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/** Filter pages by the current domain/folder/type/tag facets and the free-text query.
  *  Query matches title, canonical name, any alias, or any tag (all case-insensitive). */
 export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
   const q = filters.q.toLowerCase();
   return pages.filter((p) => {
     if (filters.domain && p.domain !== filters.domain) return false;
+    if (filters.folder && pageFolder(p) !== filters.folder) return false;
     if (filters.type && p.type !== filters.type) return false;
     if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
     if (!q) return true;
@@ -69,7 +111,9 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
   });
 }
 
-/** Sort a copy of `pages` by the given mode without mutating the input. */
+/** Sort a copy of `pages` by the given mode without mutating the input. Recency
+ *  ties (two pages stamped the same day by frontmatter alone) fall back to title
+ *  so the order is stable rather than scan-order. */
 export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing[] {
   const copy = pages.slice();
   if (mode === "title") {
@@ -77,11 +121,22 @@ export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing
   } else if (mode === "backlinks") {
     copy.sort((a, b) => b.backlinkCount - a.backlinkCount);
   } else {
-    copy.sort((a, b) =>
-      (b.updated || b.created || "").localeCompare(a.updated || a.created || ""),
-    );
+    copy.sort((a, b) => pageTimeMs(b) - pageTimeMs(a) || a.title.localeCompare(b.title));
   }
   return copy;
+}
+
+/** Count pages per top-level folder, honoring the active domain filter (used for
+ *  the folder picker). Keyed by `pageFolder`, so wiki-root pages land under
+ *  `ROOT_FOLDER`. */
+export function folderCounts(pages: WikiListing[], domain: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    const f = pageFolder(p);
+    counts[f] = (counts[f] || 0) + 1;
+  });
+  return counts;
 }
 
 /** Count pages per type, honoring the active domain filter (used for the type chip row). */

@@ -34,6 +34,12 @@ export interface WikiPageMeta {
   url?: string;
   /** Path relative to the wiki root — unique even when stems collide. */
   relPath: string;
+  /**
+   * File mtime (epoch ms). The only recency signal wikis that carry no
+   * frontmatter (mimir, melosys-kode-wiki) have — without it every page there
+   * sorts as undated. Undefined when the file couldn't be stat'd.
+   */
+  mtimeMs?: number;
 }
 
 export interface WikiIndex {
@@ -241,6 +247,15 @@ function asStringArray(v: string | string[] | undefined): string[] {
 const HTML_TITLE_SNIFF_BYTES = 4096;
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 
+/** File mtime in epoch ms, or undefined when the file can't be stat'd. */
+async function fileMtimeMs(abs: string): Promise<number | undefined> {
+  try {
+    return (await stat(abs)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Build metadata for a standalone HTML explainer. Unlike markdown pages these
  * carry no frontmatter and don't join the wikilink graph — title comes from the
@@ -259,12 +274,8 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
   } catch {
     return null; // unreadable — skip, keep the rest of the wiki browsable
   }
-  let date: string | undefined;
-  try {
-    date = (await stat(abs)).mtime.toISOString().slice(0, 10);
-  } catch {
-    date = undefined;
-  }
+  const mtimeMs = await fileMtimeMs(abs);
+  const date = mtimeMs === undefined ? undefined : new Date(mtimeMs).toISOString().slice(0, 10);
   return {
     name: stem,
     title,
@@ -275,6 +286,7 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
     created: date,
     updated: date,
     relPath,
+    mtimeMs,
   };
 }
 
@@ -317,9 +329,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         }
         return;
       }
+      const abs = path.join(root, relPath);
       let content: string;
       try {
-        content = await Bun.file(path.join(root, relPath)).text();
+        content = await Bun.file(abs).text();
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
@@ -336,6 +349,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         updated: typeof fm.updated === "string" ? fm.updated : undefined,
         url: typeof fm.url === "string" ? fm.url : undefined,
         relPath,
+        mtimeMs: await fileMtimeMs(abs),
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));

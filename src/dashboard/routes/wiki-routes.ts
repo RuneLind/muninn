@@ -127,13 +127,16 @@ async function computeWikiFreshness(
         out[entry.name] = new Date(mtime).toISOString().slice(0, 10);
         return;
       }
-      // No log.md — fall back to the newest page date from the index.
+      // No log.md — fall back to the newest page date from the index. Wikis with
+      // no frontmatter at all (mimir) only have mtime, so consider both.
       const index = await getWikiIndex({ root: entry.root });
       if (!index) return;
       let newest = "";
       for (const p of index.pages) {
+        const mtimeDate = p.mtimeMs ? new Date(p.mtimeMs).toISOString().slice(0, 10) : "";
         const d = p.updated || p.created || "";
-        if (d > newest) newest = d;
+        const best = d > mtimeDate ? d : mtimeDate;
+        if (best > newest) newest = best;
       }
       if (newest) out[entry.name] = newest;
     }),
