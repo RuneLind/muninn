@@ -67,6 +67,29 @@ describe("getRecentAgentTraces", () => {
     expect(ids.has(real.traceId)).toBe(true);
   });
 
+  test("surfaces token totals off a chat root's own attributes (message-processor t.finish stamp)", async () => {
+    const chat = chatRoot("telegram_message", { attributes: { inputTokens: 25111, outputTokens: 22 } });
+    await saveSpan(chat);
+
+    const rows = await getRecentAgentTraces(400);
+    const row = rows.find((r) => r.traceId === chat.traceId)!;
+    expect(row).toBeTruthy();
+    expect(row.inputTokens).toBe(25111);
+    expect(row.outputTokens).toBe(22);
+  });
+
+  test("surfaces token totals + model off the watcher span's own attributes", async () => {
+    const wat = watcherChild("email", { type: "email", model: "claude-haiku-4-5", inputTokens: 227000, outputTokens: 512 });
+    await saveSpan(wat);
+
+    const rows = await getRecentAgentTraces(400);
+    const row = rows.find((r) => r.traceId === wat.traceId)!;
+    expect(row).toBeTruthy();
+    expect(row.inputTokens).toBe(227000);
+    expect(row.outputTokens).toBe(512);
+    expect(row.model).toBe("claude-haiku-4-5");
+  });
+
   test("does NOT return non-chat root spans or generic child spans", async () => {
     // A scheduler_tick root + an aggregate scheduled_tasks span must not appear.
     const tick = chatRoot("scheduler_tick");
@@ -96,5 +119,23 @@ describe("getRecentExtractorUsage", () => {
     expect(mem!.model).toBe("claude-haiku-4-5");
     // 'briefing' is a task source, not an extractor — excluded.
     expect(rows.some((r) => r.source === "briefing")).toBe(false);
+  });
+
+  test("includes wiki_gardener_* sources but excludes task/watcher sources", async () => {
+    const sql = getDb();
+    await sql`INSERT INTO haiku_usage (source, model, bot_name, input_tokens, output_tokens)
+              VALUES ('wiki_gardener_draft', 'claude-sonnet-5', 'gardenbot', 4200, 1800)`;
+    await sql`INSERT INTO haiku_usage (source, model, bot_name, input_tokens, output_tokens)
+              VALUES ('wiki_gardener_cluster', 'claude-haiku-4-5', 'gardenbot', 900, 120)`;
+    await sql`INSERT INTO haiku_usage (source, model, bot_name, input_tokens, output_tokens)
+              VALUES ('watcher-email', 'claude-haiku-4-5', 'gardenbot', 5000, 40)`;
+
+    const rows = await getRecentExtractorUsage(400);
+    const draft = rows.find((r) => r.source === "wiki_gardener_draft" && r.botName === "gardenbot");
+    expect(draft).toBeTruthy();
+    expect(draft!.inputTokens).toBe(4200);
+    expect(rows.some((r) => r.source === "wiki_gardener_cluster")).toBe(true);
+    // watcher-* tokens surface via the trace path, NOT here (would double a Recent row).
+    expect(rows.some((r) => r.source === "watcher-email")).toBe(false);
   });
 });

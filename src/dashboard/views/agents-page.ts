@@ -120,6 +120,12 @@ export async function renderAgentsPage(): Promise<string> {
     }
     .status-error { color: var(--status-error); }
     .scroll { overflow-x: auto; }
+    /* Token / turns / tools summary — Recent rows + completed Running cards. */
+    .run-toks { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+      margin-left: 6px; white-space: nowrap; }
+    .run-usage { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+      display: flex; gap: 10px; flex-wrap: wrap; }
+    .run-usage b { color: var(--text-secondary); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -373,6 +379,17 @@ export async function renderAgentsPage(): Promise<string> {
         ? '<div class="run-eta' + (eta.barMode === 'over' ? ' over' : '') + '" data-eta>' + esc(eta.etaLabel) + '</div>'
         : '<div class="run-eta" data-eta></div>';
 
+      // Usage summary — in / out / turns / tools. Tokens update live over SSE
+      // (usage_progress → updateUsage); turns/tools land at completion. Rendered
+      // whenever any field is present (a completed watcher/chat card, or a live
+      // run already reporting tokens).
+      var usageParts = [];
+      if (r.inputTokens != null) usageParts.push('<span><b>' + fmtTokens(r.inputTokens) + '</b> in</span>');
+      if (r.outputTokens != null) usageParts.push('<span><b>' + fmtTokens(r.outputTokens) + '</b> out</span>');
+      if (r.numTurns != null) usageParts.push('<span><b>' + r.numTurns + '</b> turn' + (r.numTurns !== 1 ? 's' : '') + '</span>');
+      if (r.toolCount != null && r.toolCount > 0) usageParts.push('<span><b>' + r.toolCount + '</b> tool' + (r.toolCount !== 1 ? 's' : '') + '</span>');
+      var usageLine = usageParts.length ? '<div class="run-usage">' + usageParts.join('') + '</div>' : '';
+
       // Live scrolling mini-log: recent tool steps (auto-scrolled to the newest in
       // renderRunning), with the current phase as a trailing "→ <phase>" line.
       var toolRows = (r.tools || []).slice(-6).map(function (t) {
@@ -410,6 +427,7 @@ export async function renderAgentsPage(): Promise<string> {
         '<div class="' + trackCls + '" data-track>' + barHtml + '</div>' +
         progLabel +
         etaLine +
+        usageLine +
         (tools ? '<div class="run-tools" data-log>' + tools + '</div>' : '') +
         (links.length ? '<div class="run-links">' + links.join('') + '</div>' : '') +
       '</div>';
@@ -514,10 +532,14 @@ export async function renderAgentsPage(): Promise<string> {
         var dur = r.durationMs != null ? fmtMs(r.durationMs) : '';
         var statusCls = r.status === 'error' ? ' status-error' : '';
         var link = r.traceId ? '<a class="run-link" href="/traces#' + escapeAttr(r.traceId) + '">Trace</a>' : '';
+        // Token counts (watcher spans + extractor/gardener haiku rows carry them).
+        var toks = (r.inputTokens != null || r.outputTokens != null)
+          ? '<span class="run-toks">' + fmtTokens(r.inputTokens || 0) + ' in · ' + fmtTokens(r.outputTokens || 0) + ' out</span>'
+          : '';
         return '<tr>' +
           '<td><span class="when">' + esc(timeAgo(r.finishedAt)) + '</span></td>' +
           '<td><span class="tag' + statusCls + '">' + esc(kindLabels[r.kind] || r.kind) + '</span></td>' +
-          '<td>' + esc(r.name) + (r.model ? ' <code>' + esc(r.model) + '</code>' : '') + '</td>' +
+          '<td>' + esc(r.name) + (r.model ? ' <code>' + esc(r.model) + '</code>' : '') + toks + '</td>' +
           '<td>' + (r.bot ? '<code>' + esc(r.bot) + '</code>' : '') + '</td>' +
           '<td><span class="when">' + esc(dur) + '</span></td>' +
           '<td>' + link + '</td>' +

@@ -362,14 +362,27 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         if (cinfo.model) agentStatus.setModel(requestId, cinfo.model);
       }
 
+      // Accumulate token usage across a checker's spawnHaiku calls. x/anthropic
+      // make MULTIPLE calls (gate + digest / capture gate) per run, so sum here;
+      // the total is stamped onto the `watcher:<type>` span + the Running card.
+      const usage = { inputTokens: 0, outputTokens: 0, numTurns: 0, calls: 0, model: undefined as string | undefined };
+
       // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
-      // live progress callback fills this run's `/agents` tool mini-log, and `wt`
+      // live progress callback fills this run's `/agents` tool mini-log, `wt`
       // receives tool child spans (Gmail MCP calls etc.) under the `watcher:<type>`
-      // span. News/wiki-linter/wiki-gardener checkers ignore it (no spawnHaiku).
+      // span, and onUsage sums token usage. News/wiki-linter/wiki-gardener
+      // checkers ignore it (no spawnHaiku).
       const telemetry: HaikuTelemetry = {
         onProgress: createProgressCallback(requestId, "running_watcher"),
         tracer: wt,
         captureToolOutputs,
+        onUsage: (u) => {
+          usage.inputTokens += u.inputTokens;
+          usage.outputTokens += u.outputTokens;
+          if (u.numTurns != null) usage.numTurns += u.numTurns;
+          usage.model = u.model;
+          usage.calls++;
+        },
       };
 
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
@@ -480,11 +493,22 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       ].slice(-MAX_NOTIFIED_IDS);
 
       await updateWatcherLastRun(watcher.id, updatedIds);
+      // Token totals from the checker's spawnHaiku call(s) — stamped onto the
+      // span (read back into Recent via getRecentAgentTraces off the childless
+      // watcher span's OWN attributes) and onto the Running/completed card.
+      const usageMeta = usage.calls > 0
+        ? {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            ...(usage.numTurns > 0 ? { numTurns: usage.numTurns } : {}),
+            ...(usage.model ? { model: usage.model } : {}),
+          }
+        : {};
       // `wt` is a child span sharing the scheduler_tick trace id, so the card's
       // trace link opens the whole tick — coarser than chat's per-request link,
-      // but the only handle in scope here (no exec result / no token counts).
-      agentStatus.completeRequest(requestId, { traceId: wt?.traceId });
-      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...(forced && { manualTrigger: true }) });
+      // but the only handle in scope here.
+      agentStatus.completeRequest(requestId, { traceId: wt?.traceId, ...usageMeta });
+      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...usageMeta, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       wt?.error(err instanceof Error ? err : String(err));

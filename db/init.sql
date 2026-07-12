@@ -298,7 +298,8 @@ CREATE TABLE haiku_usage (
   model TEXT,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  trace_id UUID -- request trace that produced this call (NULL when no telemetry threaded); migration 060
 );
 
 CREATE INDEX idx_haiku_usage_created ON haiku_usage(created_at DESC);

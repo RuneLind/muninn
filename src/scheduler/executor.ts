@@ -35,6 +35,23 @@ export interface HaikuTelemetry {
   onProgress?: StreamProgressCallback;
   tracer?: Tracer;
   captureToolOutputs?: boolean;
+  /**
+   * Fired once per `spawnHaiku` call with the run's final token usage. A checker
+   * that makes MULTIPLE spawnHaiku calls (x/anthropic gate + digest) sums across
+   * invocations here so the runner can stamp the total onto the `watcher:<type>`
+   * span + the `/agents` Running card. Optional — absent for a `spawnHaiku` call
+   * outside the watcher runner.
+   */
+  onUsage?: (usage: HaikuUsage) => void;
+}
+
+/** Final token usage for one Haiku call, delivered to {@link HaikuTelemetry.onUsage}. */
+export interface HaikuUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  numTurns?: number;
+  costUsd?: number;
 }
 
 /**
@@ -90,6 +107,7 @@ export async function spawnHaiku(
     onProgress,
     tracer,
     captureToolOutputs,
+    onUsage,
   } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
   const wallStart = performance.now();
@@ -162,8 +180,19 @@ export async function spawnHaiku(
       });
     }
 
-    // Track usage async — don't block the caller
-    trackUsage(source, haiku.model, haiku.inputTokens, haiku.outputTokens, botName);
+    // Track usage async — don't block the caller. Thread the telemetry Tracer's
+    // trace id so the row ties back to the request trace (NULL without telemetry).
+    trackUsage(source, haiku.model, haiku.inputTokens, haiku.outputTokens, botName, tracer?.traceId);
+
+    // Hand the final usage to the runner's accumulator so multi-call checkers
+    // (x/anthropic) can sum tokens across invocations for the span + Running card.
+    onUsage?.({
+      model: haiku.model,
+      inputTokens: haiku.inputTokens,
+      outputTokens: haiku.outputTokens,
+      numTurns: haiku.numTurns,
+      costUsd: haiku.costUsd,
+    });
 
     // Emit tool child spans under the tracer's root span (the `watcher:<type>`
     // span) so the waterfall + getToolUsageStats pick them up. attachToolSpans'
@@ -324,13 +353,14 @@ export function trackUsage(
   inputTokens: number,
   outputTokens: number,
   botName?: string,
+  traceId?: string,
 ): void {
   if (inputTokens === 0 && outputTokens === 0) return;
 
   const sql = getDb();
   sql`
-    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name)
-    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null})
+    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name, trace_id)
+    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null}, ${traceId ?? null})
   `.catch((err) => {
     log.error("Failed to track Haiku usage: {error}", { botName: botName ?? "haiku", error: err instanceof Error ? err.message : String(err) });
   });
