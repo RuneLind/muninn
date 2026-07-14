@@ -13,7 +13,8 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
-import { agentStatus } from "../observability/agent-status.ts";
+import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
+import { Tracer } from "../tracing/tracer.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
 import { persistResearchCitations } from "../db/research-citations.ts";
 import { getLog } from "../logging.ts";
@@ -65,6 +66,8 @@ export interface ResearchAnswerOptions {
   /** Synthesis system prompt. Defaults to {@link SYNTHESIS_SYSTEM_PROMPT} (the
    *  Learning-Center framing); the wiki Ask route passes a per-wiki framing. */
   systemPrompt?: string;
+  /** Injectable tracer (tests pass a recording one to avoid DB span writes). */
+  tracer?: Tracer;
 }
 
 /**
@@ -90,7 +93,23 @@ export async function streamResearchAnswer(
     kind: "research",
     name: question.length > 60 ? `${question.slice(0, 57)}…` : question,
   });
-  let traceId: string | undefined;
+  setConnectorInfo(reqId, botConfig, config.claudeModel);
+
+  // ONE trace for the whole ask. Retrieval used to own the only trace:
+  // `researchKnowledge` built its own root and FINISHED it before returning, so
+  // the synthesis call — the expensive half — ran with no span under any trace at
+  // all. Rooting here and handing `researchKnowledge` our context (a seam it
+  // already supports) nests retrieval as a child and lets synthesis be its
+  // sibling, so one trace shows the whole question end to end. The traceId the
+  // UI already receives on the `sources` event is unchanged in shape: it is now
+  // this root's id, which the retrieval spans share.
+  const tracer = opts.tracer ?? new Tracer("research_ask", {
+    botName: botConfig.name,
+    platform: "research",
+  });
+  const traceId: string | undefined = tracer.traceId;
+  let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
+  let status: "ok" | "error" = "ok";
 
   try {
     await emit({ type: "phase", phase: "searching" });
@@ -106,6 +125,7 @@ export async function streamResearchAnswer(
       knowledgeApiUrl: config.knowledgeApiUrl,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,
+      traceContext: tracer.context,
     });
 
     const citations = buildCitations(result.results, maxSources);
@@ -116,7 +136,6 @@ export async function streamResearchAnswer(
       subSearches: result.subSearches,
       traceId: result.traceId,
     });
-    traceId = result.traceId;
 
     // Honest relevance floor: gate synthesis on Huginn's raw-score `lowConfidence`
     // signal, not the rank-based `relevance` value (see assessCoverage). On a
@@ -165,12 +184,25 @@ export async function streamResearchAnswer(
       }
     };
 
+    tracer.start("claude", {
+      sources: citations.length,
+      historyTurns: history.length,
+      model: botConfig.model,
+      connector: botConfig.connector ?? "claude-cli",
+    });
     const claude = await executeOneShot(
       userPrompt,
       config,
       botConfig,
       { systemPrompt: opts.systemPrompt ?? SYNTHESIS_SYSTEM_PROMPT, onProgress },
     );
+    usage = {
+      inputTokens: claude.inputTokens,
+      outputTokens: claude.outputTokens,
+      numTurns: claude.numTurns,
+    };
+    tracer.end("claude", { ...usage, model: claude.model, costUsd: claude.costUsd });
+    if (claude.model) agentStatus.setModel(reqId, claude.model);
 
     const answer = (claude.result ?? "").trim();
     log.info("Research answer synthesized botName={botName} sources={sources} tokens={tokens}", {
@@ -198,13 +230,22 @@ export async function streamResearchAnswer(
       cited,
     });
   } catch (err) {
+    status = "error";
     const message = err instanceof Error ? err.message : String(err);
+    tracer.finish("error", { error: message });
     log.error("Research answer failed botName={botName} error={error}", {
       botName: botConfig.name,
       error: message,
     });
     await emit({ type: "error", message });
   } finally {
-    agentStatus.completeRequest(reqId, traceId ? { traceId } : {});
+    // The declined-coverage path returns early without synthesizing, so `usage`
+    // is empty there and the trace records retrieval only — which is exactly what
+    // happened.
+    if (status === "ok") tracer.finish("ok", usage);
+    agentStatus.completeRequest(reqId, {
+      ...usage,
+      ...(config.tracingEnabled ? { traceId } : {}),
+    });
   }
 }

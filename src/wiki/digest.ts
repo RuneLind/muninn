@@ -18,7 +18,10 @@ import path from "node:path";
 import { stat } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
+import type { ClaudeExecResult } from "../ai/executor.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
+import { Tracer } from "../tracing/tracer.ts";
+import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
 
@@ -307,6 +310,8 @@ export async function readLogMtimeMs(root: string): Promise<number | null> {
 export interface GenerateDigestOptions {
   /** Injectable one-shot seam (tests pass a fake to avoid a real connector run). */
   oneShot?: typeof executeOneShot;
+  /** Injectable tracer (tests pass a recording one to avoid DB span writes). */
+  tracer?: Tracer;
   /** Clock override for `generatedAt` + the future-date guard in selection (tests). */
   now?: () => number;
   /** Connector timeout for the single digest call. Defaults to {@link DIGEST_TIMEOUT_MS}. */
@@ -348,17 +353,58 @@ export async function generateWikiDigest(
   const toDate = entries[entries.length - 1]!.date;
   const block = renderEntriesBlock(entries);
 
-  const userPrompt = `Wiki: ${root.split("/").pop() ?? "wiki"}
+  const wikiName = root.split("/").pop() ?? "wiki";
+  const userPrompt = `Wiki: ${wikiName}
 Recent log entries (${fromDate} – ${toDate}), oldest first:
 
 ${block}
 
 Write the "what's new" digest as 4–6 markdown bullets.`;
 
-  const result = await oneShot(userPrompt, config, botConfig, {
-    systemPrompt: DIGEST_SYSTEM_PROMPT,
-    timeoutMs,
+  // Observability. The digest fires on every /wiki open (cache miss) and used to
+  // leave NOTHING behind — no trace, no /agents row — so a slow or failing digest
+  // was invisible on both dashboards. Everything above this point is cheap local
+  // I/O with early returns; the model call is the only part worth accounting for,
+  // so the run + trace start here.
+  const tracer = opts.tracer ?? new Tracer("wiki_digest", {
+    botName: botConfig.name,
+    platform: "wiki",
   });
+  const reqId = agentStatus.startRequest(botConfig.name, "synthesizing", undefined, {
+    kind: "digest",
+    name: `Wiki digest: ${wikiName}`,
+  });
+  agentStatus.setSourcePage(reqId, "/wiki");
+  setConnectorInfo(reqId, botConfig, config.claudeModel);
+  tracer.start("claude", { wiki: wikiName, entries: entries.length, fromDate, toDate });
+
+  let result: ClaudeExecResult;
+  try {
+    result = await oneShot(userPrompt, config, botConfig, {
+      systemPrompt: DIGEST_SYSTEM_PROMPT,
+      timeoutMs,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    tracer.end("claude", { error: message });
+    tracer.finish("error", { wiki: wikiName, error: message });
+    agentStatus.completeRequest(reqId, {});
+    throw err; // the route already degrades this to `{ digest: null }`
+  }
+
+  const usage = {
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    numTurns: result.numTurns,
+  };
+  tracer.end("claude", { ...usage, model: result.model, costUsd: result.costUsd });
+  if (result.model) agentStatus.setModel(reqId, result.model);
+  tracer.finish("ok", { wiki: wikiName, entries: entries.length, ...usage });
+  agentStatus.completeRequest(reqId, {
+    ...usage,
+    ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
+  });
+
   const raw = (result.result ?? "").trim();
   if (!raw) return null;
 

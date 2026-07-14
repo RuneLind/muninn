@@ -66,6 +66,7 @@ function kindShort(kind: string | undefined): string {
     case "watcher": return "Watcher";
     case "capture": return "Capture";
     case "research": return "Research";
+    case "digest": return "Wiki digest";
     case "scheduled_task": return "Task";
     case "extractor": return "Extractor";
     case "profile": return "Profile";
@@ -219,6 +220,7 @@ export function agentPresenceScript(mountId: string, filter: PresenceFilter): st
           case 'watcher': return 'Watcher';
           case 'capture': return 'Capture';
           case 'research': return 'Research';
+          case 'digest': return 'Wiki digest';
           case 'scheduled_task': return 'Task';
           case 'extractor': return 'Extractor';
           case 'profile': return 'Profile';

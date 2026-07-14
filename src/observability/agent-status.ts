@@ -53,6 +53,7 @@ export type AgentKind =
   | "gardener_drain"
   | "capture"
   | "research"
+  | "digest"
   | "extractor"
   | "profile";
 

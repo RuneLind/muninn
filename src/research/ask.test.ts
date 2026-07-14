@@ -1,6 +1,7 @@
 import { test, expect, beforeEach, describe, mock } from "bun:test";
 import { agentStatus } from "../observability/agent-status.ts";
 import type { Config } from "../config.ts";
+import type { Tracer } from "../tracing/index.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ResearchHit, ResearchKnowledgeResult } from "../ai/research-knowledge.ts";
 import type { AnswerEvent } from "./ask.ts";
@@ -67,15 +68,32 @@ mock.module("../ai/one-shot.ts", () => ({
 
 const { streamResearchAnswer } = await import("./ask.ts");
 
-const config = { knowledgeApiUrl: "http://kb.test" } as unknown as Config;
+const config = { knowledgeApiUrl: "http://kb.test", tracingEnabled: true } as unknown as Config;
+
+/** Recording tracer with a fixed id — avoids DB span writes and lets the tests
+ *  assert the ask's own trace id (which retrieval now shares via traceContext). */
+function fakeTracer() {
+  const spans: Array<{ op: string; label?: string; attrs?: Record<string, unknown> }> = [];
+  const tracer = {
+    traceId: "ask-trace-1",
+    get context() { return { traceId: "ask-trace-1", parentId: "root-1" }; },
+    start(label: string, attrs?: Record<string, unknown>) { spans.push({ op: "start", label, attrs }); return "s"; },
+    end(label: string, attrs?: Record<string, unknown>) { spans.push({ op: "end", label, attrs }); return 1; },
+    finish(status: "ok" | "error", attrs?: Record<string, unknown>) { spans.push({ op: "finish:" + status, attrs }); },
+    addChildSpan() { return "c"; },
+    addSubSpan() { return "s"; },
+  } as unknown as Tracer;
+  return { tracer, spans };
+}
 const bot = { name: "jarvis", dir: "/tmp/jarvis", connector: "claude-cli" } as unknown as BotConfig;
 
 async function collect(
   question: string,
   history?: Array<{ question: string; answer: string }>,
+  tracer?: Tracer,
 ): Promise<AnswerEvent[]> {
   const events: AnswerEvent[] = [];
-  await streamResearchAnswer({ question, config, botConfig: bot, history }, (e) => {
+  await streamResearchAnswer({ question, config, botConfig: bot, history, tracer: tracer ?? fakeTracer().tracer }, (e) => {
     events.push(e);
   });
   return events;
@@ -209,7 +227,9 @@ describe("AgentRun registry mirror", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]!.name).toBe("What is Claude Code and does it support MCP?");
     expect(runs[0]!.botName).toBe("jarvis");
-    expect(runs[0]!.traceId).toBe("trace-123"); // completeRequest carried the traceId
+    // The ask roots its own trace and hands retrieval that context, so this is the
+    // ask's trace id — the one that now covers BOTH retrieval and synthesis.
+    expect(runs[0]!.traceId).toBe("ask-trace-1");
     // No live research run leaks past completion.
     expect(agentStatus.getAll().some((r) => r.kind === "research" && !r.completed)).toBe(false);
   });
@@ -227,5 +247,44 @@ describe("AgentRun registry mirror", () => {
     await collect("q");
     expect(agentStatus.getRecentCompleted().some((r) => r.kind === "research")).toBe(true);
     expect(agentStatus.getAll().some((r) => r.kind === "research" && !r.completed)).toBe(false);
+  });
+});
+
+// ── Tracing: one trace covers retrieval AND synthesis ────────────────────────
+// researchKnowledge used to build + finish its own root trace before returning,
+// so the synthesis call — the expensive half — ran with no span under any trace.
+
+describe("research trace", () => {
+  beforeEach(() => agentStatus.clearRequest());
+
+  test("hands retrieval the ask's trace context, so both halves share one trace", async () => {
+    const { tracer } = fakeTracer();
+    await collect("What is Claude Code and does it support MCP?", undefined, tracer);
+    expect(lastResearchOpts?.traceContext).toEqual({ traceId: "ask-trace-1", parentId: "root-1" });
+  });
+
+  test("spans the synthesis call with its model, tokens and cost", async () => {
+    const { tracer, spans } = fakeTracer();
+    await collect("What is Claude Code and does it support MCP?", undefined, tracer);
+
+    const end = spans.find((s) => s.op === "end" && s.label === "claude");
+    expect(end).toBeDefined();
+    expect(end!.attrs).toMatchObject({ outputTokens: expect.any(Number) });
+    expect(spans.some((s) => s.op === "finish:ok")).toBe(true);
+  });
+
+  test("carries the synthesis tokens onto the /agents run (they used to be dropped)", async () => {
+    await collect("What is Claude Code and does it support MCP?");
+    const run = agentStatus.getRecentCompleted().filter((r) => r.kind === "research")[0]!;
+    expect(run.outputTokens).toBeGreaterThan(0);
+  });
+
+  test("a declined-coverage ask never opens a synthesis span (no Claude call was made)", async () => {
+    mockResults = []; // zero hits ⇒ assessCoverage declines, synthesis is skipped
+    const { tracer, spans } = fakeTracer();
+    await collect("Something nothing covers", undefined, tracer);
+    // The trace records retrieval only — which is exactly what happened.
+    expect(spans.some((s) => s.label === "claude")).toBe(false);
+    expect(spans.some((s) => s.op === "finish:ok")).toBe(true);
   });
 });
