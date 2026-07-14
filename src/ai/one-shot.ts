@@ -82,13 +82,25 @@ export interface ConnectorCapabilities {
    * have no equivalent knob.
    */
   supportsExtraDirs: boolean;
+  /**
+   * Whether `thinkingMaxTokens` actually means "extended-thinking budget" on
+   * this connector. It does NOT mean that everywhere: `openai-compat` reuses the
+   * field as the request's **`max_tokens`** (an output-length cap), and
+   * `copilot-sdk` ignores it entirely. So a caller that wants to tune *thinking*
+   * (e.g. the capture summarizers capping it to kill first-token dead-air) must
+   * gate on this — overriding the field on an openai-compat bot would silently
+   * clamp how long its answer is allowed to be.
+   */
+  supportsThinkingBudget: boolean;
 }
 
 /** Query a bot's connector capabilities without spawning anything. */
 export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabilities {
   const connector: ConnectorType = botConfig.connector ?? "claude-cli";
+  const isClaude = connector === "claude-cli" || connector === "claude-sdk";
   return {
-    supportsExtraDirs: connector === "claude-cli" || connector === "claude-sdk",
+    supportsExtraDirs: isClaude,
+    supportsThinkingBudget: isClaude,
   };
 }
 

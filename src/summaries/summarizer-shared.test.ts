@@ -164,7 +164,7 @@ test("ingestSummary is best-effort: a fetch rejection is swallowed", async () =>
 //   3. the thinking cap that buys back the first-token dead-air.
 
 describe("runCaptureOneShot", () => {
-  const config = { tracingCaptureToolOutputs: false } as unknown as Config;
+  const config = { tracingCaptureToolOutputs: false, tracingEnabled: true } as unknown as Config;
   const botConfig = {
     name: "jarvis",
     connector: "claude-sdk",
@@ -238,6 +238,22 @@ describe("runCaptureOneShot", () => {
     await runCaptureOneShot(h.opts);
     expect(h.seen[0]!.thinkingMaxTokens).toBe(CAPTURE_THINKING_MAX_TOKENS);
     expect(CAPTURE_THINKING_MAX_TOKENS).toBeLessThan(botConfig.thinkingMaxTokens!);
+  });
+
+  test("never overrides thinking on openai-compat — there the field is max_tokens", async () => {
+    // Overriding it on a local-model bot would clamp the SUMMARY's length to 8k,
+    // not its thinking; and there is no thinking dead-air there to buy back.
+    const local = { ...botConfig, connector: "openai-compat", baseUrl: "http://localhost:11434/v1" } as unknown as BotConfig;
+    const h = harness({ botConfig: local });
+    await runCaptureOneShot(h.opts);
+    expect(h.seen[0]!.thinkingMaxTokens).toBeUndefined();
+  });
+
+  test("stamps no trace link when tracing is disabled (no dead /agents Trace link)", async () => {
+    const h = harness({ config: { tracingCaptureToolOutputs: false, tracingEnabled: false } as unknown as Config });
+    await runCaptureOneShot(h.opts);
+    expect(h.attached[0]!.traceId).toBeUndefined();
+    expect(h.attached[0]!.botName).toBe("jarvis"); // the rest of the card still binds
   });
 
   test("thinkingMaxTokens: null inherits the bot's budget (TikTok's frame reading)", async () => {

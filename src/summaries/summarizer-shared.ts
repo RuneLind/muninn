@@ -3,7 +3,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
+import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
@@ -83,17 +83,24 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
   const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
   // Bind what's already known so the *in-flight* card is truthful; the model
   // string is the configured one here and is overwritten below with what the
-  // connector actually reported.
+  // connector actually reported. The trace link is only offered when tracing is
+  // on — a Tracer still mints a traceId with TRACING_ENABLED=false, and stamping
+  // that would give the /agents card a "Trace" link to a trace nobody wrote.
   attachRun(jobId, {
     botName: botConfig.name,
     connectorLabel,
     ...(botConfig.model ? { model: botConfig.model } : {}),
-    traceId: tracer.traceId,
+    ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
   });
 
-  const thinking = opts.thinkingMaxTokens === undefined
-    ? CAPTURE_THINKING_MAX_TOKENS
-    : opts.thinkingMaxTokens;
+  // Only cap thinking where the field IS a thinking budget: on openai-compat it
+  // is the request's max_tokens, so overriding it would clamp the summary's
+  // length instead (and there is no thinking dead-air there to buy back).
+  const thinking = !connectorCapabilities(botConfig).supportsThinkingBudget
+    ? null
+    : opts.thinkingMaxTokens === undefined
+      ? CAPTURE_THINKING_MAX_TOKENS
+      : opts.thinkingMaxTokens;
 
   tracer.start("claude", {
     source,

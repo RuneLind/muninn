@@ -67,6 +67,12 @@ mock.module("../ai/one-shot.ts", () => ({
     opts?.onProgress?.({ type: "text_delta", text: claudeResult });
     return { result: claudeResult, outputTokens: 42, inputTokens: 10, wallClockMs: 5 };
   },
+  // summarizer-shared imports this too (the thinking-budget capability gate) —
+  // mirror the real rule rather than hardcoding, so the mock can't drift.
+  connectorCapabilities: (b: { connector?: string }) => {
+    const isClaude = (b.connector ?? "claude-cli") === "claude-cli" || b.connector === "claude-sdk";
+    return { supportsExtraDirs: isClaude, supportsThinkingBudget: isClaude };
+  },
 }));
 
 const originalFetch = globalThis.fetch;
