@@ -1,11 +1,11 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt, ingestSummary } from "../summaries/summarizer-shared.ts";
+import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import {
+  attachRun,
   updateStatus,
   appendText,
   setCategory,
@@ -77,12 +77,18 @@ Video URL: ${url}`;
       }
     };
 
-    const result = await executeOneShot(
-      transcriptText,
+    const result = await runCaptureOneShot({
+      source: "youtube",
+      jobId,
+      title,
+      url,
+      prompt: transcriptText,
+      systemPrompt,
       config,
       botConfig,
-      { systemPrompt, onProgress },
-    );
+      attachRun,
+      onProgress,
+    });
 
     // 3. Parse response
     const { category, summary } = parseSummaryResponse(result.result);

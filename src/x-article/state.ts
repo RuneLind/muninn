@@ -27,6 +27,7 @@ const store = createJobStore<JobStatus, { articleId: string; author: string }>({
 });
 
 export const {
+  attachRun,
   getJob,
   getRecentJobs,
   updateStatus,

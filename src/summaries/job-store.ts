@@ -85,8 +85,30 @@ export interface JobStoreOptions<S extends string> {
   cleanupIntervalMs?: number;
 }
 
+/** Run telemetry that can only be known once the model call settles — parked
+ *  until the job's terminal transition, then handed to `completeRequest`. */
+interface CompletedRunMeta {
+  traceId?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  numTurns?: number;
+  toolCount?: number;
+}
+
+/** Telemetry late-bound onto a job's `/agents` run by `attachRun`. The first
+ *  three are live (pushed onto the in-flight card); the rest ride
+ *  {@link CompletedRunMeta} to completion. */
+export interface RunMeta extends CompletedRunMeta {
+  botName?: string;
+  model?: string;
+  connectorLabel?: string;
+}
+
 export interface JobStore<S extends string, F> {
   createJob(fields: F & { title: string; url: string }): string;
+  /** Late-bind bot/model/trace/token telemetry onto the job's `/agents` run.
+   *  Unknown jobId (or a job whose run already completed) is a silent no-op. */
+  attachRun(jobId: string, meta: RunMeta): void;
   getJob(jobId: string): Job<S, F> | undefined;
   getRecentJobs(limit?: number): Job<S, F>[];
   updateStatus(jobId: string, status: S): void;
@@ -111,9 +133,18 @@ export function createJobStore<S extends string, F>(
   // covers all four capture verticals (youtube / x-article / tiktok / anthropic):
   // createJob → startRequest(kind "capture"), the terminal completeJob/failJob →
   // completeRequest. `jobRuns` maps jobId → requestId for the completion lookup.
-  // Capture jobs aren't bot-scoped, so the run carries an empty botName (the card
-  // renders no bot chip); `opts.label` is the vertical name shown in the run name.
+  // `opts.label` is the vertical name shown in the run name.
+  //
+  // The run starts at createJob — route level, BEFORE the summarizer bot is
+  // resolved and before the model call — so bot/model/trace/tokens can't be known
+  // yet. `attachRun` late-binds them once the summarizer has them (see
+  // `runCaptureOneShot`): the live fields (bot/model/connector) are pushed
+  // straight onto the run so the Running card is truthful mid-flight, while the
+  // completion-only fields (traceId + token totals) are parked in `jobRunMeta`
+  // and handed to `completeRequest` at the terminal transition — that snapshot is
+  // what lands in the completed-runs ring, i.e. what `/agents` Recent shows.
   const jobRuns = new Map<string, string>();
+  const jobRunMeta = new Map<string, CompletedRunMeta>();
 
   /** Short, single-line run name: "YouTube: <title-or-url>", capped for the card. */
   function runName(fields: { title?: string; url: string }): string {
@@ -122,11 +153,36 @@ export function createJobStore<S extends string, F>(
     return short ? `${opts.label}: ${short}` : opts.label;
   }
 
+  function attachRun(jobId: string, meta: RunMeta): void {
+    const reqId = jobRuns.get(jobId);
+    if (!reqId) return;
+    if (meta.botName) agentStatus.setBotName(reqId, meta.botName);
+    if (meta.connectorLabel) agentStatus.setConnectorLabel(reqId, meta.connectorLabel);
+    if (meta.model) agentStatus.setModel(reqId, meta.model);
+
+    const { traceId, inputTokens, outputTokens, numTurns, toolCount } = meta;
+    if (
+      traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
+      numTurns !== undefined || toolCount !== undefined
+    ) {
+      jobRunMeta.set(jobId, {
+        ...jobRunMeta.get(jobId),
+        ...(traceId !== undefined ? { traceId } : {}),
+        ...(inputTokens !== undefined ? { inputTokens } : {}),
+        ...(outputTokens !== undefined ? { outputTokens } : {}),
+        ...(numTurns !== undefined ? { numTurns } : {}),
+        ...(toolCount !== undefined ? { toolCount } : {}),
+      });
+    }
+  }
+
   function completeRun(jobId: string): void {
     const reqId = jobRuns.get(jobId);
     if (!reqId) return;
     jobRuns.delete(jobId);
-    agentStatus.completeRequest(reqId, {});
+    const meta = jobRunMeta.get(jobId) ?? {};
+    jobRunMeta.delete(jobId);
+    agentStatus.completeRequest(reqId, meta);
   }
 
   // --- Pub/Sub ---
@@ -262,6 +318,7 @@ export function createJobStore<S extends string, F>(
 
   return {
     createJob,
+    attachRun,
     getJob,
     getRecentJobs,
     updateStatus,

@@ -4,10 +4,9 @@ import { mkdir, rm } from "node:fs/promises";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { ingestSummary } from "../summaries/summarizer-shared.ts";
+import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import {
   downloadVideo,
   transcribeVideo,
@@ -15,6 +14,7 @@ import {
   type Keyframe,
 } from "./media.ts";
 import {
+  attachRun,
   updateStatus,
   appendText,
   setCategory,
@@ -156,13 +156,25 @@ Author: ${dl.uploader}`;
       }
     };
 
-    const result = await executeOneShot(userPrompt, config, botConfig, {
+    const result = await runCaptureOneShot({
+      source: "tiktok",
+      jobId,
+      title: ingestTitle,
+      url: dl.canonicalUrl,
+      prompt: userPrompt,
       systemPrompt,
+      config,
+      botConfig,
+      attachRun,
       onProgress,
       extraDirs: [workDir],
       // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
       // (opus + thinking) — this is a background job, nothing blocks on it.
       timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
+      // Keep the bot's own thinking budget (the other verticals cap it): reading
+      // 25 keyframes IS the reasoning here, and as a background job with no
+      // reader waiting on the first token there's no dead-air to buy back.
+      thinkingMaxTokens: null,
     });
 
     // 5. Parse response.

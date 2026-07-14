@@ -1,13 +1,13 @@
 import { loadConfig, type Config } from "../config.ts";
 import { discoverAllBots, resolveSummarizerBot, type BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { buildSummarySystemPrompt } from "../summaries/summarizer-shared.ts";
+import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import { setCandidateStatus } from "../db/summary-candidates.ts";
 import {
+  attachRun,
   createJob,
   updateStatus,
   appendText,
@@ -308,12 +308,20 @@ URL: ${url}`;
       }
     };
 
-    const result = await executeOneShot(
-      content.text,
+    const result = await runCaptureOneShot({
+      // The `anthropic` capture covers both the Anthropic firehose and X-post
+      // candidates (`sourceDocId` set) — one shelf, one vertical.
+      source: "anthropic",
+      jobId,
+      title,
+      url,
+      prompt: content.text,
+      systemPrompt,
       config,
       botConfig,
-      { systemPrompt, onProgress },
-    );
+      attachRun,
+      onProgress,
+    });
 
     // 3. Parse response. Clamp to ai/* — the anthropic-summaries collection only
     //    accepts those (Huginn allowlist); a stray valid-but-non-ai category
