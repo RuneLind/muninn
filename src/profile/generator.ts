@@ -99,7 +99,8 @@ export async function refreshInterestProfile(
   // /agents Running list until restart).
   let tracer: Tracer | undefined;
   let reqId: string | undefined;
-  let usage: { model?: string; inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
+  let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
+  let model: string | undefined;
   let status: "ok" | "error" = "ok";
 
   try {
@@ -137,13 +138,13 @@ export async function refreshInterestProfile(
     const { result } = haiku;
 
     usage = {
-      model: haiku.model,
       inputTokens: haiku.inputTokens,
       outputTokens: haiku.outputTokens,
       ...(haiku.numTurns !== undefined ? { numTurns: haiku.numTurns } : {}),
     };
-    tracer.end("haiku", usage);
-    if (haiku.model) agentStatus.setModel(reqId, haiku.model);
+    model = haiku.model;
+    tracer.end("haiku", { ...usage, model });
+    if (model) agentStatus.setModel(reqId, model);
 
     const profile = result.trim();
     if (!profile) {
@@ -175,6 +176,10 @@ export async function refreshInterestProfile(
   } catch (err) {
     status = "error";
     const message = err instanceof Error ? err.message : String(err);
+    // End the span too, not just the root: a Haiku call that throws (timeout,
+    // backend down) still ran for a while, and an unended span carries no
+    // duration at all in the waterfall.
+    tracer?.end("haiku", { error: message });
     tracer?.finish("error", { error: message });
     log.error("Interest-profile refresh failed: {error}", {
       botName,
@@ -182,7 +187,7 @@ export async function refreshInterestProfile(
       error: message,
     });
   } finally {
-    if (status === "ok") tracer?.finish("ok", usage);
+    if (status === "ok") tracer?.finish("ok", { ...usage, ...(model ? { model } : {}) });
     if (reqId) agentStatus.completeRequest(reqId, usage);
   }
 }
