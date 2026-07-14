@@ -230,7 +230,9 @@ describe("createJobStore — AgentRun registry mirror", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]!.name).toBe("YouTube: Cool video");
     expect(runs[0]!.completed).toBeFalsy();
-    expect(runs[0]!.botName).toBe(""); // capture jobs aren't bot-scoped
+    // Empty until the summarizer resolves the bot and calls attachRun — createJob
+    // runs at route level, before the summarizer bot is known.
+    expect(runs[0]!.botName).toBe("");
   });
 
   test("name falls back to the url when the job has no title", () => {
@@ -281,5 +283,85 @@ describe("createJobStore — AgentRun registry mirror", () => {
     await new Promise((r) => setTimeout(r, 30));
     // The TTL cleanup dropped the job AND completed the dangling registry run.
     expect(captureRuns().every((r) => r.completed)).toBe(true);
+  });
+});
+
+// ── attachRun: late-bound telemetry (bot / model / trace / tokens) ────────────
+// The run starts at createJob, before the summarizer bot is resolved and before
+// the model call — so everything worth showing on the card is bound afterwards.
+
+describe("createJobStore — attachRun", () => {
+  beforeEach(() => agentStatus.clearRequest());
+
+  function store() {
+    return createJobStore<Status, { videoId: string }>({
+      subsystem: "test",
+      label: "YouTube",
+      initialStatus: "pending",
+    });
+  }
+
+  function liveRun() {
+    return agentStatus.getAll().filter((r) => r.kind === "capture")[0]!;
+  }
+
+  test("binds bot, connector and model onto the LIVE run", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { botName: "jarvis", connectorLabel: "Claude SDK", model: "claude-sonnet-5" });
+
+    const run = liveRun();
+    expect(run.botName).toBe("jarvis");
+    expect(run.connectorLabel).toBe("Claude SDK");
+    expect(run.model).toBe("claude-sonnet-5");
+    expect(run.completed).toBeFalsy();
+  });
+
+  test("parks trace + tokens and hands them to completeRequest at the terminal transition", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { botName: "jarvis", traceId: "trace-abc" });
+    s.attachRun(id, { model: "claude-sonnet-5", inputTokens: 12_000, outputTokens: 900, numTurns: 1, toolCount: 3 });
+
+    s.completeJob(id, "summary", "ai/general");
+
+    // The ring snapshot is what /agents "Recently finished" renders.
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring).toHaveLength(1);
+    expect(ring[0]!).toMatchObject({
+      botName: "jarvis",
+      model: "claude-sonnet-5",
+      traceId: "trace-abc",
+      inputTokens: 12_000,
+      outputTokens: 900,
+      toolCount: 3,
+    });
+  });
+
+  test("telemetry bound before a FAILING job still lands on the ring row", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.attachRun(id, { botName: "jarvis", traceId: "trace-err", inputTokens: 500 });
+    s.failJob(id, "boom");
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.traceId).toBe("trace-err");
+    expect(ring[0]!.inputTokens).toBe(500);
+  });
+
+  test("unknown jobId is a silent no-op (never throws)", () => {
+    const s = store();
+    expect(() => s.attachRun("no-such-job", { botName: "jarvis" })).not.toThrow();
+  });
+
+  test("attachRun after the job settled does not resurrect the run", () => {
+    const s = store();
+    const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
+    s.completeJob(id, "summary", "cat");
+    s.attachRun(id, { botName: "late", inputTokens: 999 });
+
+    const ring = agentStatus.getRecentCompleted().filter((r) => r.kind === "capture");
+    expect(ring[0]!.botName).toBe("");
+    expect(ring[0]!.inputTokens).toBeUndefined();
   });
 });

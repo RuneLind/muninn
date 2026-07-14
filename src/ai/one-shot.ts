@@ -50,6 +50,19 @@ export interface OneShotOptions {
   systemPrompt?: string;
   /** Response timeout override in ms. Falls back to the bot/global default. */
   timeoutMs?: number;
+  /**
+   * Thinking-budget override for this call (`0` disables thinking entirely).
+   * Falls back to the bot's `thinkingMaxTokens`.
+   *
+   * A one-shot job inherits the bot's CHAT thinking budget, which is tuned for
+   * open-ended conversation — jarvis carries 40k. On a batch transform (the
+   * capture summarizers) that budget is spent as silent dead-air before the
+   * first token: measured on a real 2.3k-word transcript, 40k thinking took
+   * 9.5s to first token / 23.8s total, versus 2.5s / 17.2s at an 8k cap, with
+   * no loss of summary quality. Callers whose work genuinely benefits from
+   * deep reasoning simply omit this and keep the bot's budget.
+   */
+  thinkingMaxTokens?: number;
   /** Streaming progress callback (text deltas, tool events). */
   onProgress?: StreamProgressCallback;
   /**
@@ -93,7 +106,7 @@ export async function executeOneShot(
   botConfig: BotConfig,
   opts: OneShotOptions = {},
 ): Promise<ClaudeExecResult> {
-  const { systemPrompt, timeoutMs, onProgress, extraDirs } = opts;
+  const { systemPrompt, timeoutMs, thinkingMaxTokens, onProgress, extraDirs } = opts;
 
   checkPromptResolved(prompt);
 
@@ -101,6 +114,10 @@ export async function executeOneShot(
 
   if (timeoutMs !== undefined) {
     effective = { ...effective, timeoutMs };
+  }
+
+  if (thinkingMaxTokens !== undefined) {
+    effective = { ...effective, thinkingMaxTokens };
   }
 
   if (extraDirs && extraDirs.length > 0) {

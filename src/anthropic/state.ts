@@ -39,6 +39,7 @@ const store = createJobStore<JobStatus, { candidateId: string; docId?: string }>
 });
 
 export const {
+  attachRun,
   getJob,
   getRecentJobs,
   updateStatus,

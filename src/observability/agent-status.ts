@@ -253,6 +253,16 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
+  /** Late-bind the bot that actually ran this job. The capture verticals start
+   *  their run at `createJob` (route level, before the summarizer bot is
+   *  resolved), so their card would otherwise carry an empty bot chip. */
+  setBotName(requestId: string, botName: string) {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    req.botName = botName;
+    this.notifyProgress();
+  }
+
   /** Live token counts (from `usage_progress` stream events) so a Running card
    *  shows growing in/out tokens before the run completes. `completeRequest`
    *  overwrites these with the final totals. */

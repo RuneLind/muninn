@@ -35,6 +35,7 @@ const store = createJobStore<JobStatus, { videoId: string }>({
 });
 
 export const {
+  attachRun,
   getJob,
   getRecentJobs,
   updateStatus,

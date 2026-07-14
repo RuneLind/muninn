@@ -1,7 +1,145 @@
 import { getLog } from "../logging.ts";
-import type { SimilarArticle } from "./job-store.ts";
+import type { Config } from "../config.ts";
+import type { BotConfig } from "../bots/config.ts";
+import type { ClaudeExecResult } from "../ai/executor.ts";
+import type { StreamProgressCallback } from "../ai/stream-parser.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
+import { Tracer } from "../tracing/tracer.ts";
+import { attachToolSpans } from "../core/tool-spans.ts";
+import { getConnectorLabel } from "../observability/agent-status.ts";
+import type { RunMeta, SimilarArticle } from "./job-store.ts";
 
 const log = getLog("summaries", "ingest");
+const captureLog = getLog("summaries", "capture");
+
+/**
+ * Thinking budget for a capture summarization.
+ *
+ * A capture job inherits its bot's CHAT thinking budget (jarvis: 40k), which on
+ * a batch transform is spent as silent dead-air before the first streamed token.
+ * Measured against a real 2.3k-word YouTube transcript on jarvis/claude-sdk:
+ *
+ *   40k thinking → 9.5s to first token, 23.8s total
+ *    8k thinking → 2.5s to first token, 17.2s total
+ *    0  thinking → 2.5s to first token, 17.4s total
+ *
+ * 8k is the knee: it buys back the dead-air (identical to disabling thinking
+ * outright) while leaving headroom for a messy transcript — and it matches the
+ * cap the gardener already puts on its drafts.
+ */
+export const CAPTURE_THINKING_MAX_TOKENS = 8000;
+
+export interface CaptureOneShotOptions {
+  /** Vertical id — names the trace root span, e.g. `capture:youtube`. */
+  source: string;
+  jobId: string;
+  /** Job subject — stamped on the trace so `/traces` rows are readable. */
+  title: string;
+  url: string;
+  prompt: string;
+  systemPrompt: string;
+  config: Config;
+  botConfig: BotConfig;
+  /** The vertical's job-store `attachRun` — late-binds telemetry onto the run. */
+  attachRun: (jobId: string, meta: RunMeta) => void;
+  onProgress?: StreamProgressCallback;
+  timeoutMs?: number;
+  extraDirs?: string[];
+  /**
+   * Thinking budget. Defaults to {@link CAPTURE_THINKING_MAX_TOKENS}; pass
+   * `null` to inherit the bot's own budget (TikTok does — its multi-turn frame
+   * reading is genuine visual reasoning, and as a ~10-min background job it has
+   * no first-token latency to protect).
+   */
+  thinkingMaxTokens?: number | null;
+  /** Test seams — production callers pass neither. */
+  oneShot?: typeof executeOneShot;
+  tracer?: Tracer;
+}
+
+/**
+ * Run a capture vertical's model call with observability attached.
+ *
+ * The four capture summarizers (youtube / x-article / tiktok / anthropic) used
+ * to call `executeOneShot` bare: no `Tracer`, so a user-triggered summarize left
+ * NOTHING on `/traces`, and its `/agents` row carried no bot, model, tokens or
+ * trace link. This is the one seam they all route through, so a capture job now
+ * traces like a chat turn does — a `capture:<source>` root with a `claude` child
+ * span carrying model + tokens + cost, tool child spans underneath it (TikTok's
+ * frame Reads), and the same telemetry mirrored onto the `/agents` card.
+ *
+ * Fail-soft by construction: the trace is stamped `error` and re-thrown, so the
+ * caller's existing `failJob` path is unchanged.
+ */
+export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<ClaudeExecResult> {
+  const { source, jobId, title, url, config, botConfig, attachRun } = opts;
+
+  const tracer = opts.tracer ?? new Tracer(`capture:${source}`, {
+    botName: botConfig.name,
+    platform: "capture",
+  });
+  const oneShot = opts.oneShot ?? executeOneShot;
+
+  const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
+  // Bind what's already known so the *in-flight* card is truthful; the model
+  // string is the configured one here and is overwritten below with what the
+  // connector actually reported.
+  attachRun(jobId, {
+    botName: botConfig.name,
+    connectorLabel,
+    ...(botConfig.model ? { model: botConfig.model } : {}),
+    traceId: tracer.traceId,
+  });
+
+  const thinking = opts.thinkingMaxTokens === undefined
+    ? CAPTURE_THINKING_MAX_TOKENS
+    : opts.thinkingMaxTokens;
+
+  tracer.start("claude", {
+    source,
+    title,
+    url,
+    connector: botConfig.connector ?? "claude-cli",
+    model: botConfig.model,
+    ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+  });
+
+  try {
+    const result = await oneShot(opts.prompt, config, botConfig, {
+      systemPrompt: opts.systemPrompt,
+      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
+      ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+    });
+
+    const usage = {
+      model: result.model,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      numTurns: result.numTurns,
+      toolCount: result.toolCalls?.length ?? 0,
+    };
+
+    tracer.end("claude", { ...usage, costUsd: result.costUsd, durationMs: result.durationMs });
+    // Tool child spans hang off the `claude` span, exactly as on the chat path.
+    await attachToolSpans(tracer, result.toolCalls, !!config.tracingCaptureToolOutputs);
+    attachRun(jobId, usage);
+    tracer.finish("ok", { source, ...usage });
+
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    tracer.end("claude", { error: message });
+    tracer.finish("error", { source, error: message });
+    captureLog.warn("Capture summarize failed for {source} job {jobId}: {error}", {
+      source,
+      jobId,
+      error: message,
+    });
+    throw err;
+  }
+}
 
 /** Default structured-summary bullet list under step 3 of the scaffold. */
 const DEFAULT_STRUCTURE_BULLETS = [
