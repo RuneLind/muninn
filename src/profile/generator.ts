@@ -5,6 +5,8 @@ import { getInterestProfile, upsertInterestProfile } from "../db/interest-profil
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
+import { Tracer } from "../tracing/tracer.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("profile", "generator");
@@ -91,6 +93,15 @@ export async function refreshInterestProfile(
   botName: string,
   opts: RefreshOptions = {},
 ): Promise<void> {
+  // Declared out here so the `finally` settles them on EVERY path — including the
+  // empty-output and shape-gate early returns, which neither throw nor fall
+  // through to the end (a run registered but never completed would sit on the
+  // /agents Running list until restart).
+  let tracer: Tracer | undefined;
+  let reqId: string | undefined;
+  let usage: { model?: string; inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
+  let status: "ok" | "error" = "ok";
+
   try {
     const [goals, memories] = await Promise.all([
       getActiveGoals(userId, botName),
@@ -102,8 +113,20 @@ export async function refreshInterestProfile(
       return;
     }
 
+    // Observability starts HERE, not at function entry: the skip above fires on
+    // every tick for an empty user, and registering earlier would spam /agents
+    // with flash-runs and /traces with empty traces. From this point on there IS
+    // a model call to account for. `profile` was a declared AgentKind with no
+    // producer until now — the weekly distillation ran entirely unobserved.
+    tracer = new Tracer("interest_profile", { botName, userId, platform: "profile" });
+    reqId = agentStatus.startRequest(botName, "calling_claude", undefined, {
+      kind: "profile",
+      name: `Interest profile: ${botName}`,
+    });
+    tracer.start("haiku", { goals: goals.length, memories: memories.length });
+
     const prompt = buildPrompt(goals, memories);
-    const { result } = await callHaikuWithFallback(prompt, {
+    const haiku = await callHaikuWithFallback(prompt, {
       source: "interest_profile",
       entrypoint: `${botName}-interest-profile`,
       botName,
@@ -111,6 +134,16 @@ export async function refreshInterestProfile(
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,
     });
+    const { result } = haiku;
+
+    usage = {
+      model: haiku.model,
+      inputTokens: haiku.inputTokens,
+      outputTokens: haiku.outputTokens,
+      ...(haiku.numTurns !== undefined ? { numTurns: haiku.numTurns } : {}),
+    };
+    tracer.end("haiku", usage);
+    if (haiku.model) agentStatus.setModel(reqId, haiku.model);
 
     const profile = result.trim();
     if (!profile) {
@@ -140,11 +173,17 @@ export async function refreshInterestProfile(
       memories: memories.length,
     });
   } catch (err) {
+    status = "error";
+    const message = err instanceof Error ? err.message : String(err);
+    tracer?.finish("error", { error: message });
     log.error("Interest-profile refresh failed: {error}", {
       botName,
       userId,
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
     });
+  } finally {
+    if (status === "ok") tracer?.finish("ok", usage);
+    if (reqId) agentStatus.completeRequest(reqId, usage);
   }
 }
 

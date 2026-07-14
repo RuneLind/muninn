@@ -193,7 +193,7 @@ export async function renderAgentsPage(): Promise<string> {
     var kindLabels = {
       chat: 'Chat', scheduled_task: 'Task', watcher: 'Watcher',
       gardener_drain: 'Gardener', capture: 'Capture', research: 'Research',
-      extractor: 'Extractor', profile: 'Profile'
+      digest: 'Wiki digest', extractor: 'Extractor', profile: 'Profile'
     };
 
     var selectedBot = '';

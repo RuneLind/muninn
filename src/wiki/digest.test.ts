@@ -5,6 +5,8 @@ import path from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
+import type { Tracer } from "../tracing/index.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 import {
   parseLogEntries,
   selectRecentEntries,
@@ -311,4 +313,79 @@ describe("newestLogEntryDate", () => {
 test("DIGEST_MAX_BYTES is a reasonable prompt bound", () => {
   expect(DIGEST_MAX_BYTES).toBeGreaterThan(1000);
   expect(DIGEST_MAX_BYTES).toBeLessThan(100_000);
+});
+
+// ── Observability ────────────────────────────────────────────────────────────
+// The digest fires whenever a reader opens /wiki (cache miss). It used to leave
+// nothing behind on either dashboard, so a slow or failing digest was invisible.
+
+describe("generateWikiDigest — observability", () => {
+  let root: string;
+  let index: WikiIndex;
+  const config = { tracingEnabled: true } as Config;
+  const bot = { name: "jarvis", dir: "/tmp/jarvis" } as BotConfig;
+
+  beforeEach(async () => {
+    agentStatus.clearRequest(); // reset the singleton between cases
+    root = await mkdtemp(path.join(tmpdir(), "wiki-digest-obs-"));
+    await Bun.write(path.join(root, "log.md"), SAMPLE_LOG);
+    index = await buildWikiIndex(root);
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function recordingTracer() {
+    const spans: Array<{ op: string; label?: string; attrs?: Record<string, unknown> }> = [];
+    const tracer = {
+      traceId: "digest-trace-1",
+      start(label: string, attrs?: Record<string, unknown>) { spans.push({ op: "start", label, attrs }); return "s"; },
+      end(label: string, attrs?: Record<string, unknown>) { spans.push({ op: "end", label, attrs }); return 1; },
+      finish(status: "ok" | "error", attrs?: Record<string, unknown>) { spans.push({ op: "finish:" + status, attrs }); },
+      addChildSpan() { return "c"; },
+      addSubSpan() { return "s"; },
+    } as unknown as Tracer;
+    return { tracer, spans };
+  }
+
+  const okResult = { result: "- Grew a page", model: "claude-sonnet-5", inputTokens: 900, outputTokens: 80 } as ClaudeExecResult;
+
+  test("traces the model call and settles a completed digest run on /agents", async () => {
+    const { tracer, spans } = recordingTracer();
+    await generateWikiDigest(root, index, config, bot, { tracer, oneShot: async () => okResult });
+
+    const end = spans.find((s) => s.op === "end" && s.label === "claude")!;
+    expect(end.attrs).toMatchObject({ model: "claude-sonnet-5", inputTokens: 900, outputTokens: 80 });
+    expect(spans.some((s) => s.op === "finish:ok")).toBe(true);
+
+    const runs = agentStatus.getRecentCompleted().filter((r) => r.kind === "digest");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!).toMatchObject({ botName: bot.name, outputTokens: 80, traceId: "digest-trace-1" });
+    expect(agentStatus.getAll().some((r) => r.kind === "digest" && !r.completed)).toBe(false);
+  });
+
+  test("a failing digest stamps the trace error and settles the run (no leak)", async () => {
+    const { tracer, spans } = recordingTracer();
+    await expect(
+      generateWikiDigest(root, index, config, bot, {
+        tracer,
+        oneShot: async () => { throw new Error("connector down"); },
+      }),
+    ).rejects.toThrow("connector down");
+
+    expect(spans.find((s) => s.op === "finish:error")!.attrs).toMatchObject({ error: "connector down" });
+    expect(agentStatus.getAll().some((r) => r.kind === "digest" && !r.completed)).toBe(false);
+  });
+
+  test("a wiki with no log.md registers NO run at all (the model is never called)", async () => {
+    const empty = await mkdtemp(path.join(tmpdir(), "wiki-nolog-obs-"));
+    try {
+      const emptyIndex = await buildWikiIndex(empty);
+      await generateWikiDigest(empty, emptyIndex, config, bot, { oneShot: async () => okResult });
+      expect(agentStatus.getAll().filter((r) => r.kind === "digest")).toHaveLength(0);
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
+  });
 });

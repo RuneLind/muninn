@@ -1,4 +1,5 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
+import { agentStatus } from "../observability/agent-status.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // This file is run in an ISOLATED `bun test src/profile/` process (see the
@@ -150,5 +151,53 @@ describe("loadInterestProfileForBot", () => {
   test("returns null (never throws) on a DB error", async () => {
     defaultUserThrows = true;
     expect(await loadInterestProfileForBot("jarvis")).toBeNull();
+  });
+});
+
+// ── Observability ────────────────────────────────────────────────────────────
+// `profile` was a declared AgentKind with no producer: the weekly distillation
+// ran entirely unobserved. Recent rows come from its `haiku_usage` row (the
+// extractor path), so the registry run is the LIVE signal — and it must settle
+// on every path, including the two early returns that neither throw nor fall
+// through (empty output, shape gate).
+
+describe("refreshInterestProfile — observability", () => {
+  beforeEach(() => agentStatus.clearRequest());
+
+  function profileRuns() {
+    return agentStatus.getAll().filter((r) => r.kind === "profile");
+  }
+
+  test("registers a profile run carrying the bot, model and tokens", async () => {
+    goals = [{ title: "Ship the agent dashboard", description: "", tags: [] }] as never;
+    await refreshInterestProfile("user-1", "jarvis");
+
+    const runs = agentStatus.getRecentCompleted().filter((r) => r.kind === "profile");
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!).toMatchObject({
+      botName: "jarvis",
+      name: "Interest profile: jarvis",
+      model: "claude-haiku-4-5-20251001",
+      inputTokens: 100,
+      outputTokens: 40,
+    });
+    expect(profileRuns().some((r) => !r.completed)).toBe(false);
+  });
+
+  test("registers NO run when there is nothing to distil (the skip path)", async () => {
+    goals = [];
+    memories = [];
+    await refreshInterestProfile("user-1", "jarvis");
+    // Registering before the skip would flash a run on /agents every scheduler tick.
+    expect(profileRuns()).toHaveLength(0);
+  });
+
+  test("settles the run when the output fails the shape gate (early return, no throw)", async () => {
+    goals = [{ title: "Ship it", description: "", tags: [] }] as never;
+    haikuResult = "I'm sorry, I can't help with that."; // no bullets ⇒ shape gate rejects
+    await refreshInterestProfile("user-1", "jarvis");
+
+    expect(upsertCalls).toHaveLength(0);           // nothing persisted
+    expect(profileRuns().some((r) => !r.completed)).toBe(false); // but the run still settled
   });
 });

@@ -45,6 +45,7 @@ const RING_RECENT_KINDS: ReadonlySet<AgentKind> = new Set<AgentKind>([
   "gardener_drain",
   "capture",
   "research",
+  "digest",
   "scheduled_task",
 ]);
 
@@ -235,6 +236,7 @@ const GARDENER_SOURCE_LABELS: Record<string, string> = {
   wiki_gardener_cluster: "Gardener: cluster",
   wiki_gardener_triage: "Gardener: triage",
   wiki_gardener_draft: "Gardener: draft",
+  interest_profile: "Interest profile",
 };
 
 function extractorToRecent(r: RecentExtractorRow): RecentEntry {
@@ -272,6 +274,7 @@ function kindLabel(kind?: AgentKind): string {
     case "gardener_drain": return "Gardener drain";
     case "capture": return "Capture job";
     case "research": return "Research";
+    case "digest": return "Wiki digest";
     case "scheduled_task": return "Scheduled task";
     case "extractor": return "Extractor";
     case "watcher": return "Watcher";

@@ -157,6 +157,12 @@ export interface RecentExtractorRow {
  * run's duration only, while these rows add the per-call token counts. The
  * weekly gardener's `watcher:wiki-gardener` trace row likewise carries no tokens
  * (gardener isn't wired to runner telemetry), so no token number is duplicated.
+ *
+ * `interest_profile` (the weekly profile distillation) is included on the same
+ * reasoning: it runs through `callHaikuWithFallback`, so `haiku_usage` is the
+ * only durable record of its tokens. Its `kind:"profile"` registry run is NOT in
+ * `RING_RECENT_KINDS`, so the ring row surfaces it live on Running only and
+ * cannot double it up in Recent.
  */
 export async function getRecentExtractorUsage(limit = 40, windowHours = 48): Promise<RecentExtractorRow[]> {
   const sql = getDb();
@@ -165,7 +171,8 @@ export async function getRecentExtractorUsage(limit = 40, windowHours = 48): Pro
     FROM haiku_usage
     WHERE source IN (
         'memory', 'goals', 'schedule',
-        'wiki_gardener_cluster', 'wiki_gardener_triage', 'wiki_gardener_draft'
+        'wiki_gardener_cluster', 'wiki_gardener_triage', 'wiki_gardener_draft',
+        'interest_profile'
       )
       AND created_at >= now() - make_interval(hours => ${windowHours})
     ORDER BY created_at DESC
