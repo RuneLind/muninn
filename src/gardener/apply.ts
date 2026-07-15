@@ -27,7 +27,7 @@ import path from "node:path";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
-import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine } from "./wire.ts";
+import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages } from "./wire.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { sha256, todayOslo } from "./util.ts";
@@ -352,12 +352,11 @@ async function runWireStage(
     }
   }
 
-  // (b) Inbound See-also links from related pages that still resolve.
-  for (const rp of (proposal.relatedPages ?? []).slice(0, 3)) {
-    const page = index?.resolve(rp.title) ?? (rp.relPath ? index?.resolveRelPath(rp.relPath) : undefined);
-    if (!page) continue;
+  // (b) Inbound See-also links from related pages that still resolve. Selection
+  //     (slice(0,3) → resolve → skip self-links) is the shared `selectWirablePages`
+  //     helper so the review-gate preview can't promise a backlink apply skips.
+  for (const { page } of selectWirablePages(proposal.relatedPages, index, proposal.targetPath)) {
     const relPath = page.relPath;
-    if (relPath === proposal.targetPath) continue; // never link a page to itself
     // Pure-confinement semantics (existingRelPath supplied): rel === the page's own
     // path, and FORBIDDEN_BASENAMES (log.md/index.md/CLAUDE.md) is rejected first —
     // so this path can never touch wiki infrastructure files.

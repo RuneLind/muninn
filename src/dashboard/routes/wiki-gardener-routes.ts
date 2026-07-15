@@ -4,7 +4,7 @@ import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
-import { buildIndexEntry } from "../../gardener/wire.ts";
+import { buildIndexEntry, selectWirablePages } from "../../gardener/wire.ts";
 import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
@@ -591,10 +591,9 @@ export function registerWikiGardenerRoutes(
             rationale: p.rationale,
             body: stripFrontmatter(p.draft),
           });
-          const seeAlso = (p.relatedPages ?? [])
-            .filter((rp) => !!resolve(rp.title))
-            .slice(0, 3)
-            .map((rp) => rp.title);
+          const seeAlso = selectWirablePages(p.relatedPages, index, p.targetPath).map(
+            (wp) => wp.title,
+          );
           wiring = {
             indexLine: entry ? entry.line : null,
             indexSkipEntity: p.kind === "entity",

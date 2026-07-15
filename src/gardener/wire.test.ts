@@ -1,5 +1,32 @@
 import { test, expect, describe } from "bun:test";
-import { buildIndexEntry, insertIndexLine, buildSeeAlsoEdit } from "./wire.ts";
+import { buildIndexEntry, insertIndexLine, buildSeeAlsoEdit, selectWirablePages } from "./wire.ts";
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
+
+/**
+ * Minimal WikiIndex fake: `pages` are { title → relPath }. `resolve` matches by
+ * title (case-insensitive), `resolveRelPath` by exact relPath — enough to drive
+ * `selectWirablePages` without a filesystem.
+ */
+function fakeIndex(pages: Record<string, string>): WikiIndex {
+  const metas: WikiPageMeta[] = Object.entries(pages).map(([name, relPath]) => ({
+    name,
+    title: name,
+    type: "concept",
+    domain: relPath.startsWith("life/") ? "life" : "ai",
+    tags: [],
+    aliases: [],
+    relPath,
+  }));
+  return {
+    pages: metas,
+    outgoing: new Map(),
+    backlinks: new Map(),
+    resolve: (target: string) => metas.find((m) => m.name.toLowerCase() === target.toLowerCase()),
+    resolveRelPath: (relPath: string) => metas.find((m) => m.relPath === relPath),
+    scannedAt: 0,
+    root: "/fake",
+  };
+}
 
 describe("buildIndexEntry", () => {
   test("concept + ai → AI / Claude / Coding section, rationale one-liner", () => {
@@ -157,5 +184,54 @@ describe("buildSeeAlsoEdit", () => {
 
   test("blank title ⇒ null", () => {
     expect(buildSeeAlsoEdit(PAGE, "  ")).toBeNull();
+  });
+});
+
+describe("selectWirablePages", () => {
+  test("reproduced case: [unresolvable, A, B, C] — slice(0,3) BEFORE resolve, so C is dropped", () => {
+    // The exact review-finding case: the old preview did filter-then-slice, which
+    // kept A,B,C and promised C a backlink apply never made (apply slices first,
+    // seeing [unresolvable, A, B] → only A, B resolve). Both now agree on A, B.
+    const index = fakeIndex({
+      A: "concepts/A.md",
+      B: "concepts/B.md",
+      C: "concepts/C.md",
+    });
+    const related = [
+      { title: "Nope" }, // unresolvable
+      { title: "A" },
+      { title: "B" },
+      { title: "C" },
+    ];
+    const picked = selectWirablePages(related, index, "concepts/New.md");
+    expect(picked.map((p) => p.title)).toEqual(["A", "B"]);
+    expect(picked.map((p) => p.page.relPath)).toEqual(["concepts/A.md", "concepts/B.md"]);
+  });
+
+  test("falls back to relPath when the title no longer resolves", () => {
+    const index = fakeIndex({ Renamed: "concepts/RAG.md" });
+    const picked = selectWirablePages(
+      [{ title: "RAG", relPath: "concepts/RAG.md" }],
+      index,
+      "concepts/New.md",
+    );
+    expect(picked.map((p) => p.page.relPath)).toEqual(["concepts/RAG.md"]);
+  });
+
+  test("skips a self-link (a related page resolving to targetPath)", () => {
+    const index = fakeIndex({ Self: "concepts/New.md", Other: "concepts/Other.md" });
+    const picked = selectWirablePages(
+      [{ title: "Self" }, { title: "Other" }],
+      index,
+      "concepts/New.md",
+    );
+    expect(picked.map((p) => p.title)).toEqual(["Other"]);
+  });
+
+  test("null / empty related pages, or null index ⇒ []", () => {
+    const index = fakeIndex({ A: "concepts/A.md" });
+    expect(selectWirablePages(null, index, "concepts/New.md")).toEqual([]);
+    expect(selectWirablePages([], index, "concepts/New.md")).toEqual([]);
+    expect(selectWirablePages([{ title: "A" }], null, "concepts/New.md")).toEqual([]);
   });
 });

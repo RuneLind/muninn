@@ -14,7 +14,45 @@
  * All three are string-in / string-out with no DB, no filesystem, no markdown
  * library — plain line-scanning like `insertLogEntry` (apply.ts). The apply step
  * wires the filesystem reads/writes around them and swallows per-file failures.
+ *
+ * A fourth pure helper, `selectWirablePages`, picks WHICH related pages the wire
+ * stage backlinks — shared by apply and the review-gate preview so the two can't
+ * drift on selection order.
  */
+
+import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
+import type { WikiProposalRelatedPage } from "../db/wiki-proposals.ts";
+
+/** A related page the wire stage will attempt to backlink (title + resolved page). */
+export interface WirablePage {
+  /** The related page's title as it will be linked (`[[title]]`). */
+  title: string;
+  /** The resolved wiki page — its `relPath`/`domain` drive apply's confinement + edit. */
+  page: WikiPageMeta;
+}
+
+/**
+ * The related pages the wire stage will attempt to backlink, in apply's EXACT
+ * selection order so the review-gate preview can't drift from what apply does:
+ * take the first 3 related pages, resolve each (by title, then `relPath`
+ * fallback), drop the unresolvable ones, and skip self-links (a page resolving
+ * back to `targetPath`). PURE — no filesystem: apply's further already-linked and
+ * path-confinement skips need file reads and stay in apply.ts.
+ */
+export function selectWirablePages(
+  relatedPages: WikiProposalRelatedPage[] | null | undefined,
+  index: WikiIndex | null,
+  targetPath: string,
+): WirablePage[] {
+  const out: WirablePage[] = [];
+  for (const rp of (relatedPages ?? []).slice(0, 3)) {
+    const page = index?.resolve(rp.title) ?? (rp.relPath ? index?.resolveRelPath(rp.relPath) : undefined);
+    if (!page) continue;
+    if (page.relPath === targetPath) continue; // never link a page to itself
+    out.push({ title: rp.title, page });
+  }
+  return out;
+}
 
 /** Concept index section per domain — heading strings must byte-match index.md. */
 const CONCEPT_SECTION: Record<"ai" | "life", string> = {
