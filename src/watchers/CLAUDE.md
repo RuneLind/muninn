@@ -26,8 +26,9 @@ Scheduler tick (every 60s)
 
 ## Interest-profile personalization (gate/capture prompts)
 
-The `x` and `anthropic` gate/capture/digest prompts carry a hardcoded BASELINE of
-topics (e.g. "a senior AI engineer who lives in Claude Code…"). On top of that,
+The `x`, `anthropic`, and `email` gate/capture/digest prompts carry a hardcoded
+BASELINE of criteria (topics for x/anthropic; the notify/don't-notify rules for
+email). On top of that,
 each run loads a per-user **interest profile** — a periodically-refreshed
 distillation of the bot user's active goals + recent memories (`interest_profiles`
 table; built by `src/profile/generator.ts` on a scheduler step gated by a
@@ -50,8 +51,16 @@ own; the profile only RAISES relevance for the user's own interests.
   watcher** (`getEnabledWatcherOwners`), not just `bot_default_user`; the
   in-flight guard is keyed `bot:user`. A bot with no enabled watchers refreshes
   nobody.
-- Wired at: the anthropic `runGate` + `runDigest` criteria, and the X `runAlertPath`
-  (highlights/digest) + `runCaptureGate` (capture) prompts.
+- Wired at: the anthropic `runGate` + `runDigest` criteria, the X `runAlertPath`
+  (highlights/digest) + `runCaptureGate` (capture) prompts, and the `email`
+  checker (`checkEmail`). Email's criteria sit mid-prompt (the `CRITICAL` +
+  "Return ONLY a JSON array" format contract comes AFTER the user criteria), so
+  it wraps the **full assembled prompt** — the profile block lands after the
+  format contract, keeping `withInterestProfile`'s "output-format instructions
+  above still apply" trailer truthful — rather than wrapping the criteria alone
+  (which would put that trailer before the format block). Augment-only holds:
+  importance triage still fires on objectively-important mail (payment reminders,
+  security alerts) for topics the profile never mentions.
 - No config knob — personalization is automatic and silent when a profile exists.
   The profile is visible only via the DB this PR (no dashboard UI yet).
 

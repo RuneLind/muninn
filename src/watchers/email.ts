@@ -1,6 +1,8 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
+import { loadInterestProfile } from "../profile/generator.ts";
+import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "email");
@@ -32,8 +34,15 @@ export async function checkEmail(watcher: Watcher, cwd?: string, botName?: strin
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
 
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
+  const interestProfile = await loadInterestProfile(watcher.userId, botName ?? watcher.botName);
 
-  const prompt = `You have access to Gmail MCP tools.
+  // Email's criteria sit mid-prompt (the CRITICAL + "Return ONLY a JSON array"
+  // format contract comes AFTER the user criteria), so we wrap the FULL assembled
+  // prompt — the interest-profile block lands last, after the format contract, and
+  // `withInterestProfile`'s "the output-format instructions above still apply"
+  // trailer then correctly refers to the format block above it. With no profile the
+  // wrapper returns this string verbatim, so the prompt is byte-identical to before.
+  const basePrompt = `You have access to Gmail MCP tools.
 Search for unread emails matching: "${query}"
 
 ${userPrompt}
@@ -46,6 +55,7 @@ CRITICAL:
 Return ONLY a JSON array (no markdown fences):
 [{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
 If nothing worth notifying, return: []`;
+  const prompt = withInterestProfile(basePrompt, interestProfile);
 
   const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", cwd, botName, model: config.model, ...telemetry });
   try {
