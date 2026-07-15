@@ -7,6 +7,8 @@ import {
   normalizeDraftOutput,
   stripOwnedAliases,
   replaceUnresolvedSourceLinks,
+  isHttpUrl,
+  appendPendingIngestionCallout,
   scanUnresolvedBodyLinks,
   containBodyLinks,
   containDraftBodyLinks,
@@ -302,6 +304,67 @@ describe("replaceUnresolvedSourceLinks", () => {
     const out = replaceUnresolvedSourceLinks(draft, { index: index([]), urls: ["https://a.com/x"] });
     expect(out.replaced).toEqual(["A", "B"]);
     expect(out.draft).toContain("sources: [https://a.com/x]");
+  });
+
+  test("non-http(s) urls in opts.urls are ignored (file:// never appended)", () => {
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Phantom]]"), {
+      index: index([]),
+      urls: ["file:///Users/rune/x.md", "https://real.url/x"],
+    });
+    expect(out.replaced).toEqual(["Phantom"]);
+    // Only the http(s) url is appended; the file:// entry is dropped.
+    expect(out.draft).toContain("sources: [https://real.url/x]");
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("only-file:// urls yield an empty sources list (no placeholder invented)", () => {
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Phantom]]"), {
+      index: index([]),
+      urls: ["file:///Users/rune/x.md"],
+    });
+    expect(out.replaced).toEqual(["Phantom"]);
+    expect(out.draft).toContain("sources: []");
+    expect(out.draft).not.toContain("file://");
+  });
+});
+
+describe("isHttpUrl", () => {
+  test("accepts http and https (any case)", () => {
+    expect(isHttpUrl("http://a.com/x")).toBe(true);
+    expect(isHttpUrl("https://a.com/x")).toBe(true);
+    expect(isHttpUrl("  https://a.com/x  ")).toBe(true);
+    expect(isHttpUrl("HTTPS://a.com/x")).toBe(true);
+  });
+
+  test("rejects file://, empty, and non-string", () => {
+    expect(isHttpUrl("file:///Users/rune/x.md")).toBe(false);
+    expect(isHttpUrl("")).toBe(false);
+    expect(isHttpUrl("   ")).toBe(false);
+    expect(isHttpUrl(null)).toBe(false);
+    expect(isHttpUrl(undefined)).toBe(false);
+    expect(isHttpUrl("ftp://a.com/x")).toBe(false);
+  });
+});
+
+describe("appendPendingIngestionCallout", () => {
+  const draft = `---\ntype: concept\ntitle: New Page\nsources: []\n---\n\n# New Page\n\nBody.`;
+
+  test("no pending docs → draft returned unchanged (byte-identical)", () => {
+    expect(appendPendingIngestionCallout(draft, [])).toBe(draft);
+  });
+
+  test("one callout with one line per pending doc", () => {
+    const out = appendPendingIngestionCallout(draft, [
+      { collection: "youtube-summaries", docId: "a.md" },
+      { collection: "x-summaries", docId: "b.md" },
+    ]);
+    // Exactly one callout header.
+    expect(out.match(/> \[!note\] Source pending ingestion/g)).toHaveLength(1);
+    expect(out).toContain("> `youtube-summaries/a.md` has no public URL yet.");
+    expect(out).toContain("> `x-summaries/b.md` has no public URL yet.");
+    // Appended after the existing body, separated by a blank line.
+    expect(out.startsWith(draft.replace(/\s+$/, ""))).toBe(true);
+    expect(out).toContain("Body.\n\n> [!note] Source pending ingestion");
   });
 });
 

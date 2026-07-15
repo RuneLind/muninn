@@ -22,8 +22,10 @@ import { harvestDocs } from "./harvest.ts";
 import { buildClusterPrompt, existingPageLines, filterClusters, parseClusters } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
 import {
+  appendPendingIngestionCallout,
   buildDraftPrompt,
   containDraftBodyLinks,
+  isHttpUrl,
   normalizeDraftOutput,
   replaceUnresolvedSourceLinks,
   shapeGate,
@@ -346,8 +348,13 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     // frontmatter `sources:` list with the cluster's real source_docs URLs — the
     // drafter can't see which source pages exist, so an invented ref is a broken
     // link. Mutates the stored draft, so it must run before insert.
+    // Only PUBLIC (http/https) URLs may be appended into `sources:`. huginn
+    // stores a machine-local `file://…` path for a not-yet-ingested local doc
+    // (harvest.ts flows it straight into HarvestedDoc.url); filtering it here —
+    // and again inside replaceUnresolvedSourceLinks — stops that path leaking
+    // into a shipped page's citation trail. An empty `sources: []` is fine.
     const sourceDocs = sourceDocsFor(cluster, byKey);
-    const sourceUrls = sourceDocs.map((d) => d.url).filter((u): u is string => !!u);
+    const sourceUrls = sourceDocs.map((d) => d.url).filter((u): u is string => isHttpUrl(u));
     const relinked = replaceUnresolvedSourceLinks(dealiased.draft, { index, urls: sourceUrls });
     if (relinked.replaced.length > 0) {
       log.warn("Gardener draft for {topic}: replaced unresolved source link(s) with URLs: {links}", {
@@ -389,6 +396,21 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
     }
 
+    // Pending-ingestion callout (after containment, before insert): for any
+    // cluster doc whose URL was filtered out above (non-http/https or empty),
+    // append ONE callout listing them so the citation is honest — the source
+    // exists but has no public URL yet. Byte-identical to today when every doc
+    // has a real URL (the common case): appendPendingIngestionCallout no-ops.
+    const pendingDocs = sourceDocs.filter((d) => !isHttpUrl(d.url));
+    const finalDraft = appendPendingIngestionCallout(containedDraft, pendingDocs);
+    if (pendingDocs.length > 0) {
+      log.info("Gardener draft for {topic}: {count} source(s) pending ingestion (no public URL)", {
+        botName,
+        topic: cluster.topicKey,
+        count: pendingDocs.length,
+      });
+    }
+
     try {
       const row = await deps.insertProposal({
         botName,
@@ -397,7 +419,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         mode: target.mode,
         targetPath: target.targetPath,
         baseHash,
-        draft: containedDraft.trim(),
+        draft: finalDraft.trim(),
         sourceDocs,
         rationale: cluster.rationale ?? null,
         containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,

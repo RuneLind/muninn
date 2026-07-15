@@ -14,6 +14,7 @@ import {
   backlogOutcomeHtml,
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
+import { sourcesHtml } from "./wiki-gardener-sources.ts";
 
 interface SourceDoc {
   collection: string;
@@ -82,20 +83,6 @@ function fmtDate(ms: number): string {
 
 function chip(status: string): string {
   return `<span class="gard-badge chip-${esc(status)}">${esc(status)}</span>`;
-}
-
-function sourcesHtml(docs: SourceDoc[]): string {
-  if (!docs.length) return "";
-  let html = '<div class="gard-section-label">Sources (' + docs.length + ")</div><ul class=\"gard-sources\">";
-  docs.forEach((d) => {
-    const label = d.title || d.docId;
-    html += "<li>";
-    html += d.url
-      ? `<a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(label)}</a>`
-      : esc(label);
-    html += ` <span class="gard-src-coll">${esc(d.collection)}</span></li>`;
-  });
-  return html + "</ul>";
 }
 
 function diffHtml(diff: DiffLine[]): string {

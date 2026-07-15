@@ -244,6 +244,38 @@ function unquoteItem(raw: string): string {
 }
 
 /**
+ * A public, navigable URL — `http://` or `https://` only. Everything else
+ * (empty, `file://…` machine-local paths, or any other scheme huginn may have
+ * stored for a not-yet-ingested doc) is treated as "no public URL yet": it must
+ * never land in a shipped page's `sources:` list nor render as a clickable link.
+ */
+export function isHttpUrl(u: string | null | undefined): boolean {
+  return typeof u === "string" && /^https?:\/\//i.test(u.trim());
+}
+
+/**
+ * Append a single "Source pending ingestion" callout to a draft body, listing
+ * every cluster doc that has no public URL yet (one line per doc inside the one
+ * callout). This mirrors the wiki-side convention — a source cited without a
+ * resolvable source page is pending ingestion, not an error — so a real shipped
+ * page never carries a machine-local `file://…` path in place of a citation.
+ *
+ * Returns the draft UNCHANGED when nothing is pending, so the common case (every
+ * doc has a real URL) is byte-identical to pre-callout output. The callout is
+ * appended after the existing body with the trailing whitespace normalized to a
+ * single blank-line separator; the caller trims the whole draft before persist.
+ */
+export function appendPendingIngestionCallout(
+  draft: string,
+  pending: { collection: string; docId: string }[],
+): string {
+  if (pending.length === 0) return draft;
+  const lines = pending.map((p) => `> \`${p.collection}/${p.docId}\` has no public URL yet.`);
+  const callout = `> [!note] Source pending ingestion\n${lines.join("\n")}`;
+  return `${draft.replace(/\s+$/, "")}\n\n${callout}\n`;
+}
+
+/**
  * Persist-time source-link guard: `sources:` frontmatter entries that are
  * `[[wikilink]]` refs to pages that DON'T resolve against the wiki index are
  * dropped and replaced with the cluster's real `source_docs` URLs — the drafter
@@ -266,7 +298,11 @@ export function replaceUnresolvedSourceLinks(
   const fenceEnd = draft.indexOf("\n---", 3);
   if (fenceEnd === -1) return { draft, replaced: [] };
 
-  const urls = opts.urls.filter((u) => u && u.trim());
+  // Belt-and-braces with the runner seam: only ever append PUBLIC (http/https)
+  // URLs into `sources:`. A machine-local `file://…` path (or any non-web
+  // scheme huginn stored for a not-yet-ingested doc) must never leak into a
+  // shipped page's citation trail, so no future caller can reintroduce the leak.
+  const urls = opts.urls.filter((u) => isHttpUrl(u));
   const replaced: string[] = [];
   const head = draft
     .slice(0, fenceEnd)
