@@ -110,6 +110,55 @@ describe("messages", () => {
     expect(msg!.timestamp).toBeGreaterThan(0);
   });
 
+  describe("getRecentMessages excludeProactive", () => {
+    test("excludes proactive rows (watcher/task/goal) when flag set", async () => {
+      await saveMessage(makeMessage({ userId: "px", botName: "bot1", content: "real convo" }));
+      await saveMessage(makeMessage({ userId: "px", botName: "bot1", source: "watcher:email", content: "w" }));
+      await saveMessage(makeMessage({ userId: "px", botName: "bot1", source: "task:briefing", content: "t" }));
+      await saveMessage(makeMessage({ userId: "px", botName: "bot1", source: "goal:reminder", content: "g" }));
+
+      const filtered = await getRecentMessages("px", 10, "bot1", undefined, { excludeProactive: true });
+      expect(filtered.map((m) => m.text)).toEqual(["real convo"]);
+    });
+
+    test("keeps NULL-source rows (and non-proactive tags) when flag set", async () => {
+      await saveMessage(makeMessage({ userId: "pn", botName: "bot1", content: "null source" }));
+      // A hypothetical future non-proactive source tag must NOT vanish from history.
+      await saveMessage(makeMessage({ userId: "pn", botName: "bot1", source: "import:archive", content: "tagged but not proactive" }));
+
+      const filtered = await getRecentMessages("pn", 10, "bot1", undefined, { excludeProactive: true });
+      expect(filtered.map((m) => m.text)).toEqual(["null source", "tagged but not proactive"]);
+    });
+
+    test("flag off (default) keeps proactive rows — current behavior", async () => {
+      await saveMessage(makeMessage({ userId: "pd", botName: "bot1", content: "convo" }));
+      await saveMessage(makeMessage({ userId: "pd", botName: "bot1", source: "watcher:email", content: "watcher" }));
+
+      const defaulted = await getRecentMessages("pd", 10, "bot1");
+      expect(defaulted).toHaveLength(2);
+
+      const explicitOff = await getRecentMessages("pd", 10, "bot1", undefined, { excludeProactive: false });
+      expect(explicitOff).toHaveLength(2);
+    });
+
+    test("applies in the bare-userId branch (no bot, no thread)", async () => {
+      await saveMessage(makeMessage({ userId: "pu", botName: "bot1", content: "keep me" }));
+      await saveMessage(makeMessage({ userId: "pu", botName: "bot2", source: "watcher:email", content: "drop me" }));
+
+      const filtered = await getRecentMessages("pu", 10, undefined, undefined, { excludeProactive: true });
+      expect(filtered.map((m) => m.text)).toEqual(["keep me"]);
+    });
+
+    test("applies in the thread-scoped branch", async () => {
+      const thread = await createThread("pt", "bot1", "work");
+      await saveMessage(makeMessage({ userId: "pt", botName: "bot1", content: "thread convo", threadId: thread.id }));
+      await saveMessage(makeMessage({ userId: "pt", botName: "bot1", source: "goal:checkin", content: "thread proactive", threadId: thread.id }));
+
+      const filtered = await getRecentMessages("pt", 10, "bot1", thread.id, { excludeProactive: true });
+      expect(filtered.map((m) => m.text)).toEqual(["thread convo"]);
+    });
+  });
+
   describe("getSimMessages", () => {
     test("allPlatforms returns messages across all platforms", async () => {
       const thread = await createThread("u1", "bot1", "cross-platform");
@@ -194,6 +243,18 @@ describe("messages", () => {
 
       const alerts = await getRecentAlerts("u1", "bot1", 24, 2);
       expect(alerts).toHaveLength(2);
+    });
+
+    test("scopes to the three proactive prefixes, not every non-NULL source", async () => {
+      await saveMessage(makeMessage({ userId: "ap", botName: "bot1", source: "watcher:email", content: "w" }));
+      await saveMessage(makeMessage({ userId: "ap", botName: "bot1", source: "task:briefing", content: "t" }));
+      await saveMessage(makeMessage({ userId: "ap", botName: "bot1", source: "goal:reminder", content: "g" }));
+      // Non-proactive tagged rows must NOT surface as alerts.
+      await saveMessage(makeMessage({ userId: "ap", botName: "bot1", source: "import:archive", content: "not proactive" }));
+      await saveMessage(makeMessage({ userId: "ap", botName: "bot1", content: "plain convo" }));
+
+      const alerts = await getRecentAlerts("ap", "bot1");
+      expect(alerts.map((a) => a.content).sort()).toEqual(["g", "t", "w"]);
     });
   });
 });

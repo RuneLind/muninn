@@ -1,6 +1,35 @@
 import { getDb } from "./client.ts";
 import type { ConversationMessage, Platform } from "../types.ts";
 
+/**
+ * The complete set of `messages.source` prefixes that mark a PROACTIVE
+ * (non-conversation) row: watcher alerts, scheduled-task output, goal
+ * reminders/check-ins. Every other value — including `NULL` for real
+ * conversation — is conversation.
+ *
+ * This is the single source of truth for "what counts as proactive". The
+ * history filter is an EXCLUSION on these prefixes (not `source IS NULL`), so a
+ * future non-proactive source tag stays visible in history instead of silently
+ * vanishing.
+ */
+export const PROACTIVE_SOURCE_PREFIXES = ["watcher:", "task:", "goal:"] as const;
+
+type SqlClient = ReturnType<typeof getDb>;
+
+/** SQL fragment keeping only conversation rows (NULL source, or any non-proactive tag). */
+function excludeProactiveFragment(sql: SqlClient) {
+  const conds = PROACTIVE_SOURCE_PREFIXES.map((p) => sql`source NOT LIKE ${p + "%"}`);
+  const combined = conds.reduce((acc, c) => sql`${acc} AND ${c}`);
+  return sql`AND (source IS NULL OR (${combined}))`;
+}
+
+/** SQL fragment matching only proactive-tagged rows. */
+function onlyProactiveFragment(sql: SqlClient) {
+  const conds = PROACTIVE_SOURCE_PREFIXES.map((p) => sql`source LIKE ${p + "%"}`);
+  const combined = conds.reduce((acc, c) => sql`${acc} OR ${c}`);
+  return sql`AND (${combined})`;
+}
+
 export interface SaveMessageParams {
   userId: string;
   botName: string;
@@ -99,8 +128,14 @@ export async function getRecentMessages(
   limit = 20,
   botName?: string,
   threadId?: string,
+  opts?: { excludeProactive?: boolean },
 ): Promise<ConversationMessage[]> {
   const sql = getDb();
+
+  // Opt-in filter (off by default): drop proactive-tagged rows so the history
+  // window is conversation-only. The prompt-builder passes this; the dashboard
+  // messages endpoint does not (it shows proactive rows).
+  const proactive = opts?.excludeProactive ? excludeProactiveFragment(sql) : sql``;
 
   let rows;
   if (threadId) {
@@ -119,6 +154,7 @@ export async function getRecentMessages(
             SELECT 1 FROM threads t WHERE t.id = ${threadId} AND t.name = 'main'
           ))
         )
+        ${proactive}
       ORDER BY created_at DESC
       LIMIT ${limit}
     `;
@@ -127,6 +163,7 @@ export async function getRecentMessages(
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
       WHERE user_id = ${userId} AND bot_name = ${botName}
+        ${proactive}
       ORDER BY created_at DESC
       LIMIT ${limit}
     `;
@@ -135,6 +172,7 @@ export async function getRecentMessages(
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
       WHERE user_id = ${userId}
+        ${proactive}
       ORDER BY created_at DESC
       LIMIT ${limit}
     `;
@@ -328,12 +366,16 @@ export async function getRecentAlerts(
   limit = 10,
 ): Promise<AlertMessage[]> {
   const sql = getDb();
+  // Scope to the same three proactive prefixes the history filter excludes —
+  // NOT every `source IS NOT NULL` row (message_feedback-style tags must not
+  // leak into the alerts block).
+  const proactive = onlyProactiveFragment(sql);
   const rows = await sql`
     SELECT id, source, content, created_at
     FROM messages
     WHERE user_id = ${userId}
       AND bot_name = ${botName}
-      AND source IS NOT NULL
+      ${proactive}
       AND created_at > now() - make_interval(hours => ${hours})
     ORDER BY created_at DESC
     LIMIT ${limit}

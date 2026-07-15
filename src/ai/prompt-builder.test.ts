@@ -94,7 +94,7 @@ mock.module("./embeddings.ts", () => ({
   generateEmbedding: mock(() => Promise.resolve(Array.from({ length: 384 }, () => 0.1))),
 }));
 
-const { buildPrompt, CORRECTIVE_RETRIEVAL_PROMPT, RESEARCH_KNOWLEDGE_NUDGE } = await import("./prompt-builder.ts");
+const { buildPrompt, formatAlerts, CORRECTIVE_RETRIEVAL_PROMPT, RESEARCH_KNOWLEDGE_NUDGE } = await import("./prompt-builder.ts");
 
 const bp = (overrides: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
   buildPrompt({ userId: "u1", currentMessage: "hello", persona: "persona", botName: "testbot", ...overrides });
@@ -222,5 +222,49 @@ describe("buildPrompt", () => {
 
     const explicitlyOff = await bp({ researchKnowledgeAvailable: false });
     expect(explicitlyOff.systemPrompt).not.toContain(RESEARCH_KNOWLEDGE_NUDGE);
+  });
+});
+
+describe("formatAlerts", () => {
+  const ts = Date.parse("2026-07-15T10:30:00Z");
+
+  test("uses the honest proactive-messages label", () => {
+    const out = formatAlerts([{ id: "a1", source: "watcher:email", content: "hi", timestamp: ts }]);
+    expect(out).toContain("Recent proactive messages sent to user (last 24h):");
+    expect(out).not.toContain("watcher alerts");
+  });
+
+  test("strips all three proactive prefixes from the type label", () => {
+    const out = formatAlerts([
+      { id: "a1", source: "watcher:email", content: "w", timestamp: ts },
+      { id: "a2", source: "task:briefing", content: "t", timestamp: ts },
+      { id: "a3", source: "goal:reminder", content: "g", timestamp: ts },
+    ]);
+    expect(out).toContain("email: w");
+    expect(out).toContain("briefing: t");
+    expect(out).toContain("reminder: g");
+    expect(out).not.toContain("watcher:");
+    expect(out).not.toContain("task:");
+    expect(out).not.toContain("goal:");
+  });
+
+  test("leaves a short alert content untouched", () => {
+    const out = formatAlerts([{ id: "a1", source: "watcher:email", content: "short and sweet", timestamp: ts }]);
+    expect(out).toContain("short and sweet");
+    expect(out).not.toContain("…");
+  });
+
+  test("caps a long alert at a word boundary with an ellipsis", () => {
+    const content = "word ".repeat(200).trim(); // ~1000 chars, all whole words
+    const out = formatAlerts([{ id: "a1", source: "watcher:email", content, timestamp: ts }]);
+    const line = out.split("\n").at(-1)!;
+    // content portion after the "] email: " prefix
+    const rendered = line.slice(line.indexOf("email: ") + "email: ".length);
+    expect(rendered.endsWith("…")).toBe(true);
+    // The visible content (minus ellipsis) is within the cap and ends on a whole word.
+    const visible = rendered.slice(0, -1);
+    expect(visible.length).toBeLessThanOrEqual(300);
+    expect(visible.endsWith("word")).toBe(true);
+    expect(visible).not.toContain("wor…");
   });
 });
