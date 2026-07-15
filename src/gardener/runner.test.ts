@@ -58,6 +58,7 @@ function makeDeps(overrides: Partial<GardenerDeps> = {}): { deps: GardenerDeps; 
         draft: params.draft,
         sourceDocs: params.sourceDocs,
         rationale: params.rationale ?? null,
+        containedLinks: params.containedLinks ?? null,
         status: "draft",
         createdAt: NOW,
         resolvedAt: null,
@@ -96,7 +97,8 @@ describe("runGardener", () => {
           id: String((seq += 1)),
           botName: params.botName, topicKey: params.topicKey, kind: params.kind, mode: params.mode,
           targetPath: params.targetPath, baseHash: params.baseHash ?? null, draft: params.draft,
-          sourceDocs: params.sourceDocs, rationale: params.rationale ?? null, status: "draft",
+          sourceDocs: params.sourceDocs, rationale: params.rationale ?? null,
+          containedLinks: params.containedLinks ?? null, status: "draft",
           createdAt: NOW, resolvedAt: null,
         }),
       }).deps,
@@ -159,6 +161,36 @@ describe("runGardener", () => {
     // The phantom wikilink is gone; the cluster's real source_docs URLs are in.
     expect(inserted[0]!.draft).not.toContain("[[Phantom Source]]");
     expect(inserted[0]!.draft).toContain("https://2026-07-07_a.md");
+  });
+
+  test("unresolvable body [[wikilink]] is de-linked at persist time; contained_links persisted", async () => {
+    // validDraft()'s body has `[[X]]` in the See-also section. With a real index
+    // where X doesn't resolve, the persist-time guard de-links it to plain text.
+    const index: WikiIndex = {
+      pages: [],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined, // nothing resolves ⇒ [[X]] is a phantom
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    const { deps, inserted } = makeDeps({ getWikiIndex: async () => index });
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.draft).not.toContain("[[X]]");
+    expect(inserted[0]!.draft).toContain("**X**");
+    expect(inserted[0]!.containedLinks).toEqual({ delinked: ["X"] });
+  });
+
+  test("null wiki index → body-link containment skipped (link left intact, no report)", async () => {
+    // The default makeDeps has getWikiIndex → null: containment must not run (an
+    // index outage must not de-link a whole draft), so [[X]] survives verbatim.
+    const { deps, inserted } = makeDeps();
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.draft).toContain("[[X]]");
+    expect(inserted[0]!.containedLinks ?? null).toBeNull();
   });
 
   test("drops a draft that fails the shape gate — no proposal, no alert", async () => {
@@ -351,6 +383,7 @@ function makeTwoClusterDeps(overrides: Partial<GardenerDeps> = {}): {
         draft: params.draft,
         sourceDocs: params.sourceDocs,
         rationale: params.rationale ?? null,
+        containedLinks: params.containedLinks ?? null,
         status: "draft",
         createdAt: NOW,
         resolvedAt: null,

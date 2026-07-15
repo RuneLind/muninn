@@ -40,6 +40,7 @@ interface ProposalView {
   previewHtml: string;
   diff: DiffLine[] | null;
   unresolvedLinks?: string[];
+  containedLinks?: string[] | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -117,10 +118,18 @@ function cardHtml(p: ProposalView): string {
   html += `<span class="gard-badge badge-${esc(p.kind)}">${esc(p.kind)}</span>`;
   html += `<span class="gard-badge badge-${esc(p.mode)}">${esc(p.mode)}</span>`;
   html += chip(p.status);
-  const unresolved = p.unresolvedLinks || [];
-  if (unresolved.length) {
-    const label = unresolved.length + (unresolved.length === 1 ? " unresolved link" : " unresolved links");
-    html += `<span class="gard-badge chip-unresolved" title="Body links to pages that don't exist yet: ${esc(unresolved.join(", "))}">${esc(label)}</span>`;
+  // New rows: neutral/informational report of body links auto-de-linked at persist
+  // time. Legacy rows (no containment report): the old amber unresolved-link chip.
+  const contained = p.containedLinks || [];
+  if (contained.length) {
+    const label = contained.length + (contained.length === 1 ? " link auto-de-linked" : " links auto-de-linked");
+    html += `<span class="gard-badge chip-delinked" title="Unresolvable body links de-linked to plain text: ${esc(contained.join(", "))}">${esc(label)}</span>`;
+  } else {
+    const unresolved = p.unresolvedLinks || [];
+    if (unresolved.length) {
+      const label = unresolved.length + (unresolved.length === 1 ? " unresolved link" : " unresolved links");
+      html += `<span class="gard-badge chip-unresolved" title="Body links to pages that don't exist yet: ${esc(unresolved.join(", "))}">${esc(label)}</span>`;
+    }
   }
   html += "</div>";
   html += `<div class="gard-meta-row"><span class="gard-path">${esc(p.targetPath)}</span><span>·</span><span>${esc(fmtDate(p.createdAt))}</span></div>`;

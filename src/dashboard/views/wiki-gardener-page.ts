@@ -176,6 +176,7 @@ export async function renderWikiGardenerPage(opts?: {
     .chip-stale { background: var(--tint-warning, var(--tint-neutral)); color: var(--status-warning, var(--text-muted)); }
     .chip-error { background: var(--tint-magenta); color: var(--status-magenta); }
     .chip-unresolved { background: color-mix(in srgb, var(--status-warning, #d0a000) 16%, transparent); color: var(--status-warning, #d0a000); text-transform: none; letter-spacing: 0; cursor: help; }
+    .chip-delinked { background: var(--tint-neutral); color: var(--text-muted); text-transform: none; letter-spacing: 0; cursor: help; }
 
     .gard-body { padding: 14px 18px; }
     .gard-section-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); margin: 4px 0 8px; }

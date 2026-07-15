@@ -23,11 +23,13 @@ import { buildClusterPrompt, existingPageLines, filterClusters, parseClusters } 
 import { resolveTarget } from "./target-resolve.ts";
 import {
   buildDraftPrompt,
+  containDraftBodyLinks,
   normalizeDraftOutput,
   replaceUnresolvedSourceLinks,
   shapeGate,
   stripOwnedAliases,
 } from "./draft.ts";
+import { parseFrontmatter } from "../wiki/store.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -355,6 +357,38 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
     }
 
+    // Body-link containment (symmetric with the source-link guard above): de-link
+    // unresolvable body `[[wikilinks]]` to plain bold text — a wikilink is a claim
+    // that a page exists, and only the index can make that claim. With a NULL index
+    // we can't tell resolvable from phantom, so we SKIP containment entirely rather
+    // than de-link a whole draft on an index outage (the read-time scan chip still
+    // surfaces the links on the review gate). selfTitle comes from the draft's own
+    // frontmatter so an update-mode page linking itself is de-linked too.
+    let containedDraft = relinked.draft;
+    let containedLinks: string[] = [];
+    if (index) {
+      const fm = parseFrontmatter(containedDraft);
+      const selfTitle = Array.isArray(fm.title) ? fm.title[0] : fm.title;
+      const contained = containDraftBodyLinks(containedDraft, {
+        resolve: index.resolve,
+        selfTitle,
+      });
+      containedDraft = contained.draft;
+      containedLinks = contained.delinked;
+      if (containedLinks.length > 0) {
+        log.warn("Gardener draft for {topic}: de-linked unresolvable body link(s): {links}", {
+          botName,
+          topic: cluster.topicKey,
+          links: containedLinks.join(", "),
+        });
+      }
+    } else {
+      log.warn("Gardener draft for {topic}: null wiki index — skipping body-link containment", {
+        botName,
+        topic: cluster.topicKey,
+      });
+    }
+
     try {
       const row = await deps.insertProposal({
         botName,
@@ -363,9 +397,10 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         mode: target.mode,
         targetPath: target.targetPath,
         baseHash,
-        draft: relinked.draft.trim(),
+        draft: containedDraft.trim(),
         sourceDocs,
         rationale: cluster.rationale ?? null,
+        containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,
       });
       if (row) {
         persisted.push(row);

@@ -25,6 +25,16 @@ export interface WikiProposalSourceDoc {
   url: string;
 }
 
+/**
+ * Body-link containment report (JSONB `contained_links`): the unresolvable body
+ * `[[wikilinks]]` the persist-time guard de-linked to plain text. Stored so the
+ * review gate can render an informational "N links auto-de-linked" note instead of
+ * re-scanning at read time. NULL on legacy rows drafted before containment.
+ */
+export interface WikiProposalContainedLinks {
+  delinked: string[];
+}
+
 export type WikiProposalKind = "concept" | "entity";
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
@@ -46,6 +56,7 @@ export interface WikiProposal {
   draft: string;
   sourceDocs: WikiProposalSourceDoc[];
   rationale: string | null;
+  containedLinks: WikiProposalContainedLinks | null;
   status: WikiProposalStatus;
   createdAt: number;
   resolvedAt: number | null;
@@ -61,6 +72,7 @@ export interface InsertWikiProposalParams {
   draft: string;
   sourceDocs: WikiProposalSourceDoc[];
   rationale?: string | null;
+  containedLinks?: WikiProposalContainedLinks | null;
   status?: WikiProposalStatus;
 }
 
@@ -77,7 +89,7 @@ export async function insertWikiProposal(
   const sql = getDb();
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, status
+      bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, status
     ) VALUES (
       ${params.botName},
       ${params.topicKey},
@@ -88,6 +100,7 @@ export async function insertWikiProposal(
       ${params.draft},
       ${sql.json(params.sourceDocs as any)},
       ${params.rationale ?? null},
+      ${params.containedLinks ? sql.json(params.containedLinks as any) : null},
       ${params.status ?? "draft"}
     )
     ON CONFLICT (bot_name, topic_key) WHERE status IN ('draft', 'approved') DO NOTHING
@@ -301,6 +314,10 @@ function mapRow(r: Record<string, any>): WikiProposal {
     draft: r.draft,
     sourceDocs: Array.isArray(r.source_docs) ? r.source_docs : [],
     rationale: r.rationale ?? null,
+    containedLinks:
+      r.contained_links && Array.isArray(r.contained_links.delinked)
+        ? { delinked: r.contained_links.delinked as string[] }
+        : null,
     status: r.status as WikiProposalStatus,
     createdAt: new Date(r.created_at).getTime(),
     resolvedAt: r.resolved_at ? new Date(r.resolved_at).getTime() : null,

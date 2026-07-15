@@ -313,10 +313,16 @@ export function replaceUnresolvedSourceLinks(
 
 /**
  * Read-time unresolved-link scanner: the draft BODY's `[[wikilinks]]` that don't
- * resolve against the live wiki index. Body links are SURFACED (an amber review
- * chip), never stripped — a mentioned-but-missing concept link is a wiki feature.
- * The page's own title is excluded (a create-mode draft's own title resolves to
- * nothing yet — don't flag the page linking itself). Deduped, in first-seen order.
+ * resolve against the live wiki index. Deduped, in first-seen order; the page's
+ * own title is excluded (a create-mode draft's own title resolves to nothing yet).
+ *
+ * LEGACY as of the body-containment PR: persist-time `containBodyLinks` now
+ * de-links unresolvable body wikilinks to plain bold text (symmetric with the
+ * `sources:` frontmatter guard — a wikilink is a CLAIM that a page exists, which
+ * only the wiki index can make). This scanner survives only to keep surfacing the
+ * old amber "N unresolved links" chip for legacy rows that predate the
+ * `contained_links` column (drafted before containment ran) — new rows carry
+ * their auto-de-link report in `contained_links` instead.
  */
 export function scanUnresolvedBodyLinks(
   body: string,
@@ -330,6 +336,87 @@ export function scanUnresolvedBodyLinks(
     unresolved.push(target);
   }
   return unresolved;
+}
+
+/**
+ * Body-link containment matcher: EITHER a code region (fenced ```…``` block or an
+ * inline `…` span — capture group 1, left untouched) OR a wikilink (`[[target]]`
+ * / `[[target|label]]` — groups 2/3). Alternation order matters: the code branch
+ * is tried first so a `[[link]]` inside a fence is swallowed by the fence match
+ * and never rewritten. Its OWN capturing regex (not `extractWikilinks`, which
+ * dedupes + drops labels/positions and so can't drive a rewrite).
+ */
+const CONTAIN_BODY_RE = /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]/g;
+
+/**
+ * Persist-time BODY-link containment (symmetric with `replaceUnresolvedSourceLinks`
+ * for the `sources:` frontmatter): every `[[wikilink]]` in the body that does NOT
+ * resolve against the live index is de-linked to plain bold text — `[[Zone 2
+ * Cardio]]` → `**Zone 2 Cardio**`, `[[X|label]]` → `**label**`. A wikilink is a
+ * claim that a page exists; only the wiki index can make that claim, so an
+ * unresolvable link becomes prose rather than a phantom red-link.
+ *
+ * Self-referential links (target == the page's own `selfTitle`, e.g. `[[Mobility
+ * Training]]` on the Mobility Training page) are ALSO de-linked — in update mode
+ * the page resolves against itself, but a page linking itself is never a real
+ * navigation, so `selfTitle` forces the de-link ahead of the resolve check.
+ *
+ * NO `[[#Heading]]` anchor rewrite (deliberate): the render path emits bare
+ * h2/h3 with no ids (`web-format.ts`), so an in-page anchor is a dead link that
+ * merely LOOKS healthy — an unresolvable target de-linked to bold is honest.
+ *
+ * Code is untouched: fenced ```…``` blocks and inline `…` spans survive verbatim.
+ * Body text ONLY — the caller splits frontmatter off first (see
+ * {@link containDraftBodyLinks}). `delinked` is deduped in first-seen order (every
+ * occurrence is still rewritten; the list is the review report).
+ */
+export function containBodyLinks(
+  body: string,
+  opts: { resolve: (target: string) => WikiPageMeta | undefined; selfTitle?: string | null },
+): { body: string; delinked: string[] } {
+  const self = opts.selfTitle ? normalizeLabel(opts.selfTitle) : "";
+  const delinked: string[] = [];
+  const seen = new Set<string>();
+  const out = body.replace(CONTAIN_BODY_RE, (match, code, target, label) => {
+    if (code !== undefined) return match; // code region — leave verbatim
+    const t = (target as string).trim();
+    const isSelf = self !== "" && normalizeLabel(t) === self;
+    // Resolvable AND not a self-link → keep the wikilink unchanged.
+    if (!isSelf && opts.resolve(t)) return match;
+    // Otherwise de-link to bold. Piped links show the label; bare links the target.
+    const lbl = typeof label === "string" && label.trim() ? label.trim() : t;
+    if (!seen.has(t)) {
+      seen.add(t);
+      delinked.push(t);
+    }
+    return `**${lbl}**`;
+  });
+  return { body: out, delinked };
+}
+
+/**
+ * Split the frontmatter off a full draft (`stripFrontmatter` in render.ts is lossy
+ * — body only, no handle on the head), run {@link containBodyLinks} over the body,
+ * and rejoin with the frontmatter bytes PRESERVED VERBATIM. Returns the draft
+ * unchanged (empty `delinked`) when there's no terminated frontmatter fence — the
+ * shape-gate guarantees one on the runner path, so that's a defensive no-op.
+ */
+export function containDraftBodyLinks(
+  draft: string,
+  opts: { resolve: (target: string) => WikiPageMeta | undefined; selfTitle?: string | null },
+): { draft: string; delinked: string[] } {
+  if (!draft.startsWith("---")) return { draft, delinked: [] };
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return { draft, delinked: [] };
+  // End of the closing `---` fence LINE — head keeps its trailing newline so the
+  // rejoin is byte-exact.
+  const bodyStart = draft.indexOf("\n", fenceEnd + 1);
+  if (bodyStart === -1) return { draft, delinked: [] }; // fence with no body
+  const head = draft.slice(0, bodyStart + 1);
+  const body = draft.slice(bodyStart + 1);
+  const { body: contained, delinked } = containBodyLinks(body, opts);
+  if (delinked.length === 0) return { draft, delinked: [] };
+  return { draft: head + contained, delinked };
 }
 
 export interface ShapeGateResult {

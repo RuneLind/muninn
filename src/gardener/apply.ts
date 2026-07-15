@@ -26,7 +26,7 @@
 import path from "node:path";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
-import { isPathConfined, stripOwnedAliases } from "./draft.ts";
+import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
@@ -185,8 +185,33 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
     });
   }
 
+  // 1d. Body-link containment re-run against the FRESH index (TOCTOU symmetry with
+  //     the alias re-strip): a page linked in the body that was deleted between
+  //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
+  //     (can't tell resolvable from phantom; don't de-link a whole page on an index
+  //     outage). This mutates finalContent, which drives the re-run-safe early
+  //     return below — an accepted, benign corner (a page deleted between draft and
+  //     approve, a crash after the page write, then a re-approve makes finalContent
+  //     no longer match disk, so the early return is skipped and create-mode falls
+  //     to `stale`; the row re-drafts next weekly cycle). When the index is
+  //     unchanged, containment is a no-op and idempotent recovery still holds.
+  let containedDraft = dealiased.draft;
+  if (index) {
+    const contained = containDraftBodyLinks(dealiased.draft, {
+      resolve: index.resolve,
+      selfTitle: draftTitle(proposal),
+    });
+    containedDraft = contained.draft;
+    if (contained.delinked.length > 0) {
+      log.warn("Apply: de-linked unresolvable body link(s) from proposal {id}: {links}", {
+        id: proposal.id,
+        links: contained.delinked.join(", "),
+      });
+    }
+  }
+
   const absTarget = path.join(deps.wikiDir, proposal.targetPath);
-  const finalContent = withTrailingNewline(dealiased.draft);
+  const finalContent = withTrailingNewline(containedDraft);
   const current = await deps.readFile(absTarget);
 
   // 2a. Re-run safety: the target already IS the draft — a crash after the file

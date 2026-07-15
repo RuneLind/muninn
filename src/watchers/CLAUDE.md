@@ -326,13 +326,28 @@ apply**.
   (`draft.ts`, run in the runner after `stripOwnedAliases`, before insert) drops
   frontmatter `sources:` entries that are unresolved `[[wikilinks]]` and appends
   the cluster's real `source_docs` URLs (same raw-preserving edit as the alias
-  strip; null index ⇒ every wikilink treated as broken), and *read-time*
-  `scanUnresolvedBodyLinks` (`draft.ts`, called by the `/api/wiki/proposals`
-  builder off the live index `resolve`) surfaces the **body**'s unresolved
-  `[[links]]` as an amber `N unresolved links` review chip — SURFACED not stripped
-  (a mentioned-but-missing link is a wiki feature), read-time so a page created
-  while the proposal awaited review clears it, and the draft's own title is never
-  flagged (no DB column / migration); (c) an optional `searchRelated` seam
+  strip; null index ⇒ every wikilink treated as broken), and *persist-time*
+  **body containment** `containBodyLinks`/`containDraftBodyLinks` (`draft.ts`, run
+  in the runner after `replaceUnresolvedSourceLinks`, before insert; re-run at
+  **apply time** against the fresh index for TOCTOU symmetry with the alias
+  re-strip) de-links every unresolvable **body** `[[wikilink]]` to plain bold text
+  — `[[Zone 2 Cardio]]` → `**Zone 2 Cardio**`, `[[X|label]]` → `**label**`. This
+  is symmetric with the `sources:` guard: a wikilink is a CLAIM that a page exists,
+  and only the wiki index can make that claim. Self-referential links (target ==
+  the page's own title) are de-linked too (in update mode the page resolves against
+  itself, but a page linking itself is never real navigation); NO `[[#Heading]]`
+  anchor rewrite (the render emits no heading ids, so an anchor would be a dead
+  link that only looks healthy — bold is honest); fenced ```code``` blocks + inline
+  `code` spans are left verbatim. **Null index ⇒ SKIP containment** (can't tell
+  resolvable from phantom; don't de-link a whole draft on an index outage — warn +
+  proceed). The split/rejoin preserves frontmatter bytes verbatim (`stripFrontmatter`
+  is lossy). What it de-linked is persisted on the row in the `contained_links`
+  JSONB column (`{delinked: string[]}`, migration 061, nullable) and rendered on the
+  review gate as a neutral informational `N links auto-de-linked` chip. The legacy
+  read-time scanner `scanUnresolvedBodyLinks` (`draft.ts`) survives ONLY as the
+  fallback for rows with a NULL `contained_links` (drafted before containment) —
+  those still show the old amber `N unresolved links` chip; the draft's own title is
+  never flagged; (c) an optional `searchRelated` seam
   (`GardenerDeps` → `SharedGardenerSeams` → `buildGardenerSeams`, one huginn
   `/api/search` per `wikiCollections` collection in brief mode / corrective off,
   merged + capped top-3) inlines a "POSSIBLY-RELATED EXISTING PAGES" block into

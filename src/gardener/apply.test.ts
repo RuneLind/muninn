@@ -45,6 +45,7 @@ function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
       { collection: "x-articles", docId: "b", title: "B", url: "https://example.com/b" },
     ],
     rationale: null,
+    containedLinks: null,
     status: "approved",
     createdAt: Date.now(),
     resolvedAt: null,
@@ -202,12 +203,47 @@ describe("applyWikiProposal", () => {
   });
 
   test("crash-after-write simulation: file == draft, no log yet ⇒ applied", async () => {
+    // DRAFT_BODY's See-also links [[Harness Engineering]]; make it resolvable so
+    // apply-time body containment is a no-op and the on-disk pre-write bytes are
+    // exactly what apply would write (an unchanged index ⇒ idempotent recovery).
+    const linked = path.join(wikiDir, "concepts/Harness Engineering.md");
+    await mkdir(path.dirname(linked), { recursive: true });
+    await writeFile(linked, "---\ntype: concept\ntitle: Harness Engineering\naliases: []\n---\n\n# Harness Engineering\n");
+
     const target = path.join(wikiDir, "concepts/Context Compaction.md");
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, `${DRAFT_BODY}\n`); // exactly what apply would write
 
     const res = await applyWikiProposal(makeProposal(), deps());
     expect(res.outcome).toBe("applied");
+  });
+
+  test("apply-time containment de-links a body link whose page was removed since drafting", async () => {
+    // The draft body links [[Harness Engineering]] (resolved at draft time), but no
+    // such page exists in the wiki at apply time (deleted between draft and approve).
+    // Apply-time containment (fresh index) de-links it so no dangling link ships.
+    const res = await applyWikiProposal(makeProposal(), deps());
+    expect(res.outcome).toBe("applied");
+    const written = await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8");
+    expect(written).not.toContain("[[Harness Engineering]]");
+    expect(written).toContain("**Harness Engineering**");
+  });
+
+  test("idempotent recovery: re-approving an already-written identical page ⇒ applied, log not duplicated", async () => {
+    // The index is unchanged between the two applies, so containment de-links the
+    // same link both times → finalContent matches disk on the second pass → applied
+    // without a rewrite or a duplicate log entry (the re-run-safe early return).
+    const d = deps();
+    const first = await applyWikiProposal(makeProposal(), d);
+    expect(first.outcome).toBe("applied");
+    const logAfterFirst = await readFile(path.join(wikiDir, "log.md"), "utf8");
+
+    const second = await applyWikiProposal(makeProposal(), d);
+    expect(second.outcome).toBe("applied");
+    const logAfterSecond = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(logAfterSecond).toBe(logAfterFirst);
+    const entries = logAfterSecond.match(/## \[2026-07-08\] create \| Context Compaction/g) ?? [];
+    expect(entries.length).toBe(1);
   });
 
   test("update-mode happy path writes + logs an update entry, reindex wiki-life for life/**", async () => {
