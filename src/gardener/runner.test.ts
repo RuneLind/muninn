@@ -59,6 +59,7 @@ function makeDeps(overrides: Partial<GardenerDeps> = {}): { deps: GardenerDeps; 
         sourceDocs: params.sourceDocs,
         rationale: params.rationale ?? null,
         containedLinks: params.containedLinks ?? null,
+        relatedPages: params.relatedPages ?? null,
         status: "draft",
         createdAt: NOW,
         resolvedAt: null,
@@ -131,7 +132,7 @@ describe("runGardener", () => {
           botName: params.botName, topicKey: params.topicKey, kind: params.kind, mode: params.mode,
           targetPath: params.targetPath, baseHash: params.baseHash ?? null, draft: params.draft,
           sourceDocs: params.sourceDocs, rationale: params.rationale ?? null,
-          containedLinks: params.containedLinks ?? null, status: "draft",
+          containedLinks: params.containedLinks ?? null, relatedPages: params.relatedPages ?? null, status: "draft",
           createdAt: NOW, resolvedAt: null,
         }),
       }).deps,
@@ -183,6 +184,47 @@ describe("runGardener", () => {
     expect(captured).not.toContain("BEGIN POSSIBLY-RELATED EXISTING PAGES");
     expect(inserted).toHaveLength(1); // draft still persisted
     expect(alerts).toHaveLength(1);
+  });
+
+  test("searchRelated hits are persisted as related_pages, titles resolved to relPaths", async () => {
+    const sibling: WikiPageMeta = {
+      name: "Sibling Page",
+      title: "Sibling Page",
+      type: "concept",
+      domain: "ai",
+      tags: [],
+      aliases: [],
+      relPath: "concepts/Sibling Page.md",
+    };
+    const index: WikiIndex = {
+      pages: [sibling],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: (t) => (t.toLowerCase() === "sibling page" ? sibling : undefined),
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => index,
+      searchRelated: async () => [
+        { title: "Sibling Page", snippet: "resolves" },
+        { title: "Unknown Page", snippet: "does not resolve" },
+      ],
+    });
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.relatedPages).toEqual([
+      { title: "Sibling Page", relPath: "concepts/Sibling Page.md" },
+      { title: "Unknown Page" },
+    ]);
+  });
+
+  test("no searchRelated seam → related_pages is [] (not NULL — a fresh, empty run)", async () => {
+    const { deps, inserted } = makeDeps(); // no searchRelated
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.relatedPages).toEqual([]);
   });
 
   test("unresolved [[source page]] in frontmatter is replaced with source URLs at persist time", async () => {
@@ -417,6 +459,7 @@ function makeTwoClusterDeps(overrides: Partial<GardenerDeps> = {}): {
         sourceDocs: params.sourceDocs,
         rationale: params.rationale ?? null,
         containedLinks: params.containedLinks ?? null,
+        relatedPages: params.relatedPages ?? null,
         status: "draft",
         createdAt: NOW,
         resolvedAt: null,

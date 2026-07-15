@@ -15,6 +15,7 @@ import {
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
+import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
   collection: string;
@@ -42,6 +43,7 @@ interface ProposalView {
   diff: DiffLine[] | null;
   unresolvedLinks?: string[];
   containedLinks?: string[] | null;
+  wiring?: WiringPreview | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -132,6 +134,8 @@ function cardHtml(p: ProposalView): string {
     html += `<div class="gard-rationale">${esc(p.rationale)}</div>`;
   }
   html += sourcesHtml(p.sourceDocs);
+  // Wiring preview (reviewable rows only) — what approve will link into the wiki.
+  html += wiringHtml(p.wiring);
 
   // Toggles: diff (update only) + preview. Terminal rows (applied/rejected/error)
   // carry no server-rendered preview/diff — metadata only.

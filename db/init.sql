@@ -728,6 +728,7 @@ CREATE TABLE wiki_proposals (
   source_docs   JSONB NOT NULL,          -- [{collection, docId, title, url}]
   rationale     TEXT,
   contained_links JSONB,                 -- {delinked: [..]} — body wikilinks de-linked at persist time (migration 061)
+  related_pages JSONB,                   -- [{title, relPath?}] — related existing pages for apply-time See-also wiring (migration 062)
   status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at   TIMESTAMPTZ

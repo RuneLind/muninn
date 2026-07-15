@@ -30,6 +30,21 @@ A technique for shrinking context.
 ## See also
 - [[Harness Engineering]]`;
 
+const INDEX_MD = [
+  "# Index",
+  "",
+  "## Concepts",
+  "",
+  "### AI / Claude / Coding",
+  "",
+  "- [[Agent Loops]] — a",
+  "",
+  "### Health / Learning",
+  "",
+  "- [[Sleep]] — s",
+  "",
+].join("\n");
+
 function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
   return {
     id: "11111111-1111-1111-1111-111111111111",
@@ -46,6 +61,7 @@ function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
     ],
     rationale: null,
     containedLinks: null,
+    relatedPages: null,
     status: "approved",
     createdAt: Date.now(),
     resolvedAt: null,
@@ -348,5 +364,123 @@ describe("applyWikiProposal", () => {
     const [r1, r2] = await Promise.all([applyWikiProposal(p1, d), applyWikiProposal(p2, d)]);
     const outcomes = [r1.outcome, r2.outcome].sort();
     expect(outcomes).toEqual(["applied", "stale"]);
+  });
+
+  // ── Wire stage (PR B): stop every gardener page shipping as an orphan ──────
+
+  async function seedRelated(relPath: string, title: string): Promise<void> {
+    const abs = path.join(wikiDir, relPath);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, `---\ntype: concept\ntitle: ${title}\n---\n\n# ${title}\n\nBody.\n\n## See also\n- [[Other]]\n`);
+  }
+
+  test("create wires the index line + an inbound See also on a related page", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    await seedRelated("concepts/RAG.md", "RAG");
+
+    const proposal = makeProposal({ relatedPages: [{ title: "RAG", relPath: "concepts/RAG.md" }] });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("applied");
+
+    const idx = await readFile(path.join(wikiDir, "index.md"), "utf8");
+    const idxLine = "- [[Context Compaction]] — A technique for shrinking context.";
+    expect(idx).toContain(idxLine);
+    // Landed under AI / Claude / Coding, before the Health section.
+    const lines = idx.split("\n");
+    expect(lines.indexOf(idxLine)).toBeGreaterThan(lines.indexOf("### AI / Claude / Coding"));
+    expect(lines.indexOf(idxLine)).toBeLessThan(lines.indexOf("### Health / Learning"));
+
+    const rag = await readFile(path.join(wikiDir, "concepts/RAG.md"), "utf8");
+    expect(rag).toContain("- [[Context Compaction]]");
+  });
+
+  test("second approve is idempotent — no duplicate index line or See also", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    await seedRelated("concepts/RAG.md", "RAG");
+    const proposal = makeProposal({ relatedPages: [{ title: "RAG", relPath: "concepts/RAG.md" }] });
+    const d = deps();
+
+    await applyWikiProposal(proposal, d);
+    const res2 = await applyWikiProposal(proposal, d); // early-return path re-runs wire
+    expect(res2.outcome).toBe("applied");
+
+    const idx = await readFile(path.join(wikiDir, "index.md"), "utf8");
+    expect((idx.match(/\[\[Context Compaction\]\]/g) ?? []).length).toBe(1);
+    const rag = await readFile(path.join(wikiDir, "concepts/RAG.md"), "utf8");
+    expect((rag.match(/\[\[Context Compaction\]\]/g) ?? []).length).toBe(1);
+  });
+
+  test("early-return path (pre-written identical page) still wires", async () => {
+    // Make [[Harness Engineering]] resolvable so apply-time containment is a no-op
+    // and the pre-written bytes exactly equal finalContent → early-return path.
+    await seedRelated("concepts/Harness Engineering.md", "Harness Engineering");
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    await seedRelated("concepts/RAG.md", "RAG");
+    const target = path.join(wikiDir, "concepts/Context Compaction.md");
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, `${DRAFT_BODY}\n`); // exactly what apply would write
+
+    const proposal = makeProposal({ relatedPages: [{ title: "RAG", relPath: "concepts/RAG.md" }] });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("applied");
+
+    const idx = await readFile(path.join(wikiDir, "index.md"), "utf8");
+    expect(idx).toContain("- [[Context Compaction]] —");
+    const rag = await readFile(path.join(wikiDir, "concepts/RAG.md"), "utf8");
+    expect(rag).toContain("- [[Context Compaction]]");
+  });
+
+  test("a read-only related page fails soft — page + log.md still written", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    await seedRelated("concepts/RAG.md", "RAG");
+    const ragBefore = await readFile(path.join(wikiDir, "concepts/RAG.md"), "utf8");
+
+    const proposal = makeProposal({ relatedPages: [{ title: "RAG", relPath: "concepts/RAG.md" }] });
+    // Throw only on the related-page write; the page, log.md, and index.md succeed.
+    const base = deps();
+    const d: ApplyDeps = {
+      ...base,
+      writeFile: async (absPath, content) => {
+        if (absPath.endsWith(`concepts${path.sep}RAG.md`)) throw new Error("EACCES");
+        return base.writeFile(absPath, content);
+      },
+    };
+
+    const res = await applyWikiProposal(proposal, d);
+    expect(res.outcome).toBe("applied");
+    // The page write and log.md are the source of truth — untouched by the wiring failure.
+    expect(await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8")).toContain("# Context Compaction");
+    expect(await readFile(path.join(wikiDir, "log.md"), "utf8")).toContain("# Activity Log");
+    // The related page is unchanged (its write threw).
+    expect(await readFile(path.join(wikiDir, "concepts/RAG.md"), "utf8")).toBe(ragBefore);
+  });
+
+  test("reindex union covers a modified related page's collection", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    // Related page lives under life/ → its See-also edit reindexes wiki-life, while
+    // the created concept page reindexes wiki: the union must fire BOTH.
+    await seedRelated("life/concepts/Longevity.md", "Longevity");
+    const proposal = makeProposal({
+      relatedPages: [{ title: "Longevity", relPath: "life/concepts/Longevity.md" }],
+    });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("applied");
+    expect([...reindexed].sort()).toEqual(["wiki", "wiki-life"]);
+  });
+
+  test("entity create skips the index entry (no section guess) but still writes the page", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    const entityDraft = `---\ntype: entity\ntitle: Anthropic\naliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: []\n---\n\n# Anthropic\n\nAn AI lab.\n\n## See also\n- [[X]]`;
+    const proposal = makeProposal({
+      kind: "entity",
+      targetPath: "entities/Anthropic.md",
+      draft: entityDraft,
+      relatedPages: [],
+    });
+    const res = await applyWikiProposal(proposal, deps());
+    expect(res.outcome).toBe("applied");
+    // Page written, but index.md unchanged (entity → manual filing).
+    expect(await readFile(path.join(wikiDir, "entities/Anthropic.md"), "utf8")).toContain("# Anthropic");
+    expect(await readFile(path.join(wikiDir, "index.md"), "utf8")).toBe(INDEX_MD);
   });
 });

@@ -1,0 +1,16 @@
+-- Related-pages memory for wiki-gardener proposals.
+-- The runner's `searchRelated` seam (PR #255) already retrieves the top-3
+-- existing wiki pages related to each cluster (huginn search over the bot's
+-- `wikiCollections`) — but the results only fed the draft prompt and were then
+-- thrown away. This column persists them so the apply-time WIRE stage can add
+-- inbound `## See also` links from those pages back to the newly-created page
+-- (without them every gardener page shipped as an orphan). Shape:
+-- [{"title": "Page Title", "relPath": "concepts/Page Title.md"}] — relPath is
+-- resolved against the index at insert time where possible (may be absent).
+-- Nullable; NULL on legacy rows drafted before this column (the wire stage does
+-- the index entry only for those, and the review gate shows "no related-pages
+-- data (pre-migration proposal)").
+--
+-- ⚠️ Mirror of db/init.sql: keep the column in both, or schema-drift.test.ts
+-- (which diffs the live schema against init.sql) fails.
+ALTER TABLE wiki_proposals ADD COLUMN related_pages JSONB;

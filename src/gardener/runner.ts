@@ -421,6 +421,17 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
     }
 
+    // Persist the top-3 related existing pages (resolving titles to relPaths via
+    // the fresh index where possible) so the apply-time wire stage can add
+    // inbound See-also links back from them — the retrieval that only fed the
+    // draft prompt before is now durable. Empty array (seam absent / no hits) is
+    // stored as [] and reads back as "no inbound links, but not pre-migration";
+    // a genuine NULL only appears on rows drafted before this column.
+    const relatedPages = related.slice(0, 3).map((r) => {
+      const page = index?.resolve(r.title);
+      return page ? { title: r.title, relPath: page.relPath } : { title: r.title };
+    });
+
     try {
       const row = await deps.insertProposal({
         botName,
@@ -433,6 +444,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         sourceDocs,
         rationale: cluster.rationale ?? null,
         containedLinks: containedLinks.length > 0 ? { delinked: containedLinks } : null,
+        relatedPages,
       });
       if (row) {
         persisted.push(row);

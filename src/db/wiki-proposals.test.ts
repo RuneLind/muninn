@@ -36,6 +36,22 @@ describe("wiki_proposals CRUD", () => {
     const fetched = await getWikiProposalById(row!.id);
     expect(fetched!.topicKey).toBe("context-compaction");
     expect(fetched!.createdAt).toBeGreaterThan(0);
+    // No related_pages supplied → NULL column, mapped back to null.
+    expect(fetched!.relatedPages).toBeNull();
+  });
+
+  test("related_pages round-trip (title + optional relPath)", async () => {
+    const row = await insertWikiProposal(
+      makeProposal({
+        topicKey: "with-related",
+        relatedPages: [{ title: "RAG", relPath: "concepts/RAG.md" }, { title: "Unresolved" }],
+      }),
+    );
+    const fetched = await getWikiProposalById(row!.id);
+    expect(fetched!.relatedPages).toEqual([
+      { title: "RAG", relPath: "concepts/RAG.md" },
+      { title: "Unresolved" },
+    ]);
   });
 
   test("ON CONFLICT DO NOTHING against the live partial unique index", async () => {
