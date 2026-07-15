@@ -27,7 +27,9 @@ import path from "node:path";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
+import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages } from "./wire.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
+import { stripFrontmatter } from "../wiki/render.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -221,6 +223,16 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
     log.info("Wiki-gardener apply: target already matches draft for {path} — treating as applied", {
       path: proposal.targetPath,
     });
+    // The crashed/double-approved pass may never have reached the wire stage or
+    // the reindex — run the idempotent wire stage here too, refresh, and reindex
+    // the union (including the target's own collection) before returning.
+    const modified = await runWireStage(proposal, deps, index);
+    try {
+      await deps.refreshIndex();
+    } catch (err) {
+      log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
+    }
+    reindexUnion(deps, proposal.targetPath, modified);
     return { outcome: "applied", writtenPath: proposal.targetPath };
   }
 
@@ -257,6 +269,11 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
     });
   }
 
+  // 4b. Wire the page into the wiki — index.md line + inbound See-also links on
+  //     related pages — so it isn't shipped as an orphan. Best-effort per file;
+  //     returns the paths it modified for the reindex union below.
+  const modified = await runWireStage(proposal, deps, index);
+
   // 5. Refresh the read cache so /wiki and the next target-resolve see the write.
   try {
     await deps.refreshIndex();
@@ -264,17 +281,132 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
     log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
   }
 
-  // 6. Fire-and-forget huginn reindex — the approve response must not wait on a
-  //    (potentially slow) best-effort POST.
-  const collection = reindexCollectionFor(proposal.targetPath);
-  deps.reindex(collection).catch((err) => {
-    log.warn("Wiki-gardener apply: reindex failed for {collection}: {error}", {
-      collection,
-      error: errMsg(err),
-    });
-  });
+  // 6. Fire-and-forget huginn reindex over the union of the target's collection +
+  //    every collection the wire stage touched — the approve response must not
+  //    wait on a (potentially slow) best-effort POST.
+  reindexUnion(deps, proposal.targetPath, modified);
 
   return { outcome: "applied", writtenPath: proposal.targetPath };
+}
+
+/**
+ * Wire the just-written page INTO the wiki so it isn't an orphan (the whole point
+ * of this PR): (a) add its `## Concepts` index.md line (create mode only —
+ * entities skip, sections that don't exist are never invented), and (b) add an
+ * inbound `## See also` link on up to 3 of the proposal's `related_pages` that
+ * still resolve in the fresh apply-time index.
+ *
+ * Best-effort PER FILE: a wiring failure warns and continues — the page write is
+ * the source of truth and must never be undone by a wiring hiccup. Idempotent, so
+ * safe to run on the re-run/early-return recovery path too. Returns the set of
+ * wiki-relative paths it actually modified (for the reindex union). Index-line and
+ * See-also edits deliberately bypass the base_hash CAS: they're additive,
+ * idempotent, and re-read at apply time (accepted tiny race).
+ */
+async function runWireStage(
+  proposal: WikiProposal,
+  deps: ApplyDeps,
+  index: WikiIndex | null,
+): Promise<Set<string>> {
+  const modified = new Set<string>();
+  const title = draftTitle(proposal);
+  const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
+
+  // (a) index.md entry — create mode only.
+  if (proposal.mode === "create") {
+    try {
+      const entry = buildIndexEntry({
+        title,
+        kind: proposal.kind,
+        domain,
+        rationale: proposal.rationale,
+        body: stripFrontmatter(proposal.draft),
+      });
+      if (!entry) {
+        log.info("Wiki-gardener wire: index entry skipped for {title} (entity — file manually)", {
+          title,
+        });
+      } else {
+        const indexPath = path.join(deps.wikiDir, "index.md");
+        const existing = (await deps.readFile(indexPath)) ?? "";
+        const res = insertIndexLine(existing, entry);
+        if (res.reason === "section-not-found") {
+          log.warn(
+            "Wiki-gardener wire: index section \"### {section}\" not found — skipping index entry for {title}",
+            { section: entry.section, title },
+          );
+        } else if (res.changed) {
+          await deps.writeFile(indexPath, res.content);
+          modified.add("index.md");
+          log.info("Wiki-gardener wire: added index entry for {title} under \"### {section}\"", {
+            title,
+            section: entry.section,
+          });
+        }
+      }
+    } catch (err) {
+      log.warn("Wiki-gardener wire: index entry failed for {title}: {error}", {
+        title,
+        error: errMsg(err),
+      });
+    }
+  }
+
+  // (b) Inbound See-also links from related pages that still resolve. Selection
+  //     (slice(0,3) → resolve → skip self-links) is the shared `selectWirablePages`
+  //     helper so the review-gate preview can't promise a backlink apply skips.
+  for (const { page } of selectWirablePages(proposal.relatedPages, index, proposal.targetPath)) {
+    const relPath = page.relPath;
+    // Pure-confinement semantics (existingRelPath supplied): rel === the page's own
+    // path, and FORBIDDEN_BASENAMES (log.md/index.md/CLAUDE.md) is rejected first —
+    // so this path can never touch wiki infrastructure files.
+    if (
+      !isPathConfined({
+        targetPath: relPath,
+        wikiDir: deps.wikiDir,
+        domain: page.domain,
+        kind: "concept",
+        existingRelPath: relPath,
+      })
+    ) {
+      continue;
+    }
+    try {
+      const abs = path.join(deps.wikiDir, relPath);
+      const content = await deps.readFile(abs);
+      if (content === null) continue;
+      const edited = buildSeeAlsoEdit(content, title);
+      if (edited === null) continue; // already linked / nothing to do
+      await deps.writeFile(abs, edited);
+      modified.add(relPath);
+      log.info("Wiki-gardener wire: added See-also [[{title}]] to {relPath}", { title, relPath });
+    } catch (err) {
+      log.warn("Wiki-gardener wire: See-also edit failed for {relPath}: {error}", {
+        relPath,
+        error: errMsg(err),
+      });
+    }
+  }
+
+  return modified;
+}
+
+/**
+ * Fire-and-forget huginn reindex for the UNION of the target's collection and
+ * every collection the wire stage touched (life/** → wiki-life, else wiki),
+ * deduped. Each POST is best-effort — a failure warns, never blocks the approve.
+ */
+function reindexUnion(deps: ApplyDeps, targetPath: string, modified: Set<string>): void {
+  const collections = new Set<"wiki" | "wiki-life">([reindexCollectionFor(targetPath)]);
+  for (const rel of modified) collections.add(reindexCollectionFor(rel));
+  for (const collection of collections) {
+    deps.reindex(collection).catch((err) => {
+      log.warn("Wiki-gardener apply: reindex failed for {collection}: {error}", {
+        collection,
+        error: errMsg(err),
+      });
+    });
+  }
 }
 
 function errMsg(err: unknown): string {

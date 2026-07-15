@@ -192,6 +192,12 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-sources a:hover { text-decoration: underline; }
     .gard-src-coll { color: var(--text-faint); font-size: 11px; }
 
+    /* Wiring-on-approve preview */
+    .gard-wiring { list-style: none; margin: 0 0 14px; padding: 0; }
+    .gard-wiring li { font-size: 12.5px; margin: 3px 0; color: var(--text-secondary); }
+    .gard-wiring .gw-k { color: var(--text-faint); margin-right: 4px; }
+    .gard-wiring code { font-size: 11.5px; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; word-break: break-word; }
+
     /* Toggle sections */
     .gard-toggle {
       background: none; border: 1px solid var(--border-secondary); border-radius: 6px;

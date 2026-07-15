@@ -35,6 +35,19 @@ export interface WikiProposalContainedLinks {
   delinked: string[];
 }
 
+/**
+ * One existing wiki page the runner's `searchRelated` seam surfaced as related to
+ * a cluster (stored in the `related_pages` JSONB array). The apply-time wire stage
+ * adds an inbound `## See also` link from each still-resolving page back to the
+ * newly-created page. `relPath` is resolved against the index at insert time where
+ * possible (absent when the title didn't resolve at draft time). NULL column on
+ * legacy rows drafted before this feature.
+ */
+export interface WikiProposalRelatedPage {
+  title: string;
+  relPath?: string;
+}
+
 export type WikiProposalKind = "concept" | "entity";
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
@@ -57,6 +70,7 @@ export interface WikiProposal {
   sourceDocs: WikiProposalSourceDoc[];
   rationale: string | null;
   containedLinks: WikiProposalContainedLinks | null;
+  relatedPages: WikiProposalRelatedPage[] | null;
   status: WikiProposalStatus;
   createdAt: number;
   resolvedAt: number | null;
@@ -73,6 +87,7 @@ export interface InsertWikiProposalParams {
   sourceDocs: WikiProposalSourceDoc[];
   rationale?: string | null;
   containedLinks?: WikiProposalContainedLinks | null;
+  relatedPages?: WikiProposalRelatedPage[] | null;
   status?: WikiProposalStatus;
 }
 
@@ -89,7 +104,7 @@ export async function insertWikiProposal(
   const sql = getDb();
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, status
+      bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
     ) VALUES (
       ${params.botName},
       ${params.topicKey},
@@ -101,6 +116,7 @@ export async function insertWikiProposal(
       ${sql.json(params.sourceDocs as any)},
       ${params.rationale ?? null},
       ${params.containedLinks ? sql.json(params.containedLinks as any) : null},
+      ${params.relatedPages ? sql.json(params.relatedPages as any) : null},
       ${params.status ?? "draft"}
     )
     ON CONFLICT (bot_name, topic_key) WHERE status IN ('draft', 'approved') DO NOTHING
@@ -318,6 +334,14 @@ function mapRow(r: Record<string, any>): WikiProposal {
       r.contained_links && Array.isArray(r.contained_links.delinked)
         ? { delinked: r.contained_links.delinked as string[] }
         : null,
+    relatedPages: Array.isArray(r.related_pages)
+      ? (r.related_pages as any[])
+          .filter((x) => x && typeof x.title === "string")
+          .map((x) => ({
+            title: x.title as string,
+            ...(typeof x.relPath === "string" ? { relPath: x.relPath as string } : {}),
+          }))
+      : null,
     status: r.status as WikiProposalStatus,
     createdAt: new Date(r.created_at).getTime(),
     resolvedAt: r.resolved_at ? new Date(r.resolved_at).getTime() : null,

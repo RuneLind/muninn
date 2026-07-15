@@ -386,10 +386,34 @@ header carries a 🌱 Gardener link + pending-draft count badge.
   `Bun.write` the draft → insert a `log.md` entry **after the `# Activity Log`
   header, before the first `## [`** (`## [YYYY-MM-DD] create|update | <Title>` +
   `- via wiki-gardener, N sources`, Europe/Oslo date; creates log.md if missing) →
-  refresh the wiki-store cache (`getWikiIndex refresh`) → fire-and-forget huginn
-  reindex (collection derived from `target_path`: `life/**` → `wiki-life`, else
-  `wiki`; failures warn, never fail or delay the apply) → mark `applied`. `stale`
+  **WIRE STAGE** (`src/gardener/wire.ts` — stops every gardener page shipping as an
+  ORPHAN: before this PR the page was written but never linked in) → refresh the
+  wiki-store cache (`getWikiIndex refresh`) → fire-and-forget huginn reindex over
+  the **union** of the target's collection + every collection the wire stage
+  touched (each `life/**` → `wiki-life`, else `wiki`; failures warn, never fail or
+  delay the apply) → mark `applied`. `stale`
   rows show an explanation and become eligible again on the next weekly run.
+  - **Wire stage** (`buildIndexEntry` / `insertIndexLine` / `buildSeeAlsoEdit`,
+    pure + unit-tested; best-effort **per file** — a wiring failure warns and
+    continues, the page write stays source of truth): (a) inserts the page's
+    `## Concepts` **index.md** bullet (`- [[Title]] — <one-liner>`, one-liner from
+    rationale/first body paragraph ≤120 chars) in case-sensitive ASCII order within
+    the byte-matched `### AI / Claude / Coding` (domain ai) or `### Health / Learning`
+    (domain life) block — **create mode only**; **entity ⇒ skipped** (People/Orgs/
+    Products isn't derivable — file manually) and a **missing `###` ⇒ skip, never
+    creates a heading**; (b) adds an inbound `## See also` `[[link]]` on up to 3 of
+    the proposal's **`related_pages`** that still resolve in the fresh apply-time
+    index (creates the `## See also` section if absent). Both edits are idempotent
+    (a `[[Title]]` already present ⇒ no-op) and **bypass the base_hash CAS**
+    (additive, re-read at apply time — accepted tiny race). `related_pages` is the
+    persisted output of the runner's `searchRelated` seam (`jsonb [{title, relPath?}]`,
+    migration 062, nullable) — the top-3 related pages that previously only fed the
+    draft prompt and were thrown away. **Both the normal write path AND the re-run/
+    early-return recovery path run the wire stage** (the crashed pass may never have
+    reached it). Legacy rows (`related_pages` NULL) get the index entry only. The
+    review gate previews the planned wiring (index line or entity-skip note + the
+    pages that will gain a See-also link) in a "Wiring on approve" card, computed
+    read-time from `related_pages` + the live index (`wiki-gardener-wiring.ts`).
   (A **manual** counterpart to this fire-and-forget reindex now exists on the
   `/wiki` reader's Index card — `POST /api/wiki/reindex` fans huginn's per-collection
   `/update` over every backing collection and polls `/update-status`; see the
@@ -530,8 +554,10 @@ backlog run reuses `minClusterSize` but overrides `lookbackDays`/`maxProposalsPe
 hours), `config.timeoutMs: 1200000` (net headroom for 3 drafts at 300s + cluster + harvest;
 a timed-out run advances last_run_at and loses the week).
 
-Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`); the
-`watchers.type` CHECK gains `'wiki-gardener'` (migration `056`).
+Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`; the
+`contained_links` column is migration `061`, `related_pages jsonb` [apply-time
+See-also wiring memory] is migration `062`); the `watchers.type` CHECK gains
+`'wiki-gardener'` (migration `056`).
 
 ## Wiki Linter (wiki-linter.ts + src/wiki/lint.ts)
 

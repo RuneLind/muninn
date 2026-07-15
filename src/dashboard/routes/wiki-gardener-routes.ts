@@ -4,6 +4,8 @@ import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
+import { buildIndexEntry, selectWirablePages } from "../../gardener/wire.ts";
+import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
@@ -110,6 +112,9 @@ interface ProposalView {
   /** Body [[wikilinks]] the persist-time guard auto-de-linked to plain text
    *  (informational, from the `contained_links` column). Null on legacy rows. */
   containedLinks: string[] | null;
+  /** Read-time preview of the apply-time wire stage (index line + inbound See-also
+   *  targets). Null for terminal rows (nothing will be wired). */
+  wiring: WiringPreview | null;
 }
 
 async function readFileOrNull(absPath: string): Promise<string | null> {
@@ -572,6 +577,30 @@ export function registerWikiGardenerRoutes(
           reviewable && !containedLinks
             ? scanUnresolvedBodyLinks(stripFrontmatter(p.draft), { resolve, selfTitle: title })
             : [];
+        // Wiring preview: what the apply-time wire stage will do — the planned
+        // index line (or entity skip) + the related pages that still resolve in the
+        // live index and will gain an inbound See-also link. Read-time, no persisted
+        // state; a NULL `related_pages` (pre-migration row) degrades to a note.
+        let wiring: WiringPreview | null = null;
+        if (reviewable) {
+          const domain: "ai" | "life" = p.targetPath.startsWith("life/") ? "life" : "ai";
+          const entry = buildIndexEntry({
+            title,
+            kind: p.kind,
+            domain,
+            rationale: p.rationale,
+            body: stripFrontmatter(p.draft),
+          });
+          const seeAlso = selectWirablePages(p.relatedPages, index, p.targetPath).map(
+            (wp) => wp.title,
+          );
+          wiring = {
+            indexLine: entry ? entry.line : null,
+            indexSkipEntity: p.kind === "entity",
+            seeAlso,
+            legacyNoRelated: p.relatedPages === null,
+          };
+        }
         return {
           id: p.id,
           topicKey: p.topicKey,
@@ -588,6 +617,7 @@ export function registerWikiGardenerRoutes(
           diff,
           unresolvedLinks,
           containedLinks,
+          wiring,
         };
       }),
     );
