@@ -103,9 +103,13 @@ interface ProposalView {
   previewHtml: string;
   diff: DiffLine[] | null;
   /** Body [[wikilinks]] that don't resolve against the live index (surfaced, not
-   *  stripped). Read-time so a page created while the proposal awaited review
-   *  stops being flagged. Empty for terminal rows. */
+   *  stripped). LEGACY read-time fallback: only computed for rows without a
+   *  persisted `containedLinks` report (drafted before body containment). Read-time
+   *  so a page created while the proposal awaited review stops being flagged. */
   unresolvedLinks: string[];
+  /** Body [[wikilinks]] the persist-time guard auto-de-linked to plain text
+   *  (informational, from the `contained_links` column). Null on legacy rows. */
+  containedLinks: string[] | null;
 }
 
 async function readFileOrNull(absPath: string): Promise<string | null> {
@@ -560,11 +564,14 @@ export function registerWikiGardenerRoutes(
           const current = await readFileOrNull(path.join(root, p.targetPath));
           if (current !== null) diff = lineDiff(current, p.draft);
         }
-        // Surface (don't strip) body wikilinks that don't resolve against the
-        // live index — computed read-time so a page created post-draft clears it.
-        const unresolvedLinks = reviewable
-          ? scanUnresolvedBodyLinks(stripFrontmatter(p.draft), { resolve, selfTitle: title })
-          : [];
+        // New rows carry a persisted containment report (`contained_links`); the
+        // read-time scan is only a fallback for legacy rows drafted before body
+        // containment. Computed read-time (a page created post-draft clears it).
+        const containedLinks = p.containedLinks ? p.containedLinks.delinked : null;
+        const unresolvedLinks =
+          reviewable && !containedLinks
+            ? scanUnresolvedBodyLinks(stripFrontmatter(p.draft), { resolve, selfTitle: title })
+            : [];
         return {
           id: p.id,
           topicKey: p.topicKey,
@@ -580,6 +587,7 @@ export function registerWikiGardenerRoutes(
           previewHtml: reviewable ? renderWikiHtml(p.draft, resolve, { stripTitle: title }) : "",
           diff,
           unresolvedLinks,
+          containedLinks,
         };
       }),
     );

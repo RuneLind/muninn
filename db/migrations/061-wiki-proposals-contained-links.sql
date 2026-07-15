@@ -1,0 +1,12 @@
+-- Body-link containment report for wiki-gardener proposals.
+-- The persist-time guard (`containBodyLinks`, src/gardener/draft.ts) now de-links
+-- unresolvable body `[[wikilinks]]` to plain bold text (symmetric with the
+-- existing `sources:` frontmatter containment). This column stores what it
+-- de-linked so the review gate can render a neutral "N links auto-de-linked"
+-- report instead of re-scanning at read time. Shape: {"delinked": ["Title", …]}.
+-- Nullable; NULL on legacy rows drafted before containment (the gate falls back
+-- to the read-time scanUnresolvedBodyLinks chip for those).
+--
+-- ⚠️ Mirror of db/init.sql: keep the column in both, or schema-drift.test.ts
+-- (which diffs the live schema against init.sql) fails.
+ALTER TABLE wiki_proposals ADD COLUMN contained_links JSONB;

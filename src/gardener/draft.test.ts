@@ -8,6 +8,8 @@ import {
   stripOwnedAliases,
   replaceUnresolvedSourceLinks,
   scanUnresolvedBodyLinks,
+  containBodyLinks,
+  containDraftBodyLinks,
   WIKI_CONVENTIONS_DIGEST,
 } from "./draft.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
@@ -331,6 +333,111 @@ describe("scanUnresolvedBodyLinks", () => {
     const body = "[[A]] [[B]] [[A]]";
     const out = scanUnresolvedBodyLinks(body, { resolve: resolveFrom([]) });
     expect(out).toEqual(["A", "B"]);
+  });
+});
+
+describe("containBodyLinks", () => {
+  const resolveFrom = (titles: string[]) => (target: string) =>
+    titles.some((t) => t.toLowerCase() === target.toLowerCase())
+      ? ({ title: target } as unknown as WikiPageMeta)
+      : undefined;
+
+  test("resolvable link kept unchanged; unresolvable de-linked to bold", () => {
+    const out = containBodyLinks("See [[Real Page]] and [[Missing Page]].", {
+      resolve: resolveFrom(["Real Page"]),
+    });
+    expect(out.body).toBe("See [[Real Page]] and **Missing Page**.");
+    expect(out.delinked).toEqual(["Missing Page"]);
+  });
+
+  test("piped unresolvable link de-links to its label", () => {
+    const out = containBodyLinks("Try [[Zone 2 Cardio|easy cardio]] today.", {
+      resolve: resolveFrom([]),
+    });
+    expect(out.body).toBe("Try **easy cardio** today.");
+    expect(out.delinked).toEqual(["Zone 2 Cardio"]);
+  });
+
+  test("piped RESOLVABLE link is kept verbatim (label preserved)", () => {
+    const out = containBodyLinks("See [[Real Page|nice label]].", {
+      resolve: resolveFrom(["Real Page"]),
+    });
+    expect(out.body).toBe("See [[Real Page|nice label]].");
+    expect(out.delinked).toEqual([]);
+  });
+
+  test("self-referential link is de-linked even when it resolves (update mode)", () => {
+    // In update mode the page exists in the index, so resolve() returns it — but a
+    // page linking itself is never real navigation, so selfTitle forces the de-link.
+    const out = containBodyLinks("This [[Mobility Training]] page covers mobility.", {
+      resolve: resolveFrom(["Mobility Training"]),
+      selfTitle: "Mobility Training",
+    });
+    expect(out.body).toBe("This **Mobility Training** page covers mobility.");
+    expect(out.delinked).toEqual(["Mobility Training"]);
+  });
+
+  test("links inside a fenced code block and inline code span are untouched", () => {
+    const body =
+      "Real [[Missing]] here.\n\n```\ncode [[Missing]] stays\n```\n\nInline `[[Missing]]` stays too.";
+    const out = containBodyLinks(body, { resolve: resolveFrom([]) });
+    expect(out.body).toBe(
+      "Real **Missing** here.\n\n```\ncode [[Missing]] stays\n```\n\nInline `[[Missing]]` stays too.",
+    );
+    // Only the one outside code contributes to the report (deduped).
+    expect(out.delinked).toEqual(["Missing"]);
+  });
+
+  test("deduped report, first-seen order; every occurrence rewritten", () => {
+    const out = containBodyLinks("[[A]] then [[B]] then [[A]] again.", {
+      resolve: resolveFrom([]),
+    });
+    expect(out.body).toBe("**A** then **B** then **A** again.");
+    expect(out.delinked).toEqual(["A", "B"]);
+  });
+
+  test("idempotent: containing an already-contained body is a no-op", () => {
+    const once = containBodyLinks("See [[Missing]] and [[Real]].", {
+      resolve: resolveFrom(["Real"]),
+    });
+    const twice = containBodyLinks(once.body, { resolve: resolveFrom(["Real"]) });
+    expect(twice.body).toBe(once.body);
+    expect(twice.delinked).toEqual([]);
+  });
+});
+
+describe("containDraftBodyLinks", () => {
+  const resolveFrom = (titles: string[]) => (target: string) =>
+    titles.some((t) => t.toLowerCase() === target.toLowerCase())
+      ? ({ title: target } as unknown as WikiPageMeta)
+      : undefined;
+
+  const draft = (body: string) =>
+    `---\ntype: concept\ntitle: New Page\naliases: [[[Keep Me]]]\ncreated: 2026-07-13\nupdated: 2026-07-13\ntags: []\nsources: []\n---\n\n${body}`;
+
+  test("de-links body while leaving frontmatter bytes untouched", () => {
+    const input = draft("# New Page\n\nSee [[Missing]].");
+    const out = containDraftBodyLinks(input, { resolve: resolveFrom([]) });
+    expect(out.delinked).toEqual(["Missing"]);
+    // Frontmatter (incl. the bracket-heavy aliases line) is byte-identical.
+    const head = input.slice(0, input.indexOf("\n\n# New Page"));
+    expect(out.draft.startsWith(head)).toBe(true);
+    expect(out.draft).toContain("aliases: [[[Keep Me]]]");
+    expect(out.draft).toContain("See **Missing**.");
+    expect(out.draft).not.toContain("[[Missing]]");
+  });
+
+  test("nothing unresolved → draft byte-identical", () => {
+    const input = draft("# New Page\n\nSee [[Real]].");
+    const out = containDraftBodyLinks(input, { resolve: resolveFrom(["Real"]) });
+    expect(out.delinked).toEqual([]);
+    expect(out.draft).toBe(input);
+  });
+
+  test("no frontmatter fence → unchanged, defensive no-op", () => {
+    const out = containDraftBodyLinks("# Bare body\n\n[[Missing]]", { resolve: resolveFrom([]) });
+    expect(out.delinked).toEqual([]);
+    expect(out.draft).toBe("# Bare body\n\n[[Missing]]");
   });
 });
 
