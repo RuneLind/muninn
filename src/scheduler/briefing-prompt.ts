@@ -1,5 +1,6 @@
 import type { ScheduledTask } from "../types.ts";
-import { searchMemories } from "../db/memories.ts";
+import { searchMemoriesHybrid } from "../db/memories.ts";
+import { generateEmbedding } from "../ai/embeddings.ts";
 import { getActiveGoals } from "../db/goals.ts";
 import { getScheduledTasksForUser } from "../db/scheduled-tasks.ts";
 import { getRecentAlerts } from "../db/messages.ts";
@@ -31,14 +32,21 @@ export async function buildBriefingPrompt(
 
   const timeOfDay = getTimeOfDay(task.scheduleHour);
 
-  // Build a search query from the task metadata for FTS memory lookup
-  const searchQuery = [task.title, task.prompt, "preferences schedule daily"]
-    .filter(Boolean)
-    .join(" ");
+  // Build a semantic search query from the task metadata. title + prompt reads
+  // as the natural-language topic of the briefing — the best input for embedding
+  // search (the old "preferences schedule daily" keyword suffix was tuned for
+  // FTS matching and only muddies a semantic query).
+  const searchQuery = [task.title, task.prompt].filter(Boolean).join(" ");
 
-  // Fetch all context in parallel
+  // Fetch all context in parallel. Memory recall uses hybrid (FTS + vector)
+  // search like chat does; searchMemoriesHybrid degrades to plain FTS when the
+  // embedding is null, so no extra fallback branch is needed here.
   const [memories, goals, scheduledTasks, alerts] = await Promise.all([
-    searchMemories(task.userId, searchQuery, 8, botName).catch(() => []),
+    generateEmbedding(searchQuery)
+      .then((embedding) =>
+        searchMemoriesHybrid(task.userId, searchQuery, embedding, 8, botName),
+      )
+      .catch(() => []),
     getActiveGoals(task.userId, botName).catch(() => []),
     getScheduledTasksForUser(task.userId, botName).catch(() => []),
     getRecentAlerts(task.userId, botName, 24, 5).catch(() => []),

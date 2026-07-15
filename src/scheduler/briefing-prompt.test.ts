@@ -1,18 +1,24 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
 import type { ScheduledTask, Memory, Goal } from "../types.ts";
 
-const mockSearchMemories = mock(() => Promise.resolve([] as Memory[]));
+const mockSearchMemoriesHybrid = mock((..._args: any[]) => Promise.resolve([] as Memory[]));
+const mockGenerateEmbedding = mock((..._args: any[]) => Promise.resolve([0.1, 0.2, 0.3] as number[] | null));
 const mockGetActiveGoals = mock(() => Promise.resolve([] as Goal[]));
 const mockGetScheduledTasksForUser = mock(() => Promise.resolve([] as ScheduledTask[]));
 const mockGetRecentAlerts = mock(() => Promise.resolve([] as any[]));
 
 mock.module("../db/memories.ts", () => ({
-  searchMemories: mockSearchMemories,
-  searchMemoriesHybrid: mock(() => Promise.resolve([])),
+  searchMemories: mock(() => Promise.resolve([])),
+  searchMemoriesHybrid: mockSearchMemoriesHybrid,
   saveMemory: mock(() => Promise.resolve("mem-1")),
   updateMemoryEmbedding: mock(() => Promise.resolve()),
   getRecentMemories: mock(() => Promise.resolve([])),
   getMemoriesWithoutEmbeddings: mock(() => Promise.resolve([])),
+}));
+
+mock.module("../ai/embeddings.ts", () => ({
+  generateEmbedding: mockGenerateEmbedding,
+  warmupEmbeddings: mock(() => Promise.resolve()),
 }));
 
 mock.module("../db/goals.ts", () => ({
@@ -71,7 +77,8 @@ const baseTask: ScheduledTask = {
 const persona = "You are Jarvis, a personal AI assistant.";
 
 beforeEach(() => {
-  mockSearchMemories.mockClear();
+  mockSearchMemoriesHybrid.mockClear();
+  mockGenerateEmbedding.mockClear();
   mockGetActiveGoals.mockClear();
   mockGetScheduledTasksForUser.mockClear();
   mockGetRecentAlerts.mockClear();
@@ -124,7 +131,7 @@ describe("buildBriefingPrompt", () => {
         createdAt: Date.now(),
       },
     ];
-    mockSearchMemories.mockResolvedValueOnce(memories);
+    mockSearchMemoriesHybrid.mockResolvedValueOnce(memories);
 
     const { systemPrompt, meta } = await buildBriefingPrompt(baseTask, persona, "jarvis");
     expect(systemPrompt).toContain("User prefers TypeScript");
@@ -179,7 +186,7 @@ describe("buildBriefingPrompt", () => {
   });
 
   test("handles DB errors gracefully", async () => {
-    mockSearchMemories.mockRejectedValueOnce(new Error("DB down"));
+    mockSearchMemoriesHybrid.mockRejectedValueOnce(new Error("DB down"));
     mockGetActiveGoals.mockRejectedValueOnce(new Error("DB down"));
     mockGetScheduledTasksForUser.mockRejectedValueOnce(new Error("DB down"));
     mockGetRecentAlerts.mockRejectedValueOnce(new Error("DB down"));
@@ -192,15 +199,55 @@ describe("buildBriefingPrompt", () => {
     expect(meta.goalsCount).toBe(0);
   });
 
-  test("searches memories with FTS using task title + prompt", async () => {
+  test("searches memories via hybrid search with the generated embedding", async () => {
     await buildBriefingPrompt(baseTask, persona, "jarvis");
-    expect(mockSearchMemories).toHaveBeenCalledTimes(1);
-    const [userId, query, limit, botName] = mockSearchMemories.mock.calls[0] as any[];
+
+    // Embedding is generated from the same title + prompt query
+    expect(mockGenerateEmbedding).toHaveBeenCalledTimes(1);
+    const [embedQuery] = mockGenerateEmbedding.mock.calls[0] as any[];
+    expect(embedQuery).toContain("Morning Tech Briefing");
+    expect(embedQuery).toContain("Search for the latest tech news");
+
+    // Hybrid search receives that embedding and query
+    expect(mockSearchMemoriesHybrid).toHaveBeenCalledTimes(1);
+    const [userId, query, embedding, limit, botName] =
+      mockSearchMemoriesHybrid.mock.calls[0] as any[];
     expect(userId).toBe("u1");
     expect(query).toContain("Morning Tech Briefing");
     expect(query).toContain("Search for the latest tech news");
+    expect(embedding).toEqual([0.1, 0.2, 0.3]);
     expect(limit).toBe(8);
     expect(botName).toBe("jarvis");
+  });
+
+  test("query no longer carries the FTS keyword suffix", async () => {
+    await buildBriefingPrompt(baseTask, persona, "jarvis");
+    const [, query] = mockSearchMemoriesHybrid.mock.calls[0] as any[];
+    expect(query).not.toContain("preferences schedule daily");
+  });
+
+  test("still returns memories when embedding generation fails (null)", async () => {
+    mockGenerateEmbedding.mockResolvedValueOnce(null);
+    const memories: Memory[] = [
+      {
+        id: "m1",
+        userId: "u1",
+        content: "User prefers TypeScript",
+        summary: "User prefers TypeScript",
+        tags: ["preferences"],
+        scope: "personal",
+        createdAt: Date.now(),
+      },
+    ];
+    // searchMemoriesHybrid delegates to FTS internally on null embedding; here we
+    // only assert the briefing call site passes null through and surfaces results.
+    mockSearchMemoriesHybrid.mockResolvedValueOnce(memories);
+
+    const { systemPrompt, meta } = await buildBriefingPrompt(baseTask, persona, "jarvis");
+    const [, , embedding] = mockSearchMemoriesHybrid.mock.calls[0] as any[];
+    expect(embedding).toBeNull();
+    expect(systemPrompt).toContain("User prefers TypeScript");
+    expect(meta.memoriesCount).toBe(1);
   });
 
   test("returns correct time of day for evening", async () => {
