@@ -83,6 +83,39 @@ describe("runGardener", () => {
     expect(alerts[0]!.id).toBe("wiki-gardener:1");
   });
 
+  test("all-http source urls → no pending-ingestion callout (byte-identical draft)", async () => {
+    const { deps, inserted } = makeDeps();
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    // Common case: every doc has a real https URL → the draft is unchanged.
+    expect(inserted[0]!.draft).not.toContain("Source pending ingestion");
+    expect(inserted[0]!.draft).toBe(validDraft());
+  });
+
+  test("file:// source url is filtered from sources and gets a pending-ingestion callout", async () => {
+    const bodies: Record<string, RawFetchedDoc> = {
+      [IDS[0]!]: {
+        text: "# Doc a\n\nAbout context compaction.",
+        metadata: { url: "file:///Users/rune/source/private/huginn/data/sources/a.md" },
+      },
+      [IDS[1]!]: { text: "# Doc b\n\nAbout context compaction.", metadata: { url: `https://${IDS[1]}` } },
+      [IDS[2]!]: { text: "# Doc c\n\nAbout context compaction.", metadata: { url: `https://${IDS[2]}` } },
+    };
+    const { deps, inserted } = makeDeps({ fetchDoc: async (_c, id) => bodies[id] ?? null });
+    await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+
+    // The raw file:// url survives in source_docs (provenance) …
+    const fileDoc = inserted[0]!.sourceDocs.find((d) => d.url.startsWith("file://"));
+    expect(fileDoc).toBeDefined();
+
+    // … but never leaks into the rendered draft body, and a single callout lists it.
+    const draft = inserted[0]!.draft;
+    expect(draft).not.toContain("file://");
+    expect(draft.match(/> \[!note\] Source pending ingestion/g)).toHaveLength(1);
+    expect(draft).toContain(`> \`youtube-summaries/${IDS[0]}\` has no public URL yet.`);
+  });
+
   test("alert id is per-run-unique so repeat runs deliver", async () => {
     const a = await runGardener(makeDeps().deps);
     const b = await runGardener(makeDeps().deps);

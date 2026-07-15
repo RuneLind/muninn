@@ -7,6 +7,8 @@ import {
   normalizeDraftOutput,
   stripOwnedAliases,
   replaceUnresolvedSourceLinks,
+  isHttpUrl,
+  appendPendingIngestionCallout,
   scanUnresolvedBodyLinks,
   containBodyLinks,
   containDraftBodyLinks,
@@ -149,6 +151,20 @@ describe("buildDraftPrompt", () => {
     // The 7000-char doc (Doc 15, kept as most recent) is truncated with a marker.
     expect(p).toContain("[… truncated for length]");
     expect(p).not.toContain("x".repeat(4500));
+  });
+
+  test("summary header omits a non-http(s) URL, keeps an http(s) one", () => {
+    // ids sort descending (recency): id "2" (Web) becomes Summary 1, id "1" (Local) Summary 2.
+    const mixed: HarvestedDoc[] = [
+      { key: "c/1", collection: "c", id: "1", url: "file:///Users/rune/Self-Learning Agent Architecture.md", title: "Local Doc", text: "local body" },
+      { key: "c/2", collection: "c", id: "2", url: "https://real.url/x", title: "Web Doc", text: "web body" },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs: mixed, today: "2026-07-15" });
+    // The file:// URL never reaches the model — the local doc's header shows title only.
+    expect(p).not.toContain("file://");
+    expect(p).toContain("### Summary 2: Local Doc\n");
+    // The http(s) URL is still rendered in its header.
+    expect(p).toContain("### Summary 1: Web Doc (https://real.url/x)");
   });
 });
 
@@ -302,6 +318,102 @@ describe("replaceUnresolvedSourceLinks", () => {
     const out = replaceUnresolvedSourceLinks(draft, { index: index([]), urls: ["https://a.com/x"] });
     expect(out.replaced).toEqual(["A", "B"]);
     expect(out.draft).toContain("sources: [https://a.com/x]");
+  });
+
+  test("non-http(s) urls in opts.urls are ignored (file:// never appended)", () => {
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Phantom]]"), {
+      index: index([]),
+      urls: ["file:///Users/rune/x.md", "https://real.url/x"],
+    });
+    expect(out.replaced).toEqual(["Phantom"]);
+    // Only the http(s) url is appended; the file:// entry is dropped.
+    expect(out.draft).toContain("sources: [https://real.url/x]");
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("only-file:// urls yield an empty sources list (no placeholder invented)", () => {
+    const out = replaceUnresolvedSourceLinks(draftWithSources("[[Phantom]]"), {
+      index: index([]),
+      urls: ["file:///Users/rune/x.md"],
+    });
+    expect(out.replaced).toEqual(["Phantom"]);
+    expect(out.draft).toContain("sources: []");
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("model-authored file:// literal (NO wikilinks) is dropped, https kept in order", () => {
+    // The real production leak (proposal f1c539ea…): the model wrote the file://
+    // path itself into `sources:` — no wikilink present, so the old code returned
+    // the line raw and the machine-local path shipped in the citation trail.
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`"file:///Users/rune/Self-Learning Agent Architecture.md", "https://a", "https://b"`),
+      { index: index([]), urls: [] },
+    );
+    expect(out.replaced).toEqual([]);
+    expect(out.droppedLiterals).toEqual(["file:///Users/rune/Self-Learning Agent Architecture.md"]);
+    expect(out.draft).toContain(`sources: ["https://a", "https://b"]`);
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("file:// literal alongside a wikilink is dropped on the rebuild path", () => {
+    const idx = index([page({ title: "Real Page" })]);
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`file:///Users/rune/x.md, [[Real Page]], [[Phantom]]`),
+      { index: idx, urls: ["https://backfill.url"] },
+    );
+    expect(out.replaced).toEqual(["Phantom"]);
+    expect(out.droppedLiterals).toEqual(["file:///Users/rune/x.md"]);
+    // file:// gone; resolved wikilink kept; phantom replaced by the backfill URL.
+    expect(out.draft).toContain("sources: [[[Real Page]], https://backfill.url]");
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("happy path: all-https sources line stays byte-identical", () => {
+    const original = draftWithSources(`https://a.com/x, https://b.com/y`);
+    const out = replaceUnresolvedSourceLinks(original, { index: index([]), urls: ["https://a.com/x"] });
+    expect(out.replaced).toEqual([]);
+    expect(out.droppedLiterals).toEqual([]);
+    expect(out.draft).toBe(original);
+  });
+});
+
+describe("isHttpUrl", () => {
+  test("accepts http and https (any case)", () => {
+    expect(isHttpUrl("http://a.com/x")).toBe(true);
+    expect(isHttpUrl("https://a.com/x")).toBe(true);
+    expect(isHttpUrl("  https://a.com/x  ")).toBe(true);
+    expect(isHttpUrl("HTTPS://a.com/x")).toBe(true);
+  });
+
+  test("rejects file://, empty, and non-string", () => {
+    expect(isHttpUrl("file:///Users/rune/x.md")).toBe(false);
+    expect(isHttpUrl("")).toBe(false);
+    expect(isHttpUrl("   ")).toBe(false);
+    expect(isHttpUrl(null)).toBe(false);
+    expect(isHttpUrl(undefined)).toBe(false);
+    expect(isHttpUrl("ftp://a.com/x")).toBe(false);
+  });
+});
+
+describe("appendPendingIngestionCallout", () => {
+  const draft = `---\ntype: concept\ntitle: New Page\nsources: []\n---\n\n# New Page\n\nBody.`;
+
+  test("no pending docs → draft returned unchanged (byte-identical)", () => {
+    expect(appendPendingIngestionCallout(draft, [])).toBe(draft);
+  });
+
+  test("one callout with one line per pending doc", () => {
+    const out = appendPendingIngestionCallout(draft, [
+      { collection: "youtube-summaries", docId: "a.md" },
+      { collection: "x-summaries", docId: "b.md" },
+    ]);
+    // Exactly one callout header.
+    expect(out.match(/> \[!note\] Source pending ingestion/g)).toHaveLength(1);
+    expect(out).toContain("> `youtube-summaries/a.md` has no public URL yet.");
+    expect(out).toContain("> `x-summaries/b.md` has no public URL yet.");
+    // Appended after the existing body, separated by a blank line.
+    expect(out.startsWith(draft.replace(/\s+$/, ""))).toBe(true);
+    expect(out).toContain("Body.\n\n> [!note] Source pending ingestion");
   });
 });
 
