@@ -321,7 +321,7 @@ describe("createJobStore — attachRun", () => {
     const s = store();
     const id = s.createJob({ videoId: "v1", title: "T", url: "u" });
     s.attachRun(id, { botName: "jarvis", traceId: "trace-abc" });
-    s.attachRun(id, { model: "claude-sonnet-5", inputTokens: 12_000, outputTokens: 900, numTurns: 1, toolCount: 3 });
+    s.attachRun(id, { model: "claude-sonnet-5", inputTokens: 12_000, outputTokens: 900, numTurns: 1, toolCount: 3, costUsd: 0.042 });
 
     s.completeJob(id, "summary", "ai/general");
 
@@ -335,6 +335,7 @@ describe("createJobStore — attachRun", () => {
       inputTokens: 12_000,
       outputTokens: 900,
       toolCount: 3,
+      costUsd: 0.042,
     });
   });
 

@@ -108,7 +108,7 @@ export async function streamResearchAnswer(
     platform: "research",
   });
   const traceId: string | undefined = tracer.traceId;
-  let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number } = {};
+  let usage: { inputTokens?: number; outputTokens?: number; numTurns?: number; costUsd?: number } = {};
   let status: "ok" | "error" = "ok";
 
   try {
@@ -200,8 +200,9 @@ export async function streamResearchAnswer(
       inputTokens: claude.inputTokens,
       outputTokens: claude.outputTokens,
       numTurns: claude.numTurns,
+      costUsd: claude.costUsd,
     };
-    tracer.end("claude", { ...usage, model: claude.model, costUsd: claude.costUsd });
+    tracer.end("claude", { ...usage, model: claude.model });
     if (claude.model) agentStatus.setModel(reqId, claude.model);
 
     const answer = (claude.result ?? "").trim();

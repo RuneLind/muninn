@@ -27,6 +27,11 @@ export interface RecentTraceRow {
    *  rows stay null). Null whenever the run recorded no tokens. */
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Cost in USD — chat rows from the child `claude` span's `costUsd` attribute,
+   *  watcher rows from the (childless) watcher span's OWN `costUsd` attribute.
+   *  Null when no cost was recorded (e.g. externally-traced turns). An explicit
+   *  `0` (subscription connectors report it) is a real value, distinct from null. */
+  costUsd: number | null;
 }
 
 /**
@@ -44,13 +49,17 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
            -- Chat rows: the child claude span's model. Watcher rows are childless,
            -- so fall back to the watcher span's OWN model attribute.
            COALESCE(c.model, t.attributes->>'model') AS model,
+           -- Cost mirrors the model lookup: chat rows carry it on the child claude
+           -- span, watcher rows on the (childless) watcher span's OWN attributes.
+           COALESCE(c.cost_usd, t.attributes->>'costUsd') AS cost_usd,
            -- Token totals live on the root span's OWN attributes — stamped by the
            -- runner for watchers and by message-processor's t.finish for chat.
            t.attributes->>'inputTokens'  AS input_tokens,
            t.attributes->>'outputTokens' AS output_tokens
     FROM traces t
     LEFT JOIN LATERAL (
-      SELECT cs.attributes->>'model' AS model
+      SELECT cs.attributes->>'model' AS model,
+             cs.attributes->>'costUsd' AS cost_usd
       FROM traces cs
       WHERE cs.trace_id = t.trace_id AND cs.parent_id = t.id AND cs.name = 'claude'
       LIMIT 1
@@ -75,6 +84,7 @@ export async function getRecentAgentTraces(limit = 40, windowHours = 48): Promis
     startedAt: new Date(r.started_at).getTime(),
     durationMs: r.duration_ms ?? null,
     model: (r.model as string | null) ?? null,
+    costUsd: r.cost_usd != null ? Number(r.cost_usd) : null,
     inputTokens: r.input_tokens != null ? Number(r.input_tokens) : null,
     outputTokens: r.output_tokens != null ? Number(r.output_tokens) : null,
   }));

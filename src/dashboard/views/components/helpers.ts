@@ -53,6 +53,23 @@ export function fmtMs(ms: number): string {
   return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
 }
 
+/**
+ * Format a run cost in USD for the `/agents` Recent table.
+ * - `null`/`undefined` ⇒ `—` (unknown: direct-SDK Haiku backends, drains,
+ *   extractor rows, externally-traced chat turns).
+ * - An explicit `0` ⇒ `$0.00` — truthful for subscription connectors
+ *   (copilot-sdk / openai-compat report a real `0`), and deliberately distinct
+ *   from the unknown dash.
+ * - Sub-cent positive costs keep 4 decimals so a real ~$0.003 run isn't
+ *   flattened to `$0.00` and confused with a genuine zero.
+ */
+export function fmtCost(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n === 0) return "$0.00";
+  if (n < 0.01) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(2);
+}
+
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms == null) return "-";
   return fmtMs(ms);

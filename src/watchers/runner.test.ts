@@ -9,6 +9,8 @@ import {
   releaseChecker,
   __resetCheckerGuardForTest,
   watcherConnectorInfo,
+  newWatcherUsage,
+  accumulateWatcherUsage,
 } from "./runner.ts";
 import { DEFAULT_MODEL } from "../scheduler/executor.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -252,6 +254,39 @@ describe("formatAlerts", () => {
     // Header + two alerts joined by \n\n
     const lines = result.split("\n\n");
     expect(lines.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ── watcher usage accumulator (token + cost summing) ─────────────────
+
+describe("accumulateWatcherUsage", () => {
+  test("sums tokens, turns, and cost across multiple calls (x/anthropic gate+digest)", () => {
+    const acc = newWatcherUsage();
+    accumulateWatcherUsage(acc, { model: "claude-haiku", inputTokens: 100, outputTokens: 20, numTurns: 1, costUsd: 0.01 });
+    accumulateWatcherUsage(acc, { model: "claude-sonnet", inputTokens: 300, outputTokens: 40, numTurns: 2, costUsd: 0.05 });
+    expect(acc.inputTokens).toBe(400);
+    expect(acc.outputTokens).toBe(60);
+    expect(acc.numTurns).toBe(3);
+    expect(acc.calls).toBe(2);
+    expect(acc.model).toBe("claude-sonnet"); // last call wins
+    expect(acc.costUsd).toBeCloseTo(0.06, 10);
+  });
+
+  test("all-undefined cost leaves costUsd undefined (→ dash), a summed 0 stays 0 (→ $0.00)", () => {
+    const noCost = newWatcherUsage();
+    accumulateWatcherUsage(noCost, { model: "m", inputTokens: 10, outputTokens: 2 });
+    expect(noCost.costUsd).toBeUndefined();
+
+    const zeroCost = newWatcherUsage();
+    accumulateWatcherUsage(zeroCost, { model: "m", inputTokens: 10, outputTokens: 2, costUsd: 0 });
+    expect(zeroCost.costUsd).toBe(0);
+  });
+
+  test("a missing cost on one call doesn't wipe an already-summed total", () => {
+    const acc = newWatcherUsage();
+    accumulateWatcherUsage(acc, { model: "m", inputTokens: 10, outputTokens: 2, costUsd: 0.03 });
+    accumulateWatcherUsage(acc, { model: "m", inputTokens: 10, outputTokens: 2 }); // no cost
+    expect(acc.costUsd).toBeCloseTo(0.03, 10);
   });
 });
 

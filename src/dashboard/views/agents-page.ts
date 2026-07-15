@@ -158,8 +158,8 @@ export async function renderAgentsPage(): Promise<string> {
     <div class="zone">
       <h2>Recently finished <span class="zone-count" id="recentCount">0</span></h2>
       <div class="scroll"><table class="list-table">
-        <thead><tr><th>Finished</th><th>Kind</th><th>Name</th><th>Bot</th><th>Duration</th><th></th></tr></thead>
-        <tbody id="recentBody"><tr><td colspan="6" class="empty-msg">Loading…</td></tr></tbody>
+        <thead><tr><th>Finished</th><th>Kind</th><th>Name</th><th>Bot</th><th>Duration</th><th>Cost</th><th></th></tr></thead>
+        <tbody id="recentBody"><tr><td colspan="7" class="empty-msg">Loading…</td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -527,7 +527,7 @@ export async function renderAgentsPage(): Promise<string> {
       var visible = items.filter(function (r) { return matchesBot(r.bot); });
       document.getElementById('recentCount').textContent = visible.length;
       var body = document.getElementById('recentBody');
-      if (visible.length === 0) { body.innerHTML = '<tr><td colspan="6" class="empty-msg">No recent runs.</td></tr>'; return; }
+      if (visible.length === 0) { body.innerHTML = '<tr><td colspan="7" class="empty-msg">No recent runs.</td></tr>'; return; }
       body.innerHTML = visible.map(function (r) {
         var dur = r.durationMs != null ? fmtMs(r.durationMs) : '';
         var statusCls = r.status === 'error' ? ' status-error' : '';
@@ -536,12 +536,15 @@ export async function renderAgentsPage(): Promise<string> {
         var toks = (r.inputTokens != null || r.outputTokens != null)
           ? '<span class="run-toks">' + fmtTokens(r.inputTokens || 0) + ' in · ' + fmtTokens(r.outputTokens || 0) + ' out</span>'
           : '';
+        // fmtCost degrades an unknown cost to a dash and renders an explicit 0
+        // (subscription connectors) as $0.00.
         return '<tr>' +
           '<td><span class="when">' + esc(timeAgo(r.finishedAt)) + '</span></td>' +
           '<td><span class="tag' + statusCls + '">' + esc(kindLabels[r.kind] || r.kind) + '</span></td>' +
           '<td>' + esc(r.name) + (r.model ? ' <code>' + esc(r.model) + '</code>' : '') + toks + '</td>' +
           '<td>' + (r.bot ? '<code>' + esc(r.bot) + '</code>' : '') + '</td>' +
           '<td><span class="when">' + esc(dur) + '</span></td>' +
+          '<td><span class="run-cost">' + esc(fmtCost(r.costUsd)) + '</span></td>' +
           '<td>' + link + '</td>' +
         '</tr>';
       }).join('');
