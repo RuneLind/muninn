@@ -208,7 +208,11 @@ export async function callHaikuDirect(
     }
   }
 
-  trackUsage(source, response.model, inputTokens, outputTokens, botName);
+  // Thread the telemetry Tracer's trace id so the haiku_usage row ties back to
+  // the request trace (NULL without a tracer). Mirrors spawnHaiku's trackUsage
+  // call — before this, the anthropic backend (the active HAIKU_DIRECT_ENABLED
+  // path) wrote every extractor/decomposer row with a NULL trace_id.
+  trackUsage(source, response.model, inputTokens, outputTokens, botName, opts.tracer?.traceId);
 
   return {
     result: resultText,
@@ -264,7 +268,9 @@ export async function callHaikuViaCopilot(
         { botName: opts.botName ?? "haiku", model: reportedModel },
       );
     }
-    trackUsage(opts.source, reportedModel, inputTokens, outputTokens, opts.botName);
+    // Thread the telemetry Tracer's trace id (NULL without a tracer) — same join
+    // as callHaikuDirect / spawnHaiku so the copilot backend's rows tie back too.
+    trackUsage(opts.source, reportedModel, inputTokens, outputTokens, opts.botName, opts.tracer?.traceId);
     return {
       result: resultText,
       inputTokens,

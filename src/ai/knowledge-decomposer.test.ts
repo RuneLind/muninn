@@ -1,5 +1,34 @@
-import { test, expect, describe } from "bun:test";
-import { normalize } from "./knowledge-decomposer.ts";
+import { test, expect, describe, beforeEach, mock } from "bun:test";
+
+// Capture the opts handed to the Haiku router so we can assert the tracer (and
+// thus its trace_id) is threaded through decomposeQuestion.
+const haikuCalls: Array<{ prompt: string; opts: Record<string, unknown> }> = [];
+mock.module("./haiku-direct.ts", () => ({
+  callHaikuWithFallback: async (prompt: string, opts: Record<string, unknown>) => {
+    haikuCalls.push({ prompt, opts });
+    return { result: JSON.stringify({ subQuestions: ["q"], rationale: "r" }), inputTokens: 1, outputTokens: 1, model: "m" };
+  },
+}));
+
+const { normalize, decomposeQuestion } = await import("./knowledge-decomposer.ts");
+
+describe("decomposeQuestion tracer threading (obs-tail #1)", () => {
+  beforeEach(() => { haikuCalls.length = 0; });
+
+  test("passes the caller tracer to callHaikuWithFallback", async () => {
+    const tracer = { traceId: "trace-xyz" } as unknown as import("../tracing/index.ts").Tracer;
+    await decomposeQuestion({ question: "What is X?", botName: "jarvis", tracer });
+    expect(haikuCalls).toHaveLength(1);
+    expect(haikuCalls[0]!.opts.source).toBe("knowledge-decompose");
+    expect((haikuCalls[0]!.opts.tracer as { traceId: string }).traceId).toBe("trace-xyz");
+  });
+
+  test("threads undefined tracer when none supplied", async () => {
+    await decomposeQuestion({ question: "What is X?", botName: "jarvis" });
+    expect(haikuCalls).toHaveLength(1);
+    expect(haikuCalls[0]!.opts.tracer).toBeUndefined();
+  });
+});
 
 describe("knowledge-decomposer normalize", () => {
   const original = "How does A001 differ from A002?";

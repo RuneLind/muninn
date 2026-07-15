@@ -49,6 +49,15 @@ mock.module("@anthropic-ai/sdk", () => {
 // Mock spawnHaiku — fallback path. We only check it's called with the same
 // shape, not that the CLI actually runs.
 const spawnCalls: Array<{ prompt: string; opts: unknown }> = [];
+// trackUsage calls captured so we can assert the trace_id join (6th param).
+const trackUsageCalls: Array<{
+  source: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  botName?: string;
+  traceId?: string;
+}> = [];
 mock.module("../scheduler/executor.ts", () => ({
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
@@ -61,7 +70,16 @@ mock.module("../scheduler/executor.ts", () => ({
       model: "claude-haiku-4-5-20251001",
     };
   },
-  trackUsage: () => {},
+  trackUsage: (
+    source: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    botName?: string,
+    traceId?: string,
+  ) => {
+    trackUsageCalls.push({ source, model, inputTokens, outputTokens, botName, traceId });
+  },
 }));
 
 // Mock the Copilot connector — exposes a `getCopilotClient` returning a fake
@@ -130,6 +148,7 @@ const {
 beforeEach(() => {
   sdkCalls.length = 0;
   spawnCalls.length = 0;
+  trackUsageCalls.length = 0;
   copilotCalls.length = 0;
   copilotResponseContent = "copilot-result";
   copilotUsageEvents = [{ inputTokens: 7, outputTokens: 3, model: "claude-haiku-4-5-20251001" }];
@@ -564,5 +583,44 @@ describe("callHaikuWithFallback dispatch", () => {
     expect(sdkCalls).toHaveLength(0);
     expect(copilotCalls).toHaveLength(0);
     expect(spawnCalls).toHaveLength(1);
+  });
+});
+
+describe("trackUsage trace_id join (obs-tail #1)", () => {
+  // A structural stand-in for a Tracer — only `.traceId` is read by the backends.
+  const tracer = { traceId: "trace-abc-123" } as unknown as import("../tracing/index.ts").Tracer;
+
+  test("callHaikuDirect threads opts.tracer.traceId into trackUsage", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    sdkResponse = {
+      content: [{ type: "text", text: "ok" }],
+      model: "claude-haiku-4-5-20251001",
+      usage: { input_tokens: 4, output_tokens: 2 },
+    };
+    await callHaikuDirect("hi", { source: "memory", botName: "jarvis", tracer });
+    expect(trackUsageCalls).toHaveLength(1);
+    expect(trackUsageCalls[0]!.traceId).toBe("trace-abc-123");
+    expect(trackUsageCalls[0]!.source).toBe("memory");
+  });
+
+  test("callHaikuDirect passes undefined traceId when no tracer", async () => {
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    await callHaikuDirect("hi", { source: "memory" });
+    expect(trackUsageCalls).toHaveLength(1);
+    expect(trackUsageCalls[0]!.traceId).toBeUndefined();
+  });
+
+  test("callHaikuViaCopilot threads opts.tracer.traceId into trackUsage", async () => {
+    copilotUsageEvents = [{ inputTokens: 3, outputTokens: 1, model: "claude-haiku-4-5-20251001" }];
+    await callHaikuViaCopilot("hi", { source: "knowledge-decompose", tracer });
+    expect(trackUsageCalls).toHaveLength(1);
+    expect(trackUsageCalls[0]!.traceId).toBe("trace-abc-123");
+    expect(trackUsageCalls[0]!.source).toBe("knowledge-decompose");
+  });
+
+  test("callHaikuViaCopilot passes undefined traceId when no tracer", async () => {
+    await callHaikuViaCopilot("hi", { source: "knowledge-decompose" });
+    expect(trackUsageCalls).toHaveLength(1);
+    expect(trackUsageCalls[0]!.traceId).toBeUndefined();
   });
 });

@@ -2,6 +2,7 @@ import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { getLog } from "../logging.ts";
 import type { ConnectorType } from "../bots/config.ts";
+import type { Tracer } from "../tracing/index.ts";
 import { fillTemplate } from "../utils/fill-template.ts";
 
 const log = getLog("ai", "knowledge-decomposer");
@@ -14,6 +15,12 @@ export interface DecomposeOptions {
   connector?: ConnectorType;
   /** Per-bot override from `BotConfig.haikuBackend`. */
   haikuBackend?: HaikuBackend;
+  /**
+   * Optional caller trace (the research_knowledge root span). Threaded into the
+   * Haiku router so the `knowledge-decompose` haiku_usage row ties back to this
+   * trace — NULL without it, which is why every decomposer row was untraced.
+   */
+  tracer?: Tracer;
 }
 
 export interface DecomposeResult {
@@ -60,7 +67,7 @@ interface RawResult {
 }
 
 export async function decomposeQuestion(opts: DecomposeOptions): Promise<DecomposeResult> {
-  const { question, botName, botDir, connector, haikuBackend } = opts;
+  const { question, botName, botDir, connector, haikuBackend, tracer } = opts;
   const prompt = fillTemplate(DECOMPOSE_PROMPT, { QUESTION: question });
 
   const t0 = performance.now();
@@ -73,6 +80,7 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
       botName,
       connector,
       haikuBackend,
+      tracer,
     });
     raw = haiku.result;
   } catch (err) {

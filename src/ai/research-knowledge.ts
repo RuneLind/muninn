@@ -105,7 +105,7 @@ export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise
     parentId: traceContext?.parentId,
   });
 
-  const decomposition = await decomposeQuestion({ question, botName, botDir, connector, haikuBackend });
+  const decomposition = await decomposeQuestion({ question, botName, botDir, connector, haikuBackend, tracer });
   tracer.addChildSpan(
     "knowledge_decompose",
     "knowledge_decompose",
