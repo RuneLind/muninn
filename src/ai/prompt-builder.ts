@@ -66,7 +66,7 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
 
   const [recentMessages, queryEmbedding, activeGoals, scheduledTasks, recentAlerts] =
     await Promise.all([
-      getRecentMessages(userId, 20, botName, threadId).then((r) => {
+      getRecentMessages(userId, 20, botName, threadId, { excludeProactive: true }).then((r) => {
         dbHistoryMs = performance.now() - t0;
         return r;
       }),
@@ -228,6 +228,18 @@ export function formatScheduledTasks(tasks: ScheduledTask[]): string {
   return `User's scheduled tasks:\n${items}`;
 }
 
+/** Max chars of a single alert's content injected into the prompt. */
+const ALERT_CONTENT_MAX = 300;
+
+/** Truncate at a word boundary within the cap and append an ellipsis. */
+function truncateAlertContent(content: string): string {
+  if (content.length <= ALERT_CONTENT_MAX) return content;
+  const slice = content.slice(0, ALERT_CONTENT_MAX);
+  const lastSpace = slice.lastIndexOf(" ");
+  const cut = lastSpace > 0 ? slice.slice(0, lastSpace) : slice;
+  return `${cut.trimEnd()}…`;
+}
+
 export function formatAlerts(alerts: AlertMessage[]): string {
   const items = alerts
     .map((a) => {
@@ -237,11 +249,11 @@ export function formatAlerts(alerts: AlertMessage[]): string {
         hour12: false,
         timeZone: "Europe/Oslo",
       });
-      const type = a.source.replace("watcher:", "");
-      return `- [${time}] ${type}: ${a.content}`;
+      const type = a.source.replace(/^(watcher|task|goal):/, "");
+      return `- [${time}] ${type}: ${truncateAlertContent(a.content)}`;
     })
     .join("\n");
-  return `Recent watcher alerts sent to user (last 24h):\n${items}`;
+  return `Recent proactive messages sent to user (last 24h):\n${items}`;
 }
 
 function formatConversationHistory(messages: ConversationMessage[]): string {
