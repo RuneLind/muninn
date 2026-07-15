@@ -134,6 +134,10 @@ export async function refreshInterestProfile(
       timeoutMs: REFRESH_TIMEOUT_MS,
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,
+      // The join: this refresh already builds a tracer above — hand it to the
+      // router so the `interest_profile` haiku_usage row ties back to this trace
+      // (NULL before; the span already stamps model/tokens itself at finish).
+      tracer,
     });
     const { result } = haiku;
 

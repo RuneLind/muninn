@@ -8,10 +8,32 @@ import { agentStatus } from "../observability/agent-status.ts";
 // import below, per the repo's mock.module convention. ---
 
 let mockResult = "";
+// Usage returned by the mocked Haiku call — used to assert (b) folds model +
+// tokens into the extractor tracer's finish attributes.
+let mockUsage = { inputTokens: 11, outputTokens: 7, model: "claude-haiku-4-5-20251001" };
+// Records the opts passed to the router so (a) — the tracer join — is assertable.
+const haikuOpts: Array<Record<string, unknown>> = [];
 
 mock.module("./haiku-direct.ts", () => ({
-  callHaikuWithFallback: async () => ({ result: mockResult }),
+  callHaikuWithFallback: async (_prompt: string, opts: Record<string, unknown>) => {
+    haikuOpts.push(opts);
+    return { result: mockResult, ...mockUsage };
+  },
 }));
+
+// Fake Tracer capturing finish() attributes so we can assert the (b) usage
+// stamping without a live DB. Only the surface doExtract touches is implemented.
+const finishCalls: Array<{ status: string; attributes?: Record<string, unknown> }> = [];
+class FakeTracer {
+  readonly traceId: string;
+  constructor(_name: string, opts: { traceId?: string } = {}) {
+    this.traceId = opts.traceId ?? "fake-trace";
+  }
+  finish(status: "ok" | "error" = "ok", attributes?: Record<string, unknown>): void {
+    finishCalls.push({ status, attributes });
+  }
+}
+mock.module("../tracing/index.ts", () => ({ Tracer: FakeTracer }));
 
 const { runHaikuExtraction } = await import("./haiku-extraction.ts");
 
@@ -91,5 +113,68 @@ describe("runHaikuExtraction — AgentRun registry mirror", () => {
       .map((r) => r.name)
       .sort();
     expect(names).toEqual(["Extractor: goals", "Extractor: schedule"]);
+  });
+});
+
+describe("runHaikuExtraction — trace_id join + usage stamping (obs-tail #1)", () => {
+  beforeEach(() => {
+    agentStatus.clearRequest();
+    finishCalls.length = 0;
+    haikuOpts.length = 0;
+    mockResult = JSON.stringify({ ok: true });
+    mockUsage = { inputTokens: 11, outputTokens: 7, model: "claude-haiku-4-5-20251001" };
+  });
+
+  test("(a) threads the tracer into the router when traceContext is set", async () => {
+    runHaikuExtraction(
+      baseOpts({ traceContext: { traceId: "req-trace", parentId: "req-parent" } }),
+    );
+    await settle();
+    expect(haikuOpts).toHaveLength(1);
+    expect((haikuOpts[0]!.tracer as { traceId: string }).traceId).toBe("req-trace");
+  });
+
+  test("(a) no tracer threaded when traceContext is absent", async () => {
+    runHaikuExtraction(baseOpts());
+    await settle();
+    expect(haikuOpts).toHaveLength(1);
+    expect(haikuOpts[0]!.tracer).toBeUndefined();
+  });
+
+  test("(b) folds model + tokens into the tracer finish, alongside onResult attrs", async () => {
+    runHaikuExtraction(
+      baseOpts({
+        traceContext: { traceId: "req-trace", parentId: "req-parent" },
+        onResult: async (_r, tracer) => {
+          tracer?.finish("ok", { worthRemembering: true });
+        },
+      }),
+    );
+    await settle();
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.status).toBe("ok");
+    expect(finishCalls[0]!.attributes).toMatchObject({
+      worthRemembering: true,
+      model: "claude-haiku-4-5-20251001",
+      inputTokens: 11,
+      outputTokens: 7,
+    });
+  });
+
+  test("(b) usage is stamped on the parse-failure finish too", async () => {
+    mockResult = "not json {{{";
+    runHaikuExtraction(
+      baseOpts({ traceContext: { traceId: "req-trace", parentId: "req-parent" } }),
+    );
+    await settle();
+    // The parse-failure path finishes with status "error" — usage still folds in.
+    expect(finishCalls).toHaveLength(1);
+    expect(finishCalls[0]!.status).toBe("error");
+    expect(finishCalls[0]!.attributes).toMatchObject({
+      error: "parse_failed",
+      model: "claude-haiku-4-5-20251001",
+      inputTokens: 11,
+      outputTokens: 7,
+    });
   });
 });

@@ -82,7 +82,29 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
       botName: opts.botName,
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,
+      // (a) The join: hand the tracer to the router so its trackUsage call ties
+      // the haiku_usage row back to this extraction's trace (NULL without it —
+      // the ~89% of rows the anthropic/copilot backends wrote before this fix).
+      tracer,
     });
+
+    // (b) Span attributes: callHaikuDirect / callHaikuViaCopilot return usage but
+    // never write it onto a span, so this extractor's (childless) root span would
+    // still carry no model/tokens after (a). Mirror the watcher runner's
+    // onUsage → finish stamping: fold the call's usage into whatever attributes
+    // the finish writes — onResult's success finish, the parse-failure finish, or
+    // the onResult-throw error finish below — so a read off the root span's own
+    // attributes surfaces the model + tokens.
+    if (tracer) {
+      const usageAttrs = {
+        model: haiku.model,
+        inputTokens: haiku.inputTokens,
+        outputTokens: haiku.outputTokens,
+      };
+      const baseFinish = tracer.finish.bind(tracer);
+      tracer.finish = (status: "ok" | "error" = "ok", attributes?: Record<string, unknown>): void =>
+        baseFinish(status, { ...usageAttrs, ...attributes });
+    }
 
     let result: T;
     try {
