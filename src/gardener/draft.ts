@@ -114,7 +114,11 @@ export function buildDraftPrompt(opts: {
 
   const summaries = bounded
     .map((d, i) => {
-      const header = `### Summary ${i + 1}: ${d.title}${d.url ? ` (${d.url})` : ""}`;
+      // Only surface a PUBLIC (http/https) URL in the summary header. A
+      // machine-local `file://…` path (huginn's URL for a not-yet-ingested local
+      // doc) must never reach the model — the drafter is told to list source URLs
+      // verbatim in `sources:`, and it can't cite what it never sees.
+      const header = `### Summary ${i + 1}: ${d.title}${isHttpUrl(d.url) ? ` (${d.url})` : ""}`;
       let text = d.text.trim();
       if (text.length > MAX_DOC_CHARS) {
         const cut = text.lastIndexOf(" ", MAX_DOC_CHARS);
@@ -276,27 +280,44 @@ export function appendPendingIngestionCallout(
 }
 
 /**
- * Persist-time source-link guard: `sources:` frontmatter entries that are
- * `[[wikilink]]` refs to pages that DON'T resolve against the wiki index are
- * dropped and replaced with the cluster's real `source_docs` URLs — the drafter
- * can't see which source pages exist, so an invented `[[source page]]` ref ships
- * a broken frontmatter link. A line whose wikilinks ALL resolve is preserved RAW
- * (same lossless edit pattern as `stripOwnedAliases`); only a line with at least
- * one unresolved wikilink is rebuilt — plain URLs and resolved links survive the
- * rebuild (a resolved `[[Page|label]]` is re-serialized without its display
- * label). Any `urls` not already present are appended so the page keeps a real
- * citation trail. A null index treats every wikilink as unresolved (no wiki ⇒
- * no page exists ⇒ the ref is broken). Wikilinks are scanned on the whole line,
- * so the scalar form `sources: [[Page]]`, the array form `[[[Page]]]`, and
+ * Persist-time source-link guard — the invariant it enforces: after this runs a
+ * `sources:` line contains ONLY public http(s) URLs and RESOLVED `[[wikilinks]]`.
+ * Two kinds of junk are removed:
+ *
+ * (a) `[[wikilink]]` refs to pages that DON'T resolve against the wiki index are
+ *     dropped and replaced with the cluster's real `source_docs` URLs — the
+ *     drafter can't see which source pages exist, so an invented `[[source
+ *     page]]` ref ships a broken frontmatter link.
+ * (b) Non-http(s) PLAIN literals (a model-authored `file:///…/doc.md` copied
+ *     verbatim from a summary header, or any other non-web scheme) are dropped
+ *     UNCONDITIONALLY — even when the line has no wikilinks at all. This is the
+ *     model-authored leak the runner-side `sourceUrls` filter can't catch: the
+ *     model writes the file:// path itself into `sources:`, so filtering the
+ *     appended cluster URLs never touches it. The pending-ingestion callout
+ *     names those docs independently (runner computes it from `sourceDocs`), so
+ *     the citation stays honest.
+ *
+ * A line that needs NO change (only http(s) URLs and/or all-resolved wikilinks)
+ * is preserved RAW (same lossless edit pattern as `stripOwnedAliases` — the
+ * all-https happy path is byte-identical). A resolved `[[Page|label]]` is
+ * re-serialized without its display label on any rebuild. Any `urls` not already
+ * present are appended (only on an unresolved-wikilink rebuild) so the page keeps
+ * a real citation trail. A null index treats every wikilink as unresolved (no
+ * wiki ⇒ no page exists ⇒ the ref is broken). Wikilinks are scanned on the whole
+ * line, so the scalar form `sources: [[Page]]`, the array form `[[[Page]]]`, and
  * multi-link lists all count.
+ *
+ * `replaced` lists dropped unresolved wikilink targets; `droppedLiterals` lists
+ * dropped non-http(s) plain literals — both are review/log reports.
  */
 export function replaceUnresolvedSourceLinks(
   draft: string,
   opts: { index: WikiIndex | null; urls: string[] },
-): { draft: string; replaced: string[] } {
-  if (!draft.startsWith("---")) return { draft, replaced: [] };
+): { draft: string; replaced: string[]; droppedLiterals: string[] } {
+  const empty = { draft, replaced: [] as string[], droppedLiterals: [] as string[] };
+  if (!draft.startsWith("---")) return empty;
   const fenceEnd = draft.indexOf("\n---", 3);
-  if (fenceEnd === -1) return { draft, replaced: [] };
+  if (fenceEnd === -1) return empty;
 
   // Belt-and-braces with the runner seam: only ever append PUBLIC (http/https)
   // URLs into `sources:`. A machine-local `file://…` path (or any non-web
@@ -304,6 +325,8 @@ export function replaceUnresolvedSourceLinks(
   // shipped page's citation trail, so no future caller can reintroduce the leak.
   const urls = opts.urls.filter((u) => isHttpUrl(u));
   const replaced: string[] = [];
+  const droppedLiterals: string[] = [];
+  let changed = false;
   const head = draft
     .slice(0, fenceEnd)
     .split("\n")
@@ -319,13 +342,21 @@ export function replaceUnresolvedSourceLinks(
         const target = wl[1]!.trim();
         if (target && !wlTargets.includes(target)) wlTargets.push(target);
       }
-      if (wlTargets.length === 0) return line; // plain URL list — preserved raw
       let hadUnresolved = false;
+      let droppedHere = false;
       const kept: string[] = [];
       for (const item of rawInlineItems(m[2]!)) {
-        // Plain literals (URLs) carry no brackets; bracket-bearing fragments are
-        // wikilink debris from the outer regex and are re-serialized below.
-        if (!/[\[\]]/.test(unquoteItem(item))) kept.push(item);
+        const bare = unquoteItem(item);
+        // Bracket-bearing fragments are wikilink debris from the outer regex —
+        // re-serialized from `wlTargets` below, so skip them here.
+        if (/[\[\]]/.test(bare)) continue;
+        // Plain literal: keep ONLY public http(s) URLs; drop file://… & friends.
+        if (isHttpUrl(bare)) {
+          kept.push(item);
+        } else {
+          droppedLiterals.push(bare);
+          droppedHere = true;
+        }
       }
       for (const target of wlTargets) {
         if (opts.index?.resolve(target)) {
@@ -335,16 +366,22 @@ export function replaceUnresolvedSourceLinks(
           replaced.push(target);
         }
       }
-      if (!hadUnresolved) return line;
-      for (const u of urls) {
-        if (!kept.some((k) => unquoteItem(k) === u)) kept.push(u);
+      // Nothing to fix on this line — preserve it RAW (byte-identical happy path).
+      if (!hadUnresolved && !droppedHere) return line;
+      // Only backfill cluster URLs when an invented wikilink was dropped — a bare
+      // file:// drop shouldn't manufacture citations the model never wrote.
+      if (hadUnresolved) {
+        for (const u of urls) {
+          if (!kept.some((k) => unquoteItem(k) === u)) kept.push(u);
+        }
       }
+      changed = true;
       return `${m[1]}[${kept.join(", ")}]`;
     })
     .join("\n");
 
-  if (replaced.length === 0) return { draft, replaced: [] };
-  return { draft: head + draft.slice(fenceEnd), replaced };
+  if (!changed) return empty;
+  return { draft: head + draft.slice(fenceEnd), replaced, droppedLiterals };
 }
 
 /**

@@ -363,6 +363,16 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
         links: relinked.replaced.join(", "),
       });
     }
+    if (relinked.droppedLiterals.length > 0) {
+      // Model-authored non-http(s) literals (e.g. a file:// path copied from a
+      // summary header) dropped from `sources:` — the pending-ingestion callout
+      // below names the affected docs, so the citation stays honest.
+      log.warn("Gardener draft for {topic}: dropped non-http(s) source literal(s): {literals}", {
+        botName,
+        topic: cluster.topicKey,
+        literals: relinked.droppedLiterals.join(", "),
+      });
+    }
 
     // Body-link containment (symmetric with the source-link guard above): de-link
     // unresolvable body `[[wikilinks]]` to plain bold text — a wikilink is a claim

@@ -152,6 +152,20 @@ describe("buildDraftPrompt", () => {
     expect(p).toContain("[… truncated for length]");
     expect(p).not.toContain("x".repeat(4500));
   });
+
+  test("summary header omits a non-http(s) URL, keeps an http(s) one", () => {
+    // ids sort descending (recency): id "2" (Web) becomes Summary 1, id "1" (Local) Summary 2.
+    const mixed: HarvestedDoc[] = [
+      { key: "c/1", collection: "c", id: "1", url: "file:///Users/rune/Self-Learning Agent Architecture.md", title: "Local Doc", text: "local body" },
+      { key: "c/2", collection: "c", id: "2", url: "https://real.url/x", title: "Web Doc", text: "web body" },
+    ];
+    const p = buildDraftPrompt({ cluster, mode: "create", docs: mixed, today: "2026-07-15" });
+    // The file:// URL never reaches the model — the local doc's header shows title only.
+    expect(p).not.toContain("file://");
+    expect(p).toContain("### Summary 2: Local Doc\n");
+    // The http(s) URL is still rendered in its header.
+    expect(p).toContain("### Summary 1: Web Doc (https://real.url/x)");
+  });
 });
 
 describe("WIKI_CONVENTIONS_DIGEST sources rule (URLs by default)", () => {
@@ -325,6 +339,41 @@ describe("replaceUnresolvedSourceLinks", () => {
     expect(out.replaced).toEqual(["Phantom"]);
     expect(out.draft).toContain("sources: []");
     expect(out.draft).not.toContain("file://");
+  });
+
+  test("model-authored file:// literal (NO wikilinks) is dropped, https kept in order", () => {
+    // The real production leak (proposal f1c539ea…): the model wrote the file://
+    // path itself into `sources:` — no wikilink present, so the old code returned
+    // the line raw and the machine-local path shipped in the citation trail.
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`"file:///Users/rune/Self-Learning Agent Architecture.md", "https://a", "https://b"`),
+      { index: index([]), urls: [] },
+    );
+    expect(out.replaced).toEqual([]);
+    expect(out.droppedLiterals).toEqual(["file:///Users/rune/Self-Learning Agent Architecture.md"]);
+    expect(out.draft).toContain(`sources: ["https://a", "https://b"]`);
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("file:// literal alongside a wikilink is dropped on the rebuild path", () => {
+    const idx = index([page({ title: "Real Page" })]);
+    const out = replaceUnresolvedSourceLinks(
+      draftWithSources(`file:///Users/rune/x.md, [[Real Page]], [[Phantom]]`),
+      { index: idx, urls: ["https://backfill.url"] },
+    );
+    expect(out.replaced).toEqual(["Phantom"]);
+    expect(out.droppedLiterals).toEqual(["file:///Users/rune/x.md"]);
+    // file:// gone; resolved wikilink kept; phantom replaced by the backfill URL.
+    expect(out.draft).toContain("sources: [[[Real Page]], https://backfill.url]");
+    expect(out.draft).not.toContain("file://");
+  });
+
+  test("happy path: all-https sources line stays byte-identical", () => {
+    const original = draftWithSources(`https://a.com/x, https://b.com/y`);
+    const out = replaceUnresolvedSourceLinks(original, { index: index([]), urls: ["https://a.com/x"] });
+    expect(out.replaced).toEqual([]);
+    expect(out.droppedLiterals).toEqual([]);
+    expect(out.draft).toBe(original);
   });
 });
 
