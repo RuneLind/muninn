@@ -934,9 +934,12 @@ describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", 
   /** A processMessage stub that records its calls (the real bot would call
    *  delegate_task(role:"build") here). */
   function makeStubProcess() {
-    const calls: Array<{ text: string; threadId?: string; skipUserSave?: boolean }> = [];
+    const calls: Array<{ text: string; threadId?: string; skipUserSave?: boolean; traceId?: string }> = [];
     const fn: typeof ProcessMessageFn = async (params) => {
-      calls.push({ text: params.text, threadId: params.threadId, skipUserSave: params.skipUserSave });
+      calls.push({
+        text: params.text, threadId: params.threadId, skipUserSave: params.skipUserSave,
+        traceId: params.tracer?.traceId,
+      });
       return {
         responseText: "re-engaged the build agent",
         traceId: "t", durationMs: 1, inputTokens: 1, outputTokens: 1,
@@ -1153,6 +1156,34 @@ describe("HivemindRouter auto-re-engage (Phase 6b — re-engage build on red)", 
     const after = (await getDevRunById(run.id))!;
     expect(after.status).toBe("building");
     expect(after.reengageCount).toBe(1);
+  });
+
+  test("constructs the devloop_autostep tracer BEFORE classification and threads it into the classify call", async () => {
+    const { run } = await seedVerifyingRun("research-6b00000b");
+    const chat = new ChatState();
+    const stub = makeStubProcess();
+    const seenTraceIds: Array<string | undefined> = [];
+    const classify: AutorespondDeps["classifyReengageRole"] = async (_ctx, opts) => {
+      // The tracer must already exist when the classifier runs — this is the
+      // whole point of the hoist (its haiku_usage row ties to the turn trace).
+      seenTraceIds.push(opts.tracer?.traceId);
+      return "build";
+    };
+    const router = new HivemindRouter(
+      chat,
+      makeDeps(makeBotConfig({ autoReengageOnRed: true, reengageClassifier: true }), stub.fn, classify),
+    );
+
+    await router.route(P6_BOT, orchPeerRed(run.id));
+    await router.pendingHandoffInterpret;
+    await router.pendingAdvanceRun;
+
+    expect(seenTraceIds).toHaveLength(1);
+    expect(seenTraceIds[0]).toBeTruthy(); // classifier got a live tracer, not undefined
+    // ...and it is the SAME tracer the turn runs under (single construction,
+    // settled exactly once by the turn's try/catch — no leak on any path).
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]!.traceId).toBe(seenTraceIds[0]);
   });
 
   test("routes to the BUILD agent when the classifier judges a feature bug", async () => {

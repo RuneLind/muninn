@@ -1,15 +1,21 @@
 import { test, expect, describe } from "bun:test";
 import { classifyReengageRole, parseRole, type HaikuCaller } from "./devloop-classifier.ts";
 import type { ReengageContext } from "./devloop-prompts.ts";
+import type { Tracer } from "../tracing/index.ts";
 
-/** A HaikuCaller stub that returns a fixed verdict and records the prompt. */
-function stubHaiku(result: string): { fn: HaikuCaller; prompts: string[] } {
+type HaikuOpts = Parameters<HaikuCaller>[1];
+
+/** A HaikuCaller stub that returns a fixed verdict and records the prompt + the
+ *  options object (so tests can assert the tracer/backend threading). */
+function stubHaiku(result: string): { fn: HaikuCaller; prompts: string[]; opts: (HaikuOpts | undefined)[] } {
   const prompts: string[] = [];
-  const fn: HaikuCaller = async (prompt) => {
+  const opts: (HaikuOpts | undefined)[] = [];
+  const fn: HaikuCaller = async (prompt, callOpts) => {
     prompts.push(prompt);
+    opts.push(callOpts);
     return { result, inputTokens: 0, outputTokens: 0, model: "stub-haiku" };
   };
-  return { fn, prompts };
+  return { fn, prompts, opts };
 }
 
 const OPTS = { botName: "testbot", botDir: "/tmp/bots/testbot" };
@@ -95,6 +101,17 @@ describe("classifyReengageRole", () => {
   test("defaults to build on an ambiguous verdict", async () => {
     const haiku = stubHaiku("could be a test or a build problem");
     expect(await classifyReengageRole(CTX, OPTS, haiku.fn)).toBe("build");
+  });
+
+  test("threads ClassifyOptions.tracer into the callHaiku options (traceId reaches the router seam)", async () => {
+    const haiku = stubHaiku("build");
+    const tracer = { traceId: "trace-abc123" } as unknown as Tracer;
+    await classifyReengageRole(CTX, { ...OPTS, tracer }, haiku.fn);
+    // The tracer object reaches the callHaiku seam, so haiku-direct's
+    // trackUsage(...opts.tracer?.traceId) stamps the haiku_usage row with the
+    // enclosing devloop_autostep trace id.
+    expect(haiku.opts[0]?.tracer).toBe(tracer);
+    expect(haiku.opts[0]?.tracer?.traceId).toBe("trace-abc123");
   });
 
   test("feeds a report with $ sequences into the prompt verbatim (no replace-pattern mangling)", async () => {
