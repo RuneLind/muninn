@@ -504,3 +504,55 @@ describe("runGardener — progress + soft cancel", () => {
     expect(alerts[0]!.id).toBe("wiki-gardener:1,2");
   });
 });
+
+describe("runGardener — tracer threading (one connected trace)", () => {
+  // The watcher checker now reuses the runner's `watcher:wiki-gardener` span as
+  // `deps.tracer` (no self-minted second root). This asserts runGardener drives
+  // EVERY stage span off the single injected tracer — the structural guarantee
+  // behind "one connected tree" on /traces.
+  test("drives all stage spans off the injected tracer, in order", async () => {
+    const started: string[] = [];
+    const ended: string[] = [];
+    const childSpans: Array<{ parent: string; name: string }> = [];
+    const tracer = {
+      start: (label: string) => {
+        started.push(label);
+        return "id";
+      },
+      end: (label: string) => {
+        ended.push(label);
+        return 0;
+      },
+      addChildSpan: (parent: string, name: string) => {
+        childSpans.push({ parent, name });
+        return "child-id";
+      },
+      traceId: "trace-abc",
+    } as unknown as import("../tracing/index.ts").Tracer;
+
+    // A callDraft that stamps a `claude` child span the way the real seam does,
+    // proving the child attaches under the SAME injected tracer's "draft" stage.
+    const { deps } = makeDeps({
+      tracer,
+      callDraft: async () => {
+        tracer.addChildSpan("draft", "claude", 10, { model: "m", inputTokens: 1, outputTokens: 2 });
+        return validDraft();
+      },
+    });
+
+    await runGardener(deps);
+
+    expect(started).toEqual(["harvest", "cluster", "resolve", "draft"]);
+    expect(ended).toEqual(expect.arrayContaining(["harvest", "cluster", "resolve", "draft"]));
+    // The draft `claude` span hangs off the "draft" stage span — a child, never
+    // the root — so it can never make the watcher span token-bearing.
+    expect(childSpans).toEqual([{ parent: "draft", name: "claude" }]);
+  });
+
+  test("runs unchanged when no tracer is injected (drain path / tracing off)", async () => {
+    const { deps, inserted } = makeDeps({ tracer: undefined });
+    const alerts = await runGardener(deps);
+    expect(inserted).toHaveLength(1);
+    expect(alerts).toHaveLength(1);
+  });
+});

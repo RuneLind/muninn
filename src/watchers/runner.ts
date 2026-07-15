@@ -564,7 +564,12 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
     case "wiki-gardener":
       // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
       // for executeOneShot — passed through instead of re-running bot discovery.
-      return await checkWikiGardener(watcher, botConfig);
+      // Telemetry threads the runner's `watcher:wiki-gardener` span in as the
+      // run's tracer, so stage + draft `claude` child spans attach under it (one
+      // connected trace) rather than a disconnected self-minted root. The gardener
+      // ignores `onProgress`/`onUsage` (no spawnHaiku) — so its watcher span never
+      // becomes token-bearing (tokens ride the `wiki_gardener_*` extractor rows).
+      return await checkWikiGardener(watcher, botConfig, telemetry);
     case "wiki-linter":
       // Report-only lint over the bot's wikiDir — needs the full BotConfig for
       // its wikiDir; never writes to the wiki or DB.

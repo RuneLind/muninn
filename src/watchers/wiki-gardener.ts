@@ -16,11 +16,12 @@ import { loadConfig } from "../config.ts";
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
-import { trackUsage } from "../scheduler/executor.ts";
+import { trackUsage, type HaikuTelemetry } from "../scheduler/executor.ts";
+import type { ClaudeExecResult } from "../ai/executor.ts";
 import { loadInterestProfile, loadInterestProfileForBot } from "../profile/generator.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
-import { Tracer } from "../tracing/index.ts";
+import type { Tracer } from "../tracing/index.ts";
 import {
   getConsumedDocIds,
   getLiveTopicKeys,
@@ -119,6 +120,34 @@ async function searchRelatedPages(
   return out;
 }
 
+/**
+ * Stamp a `claude` child span under the gardener's "draft" stage span carrying
+ * the draft one-shot's model + tokens — the dominant gardener cost, otherwise
+ * left with only a coarse stage-duration span. For `/traces` legibility only.
+ *
+ * CHILD SPAN ONLY (HARD INVARIANT): the tokens must NEVER be stamped onto the
+ * parent `watcher:wiki-gardener` span's OWN attributes. `/agents` Recent already
+ * surfaces the gardener's tokens via the `wiki_gardener_draft` extractor row
+ * (`getRecentExtractorUsage` allow-list), and the documented rule is "never both"
+ * — a token-bearing watcher span would double-count against that row. Attaching
+ * under the "draft" stage span (not the root) also keeps `getRecentAgentTraces`'
+ * root-child `claude` join from ever reading these tokens onto the watcher row.
+ *
+ * No-op when `tracer` is undefined (tracing off, or the checker invoked outside
+ * the runner) — every call is null-guarded.
+ */
+export function stampDraftClaudeSpan(
+  tracer: Tracer | undefined,
+  exec: Pick<ClaudeExecResult, "model" | "inputTokens" | "outputTokens">,
+  durationMs: number,
+): void {
+  tracer?.addChildSpan("draft", "claude", durationMs, {
+    model: exec.model,
+    inputTokens: exec.inputTokens,
+    outputTokens: exec.outputTokens,
+  });
+}
+
 export interface GardenerSeamContext {
   botConfig: BotConfig;
   config: Config;
@@ -131,10 +160,18 @@ export interface GardenerSeamContext {
    * PR2: keeps one user's interests out of another's alerts on a multi-user bot.
    */
   profileUserId?: string;
+  /**
+   * The run's tracer (the runner's `watcher:wiki-gardener` span for the weekly
+   * checker, or the drain's own root). Threaded into the Haiku cluster call (so
+   * its `wiki_gardener_cluster` `haiku_usage` row joins the trace via `trace_id`)
+   * and the draft seam (so each draft stamps a `claude` child span + a joined
+   * `wiki_gardener_draft` row). Optional — absent ⇒ every tracer call is a no-op.
+   */
+  tracer?: Tracer;
 }
 
 export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeams {
-  const { botConfig, config, apiUrl, wikiDir, profileUserId } = ctx;
+  const { botConfig, config, apiUrl, wikiDir, profileUserId, tracer } = ctx;
   const name = botConfig.name;
   const collections = (botConfig.wikiCollections ?? []).filter((c) => c && c.trim());
   const seams: SharedGardenerSeams = {
@@ -151,6 +188,11 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
         botName: name,
         connector: botConfig.connector,
         haikuBackend: botConfig.haikuBackend,
+        // Thread the run's tracer so the cluster's `wiki_gardener_cluster`
+        // haiku_usage row ties back to the trace (trackUsage stamps
+        // `tracer.traceId`; NULL without it) — the #267 join, now for the
+        // gardener cluster/triage rows too.
+        tracer,
       });
       return result;
     },
@@ -161,13 +203,20 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
       // thinking budget (jarvis: 40k), which makes one-shots slow and variable.
       const draftBotConfig = { ...botConfig, thinkingMaxTokens: DRAFT_THINKING_MAX_TOKENS };
+      const startedAt = performance.now();
       const exec = await executeOneShot(prompt, config, draftBotConfig, { timeoutMs });
+      const durationMs = performance.now() - startedAt;
       // executeOneShot / one-shot.ts never calls trackUsage (many callers —
       // summarizers/research — where blanket usage rows would be scope creep), so
       // the draft's tokens exist nowhere unless captured here. Write a
       // `wiki_gardener_draft` row (allow-listed in getRecentExtractorUsage) so the
       // gardener's dominant token cost surfaces on /agents Recent. Best-effort.
-      trackUsage("wiki_gardener_draft", exec.model, exec.inputTokens, exec.outputTokens, name);
+      // `tracer.traceId` joins the row back to the trace (#267; NULL without it).
+      trackUsage("wiki_gardener_draft", exec.model, exec.inputTokens, exec.outputTokens, name, tracer?.traceId);
+      // …and a `claude` child span under the "draft" stage span so /traces shows
+      // the dominant per-draft cost. CHILD SPAN ONLY — see stampDraftClaudeSpan
+      // (never stamps tokens on the watcher span's own attrs → no double-count).
+      stampDraftClaudeSpan(tracer, exec, durationMs);
       return exec.result;
     },
     readWikiFile: async (absPath) => {
@@ -193,6 +242,7 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
 export async function checkWikiGardener(
   watcher: Watcher,
   botConfig: BotConfig,
+  telemetry?: HaikuTelemetry,
 ): Promise<WatcherAlert[]> {
   const name = botConfig.name;
   if (!botConfig.wikiDir) {
@@ -212,7 +262,14 @@ export async function checkWikiGardener(
   const apiUrl = DEFAULT_API_URL;
   const wikiDir = botConfig.wikiDir;
 
-  const tracer = new Tracer("wiki-gardener", { botName: name, userId: watcher.userId });
+  // Reuse the runner's `watcher:wiki-gardener` span (already opened as a child of
+  // `scheduler_tick`) as the gardener's tracer, instead of minting a second,
+  // disconnected `wiki-gardener` root. Stage spans + the per-draft `claude` child
+  // span then attach directly under it, so one logical run is ONE connected trace.
+  // The runner OWNS this tracer's lifecycle (it calls finish/error), so we never
+  // finish it here. Absent when tracing is off, or the checker is invoked outside
+  // the runner — every tracer use is null-guarded.
+  const tracer = telemetry?.tracer;
 
   // Acquire the per-bot gardener mutex — if a manual backlog run is draining the
   // same wiki, skip this weekly fire (the in-flight batch covers the newest docs).
@@ -237,7 +294,7 @@ export async function checkWikiGardener(
         return Array.isArray(data?.documents) ? data.documents : [];
       },
       consumedDocIds: () => getConsumedDocIds(name),
-      ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir, profileUserId: watcher.userId }),
+      ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir, profileUserId: watcher.userId, tracer }),
     }),
   );
 
@@ -251,16 +308,14 @@ export async function checkWikiGardener(
       botName: name,
       name,
     });
-    tracer.finish("ok", { skippedForBacklogRun: true });
+    // Mark the skip as a point-in-time event on the runner's span (which the
+    // runner finishes with its own alertsFound=0 attrs). Don't finish the tracer
+    // here — the runner owns it.
+    tracer?.event("skipped_for_backlog_run");
     return [];
   }
 
-  try {
-    const alerts = await run;
-    tracer.finish("ok", { alertsSent: alerts.length });
-    return alerts;
-  } catch (err) {
-    tracer.error(err instanceof Error ? err : String(err));
-    throw err;
-  }
+  // Errors propagate to the runner, whose catch calls `wt.error(...)` on this same
+  // span — no local finish/error, so the run stays a single connected trace.
+  return await run;
 }
