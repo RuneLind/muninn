@@ -54,19 +54,23 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
         source: `task:${task.taskType}`, platform: "telegram", threadId,
       });
       await updateTaskLastRun(task);
-      agentStatus.completeRequest(requestId, meta);
+      // traceId gives the ring-sourced Recent card its trace click-through,
+      // same as the watcher runner's completeRequest.
+      agentStatus.completeRequest(requestId, { traceId: tt?.traceId, ...meta });
       agentStatus.set("idle");
-      // Settle the task span on success. The `claude`/haiku token attrs land on
-      // this span for /traces; Recent stays ring-sourced for scheduled_task (the
-      // "never both" rule — task:% is deliberately NOT added to
-      // getRecentAgentTraces), so these attrs never double-count.
-      tt?.finish("ok", { taskType: task.taskType, ...meta });
       activityLog.push(
         "system",
         `Scheduled task fired: ${task.title} (${task.taskType})`,
         { userId: task.userId, botName: tag },
       );
       log.info("Scheduled task fired: \"{title}\" ({taskType}) to user {userId}", { botName: tag, title: task.title, taskType: task.taskType, userId: task.userId });
+      // Settle the task span on success — last in the try, so a throw from any
+      // trailing call can't reach the catch and double-settle it. The
+      // `claude`/haiku token attrs land on this span for /traces; Recent stays
+      // ring-sourced for scheduled_task (the "never both" rule — task:% is
+      // deliberately NOT added to getRecentAgentTraces), so these attrs never
+      // double-count.
+      tt?.finish("ok", { taskType: task.taskType, ...meta });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");

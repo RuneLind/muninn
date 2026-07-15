@@ -102,6 +102,19 @@ describe("getRecentAgentTraces", () => {
     expect(ids.has(tick.traceId)).toBe(false);
     expect(ids.has(agg.traceId)).toBe(false);
   });
+
+  test("does NOT return task:% spans — scheduled tasks stay ring-sourced (never both)", async () => {
+    // /agents Recent sources scheduled_task rows from the registry ring; a
+    // task:<type> span surfacing here too would double-count the same run.
+    const tick = chatRoot("scheduler_tick");
+    const task = { ...chatRoot("task:briefing"), parentId: tick.id, kind: "span" as const, traceId: tick.traceId };
+    await saveSpan(tick);
+    await saveSpan(task);
+
+    const rows = await getRecentAgentTraces(300);
+    expect(rows.some((r) => r.name.startsWith("task:"))).toBe(false);
+    expect(rows.some((r) => r.traceId === tick.traceId)).toBe(false);
+  });
 });
 
 describe("getRecentExtractorUsage", () => {
