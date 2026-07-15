@@ -3,7 +3,7 @@ import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/exe
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore } from "../summaries/author-scores.ts";
-import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 import path from "node:path";
@@ -638,7 +638,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   // when the bot has no default user / no profile / on any error, in which case
   // the capture-gate and digest prompts are byte-identical to today (the profile
   // only ever augments the hardcoded baseline criteria — anti-filter-bubble).
-  const interestProfile = await loadInterestProfileForBot(botName ?? watcher.botName);
+  const interestProfile = await loadInterestProfile(watcher.userId, botName ?? watcher.botName);
 
   // Candidate capture (Candidates → Summaries) runs on the FULL fetched batch,
   // INDEPENDENT of the silencing paths below (the minScore early return + the quietMode
