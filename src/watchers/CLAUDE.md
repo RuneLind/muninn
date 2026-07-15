@@ -596,9 +596,16 @@ up. Threaded through `runChecker` → `checkEmail` / `checkX` (both spawnHaiku s
 / `checkAnthropic` (→ `runGate`/`runDigest` → `callAnthropicModel`). The email
 watcher's Gmail MCP calls are the primary payoff; X/anthropic gate/digest calls run
 no MCP tools, so their mini-log stays empty but `numTurns`/`costUsd` populate.
-`wiki-gardener` is NOT threaded — it uses `callHaikuWithFallback`/`executeOneShot`,
-not `spawnHaiku`. Checkers invoked outside the runner keep working with the seam
-absent (behavior byte-identical to before).
+`wiki-gardener` does not use `spawnHaiku`, so `onProgress`/`onUsage` never fire for
+it (no tool mini-log, and — load-bearing — **no tokens on its watcher span's own
+attrs**). But it IS handed the telemetry seam now for its `tracer`: `checkWikiGardener`
+reuses `telemetry.tracer` (the runner's `watcher:wiki-gardener` span) as
+`runGardener`'s `deps.tracer` instead of minting a second, disconnected
+`wiki-gardener` root — so the stage spans (harvest/cluster/resolve/draft) and the
+per-draft `claude` child span attach directly under `watcher:wiki-gardener`, one
+connected `scheduler_tick → watcher:wiki-gardener → stage → claude` tree (see
+"Token totals" below). Checkers invoked outside the runner keep working with the
+seam absent (`tracer` undefined ⇒ every tracer call is a null-guarded no-op).
 
 **Token totals on `/agents` (PR3).** `onUsage` sums a checker's spawnHaiku token
 usage across its (possibly multiple, for x/anthropic) calls; the runner stamps the
@@ -613,10 +620,23 @@ without telemetry write NULL. The gardener is a special case: its draft
 (`executeOneShot`, which never calls `trackUsage`) writes a `wiki_gardener_draft`
 `haiku_usage` row at the `callDraft` seam so its dominant token cost isn't lost —
 surfaced via the extractor path (`getRecentExtractorUsage` allow-list, alongside
-`wiki_gardener_cluster`/`wiki_gardener_triage`), NOT the trace path. This does not
-double-count: the `gardener_drain` ring entry completes with no tokens and the
-`watcher:wiki-gardener` trace row carries none (gardener isn't wired to runner
-telemetry), so the haiku rows add the only token numbers.
+`wiki_gardener_cluster`/`wiki_gardener_triage`), NOT the trace path. The `callDraft`
+seam ALSO stamps a `claude` **child** span (via `stampDraftClaudeSpan`) under the
+"draft" stage span carrying the draft's model/tokens, and threads `tracer.traceId`
+into both `trackUsage` calls + the cluster's `callHaikuWithFallback` so the
+`wiki_gardener_cluster`/`_draft` rows join the trace (the #267 join). **This does
+not double-count on `/agents` Recent** (the "never both" invariant): the draft
+`claude` span is a **child of the "draft" stage span, never the root** — so
+`getRecentAgentTraces`' root-child `claude` join (`cs.parent_id = t.id`) can't read
+its tokens onto the watcher row — and because the gardener never fires `onUsage`,
+the runner stamps **no** token attrs onto the `watcher:wiki-gardener` span itself.
+The span is thus token-free on Recent; the `wiki_gardener_*` haiku rows add the
+only token numbers. The trace is now a single connected tree (child spans no longer
+break the "childless watcher span" assumption `getRecentAgentTraces` relies on for
+token reads, precisely because those reads are OWN-attr reads the gardener leaves
+unset). The manual drain mirrors this via its own `wiki-gardener-backlog` tracer
+(threaded into `buildBacklogGardenerDeps` → `buildGardenerSeams`); its root isn't a
+`watcher:%` span, so it never surfaces on the trace-sourced Recent at all.
 
 ## Testing
 

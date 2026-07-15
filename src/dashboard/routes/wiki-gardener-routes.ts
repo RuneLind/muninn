@@ -465,7 +465,12 @@ function buildBacklogGardenerDeps(
     // consumed-complement: everything except the batch is "consumed", so harvest
     // caps to exactly the selected batch.
     consumedDocIds: async () => assembled.consumedComplement,
-    ...buildGardenerSeams({ botConfig: bot, config, apiUrl, wikiDir: root }),
+    // Thread the drain's own tracer (the `wiki-gardener-backlog` root, finished by
+    // the route) so the cluster haiku row joins the trace and each draft stamps a
+    // `claude` child span under the "draft" stage span — parity with the weekly
+    // checker. The drain never surfaces on /agents via traces (its root isn't a
+    // `watcher:%`/`%_message` span), so the child span can't double-count.
+    ...buildGardenerSeams({ botConfig: bot, config, apiUrl, wikiDir: root, tracer }),
   };
 }
 
