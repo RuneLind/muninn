@@ -11,6 +11,11 @@ describe("fmtCost", () => {
     expect(fmtCost(0)).toBe("$0.00");
   });
 
+  test("non-finite values degrade to a dash, never $NaN/$Infinity", () => {
+    expect(fmtCost(Number.NaN)).toBe("—");
+    expect(fmtCost(Number.POSITIVE_INFINITY)).toBe("—");
+  });
+
   test("normal costs round to 2 decimals", () => {
     expect(fmtCost(0.0234)).toBe("$0.02");
     expect(fmtCost(1.5)).toBe("$1.50");

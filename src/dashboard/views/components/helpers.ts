@@ -64,7 +64,7 @@ export function fmtMs(ms: number): string {
  *   flattened to `$0.00` and confused with a genuine zero.
  */
 export function fmtCost(n: number | null | undefined): string {
-  if (n == null) return "—";
+  if (n == null || !Number.isFinite(n)) return "—";
   if (n === 0) return "$0.00";
   if (n < 0.01) return "$" + n.toFixed(4);
   return "$" + n.toFixed(2);
