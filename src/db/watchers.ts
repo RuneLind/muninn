@@ -61,6 +61,23 @@ export async function getWatchersDueNow(botName?: string): Promise<Watcher[]> {
   return rows.map(mapRow);
 }
 
+/**
+ * Distinct `user_id`s that own at least one ENABLED watcher for this bot. The
+ * scheduler refreshes an interest profile per watcher owner (the identity a
+ * watcher run personalizes against — `watcher.userId`), so a multi-user bot
+ * refreshes each owner's profile rather than only `bot_default_user`. A bot with
+ * no enabled watchers returns [] — nothing reads a profile there, so nothing to
+ * refresh.
+ */
+export async function getEnabledWatcherOwners(botName: string): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT user_id FROM watchers
+    WHERE bot_name = ${botName} AND enabled = true
+  `;
+  return rows.map((r) => r.user_id as string);
+}
+
 export async function updateWatcherLastRun(
   id: string,
   notifiedIds: string[],

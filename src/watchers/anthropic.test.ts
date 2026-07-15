@@ -51,6 +51,18 @@ mock.module("../anthropic/summarizer.ts", () => ({
   },
 }));
 
+// Interest profile: keyed by the EXPLICIT userId (loadInterestProfile) so the
+// deliberate-mismatch test can prove the watcher owner's profile — not the
+// web-chat's bot_default_user — reaches the gate prompt. loadInterestProfileForBot
+// (the pre-PR2 bot_default_user path) returns a distinct marker so a regression
+// back to it would be caught by the negative assertion.
+const profileByUser = new Map<string, string>();
+mock.module("../profile/generator.ts", () => ({
+  loadInterestProfile: async (userId: string | undefined) =>
+    (userId ? profileByUser.get(userId) : null) ?? null,
+  loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
+}));
+
 const {
   parseAtomEntries,
   parseLlmsTxtDocs,
@@ -317,6 +329,7 @@ describe("checkAnthropic", () => {
     upsertCalls.length = 0;
     autoPromoted.length = 0;
     candidateRows.clear();
+    profileByUser.clear();
   });
 
   function stub(body: string | ((url: string) => string)) {
@@ -402,6 +415,24 @@ describe("checkAnthropic", () => {
     expect(visible[0]!.urgency).toBe("high"); // 0.9 >= 0.85
     expect(silent.length).toBe(1);
     expect(silent[0]!.trackingIds).toContain(C2);
+  });
+
+  test("gate prompt carries the WATCHER OWNER's profile, not bot_default_user's (PR2 regression pin)", async () => {
+    stub(COMMITS_ATOM);
+    gateResult = "[]";
+    // Deliberate mismatch: the watcher is owned by "watcher-owner", whose profile
+    // must win over any bot_default_user profile (the pre-PR2 leak the dropdown
+    // could silently cause). loadInterestProfileForBot returns WRONG-DEFAULT-USER-PROFILE.
+    profileByUser.set("watcher-owner", "OWNER-INTEREST-MARKER: agentic retrieval");
+    await checkAnthropic(
+      baseWatcher({
+        userId: "watcher-owner",
+        lastNotifiedIds: ["already-seen"],
+        config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, gate: true },
+      }),
+    );
+    expect(lastGatePrompt).toContain("OWNER-INTEREST-MARKER: agentic retrieval");
+    expect(lastGatePrompt).not.toContain("WRONG-DEFAULT-USER-PROFILE");
   });
 
   test("gate returning [] silences all candidates (one silent alert, no visible)", async () => {

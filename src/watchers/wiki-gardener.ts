@@ -17,7 +17,7 @@ import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import { trackUsage } from "../scheduler/executor.ts";
-import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { loadInterestProfile, loadInterestProfileForBot } from "../profile/generator.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
 import { Tracer } from "../tracing/index.ts";
@@ -124,10 +124,17 @@ export interface GardenerSeamContext {
   config: Config;
   apiUrl: string;
   wikiDir: string;
+  /**
+   * The identity the run personalizes against — the weekly checker passes
+   * `watcher.userId` (the watcher's owner), the manual dashboard drain passes
+   * nothing (no watcher in scope) and falls back to `loadInterestProfileForBot`.
+   * PR2: keeps one user's interests out of another's alerts on a multi-user bot.
+   */
+  profileUserId?: string;
 }
 
 export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeams {
-  const { botConfig, config, apiUrl, wikiDir } = ctx;
+  const { botConfig, config, apiUrl, wikiDir, profileUserId } = ctx;
   const name = botConfig.name;
   const collections = (botConfig.wikiCollections ?? []).filter((c) => c && c.trim());
   const seams: SharedGardenerSeams = {
@@ -147,7 +154,8 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       });
       return result;
     },
-    loadInterestProfile: () => loadInterestProfileForBot(name),
+    loadInterestProfile: () =>
+      profileUserId ? loadInterestProfile(profileUserId, name) : loadInterestProfileForBot(name),
     getWikiIndex: () => getWikiIndex({ root: wikiDir }),
     callDraft: async (prompt, timeoutMs) => {
       // Drafting is mechanical synthesis — don't inherit the bot's chat-tuned
@@ -229,7 +237,7 @@ export async function checkWikiGardener(
         return Array.isArray(data?.documents) ? data.documents : [];
       },
       consumedDocIds: () => getConsumedDocIds(name),
-      ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir }),
+      ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir, profileUserId: watcher.userId }),
     }),
   );
 

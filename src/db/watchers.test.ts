@@ -12,6 +12,7 @@ import {
   updateWatcher,
   getWatcherSnapshot,
   setWatcherSnapshot,
+  getEnabledWatcherOwners,
 } from "./watchers.ts";
 import { getDb } from "./client.ts";
 
@@ -67,6 +68,24 @@ describe("watchers", () => {
     const watchers = await getWatchersForUser("u1", "bot1");
     expect(watchers).toHaveLength(1);
     expect(watchers[0]!.name).toBe("u1 watcher");
+  });
+
+  test("getEnabledWatcherOwners returns distinct enabled owners for the bot", async () => {
+    // Two enabled watchers owned by u1 (must dedupe to one), one by u2, and a
+    // disabled one by u3 (excluded), plus an enabled watcher on another bot.
+    await saveWatcher(makeWatcher({ userId: "u1", botName: "owbot", name: "u1 a" }));
+    await saveWatcher(makeWatcher({ userId: "u1", botName: "owbot", name: "u1 b" }));
+    await saveWatcher(makeWatcher({ userId: "u2", botName: "owbot", name: "u2 a" }));
+    const disabledId = await saveWatcher(makeWatcher({ userId: "u3", botName: "owbot", name: "u3 a" }));
+    await toggleWatcher(disabledId, false);
+    await saveWatcher(makeWatcher({ userId: "u4", botName: "otherbot", name: "other" }));
+
+    const owners = await getEnabledWatcherOwners("owbot");
+    expect(owners.sort()).toEqual(["u1", "u2"]);
+  });
+
+  test("getEnabledWatcherOwners returns [] for a bot with no enabled watchers", async () => {
+    expect(await getEnabledWatcherOwners("nonexistent-bot")).toEqual([]);
   });
 
   test("deleteWatcher removes the watcher", async () => {

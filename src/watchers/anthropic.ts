@@ -6,7 +6,7 @@ import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.t
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
 import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
-import { loadInterestProfileForBot } from "../profile/generator.ts";
+import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
 
@@ -352,7 +352,7 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
   // when the bot has no default user / no profile / on any error, in which case
   // the gate & digest prompts are byte-identical to today (anti-filter-bubble:
   // the profile only ever augments the hardcoded baseline criteria).
-  const interestProfile = await loadInterestProfileForBot(watcher.botName);
+  const interestProfile = await loadInterestProfile(watcher.userId, watcher.botName);
 
   // Digest mode (Phase 4): roll this window's candidates into ONE digest message
   // (Daily/Weekly rows) instead of per-item gated alerts. Reached only with ≥1

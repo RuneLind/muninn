@@ -41,7 +41,8 @@ const mockCallHaiku = mock(async () => ({
 }));
 mock.module("../ai/haiku-direct.ts", () => ({ callHaikuWithFallback: mockCallHaiku }));
 
-const { refreshInterestProfile, loadInterestProfileForBot, isValidProfileShape } = await import("./generator.ts");
+const { refreshInterestProfile, loadInterestProfileForBot, loadInterestProfile, isValidProfileShape } =
+  await import("./generator.ts");
 
 beforeEach(() => {
   goals = [];
@@ -151,6 +152,43 @@ describe("loadInterestProfileForBot", () => {
   test("returns null (never throws) on a DB error", async () => {
     defaultUserThrows = true;
     expect(await loadInterestProfileForBot("jarvis")).toBeNull();
+  });
+});
+
+describe("loadInterestProfile (explicit user — the identity the agent runs as)", () => {
+  beforeEach(() => {
+    mockGetInterestProfile.mockClear();
+    mockGetBotDefaultUser.mockClear();
+  });
+
+  test("returns null when userId is undefined", async () => {
+    expect(await loadInterestProfile(undefined, "jarvis")).toBeNull();
+    expect(mockGetInterestProfile).toHaveBeenCalledTimes(0);
+  });
+
+  test("returns null when botName is undefined", async () => {
+    expect(await loadInterestProfile("user-9", undefined)).toBeNull();
+    expect(mockGetInterestProfile).toHaveBeenCalledTimes(0);
+  });
+
+  test("loads the profile for the PASSED user — never resolves via bot_default_user", async () => {
+    defaultUser = "user-1"; // the web-chat acting persona
+    storedProfile = { profile: "- watcher owner topic" };
+    const out = await loadInterestProfile("watcher-owner-2", "jarvis");
+    expect(out).toBe("- watcher owner topic");
+    // The explicit user is what reaches the DB, not bot_default_user.
+    expect(mockGetInterestProfile).toHaveBeenCalledWith("watcher-owner-2", "jarvis");
+    expect(mockGetBotDefaultUser).toHaveBeenCalledTimes(0);
+  });
+
+  test("returns null when there is no profile row", async () => {
+    storedProfile = null;
+    expect(await loadInterestProfile("user-9", "jarvis")).toBeNull();
+  });
+
+  test("returns null (never throws) on a DB error", async () => {
+    mockGetInterestProfile.mockRejectedValueOnce(new Error("db down"));
+    expect(await loadInterestProfile("user-9", "jarvis")).toBeNull();
   });
 });
 

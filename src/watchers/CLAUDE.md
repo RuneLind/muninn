@@ -37,9 +37,19 @@ baseline — the anti-filter-bubble guard: baseline topics always qualify on the
 own; the profile only RAISES relevance for the user's own interests.
 
 - **Loaded once per watcher run** (not per candidate), via
-  `loadInterestProfileForBot(botName)` which resolves the bot's primary user
-  through `bot_default_user`. Best-effort: no default user / no profile row / any
-  DB error → returns `null`, and the prompt is **byte-identical to today**.
+  `loadInterestProfile(watcher.userId, botName)` — keyed on the **watcher's own
+  owner** (the identity the run personalizes against), NOT `bot_default_user`
+  (which the web-chat dropdown clobbers via `syncDefaultUser`, and which leaks
+  one user's interests into another's alerts on a multi-user bot). Best-effort:
+  no user / no profile row / any DB error → returns `null`, and the prompt is
+  **byte-identical to today**. `loadInterestProfileForBot(botName)` (the
+  `bot_default_user` resolver) survives only as the fallback for the user-less
+  **manual gardener drain** (no watcher in scope). The scheduler refresh
+  (`maybeRefreshInterestProfile`, `src/scheduler/profile-refresh.ts`) mirrors
+  this: it refreshes a stale profile for **every distinct owner of an enabled
+  watcher** (`getEnabledWatcherOwners`), not just `bot_default_user`; the
+  in-flight guard is keyed `bot:user`. A bot with no enabled watchers refreshes
+  nobody.
 - Wired at: the anthropic `runGate` + `runDigest` criteria, and the X `runAlertPath`
   (highlights/digest) + `runCaptureGate` (capture) prompts.
 - No config knob — personalization is automatic and silent when a profile exists.

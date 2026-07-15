@@ -213,3 +213,31 @@ export async function loadInterestProfileForBot(botName: string | undefined): Pr
     return null;
   }
 }
+
+/**
+ * Load the stored interest-profile text for an EXPLICIT user (the identity the
+ * agent actually runs as — e.g. `watcher.userId`), rather than resolving via
+ * `bot_default_user` (which the web-chat dropdown clobbers, and which leaks one
+ * user's interests into another's alerts on a multi-user bot). Same best-effort
+ * contract as `loadInterestProfileForBot`: returns null — so gate prompts stay
+ * byte-identical to today — on missing user/bot, no profile row, or ANY error
+ * (a DB hiccup must never break a watcher run; PR2/PR4 lean on "null ⇒ unchanged
+ * prompt").
+ */
+export async function loadInterestProfile(
+  userId: string | undefined,
+  botName: string | undefined,
+): Promise<string | null> {
+  if (!userId || !botName) return null;
+  try {
+    const profile = await getInterestProfile(userId, botName);
+    return profile?.profile ?? null;
+  } catch (err) {
+    log.warn("Failed to load interest profile for {botName}/{userId}: {error}", {
+      botName,
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
