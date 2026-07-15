@@ -690,6 +690,17 @@ export class HivemindRouter {
       botName: run.botName, userId: run.userId, username: user?.username,
     });
 
+    // Construct the turn's tracer BEFORE the classifier so the classify Haiku
+    // call nests under this trace (its `haiku_usage` row carries the trace_id).
+    // Everything between here and the try/catch below (classify — caught
+    // internally — and the pure-string prompt builders) cannot throw, so the
+    // tracer is always settled by that try/catch's finish/error; the function's
+    // earlier `return`s (no deps / no thread / no bot config) all precede this
+    // construction, so no early exit leaves it unsettled.
+    const tracer = new Tracer("devloop_autostep", {
+      botName: run.botName, userId: run.userId, username: user?.username ?? run.userId, platform: "web",
+    });
+
     // Route the fix: build (default) or, when the bot opts into the classifier,
     // test (spec/test drift). The classifier degrades to "build" on any
     // miss/error, so the verified always-build path stands unless it's both
@@ -707,6 +718,7 @@ export class HivemindRouter {
           botDir: botCfg.dir,
           connector: botCfg.connector,
           haikuBackend: botCfg.haikuBackend,
+          tracer,
         });
       } catch (err) {
         log.warn("reengage classifier threw for run {run}, defaulting to build: {error}", {
@@ -717,9 +729,6 @@ export class HivemindRouter {
     }
     const reengagePrompt = role === "test" ? testReengagePrompt(context) : buildReengagePrompt(context);
 
-    const tracer = new Tracer("devloop_autostep", {
-      botName: run.botName, userId: run.userId, username: user?.username ?? run.userId, platform: "web",
-    });
     tracer.event("auto_reengage", { runId: run.id, issueKey: run.issueKey, attempt: run.reengageCount, role });
 
     const runProcessMessage = deps.processMessage ?? defaultProcessMessage;

@@ -4,6 +4,7 @@ import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { ReengageContext } from "./devloop-prompts.ts";
 import { fillTemplate } from "../utils/fill-template.ts";
+import type { Tracer } from "../tracing/index.ts";
 
 const log = getLog("hivemind", "devloop-classifier");
 
@@ -26,6 +27,10 @@ export interface ClassifyOptions {
   botDir: string;
   connector?: ConnectorType;
   haikuBackend?: HaikuBackend;
+  /** Telemetry tracer for the enclosing `devloop_autostep` turn. Threaded into
+   *  the Haiku call so the `haiku_usage` row carries the turn's trace_id and the
+   *  classify call nests under that trace (the router reads `tracer?.traceId`). */
+  tracer?: Tracer;
 }
 
 /** Injectable Haiku caller (defaults to the real router). Tests pass a stub so
@@ -76,6 +81,7 @@ export async function classifyReengageRole(
       botName: opts.botName,
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,
+      tracer: opts.tracer,
     });
     return parseRole(haiku.result, opts.botName);
   } catch (err) {
