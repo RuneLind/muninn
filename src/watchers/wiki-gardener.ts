@@ -135,6 +135,12 @@ async function searchRelatedPages(
  *
  * No-op when `tracer` is undefined (tracing off, or the checker invoked outside
  * the runner) — every call is null-guarded.
+ *
+ * Ordering caveat: `addChildSpan("draft", …)` resolves the parent by label and
+ * falls back to the ROOT span when no "draft" span is open — so this must only
+ * be called while `runGardener`'s draft stage span is live. Moving the call
+ * outside that window would silently attach under the watcher root and leak
+ * `model` into the Recent row's model column.
  */
 export function stampDraftClaudeSpan(
   tracer: Tracer | undefined,
