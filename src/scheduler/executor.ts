@@ -330,6 +330,13 @@ export async function readAndParseHaikuStream(
 
 /**
  * High-level Haiku call with fallback — used by scheduler runner.
+ *
+ * `telemetry` threads the {@link HaikuTelemetry} `tracer` + `onUsage` seams into
+ * the underlying {@link spawnHaiku} so a traced caller (the scheduled-task
+ * reminder/custom paths) gets the `haiku_usage` row joined to its trace
+ * (`trace_id`, #267) and the call's token usage surfaced. Absent ⇒ byte-identical
+ * to the untelemetered call. `onProgress`/`captureToolOutputs` are intentionally
+ * not exposed here — these prompts run no tools.
  */
 export async function callHaiku(
   prompt: string,
@@ -338,9 +345,17 @@ export async function callHaiku(
   cwd?: string,
   botName?: string,
   timeoutMs?: number,
+  telemetry?: Pick<HaikuTelemetry, "tracer" | "onUsage">,
 ): Promise<string> {
   try {
-    const { result } = await spawnHaiku(prompt, { source, cwd, botName, timeoutMs });
+    const { result } = await spawnHaiku(prompt, {
+      source,
+      cwd,
+      botName,
+      timeoutMs,
+      ...(telemetry?.tracer ? { tracer: telemetry.tracer } : {}),
+      ...(telemetry?.onUsage ? { onUsage: telemetry.onUsage } : {}),
+    });
     return result.trim();
   } catch {
     return fallback;

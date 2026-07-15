@@ -111,11 +111,12 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
   }
 
   try {
-    // 1. Run due scheduled tasks
+    // 1. Run due scheduled tasks. Pass the tick's trace context so each due task
+    //    opens its own `task:<type>` child span under the tick (mirrors how
+    //    runWatchers receives t?.context) — replacing the old coarse
+    //    `scheduled_tasks` count span, which produced no model/tokens per task.
     if (dueTasks.length > 0) {
-      t?.start("scheduled_tasks");
-      await runScheduledTasksFromList(api, config, botConfig, dueTasks);
-      t?.end("scheduled_tasks", { count: dueTasks.length });
+      await runScheduledTasksFromList(api, config, botConfig, dueTasks, t?.context);
     }
 
     // 2. Goal deadline reminders (24h ahead)
