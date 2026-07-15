@@ -93,6 +93,7 @@ interface CompletedRunMeta {
   outputTokens?: number;
   numTurns?: number;
   toolCount?: number;
+  costUsd?: number;
 }
 
 /** Telemetry late-bound onto a job's `/agents` run by `attachRun`. The first
@@ -160,10 +161,10 @@ export function createJobStore<S extends string, F>(
     if (meta.connectorLabel) agentStatus.setConnectorLabel(reqId, meta.connectorLabel);
     if (meta.model) agentStatus.setModel(reqId, meta.model);
 
-    const { traceId, inputTokens, outputTokens, numTurns, toolCount } = meta;
+    const { traceId, inputTokens, outputTokens, numTurns, toolCount, costUsd } = meta;
     if (
       traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
-      numTurns !== undefined || toolCount !== undefined
+      numTurns !== undefined || toolCount !== undefined || costUsd !== undefined
     ) {
       jobRunMeta.set(jobId, {
         ...jobRunMeta.get(jobId),
@@ -172,6 +173,7 @@ export function createJobStore<S extends string, F>(
         ...(outputTokens !== undefined ? { outputTokens } : {}),
         ...(numTurns !== undefined ? { numTurns } : {}),
         ...(toolCount !== undefined ? { toolCount } : {}),
+        ...(costUsd !== undefined ? { costUsd } : {}),
       });
     }
   }

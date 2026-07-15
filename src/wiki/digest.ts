@@ -396,8 +396,9 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     inputTokens: result.inputTokens,
     outputTokens: result.outputTokens,
     numTurns: result.numTurns,
+    costUsd: result.costUsd,
   };
-  tracer.end("claude", { ...usage, model: result.model, costUsd: result.costUsd });
+  tracer.end("claude", { ...usage, model: result.model });
   if (result.model) agentStatus.setModel(reqId, result.model);
   tracer.finish("ok", { wiki: wikiName, entries: entries.length, ...usage });
   agentStatus.completeRequest(reqId, {

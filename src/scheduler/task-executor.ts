@@ -96,7 +96,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
  *  card's model comes from `setConnectorInfo`). */
 interface TaskResult {
   markdown: string;
-  meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string };
+  meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string; costUsd?: number };
 }
 
 async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string, tracer?: Tracer): Promise<TaskResult> {
@@ -157,6 +157,7 @@ async function runHaikuTask(
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           ...(usage.numTurns != null ? { numTurns: usage.numTurns } : {}),
+          ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
           model: usage.model,
         }
       : {},
@@ -215,6 +216,7 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
         numTurns: result.numTurns,
         toolCount,
         model: result.model,
+        costUsd: result.costUsd,
       },
     };
   } catch (err) {

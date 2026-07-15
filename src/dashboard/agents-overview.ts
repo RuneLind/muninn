@@ -72,6 +72,11 @@ export interface RecentEntry {
   model?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** Run cost in USD. Absent ⇒ unknown → the client renders a dash; an explicit
+   *  `0` (subscription connectors) is kept and renders `$0.00`. Extractor rows
+   *  (haiku_usage has no cost column) and gardener drains (no token/cost meta)
+   *  are always absent here. */
+  costUsd?: number;
 }
 
 export interface AgentsOverview {
@@ -229,6 +234,8 @@ function traceToRecent(r: RecentTraceRow): RecentEntry {
     // turns skip the stamp and stay tokenless).
     ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),
     ...(r.outputTokens != null ? { outputTokens: r.outputTokens } : {}),
+    // Preserve an explicit 0 (subscription connectors) — only null is "unknown".
+    ...(r.costUsd != null ? { costUsd: r.costUsd } : {}),
   };
 }
 
@@ -264,6 +271,9 @@ function ringToRecent(r: AgentRun): RecentEntry {
     ...(r.model ? { model: r.model } : {}),
     ...(r.inputTokens != null ? { inputTokens: r.inputTokens } : {}),
     ...(r.outputTokens != null ? { outputTokens: r.outputTokens } : {}),
+    // Preserve an explicit 0 — only undefined is "unknown". Drains complete with
+    // no meta (costUsd undefined ⇒ dash).
+    ...(r.costUsd != null ? { costUsd: r.costUsd } : {}),
   };
 }
 

@@ -126,9 +126,10 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       outputTokens: result.outputTokens,
       numTurns: result.numTurns,
       toolCount: result.toolCalls?.length ?? 0,
+      costUsd: result.costUsd,
     };
 
-    tracer.end("claude", { ...usage, costUsd: result.costUsd, durationMs: result.durationMs });
+    tracer.end("claude", { ...usage, durationMs: result.durationMs });
     // Tool child spans hang off the `claude` span, exactly as on the chat path.
     await attachToolSpans(tracer, result.toolCalls, !!config.tracingCaptureToolOutputs);
     attachRun(jobId, usage);

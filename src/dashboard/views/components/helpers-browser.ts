@@ -14,6 +14,7 @@ import {
   fmtMs,
   fmtDuration,
   fmtTokens,
+  fmtCost,
   formatSchedule,
 } from "./helpers.ts";
 
@@ -30,6 +31,7 @@ Object.assign(globalThis, {
   fmtMs,
   fmtDuration,
   fmtTokens,
+  fmtCost,
   formatSchedule,
   sseClient,
   getJson,

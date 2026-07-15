@@ -1,5 +1,25 @@
 import { describe, test, expect } from "bun:test";
-import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, normalizeToolName } from "./helpers.ts";
+import { extractToolInputLabel, deriveSpanLabelHtml, abbreviateCollection, sortCollectionsByPriority, summarizeSearchTrace, normalizeToolName, fmtCost } from "./helpers.ts";
+
+describe("fmtCost", () => {
+  test("undefined/null degrade to a dash (unknown cost)", () => {
+    expect(fmtCost(undefined)).toBe("—");
+    expect(fmtCost(null)).toBe("—");
+  });
+
+  test("an explicit 0 renders $0.00 (subscription connectors), NOT a dash", () => {
+    expect(fmtCost(0)).toBe("$0.00");
+  });
+
+  test("normal costs round to 2 decimals", () => {
+    expect(fmtCost(0.0234)).toBe("$0.02");
+    expect(fmtCost(1.5)).toBe("$1.50");
+  });
+
+  test("sub-cent positive costs keep 4 decimals so they aren't confused with $0.00", () => {
+    expect(fmtCost(0.003)).toBe("$0.0030");
+  });
+});
 
 describe("extractToolInputLabel", () => {
   test("returns empty string for falsy input", () => {

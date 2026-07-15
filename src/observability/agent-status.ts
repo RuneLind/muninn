@@ -94,6 +94,9 @@ export interface AgentRun {
   outputTokens?: number;
   numTurns?: number;
   toolCount?: number;
+  /** Cost of this run in USD. `undefined` ⇒ unknown (direct-SDK Haiku backends
+   *  leave it unset); an explicit `0` is a real value (subscription connectors). */
+  costUsd?: number;
   // --- AgentRun registry fields (additive, /agents dashboard) ---------------
   /** Origin surface — defaults to `"chat"` at `startRequest`. */
   kind?: AgentKind;
@@ -308,6 +311,7 @@ class AgentStatusTracker {
     outputTokens?: number;
     numTurns?: number;
     toolCount?: number;
+    costUsd?: number;
   }) {
     const req = this.requests.get(requestId);
     if (!req) return;
@@ -318,6 +322,7 @@ class AgentStatusTracker {
     req.outputTokens = meta.outputTokens;
     req.numTurns = meta.numTurns;
     req.toolCount = meta.toolCount;
+    req.costUsd = meta.costUsd;
 
     // Snapshot into the completed-runs ring — this survives the 30s auto-clear
     // below, so Recent can source kinds that have no durable trace/usage row

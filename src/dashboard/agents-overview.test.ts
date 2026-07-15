@@ -56,7 +56,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
 }
 
 function traceRow(over: Partial<RecentTraceRow> = {}): RecentTraceRow {
-  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, model: null, inputTokens: null, outputTokens: null, ...over };
+  return { traceId: `tr-${Math.random()}`, name: "telegram_message", status: "ok", botName: "jarvis", startedAt: 1000, durationMs: 500, model: null, costUsd: null, inputTokens: null, outputTokens: null, ...over };
 }
 
 function extractorRow(over: Partial<RecentExtractorRow> = {}): RecentExtractorRow {
@@ -315,6 +315,61 @@ describe("assembleAgentsOverview recent", () => {
     const finishes = o.recent.map((r) => r.finishedAt);
     expect(finishes).toEqual([...finishes].sort((a, b) => b - a));
     expect(finishes[0]).toBe(9000);
+  });
+});
+
+// ── recent cost column (trace + ring carry it; extractor/unknown → undefined) ──
+
+describe("assembleAgentsOverview recent cost", () => {
+  test("chat + watcher trace rows carry costUsd; a null cost is omitted (→ dash)", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentTraces: async () => [
+        traceRow({ name: "telegram_message", startedAt: 1000, costUsd: 0.0234 }),
+        traceRow({ name: "watcher:email", startedAt: 2000, costUsd: 0.05 }),
+        traceRow({ name: "web_message", startedAt: 3000, costUsd: null }),
+      ],
+    }), NOW);
+    const chat = o.recent.find((r) => r.kind === "chat" && r.costUsd === 0.0234);
+    expect(chat).toBeDefined();
+    const watcher = o.recent.find((r) => r.kind === "watcher");
+    expect(watcher!.costUsd).toBe(0.05);
+    // A null cost must not leak an undefined `costUsd` key onto the entry.
+    const noCost = o.recent.find((r) => r.kind === "chat" && r.model === undefined && r.costUsd === undefined);
+    expect(noCost).toBeDefined();
+    expect("costUsd" in noCost!).toBe(false);
+  });
+
+  test("an explicit 0 (subscription connector) is preserved, distinct from unknown", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentTraces: async () => [traceRow({ name: "telegram_message", startedAt: 1000, costUsd: 0 })],
+    }), NOW);
+    const chat = o.recent.find((r) => r.kind === "chat")!;
+    expect(chat.costUsd).toBe(0);
+    expect("costUsd" in chat).toBe(true);
+  });
+
+  test("ring rows (research/task/digest) carry costUsd; drain with no meta omits it", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [
+        run({ kind: "research", name: "Ask", completedAt: 9000, startedAt: 8500, costUsd: 0.012 }),
+        run({ kind: "scheduled_task", name: "Briefing", completedAt: 10000, startedAt: 9000, costUsd: 0 }),
+        run({ kind: "gardener_drain", name: "Drain", completedAt: 8000, startedAt: 7000 }), // no costUsd
+      ],
+    }), NOW);
+    const research = o.recent.find((r) => r.kind === "research")!;
+    expect(research.costUsd).toBe(0.012);
+    const task = o.recent.find((r) => r.kind === "scheduled_task")!;
+    expect(task.costUsd).toBe(0); // explicit 0 preserved
+    const drain = o.recent.find((r) => r.kind === "gardener_drain")!;
+    expect("costUsd" in drain).toBe(false); // unknown → dash
+  });
+
+  test("extractor rows never carry a cost (haiku_usage has no cost column)", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentExtractors: async () => [extractorRow({ source: "goals", createdAt: 7000 })],
+    }), NOW);
+    const e = o.recent.find((r) => r.kind === "extractor")!;
+    expect("costUsd" in e).toBe(false);
   });
 });
 

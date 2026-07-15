@@ -11,7 +11,7 @@ import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
-import { DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
+import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../scheduler/executor.ts";
 import { loadConfig } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
@@ -23,6 +23,37 @@ import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers");
+
+/** Running token/cost totals across a checker's (possibly multiple) spawnHaiku
+ *  calls — x/anthropic make a gate + a digest/capture call per run, so the
+ *  runner sums them here before stamping the total onto the `watcher:<type>`
+ *  span + the `/agents` card. `model` reflects the LAST call; `costUsd` stays
+ *  `undefined` until a call reports one (direct-SDK Haiku backends never do),
+ *  so a real summed `0` is distinguishable from "no cost seen". */
+export interface WatcherUsageAcc {
+  inputTokens: number;
+  outputTokens: number;
+  numTurns: number;
+  calls: number;
+  model: string | undefined;
+  costUsd: number | undefined;
+}
+
+export function newWatcherUsage(): WatcherUsageAcc {
+  return { inputTokens: 0, outputTokens: 0, numTurns: 0, calls: 0, model: undefined, costUsd: undefined };
+}
+
+/** Fold one `spawnHaiku` call's usage into the accumulator (mutates in place). */
+export function accumulateWatcherUsage(acc: WatcherUsageAcc, u: HaikuUsage): void {
+  acc.inputTokens += u.inputTokens;
+  acc.outputTokens += u.outputTokens;
+  if (u.numTurns != null) acc.numTurns += u.numTurns;
+  // Only a reported cost advances the sum, so all-undefined calls leave costUsd
+  // undefined (⇒ dash on /agents) while a genuine 0 stays 0 (⇒ $0.00).
+  if (u.costUsd != null) acc.costUsd = (acc.costUsd ?? 0) + u.costUsd;
+  acc.model = u.model;
+  acc.calls++;
+}
 
 // IDs + content hashes share this rolling array. Sized so the anthropic Weekly
 // digest's dedup window survives two busy runs: each can track up to
@@ -365,7 +396,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Accumulate token usage across a checker's spawnHaiku calls. x/anthropic
       // make MULTIPLE calls (gate + digest / capture gate) per run, so sum here;
       // the total is stamped onto the `watcher:<type>` span + the Running card.
-      const usage = { inputTokens: 0, outputTokens: 0, numTurns: 0, calls: 0, model: undefined as string | undefined };
+      const usage = newWatcherUsage();
 
       // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
       // live progress callback fills this run's `/agents` tool mini-log, `wt`
@@ -376,13 +407,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         onProgress: createProgressCallback(requestId, "running_watcher"),
         tracer: wt,
         captureToolOutputs,
-        onUsage: (u) => {
-          usage.inputTokens += u.inputTokens;
-          usage.outputTokens += u.outputTokens;
-          if (u.numTurns != null) usage.numTurns += u.numTurns;
-          usage.model = u.model;
-          usage.calls++;
-        },
+        onUsage: (u) => accumulateWatcherUsage(usage, u),
       };
 
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
@@ -501,6 +526,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             ...(usage.numTurns > 0 ? { numTurns: usage.numTurns } : {}),
+            ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
             ...(usage.model ? { model: usage.model } : {}),
             // Usage comes exclusively from spawnHaiku, which is always the
             // Claude CLI — lets the /traces Backend column label the run.

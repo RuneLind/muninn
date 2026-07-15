@@ -155,6 +155,7 @@ describe("AgentStatusTracker", () => {
         outputTokens: 200,
         numTurns: 3,
         toolCount: 2,
+        costUsd: 0.031,
       });
 
       const progress = agentStatus.getProgress();
@@ -166,6 +167,7 @@ describe("AgentStatusTracker", () => {
       expect(progress!.outputTokens).toBe(200);
       expect(progress!.numTurns).toBe(3);
       expect(progress!.toolCount).toBe(2);
+      expect(progress!.costUsd).toBe(0.031);
     });
 
     test("does nothing if request ID does not match", () => {
