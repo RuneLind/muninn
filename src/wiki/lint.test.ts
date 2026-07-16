@@ -114,6 +114,38 @@ describe("lintWiki", () => {
     expect(broken[0]!.detail).toBe("markdown");
   });
 
+  test("relative .html explainer links never fire broken-link (real, missing, or shadowed)", async () => {
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+    // A real explainer (indexed) and a shadowed one (same-stem .md wins, dropped
+    // from the index but present on disk).
+    await write("blogs/deep-dive.html", "<title>Deep Dive</title>");
+    await write("blogs/genesis.html", "<title>Genesis mirror</title>");
+    await write("concepts/Genesis.md", "---\ntype: concept\ntitle: Genesis\nupdated: 2026-06-03\nsources: [x]\n---\n\nCanonical.");
+    await write(
+      "concepts/Sidekick.md",
+      [
+        "---",
+        "type: concept",
+        "title: Sidekick",
+        "updated: 2026-06-03",
+        "sources: [x]",
+        "---",
+        "",
+        "Real explainer [a](../blogs/deep-dive.html).",
+        "Shadowed explainer [b](../blogs/genesis.html).",
+        "Missing explainer [c](../blogs/nope.html).",
+      ].join("\n"),
+    );
+    const findings = await lint();
+    // NONE of the three .html links produces a broken-link finding: resolving to
+    // a real explainer is valid, and unresolved .html (missing or shadowed) is
+    // deliberately exempt so the linter watcher sees no spurious jump.
+    const broken = findings.filter(
+      (f) => f.check === "broken-link" && f.relPath === "concepts/Sidekick.md",
+    );
+    expect(broken).toEqual([]);
+  });
+
   test("[[Page#Section]] to an existing page is not broken; the linked page is not an orphan", async () => {
     await write(
       "concepts/Sidekick.md",

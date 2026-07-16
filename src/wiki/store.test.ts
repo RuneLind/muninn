@@ -94,7 +94,7 @@ describe("extractMarkdownLinks", () => {
     ]);
   });
 
-  test("ignores http/https, mailto, absolute paths, images, and non-.md", () => {
+  test("ignores http/https, mailto, absolute paths, images, and non-page extensions", () => {
     const links = extractMarkdownLinks(
       [
         "[web](https://example.com/x.md)",
@@ -103,7 +103,8 @@ describe("extractMarkdownLinks", () => {
         "[abs](/etc/passwd.md)",
         "![img](diagram.png)",
         "![mdimg](fake.md)",
-        "[html](page.html)",
+        "![htmlimg](fake.html)",
+        "[png](diagram.png)",
         "[anchor](#local-section)",
         "[real](kept.md)",
       ].join("\n"),
@@ -111,8 +112,25 @@ describe("extractMarkdownLinks", () => {
     expect(links).toEqual(["kept.md"]);
   });
 
-  test("is case-insensitive on the .md extension", () => {
+  test("extracts relative .html targets (explainer links), with anchors/%-encoding/titles handled", () => {
+    const links = extractMarkdownLinks(
+      [
+        "[explainer](../blogs/deep-dive.html)",
+        "[anchored](../blogs/deep-dive.html#section)",
+        "[encoded](../blogs/deep%20dive.html)",
+        '[titled](../blogs/other.html "Other explainer")',
+      ].join("\n"),
+    );
+    expect(links).toEqual([
+      "../blogs/deep-dive.html",
+      "../blogs/deep dive.html",
+      "../blogs/other.html",
+    ]);
+  });
+
+  test("is case-insensitive on the .md and .html extensions", () => {
     expect(extractMarkdownLinks("[x](Notes.MD)")).toEqual(["Notes.MD"]);
+    expect(extractMarkdownLinks("[x](Deep.HTML)")).toEqual(["Deep.HTML"]);
   });
 });
 
@@ -308,6 +326,72 @@ describe("buildWikiIndex", () => {
     // Explainers carry no wikilinks and are not link targets/sources.
     expect(index.outgoing.get("blogs/deep dive.html")).toEqual([]);
     expect(index.backlinks.get("blogs/deep dive.html") ?? []).toEqual([]);
+  });
+
+  test("markdown .html links backlink standalone explainers (anchor/%-encoded/title/missing/image variants)", async () => {
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+    await Bun.write(
+      path.join(root, "blogs/deep-dive.html"),
+      "<!doctype html><html><head><title>Deep Dive</title></head><body>Hi</body></html>",
+    );
+    await Bun.write(
+      path.join(root, "blogs/spaced name.html"),
+      "<!doctype html><html><head><title>Spaced</title></head><body>Hi</body></html>",
+    );
+    await Bun.write(
+      path.join(root, "concepts/Linker.md"),
+      [
+        "---",
+        "type: concept",
+        "---",
+        "",
+        "Plain [a](../blogs/deep-dive.html).",
+        "Anchored [b](../blogs/deep-dive.html#section).",
+        "Titled [c](../blogs/deep-dive.html \"A title\").",
+        "Encoded [d](../blogs/spaced%20name.html).",
+        "Missing [e](../blogs/nonexistent.html).",
+        "As image ![f](../blogs/deep-dive.html).",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+
+    // The linking md page's outgoing set contains both real explainers, deduped
+    // across the anchor/title variants; the image and the missing target drop.
+    expect(index.outgoing.get("concepts/linker.md")!.slice().sort()).toEqual([
+      "blogs/deep-dive.html",
+      "blogs/spaced name.html",
+    ]);
+    // Each explainer gains the backlink (its "Linked from" / connection count).
+    expect(index.backlinks.get("blogs/deep-dive.html")).toEqual(["concepts/linker.md"]);
+    expect(index.backlinks.get("blogs/spaced name.html")).toEqual(["concepts/linker.md"]);
+    // A link to a nonexistent explainer is silently dropped — never in the graph.
+    expect(index.backlinks.get("blogs/nonexistent.html")).toBeUndefined();
+    // Explainers still emit no outgoing links of their own.
+    expect(index.outgoing.get("blogs/deep-dive.html")).toEqual([]);
+  });
+
+  test("a .html link to a SHADOWED explainer (same-stem .md wins) produces no backlink", async () => {
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+    // Same stem in both a markdown page and an explainer — the .md wins and the
+    // .html is dropped from the index, though it still exists on disk.
+    await Bun.write(
+      path.join(root, "concepts/Genesis.md"),
+      "---\ntype: concept\n---\n\nThe canonical page.",
+    );
+    await Bun.write(
+      path.join(root, "blogs/genesis.html"),
+      "<!doctype html><html><head><title>Genesis</title></head><body>Mirror</body></html>",
+    );
+    await Bun.write(
+      path.join(root, "sources/Refers.md"),
+      "---\ntype: source\n---\n\nSee [mirror](../blogs/genesis.html).",
+    );
+    const index = await buildWikiIndex(root);
+    // The shadowed explainer is not in the index → the link resolves to nothing,
+    // no crash, no backlink, no outgoing edge from the linking page.
+    expect(index.pages.some((p) => p.relPath === "blogs/genesis.html")).toBe(false);
+    expect(index.backlinks.get("blogs/genesis.html")).toBeUndefined();
+    expect(index.outgoing.get("sources/refers.md")).toEqual([]);
   });
 
   test("sniffs <meta keywords>/<meta description> for explainers: present/absent/malformed/order/beyond-prefix/headless", async () => {

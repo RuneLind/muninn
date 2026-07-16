@@ -109,6 +109,14 @@ function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiInd
   // root via `../` are external references, not broken wiki links — skip them.
   const dir = path.posix.dirname(page.relPath);
   for (const raw of extractMarkdownLinks(content)) {
+    // `.html` explainer links are NOT held to the broken-link check. Real
+    // explainers resolve in the store graph (giving them backlinks), but an
+    // unresolved `.html` target must never be reported broken: a link to a
+    // SHADOWED explainer (same-stem `.md` wins ⇒ the `.html` is dropped from the
+    // index yet still exists on disk) would be a false positive. We err toward
+    // zero false positives — the valuable signal is the backlink, not `.html`
+    // dead-link detection — so the linter watcher sees no spurious jump.
+    if (/\.html$/i.test(raw)) continue;
     const joined = path.posix.normalize(path.posix.join(dir, raw));
     if (joined === ".." || joined.startsWith("../")) continue;
     if (!index.resolveRelPath(joined)) {

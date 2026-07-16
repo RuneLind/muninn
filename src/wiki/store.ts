@@ -196,15 +196,18 @@ export function extractWikilinks(content: string): string[] {
 const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
 
 /**
- * Extract relative markdown link targets — `[text](target.md)` — from raw page
- * content. Wikis that use plain relative links instead of Obsidian [[wikilinks]]
- * (e.g. mimir, melosys-kode-wiki) join the same link graph through these. Returns
- * deduped, URL-decoded targets ending in `.md` (case-insensitive), with any
- * `#anchor` fragment stripped, still *relative to the linking page* (resolution
- * happens in `resolveMarkdownTargets`). Skips: images (`![...](...)`), absolute
- * URLs / any `scheme:` target (http:, https:, mailto:, …), absolute filesystem
- * paths (leading `/`), and non-`.md` targets. Like `extractWikilinks`, this does
- * not special-case fenced code blocks — matching that function's behavior.
+ * Extract relative markdown link targets — `[text](target.md)` or
+ * `[text](target.html)` — from raw page content. Wikis that use plain relative
+ * links instead of Obsidian [[wikilinks]] (e.g. mimir, melosys-kode-wiki) join
+ * the same link graph through these, and relative `.html` links let markdown
+ * pages backlink standalone explainers. Returns deduped, URL-decoded targets
+ * ending in `.md` or `.html` (case-insensitive), with any `#anchor` fragment
+ * stripped, still *relative to the linking page* (resolution happens in
+ * `resolveMarkdownTargets`). Skips: images (`![...](...)`), absolute URLs / any
+ * `scheme:` target (http:, https:, mailto:, …), absolute filesystem paths
+ * (leading `/`), and targets that are neither `.md` nor `.html`. Like
+ * `extractWikilinks`, this does not special-case fenced code blocks — matching
+ * that function's behavior.
  */
 export function extractMarkdownLinks(content: string): string[] {
   const targets = new Set<string>();
@@ -229,7 +232,8 @@ export function extractMarkdownLinks(content: string): string[] {
     } catch {
       // Malformed %-escape — keep the raw form so a real .md link isn't lost.
     }
-    if (!decoded.toLowerCase().endsWith(".md")) continue;
+    const lower = decoded.toLowerCase();
+    if (!lower.endsWith(".md") && !lower.endsWith(".html")) continue;
     targets.add(decoded);
   }
   return [...targets];
@@ -589,8 +593,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       if (targetKey !== key) resolved.add(targetKey);
     }
     // Relative markdown links resolve by path and feed the same set — a page
-    // linked both by [[wikilink]] and [text](path.md) counts once. Explainers
-    // can't be markdown-link targets (targets always end in .md).
+    // linked both by [[wikilink]] and [text](path.md) counts once. A relative
+    // `.html` link resolves the same way (byRelPath holds explainers), so a
+    // markdown page's `[text](../blogs/foo.html)` gives that explainer a
+    // backlink — explainers still emit no outgoing links of their own (:497).
     for (const rel of rawMdTargets.get(meta.relPath) ?? []) {
       if (rel !== key && byRelPath.has(rel)) resolved.add(rel);
     }
