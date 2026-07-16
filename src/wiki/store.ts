@@ -240,7 +240,7 @@ export function extractMarkdownLinks(content: string): string[] {
 }
 
 /**
- * Resolve extracted relative `.md` targets against the linking page's own
+ * Resolve extracted relative `.md`/`.html` targets against the linking page's own
  * location within the wiki, returning normalized, lowercased target relPaths
  * that stay inside the wiki root. Targets that escape the root via `../` are
  * dropped. Lowercasing mirrors the case-insensitive `resolve()` used for the
