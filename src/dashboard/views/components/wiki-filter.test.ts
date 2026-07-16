@@ -1,8 +1,11 @@
 import { test, expect } from "bun:test";
 import {
+  connectionTypeOrder,
   filterPages,
   folderCounts,
   hasTypedHubs,
+  hubTypeList,
+  mergeWikiTypes,
   pageDateLabel,
   pageFolder,
   pageTimeMs,
@@ -11,6 +14,8 @@ import {
   tagCounts,
   topPages,
   typeCounts,
+  TYPE_LABEL,
+  TYPE_ORDER,
   type WikiFilters,
   type WikiListing,
 } from "./wiki-filter.ts";
@@ -187,13 +192,102 @@ test("tagCounts: honors domain + type filters", () => {
   expect(tagCounts(PAGES, "ai", "entity")).toEqual({ llm: 1, org: 1 });
 });
 
-test("hasTypedHubs: true when concepts/entities exist, false for untyped wikis", () => {
-  expect(hasTypedHubs(PAGES)).toBe(true);
+test("hasTypedHubs: true with ≥2 non-note types, false for untyped/single-type wikis", () => {
+  expect(hasTypedHubs(PAGES)).toBe(true); // concept + entity → 2 non-note types
   const untyped: WikiListing[] = [
     page({ name: "a", type: "note", backlinkCount: 3 }),
     page({ name: "b", type: "note", backlinkCount: 1 }),
   ];
   expect(hasTypedHubs(untyped)).toBe(false);
+  // A single non-note type isn't enough of an ontology — falls back to the cross-type hub.
+  const singleType: WikiListing[] = [
+    page({ name: "c1", type: "concept" }),
+    page({ name: "n1", type: "note" }),
+  ];
+  expect(hasTypedHubs(singleType)).toBe(false);
+  // A wiki with custom types (mimir) counts them.
+  const mimir: WikiListing[] = [
+    page({ name: "s", type: "subsystem" }),
+    page({ name: "p", type: "plan" }),
+  ];
+  expect(hasTypedHubs(mimir)).toBe(true);
+});
+
+test("mergeWikiTypes: no config yields exactly today's constants (jarvis byte-identity)", () => {
+  const merged = mergeWikiTypes(null, ["concept", "entity", "source", "note"]);
+  // The whole point of the byte-identity guarantee: order + labels === the constants.
+  expect(merged.order).toEqual(TYPE_ORDER);
+  expect(merged.labels).toEqual(TYPE_LABEL);
+  // …and it's a copy, not the shared constant (client mutates the stored list).
+  expect(merged.order).not.toBe(TYPE_ORDER);
+  expect(merged.labels).not.toBe(TYPE_LABEL);
+});
+
+test("mergeWikiTypes: custom types append after standards, only when present, with labels", () => {
+  const config = {
+    typeMap: {
+      projects: "subsystem",
+      plans: "plan",
+      archive: "report",
+      flows: "concept", // standard target — no duplicate appended
+      reading: "source",
+    },
+    typeLabels: { subsystem: "Subsystems", plan: "Plans", report: "Reports", repo: "Repos" },
+  };
+  // `repo` is declared (typeLabels) but no page carries it → excluded (count 0).
+  const merged = mergeWikiTypes(config, ["concept", "subsystem", "plan", "report", "note"]);
+  expect(merged.order).toEqual([
+    ...TYPE_ORDER, // standards first, in canonical order
+    "subsystem",
+    "plan",
+    "report",
+  ]);
+  expect(merged.labels.subsystem).toBe("Subsystems");
+  expect(merged.labels.report).toBe("Reports");
+  expect(merged.labels).not.toHaveProperty("repo"); // absent type → no label added
+  expect(merged.labels.concept).toBe("Concepts"); // standard labels untouched
+});
+
+test("mergeWikiTypes: a typeMap-only custom type falls back to a title-cased label", () => {
+  const config = { typeMap: { widgets: "widget" }, typeLabels: {} };
+  const merged = mergeWikiTypes(config, ["widget"]);
+  expect(merged.order).toEqual([...TYPE_ORDER, "widget"]);
+  expect(merged.labels.widget).toBe("Widget");
+});
+
+test("hubTypeList: non-note, non-explainer types present, ordered by the merged list", () => {
+  const order = [...TYPE_ORDER, "subsystem", "plan"];
+  const pages: WikiListing[] = [
+    page({ type: "subsystem" }),
+    page({ type: "plan" }),
+    page({ type: "concept" }),
+    page({ type: "explainer" }), // excluded — explainers never join the link graph
+    page({ type: "note" }), // excluded — the fallback type
+  ];
+  expect(hubTypeList(pages, order)).toEqual(["concept", "subsystem", "plan"]);
+});
+
+test("hubTypeList: a type present but missing from the order is appended (alpha)", () => {
+  const pages: WikiListing[] = [page({ type: "zeta" }), page({ type: "alpha" })];
+  // Neither is in TYPE_ORDER → both are extras, alpha-sorted.
+  expect(hubTypeList(pages, TYPE_ORDER)).toEqual(["alpha", "zeta"]);
+});
+
+test("connectionTypeOrder: stored order first, then extras present in items (alpha)", () => {
+  const order = [...TYPE_ORDER, "subsystem"];
+  // `plan` is a real custom type NOT in the stored order (late/empty stored list) —
+  // it must still be grouped, never dropped (the :918 regression case).
+  const itemTypes = ["subsystem", "concept", "plan", "note"];
+  expect(connectionTypeOrder(itemTypes, order)).toEqual([
+    "concept",
+    "note",
+    "subsystem",
+    "plan", // extra, appended so its neighbor is never dropped
+  ]);
+});
+
+test("connectionTypeOrder: empty stored order still surfaces every present type", () => {
+  expect(connectionTypeOrder(["plan", "concept"], [])).toEqual(["concept", "plan"]);
 });
 
 test("topPages: type predicate filters and sorts by backlinkCount desc, honors limit", () => {

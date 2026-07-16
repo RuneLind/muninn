@@ -11,6 +11,7 @@ import {
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
   generateWikiDigest,
@@ -322,6 +323,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     return c.json({
       pages: index.pages.map((m) => toListing(index, m)),
       scannedAt: index.scannedAt,
+      // The wiki's ordered type list + labels (built-in defaults merged with its
+      // `.wiki-reader.json` customs). The client stores this and renders every
+      // type-keyed site off it, so a custom-typed page is never dropped/miscolored.
+      types: mergeWikiTypes(
+        index.readerConfig,
+        index.pages.map((p) => p.type),
+      ),
     });
   });
 

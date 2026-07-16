@@ -94,4 +94,18 @@ describe("resolveTarget", () => {
     expect(out.mode).toBe("create");
     expect(out.targetPath).toBe("life/entities/Brand New.md");
   });
+
+  // Fixture guard for the per-wiki type-ontology change (PR: wiki-reader-type-ontology).
+  // Widening WikiPageType to `string` must NOT make a custom-typed page a match
+  // target — only concept/entity pages are candidates. The gardener runs against the
+  // jarvis wiki (no `.wiki-reader.json`), so its behavior is unchanged; this locks that in.
+  test("a custom-typed page (e.g. mimir's 'subsystem') is never a match target — stays a create", () => {
+    const idx = index([
+      page({ title: "Wiki Gardener", type: "subsystem", relPath: "projects/muninn/wiki-gardener.md" }),
+    ]);
+    const out = resolveTarget(cluster({ label: "Wiki Gardener", kind: "concept" }), idx);
+    expect(out.mode).toBe("create");
+    expect(out.targetPath).toBe("concepts/Wiki Gardener.md");
+    expect(out.kind).toBeUndefined();
+  });
 });

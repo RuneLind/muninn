@@ -5,7 +5,13 @@
  * `src/dashboard/routes/wiki-routes.ts`.
  */
 
-export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note" | "explainer";
+/**
+ * A wiki page's type. Independent client-safe copy of the store's alias (this file
+ * has no DOM/server deps so it stays unit-testable). Widened to `string` because a
+ * wiki's `.wiki-reader.json` can introduce custom type strings beyond the built-in
+ * five — the reader's default ontology lives in `TYPE_ORDER` / `TYPE_LABEL` below.
+ */
+export type WikiPageType = string;
 
 export interface WikiListing {
   name: string;
@@ -39,7 +45,10 @@ export const ROOT_FOLDER = "/";
 
 export type WikiSortMode = "updated" | "backlinks" | "title";
 
-export const TYPE_ORDER: WikiPageType[] = [
+/** The built-in type order + labels — the no-`.wiki-reader.json` defaults. A wiki's
+ *  merged type list (see `mergeWikiTypes`) always starts with these, so a wiki with
+ *  no config renders byte-identically to before. */
+export const TYPE_ORDER: string[] = [
   "concept",
   "entity",
   "source",
@@ -47,7 +56,7 @@ export const TYPE_ORDER: WikiPageType[] = [
   "explainer",
   "note",
 ];
-export const TYPE_LABEL: Record<WikiPageType, string> = {
+export const TYPE_LABEL: Record<string, string> = {
   concept: "Concepts",
   entity: "Entities",
   source: "Sources",
@@ -55,6 +64,77 @@ export const TYPE_LABEL: Record<WikiPageType, string> = {
   explainer: "Explainers",
   note: "Notes",
 };
+
+/** The ordered type list + labels the client renders chips/stats/hubs/connections
+ *  from — the built-in defaults merged with a wiki's `.wiki-reader.json` customs. */
+export interface WikiTypeList {
+  order: string[];
+  labels: Record<string, string>;
+}
+
+/** Capitalize a raw type slug for a fallback label ("subsystem" → "Subsystem"). */
+function titleCaseType(t: string): string {
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+/**
+ * Merge the built-in ontology (`TYPE_ORDER`/`TYPE_LABEL`) with a wiki's optional
+ * `.wiki-reader.json` config into the ordered type list + labels sent to the
+ * client. Standard types always come first in their canonical order — so a wiki
+ * with no config yields exactly today's constants. Custom types the config
+ * introduces (its `typeLabels` keys + `typeMap` values that aren't already
+ * standard) are appended, but only when at least one page actually carries them
+ * (`presentTypes`); a custom type's label is its `typeLabels` entry, else a
+ * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap).
+ */
+export function mergeWikiTypes(
+  config: { typeMap: Record<string, string>; typeLabels: Record<string, string> } | null | undefined,
+  presentTypes: Iterable<string>,
+): WikiTypeList {
+  const order = [...TYPE_ORDER];
+  const labels: Record<string, string> = { ...TYPE_LABEL };
+  if (!config) return { order, labels };
+  const present = new Set(presentTypes);
+  const seen = new Set(order);
+  const candidates = [...Object.keys(config.typeLabels), ...Object.values(config.typeMap)];
+  for (const t of candidates) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    if (!present.has(t)) continue;
+    order.push(t);
+    labels[t] = config.typeLabels[t] || titleCaseType(t);
+  }
+  return { order, labels };
+}
+
+/** Distinct non-note page types present in `pages` (the ontology's "content" types). */
+function contentTypes(pages: WikiListing[]): Set<string> {
+  const s = new Set<string>();
+  for (const p of pages) if (p.type !== "note") s.add(p.type);
+  return s;
+}
+
+/** The per-type hub sections to render on the start view: non-note, non-explainer
+ *  types present in `pages`, ordered by `order` (extras alpha-sorted after). Explainers
+ *  never join the link graph, so a "by connections" hub of them is always degenerate. */
+export function hubTypeList(pages: WikiListing[], order: string[]): string[] {
+  const present = contentTypes(pages);
+  present.delete("explainer");
+  const known = order.filter((t) => t !== "note" && t !== "explainer" && present.has(t));
+  const extras = [...present].filter((t) => !order.includes(t)).sort();
+  return [...known, ...extras];
+}
+
+/** Grouping order for a connections panel: the stored `order` first (types actually
+ *  present), then any extra types present in the items but missing from `order`
+ *  (alpha). Belt-and-suspenders so a custom-typed neighbor is NEVER dropped even if
+ *  the stored list is late/empty — the pre-fix bug excluded such items entirely. */
+export function connectionTypeOrder(itemTypes: Iterable<string>, order: string[]): string[] {
+  const present = new Set(itemTypes);
+  const known = order.filter((t) => present.has(t));
+  const extras = [...present].filter((t) => !order.includes(t)).sort();
+  return [...known, ...extras];
+}
 
 /** The wiki-root-relative top-level folder a page lives in (`ROOT_FOLDER` when it
  *  sits directly in the wiki root). Nested pages report their FIRST segment, so
@@ -166,14 +246,12 @@ export function typeCounts(pages: WikiListing[], domain: string): Record<string,
   return counts;
 }
 
-/** The hub types with dedicated "Top … by connections" sections on the start view. */
-export const HUB_TYPES: WikiPageType[] = ["concept", "entity"];
-
-/** True when the wiki has any typed hub pages (concepts/entities). Wikis that use
- *  plain markdown links and no frontmatter `type` have none — they fall back to a
- *  single "Top pages by connections" hub section instead. */
+/** True when the wiki has ≥2 distinct non-note types — enough of an ontology to
+ *  warrant per-type "Top … by connections" hub sections (jarvis: concept/entity/…;
+ *  mimir: subsystem/plan/report/…). Wikis that are all `note` (plain markdown, no
+ *  frontmatter `type`, no config) fall back to a single cross-type hub instead. */
 export function hasTypedHubs(pages: WikiListing[]): boolean {
-  return pages.some((p) => HUB_TYPES.includes(p.type));
+  return contentTypes(pages).size >= 2;
 }
 
 /** Top `limit` pages matching `predicate`, most-linked-to first. Drives the hub
