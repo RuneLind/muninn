@@ -598,8 +598,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const meta = index.resolve(pageName);
     if (!meta) return c.json({ error: `no wiki page named "${pageName}"` }, 404);
 
-    // Explainers aren't markdown — query on title (+ tags) only.
-    const body = meta.type === "explainer" ? "" : (await readWikiPage(index, meta)) ?? "";
+    // Explainers aren't markdown — use the sniffed head <meta description> as the
+    // body so the query is title + tags + description instead of title-only.
+    const body =
+      meta.type === "explainer"
+        ? (meta.description ?? "")
+        : (await readWikiPage(index, meta)) ?? "";
     const query = buildSimilarQuery(meta, body);
     const searchPath = buildSimilarSearchPath(query, collections, 8);
 

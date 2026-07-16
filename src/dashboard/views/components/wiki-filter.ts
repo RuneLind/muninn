@@ -23,6 +23,8 @@ export interface WikiListing {
   created?: string;
   updated?: string;
   url?: string;
+  /** Short prose summary — explainers only (sniffed from `<meta description>`). */
+  description?: string;
   relPath: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
