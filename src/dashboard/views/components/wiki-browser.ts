@@ -1042,10 +1042,12 @@ function articleHeadHtml(m: WikiListing): string {
   return head;
 }
 
-/** Standalone HTML explainers aren't markdown and don't join the wikilink graph,
- *  so render them in a sandboxed <iframe> (scripts allowed — they use inline
- *  JS/mermaid and are trusted local docs on a loopback-only dashboard) instead
- *  of fetching /api/wiki/page. Connections panel shows a "no wikilinks" note. */
+/** Standalone HTML explainers aren't markdown, so the article renders in a
+ *  sandboxed <iframe> (scripts allowed — they use inline JS/mermaid and are
+ *  trusted local docs on a loopback-only dashboard) instead of the markdown
+ *  pane. The Connections panel is fetched from /api/wiki/page like any other
+ *  page: explainers carry backlinks ("Linked from") since md→.html links join
+ *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   currentName = m.name;
   if (push) {
@@ -1056,8 +1058,20 @@ function loadExplainer(m: WikiListing, push: boolean): void {
     articleHeadHtml(m) +
     `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="allow-scripts allow-popups" title="${esc(m.title)}"></iframe>`;
   document.getElementById("articleWrap")!.scrollTop = 0;
-  document.getElementById("connBody")!.innerHTML =
-    '<div class="wiki-conn-empty">Explainer — standalone HTML, no wikilinks.</div>';
+  document.getElementById("connBody")!.innerHTML = '<div class="wiki-conn-empty">Loading…</div>';
+  fetch(withWiki("/api/wiki/page?name=" + encodeURIComponent(m.name)))
+    .then((r) => r.json())
+    .then((data: WikiPageDetail) => {
+      // A fast page flip may have moved on — don't clobber the new page's panel.
+      if (data.error || currentName !== m.name) return;
+      renderConnections(data);
+      loadSimilar(m.name);
+    })
+    .catch(() => {
+      if (currentName !== m.name) return;
+      document.getElementById("connBody")!.innerHTML =
+        '<div class="wiki-conn-empty">Connections unavailable.</div>';
+    });
   renderList();
 }
 

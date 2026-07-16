@@ -73,6 +73,26 @@ describe("GET /api/wiki/html", () => {
     const res = await app.request("/api/wiki/html?name=does-not-exist");
     expect(res.status).toBe(404);
   });
+
+  // The explainer view's Connections panel is fed by /api/wiki/page — it must
+  // serve explainers (meta + backlinks), not just markdown pages.
+  test("/api/wiki/page serves an explainer with its backlinks", async () => {
+    await Bun.write(
+      path.join(root, "concepts/Linker.md"),
+      "---\ntype: concept\ntitle: Linker\n---\n\nSee the [explainer](../blogs/Explainer%20One.html).",
+    );
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Explainer One"));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      meta: { type: string };
+      backlinks: Array<{ name: string }>;
+      outgoing: unknown[];
+    };
+    expect(data.meta.type).toBe("explainer");
+    expect(data.backlinks.map((b) => b.name)).toContain("Linker");
+    expect(data.outgoing).toEqual([]);
+  });
 });
 
 /**
