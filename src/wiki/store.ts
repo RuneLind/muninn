@@ -51,6 +51,12 @@ export interface WikiPageMeta {
   updated?: string;
   /** External URL for source pages (YouTube video, X article, …). */
   url?: string;
+  /**
+   * Short prose summary. Explainers only — sniffed from the head `<meta
+   * name="description">`; markdown pages leave it undefined. Feeds the Similar
+   * endpoint's query so explainers match on more than their title.
+   */
+  description?: string;
   /** Path relative to the wiki root — unique even when stems collide. */
   relPath: string;
   /**
@@ -354,6 +360,49 @@ function asStringArray(v: string | string[] | undefined): string[] {
 const HTML_TITLE_SNIFF_BYTES = 4096;
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 
+/** Every `<meta …>` tag in a prefix. Tolerates attribute order — attributes are
+ *  read out of the matched tag by name, not by position. `[^>]*` naturally caps
+ *  a tag with an unclosed quote at the next `>` so its attrs fail to parse (the
+ *  tag is silently ignored) rather than swallowing the rest of the document. */
+const META_TAG_RE = /<meta\b[^>]*>/gi;
+
+/** Read one attribute's value out of a single tag string. Case-insensitive on
+ *  the attribute name; accepts single or double quotes; requires a closing quote
+ *  (an unclosed quote ⇒ undefined). */
+function metaAttr(tag: string, attr: string): string | undefined {
+  const m = tag.match(new RegExp(`\\b${attr}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  return m ? (m[1] ?? m[2]) : undefined;
+}
+
+/**
+ * Sniff the `content` of the first `<meta name="…">` matching `name` from a raw
+ * HTML prefix. Order-tolerant (`content` may precede `name`), quote- and
+ * case-insensitive, and does NOT require a `<head>` (headless fragments and meta
+ * prepended above `<title>` both work). Returns the trimmed content, or
+ * undefined when the tag is absent, malformed, or has empty content.
+ */
+function sniffMetaContent(prefix: string, name: string): string | undefined {
+  const tags = prefix.match(META_TAG_RE);
+  if (!tags) return undefined;
+  for (const tag of tags) {
+    if (metaAttr(tag, "name")?.toLowerCase() === name) {
+      const content = metaAttr(tag, "content")?.trim();
+      if (content) return content;
+    }
+  }
+  return undefined;
+}
+
+/** Normalize a `<meta name="keywords">` list into wiki tags — split on comma,
+ *  trim, lowercase, spaces→hyphens (the same shape the markdown tagger produces),
+ *  dropping empties. */
+function explainerKeywordTags(content: string): string[] {
+  return content
+    .split(",")
+    .map((t) => t.trim().toLowerCase().replace(/\s+/g, "-"))
+    .filter((t) => t.length > 0);
+}
+
 /** File mtime in epoch ms, or undefined when the file can't be stat'd. */
 async function fileMtimeMs(abs: string): Promise<number | undefined> {
   try {
@@ -374,10 +423,17 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
   const abs = path.join(root, relPath);
   const stem = path.basename(relPath, ".html");
   let title = stem;
+  let tags: string[] = [];
+  let description: string | undefined;
   try {
     const prefix = await Bun.file(abs).slice(0, HTML_TITLE_SNIFF_BYTES).text();
     const m = prefix.match(HTML_TITLE_RE);
     if (m && m[1]!.trim()) title = m[1]!.trim();
+    // Same bounded prefix also feeds the tags + description sniff (explainers
+    // carry no frontmatter — the <head> meta is all we have).
+    const keywords = sniffMetaContent(prefix, "keywords");
+    if (keywords) tags = explainerKeywordTags(keywords);
+    description = sniffMetaContent(prefix, "description");
   } catch {
     return null; // unreadable — skip, keep the rest of the wiki browsable
   }
@@ -388,10 +444,11 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
     title,
     type: "explainer",
     domain: relPath.startsWith("life/") ? "life" : "ai",
-    tags: [],
+    tags,
     aliases: [],
     created: date,
     updated: date,
+    description,
     relPath,
     mtimeMs,
   };

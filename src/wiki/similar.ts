@@ -68,8 +68,9 @@ export function firstBodyParagraph(md: string, cap = 500): string {
 
 /**
  * Build the semantic-search query for a page. Title + tags always; the first
- * body paragraph is appended for markdown pages. Explainers (`.html`) carry no
- * markdown body, so `body` is passed empty and the query is title (+ tags) only.
+ * body paragraph is appended when a body is given — the markdown page body for
+ * md pages, the sniffed `<meta name="description">` for explainers (empty when
+ * an explainer has none, leaving its query title + tags only).
  */
 export function buildSimilarQuery(meta: WikiPageMeta, body: string): string {
   const parts: string[] = [meta.title];

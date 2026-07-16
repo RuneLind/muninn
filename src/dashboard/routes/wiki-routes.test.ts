@@ -257,6 +257,13 @@ describe("GET /api/wiki/similar", () => {
     await Bun.write(path.join(root, "Current.md"), "---\ntype: concept\ntitle: Current\n---\n\nBody of current.");
     await Bun.write(path.join(root, "Cousin A.md"), "---\ntype: concept\ntitle: Cousin A\n---\n\nBody A.");
     await Bun.write(path.join(root, "sub/Cousin B.md"), "---\ntype: concept\ntitle: Cousin B\n---\n\nBody B.");
+    await Bun.write(
+      path.join(root, "sub/An Explainer.html"),
+      '<!doctype html><html><head><title>An Explainer</title>' +
+        '<meta name="keywords" content="Corrective RAG, Retrieval">' +
+        '<meta name="description" content="Head meta description prose.">' +
+        "</head><body>hello</body></html>",
+    );
     prevExtra = process.env.WIKI_EXTRA;
     // Standalone wiki WITH a collection (3rd segment) so similar can search.
     process.env.WIKI_EXTRA = `simwiki=${root}=simcoll`;
@@ -332,6 +339,34 @@ describe("GET /api/wiki/similar", () => {
   test("missing page param → 400", async () => {
     const res = await app.request("/api/wiki/similar?wiki=simwiki");
     expect(res.status).toBe(400);
+  });
+
+  test("explainer sends the enriched query (title + tags + head description)", async () => {
+    let seenPath = "";
+    __setSimilarSearchForTest(async (_baseUrl, p) => {
+      seenPath = p;
+      return { results: [] };
+    });
+    const res = await app.request(
+      "/api/wiki/similar?wiki=simwiki&page=" + encodeURIComponent("An Explainer"),
+    );
+    expect(res.status).toBe(200);
+    const q = new URLSearchParams(seenPath.split("?")[1]).get("q")!;
+    expect(q).toContain("An Explainer");
+    expect(q).toContain("corrective-rag retrieval");
+    expect(q).toContain("Head meta description prose");
+  });
+
+  test("page-list payload carries tags + description for explainers", async () => {
+    const res = await app.request("/api/wiki/pages?wiki=simwiki");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      pages: { name: string; type: string; tags: string[]; description?: string }[];
+    };
+    const ex = body.pages.find((p) => p.name === "An Explainer")!;
+    expect(ex.type).toBe("explainer");
+    expect(ex.tags).toEqual(["corrective-rag", "retrieval"]);
+    expect(ex.description).toBe("Head meta description prose.");
   });
 
   test("huginn down → 200 with empty similar (section hides, page never errors)", async () => {

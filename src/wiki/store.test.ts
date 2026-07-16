@@ -310,6 +310,88 @@ describe("buildWikiIndex", () => {
     expect(index.backlinks.get("blogs/deep dive.html") ?? []).toEqual([]);
   });
 
+  test("sniffs <meta keywords>/<meta description> for explainers: present/absent/malformed/order/beyond-prefix/headless", async () => {
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+
+    // Present: keywords → kebab-lowercased tags; description → description field.
+    await Bun.write(
+      path.join(root, "blogs/present.html"),
+      '<!doctype html><html><head><title>Present</title>' +
+        '<meta name="keywords" content="Corrective RAG, Retrieval, Wiki Gardener">' +
+        '<meta name="description" content="A deep dive into corrective retrieval.">' +
+        "</head><body>Hi</body></html>",
+    );
+
+    // Absent: no meta at all → tags [] + description undefined.
+    await Bun.write(
+      path.join(root, "blogs/absent.html"),
+      "<!doctype html><html><head><title>Absent</title></head><body>Hi</body></html>",
+    );
+
+    // Malformed: unclosed quote on keywords + empty description content → both ignored.
+    await Bun.write(
+      path.join(root, "blogs/malformed.html"),
+      '<!doctype html><html><head><title>Malformed</title>' +
+        '<meta name="keywords" content="broken, unclosed>' +
+        '<meta name="description" content="">' +
+        "</head><body>Hi</body></html>",
+    );
+
+    // Attribute order reversed (content before name), single quotes, mixed case.
+    await Bun.write(
+      path.join(root, "blogs/reversed.html"),
+      "<!doctype html><html><head><title>Reversed</title>" +
+        "<META CONTENT='Alpha Beta, Gamma' NAME='Keywords'>" +
+        "<meta content='Reversed order works.' name='description'>" +
+        "</head><body>Hi</body></html>",
+    );
+
+    // Meta beyond the 4096-byte sniff prefix must be ignored.
+    const pad = "<!-- " + "x".repeat(4200) + " -->";
+    await Bun.write(
+      path.join(root, "blogs/beyond.html"),
+      "<title>Beyond</title>" +
+        pad +
+        '<meta name="keywords" content="too, late">' +
+        '<meta name="description" content="Past the prefix, ignored.">',
+    );
+
+    // Headless fragment: meta prepended ABOVE <title>, no <head> element.
+    await Bun.write(
+      path.join(root, "blogs/headless.html"),
+      '<meta name="keywords" content="Fragment Tag">' +
+        '<meta name="description" content="Headless fragment description.">' +
+        "<title>Headless</title><h1>Body</h1>",
+    );
+
+    const index = await buildWikiIndex(root);
+
+    const present = index.resolve("present")!;
+    expect(present.tags).toEqual(["corrective-rag", "retrieval", "wiki-gardener"]);
+    expect(present.description).toBe("A deep dive into corrective retrieval.");
+
+    const absent = index.resolve("absent")!;
+    expect(absent.tags).toEqual([]);
+    expect(absent.description).toBeUndefined();
+
+    const malformed = index.resolve("malformed")!;
+    expect(malformed.tags).toEqual([]);
+    expect(malformed.description).toBeUndefined();
+
+    const reversed = index.resolve("reversed")!;
+    expect(reversed.tags).toEqual(["alpha-beta", "gamma"]);
+    expect(reversed.description).toBe("Reversed order works.");
+
+    const beyond = index.resolve("beyond")!;
+    expect(beyond.tags).toEqual([]);
+    expect(beyond.description).toBeUndefined();
+
+    const headless = index.resolve("headless")!;
+    expect(headless.title).toBe("Headless");
+    expect(headless.tags).toEqual(["fragment-tag"]);
+    expect(headless.description).toBe("Headless fragment description.");
+  });
+
   test("relative markdown links join the graph: same dir, ../ traversal, #anchor, %20, dedupe, out-of-root ignored", async () => {
     await mkdir(path.join(root, "repos"), { recursive: true });
     await Bun.write(path.join(root, "repos/muninn.md"), "---\ntype: note\n---\n\nMuninn repo.");

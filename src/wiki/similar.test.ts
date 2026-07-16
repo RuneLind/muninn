@@ -77,6 +77,29 @@ describe("buildSimilarQuery", () => {
     const q = buildSimilarQuery(meta({ title: "Some Explainer", tags: [] }), "");
     expect(q).toBe("Some Explainer");
   });
+
+  test("explainer with description + tags → title + tags + description", () => {
+    const q = buildSimilarQuery(
+      meta({
+        type: "explainer",
+        title: "Corrective RAG",
+        tags: ["retrieval", "rag"],
+        relPath: "blogs/corrective-rag.html",
+      }),
+      "A deep dive into corrective retrieval and its two rescue paths.",
+    );
+    expect(q).toContain("Corrective RAG");
+    expect(q).toContain("retrieval rag");
+    expect(q).toContain("A deep dive into corrective retrieval");
+  });
+
+  test("explainer without description stays title (+ tags) only", () => {
+    const q = buildSimilarQuery(
+      meta({ type: "explainer", title: "Bare Explainer", tags: ["rag"] }),
+      "",
+    );
+    expect(q).toBe("Bare Explainer — rag");
+  });
 });
 
 describe("buildSimilarSearchPath", () => {
