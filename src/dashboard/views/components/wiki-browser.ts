@@ -955,7 +955,74 @@ function renderConnections(data: WikiPageDetail): void {
     return html + "</div>";
   }
   document.getElementById("connBody")!.innerHTML =
-    miniGraphHtml(data) + section("Linked from", data.backlinks) + section("Links to", data.outgoing);
+    miniGraphHtml(data) +
+    section("Linked from", data.backlinks) +
+    section("Links to", data.outgoing) +
+    // Placeholder the lazy "Similar" fetch fills in after the page renders.
+    '<div id="wikiSimilar"></div>';
+}
+
+// ── Similar articles (semantic cousins, lazily fetched) ───────────────
+/** One resolved similar page (mirrors SimilarPage in src/wiki/similar.ts). */
+interface SimilarPage {
+  name: string;
+  title: string;
+  relPath: string;
+  type: string;
+  snippet?: string;
+  relevance: number;
+}
+/** Per-page memo so flipping tabs / re-rendering doesn't refetch. */
+const similarMemo = new Map<string, SimilarPage[]>();
+/** In-flight guard so a page render can't kick two concurrent fetches. */
+const similarInFlight = new Set<string>();
+
+/** Render the "Similar" section markup, or "" when there are no cousins (so the
+ *  section is simply absent). Rows reuse the connection-item shape → clicking one
+ *  opens it in the reader via the delegated `[data-page]` handler. */
+function similarSectionHtml(items: SimilarPage[]): string {
+  if (!items.length) return "";
+  let html = `<div class="wiki-conn-section"><div class="wiki-conn-title">Similar (${items.length})</div>`;
+  items.forEach((p) => {
+    html +=
+      `<div class="wiki-conn-item" data-page="${esc(p.name)}" title="${esc(p.snippet || "")}">` +
+      `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(p.title)}</span></div>`;
+  });
+  return html + "</div>";
+}
+
+/** Fill the placeholder — but only if the reader is still on the page we fetched
+ *  for (a fast tab flip may have moved on). */
+function renderSimilarInto(pageName: string, items: SimilarPage[]): void {
+  if (currentName !== pageName) return;
+  const el = document.getElementById("wikiSimilar");
+  if (el) el.innerHTML = similarSectionHtml(items);
+}
+
+/** Lazily fetch + render the Similar section for a page. Memoized per page and
+ *  guarded against concurrent duplicate fetches; a failed/empty fetch leaves the
+ *  section absent. */
+function loadSimilar(pageName: string): void {
+  const memo = similarMemo.get(pageName);
+  if (memo) {
+    renderSimilarInto(pageName, memo);
+    return;
+  }
+  if (similarInFlight.has(pageName)) return;
+  similarInFlight.add(pageName);
+  fetch(withWiki("/api/wiki/similar?page=" + encodeURIComponent(pageName)))
+    .then((r) => r.json())
+    .then((data: { similar?: SimilarPage[] }) => {
+      const items = Array.isArray(data.similar) ? data.similar : [];
+      similarMemo.set(pageName, items);
+      renderSimilarInto(pageName, items);
+    })
+    .catch(() => {
+      /* huginn down or route error — hide the section silently */
+    })
+    .finally(() => {
+      similarInFlight.delete(pageName);
+    });
 }
 
 /** Article-head block (title, badges, tags, dates, source link) — shared by
@@ -1016,6 +1083,9 @@ function loadPage(name: string, push: boolean): void {
         articleHeadHtml(data.meta) + `<div class="wiki-article">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
       renderConnections(data);
+      // Lazy: fetch semantic cousins after the page + connections are on screen,
+      // so it never blocks the article render.
+      loadSimilar(data.meta.name);
       renderList();
     })
     .catch((err: Error) => {
