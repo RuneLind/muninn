@@ -8,6 +8,7 @@ import {
   registerWikiRoutes,
   __resetWikiDigestCacheForTest,
   __seedWikiDigestForTest,
+  __setSimilarSearchForTest,
   digestCacheDecision,
 } from "./wiki-routes.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
@@ -236,6 +237,111 @@ describe("wiki reindex routes — resolution branches", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("no wiki configured");
+  });
+});
+
+/**
+ * `/api/wiki/similar` — semantic cousins for a page. The Huginn search is
+ * injected via `__setSimilarSearchForTest`, so happy / self-exclusion /
+ * unresolved-drop / huginn-down all run without a live Huginn. No-collections
+ * and unknown-wiki resolution branches (clean 404s) need no injection.
+ */
+describe("GET /api/wiki/similar", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-similar-route-"));
+    await mkdir(path.join(root, "sub"), { recursive: true });
+    await Bun.write(path.join(root, "Current.md"), "---\ntype: concept\ntitle: Current\n---\n\nBody of current.");
+    await Bun.write(path.join(root, "Cousin A.md"), "---\ntype: concept\ntitle: Cousin A\n---\n\nBody A.");
+    await Bun.write(path.join(root, "sub/Cousin B.md"), "---\ntype: concept\ntitle: Cousin B\n---\n\nBody B.");
+    prevExtra = process.env.WIKI_EXTRA;
+    // Standalone wiki WITH a collection (3rd segment) so similar can search.
+    process.env.WIKI_EXTRA = `simwiki=${root}=simcoll`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:0" } as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    __setSimilarSearchForTest(null);
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("happy path resolves hits to wiki pages, ordered by relevance", async () => {
+    __setSimilarSearchForTest(async () => ({
+      results: [
+        { collection: "simcoll", id: "Cousin A.md", relevance: 0.5 },
+        { collection: "simcoll", id: "sub/Cousin B.md", relevance: 0.9 },
+      ],
+    }));
+    const res = await app.request("/api/wiki/similar?wiki=simwiki&page=" + encodeURIComponent("Current"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { similar: { name: string; title: string; relPath: string }[] };
+    expect(body.similar.map((p) => p.title)).toEqual(["Cousin B", "Cousin A"]);
+  });
+
+  test("excludes the current page from its own similar list", async () => {
+    __setSimilarSearchForTest(async () => ({
+      results: [
+        { collection: "simcoll", id: "Current.md", relevance: 0.99 },
+        { collection: "simcoll", id: "Cousin A.md", relevance: 0.4 },
+      ],
+    }));
+    const res = await app.request("/api/wiki/similar?wiki=simwiki&page=" + encodeURIComponent("Current"));
+    const body = (await res.json()) as { similar: { title: string }[] };
+    expect(body.similar.map((p) => p.title)).toEqual(["Cousin A"]);
+  });
+
+  test("drops hits that don't resolve to a wiki page", async () => {
+    __setSimilarSearchForTest(async () => ({
+      results: [
+        { collection: "simcoll", id: "external/not-in-wiki.md", title: "Nope", relevance: 0.8 },
+        { collection: "simcoll", id: "Cousin A.md", relevance: 0.3 },
+      ],
+    }));
+    const res = await app.request("/api/wiki/similar?wiki=simwiki&page=" + encodeURIComponent("Current"));
+    const body = (await res.json()) as { similar: { title: string }[] };
+    expect(body.similar.map((p) => p.title)).toEqual(["Cousin A"]);
+  });
+
+  test("wiki with no collections → clean 404", async () => {
+    process.env.WIKI_EXTRA = `nocoll=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/similar?wiki=nocoll&page=Current");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no search collection connected");
+  });
+
+  test("unknown wiki → clean 404", async () => {
+    const res = await app.request("/api/wiki/similar?wiki=does-not-exist&page=Current");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("no wiki configured");
+  });
+
+  test("missing page param → 400", async () => {
+    const res = await app.request("/api/wiki/similar?wiki=simwiki");
+    expect(res.status).toBe(400);
+  });
+
+  test("huginn down → 200 with empty similar (section hides, page never errors)", async () => {
+    __setSimilarSearchForTest(async () => {
+      throw new Error("Knowledge API unreachable");
+    });
+    const res = await app.request("/api/wiki/similar?wiki=simwiki&page=" + encodeURIComponent("Current"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { similar: unknown[] };
+    expect(body.similar).toEqual([]);
   });
 });
 

@@ -11,6 +11,12 @@ import {
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import {
+  buildSimilarQuery,
+  buildSimilarSearchPath,
+  resolveSimilarHits,
+  type SimilarSearchHit,
+} from "../../wiki/similar.ts";
 import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
@@ -71,6 +77,19 @@ export function __resetWikiDigestCacheForTest(): void {
 /** Test-only: seed the digest cache to exercise the cache-hit path. */
 export function __seedWikiDigestForTest(name: string, digest: WikiDigest): void {
   digestCache.set(name, digest);
+}
+
+/**
+ * Injectable Huginn searcher for the `/api/wiki/similar` route. Defaults to the
+ * real `fetchKnowledgeApi`; tests override it to exercise the happy / self-
+ * exclusion / unresolved-drop / huginn-down branches without a live Huginn.
+ */
+type SimilarSearchFn = (baseUrl: string, path: string) => Promise<{ results?: SimilarSearchHit[] }>;
+let similarSearchFn: SimilarSearchFn | null = null;
+
+/** Test-only: override (or reset with `null`) the Huginn searcher used by `/api/wiki/similar`. */
+export function __setSimilarSearchForTest(fn: SimilarSearchFn | null): void {
+  similarSearchFn = fn;
 }
 
 /**
@@ -550,6 +569,56 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
     });
+  });
+
+  // Semantic "Similar" articles for one page: a query built from the page's
+  // title + tags + first body paragraph, searched against the wiki's backing
+  // collections, then resolved back onto pages in the SAME wiki. Powers the
+  // reader's Connections panel "Similar" section (fetched lazily after render).
+  // Same registry resolution + `?bot=` alias as the other wiki routes. A wiki
+  // with no `collections` (or an unknown name) is a clean 404 (Ask precedent);
+  // an unreachable Huginn degrades to `{ similar: [] }` + a warn (never errors
+  // the page). Explainers query on title only (no markdown body to read).
+  app.get("/api/wiki/similar", async (c) => {
+    const pageName = c.req.query("page");
+    if (!pageName) return c.json({ error: "page query param required" }, 400);
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) return c.json({ error: "no wiki configured for that name" }, 404);
+    const collections = entry.collections ?? [];
+    if (collections.length === 0) {
+      return c.json({ error: "no search collection connected for this wiki" }, 404);
+    }
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return c.json({ error: "wiki directory not found" }, 404);
+    const meta = index.resolve(pageName);
+    if (!meta) return c.json({ error: `no wiki page named "${pageName}"` }, 404);
+
+    // Explainers aren't markdown — query on title (+ tags) only.
+    const body = meta.type === "explainer" ? "" : (await readWikiPage(index, meta)) ?? "";
+    const query = buildSimilarQuery(meta, body);
+    const searchPath = buildSimilarSearchPath(query, collections, 8);
+
+    const search: SimilarSearchFn = similarSearchFn ?? ((baseUrl, p) => fetchKnowledgeApi(baseUrl, p));
+    let hits: SimilarSearchHit[];
+    try {
+      const resp = await search(config.knowledgeApiUrl, searchPath);
+      hits = Array.isArray(resp?.results) ? resp.results : [];
+    } catch (err) {
+      // Huginn unreachable — hide the section, never error the page.
+      log.warn("Wiki similar: search failed for wiki={wiki} page={page}: {error}", {
+        wiki: entry.name,
+        page: meta.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ similar: [] });
+    }
+
+    return c.json({ similar: resolveSimilarHits(hits, index, meta, 5) });
   });
 
   // Raw HTML for a standalone explainer, served for the reader's <iframe>. The
