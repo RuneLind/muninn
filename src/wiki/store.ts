@@ -322,12 +322,20 @@ function typeFromFrontmatter(
   if (raw === "analyses") return "analysis";
   // An explicit frontmatter type the wiki itself declares (a typeMap target or a
   // labeled custom type) is honored as authored.
-  if (raw && config && (Object.values(config.typeMap).includes(raw) || raw in config.typeLabels)) {
+  if (
+    raw &&
+    config &&
+    (Object.values(config.typeMap).includes(raw) ||
+      Object.prototype.hasOwnProperty.call(config.typeLabels, raw))
+  ) {
     return raw;
   }
   // Fall back to the folder the page lives in — first the wiki's own typeMap…
   const folder = relPath.replace(/^life\//, "").split("/")[0] ?? "";
-  if (config && config.typeMap[folder]) return config.typeMap[folder]!;
+  // Own-key guard: a folder named e.g. `constructor` must not read the prototype.
+  if (config && Object.prototype.hasOwnProperty.call(config.typeMap, folder) && config.typeMap[folder]) {
+    return config.typeMap[folder]!;
+  }
   // …then the built-in standard folder names.
   if (folder === "sources") return "source";
   if (folder === "concepts") return "concept";
