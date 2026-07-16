@@ -17,7 +17,26 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "store");
 
-export type WikiPageType = "source" | "concept" | "entity" | "analysis" | "note" | "explainer";
+/**
+ * A wiki page's type. The reader ships a built-in five-type ontology
+ * (source/concept/entity/analysis/note) plus `explainer` for standalone `.html`,
+ * but a wiki can introduce its own type strings via an optional `.wiki-reader.json`
+ * (`typeMap`/`typeLabels`) — mimir's folders (projects/plans/archive/…) ARE its
+ * ontology. So the field is a plain `string`; the values above are just the
+ * defaults `typeFromFrontmatter` falls back to and the labels the reader ships.
+ */
+export type WikiPageType = string;
+
+/**
+ * Optional per-wiki type ontology, read from `.wiki-reader.json` at the wiki root.
+ * `typeMap` maps a first-path-segment (folder) to a page type; `typeLabels` gives
+ * a human label for a (usually custom) type. Both default to `{}` — an absent or
+ * malformed file degrades to the built-in five-type behavior (never offline).
+ */
+export interface WikiReaderConfig {
+  typeMap: Record<string, string>;
+  typeLabels: Record<string, string>;
+}
 
 export interface WikiPageMeta {
   /** Canonical page name — the filename stem; what [[wikilinks]] resolve against. */
@@ -59,6 +78,12 @@ export interface WikiIndex {
   resolveRelPath: (relPath: string) => WikiPageMeta | undefined;
   scannedAt: number;
   root: string;
+  /**
+   * Parsed `.wiki-reader.json` (per-wiki type ontology) for this root, or null
+   * when the wiki has no config file. Optional so hand-built test indexes and
+   * older callers stay valid; `buildWikiIndex` always sets it.
+   */
+  readerConfig?: WikiReaderConfig | null;
 }
 
 /** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
@@ -222,14 +247,96 @@ function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[
   return out;
 }
 
-const VALID_TYPES: WikiPageType[] = ["source", "concept", "entity", "analysis", "note"];
+const VALID_TYPES: string[] = ["source", "concept", "entity", "analysis", "note"];
 
-function typeFromFrontmatter(fm: Record<string, string | string[]>, relPath: string): WikiPageType {
+const WIKI_READER_CONFIG_FILE = ".wiki-reader.json";
+
+/** True when `v` is a flat object whose every value is a string. */
+function isStringRecord(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
+}
+
+/**
+ * Read the optional `<root>/.wiki-reader.json` per-wiki type ontology. Absent ⇒
+ * null (the common case — the wiki uses the built-in five types). Malformed JSON,
+ * or a `typeMap`/`typeLabels` that isn't a string map, degrades to a config with
+ * only the valid halves kept (warned once per index build) — never takes the wiki
+ * offline, the same philosophy as bot-config validation. Read once per index
+ * build, so it inherits the index's 5-min TTL.
+ */
+async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | null> {
+  const abs = path.join(root, WIKI_READER_CONFIG_FILE);
+  let text: string;
+  try {
+    text = await Bun.file(abs).text();
+  } catch {
+    return null; // no config file — not an error, the standard case
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    log.warn("{file} at {root} is not valid JSON — ignoring: {error}", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+  const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
+  if (obj.typeMap !== undefined && !isStringRecord(obj.typeMap)) {
+    log.warn("{file} at {root}: typeMap is not a string→string map — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
+  if (obj.typeLabels !== undefined && !isStringRecord(obj.typeLabels)) {
+    log.warn("{file} at {root}: typeLabels is not a string→string map — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
+  return {
+    typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
+    typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
+  };
+}
+
+/**
+ * Resolve a page's type. Order: an explicit frontmatter `type:` (valid if it's one
+ * of the five standard types, the `analyses` alias, or a value the wiki declares in
+ * its `.wiki-reader.json` typeMap/typeLabels) → a typeMap lookup on the first path
+ * segment (after stripping `life/`) → the built-in standard-folder fallback → `note`.
+ * `.html` explainers are hardcoded `explainer` in `buildExplainerMeta`, never here.
+ */
+function typeFromFrontmatter(
+  fm: Record<string, string | string[]>,
+  relPath: string,
+  config: WikiReaderConfig | null,
+): WikiPageType {
   const raw = typeof fm.type === "string" ? fm.type : "";
-  if ((VALID_TYPES as string[]).includes(raw)) return raw as WikiPageType;
+  if (VALID_TYPES.includes(raw)) return raw;
   if (raw === "analyses") return "analysis";
-  // Fall back to the folder the page lives in.
+  // An explicit frontmatter type the wiki itself declares (a typeMap target or a
+  // labeled custom type) is honored as authored.
+  if (
+    raw &&
+    config &&
+    (Object.values(config.typeMap).includes(raw) ||
+      Object.prototype.hasOwnProperty.call(config.typeLabels, raw))
+  ) {
+    return raw;
+  }
+  // Fall back to the folder the page lives in — first the wiki's own typeMap…
   const folder = relPath.replace(/^life\//, "").split("/")[0] ?? "";
+  // Own-key guard: a folder named e.g. `constructor` must not read the prototype.
+  if (config && Object.prototype.hasOwnProperty.call(config.typeMap, folder) && config.typeMap[folder]) {
+    return config.typeMap[folder]!;
+  }
+  // …then the built-in standard folder names.
   if (folder === "sources") return "source";
   if (folder === "concepts") return "concept";
   if (folder === "entities") return "entity";
@@ -308,6 +415,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   }
   relPaths.sort();
 
+  // Per-wiki type ontology — read once per build (inherits the index TTL). Absent
+  // or malformed ⇒ null (built-in five-type behavior). `.wiki-reader.json` is not
+  // an .md/.html page, so it's already outside the page glob above.
+  const readerConfig = await readWikiReaderConfig(root);
+
   const pages: WikiPageMeta[] = [];
   const byKey = new Map<string, WikiPageMeta>();
   const rawOutgoing = new Map<string, string[]>();
@@ -344,7 +456,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       const meta: WikiPageMeta = {
         name,
         title: typeof fm.title === "string" && fm.title ? fm.title : name,
-        type: typeFromFrontmatter(fm, relPath),
+        type: typeFromFrontmatter(fm, relPath, readerConfig),
         domain: relPath.startsWith("life/") ? "life" : "ai",
         tags: asStringArray(fm.tags),
         aliases: asStringArray(fm.aliases),
@@ -437,7 +549,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   }
   for (const arr of backlinks.values()) arr.sort();
 
-  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root };
+  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root, readerConfig };
 }
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */

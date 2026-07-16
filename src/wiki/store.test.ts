@@ -409,6 +409,80 @@ describe("buildWikiIndex", () => {
     }
   });
 
+  test(".wiki-reader.json typeMap: folder → custom type, honored frontmatter, standard fallback", async () => {
+    await mkdir(path.join(root, "projects/muninn"), { recursive: true });
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await mkdir(path.join(root, "flows"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({
+        typeMap: { projects: "subsystem", plans: "plan", flows: "concept", reading: "source" },
+        typeLabels: { subsystem: "Subsystems", plan: "Plans" },
+      }),
+    );
+    // No frontmatter type — resolved from the first path segment via typeMap.
+    await Bun.write(path.join(root, "projects/muninn/wiki-gardener.md"), "# Gardener\n\nBody.");
+    await Bun.write(path.join(root, "plans/some-plan.md"), "# Plan\n\nBody.");
+    // A folder mapped to a STANDARD type.
+    await Bun.write(path.join(root, "flows/a-flow.md"), "# Flow\n\nBody.");
+    // Explicit frontmatter type declared in the config is honored as authored,
+    // even though the folder would map it elsewhere.
+    await Bun.write(
+      path.join(root, "projects/muninn/note-page.md"),
+      "---\ntype: plan\n---\n\nAuthored as a plan though it lives under projects/.",
+    );
+    // A folder with no typeMap entry AND no standard-folder name → note.
+    await mkdir(path.join(root, "misc"), { recursive: true });
+    await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.typeMap.projects).toBe("subsystem");
+    expect(index.resolve("wiki-gardener")!.type).toBe("subsystem");
+    expect(index.resolve("some-plan")!.type).toBe("plan");
+    expect(index.resolve("a-flow")!.type).toBe("concept"); // typeMap → standard type
+    expect(index.resolve("note-page")!.type).toBe("plan"); // explicit frontmatter honored
+    expect(index.resolve("loose")!.type).toBe("note"); // unmapped, non-standard folder
+
+    // The built-in standard-folder fallback still works alongside the config
+    // (beforeEach's concepts/ + sources/ pages carry no typeMap entry).
+    expect(index.resolve("harness engineering")!.type).toBe("concept");
+    expect(index.resolve("Creatine")!.type).toBe("source");
+  });
+
+  test(".wiki-reader.json malformed JSON degrades to standard behavior (never offline)", async () => {
+    await mkdir(path.join(root, "projects"), { recursive: true });
+    await Bun.write(path.join(root, ".wiki-reader.json"), "{ not valid json ]");
+    await Bun.write(path.join(root, "projects/x.md"), "# X\n\nBody.");
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig).toBeNull();
+    // No custom mapping → the standard-folder fallback applies (projects isn't a
+    // standard folder) → note. The wiki stays fully browsable.
+    expect(index.resolve("x")!.type).toBe("note");
+    expect(index.pages.length).toBeGreaterThan(0);
+  });
+
+  test(".wiki-reader.json with a non-object typeMap keeps the valid half", async () => {
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeMap: "oops", typeLabels: { plan: "Plans" } }),
+    );
+    await Bun.write(path.join(root, "plans/p.md"), "# P\n\nBody.");
+    const index = await buildWikiIndex(root);
+    // typeMap dropped (not a string map) but typeLabels kept — an explicit `plan`
+    // frontmatter type is still honored via the typeLabels declaration.
+    expect(index.readerConfig?.typeMap).toEqual({});
+    expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+    expect(index.resolve("p")!.type).toBe("note"); // no typeMap → plans/ isn't standard
+  });
+
+  test("no .wiki-reader.json ⇒ readerConfig null, unchanged five-type behavior", async () => {
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig).toBeNull();
+    expect(index.resolve("harness engineering")!.type).toBe("concept");
+    expect(index.resolve("index")!.type).toBe("note");
+  });
+
   test("getWikiIndex caches and refreshes via env-configured root", async () => {
     __resetWikiCacheForTest();
     const prev = process.env.WIKI_DIR;

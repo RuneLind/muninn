@@ -15,10 +15,11 @@ import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import {
+  connectionTypeOrder,
   filterPages,
   folderCounts,
   hasTypedHubs,
-  HUB_TYPES,
+  hubTypeList,
   pageDateLabel,
   ROOT_FOLDER,
   sortPages,
@@ -32,6 +33,18 @@ import {
   type WikiSortMode,
 } from "./wiki-filter.ts";
 
+// The wiki's merged type list (built-in defaults + `.wiki-reader.json` customs),
+// stored at boot from the /api/wiki/pages response and used by every type-keyed
+// render site below. Falls back to the built-in constants until (or unless) the
+// server sends a list — so an older server / a failed load still renders standard
+// types correctly instead of dropping content.
+let typeOrder: string[] = [...TYPE_ORDER];
+let typeLabels: Record<string, string> = { ...TYPE_LABEL };
+/** Label for a type — the wiki's configured label, else the raw slug. */
+function typeLabel(t: string): string {
+  return typeLabels[t] || t;
+}
+
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
   meta: WikiListing;
@@ -44,6 +57,7 @@ interface WikiPageDetail {
 interface WikiPagesResponse {
   pages: WikiListing[];
   scannedAt: number | null;
+  types?: { order: string[]; labels: Record<string, string> };
   error?: string;
 }
 
@@ -653,9 +667,11 @@ function renderFolderSelect(): void {
 function renderTypeChips(): void {
   const counts = typeCounts(allPages, filters.domain);
   let html = `<button class="wiki-chip${filters.type === "" ? " active" : ""}" data-type="">All types</button>`;
-  TYPE_ORDER.forEach((t) => {
+  // Union the stored order with the types actually present, so a custom type is
+  // never dropped from the chip row even if the stored list is missing/late.
+  connectionTypeOrder(Object.keys(counts), typeOrder).forEach((t) => {
     if (!counts[t]) return;
-    html += `<button class="wiki-chip${filters.type === t ? " active" : ""}" data-type="${t}">${TYPE_LABEL[t]} ${counts[t]}</button>`;
+    html += `<button class="wiki-chip${filters.type === t ? " active" : ""}" data-type="${esc(t)}">${esc(typeLabel(t))} ${counts[t]}</button>`;
   });
   document.getElementById("typeChips")!.innerHTML = html;
 }
@@ -687,7 +703,7 @@ function renderList(): void {
     const meta = mode === "backlinks" ? p.backlinkCount + " ←" : pageDateLabel(p);
     html +=
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
-      `<div class="wiki-type-dot type-${p.type}"></div>` +
+      `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-list-title">${esc(p.title)}</div>` +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
       `</div>`;
@@ -699,7 +715,10 @@ function renderList(): void {
 
 // ── Middle pane: article / start view ─────────────────────────────────
 function badgeHtml(p: WikiListing): string {
-  let html = `<span class="wiki-badge badge-${p.type}">${p.type}</span>`;
+  // A custom type (e.g. mimir's "subsystem") has no dedicated `badge-*` rule — the
+  // neutral `.wiki-badge` base styles it. `esc` guards the class + label since the
+  // type string can come from a wiki's `.wiki-reader.json`.
+  let html = `<span class="wiki-badge badge-${esc(p.type)}">${esc(p.type)}</span>`;
   if (p.domain === "life") html += '<span class="wiki-badge badge-life">life</span>';
   return html;
 }
@@ -718,17 +737,20 @@ function hubGridHtml(heading: string, pages: WikiListing[]): string {
 }
 
 function hubsHtml(): string {
-  // Typed wikis (huginn-jarvis) get per-type hub sections. Wikis that use plain
-  // markdown links and no frontmatter `type` (mimir, melosys-kode-wiki) have no
-  // concept/entity pages — fall back to a single cross-type "by connections" hub.
+  // Wikis with a real ontology (≥2 non-note types) get per-type hub sections, one
+  // per non-note type the wiki actually carries (jarvis: concept/entity/source/…;
+  // mimir: subsystem/plan/report/…). Wikis that are all `note` (plain markdown, no
+  // frontmatter `type`, no config) fall back to a single cross-type "by connections"
+  // hub. `esc` the heading — custom labels come from a wiki's `.wiki-reader.json`.
   if (hasTypedHubs(allPages)) {
     let html = "";
-    HUB_TYPES.forEach((t) => {
+    hubTypeList(allPages, typeOrder).forEach((t) => {
       const top = topPages(allPages, (p) => p.type === t, 12);
       if (!top.length) return;
-      html += hubGridHtml(`Top ${TYPE_LABEL[t].toLowerCase()} by connections`, top);
+      html += hubGridHtml(`Top ${esc(typeLabel(t).toLowerCase())} by connections`, top);
     });
-    return html;
+    if (html) return html;
+    // No typed section had pages — fall through to the cross-type hub.
   }
   const top = topPages(allPages, (p) => p.backlinkCount > 0, 12);
   if (!top.length) {
@@ -777,7 +799,7 @@ function timelineHtml(): string {
       html +=
         `<div class="wiki-tl-item" data-page="${esc(it.p.name)}">` +
         `<div class="wiki-tl-kind ${it.kind}">${it.kind === "new" ? "+" : "~"}</div>` +
-        `<div class="wiki-type-dot type-${it.p.type}"></div>` +
+        `<div class="wiki-type-dot type-${esc(it.p.type)}"></div>` +
         `<div class="wiki-tl-title">${esc(it.p.title)}</div>` +
         `</div>`;
     });
@@ -804,9 +826,9 @@ function renderStart(): void {
     '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
     '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
     '<div class="wiki-start-stats">';
-  TYPE_ORDER.forEach((t) => {
+  connectionTypeOrder(Object.keys(counts), typeOrder).forEach((t) => {
     if (!counts[t]) return;
-    html += `<div class="wiki-stat"><b>${counts[t]}</b><span>${TYPE_LABEL[t]}</span></div>`;
+    html += `<div class="wiki-stat"><b>${counts[t]}</b><span>${esc(typeLabel(t))}</span></div>`;
   });
   html +=
     "</div>" +
@@ -895,11 +917,11 @@ function miniGraphHtml(data: WikiPageDetail): string {
     nodes +=
       `<g class="mini-node" data-page="${esc(n.p.name)}"><title>${esc(n.p.title)}</title>` +
       `<circle class="mini-hit" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="14" fill="transparent"></circle>` +
-      `<circle class="t-${n.p.type}" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="5"></circle>` +
+      `<circle class="mini-dot t-${esc(n.p.type)}" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="5"></circle>` +
       `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(n.p.title))}</text></g>`;
   });
   nodes +=
-    `<g class="mini-center"><circle class="t-${data.meta.type}" cx="${cx}" cy="${cy}" r="7"></circle>` +
+    `<g class="mini-center"><circle class="mini-dot t-${esc(data.meta.type)}" cx="${cx}" cy="${cy}" r="7"></circle>` +
     `<text x="${cx}" y="${cy + 21}" text-anchor="middle">${esc(short(data.meta.title))}</text></g>`;
   const more =
     all.length > shown.length
@@ -915,16 +937,19 @@ function renderConnections(data: WikiPageDetail): void {
     if (!items.length) {
       return html + '<div class="wiki-conn-empty">None</div></div>';
     }
-    TYPE_ORDER.forEach((t) => {
+    // Group by the union of (stored order ∪ types actually present in the items),
+    // ordered by the stored list — so a custom-typed neighbor is NEVER dropped even
+    // if the stored list arrived late or empty (the pre-fix bug silently excluded it).
+    connectionTypeOrder(items.map((p) => p.type), typeOrder).forEach((t) => {
       const group = items.filter((p) => p.type === t);
       if (!group.length) return;
-      html += `<div class="wiki-conn-group">${TYPE_LABEL[t]}</div>`;
+      html += `<div class="wiki-conn-group">${esc(typeLabel(t))}</div>`;
       group
         .sort((a, b) => b.backlinkCount - a.backlinkCount)
         .forEach((p) => {
           html +=
             `<div class="wiki-conn-item" data-page="${esc(p.name)}">` +
-            `<div class="wiki-type-dot type-${p.type}"></div><span>${esc(p.title)}</span></div>`;
+            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(p.title)}</span></div>`;
         });
     });
     return html + "</div>";
@@ -1448,6 +1473,14 @@ fetch(withWiki("/api/wiki/pages"))
       return;
     }
     allPages = data.pages;
+    // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
+    // Absent/empty (older server / degraded) keeps the built-in constants so
+    // standard types still render — the belt-and-suspenders unions below then keep
+    // any custom-typed page from being dropped regardless.
+    if (data.types && Array.isArray(data.types.order) && data.types.order.length) {
+      typeOrder = data.types.order;
+      typeLabels = data.types.labels || { ...TYPE_LABEL };
+    }
     renderFolderSelect();
     renderTypeChips();
     renderTagChips();

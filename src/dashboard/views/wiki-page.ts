@@ -174,7 +174,9 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
 
-    .wiki-type-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; align-self: center; }
+    /* Neutral default so a custom type (no dedicated type-* rule) still shows a
+       dot; the specific rules below override for the built-in types. */
+    .wiki-type-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; align-self: center; background: var(--text-dim); }
     .type-concept { background: var(--accent); }
     .type-entity { background: var(--status-cyan); }
     .type-source { background: var(--status-info); }
@@ -216,6 +218,9 @@ export async function renderWikiPage(opts?: {
     .mini-node text { fill: var(--text-muted); font-size: 9px; }
     .mini-node:hover text { fill: var(--text-primary); }
     .mini-center text { fill: var(--text-primary); font-size: 9.5px; font-weight: 600; }
+    /* Neutral default for a custom type's mini-graph node; circle.t-* (higher
+       specificity) overrides for the built-in types, the hit circle keeps its own. */
+    .mini-dot { fill: var(--text-dim); }
     circle.t-concept { fill: var(--accent); }
     circle.t-entity { fill: var(--status-cyan); }
     circle.t-source { fill: var(--status-info); }
@@ -236,6 +241,10 @@ export async function renderWikiPage(opts?: {
       text-transform: uppercase;
       letter-spacing: 0.4px;
       font-weight: 600;
+      /* Neutral default so a custom type (no dedicated badge-* rule) still gets a
+         readable pill; the specific rules below override for the built-in types. */
+      background: var(--tint-neutral);
+      color: var(--text-muted);
     }
     .badge-concept { background: var(--tint-purple); color: var(--accent-light); }
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
