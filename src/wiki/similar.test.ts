@@ -51,6 +51,15 @@ describe("firstBodyParagraph", () => {
     expect(firstBodyParagraph("# Only a heading")).toBe("");
     expect(firstBodyParagraph("")).toBe("");
   });
+
+  test("keeps prose after a heading in the same block (no blank line)", () => {
+    expect(firstBodyParagraph("# Heading\nintro text right after")).toBe("intro text right after");
+  });
+
+  test("skips a leading fenced code block", () => {
+    const md = "```ts\nconst x = 1;\n```\n\nReal prose here.";
+    expect(firstBodyParagraph(md)).toBe("Real prose here.");
+  });
 });
 
 describe("buildSimilarQuery", () => {

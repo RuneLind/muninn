@@ -50,10 +50,17 @@ export function firstBodyParagraph(md: string, cap = 500): string {
     }
   }
   for (const block of text.split(/\n\s*\n/)) {
-    const trimmed = block.trim();
+    let trimmed = block.trim();
     if (!trimmed) continue;
-    const firstLine = trimmed.split("\n")[0]!.trim();
-    if (firstLine.startsWith("#")) continue; // pure heading block
+    if (trimmed.startsWith("```")) continue; // fenced code block — not prose
+    // Drop leading heading lines but keep any prose that follows in the same
+    // block (tightly-formatted pages put `# Heading\nintro` in one block).
+    trimmed = trimmed
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"))
+      .join("\n")
+      .trim();
+    if (!trimmed) continue; // heading-only block
     return trimmed.replace(/\s+/g, " ").slice(0, cap);
   }
   return "";
