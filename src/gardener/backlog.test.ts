@@ -1,6 +1,7 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import {
   selectBacklogBatch,
+  passesAgeFloor,
   assembleBacklog,
   runExclusive,
   gardenerRunInFlight,
@@ -111,6 +112,32 @@ describe("selectBacklogBatch", () => {
     expect(selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 30, NOW)).toHaveLength(0);
     // …but eligible under the 14-day default.
     expect(selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 14, NOW)).toHaveLength(1);
+  });
+});
+
+// ── passesAgeFloor (the shared floor predicate) ──────────────────────────────
+
+describe("passesAgeFloor", () => {
+  const NOW = Date.parse("2026-07-17T00:00:00Z");
+  const DAY = 86_400_000;
+  const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString().slice(0, 10);
+
+  test("undated doc is always eligible (old backlog)", () => {
+    expect(passesAgeFloor({ id: "no-date-here" }, 14, NOW)).toBe(true);
+  });
+
+  test("dated doc newer than the floor is ineligible; older is eligible", () => {
+    expect(passesAgeFloor({ id: "x", date: iso(3 * DAY) }, 14, NOW)).toBe(false);
+    expect(passesAgeFloor({ id: "x", date: iso(30 * DAY) }, 14, NOW)).toBe(true);
+  });
+
+  test("inclusive at the boundary (exactly minAgeDays old ⇒ eligible)", () => {
+    expect(passesAgeFloor({ id: "x", date: iso(14 * DAY) }, 14, NOW)).toBe(true);
+  });
+
+  test("falls back to the YYYY-MM-DD id prefix when no explicit date", () => {
+    expect(passesAgeFloor({ id: `${iso(3 * DAY)}-fresh` }, 14, NOW)).toBe(false);
+    expect(passesAgeFloor({ id: `${iso(30 * DAY)}-old` }, 14, NOW)).toBe(true);
   });
 });
 

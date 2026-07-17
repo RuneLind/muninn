@@ -6,10 +6,12 @@
  * same split rationale as `wiki-ask-render.ts` / `wiki-filter.ts`.
  *
  * The honest-numbers contract lives here: "offered in past runs" and the reset
- * gate/label both use `queued − remaining` (offered-and-STILL-queued), NOT the
- * raw all-time `offered` field. The all-time offered set includes since-consumed
- * keys, so `queued ≠ remaining + offered` in general and the raw number would
- * visibly not add up in the sentence. `batchSize`/`maxProposals` come from the
+ * gate/label both use the server-computed `offeredStillQueued` (queued ∩ offered),
+ * NOT the raw all-time `offered` field and NOT a client-side `queued − remaining`
+ * derivation. The all-time offered set includes since-consumed keys, and the
+ * drain's age floor makes `remaining` exclude merely-too-fresh docs, so neither
+ * `offered` nor `queued − remaining` equals the offered-and-still-queued truth —
+ * the route emits it explicitly. `batchSize`/`maxProposals` come from the
  * GET response (sourced from `src/gardener/backlog.ts`) so the client never
  * hardcodes them; when live fields are absent (the GET's degraded catch branch)
  * every number falls back cleanly to a real integer — never `NaN`/`undefined`.
@@ -58,6 +60,8 @@ export interface IngestBacklogResponse {
   running?: boolean;
   offered?: number;
   remaining?: number;
+  /** Queued docs also in the offered set — the honest "offered in past runs" count. */
+  offeredStillQueued?: number;
   watcherSeeded?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
@@ -111,7 +115,10 @@ export function backlogStripModel(
   // Degraded response (no live fields) ⇒ remaining falls back to queued, i.e.
   // "all eligible, none offered yet" — a clean, add-up-able default.
   const remaining = numOr(data.remaining, queued);
-  const offeredStillQueued = Math.max(0, queued - remaining);
+  // Server-computed (queued ∩ offered) — NOT `queued − remaining`, which the age
+  // floor would inflate by counting merely-too-fresh docs as offered. Falls back
+  // to 0 on a degraded response (no live fields ⇒ "none offered yet").
+  const offeredStillQueued = Math.max(0, numOr(data.offeredStillQueued, 0));
   const running = data.running === true;
   const controlHidden = data.watcherSeeded === false;
   const batchSize = numOr(data.batchSize, 0);
