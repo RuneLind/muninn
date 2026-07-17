@@ -10,7 +10,10 @@ import {
   __seedWikiDigestForTest,
   __setSimilarSearchForTest,
   digestCacheDecision,
+  resolveExplainPreflight,
 } from "./wiki-routes.ts";
+import type { WikiRegistryEntry } from "../../wiki/registry.ts";
+import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 
@@ -404,8 +407,10 @@ describe("GET /api/wiki/similar", () => {
  * `/api/wiki/explain` — Select-to-Explain. Sibling of the Ask route. Like the Ask
  * tests, we exercise only the seams the code allows without a live Huginn/`claude`:
  * the 400s for missing params, the `app_error` preflights (unknown wiki / no
- * collections / missing index / unknown page / explainer page), and the risk-note-4
- * behavioral check that a THROWING similar-search fn still reaches
+ * collections / missing index / unknown page), the status-200 explainer case (now
+ * supported via htmlToText — preflight-removal proven in the pure
+ * `resolveExplainPreflight` tests), and the risk-note-4 behavioral check that a
+ * THROWING similar-search fn still reaches
  * `streamResearchSSE` without a 500. All prompt-composition assertions live in the
  * pure `explain-context.test.ts` — the route stays a thin I/O shell here.
  */
@@ -491,14 +496,16 @@ describe("GET /api/wiki/explain — resolution + preflight", () => {
     expect(body).toContain("Nope");
   });
 
-  test("explainer page → app_error SSE (v1: markdown only)", async () => {
+  test("explainer page → 200 SSE (now supported via htmlToText, no preflight-out)", async () => {
+    // Explainers are no longer preflighted out. We assert only the status —
+    // reading the body would drive the real (unreachable) synthesis path, and a
+    // status-only check cannot distinguish old (app_error) from new (synthesis)
+    // anyway; the preflight-removal proof lives in the pure resolveExplainPreflight
+    // unit tests below.
     const res = await app.request(
       "/api/wiki/explain?wiki=explwiki&sel=hi&page=" + encodeURIComponent("An Explainer"),
     );
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("event: app_error");
-    expect(body).toContain("HTML explainer pages");
   });
 
   test("throwing similar search still reaches streamResearchSSE without a 500", async () => {
@@ -515,6 +522,77 @@ describe("GET /api/wiki/explain — resolution + preflight", () => {
         encodeURIComponent("Body."),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * Pure preflight decision chain for `/api/wiki/explain`. This is the seam that
+ * proves the explainer-preflight REMOVAL: an explainer meta yields `null` (no
+ * error), while the unknown-wiki / no-collections / unknown-page branches are
+ * unchanged. A status-only route test can't show this (both old and new paths
+ * are 200, and reading the body drives the unreachable synthesis path).
+ */
+describe("resolveExplainPreflight", () => {
+  const entry = { name: "w", root: "/x", source: "extra", collections: ["c"] } as WikiRegistryEntry;
+  const index = {} as WikiIndex;
+  const mdMeta = { type: "concept" } as WikiPageMeta;
+  const explainerMeta = { type: "explainer" } as WikiPageMeta;
+
+  test("explainer meta → null (no more preflight-out)", () => {
+    expect(
+      resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: explainerMeta, page: "P" }),
+    ).toBeNull();
+  });
+
+  test("markdown meta → null", () => {
+    expect(
+      resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: mdMeta, page: "P" }),
+    ).toBeNull();
+  });
+
+  test("unknown wiki → configured error (interpolates the raw wiki name)", () => {
+    expect(
+      resolveExplainPreflight({
+        wiki: "ghost",
+        unknownWiki: true,
+        entry: undefined,
+        index: null,
+        meta: undefined,
+        page: "P",
+      }),
+    ).toBe('No wiki configured for "ghost".');
+  });
+
+  test("no entry with blank wiki → (none) fallback", () => {
+    expect(
+      resolveExplainPreflight({
+        wiki: "",
+        unknownWiki: false,
+        entry: undefined,
+        index: null,
+        meta: undefined,
+        page: "P",
+      }),
+    ).toBe('No wiki configured for "(none)".');
+  });
+
+  test("entry with no collections → no-collection error", () => {
+    const noColl = { name: "w", root: "/x", source: "extra" } as WikiRegistryEntry;
+    expect(
+      resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry: noColl, index: null, meta: undefined, page: "P" }),
+    ).toBe("No search collection connected for this wiki.");
+  });
+
+  test("unloadable index → directory-not-found error", () => {
+    expect(
+      resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index: null, meta: undefined, page: "P" }),
+    ).toBe("wiki directory not found");
+  });
+
+  test("unknown page → named error (interpolates the page)", () => {
+    expect(
+      resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: undefined, page: "Nope" }),
+    ).toBe('No wiki page named "Nope".');
   });
 });
 

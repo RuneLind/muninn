@@ -18,6 +18,7 @@ import {
 } from "../../wiki/similar.ts";
 import {
   buildExplainAskOptions,
+  htmlToText,
   EXPLAIN_HEADING_MAX,
   EXPLAIN_SELECTION_MAX,
 } from "../../wiki/explain-context.ts";
@@ -111,6 +112,35 @@ export function digestCacheDecision(
   if (refresh) return "regenerate";
   if (cached && cached.logMtimeMs === logMtimeMs) return "hit";
   return "regenerate";
+}
+
+/**
+ * The `/api/wiki/explain` preflight decision chain, extracted as a pure function
+ * so the "does an explainer page preflight out?" behavior is unit-testable (a
+ * status-only route assertion can't prove it — both the old and new paths return
+ * 200 and reading the body drives the unreachable synthesis path). Mirrors the
+ * staged Ask/Similar checks: unknown wiki → no collections → unloadable index →
+ * unknown page. Explainer pages are NOT a preflight error — they are excerpted via
+ * `htmlToText` like markdown. The route resolves `index`/`meta` ONLY on the happy
+ * path (unknown wiki / no collections short-circuit before any filesystem touch),
+ * so a null `index`/`undefined` meta from an earlier short-circuit is never
+ * reached by the later branches. A missing/unreadable file is NOT a preflight
+ * error either — it degrades via `readWikiPage ?? ""` exactly like the md branch.
+ */
+export function resolveExplainPreflight(input: {
+  wiki: string;
+  unknownWiki: boolean;
+  entry: WikiRegistryEntry | undefined;
+  index: WikiIndex | null;
+  meta: WikiPageMeta | undefined;
+  page: string;
+}): string | null {
+  const { wiki, unknownWiki, entry, index, meta, page } = input;
+  if (unknownWiki || !entry) return `No wiki configured for "${wiki || "(none)"}".`;
+  if ((entry.collections ?? []).length === 0) return "No search collection connected for this wiki.";
+  if (!index) return "wiki directory not found";
+  if (!meta) return `No wiki page named "${page}".`;
+  return null;
 }
 
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
@@ -718,11 +748,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // selects a passage on a page and we run the SAME research pipeline (retrieval
   // over the wiki's collections → coverage gate → cited synthesis → answer_html)
   // with a per-wiki system prompt carrying the selected passage's article context.
-  // v1 supports markdown pages only; an explainer page preflights out. The
-  // inherited coverage gate applies — a selection from a non-indexed page may get
-  // the canned "No strong match" decline (accepted). Never 5xx: param problems are
-  // 400 JSON; wiki/page problems are `app_error` events on the already-committed
-  // 200 SSE response.
+  // Markdown pages are sent verbatim; HTML explainer pages are reduced to prose
+  // via `htmlToText` before the same locator runs. The inherited coverage gate
+  // applies — a selection from a non-indexed page may get the canned "No strong
+  // match" decline (accepted). Never 5xx: param problems are 400 JSON; wiki/page
+  // problems are `app_error` events on the already-committed 200 SSE response.
   app.get("/api/wiki/explain", async (c) => {
     const sel = (c.req.query("sel") ?? "").trim().slice(0, EXPLAIN_SELECTION_MAX);
     if (!sel) return c.json({ error: "Missing query parameter: sel" }, 400);
@@ -745,34 +775,26 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
     // Preflight (mirrors Ask's wiki/collection checks, plus the index/page checks
     // the Similar route makes — but as app_error, since the SSE response is
-    // already committed to 200). Runs the index/meta dereference ONLY on the happy
-    // path; every earlier branch leaves index/meta unset.
-    let preflightError: string | null = null;
+    // already committed to 200). Resolve index/meta ONLY on the happy path
+    // (unknown wiki / no collections short-circuit before any filesystem touch);
+    // the decision chain itself is the pure `resolveExplainPreflight`.
     let index: WikiIndex | null = null;
     let meta: WikiPageMeta | undefined;
-    if (unknownWiki || !entry) {
-      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
-    } else if (collections.length === 0) {
-      preflightError = "No search collection connected for this wiki.";
-    } else {
+    if (entry && !unknownWiki && collections.length > 0) {
       index = await getWikiIndex({ root: entry.root });
-      if (!index) {
-        preflightError = "wiki directory not found";
-      } else {
-        meta = index.resolve(page);
-        if (!meta) {
-          preflightError = `No wiki page named "${page}".`;
-        } else if (meta.type === "explainer") {
-          preflightError = "Explain is not available for HTML explainer pages yet.";
-        }
-      }
+      if (index) meta = index.resolve(page);
     }
+    const preflightError = resolveExplainPreflight({ wiki, unknownWiki, entry, index, meta, page });
 
     // Context assembly — ONLY when preflight passed (index/meta/entry are set).
     let question = "";
     let systemPrompt: string | undefined;
     if (!preflightError && entry && index && meta) {
-      const body = (await readWikiPage(index, meta)) ?? "";
+      // Explainers are HTML on disk; reduce to prose so the locator sees lines.
+      // Markdown pages pass through verbatim. A missing/unreadable file degrades
+      // to an empty body (no 500) exactly like the markdown branch.
+      const raw = (await readWikiPage(index, meta)) ?? "";
+      const body = meta.type === "explainer" ? htmlToText(raw) : raw;
       // Similar titles are best-effort background context: bounded by a short
       // timeout via Promise.race so a slow-but-alive Huginn can't stall the stream
       // open (this fetch runs BEFORE streamResearchSSE's heartbeat exists), and a
