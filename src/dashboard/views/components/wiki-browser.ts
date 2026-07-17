@@ -14,6 +14,7 @@
 import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
+import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
 import {
   connectionTypeOrder,
   filterPages,
@@ -1395,34 +1396,23 @@ function renderAskHistory(): void {
   el.innerHTML = html;
 }
 
-function askQuestion(): void {
-  const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement;
-  const q = input.value.trim();
-  if (!q) return;
-
+/** Shared stream runner for the Ask box AND the Explain pill: supersede any
+ *  in-flight ask, paint `turn` into the main pane, and drive the SSE stream to
+ *  completion. The `delta`/`done` handlers read the module-level `askBuffer`, so
+ *  the reset here is load-bearing — omitting it bleeds a stale buffer across
+ *  turns. Both entry points converge here so the committed turn lands in
+ *  `askTurns` (session history + follow-up context) with zero extra code. */
+function runAskStream(url: string, turn: AskTurn): void {
   // Supersede any in-flight ask: close its stream so late events are ignored, and
   // drop any pending progressive-render frame so it can't repaint the new pane.
   if (askConn) { askConn.close(); askConn = null; }
   cancelAskStreamRender();
-  askActive = null;
-  input.value = "";
-  const hint = document.getElementById("wikiAskHint");
-  if (hint) hint.style.display = "none";
-
-  const turn: AskTurn = {
-    question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
-  };
   askActive = turn;
   askBuffer = "";
   showAskAnswer(turn, "");
   setAskStatus("Searching…", "");
   const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
   btn.disabled = true;
-
-  let url = "/api/wiki/ask?q=" + encodeURIComponent(q);
-  if (WIKI) url += "&wiki=" + encodeURIComponent(WIKI);
-  const hist = askHistoryParam();
-  if (hist) url += "&history=" + encodeURIComponent(hist);
 
   const conn = sseClient(url, {
     phase: (e: MessageEvent) => {
@@ -1520,6 +1510,26 @@ function askQuestion(): void {
   askConn = conn;
 }
 
+function askQuestion(): void {
+  const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement;
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = "";
+  const hint = document.getElementById("wikiAskHint");
+  if (hint) hint.style.display = "none";
+
+  const turn: AskTurn = {
+    question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
+  };
+
+  let url = "/api/wiki/ask?q=" + encodeURIComponent(q);
+  if (WIKI) url += "&wiki=" + encodeURIComponent(WIKI);
+  const hist = askHistoryParam();
+  if (hist) url += "&history=" + encodeURIComponent(hist);
+
+  runAskStream(url, turn);
+}
+
 document.querySelector(".wiki-conn-tabs")?.addEventListener("click", (e) => {
   const tab = (e.target as HTMLElement).closest(".wiki-conn-tab");
   if (tab) switchConnTab(tab.getAttribute("data-conntab") || "conn");
@@ -1537,6 +1547,142 @@ document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
   const turn = askTurns[idx];
   if (turn) showAskAnswer(turn, "");
 });
+
+// ── Select-to-Explain pill ────────────────────────────────────────────
+// Selecting text inside a rendered (markdown) article floats an "✨ Explain"
+// pill above the selection; activating it runs the SAME research stream as Ask
+// (via `runAskStream`) against `/api/wiki/explain`, so the explanation lands in
+// the article pane + session history like any other Ask turn.
+const EXPLAIN_MIN_CHARS = 3;
+const EXPLAIN_MAX_CHARS = 1500;
+let explainPill: HTMLDivElement | null = null;
+// Captured at show time — BEFORE any click can collapse the selection.
+let pillSel = "";
+let pillHeading = "";
+
+/** Nearest preceding h1–h4 above the selection, within `.wiki-article`. Walks up
+ *  the ancestor chain from the selection's start, scanning previous siblings (and
+ *  their inner headings) at each level. Trimmed text, may be empty. */
+function nearestHeading(range: Range): string {
+  const startEl =
+    range.startContainer.nodeType === 1
+      ? (range.startContainer as Element)
+      : range.startContainer.parentElement;
+  const article = startEl?.closest(".wiki-article");
+  if (!article || !startEl) return "";
+  const HEAD = /^H[1-4]$/;
+  let node: Element | null = startEl;
+  while (node && node !== article) {
+    let sib: Element | null = node.previousElementSibling;
+    while (sib) {
+      if (HEAD.test(sib.tagName)) return (sib.textContent || "").trim();
+      const inner = sib.querySelectorAll ? sib.querySelectorAll("h1,h2,h3,h4") : null;
+      if (inner && inner.length) return (inner[inner.length - 1]!.textContent || "").trim();
+      sib = sib.previousElementSibling;
+    }
+    node = node.parentElement;
+  }
+  return "";
+}
+
+function ensureExplainPill(): void {
+  if (explainPill) return;
+  const pill = document.createElement("div");
+  pill.id = "wikiExplainPill";
+  pill.className = "wiki-explain-pill";
+  pill.textContent = "✨ Explain";
+  // mousedown + preventDefault so activating the pill never clears the selection
+  // before the handler reads the captured values; stopPropagation keeps the
+  // document-level dismiss listener from also firing.
+  pill.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    activateExplain();
+  });
+  document.body.appendChild(pill);
+  explainPill = pill;
+}
+
+function hideExplainPill(): void {
+  if (explainPill) explainPill.style.display = "none";
+}
+
+/** Position the pill above the selection (below when clipped by the viewport
+ *  top), horizontally centered and kept on-screen. Pill is absolutely positioned
+ *  on <body>, so add page scroll to the viewport-relative rect. */
+function positionExplainPill(range: Range): void {
+  const pill = explainPill!;
+  pill.style.display = "block";
+  const rect = range.getBoundingClientRect();
+  const pw = pill.offsetWidth;
+  const ph = pill.offsetHeight;
+  let top = rect.top - ph - 8;
+  if (top < 4) top = rect.bottom + 8; // clipped by viewport top → below
+  let left = rect.left + rect.width / 2 - pw / 2;
+  left = Math.max(4, Math.min(left, window.innerWidth - pw - 4));
+  pill.style.top = top + window.scrollY + "px";
+  pill.style.left = left + window.scrollX + "px";
+}
+
+/** Decide whether to show the pill for the current selection, and capture the
+ *  passage + heading if so. Called on `mouseup` inside the article pane. */
+function maybeShowExplainPill(): void {
+  // Real markdown page only — not the start view, not an Ask answer (both leave
+  // currentName null), not an HTML explainer (iframe selections are unreachable,
+  // but loadExplainer sets currentName, so exclude by type).
+  if (!currentName) return hideExplainPill();
+  const meta = allPages.find((p) => p.name === currentName);
+  if (meta && meta.type === "explainer") return hideExplainPill();
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideExplainPill();
+  const text = sel.toString().trim();
+  if (text.length < EXPLAIN_MIN_CHARS || text.length > EXPLAIN_MAX_CHARS) return hideExplainPill();
+  const wrap = document.getElementById("articleWrap");
+  const anchor = sel.anchorNode;
+  if (!wrap || !anchor || !wrap.contains(anchor)) return hideExplainPill();
+  const range = sel.getRangeAt(0);
+  pillSel = text;
+  pillHeading = nearestHeading(range);
+  ensureExplainPill();
+  positionExplainPill(range);
+}
+
+function activateExplain(): void {
+  hideExplainPill();
+  if (!pillSel || !currentName) return;
+  // Switch to the Ask tab so the status line is where the user expects progress.
+  switchConnTab("ask");
+  const turn: AskTurn = {
+    question: explainLabel(pillSel),
+    answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
+  };
+  const url = buildExplainUrl({
+    sel: pillSel,
+    page: currentName,
+    wiki: WIKI,
+    ctx: pillHeading,
+    history: askHistoryParam(),
+  });
+  runAskStream(url, turn);
+}
+
+// Show on selection release inside the article pane; the timeout lets the browser
+// finalize the selection first. (articleWrap's element persists across page
+// navigations — only its innerHTML is swapped — so a one-time listener suffices.)
+document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
+  setTimeout(maybeShowExplainPill, 0);
+});
+// Dismiss on: selection collapse, article scroll, Escape, any mousedown outside
+// the pill (the pill's own mousedown stops propagation, so it self-excludes).
+document.addEventListener("selectionchange", () => {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) hideExplainPill();
+});
+document.getElementById("articleWrap")?.addEventListener("scroll", hideExplainPill);
+document.addEventListener("keydown", (e) => {
+  if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
+});
+document.addEventListener("mousedown", hideExplainPill);
 
 // ── Boot ──────────────────────────────────────────────────────────────
 fetch(withWiki("/api/wiki/pages"))

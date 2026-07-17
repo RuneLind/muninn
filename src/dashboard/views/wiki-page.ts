@@ -454,6 +454,17 @@ export async function renderWikiPage(opts?: {
     @keyframes wikiAskSpin { to { transform: rotate(360deg); } }
     .wiki-ask-status.done .spinner { display: none; }
     .wiki-ask-status.error { color: var(--status-error); }
+    /* Select-to-Explain floating pill (appended to <body>, positioned in JS). */
+    .wiki-explain-pill {
+      position: absolute; z-index: 9999; display: none;
+      padding: 5px 11px; border-radius: 999px;
+      background: var(--accent); color: #fff;
+      font-size: 12px; font-weight: 600; line-height: 1;
+      cursor: pointer; white-space: nowrap; user-select: none;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      border: 1px solid color-mix(in srgb, var(--accent) 60%, #000);
+    }
+    .wiki-explain-pill:hover { background: var(--accent-light); }
     /* Answer rendered in the article pane — reuses .wiki-article typography. */
     .wiki-ask-article { margin-top: 4px; }
     .wiki-ask-cite {
