@@ -164,7 +164,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     queued: 2,
     wikiUrlCount: 5,
     generatedAt: 111,
-    queuedKeys: ["c/a", "c/b"],
+    queuedKeys: [{ key: "c/a" }, { key: "c/b" }],
   };
 
   test("merges live fields without mutating the cached payload; strips queuedKeys", () => {
@@ -210,7 +210,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     });
 
     // The cached object was never mutated by either merge.
-    expect(cached.queuedKeys).toEqual(["c/a", "c/b"]);
+    expect(cached.queuedKeys).toEqual([{ key: "c/a" }, { key: "c/b" }]);
     expect("running" in cached).toBe(false);
   });
 

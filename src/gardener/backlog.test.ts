@@ -78,6 +78,40 @@ describe("selectBacklogBatch", () => {
     );
     expect(selectBacklogBatch(docs, new Set())).toHaveLength(BACKLOG_BATCH_SIZE);
   });
+
+  // ── age floor (docs still inside the weekly gardener's window are off-limits) ──
+  const NOW = Date.parse("2026-07-17T00:00:00Z");
+  const DAY = 86_400_000;
+  const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString().slice(0, 10);
+
+  test("age floor drops a doc newer than minAgeDays, keeps an older one", () => {
+    const docs = [
+      qd("c", "fresh", iso(3 * DAY)), // 3 days old — inside the 14-day window
+      qd("c", "old", iso(30 * DAY)), // 30 days old — the drain's tail
+    ];
+    const batch = selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 14, NOW);
+    expect(batch.map((b) => b.id)).toEqual(["old"]);
+  });
+
+  test("age floor keeps an undated doc (genuinely old backlog)", () => {
+    const docs = [qd("c", "fresh", iso(3 * DAY)), qd("c", "undated")];
+    const batch = selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 14, NOW);
+    expect(batch.map((b) => b.id)).toEqual(["undated"]);
+  });
+
+  test("age floor is inclusive at the boundary (a doc exactly minAgeDays old stays eligible)", () => {
+    const docs = [qd("c", "boundary", iso(14 * DAY))];
+    const batch = selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 14, NOW);
+    expect(batch.map((b) => b.id)).toEqual(["boundary"]);
+  });
+
+  test("age floor honors a per-bot lookback override", () => {
+    const docs = [qd("c", "d20", iso(20 * DAY))];
+    // 20 days old — inside a 30-day override window ⇒ off-limits.
+    expect(selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 30, NOW)).toHaveLength(0);
+    // …but eligible under the 14-day default.
+    expect(selectBacklogBatch(docs, new Set(), BACKLOG_BATCH_SIZE, 14, NOW)).toHaveLength(1);
+  });
 });
 
 // ── assembleBacklog (consumed-complement + selection) ────────────────────────
@@ -118,6 +152,22 @@ describe("assembleBacklog", () => {
     expect([...a.consumedComplement].sort()).toEqual(["youtube-summaries/y2"]);
     // The full listing snapshot is retained for the memoized listDocs seam.
     expect(a.listedBySource["youtube-summaries"]).toHaveLength(3);
+  });
+
+  test("threads the age floor: a fresh queued doc is excluded from the batch but stays listed", async () => {
+    const now = Date.parse("2026-06-10T00:00:00Z");
+    const a = await assembleBacklog(
+      baseDeps({
+        // y1 (2026-06-03) is 7 days old — inside a 14-day window → off-limits.
+        // y3 (2026-06-01) is 9 days old — also inside. Neither should be batched.
+        minAgeDays: 14,
+        now,
+      }),
+    );
+    expect(a.batchKeys).toEqual([]);
+    // Both stay listed (harvest's consumed-complement still skips them).
+    expect(a.consumedComplement.has("youtube-summaries/y1")).toBe(true);
+    expect(a.consumedComplement.has("youtube-summaries/y3")).toBe(true);
   });
 
   test("already-offered queued docs are dropped from the batch but stay listed", async () => {

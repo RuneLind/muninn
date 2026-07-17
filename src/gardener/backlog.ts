@@ -26,7 +26,8 @@ import type { QueuedDoc, ListedDoc as WikiListedDoc, WikiRefs } from "../wiki/in
 import type { SummaryCollectionListings } from "../summaries/list-collections.ts";
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
-import { docDateMs } from "./harvest.ts";
+import { docDateMs, DAY_MS } from "./harvest.ts";
+import { GARDENER_DEFAULTS } from "./types.ts";
 import { agentStatus } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
@@ -152,12 +153,26 @@ export interface BacklogCandidate {
  * date), drop keys already offered in a prior run, and take at most
  * {@link BACKLOG_BATCH_SIZE}. Pure — the offered-memory read + persist live in
  * the caller.
+ *
+ * `minAgeDays` is the **age floor**: docs newer than `now − minAgeDays` still
+ * belong to the weekly gardener's lookback window, so the drain must not touch
+ * them (it would burn a fresh 1–9-doc arrival that can't cluster, hiding it from
+ * both paths). A doc is eligible when it is at least `minAgeDays` old OR its date
+ * is undeterminable (undated docs are genuinely old backlog — the `undefined`
+ * case is special-cased because `undefined <= cutoff` is `false`, which would
+ * wrongly drop them). Both this floor (`<= cutoff`) and the weekly window
+ * (`>= cutoff`, `filterWindow`) are inclusive, so a doc exactly at the boundary
+ * is covered by at least one path. The floor defaults to the gardener's default
+ * lookback for callers with no bot config in reach.
  */
 export function selectBacklogBatch(
   queuedDocs: QueuedDoc[],
   offeredKeys: Set<string>,
   batchSize: number = BACKLOG_BATCH_SIZE,
+  minAgeDays: number = GARDENER_DEFAULTS.lookbackDays,
+  now: number = Date.now(),
 ): BacklogCandidate[] {
+  const cutoff = now - minAgeDays * DAY_MS;
   const cands: BacklogCandidate[] = queuedDocs.map((d) => ({
     collection: d.collection,
     id: d.id,
@@ -169,7 +184,15 @@ export function selectBacklogBatch(
     (a, b) =>
       (docDateMs(b) ?? Number.NEGATIVE_INFINITY) - (docDateMs(a) ?? Number.NEGATIVE_INFINITY),
   );
-  return cands.filter((c) => !offeredKeys.has(c.key)).slice(0, batchSize);
+  return cands
+    .filter((c) => {
+      const ms = docDateMs(c);
+      // Age floor: undated docs are old backlog (stay eligible); dated docs must
+      // be at least `minAgeDays` old to leave the weekly gardener's window.
+      return ms === undefined || ms <= cutoff;
+    })
+    .filter((c) => !offeredKeys.has(c.key))
+    .slice(0, batchSize);
 }
 
 // ── Backlog assembly (huginn listed ONCE, then reused) ───────────────────────
@@ -184,6 +207,14 @@ export interface AssembleBacklogDeps {
   getConsumed: (botName: string) => Promise<Set<string>>;
   getPending: (botName: string) => Promise<Set<string>>;
   getOffered: () => Promise<Set<string>>;
+  /**
+   * Age floor (days) for {@link selectBacklogBatch} — the bot's RESOLVED gardener
+   * `lookbackDays` (must equal the weekly window, so no doc is invisible to both
+   * paths). Defaults to the gardener default when the route omits it.
+   */
+  minAgeDays?: number;
+  /** Clock for the age floor — injectable so the selection is unit-testable. */
+  now?: number;
 }
 
 export interface AssembledBacklog {
@@ -233,7 +264,13 @@ export async function assembleBacklog(deps: AssembleBacklogDeps): Promise<Assemb
 
   const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
   const queuedDocs = backlog.byCollection.flatMap((c) => c.queuedDocs);
-  const batch = selectBacklogBatch(queuedDocs, offeredBefore);
+  const batch = selectBacklogBatch(
+    queuedDocs,
+    offeredBefore,
+    BACKLOG_BATCH_SIZE,
+    deps.minAgeDays ?? GARDENER_DEFAULTS.lookbackDays,
+    deps.now ?? Date.now(),
+  );
   const batchKeys = batch.map((b) => b.key);
 
   // consumed-complement — mark every listed key except the batch as consumed, so

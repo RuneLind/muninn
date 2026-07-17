@@ -30,6 +30,7 @@ import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
 import { collectWikiRefs, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
 import { resolveGardenerConfig } from "../../gardener/types.ts";
+import { docDateMs, DAY_MS } from "../../gardener/harvest.ts";
 import { runGardener, type GardenerDeps } from "../../gardener/runner.ts";
 import {
   assembleBacklog,
@@ -308,11 +309,14 @@ export interface IngestBacklogResponse {
   /** Present only when ≥1 collection failed to load (partial data). */
   errors?: StatsError[];
   /**
-   * Server-only: `<collection>/<id>` keys of every queued doc. Cached alongside
-   * the counts so the extended GET can compute `remaining` (queued minus the
-   * offered set) precisely, but STRIPPED before the wire by {@link mergeBacklogLiveFields}.
+   * Server-only: every queued doc's `<collection>/<id>` key + its listing date
+   * (when known). Cached alongside the counts so the extended GET can compute
+   * `remaining` (queued minus the offered set AND minus docs still inside the
+   * weekly gardener's window — the same age floor the drain applies). The date is
+   * needed for that floor; youtube ids carry no date prefix, so a bare key would
+   * always read undated. STRIPPED before the wire by {@link mergeBacklogLiveFields}.
    */
-  queuedKeys?: string[];
+  queuedKeys?: { key: string; date?: string }[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -375,10 +379,10 @@ export async function computeIngestBacklogResponse(
     };
   });
 
-  // Server-only queued keys (stripped before the wire) — used by the extended GET
-  // to compute `remaining` against the offered set.
+  // Server-only queued keys + dates (stripped before the wire) — used by the
+  // extended GET to compute `remaining` against the offered set AND the age floor.
   const queuedKeys = backlog.byCollection.flatMap((c) =>
-    c.queuedDocs.map((d) => `${d.collection}/${d.id}`),
+    c.queuedDocs.map((d) => ({ key: `${d.collection}/${d.id}`, ...(d.date ? { date: d.date } : {}) })),
   );
 
   return {
@@ -698,7 +702,17 @@ export function registerWikiGardenerRoutes(
       const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
       const offeredSet = watcher ? await readOffered(backlogDeps, watcher.id) : new Set<string>();
       const queuedKeys = data.queuedKeys ?? [];
-      const remaining = queuedKeys.filter((k) => !offeredSet.has(k)).length;
+      // Mirror the drain's age floor here so the strip stops advertising docs the
+      // drain now refuses: a doc counts as `remaining` only when it is not already
+      // offered AND is old enough to have left the weekly gardener's window (undated
+      // ⇒ old backlog, kept — same rule as selectBacklogBatch).
+      const minAgeDays = resolveGardenerConfig(bot.gardener).lookbackDays;
+      const floorCutoff = Date.now() - minAgeDays * DAY_MS;
+      const remaining = queuedKeys.filter((q) => {
+        if (offeredSet.has(q.key)) return false;
+        const ms = docDateMs({ id: q.key, date: q.date });
+        return ms === undefined || ms <= floorCutoff;
+      }).length;
       const running = gardenerRunInFlight(bot.name);
 
       // Last-run: the in-memory record wins; after a restart it's gone, so fall back
@@ -772,6 +786,11 @@ export function registerWikiGardenerRoutes(
           getConsumed: backlogDeps.getConsumed,
           getPending: backlogDeps.getPending,
           getOffered: () => readOffered(backlogDeps, watcher!.id),
+          // Age floor = the bot's RESOLVED weekly window, so the drain never
+          // touches docs the weekly gardener still owns (would burn a fresh
+          // arrival that can't cluster, hiding it from both paths).
+          minAgeDays: resolveGardenerConfig(bot.gardener).lookbackDays,
+          now: Date.now(),
         }),
       persistOffered: (keys) => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_OFFERED_KEY, keys),
       // Journal seams (PR 3) — the auto-recover + crash-safety record all ride the
