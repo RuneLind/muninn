@@ -18,6 +18,7 @@ import {
 } from "../../wiki/similar.ts";
 import {
   buildExplainAskOptions,
+  buildExplainQuestion,
   htmlToText,
   EXPLAIN_HEADING_MAX,
   EXPLAIN_SELECTION_MAX,
@@ -50,10 +51,10 @@ import {
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
 import { EXPLAINER_BRIDGE_SCRIPT } from "../../wiki/explainer-bridge.ts";
-import { buildDistillPrompt, parseDistillResult } from "../../wiki/remember.ts";
+import { buildDistillPrompt, parseDistillResult, buildSavedNotesBlock } from "../../wiki/remember.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { generateEmbedding } from "../../ai/embeddings.ts";
-import { saveMemory } from "../../db/memories.ts";
+import { saveMemory, searchMemoriesHybrid } from "../../db/memories.ts";
 import { getBotDefaultUser } from "../../db/chat-preferences.ts";
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
@@ -103,6 +104,78 @@ let similarSearchFn: SimilarSearchFn | null = null;
  *  Similar + Explain routes. */
 export function __setSimilarSearchForTest(fn: SimilarSearchFn | null): void {
   similarSearchFn = fn;
+}
+
+/**
+ * Pre-stream lookup budget shared by the Explain route's Similar fetch and the
+ * Ask/Explain saved-notes lookup (PR C). Both run BEFORE `streamResearchSSE`'s
+ * heartbeat exists, so a slow-but-alive Huginn / DB must not stall the stream
+ * open — each is raced against this timer and degrades to its empty fallback.
+ */
+export const PRESTREAM_TIMEOUT_MS = 3000;
+
+/** Race a never-rejecting promise against a timer (default {@link PRESTREAM_TIMEOUT_MS}),
+ *  resolving to `fallback` if the timer wins. The caller MUST pass a promise that
+ *  never rejects (both current callers do — `fetchSimilarPages` and
+ *  `fetchSavedNotesBlock` each catch internally) so a late real settle after the
+ *  timer can't throw. The `ms` override exists for tests (a short hang bound). */
+export function raceTimeout<T>(p: Promise<T>, fallback: T, ms = PRESTREAM_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** Injectable deps for {@link fetchSavedNotes} — the DB/embedding fns are passed
+ *  in so the helper unit-tests with hanging/throwing fakes (the route passes the
+ *  real imports). */
+export interface SavedNotesDeps {
+  botName: string;
+  question: string;
+  getBotDefaultUser: (botName: string) => Promise<string | null>;
+  generateEmbedding: (text: string) => Promise<number[] | null>;
+  searchMemoriesHybrid: (
+    userId: string,
+    query: string,
+    embedding: number[] | null,
+    limit: number,
+    botName?: string,
+    tags?: string[],
+  ) => Promise<{ content: string }[]>;
+}
+
+/**
+ * The reader's saved wiki notes for an Ask/Explain question: resolve the wiki's
+ * synthesis bot's `bot_default_user`, embed the question, and run a `wiki-note`-
+ * tag-scoped hybrid memory search (cap 5). NEVER rejects — any failure ⇒ `[]`.
+ *
+ * Null-embedding guard (load-bearing): bail to `[]` when `generateEmbedding`
+ * returns null. `searchMemoriesHybrid` falls back to an UNFILTERED FTS search on a
+ * null embedding (it has no tags param), which would inject general chat memories
+ * under the saved-notes label — so no notes beat mislabeled notes. No mapping for
+ * the bot ⇒ `[]` (injection skipped silently, same as Remember's owner rule).
+ */
+export async function fetchSavedNotes(deps: SavedNotesDeps): Promise<{ content: string }[]> {
+  try {
+    const userId = await deps.getBotDefaultUser(deps.botName);
+    if (!userId) return [];
+    const embedding = await deps.generateEmbedding(deps.question);
+    if (!embedding) return []; // null-embedding guard — no notes beat mislabeled notes
+    return await deps.searchMemoriesHybrid(userId, deps.question, embedding, 5, deps.botName, [
+      "wiki-note",
+    ]);
+  } catch {
+    return [];
+  }
+}
+
+/** {@link fetchSavedNotes} → {@link buildSavedNotesBlock}. Never rejects (the
+ *  fetch catches; the builder is pure). null when there are no saved notes. */
+export async function fetchSavedNotesBlock(deps: SavedNotesDeps): Promise<string | null> {
+  return buildSavedNotesBlock(await fetchSavedNotes(deps));
 }
 
 /**
@@ -691,7 +764,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // `collections` and enriches each citation with the matched wiki page name so
   // the reader can open it in-place. A wiki with no collections (or an unknown
   // name) returns a clean app_error instead of searching the whole corpus.
-  app.get("/api/wiki/ask", (c) => {
+  app.get("/api/wiki/ask", async (c) => {
     const question = (c.req.query("q") ?? "").trim();
     if (!question) return c.json({ error: "Missing query parameter: q" }, 400);
 
@@ -728,6 +801,35 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       });
     }
 
+    // Per-wiki framing so the answer is scoped to this wiki's corpus. The same
+    // line is used on owner- and fallback-routed wikis (no "for its owner"
+    // phrasing — an owner claim would be false on a fallback/standalone wiki).
+    // Hoisted to a variable so PR C can append the saved-notes block below.
+    let systemPrompt: string | undefined = entry
+      ? buildSynthesisSystemPrompt(
+          `You answer questions about the "${entry.name}" knowledge wiki, using ONLY the numbered sources provided in the user message.`,
+        )
+      : undefined;
+
+    // Saved-notes injection (PR C): a `wiki-note`-tag-scoped hybrid memory lookup
+    // for the wiki's synthesis bot, appended to the system prompt as background.
+    // Only on the happy path (preflight clean, prompt + synthesis bot present).
+    // Bounded by the pre-stream timer and degrade-to-absent — a slow/failed lookup
+    // leaves the prompt unchanged and never stalls the SSE open.
+    if (!preflightError && systemPrompt && botConfig) {
+      const block = await raceTimeout(
+        fetchSavedNotesBlock({
+          botName: botConfig.name,
+          question,
+          getBotDefaultUser,
+          generateEmbedding,
+          searchMemoriesHybrid,
+        }),
+        null,
+      );
+      if (block) systemPrompt = systemPrompt + "\n\n" + block;
+    }
+
     return streamResearchSSE(c, {
       question,
       config,
@@ -735,14 +837,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       history,
       collections,
       preflightError,
-      // Per-wiki framing so the answer is scoped to this wiki's corpus. The same
-      // line is used on owner- and fallback-routed wikis (no "for its owner"
-      // phrasing — an owner claim would be false on a fallback/standalone wiki).
-      systemPrompt: entry
-        ? buildSynthesisSystemPrompt(
-            `You answer questions about the "${entry.name}" knowledge wiki, using ONLY the numbered sources provided in the user message.`,
-          )
-        : undefined,
+      systemPrompt,
       // Pin enrichment to the resolved wiki (not the whole registry) so a
       // collection shared by two wikis can't attribute a citation to the wrong
       // one. `entry` is guaranteed set whenever enrich runs (preflightError
@@ -806,21 +901,32 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // to an empty body (no 500) exactly like the markdown branch.
       const raw = (await readWikiPage(index, meta)) ?? "";
       const body = meta.type === "explainer" ? htmlToText(raw) : raw;
-      // Similar titles are best-effort background context: bounded by a short
-      // timeout via Promise.race so a slow-but-alive Huginn can't stall the stream
-      // open (this fetch runs BEFORE streamResearchSSE's heartbeat exists), and a
-      // dead Huginn can't block. `fetchSimilarPages` never rejects, so racing it is
-      // safe even if its real fetch settles after the timeout already won.
+      // Similar titles are best-effort background context, and (PR C) the reader's
+      // saved wiki notes are a second best-effort lookup. Both run BEFORE
+      // streamResearchSSE's heartbeat exists, so each is bounded by the shared
+      // pre-stream timer and degrades to empty — a slow/dead Huginn or DB can't
+      // stall the stream open. They run CONCURRENTLY (`Promise.all` of two
+      // never-rejecting raced promises) so the worst-case budget stays ~3s, not
+      // additive. The notes query is `buildExplainQuestion(sel, meta.title)` —
+      // derived here (pure, pre-race) so it never serializes behind the Similar
+      // race that produces the route's `question` variable below.
       const search: SimilarSearchFn = similarSearchFn ?? ((baseUrl, p) => fetchKnowledgeApi(baseUrl, p));
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<SimilarPage[]>((resolve) => {
-        timer = setTimeout(() => resolve([]), 3000);
-      });
-      const similar = await Promise.race([
-        fetchSimilarPages(entry, index, meta, config, search),
-        timeout,
+      const notesQuestion = buildExplainQuestion(sel, meta.title);
+      const [similar, notesBlock] = await Promise.all([
+        raceTimeout(fetchSimilarPages(entry, index, meta, config, search), [] as SimilarPage[]),
+        botConfig
+          ? raceTimeout(
+              fetchSavedNotesBlock({
+                botName: botConfig.name,
+                question: notesQuestion,
+                getBotDefaultUser,
+                generateEmbedding,
+                searchMemoriesHybrid,
+              }),
+              null,
+            )
+          : Promise.resolve<string | null>(null),
       ]);
-      clearTimeout(timer);
       const similarTitles = similar.map((s) => s.title);
 
       const opts = buildExplainAskOptions({
@@ -832,7 +938,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         wikiName: entry.name,
       });
       question = opts.question;
-      systemPrompt = opts.systemPrompt;
+      // Append the saved-notes block AFTER the article-context block that
+      // buildExplainAskOptions already assembled into the system prompt.
+      systemPrompt = notesBlock ? opts.systemPrompt + "\n\n" + notesBlock : opts.systemPrompt;
       log.info("Wiki explain: wiki={wiki} bot={bot} page={page} sel={sel}", {
         wiki: entry.name,
         bot: botConfig?.name,

@@ -173,6 +173,37 @@ describe("memories", () => {
     expect(results.length).toBeGreaterThanOrEqual(1);
   });
 
+  test("searchMemoriesHybrid with a tags filter returns only overlapping rows", async () => {
+    await saveMemory(makeMemory({
+      userId: "u1",
+      botName: "testbot",
+      summary: "Postgres tuning notes from the wiki",
+      content: "wiki note about Postgres tuning",
+      tags: ["wiki-note", "postgres"],
+      embedding: Array.from({ length: 384 }, () => Math.random()),
+    }));
+    await saveMemory(makeMemory({
+      userId: "u1",
+      botName: "testbot",
+      summary: "Postgres tuning chat memory",
+      content: "plain chat memory about Postgres tuning",
+      tags: ["postgres"],
+      embedding: Array.from({ length: 384 }, () => Math.random()),
+    }));
+
+    const queryEmbedding = Array.from({ length: 384 }, () => Math.random());
+    const filtered = await searchMemoriesHybrid("u1", "Postgres tuning", queryEmbedding, 5, "testbot", [
+      "wiki-note",
+    ]);
+    expect(filtered.length).toBe(1);
+    expect(filtered[0]!.content).toBe("wiki note about Postgres tuning");
+    expect(filtered.every((m) => m.tags.includes("wiki-note"))).toBe(true);
+
+    // Without the filter, both rows are eligible.
+    const unfiltered = await searchMemoriesHybrid("u1", "Postgres tuning", queryEmbedding, 5, "testbot");
+    expect(unfiltered.length).toBe(2);
+  });
+
   describe("getMemoriesByUser", () => {
     test("groups memories by user with scope counts", async () => {
       await saveMemory(makeMemory({ userId: "u1", botName: "testbot", scope: "personal", summary: "u1 personal" }));

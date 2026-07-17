@@ -90,6 +90,7 @@ export async function searchMemoriesHybrid(
   embedding: number[] | null,
   limit = 5,
   botName?: string,
+  tags?: string[],
 ): Promise<Memory[]> {
   if (!embedding) {
     return searchMemories(userId, query, limit, botName);
@@ -103,9 +104,19 @@ export async function searchMemoriesHybrid(
   const scopeFilter = botName
     ? `bot_name = $5 AND ((scope = 'personal' AND user_id = $1) OR scope = 'shared')`
     : `user_id = $1`;
-  const params = botName
+  const params: any[] = botName
     ? [userId, query, embeddingStr, limit, botName]
     : [userId, query, embeddingStr, limit];
+
+  // Optional tag overlap filter (array overlap, explicit cast). The param index is
+  // per-branch: with botName the existing arrays run $1..$5 so tags is $6; without
+  // it $1..$4 so tags is $5 — computed dynamically. Omitted ⇒ tagFilter stays ""
+  // and the SQL is byte-identical to the pre-tags query.
+  let tagFilter = "";
+  if (tags && tags.length > 0) {
+    tagFilter = ` AND tags && $${params.length + 1}::text[]`;
+    params.push(tags);
+  }
 
   const rows = await sql.unsafe(
     `WITH fts AS (
@@ -113,7 +124,7 @@ export async function searchMemoriesHybrid(
              ROW_NUMBER() OVER (ORDER BY ts_rank(search_vector, plainto_tsquery('english', $2)) DESC) AS rank
       FROM memories
       WHERE ${scopeFilter}
-        AND search_vector @@ plainto_tsquery('english', $2)
+        AND search_vector @@ plainto_tsquery('english', $2)${tagFilter}
       LIMIT 30
     ),
     vec AS (
@@ -121,7 +132,7 @@ export async function searchMemoriesHybrid(
              ROW_NUMBER() OVER (ORDER BY embedding <=> $3::vector) AS rank
       FROM memories
       WHERE ${scopeFilter}
-        AND embedding IS NOT NULL
+        AND embedding IS NOT NULL${tagFilter}
       LIMIT 30
     )
     SELECT
