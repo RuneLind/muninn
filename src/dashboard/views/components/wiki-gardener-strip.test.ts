@@ -216,9 +216,19 @@ describe("backlogOutcomeHtml — insufficient + zero-draft burn (PR 2)", () => {
     expect(html).not.toContain("bk-warn");
   });
 
-  test("insufficient eligible falls back to offered (0) when the field is absent", () => {
+  test("insufficient with zero eligible (or the field absent) → distinct empty-backlog copy", () => {
     const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient" });
-    expect(html).toContain("0 eligible doc(s)");
+    expect(html).toContain("no eligible docs in the backlog");
+    expect(html).not.toContain("bk-warn");
+  });
+
+  test("insufficient renders the run's own minClusterSize threshold, defaulting to 3", () => {
+    const withMin = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 4, minClusterSize: 5,
+    });
+    expect(withMin).toContain("below the minimum cluster size of 5");
+    const withoutMin = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 2 });
+    expect(withoutMin).toContain("below the minimum cluster size of 3");
   });
 
   test("offered docs but drafted nothing → warn style + burn copy + Reset hint", () => {

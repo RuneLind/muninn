@@ -325,6 +325,8 @@ export interface LastBacklogRun {
    */
   outcome?: "insufficient";
   eligible?: number;
+  /** The resolved threshold the guard fired against — for honest UI copy (per-bot configurable). */
+  minClusterSize?: number;
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
@@ -429,6 +431,7 @@ interface BacklogRunResult {
   /** Set when the batch was below `minClusterSize` — nothing was journalled/offered/run. */
   outcome?: "insufficient";
   eligible?: number;
+  minClusterSize?: number;
 }
 
 /**
@@ -531,7 +534,13 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         "Backlog run: {n} eligible doc(s) below minClusterSize {min} for {bot} — nothing offered",
         { botName: deps.botName, n: assembled.batchKeys.length, min: deps.minClusterSize },
       );
-      return { offered: 0, drafted: 0, outcome: "insufficient", eligible: assembled.batchKeys.length };
+      return {
+        offered: 0,
+        drafted: 0,
+        outcome: "insufficient",
+        eligible: assembled.batchKeys.length,
+        minClusterSize: deps.minClusterSize,
+      };
     }
 
     // Journal BEFORE offering — a crash between the two recovers as a harmless no-op
@@ -627,7 +636,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         offered: r.offered,
         drafted: r.drafted,
         ...(r.cancelled ? { cancelled: r.cancelled } : {}),
-        ...(r.outcome ? { outcome: r.outcome, eligible: r.eligible } : {}),
+        ...(r.outcome ? { outcome: r.outcome, eligible: r.eligible, minClusterSize: r.minClusterSize } : {}),
       });
     },
     (err) => {

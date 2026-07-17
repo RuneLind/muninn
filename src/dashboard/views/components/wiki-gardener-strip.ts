@@ -42,6 +42,8 @@ export interface LastBacklogRun {
    */
   outcome?: "insufficient";
   eligible?: number;
+  /** The resolved threshold the guard fired against — per-bot configurable, default 3. */
+  minClusterSize?: number;
 }
 
 /** Live progress of an in-flight backlog drain (mirrors the server shape). */
@@ -273,7 +275,11 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   // the too-small batch size (falls back to `offered`, which is 0 for this outcome).
   if (run.outcome === "insufficient") {
     const eligible = run.eligible ?? run.offered;
-    return ` <span class="bk-run-note">last run: ${eligible} eligible doc(s) — below the minimum cluster size of 3; nothing offered</span>`;
+    const min = run.minClusterSize ?? 3;
+    if (eligible === 0) {
+      return ` <span class="bk-run-note">last run: no eligible docs in the backlog — nothing offered</span>`;
+    }
+    return ` <span class="bk-run-note">last run: ${eligible} eligible doc(s) — below the minimum cluster size of ${min}; nothing offered</span>`;
   }
   if (run.cancelled) {
     const { drafted, of } = run.cancelled;
