@@ -515,7 +515,7 @@ export async function renderWikiPage(opts?: {
     .wiki-remember-btn:hover { border-color: var(--accent); }
     .wiki-remember-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-remember-msg { font-size: 12px; color: var(--text-secondary); }
-    .wiki-remember-msg.error { color: var(--danger, #e5534b); }
+    .wiki-remember-msg.error { color: var(--status-error); }
     .wiki-remember-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
     .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {

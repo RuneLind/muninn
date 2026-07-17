@@ -870,8 +870,8 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     try {
       type RememberBody = { wiki?: string; bot?: string; question?: string; answer?: string };
       const body = await c.req.json<RememberBody>().catch(() => ({} as RememberBody));
-      const question = (body.question ?? "").trim();
-      const answer = (body.answer ?? "").trim();
+      const question = typeof body.question === "string" ? body.question.trim() : "";
+      const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       if (!question) return c.json({ error: "question is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
 
@@ -939,7 +939,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         content: distilled.content,
         summary: distilled.summary,
         // Stable `wiki-note` first tag + the wiki name, then the distilled topics.
-        tags: ["wiki-note", entry.name, ...distilled.tags],
+        tags: [...new Set(["wiki-note", entry.name, ...distilled.tags])],
         scope: "personal",
         embedding,
       });
