@@ -1050,6 +1050,7 @@ function articleHeadHtml(m: WikiListing): string {
  *  page: explainers carry backlinks ("Linked from") since md→.html links join
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
+  hideExplainPill(); // a page switch drops any stale pill from the prior page
   currentName = m.name;
   if (push) {
     history.pushState({ page: currentName }, "", pageUrl(currentName));
@@ -1077,6 +1078,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
 }
 
 function loadPage(name: string, push: boolean): void {
+  hideExplainPill(); // a page switch drops any stale pill from the prior page
   const listing = allPages.find((p) => p.name === name);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
@@ -1608,16 +1610,23 @@ function hideExplainPill(): void {
 }
 
 /** Position the pill above the selection (below when clipped by the viewport
- *  top), horizontally centered and kept on-screen. Pill is absolutely positioned
- *  on <body>, so add page scroll to the viewport-relative rect. */
-function positionExplainPill(range: Range): void {
+ *  top), horizontally centered and kept on-screen. Input is a VIEWPORT-relative
+ *  rect (`{top,left,width,height}`): the md caller derives it from its Range, the
+ *  iframe caller translates the forwarded rect by the frame's own position — both
+ *  still viewport-relative. This is the ONLY place page scroll is added, so
+ *  callers must NOT pre-add scroll or the pill lands a scroll-height away. */
+function positionExplainPill(rect: {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}): void {
   const pill = explainPill!;
   pill.style.display = "block";
-  const rect = range.getBoundingClientRect();
   const pw = pill.offsetWidth;
   const ph = pill.offsetHeight;
   let top = rect.top - ph - 8;
-  if (top < 4) top = rect.bottom + 8; // clipped by viewport top → below
+  if (top < 4) top = rect.top + rect.height + 8; // clipped by viewport top → below
   let left = rect.left + rect.width / 2 - pw / 2;
   left = Math.max(4, Math.min(left, window.innerWidth - pw - 4));
   pill.style.top = top + window.scrollY + "px";
@@ -1644,7 +1653,7 @@ function maybeShowExplainPill(): void {
   pillSel = text;
   pillHeading = nearestHeading(range);
   ensureExplainPill();
-  positionExplainPill(range);
+  positionExplainPill(range.getBoundingClientRect());
 }
 
 function activateExplain(): void {
@@ -1683,6 +1692,42 @@ document.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
 });
 document.addEventListener("mousedown", hideExplainPill);
+
+// ── Explainer-iframe bridge ───────────────────────────────────────────
+// Standalone HTML explainers render in a sandboxed (opaque-origin) iframe, so the
+// parent can't read their selection directly — the injected forwarder posts it up
+// (see src/wiki/explainer-bridge.ts). Trust a message ONLY when the current page
+// is that explainer AND the event's source is the live frame's contentWindow
+// (looked up per event — never cached across navigations). Everything else is
+// ignored silently (other pages/extensions post messages constantly).
+window.addEventListener("message", (e: MessageEvent) => {
+  if (!currentName) return;
+  const meta = allPages.find((p) => p.name === currentName);
+  if (!meta || meta.type !== "explainer") return;
+  const frame = document.querySelector(".wiki-explainer-frame") as HTMLIFrameElement | null;
+  if (!frame || e.source !== frame.contentWindow) return;
+  const data = e.data as { type?: string; sel?: unknown; heading?: unknown; rect?: unknown };
+  if (!data || typeof data !== "object") return;
+  if (data.type === "wiki-explain-clear") return hideExplainPill();
+  if (data.type !== "wiki-explain-sel") return;
+  const raw = typeof data.sel === "string" ? data.sel.trim() : "";
+  if (raw.length < EXPLAIN_MIN_CHARS) return hideExplainPill();
+  const fwd = data.rect as { top?: number; left?: number; width?: number; height?: number } | null;
+  if (!fwd || typeof fwd !== "object") return hideExplainPill();
+  // Cap at the same ceiling as the md path (server re-caps too).
+  pillSel = raw.length > EXPLAIN_MAX_CHARS ? raw.slice(0, EXPLAIN_MAX_CHARS) : raw;
+  pillHeading = typeof data.heading === "string" ? data.heading : "";
+  // Translate the frame-relative rect into the parent viewport by the iframe
+  // element's own position; positionExplainPill adds page scroll (only there).
+  const iframeRect = frame.getBoundingClientRect();
+  ensureExplainPill();
+  positionExplainPill({
+    top: iframeRect.top + (fwd.top || 0),
+    left: iframeRect.left + (fwd.left || 0),
+    width: fwd.width || 0,
+    height: fwd.height || 0,
+  });
+});
 
 // ── Boot ──────────────────────────────────────────────────────────────
 fetch(withWiki("/api/wiki/pages"))

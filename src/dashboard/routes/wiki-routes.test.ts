@@ -16,6 +16,7 @@ import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
+import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -60,6 +61,16 @@ describe("GET /api/wiki/html", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body).toContain("<title>Explainer One</title>");
+  });
+
+  test("appends the Select-to-Explain bridge to the served explainer HTML", async () => {
+    const res = await app.request("/api/wiki/html?name=" + encodeURIComponent("Explainer One"));
+    const body = await res.text();
+    // Original content survives...
+    expect(body).toContain("<title>Explainer One</title>");
+    // ...and the forwarder is appended at the end.
+    expect(body).toContain(EXPLAINER_BRIDGE_MARKER);
+    expect(body.trimEnd().endsWith("</script>")).toBe(true);
   });
 
   test("400 without a name param", async () => {
