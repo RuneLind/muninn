@@ -19,7 +19,13 @@ import type {
 } from "../db/wiki-proposals.ts";
 import type { Cluster, HarvestedDoc, ListedDoc, RawFetchedDoc } from "./types.ts";
 import { harvestDocs } from "./harvest.ts";
-import { buildClusterPrompt, existingPageLines, filterClusters, parseClusters } from "./cluster.ts";
+import {
+  buildClusterPrompt,
+  existingPageLines,
+  filterClusters,
+  parseClusters,
+  summarizeClusterDrops,
+} from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
 import {
   appendPendingIngestionCallout,
@@ -175,16 +181,34 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     existingPages,
   });
   const clusterRaw = await deps.callCluster(clusterPrompt);
-  const clusters = filterClusters(parseClusters(clusterRaw), {
+  const { kept: clusters, dropped } = filterClusters(parseClusters(clusterRaw), {
     validDocKeys,
     minClusterSize: deps.minClusterSize,
     maxProposalsPerRun: deps.maxProposalsPerRun,
     skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
   });
-  tracer?.end("cluster", { clusters: clusters.length });
+  // Per-drop tally: on the `cluster` span so /traces answers "why 0 clusters?"
+  // without an offline replay, and as one structured log line per run.
+  const dropTally = summarizeClusterDrops(dropped);
+  tracer?.end("cluster", { clusters: clusters.length, ...dropTally });
+  log.info(
+    "Gardener cluster filter: {kept} kept, {dropped} dropped " +
+      "(size {size}, skip {skip}, hallucinated {hallucinated}, duplicate {duplicate}, cap {cap}){topicsSuffix}",
+    {
+      botName,
+      kept: clusters.length,
+      dropped: dropped.length,
+      size: dropTally.clusters_dropped_size,
+      skip: dropTally.clusters_dropped_skip,
+      hallucinated: dropTally.clusters_dropped_hallucinated,
+      duplicate: dropTally.clusters_dropped_duplicate,
+      cap: dropTally.clusters_dropped_cap,
+      topics: dropTally.clusters_dropped_topics,
+      topicsSuffix: dropTally.clusters_dropped_topics ? ` — ${dropTally.clusters_dropped_topics}` : "",
+    },
+  );
 
   if (clusters.length === 0) {
-    log.info("Gardener: no clusters passed the skip/size filter", { botName });
     return [];
   }
 
