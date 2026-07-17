@@ -247,14 +247,45 @@ export async function getLiveTopicKeys(botName: string): Promise<string[]> {
 }
 
 /**
- * TopicKeys previously rejected for this bot — the negative-memory skip list
- * (never re-propose a rejected topic).
+ * TopicKeys EVER rejected for this bot — the full negative-memory set. Feeds the
+ * cluster-prompt HINT only (so the model can reuse a rejected topicKey instead of
+ * coining a near-synonym), NOT the skip set: the skip set is TTL'd via
+ * {@link getRecentlyRejectedTopicKeys}. Keep this query unfiltered — TTL-filtering
+ * it would silently strip the hint of expired rejections too (informed re-try, not
+ * amnesia).
  */
 export async function getRejectedTopicKeys(botName: string): Promise<string[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT DISTINCT topic_key FROM wiki_proposals
     WHERE bot_name = ${botName} AND status = 'rejected'
+  `;
+  return rows.map((r) => r.topic_key as string);
+}
+
+/**
+ * TopicKeys rejected WITHIN the last `days` — the TTL'd cluster-time SKIP set. A
+ * rejection is a verdict on one draft, not a permanent verdict on the topic, so
+ * only recent rejections suppress re-proposal; older ones age out and the topic
+ * becomes re-proposable (a healthy 6-doc cluster no longer dies on a week-old
+ * rejection every run). The cluster-prompt hint still sees ALL rejections via
+ * {@link getRejectedTopicKeys}.
+ *
+ * NULL `resolved_at` is INTENTIONALLY excluded (SQL NULL comparison ⇒ not in the
+ * skip set ⇒ treated as expired / re-tryable). `rejectWikiProposal` always stamps
+ * `resolved_at`, but ad-hoc ops rows may not — the natural NULL-excludes behavior
+ * is the intended one; do NOT "fix" it.
+ */
+export async function getRecentlyRejectedTopicKeys(
+  botName: string,
+  days: number,
+): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT topic_key FROM wiki_proposals
+    WHERE bot_name = ${botName}
+      AND status = 'rejected'
+      AND resolved_at > now() - make_interval(days => ${days})
   `;
   return rows.map((r) => r.topic_key as string);
 }

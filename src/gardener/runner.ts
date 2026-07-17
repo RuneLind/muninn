@@ -76,7 +76,10 @@ export interface GardenerDeps {
 
   // DB seams.
   liveTopicKeys: () => Promise<string[]>;
+  /** ALL rejected topicKeys — feeds the cluster-prompt HINT only (informed re-try). */
   rejectedTopicKeys: () => Promise<string[]>;
+  /** Rejected within the TTL window — feeds the cluster-time SKIP set only. */
+  recentlyRejectedTopicKeys: () => Promise<string[]>;
   consumedDocIds: () => Promise<Set<string>>;
   insertProposal: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
 
@@ -151,12 +154,16 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // already-covered topic with the canonical title verbatim — that exact match
   // is what flips target-resolve to UPDATE instead of creating a near-duplicate
   // sibling page ("AI-Assisted Coding Workflows" next to "AI Coding Workflows").
-  const [interestProfile, liveKeys, rejectedKeys, index] = await Promise.all([
+  const [interestProfile, liveKeys, rejectedKeys, recentlyRejectedKeys, index] = await Promise.all([
     deps.loadInterestProfile(),
     deps.liveTopicKeys(),
     deps.rejectedTopicKeys(),
+    deps.recentlyRejectedTopicKeys(),
     deps.getWikiIndex(),
   ]);
+  // The HINT sees ALL rejections (+ live) so the model reuses a prior topicKey
+  // instead of coining a near-synonym; the SKIP set below only suppresses live +
+  // RECENTLY-rejected topics, so an expired rejection is re-proposable.
   const rejectedHint = [...new Set([...rejectedKeys, ...liveKeys])];
   // Concept/entity pages only — the kinds the gardener drafts. Source pages
   // (hundreds of video/article titles) would bloat the prompt without ever
@@ -172,7 +179,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     validDocKeys,
     minClusterSize: deps.minClusterSize,
     maxProposalsPerRun: deps.maxProposalsPerRun,
-    skipTopicKeys: new Set([...liveKeys, ...rejectedKeys]),
+    skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
   });
   tracer?.end("cluster", { clusters: clusters.length });
 

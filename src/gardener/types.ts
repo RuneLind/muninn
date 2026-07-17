@@ -22,6 +22,20 @@ export const GARDENER_DEFAULTS = {
   minClusterSize: 3,
   lookbackDays: 14,
   maxProposalsPerRun: 3,
+  /**
+   * TTL (days) on the rejected-topic SKIP behavior. A rejection is a verdict on
+   * one draft, not a permanent verdict on the topic — after this many days a
+   * rejected topic becomes re-proposable, so a healthy cluster no longer dies on
+   * a week-old rejection every run. The SQL predicate is `resolved_at > now() −
+   * rejectedSkipDays`. Deliberately a **bare constant**, NOT a per-bot
+   * `GardenerConfig` field — the cluster-prompt HINT still sees ALL rejections
+   * (informed re-try, not amnesia), only the skip SET is TTL'd. Sub-TTL ops
+   * escape hatch (for a bad-draft rejection on a healthy topic that shouldn't
+   * wait out even this window): move the row OUT of the `rejected` status so it
+   * drops from the skip predicate immediately — there is deliberately no
+   * un-reject UI.
+   */
+  rejectedSkipDays: 7,
 } as const;
 
 /** Merge a partial config with the defaults into a fully-resolved shape. */

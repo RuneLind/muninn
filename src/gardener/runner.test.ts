@@ -43,6 +43,7 @@ function makeDeps(overrides: Partial<GardenerDeps> = {}): { deps: GardenerDeps; 
     readWikiFile: async () => null,
     liveTopicKeys: async () => [],
     rejectedTopicKeys: async () => [],
+    recentlyRejectedTopicKeys: async () => [],
     consumedDocIds: async () => new Set(),
     insertProposal: async (params) => {
       inserted.push(params);
@@ -282,11 +283,42 @@ describe("runGardener", () => {
     expect(alerts).toEqual([]);
   });
 
-  test("skips clusters whose topic is already rejected", async () => {
-    const { deps, inserted } = makeDeps({ rejectedTopicKeys: async () => ["context-compaction"] });
+  test("skips clusters whose topic was RECENTLY rejected (within the TTL window)", async () => {
+    // A fresh rejection is in both the all-rejections set and the recent set, so
+    // the cluster is skipped — nothing drafted.
+    const { deps, inserted } = makeDeps({
+      rejectedTopicKeys: async () => ["context-compaction"],
+      recentlyRejectedTopicKeys: async () => ["context-compaction"],
+    });
     const alerts = await runGardener(deps);
     expect(inserted).toHaveLength(0);
     expect(alerts).toEqual([]);
+  });
+
+  test("an EXPIRED rejection reaches the cluster-prompt hint but NOT the skip set (re-proposable)", async () => {
+    // The topic was rejected long ago (in the all-rejections set that feeds the
+    // hint) but is OUTSIDE the TTL window (absent from the recent skip set). It
+    // must be re-proposable: the draft is inserted, AND the expired label still
+    // appears in the cluster prompt so the model reuses the topicKey rather than
+    // coining a near-synonym.
+    let clusterPrompt = "";
+    const { deps, inserted } = makeDeps({
+      rejectedTopicKeys: async () => ["context-compaction"],
+      recentlyRejectedTopicKeys: async () => [],
+      callCluster: async (prompt) => {
+        clusterPrompt = prompt;
+        return JSON.stringify([
+          { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
+        ]);
+      },
+    });
+    const alerts = await runGardener(deps);
+    // Hint saw the expired rejection…
+    expect(clusterPrompt).toContain("context-compaction");
+    // …but the skip set did not, so the topic was re-proposed.
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.topicKey).toBe("context-compaction");
+    expect(alerts).toHaveLength(1);
   });
 
   test("existing concept/entity titles reach the cluster prompt; exact title match becomes an update", async () => {
@@ -443,6 +475,7 @@ function makeTwoClusterDeps(overrides: Partial<GardenerDeps> = {}): {
     readWikiFile: async () => null,
     liveTopicKeys: async () => [],
     rejectedTopicKeys: async () => [],
+    recentlyRejectedTopicKeys: async () => [],
     consumedDocIds: async () => new Set(),
     insertProposal: async (params) => {
       inserted.push(params);
