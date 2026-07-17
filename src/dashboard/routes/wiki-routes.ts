@@ -49,6 +49,7 @@ import {
   type CoverageListing,
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
+import { EXPLAINER_BRIDGE_SCRIPT } from "../../wiki/explainer-bridge.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -669,7 +670,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     }
     const file = Bun.file(fileAbs);
     if (!(await file.exists())) return c.text("explainer file not found", 404);
-    return new Response(file, {
+    // Append the Select-to-Explain forwarder. A trailing listener-only script
+    // runs wherever it lands (even after </html>), so no anchor parsing is
+    // needed. Full-text read is fine at explainer sizes (≤ a few hundred KB).
+    const html = (await file.text()) + EXPLAINER_BRIDGE_SCRIPT;
+    return new Response(html, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   });
