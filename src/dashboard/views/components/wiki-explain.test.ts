@@ -48,3 +48,14 @@ test("buildExplainUrl caps sel at EXPLAIN_SEL_MAX before encoding", () => {
   const encoded = url.slice("/api/wiki/explain?sel=".length, url.indexOf("&page="));
   expect(decodeURIComponent(encoded).length).toBe(EXPLAIN_SEL_MAX);
 });
+
+test("buildExplainUrl never bisects a surrogate pair at the cap boundary", () => {
+  // An emoji straddling the UTF-16 cap must not leave a lone surrogate
+  // (encodeURIComponent throws on one).
+  const sel = "y".repeat(EXPLAIN_SEL_MAX - 1) + "😀" + "z".repeat(200);
+  const url = buildExplainUrl({ sel, page: "p" });
+  const encoded = url.slice("/api/wiki/explain?sel=".length, url.indexOf("&page="));
+  const decoded = decodeURIComponent(encoded);
+  expect(decoded.startsWith("y".repeat(EXPLAIN_SEL_MAX - 1))).toBe(true);
+  expect(decoded).not.toContain("�");
+});

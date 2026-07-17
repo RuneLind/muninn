@@ -32,7 +32,11 @@ export function buildExplainUrl(opts: {
   ctx?: string;
   history?: string;
 }): string {
-  let url = "/api/wiki/explain?sel=" + encodeURIComponent(opts.sel.slice(0, EXPLAIN_SEL_MAX));
+  // Cap by code points, not UTF-16 units — a plain slice can bisect a surrogate
+  // pair and make encodeURIComponent throw on the lone half.
+  const sel =
+    opts.sel.length > EXPLAIN_SEL_MAX ? [...opts.sel].slice(0, EXPLAIN_SEL_MAX).join("") : opts.sel;
+  let url = "/api/wiki/explain?sel=" + encodeURIComponent(sel);
   url += "&page=" + encodeURIComponent(opts.page);
   if (opts.wiki) url += "&wiki=" + encodeURIComponent(opts.wiki);
   if (opts.ctx) url += "&ctx=" + encodeURIComponent(opts.ctx);
