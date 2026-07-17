@@ -2,9 +2,14 @@
  * Replay the wiki-gardener CLUSTER stage offline — a permanent diagnostic for the
  * "why did this run produce 0 clusters?" question. It rebuilds the exact inputs the
  * weekly checker feeds the cluster model (harvest window + existing-page hints +
- * rejected/live skip sets + interest profile), makes ONE Haiku cluster call, runs
- * the pure `filterClusters` verdict, and prints a per-cluster KEPT/DROP table using
- * the drop taxonomy (`size` / `skip` / `hallucinated` / `duplicate` / `cap`).
+ * rejected/live skip sets + interest profile), makes ONE Haiku cluster call, then
+ * mirrors production's full verdict pipeline — pre-resolve `filterClusters`
+ * (strip/skip/duplicate) → `resolveTarget` (create/update, read from the live wiki
+ * index) → post-resolve `gateResolvedClusters` (CREATE-only size floor + shared cap
+ * with a reserved update slot) — and prints a per-cluster KEPT/DROP table using the
+ * drop taxonomy (`size` / `skip` / `hallucinated` / `duplicate` / `cap`). Resolve is
+ * READ-ONLY: it reads the same wiki index the runner passes to resolveTarget, no
+ * gardener-state writes — so the offline verdict matches the real run.
  *
  * READ-ONLY on gardener state: no writes to wiki_proposals, the offered set, traces,
  * or the wiki. (The Haiku call itself records one incidental `haiku_usage` telemetry
@@ -44,8 +49,10 @@ import {
   existingPageLines,
   parseClusters,
   filterClusters,
+  gateResolvedClusters,
   summarizeClusterDrops,
 } from "../src/gardener/cluster.ts";
+import { resolveTarget } from "../src/gardener/target-resolve.ts";
 import { buildGardenerSeams } from "../src/watchers/wiki-gardener.ts";
 import { resolveGardenerConfig, GARDENER_DEFAULTS } from "../src/gardener/types.ts";
 import { SUMMARY_SOURCES } from "../src/summaries/sources.ts";
@@ -148,17 +155,21 @@ async function main() {
   const parsed = parseClusters(clusterRaw);
   console.log(`Model proposed ${parsed.length} well-formed cluster(s).`);
 
-  // ── Pure filter verdict ───────────────────────────────────────────────────────
-  const { kept, dropped } = filterClusters(parsed, {
+  // ── Verdict: filter → resolve → gate (mirrors runGardener) ────────────────────
+  const { kept: filtered, dropped: clusterDropped } = filterClusters(parsed, {
     validDocKeys,
-    minClusterSize: resolved.minClusterSize,
-    maxProposalsPerRun: resolved.maxProposalsPerRun,
     skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
   });
+  const resolvedAll = filtered.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
+  const { kept: gated, dropped: gateDropped } = gateResolvedClusters(resolvedAll, {
+    minClusterSize: resolved.minClusterSize,
+    maxProposalsPerRun: resolved.maxProposalsPerRun,
+  });
+  const dropped = [...clusterDropped, ...gateDropped];
   const tally = summarizeClusterDrops(dropped);
 
   console.log("\n═══ VERDICT ══════════════════════════════════════════════════");
-  console.log(`KEPT: ${kept.length}   DROPPED: ${dropped.length}`);
+  console.log(`KEPT: ${gated.length}   DROPPED: ${dropped.length}`);
   console.log(
     `  by reason — size:${tally.clusters_dropped_size} skip:${tally.clusters_dropped_skip} ` +
       `hallucinated:${tally.clusters_dropped_hallucinated} duplicate:${tally.clusters_dropped_duplicate} ` +
@@ -166,13 +177,15 @@ async function main() {
   );
   console.log();
 
-  for (const c of kept) {
-    console.log(`  ✓ KEPT   ${c.topicKey} (${c.kind}, n:${c.docIds.length}) — ${c.label}`);
+  for (const r of gated) {
+    const c = r.cluster;
+    console.log(`  ✓ KEPT   ${c.topicKey} (${c.kind}, ${r.target.mode}, n:${c.docIds.length}) — ${c.label}`);
   }
   for (const d of dropped) {
     const strip = d.stripped ? `, strip:${d.stripped}` : "";
     console.log(`  ✗ DROP   ${d.topicKey} (${d.kind}, n:${d.size}${strip}) — reason: ${d.reason}`);
   }
+  const kept = gated;
 
   if (kept.length === 0) {
     console.log(
