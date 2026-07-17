@@ -38,6 +38,7 @@ import {
   runExclusive,
   draftedCount,
   draftedKeysSince,
+  passesAgeFloor,
   gardenerRunInFlight,
   getBacklogProgress,
   requestBacklogCancel,
@@ -247,6 +248,13 @@ export interface BacklogLiveFields {
   running: boolean;
   offered: number;
   remaining: number;
+  /**
+   * Queued docs that are ALSO in the offered set — the honest "offered in past
+   * runs" count. Computed server-side (not derived client-side as `queued −
+   * remaining`, which the age floor would inflate with merely-too-fresh docs).
+   * Gates the strip's Reset button + picks its label.
+   */
+  offeredStillQueued: number;
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
   /** Live progress of an in-flight drain (null when idle — including weekly runs). */
@@ -282,6 +290,36 @@ export function mergeBacklogLiveFields(
 }
 
 /**
+ * Split the cached `queuedKeys` into the two honest live counts the strip needs,
+ * applying the SAME age floor the drain uses ({@link passesAgeFloor}):
+ *  - `remaining` = queued, NOT offered, AND past the age floor (the eligible-now
+ *    set the "Drain a batch" button acts on);
+ *  - `offeredStillQueued` = queued AND in the offered set (the exact "offered in
+ *    past runs" count — replaces the old client-side `queued − remaining`, which
+ *    the floor inflated by counting merely-too-fresh docs as offered).
+ *
+ * Pure + injectable so the route's floor branch is unit-testable. `q.id` is the
+ * bare doc id (the floor's filename-prefix fallback needs it, not the key).
+ */
+export function computeBacklogFloorCounts(
+  queuedKeys: { key: string; id: string; date?: string }[],
+  offeredSet: Set<string>,
+  minAgeDays: number,
+  now: number,
+): { remaining: number; offeredStillQueued: number } {
+  let remaining = 0;
+  let offeredStillQueued = 0;
+  for (const q of queuedKeys) {
+    if (offeredSet.has(q.key)) {
+      offeredStillQueued++;
+      continue;
+    }
+    if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) remaining++;
+  }
+  return { remaining, offeredStillQueued };
+}
+
+/**
  * Per-collection backlog counts decorated with the summary-source id + label for
  * the UI. Deliberately count-only: the module's per-collection `queuedDocs` list
  * (up to ~hundreds of doc objects) stays server-side — no client consumes it, and
@@ -308,11 +346,17 @@ export interface IngestBacklogResponse {
   /** Present only when ≥1 collection failed to load (partial data). */
   errors?: StatsError[];
   /**
-   * Server-only: `<collection>/<id>` keys of every queued doc. Cached alongside
-   * the counts so the extended GET can compute `remaining` (queued minus the
-   * offered set) precisely, but STRIPPED before the wire by {@link mergeBacklogLiveFields}.
+   * Server-only: every queued doc's `<collection>/<id>` key, its bare `id`, and
+   * its listing date (when known). Cached alongside the counts so the extended GET
+   * can compute `remaining` (queued minus the offered set AND minus docs still
+   * inside the weekly gardener's window — the same age floor the drain applies).
+   * The `id` is the BARE doc id, kept alongside `key` because the age floor's
+   * `docDateMs` filename-prefix fallback inspects the id, not the collection-prefixed
+   * key. The date is needed for that floor; youtube ids carry no date prefix, so an
+   * undated doc reads its date from the id prefix. STRIPPED before the wire by
+   * {@link mergeBacklogLiveFields}.
    */
-  queuedKeys?: string[];
+  queuedKeys?: { key: string; id: string; date?: string }[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -375,10 +419,14 @@ export async function computeIngestBacklogResponse(
     };
   });
 
-  // Server-only queued keys (stripped before the wire) — used by the extended GET
-  // to compute `remaining` against the offered set.
+  // Server-only queued keys + dates (stripped before the wire) — used by the
+  // extended GET to compute `remaining` against the offered set AND the age floor.
   const queuedKeys = backlog.byCollection.flatMap((c) =>
-    c.queuedDocs.map((d) => `${d.collection}/${d.id}`),
+    c.queuedDocs.map((d) => ({
+      key: `${d.collection}/${d.id}`,
+      id: d.id,
+      ...(d.date ? { date: d.date } : {}),
+    })),
   );
 
   return {
@@ -698,7 +746,19 @@ export function registerWikiGardenerRoutes(
       const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
       const offeredSet = watcher ? await readOffered(backlogDeps, watcher.id) : new Set<string>();
       const queuedKeys = data.queuedKeys ?? [];
-      const remaining = queuedKeys.filter((k) => !offeredSet.has(k)).length;
+      // Mirror the drain's age floor here (shared `computeBacklogFloorCounts` ⇒
+      // `passesAgeFloor`) so the strip stops advertising docs the drain now refuses:
+      // a doc counts as `remaining` only when it is not already offered AND is old
+      // enough to have left the weekly gardener's window (undated ⇒ old backlog,
+      // kept). `offeredStillQueued` (queued ∩ offered) is emitted explicitly so the
+      // strip no longer derives it as `queued − remaining` (which the floor inflates).
+      const minAgeDays = resolveGardenerConfig(bot.gardener).lookbackDays;
+      const { remaining, offeredStillQueued } = computeBacklogFloorCounts(
+        queuedKeys,
+        offeredSet,
+        minAgeDays,
+        Date.now(),
+      );
       const running = gardenerRunInFlight(bot.name);
 
       // Last-run: the in-memory record wins; after a restart it's gone, so fall back
@@ -729,6 +789,7 @@ export function registerWikiGardenerRoutes(
           running,
           offered: offeredSet.size,
           remaining,
+          offeredStillQueued,
           lastBacklogRun,
           watcherSeeded: !!watcher,
           progress: getBacklogProgress(bot.name),
@@ -772,6 +833,11 @@ export function registerWikiGardenerRoutes(
           getConsumed: backlogDeps.getConsumed,
           getPending: backlogDeps.getPending,
           getOffered: () => readOffered(backlogDeps, watcher!.id),
+          // Age floor = the bot's RESOLVED weekly window, so the drain never
+          // touches docs the weekly gardener still owns (would burn a fresh
+          // arrival that can't cluster, hiding it from both paths).
+          minAgeDays: resolveGardenerConfig(bot.gardener).lookbackDays,
+          now: Date.now(),
         }),
       persistOffered: (keys) => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_OFFERED_KEY, keys),
       // Journal seams (PR 3) — the auto-recover + crash-safety record all ride the

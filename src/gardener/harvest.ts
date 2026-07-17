@@ -13,7 +13,7 @@ import { getLog } from "../logging.ts";
 const log = getLog("gardener", "harvest");
 
 const FETCH_BATCH_SIZE = 20;
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
 
 /** Parse a doc's date to epoch ms: prefer an explicit `date`, else the `YYYY-MM-DD` filename prefix. */
 export function docDateMs(listedOrId: { id: string; date?: string }): number | undefined {

@@ -17,10 +17,10 @@ import {
  * tested here without a DOM (the browser entrypoint touches `document` at module
  * load and can't be imported in tests).
  *
- * Key invariant: "offered in past runs" and the reset gate/label both use
- * `queued − remaining` (offered-AND-still-queued), NOT the raw all-time `offered`
- * field — so the sentence always adds up (per-source Σ = total = eligible +
- * offered-still-queued).
+ * Key invariant: "offered in past runs" and the reset gate/label both use the
+ * server-computed `offeredStillQueued` (queued ∩ offered), NOT the raw all-time
+ * `offered` field and NOT a client-side `queued − remaining` derivation (which the
+ * drain's age floor would inflate by counting merely-too-fresh docs as offered).
  */
 
 function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse {
@@ -37,8 +37,9 @@ function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse 
     wikiUrlCount: 100,
     generatedAt: 111,
     running: false,
-    offered: 200, // all-time offered (includes since-consumed) — deliberately > queued-remaining
+    offered: 200, // all-time offered (includes since-consumed) — deliberately ≠ offeredStillQueued
     remaining: 260,
+    offeredStillQueued: 69, // queued ∩ offered — the honest count (server-computed)
     watcherSeeded: true,
     batchSize: 40,
     maxProposals: 8,
@@ -47,17 +48,28 @@ function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse 
 }
 
 describe("backlogStripModel — honest numbers", () => {
-  test("offered-in-past-runs is queued − remaining, not the raw all-time offered", () => {
+  test("offered-in-past-runs is the server-computed offeredStillQueued, not the raw all-time offered", () => {
     const m = backlogStripModel(base(), 3);
     expect(m.totalNeverIngested).toBe(329);
     expect(m.eligibleNow).toBe(260);
-    // queued(329) − remaining(260) = 69 — NOT the raw offered field (200).
+    // Sourced from the response field (queued ∩ offered) — NOT the raw offered
+    // field (200), and NOT derived as queued(329) − remaining(260).
     expect(m.offeredStillQueued).toBe(69);
     expect(m.draftsAwaitingReview).toBe(3);
-    // The sentence adds up: eligible + offered-still-queued = total.
+    // In this fixture (no too-fresh docs held back by the floor) the sentence adds
+    // up: eligible + offered-still-queued = total.
     expect(m.eligibleNow + m.offeredStillQueued).toBe(m.totalNeverIngested);
     // Per-source counts sum to the total.
     expect(m.perSource.reduce((s, p) => s + p.queued, 0)).toBe(329);
+  });
+
+  test("offeredStillQueued is taken verbatim from the response, decoupled from queued − remaining", () => {
+    // The age floor makes `remaining` exclude too-fresh docs, so `queued − remaining`
+    // over-counts. The strip must trust the server field instead: here queued − remaining
+    // would be 329 − 100 = 229, but the honest offered-and-still-queued count is 10.
+    const m = backlogStripModel(base({ remaining: 100, offeredStillQueued: 10 }), 0);
+    expect(m.eligibleNow).toBe(100);
+    expect(m.offeredStillQueued).toBe(10);
   });
 
   test("drainNow = min(batchSize, eligibleNow)", () => {
@@ -69,7 +81,7 @@ describe("backlogStripModel — honest numbers", () => {
 describe("backlogStripModel — control gating", () => {
   test("zero queued → no run, no reset, not all-offered", () => {
     const m = backlogStripModel(
-      base({ byCollection: [], queued: 0, remaining: 0, offered: 0 }),
+      base({ byCollection: [], queued: 0, remaining: 0, offered: 0, offeredStillQueued: 0 }),
       0,
     );
     expect(m.showRun).toBe(false);
@@ -99,10 +111,10 @@ describe("backlogStripModel — control gating", () => {
   });
 
   test("all-offered (remaining 0, queued>0) → 'all offered' + reset with re-run wording", () => {
-    const m = backlogStripModel(base({ remaining: 0 }), 0);
+    const m = backlogStripModel(base({ remaining: 0, offeredStillQueued: 329 }), 0);
     expect(m.allOffered).toBe(true);
     expect(m.showRun).toBe(false);
-    expect(m.showReset).toBe(true); // queued − 0 = 329 offered-still-queued
+    expect(m.showReset).toBe(true); // 329 offered-still-queued
     const html = backlogControlHtml(m);
     expect(html).toContain("all offered");
     expect(html).toContain("Reset to re-run");
@@ -110,8 +122,8 @@ describe("backlogStripModel — control gating", () => {
   });
 
   test("offered-still-queued 0 (everything consumed) → no reset button", () => {
-    // remaining == queued ⇒ nothing offered-and-still-queued, so no "Reset offered (0)".
-    const m = backlogStripModel(base({ queued: 5, remaining: 5, offered: 400 }), 0);
+    // Nothing offered-and-still-queued (server reports 0), so no "Reset offered (0)".
+    const m = backlogStripModel(base({ queued: 5, remaining: 5, offered: 400, offeredStillQueued: 0 }), 0);
     expect(m.offeredStillQueued).toBe(0);
     expect(m.showReset).toBe(false);
     expect(backlogControlHtml(m)).not.toContain("Reset");
