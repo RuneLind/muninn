@@ -2,6 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import {
   parseFrontmatter,
   splitInlineArray,
@@ -647,6 +648,111 @@ describe("buildWikiIndex", () => {
     expect(index.readerConfig).toBeNull();
     expect(index.resolve("harness engineering")!.type).toBe("concept");
     expect(index.resolve("index")!.type).toBe("note");
+  });
+
+  test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {
+    await mkdir(path.join(root, "blogs/src"), { recursive: true });
+    // A native .mdx page with frontmatter (title/tags), a component (Callout), a
+    // wikilink out to an existing .md page, and a code fence.
+    await Bun.write(
+      path.join(root, "blogs/src/drain-saga.mdx"),
+      [
+        "---",
+        'title: "The Drain Saga"',
+        "tags: [muninn, tracing]",
+        "---",
+        "",
+        "# The Drain Saga",
+        "",
+        '<Callout tone="info" title="Note">',
+        "Links to [[Harness Engineering]] inside a component body.",
+        "</Callout>",
+        "",
+        "```ts",
+        "const x = 1;",
+        "```",
+      ].join("\n"),
+    );
+    // A .md fixture that links TO the .mdx page by relative path — proves the
+    // .mdx page is a first-class backlink target.
+    await Bun.write(
+      path.join(root, "concepts/Refers To Mdx.md"),
+      "---\ntype: concept\n---\n\nSee [saga](../blogs/src/drain-saga.mdx).",
+    );
+    const index = await buildWikiIndex(root);
+
+    // Discovered with the .mdx stripped off the stem.
+    const saga = index.resolve("drain-saga")!;
+    expect(saga).toBeDefined();
+    expect(saga.relPath).toBe("blogs/src/drain-saga.mdx");
+    expect(saga.title).toBe("The Drain Saga");
+    // Frontmatter tags become chips; type is NOT explainer (renders inline).
+    expect(saga.tags).toEqual(["muninn", "tracing"]);
+    expect(saga.type).not.toBe("explainer");
+
+    // Outgoing: the wikilink INSIDE the component body counts (we do not strip
+    // component tags before link extraction).
+    expect(index.outgoing.get("blogs/src/drain-saga.mdx")).toEqual([
+      "concepts/harness engineering.md",
+    ]);
+    // Backlink: the .md page's relative link resolves onto the .mdx page.
+    expect(index.backlinks.get("blogs/src/drain-saga.mdx")).toEqual([
+      "concepts/refers to mdx.md",
+    ]);
+    // A path-form wikilink with the extension implied finds the .mdx page.
+    expect(index.resolve("blogs/src/drain-saga")?.relPath).toBe("blogs/src/drain-saga.mdx");
+  });
+
+  test("stem-collision precedence .md > .mdx > .html: one listed page, losers dropped, warn logged", async () => {
+    // Capture wiki-store warnings via a logtape sink (the logger is a silent
+    // no-op unless configured, so we wire a capture sink for this case).
+    const warnings: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => warnings.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "blogs/src"), { recursive: true });
+      // Same stem "collide" across all three extensions in different folders.
+      await Bun.write(path.join(root, "concepts/Collide.md"), "---\ntype: concept\n---\n\nThe winner.");
+      await Bun.write(path.join(root, "blogs/src/Collide.mdx"), "---\ntitle: Collide\n---\n\nMdx loser.");
+      await Bun.write(
+        path.join(root, "blogs/Collide.html"),
+        "<!doctype html><html><head><title>Collide</title></head><body>Html loser.</body></html>",
+      );
+      const index = await buildWikiIndex(root);
+
+      // Exactly ONE page named "collide" survives — the .md — and the .mdx + .html
+      // are absent from `pages` entirely (still on disk).
+      const collidePages = index.pages.filter((p) => p.name.toLowerCase() === "collide");
+      expect(collidePages.length).toBe(1);
+      expect(collidePages[0]!.relPath).toBe("concepts/Collide.md");
+      expect(index.pages.some((p) => p.relPath === "blogs/src/Collide.mdx")).toBe(false);
+      expect(index.pages.some((p) => p.relPath === "blogs/Collide.html")).toBe(false);
+      // resolve() points only at the .md winner.
+      expect(index.resolve("collide")!.relPath).toBe("concepts/Collide.md");
+    } finally {
+      await reset();
+    }
+    // A shadowed page is an authoring mistake worth surfacing — logged at warn.
+    const shadowWarns = warnings.filter(
+      (r) => r.level === "warning" && r.rawMessage.includes("shadowed"),
+    );
+    expect(shadowWarns.length).toBe(2); // the .mdx and the .html loser
+  });
+
+  test("stem-collision: .mdx wins over .html when no .md exists", async () => {
+    await mkdir(path.join(root, "blogs/src"), { recursive: true });
+    await Bun.write(path.join(root, "blogs/src/OnlyMdx.mdx"), "---\ntitle: OnlyMdx\n---\n\nNative page.");
+    await Bun.write(
+      path.join(root, "blogs/OnlyMdx.html"),
+      "<!doctype html><html><head><title>OnlyMdx</title></head><body>Compiled.</body></html>",
+    );
+    const index = await buildWikiIndex(root);
+    const survivor = index.pages.filter((p) => p.name.toLowerCase() === "onlymdx");
+    expect(survivor.length).toBe(1);
+    expect(survivor[0]!.relPath).toBe("blogs/src/OnlyMdx.mdx");
   });
 
   test("getWikiIndex caches and refreshes via env-configured root", async () => {

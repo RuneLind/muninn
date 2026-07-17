@@ -111,6 +111,50 @@ describe("GET /api/wiki/html", () => {
     expect(data.backlinks.map((b) => b.name)).toContain("Linker");
     expect(data.outgoing).toEqual([]);
   });
+
+  // Native .mdx pages are first-class markdown: /api/wiki/page renders them inline
+  // (rendered HTML in the payload, non-explainer type so the client never iframes
+  // them), with a component from the shared AST and resolved connections.
+  test("/api/wiki/page renders a native .mdx page inline with a component + backlinks", async () => {
+    await mkdir(path.join(root, "blogs/src"), { recursive: true });
+    await Bun.write(
+      path.join(root, "blogs/src/Native Page.mdx"),
+      [
+        "---",
+        'title: "Native Page"',
+        "tags: [muninn, tracing]",
+        "---",
+        "",
+        "# Native Page",
+        "",
+        '<Callout tone="good" title="Shipped">',
+        "This renders inline, no iframe.",
+        "</Callout>",
+      ].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "concepts/Cites Native.md"),
+      "---\ntype: concept\ntitle: Cites Native\n---\n\nSee [native](../blogs/src/Native%20Page.mdx).",
+    );
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Native Page"));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      meta: { type: string; tags: string[] };
+      html: string;
+      backlinks: Array<{ name: string }>;
+    };
+    // Non-explainer type ⇒ the client renders it inline (never an iframe).
+    expect(data.meta.type).not.toBe("explainer");
+    expect(data.meta.tags).toEqual(["muninn", "tracing"]);
+    // Component from the shared AST is rendered, not escaped.
+    expect(data.html).toContain('class="callout callout-good"');
+    expect(data.html).toContain("This renders inline, no iframe.");
+    // Frontmatter never leaks into the rendered body.
+    expect(data.html).not.toContain("tags: [muninn");
+    // The .md → .mdx relative link resolves onto the .mdx page as a backlink.
+    expect(data.backlinks.map((b) => b.name)).toContain("Cites Native");
+  });
 });
 
 /**

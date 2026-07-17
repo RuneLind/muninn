@@ -97,6 +97,19 @@ export function normalizeRelPath(relPath: string): string {
   return path.posix.normalize(relPath).toLowerCase();
 }
 
+/**
+ * Stem-collision precedence rank for a page by file extension: `.md` (0) beats
+ * `.mdx` (1) beats `.html`/explainer (2). Lower wins. Used to drop the losing
+ * page when two DIFFERENT extensions share a stem (a `.md` and a same-stem `.mdx`
+ * are one authoring mistake, not two pages).
+ */
+function extRank(relPath: string): number {
+  const l = relPath.toLowerCase();
+  if (l.endsWith(".mdx")) return 1;
+  if (l.endsWith(".md")) return 0;
+  return 2; // .html explainer
+}
+
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_REL_PATH = "../huginn/huginn-jarvis/data/wiki";
@@ -196,12 +209,13 @@ export function extractWikilinks(content: string): string[] {
 const MD_LINK_RE = /(!?)\[(?:[^\]]*)\]\(([^)]+)\)/g;
 
 /**
- * Extract relative markdown link targets — `[text](target.md)` or
- * `[text](target.html)` — from raw page content. Wikis that use plain relative
- * links instead of Obsidian [[wikilinks]] (e.g. mimir, melosys-kode-wiki) join
- * the same link graph through these, and relative `.html` links let markdown
- * pages backlink standalone explainers. Returns deduped, URL-decoded targets
- * ending in `.md` or `.html` (case-insensitive), with any `#anchor` fragment
+ * Extract relative markdown link targets — `[text](target.md)`,
+ * `[text](target.mdx)`, or `[text](target.html)` — from raw page content. Wikis
+ * that use plain relative links instead of Obsidian [[wikilinks]] (e.g. mimir,
+ * melosys-kode-wiki) join the same link graph through these, native `.mdx` pages
+ * are first-class link targets, and relative `.html` links let markdown pages
+ * backlink standalone explainers. Returns deduped, URL-decoded targets ending in
+ * `.md`, `.mdx`, or `.html` (case-insensitive), with any `#anchor` fragment
  * stripped, still *relative to the linking page* (resolution happens in
  * `resolveMarkdownTargets`). Skips: images (`![...](...)`), absolute URLs / any
  * `scheme:` target (http:, https:, mailto:, …), absolute filesystem paths
@@ -233,7 +247,7 @@ export function extractMarkdownLinks(content: string): string[] {
       // Malformed %-escape — keep the raw form so a real .md link isn't lost.
     }
     const lower = decoded.toLowerCase();
-    if (!lower.endsWith(".md") && !lower.endsWith(".html")) continue;
+    if (!lower.endsWith(".md") && !lower.endsWith(".mdx") && !lower.endsWith(".html")) continue;
     targets.add(decoded);
   }
   return [...targets];
@@ -459,14 +473,15 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
 }
 
 /**
- * Build the index by scanning every .md and .html file under the wiki root
- * (dot-dirs like .obsidian excluded). ~700 small files — a full scan is well
- * under a second, and results are TTL-cached, so no incremental tracking is
- * needed. Markdown pages carry frontmatter + [[wikilinks]] and join the link
- * graph; standalone HTML explainers do not (title/mtime only, no backlinks).
+ * Build the index by scanning every .md, .mdx, and .html file under the wiki
+ * root (dot-dirs like .obsidian excluded). ~700 small files — a full scan is
+ * well under a second, and results are TTL-cached, so no incremental tracking is
+ * needed. Markdown pages (.md and native .mdx) carry frontmatter + [[wikilinks]]
+ * and join the link graph; standalone HTML explainers do not (title/mtime only,
+ * no backlinks).
  */
 export async function buildWikiIndex(root: string): Promise<WikiIndex> {
-  const glob = new Bun.Glob("**/*.{md,html}");
+  const glob = new Bun.Glob("**/*.{md,mdx,html}");
   const relPaths: string[] = [];
   for await (const p of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
@@ -515,7 +530,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
       const fm = parseFrontmatter(content);
-      const name = path.basename(relPath, ".md");
+      // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
+      // same wikilink extraction, same graph membership. The only difference is
+      // the extension stripped off the stem.
+      const name = path.basename(relPath).replace(/\.mdx?$/i, "");
       const meta: WikiPageMeta = {
         name,
         title: typeof fm.title === "string" && fm.title ? fm.title : name,
@@ -535,16 +553,28 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     }),
   );
 
-  // An explainer whose stem collides with a markdown page would make resolve()
-  // (and wikilinks to that stem) ambiguous — markdown wins, the explainer is
-  // dropped from the index.
-  const mdNames = new Set(
-    pages.filter((p) => p.type !== "explainer").map((p) => p.name.toLowerCase()),
-  );
+  // Same-stem pages of DIFFERENT file types make resolve() (and wikilinks/paths
+  // to that stem) ambiguous. Precedence is `.md` > `.mdx` > `.html`: the highest-
+  // precedence extension present for a stem wins, and every lower-precedence
+  // same-stem page is DROPPED from the index entirely (it still exists on disk).
+  // Same-EXTENSION same-stem pages in different folders are NOT a collision —
+  // both stay, each with its own distinct link set (see the relPath-keyed graph
+  // below). This is the read-side counterpart to mimir's authoring-side collision
+  // guard in `scripts/mdx-explainer/checks.ts` (a case-insensitive stem-collision
+  // check that refuses to compile two sources onto one output stem); here we can't
+  // refuse — the files already exist — so we resolve the ambiguity by precedence.
+  const bestRankByStem = new Map<string, number>();
+  for (const p of pages) {
+    const key = p.name.toLowerCase();
+    const rank = extRank(p.relPath);
+    const cur = bestRankByStem.get(key);
+    if (cur === undefined || rank < cur) bestRankByStem.set(key, rank);
+  }
   for (let i = pages.length - 1; i >= 0; i--) {
     const p = pages[i]!;
-    if (p.type === "explainer" && mdNames.has(p.name.toLowerCase())) {
-      log.debug("explainer {relPath} shadowed by same-stem markdown page — dropped", {
+    const best = bestRankByStem.get(p.name.toLowerCase())!;
+    if (extRank(p.relPath) > best) {
+      log.warn("wiki page {relPath} shadowed by a higher-precedence same-stem page — dropped", {
         relPath: p.relPath,
       });
       pages.splice(i, 1);
@@ -576,8 +606,16 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     const direct = byKey.get(t);
     if (direct) return direct;
     // Path-form wikilinks ([[concepts/trygdeavgift]], melosys-kode-wiki style)
-    // resolve root-relative with `.md` implied — stems only match byKey above.
-    if (t.includes("/")) return byRelPath.get(normalizeRelPath(t.endsWith(".md") ? t : `${t}.md`));
+    // resolve root-relative — stems only match byKey above. An explicit `.md`/
+    // `.mdx` extension is used as-is; a bare path implies `.md` first, then a
+    // native `.mdx` page (so [[blogs/src/foo]] finds foo.mdx).
+    if (t.includes("/")) {
+      if (t.endsWith(".md") || t.endsWith(".mdx")) return byRelPath.get(normalizeRelPath(t));
+      return (
+        byRelPath.get(normalizeRelPath(`${t}.md`)) ??
+        byRelPath.get(normalizeRelPath(`${t}.mdx`))
+      );
+    }
     return undefined;
   };
 

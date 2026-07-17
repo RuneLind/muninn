@@ -4,6 +4,7 @@ import {
   buildSimilarSearchPath,
   firstBodyParagraph,
   resolveSimilarHits,
+  stripComponentTags,
   type SimilarSearchHit,
 } from "./similar.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
@@ -99,6 +100,40 @@ describe("buildSimilarQuery", () => {
       "",
     );
     expect(q).toBe("Bare Explainer — rag");
+  });
+
+  test("native .mdx body: component tags stripped from the query, prose kept", () => {
+    const mdx = [
+      "---",
+      "title: The Drain Saga",
+      "---",
+      "",
+      '<Callout tone="info" title="Note">',
+      "Drains stall when the heartbeat stops.",
+      "</Callout>",
+    ].join("\n");
+    const q = buildSimilarQuery(meta({ title: "The Drain Saga", tags: ["tracing"] }), mdx);
+    // Prose survives; the JSX-ish component markup does not pollute the query.
+    expect(q).toContain("Drains stall when the heartbeat stops.");
+    expect(q).not.toContain("<Callout");
+    expect(q).not.toContain("</Callout>");
+    expect(q).not.toContain("tone=");
+  });
+});
+
+describe("stripComponentTags", () => {
+  test("removes open/close/self-closing whitelisted tags, keeps inner text", () => {
+    expect(stripComponentTags('<Callout tone="warn">Careful</Callout>')).toBe("Careful");
+    expect(stripComponentTags('Uses <FileRef path="src/x.ts"/> here.')).toBe("Uses  here.");
+    expect(stripComponentTags("<ComparisonTable>\n| a | b |\n</ComparisonTable>")).toBe(
+      "\n| a | b |\n",
+    );
+  });
+
+  test("leaves non-component angle-bracket text untouched", () => {
+    expect(stripComponentTags("A <div> and <NotAComponent> stay.")).toBe(
+      "A <div> and <NotAComponent> stay.",
+    );
   });
 });
 
