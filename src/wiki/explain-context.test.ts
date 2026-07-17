@@ -62,6 +62,16 @@ describe("locateExcerpt", () => {
     expect(excerpt).not.toContain("Next Top Section");
   });
 
+  test("huge single line: line-snapping does not balloon the excerpt", () => {
+    // One 8k-char line (e.g. a giant table row) — snapping to line boundaries
+    // would return the whole line; the bounded snap must keep the window cap.
+    const hugeLine = `left filler ${"x".repeat(4000)} needle target phrase here ${"y".repeat(4000)} right filler`;
+    const body = `${before}\n${hugeLine}\n${after}`;
+    const excerpt = locateExcerpt(body, "needle target phrase here");
+    expect(excerpt).toContain("needle target phrase here");
+    expect(excerpt.length).toBeLessThanOrEqual(2 * EXPLAIN_WINDOW + EXPLAIN_WINDOW + 200);
+  });
+
   test("head-of-body fallback, capped at 2×EXPLAIN_WINDOW", () => {
     const body = `${before}\n\n${after}`;
     const excerpt = locateExcerpt(body, "absent selection zzz qqq");

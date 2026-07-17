@@ -92,11 +92,15 @@ function windowAround(body: string, map: number[], collapsedIdx: number, collaps
   const origEnd = (map[collapsedIdx + collapsedLen - 1] ?? origStart) + 1;
   let start = Math.max(0, origStart - EXPLAIN_WINDOW);
   let end = Math.min(body.length, origEnd + EXPLAIN_WINDOW);
-  // Snap outward to whole lines so the excerpt reads as intact paragraphs.
+  // Snap outward to whole lines so the excerpt reads as intact paragraphs — but
+  // only when the snap stays small; a single huge line (e.g. an 8k-char table
+  // row) would otherwise balloon the excerpt far past the window cap.
   const nlBefore = body.lastIndexOf("\n", start);
-  start = nlBefore === -1 ? 0 : nlBefore + 1;
+  const snappedStart = nlBefore === -1 ? 0 : nlBefore + 1;
+  if (start - snappedStart <= EXPLAIN_WINDOW / 2) start = snappedStart;
   const nlAfter = body.indexOf("\n", end);
-  end = nlAfter === -1 ? body.length : nlAfter;
+  const snappedEnd = nlAfter === -1 ? body.length : nlAfter;
+  if (snappedEnd - end <= EXPLAIN_WINDOW / 2) end = snappedEnd;
   return body.slice(start, end).trim();
 }
 
