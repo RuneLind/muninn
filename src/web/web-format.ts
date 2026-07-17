@@ -1,4 +1,9 @@
-import { parseBlocks } from "../format/markdown-ast.ts";
+import {
+  parseBlocks,
+  normalizeCalloutTone,
+  normalizePillTone,
+  normalizeVerdictValue,
+} from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -34,6 +39,37 @@ const webRenderer: BlockRenderer = {
       "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
     ).join("") + "</tbody>";
     return `<table>${thead}${tbody}</table>`;
+  },
+  component(name, attrs, children) {
+    switch (name) {
+      case "Callout": {
+        const tone = normalizeCalloutTone(attrs.tone);
+        const title = attrs.title
+          ? `<strong class="callout-title">${escapeHtml(attrs.title)}</strong>`
+          : "";
+        return `<div class="callout callout-${tone}">${title}<div class="callout-body">${children}</div></div>`;
+      }
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = children.trim() || (value === "yes" ? "Yes" : "No");
+        return `<span class="verdict verdict-${value}">${label}</span>`;
+      }
+      case "Pill": {
+        const tone = normalizePillTone(attrs.tone);
+        const cls = tone === "default" ? "pill" : `pill pill-${tone}`;
+        return `<span class="${cls}">${children}</span>`;
+      }
+      case "Figure": {
+        const caption = attrs.caption
+          ? `<figcaption class="caption">${escapeHtml(attrs.caption)}</figcaption>`
+          : "";
+        return `<figure class="figure"><div class="figure-body">${children}</div>${caption}</figure>`;
+      }
+      case "FileRef":
+        return `<code class="fileref">${children.trim() || escapeHtml(attrs.path ?? "")}</code>`;
+      case "ComparisonTable":
+        return `<div class="tablewrap">${children}</div>`;
+    }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
 };

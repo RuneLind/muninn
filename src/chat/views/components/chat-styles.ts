@@ -15,6 +15,8 @@ const CHAT_EXTRA_LIGHT = `
       --bg-elevated: #ffffff;
 `;
 
+import { componentBlockCss } from "../../../format/component-styles.ts";
+
 /** Chat page styles — layout, sidebar, messages, inspector, modals */
 export function chatStyles(): string {
   return `
@@ -666,6 +668,7 @@ export function chatStyles(): string {
     .web-content em { font-style: italic; }
     .web-content a { color: var(--accent-light); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent-light) 40%, transparent); }
     .web-content a:hover { text-decoration-color: var(--accent-light); }
+    ${componentBlockCss(".web-content")}
     .chat-input {
       padding: 12px 16px;
       border-top: 1px solid var(--border-primary);

@@ -225,4 +225,32 @@ Found it ~~wrong~~ correct.`;
       expect(result).toBe("Visit <https://example.com> for details");
     });
   });
+
+  describe("component blocks", () => {
+    test("Callout → bold title + body", () => {
+      expect(formatSlackMrkdwn("<Callout title=\"Heads up\">\nbody\n</Callout>")).toBe("*Heads up*\nbody");
+    });
+
+    test("Callout without title → just body", () => {
+      expect(formatSlackMrkdwn("<Callout>\nbody\n</Callout>")).toBe("body");
+    });
+
+    test("Verdict → check/cross + label", () => {
+      expect(formatSlackMrkdwn("<Verdict value=\"yes\">Fast</Verdict>")).toBe("✅ Fast");
+      expect(formatSlackMrkdwn("<Verdict value=\"no\" />")).toBe("❌ No");
+    });
+
+    test("Pill → [text]", () => {
+      expect(formatSlackMrkdwn("<Pill>beta</Pill>")).toBe("[beta]");
+    });
+
+    test("FileRef self-closing → plain path", () => {
+      expect(formatSlackMrkdwn("<FileRef path=\"src/x.ts\" />")).toBe("src/x.ts");
+    });
+
+    test("ComparisonTable → labeled bullets (inner table shape)", () => {
+      const out = formatSlackMrkdwn("<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>");
+      expect(out).toBe("• *A:* 1  *B:* 2");
+    });
+  });
 });

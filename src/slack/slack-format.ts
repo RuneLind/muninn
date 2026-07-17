@@ -1,4 +1,4 @@
-import { parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks, normalizeVerdictValue } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders } from "../format/markdown-core.ts";
 
@@ -24,6 +24,25 @@ const slackRenderer: BlockRenderer = {
   ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
   ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
   table: (headers, rows) => renderTable(headers, rows),
+  component(name, attrs, children) {
+    switch (name) {
+      case "Callout":
+        return attrs.title ? `*${renderInline(attrs.title)}*\n${children}` : children;
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = children.trim() || (value === "yes" ? "Yes" : "No");
+        return `${value === "yes" ? "✅" : "❌"} ${label}`;
+      }
+      case "Pill":
+        return `[${children.trim()}]`;
+      case "Figure":
+        return attrs.caption ? `${children}\n${renderInline(attrs.caption)}` : children;
+      case "FileRef":
+        return children.trim() || renderInline(attrs.path ?? "");
+      case "ComparisonTable":
+        return children;
+    }
+  },
   text: (lines) => lines.map(renderInline).join("\n"),
 };
 

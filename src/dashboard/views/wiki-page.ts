@@ -1,4 +1,5 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
+import { componentBlockCss } from "../../format/component-styles.ts";
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -283,6 +284,7 @@ export async function renderWikiPage(opts?: {
     .wiki-article th { background: var(--bg-surface); color: var(--text-primary); }
     .wiki-article hr { border: none; border-top: 1px solid var(--border-primary); margin: 16px 0; }
     .wiki-article a[target="_blank"] { color: var(--status-info); }
+    ${componentBlockCss(".wiki-article")}
 
     .wiki-link { color: var(--accent-light); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .wiki-link:hover { color: var(--accent); border-bottom-color: var(--accent); }

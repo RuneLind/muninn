@@ -283,3 +283,63 @@ describe("formatWebHtml", () => {
   });
 
 });
+
+describe("formatWebHtml — component blocks", () => {
+  test("Callout renders div with tone class, escaped title, and body", () => {
+    const out = formatWebHtml("<Callout tone=\"warn\" title=\"Note\">\nbody text\n</Callout>");
+    expect(out).toBe(
+      '<div class="callout callout-warn"><strong class="callout-title">Note</strong><div class="callout-body">body text</div></div>',
+    );
+  });
+
+  test("Callout with unknown tone falls back to info", () => {
+    const out = formatWebHtml("<Callout tone=\"bogus\">\nx\n</Callout>");
+    expect(out).toContain('class="callout callout-info"');
+  });
+
+  test("Verdict renders labeled span", () => {
+    expect(formatWebHtml("<Verdict value=\"yes\">Fast</Verdict>")).toBe(
+      '<span class="verdict verdict-yes">Fast</span>',
+    );
+  });
+
+  test("Verdict self-closing uses default label", () => {
+    expect(formatWebHtml("<Verdict value=\"no\" />")).toBe(
+      '<span class="verdict verdict-no">No</span>',
+    );
+  });
+
+  test("Pill renders chip; tone maps to modifier class", () => {
+    expect(formatWebHtml("<Pill tone=\"rec\">go</Pill>")).toBe('<span class="pill pill-rec">go</span>');
+    expect(formatWebHtml("<Pill>plain</Pill>")).toBe('<span class="pill">plain</span>');
+  });
+
+  test("FileRef self-closing renders escaped path", () => {
+    expect(formatWebHtml("<FileRef path=\"src/x.ts\" />")).toBe('<code class="fileref">src/x.ts</code>');
+  });
+
+  test("Figure wraps body and caption", () => {
+    const out = formatWebHtml("<Figure caption=\"a diagram\">\nsee below\n</Figure>");
+    expect(out).toBe(
+      '<figure class="figure"><div class="figure-body">see below</div><figcaption class="caption">a diagram</figcaption></figure>',
+    );
+  });
+
+  test("ComparisonTable wraps its inner table", () => {
+    const out = formatWebHtml("<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>");
+    expect(out).toContain('<div class="tablewrap"><table>');
+    expect(out).toContain("</table></div>");
+  });
+
+  test("attr injection in title is escaped, not emitted as markup", () => {
+    const out = formatWebHtml('<Callout title="x<script>y">\nbody\n</Callout>');
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("x&lt;script&gt;y");
+  });
+
+  test("body content is escaped (no raw HTML injection)", () => {
+    const out = formatWebHtml("<Callout>\n<script>alert(1)</script>\n</Callout>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+  });
+});
