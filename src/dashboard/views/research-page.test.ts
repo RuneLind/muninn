@@ -32,6 +32,22 @@ test("answer_html handler swaps the body from d.html and re-linkifies citations"
   expect(segment).not.toContain("conn.close()");
 });
 
+test("done fallback renders the answer body through the component-aware formatter", async () => {
+  const html = await pageHtml();
+  const start = html.indexOf("done: function(e)");
+  expect(start).toBeGreaterThan(-1);
+  // Isolate the 'done' handler body up to the next handler ('answer_html:').
+  const segment = html.slice(start, html.indexOf("answer_html: function(e)", start));
+  // The fallback (when the trailing answer_html never arrives) must render via the
+  // component-aware formatWebHtml — the same pipeline the server's answer_html uses
+  // — so block components (Callout, Verdict, …) render as styled HTML, NOT via the
+  // marked.js renderMarkdown whose sanitizing renderer escapes raw component tags.
+  expect(segment).toContain("a.bodyEl.innerHTML = formatWebHtml(a.buffer)");
+  expect(segment).not.toContain("renderMarkdown(");
+  // Single linkify pass over the freshly-reset innerHTML (no double-linkify).
+  expect(segment).toContain("linkifyCitations(a.bodyEl, a.citations)");
+});
+
 test("answer-body scope carries the component block CSS", async () => {
   const html = await pageHtml();
   // componentBlockCss(".answer-body") injects the callout rule under that scope.

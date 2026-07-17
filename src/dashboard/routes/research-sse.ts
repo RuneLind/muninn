@@ -35,9 +35,11 @@ export interface ResearchSseOptions {
   /** Optional final-render hook. When set, after the terminal `done` event the
    *  helper renders the final answer markdown to HTML (via this fn, using the
    *  enriched citations seen on the `sources` event) and emits it as a trailing
-   *  `answer_html` event. The wiki reader sets it so the answer shows as a
-   *  formatted article in the main pane; `/research` leaves it unset (it renders
-   *  client-side). A throw here is swallowed — the streamed plain text stands. */
+   *  `answer_html` event. Both the wiki reader and `/research` set it so the
+   *  answer renders through the shared component-aware pipeline (block components
+   *  like Callout/Verdict render as styled HTML, not escaped tags); the client
+   *  swaps its streamed plain text for this HTML. A throw here is swallowed — the
+   *  streamed plain text stands. */
   renderAnswerHtml?: (answer: string, citations: Citation[]) => string;
   /** Synthesis system prompt override (per-wiki framing). Unset ⇒ the research
    *  default (`SYNTHESIS_SYSTEM_PROMPT`); `/research` leaves it unset. */
