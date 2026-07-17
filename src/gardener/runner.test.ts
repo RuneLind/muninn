@@ -655,14 +655,16 @@ describe("runGardener — tracer threading (one connected trace)", () => {
   test("drives all stage spans off the injected tracer, in order", async () => {
     const started: string[] = [];
     const ended: string[] = [];
+    const endAttrs: Record<string, Record<string, unknown>> = {};
     const childSpans: Array<{ parent: string; name: string }> = [];
     const tracer = {
       start: (label: string) => {
         started.push(label);
         return "id";
       },
-      end: (label: string) => {
+      end: (label: string, attributes?: Record<string, unknown>) => {
         ended.push(label);
+        if (attributes) endAttrs[label] = attributes;
         return 0;
       },
       addChildSpan: (parent: string, name: string) => {
@@ -689,6 +691,14 @@ describe("runGardener — tracer threading (one connected trace)", () => {
     // The draft `claude` span hangs off the "draft" stage span — a child, never
     // the root — so it can never make the watcher span token-bearing.
     expect(childSpans).toEqual([{ parent: "draft", name: "claude" }]);
+    // The drop tally rides the cluster span's end attributes — pin the wiring,
+    // not just the pure summarizeClusterDrops fold.
+    expect(endAttrs["cluster"]).toMatchObject({
+      clusters_dropped: expect.any(Number),
+      clusters_dropped_size: expect.any(Number),
+      clusters_dropped_skip: expect.any(Number),
+      clusters_dropped_topics: expect.any(String),
+    });
   });
 
   test("runs unchanged when no tracer is injected (drain path / tracing off)", async () => {

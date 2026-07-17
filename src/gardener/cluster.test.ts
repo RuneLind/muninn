@@ -173,6 +173,18 @@ describe("summarizeClusterDrops", () => {
     expect(s.clusters_dropped_topics.length).toBeLessThanOrEqual(500);
   });
 
+  test("overflowing topics list is truncated to the 500-char cap", () => {
+    const dropped = Array.from({ length: 50 }, (_, i) => ({
+      topicKey: `very-long-topic-key-for-truncation-test-${String(i).padStart(3, "0")}`,
+      kind: "concept" as const,
+      size: 1,
+      reason: "size" as const,
+    }));
+    const s = summarizeClusterDrops(dropped);
+    expect(s.clusters_dropped).toBe(50);
+    expect(s.clusters_dropped_topics.length).toBe(500);
+  });
+
   test("empty tally ⇒ all zero, empty topics string", () => {
     const s = summarizeClusterDrops([]);
     expect(s.clusters_dropped).toBe(0);

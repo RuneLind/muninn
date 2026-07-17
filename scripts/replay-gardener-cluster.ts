@@ -6,8 +6,10 @@
  * the pure `filterClusters` verdict, and prints a per-cluster KEPT/DROP table using
  * the drop taxonomy (`size` / `skip` / `hallucinated` / `duplicate` / `cap`).
  *
- * READ-ONLY: zero writes to the DB, the offered set, or the wiki. It never calls a
- * draft — the whole point is to inspect the cluster verdict cheaply (one Haiku call).
+ * READ-ONLY on gardener state: no writes to wiki_proposals, the offered set, traces,
+ * or the wiki. (The Haiku call itself records one incidental `haiku_usage` telemetry
+ * row per run via `seams.callCluster` — nothing else touches the DB.) It never calls
+ * a draft — the whole point is to inspect the cluster verdict cheaply (one Haiku call).
  * Same read-only stance as `scripts/triage-backlog-tail.ts` (which this borrows its
  * conventions from), minus that script's optional `--unoffer` write path.
  *
