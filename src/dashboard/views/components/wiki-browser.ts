@@ -1246,6 +1246,7 @@ interface AskTurn {
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askActive: AskTurn | null = null; // the turn currently streaming, or null
+let askShownTurn: AskTurn | null = null; // the turn currently painted in the pane
 let askBuffer = ""; // streamed plain-text accumulator for askActive
 let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
@@ -1370,9 +1371,23 @@ function askFollowupHtml(turn: AskTurn): string {
   );
 }
 
+/** "Remember this" button rendered under the follow-up bar. Persists the shown
+ *  turn's Q&A as a durable memory (POST /api/wiki/remember). Gated on the turn
+ *  being committed (same `turn.answer` gate as the follow-up bar) and bound via
+ *  document-level delegation. One save per render — a re-render resets it. */
+function askRememberHtml(turn: AskTurn): string {
+  const disabled = turn.answer ? "" : " disabled";
+  return (
+    '<div class="wiki-remember" id="wikiRememberBar">' +
+    '<button id="wikiRememberBtn" class="wiki-remember-btn"' + disabled + ">Remember this</button>" +
+    '<span class="wiki-remember-msg" id="wikiRememberMsg"></span>' +
+    "</div>"
+  );
+}
+
 /** Full article-pane HTML for one Ask turn: question headline, meta row, answer
  *  body (rendered final article once available, else the progressively-formatted
- *  streaming buffer), then Sources, then the follow-up bar. */
+ *  streaming buffer), then Sources, then the follow-up bar, then Remember. */
 function askArticleHtml(turn: AskTurn, buffer: string): string {
   const body = askAnswerBodyHtml(turn.html, buffer, turn.answer);
   return (
@@ -1382,22 +1397,27 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     '<div class="wiki-article wiki-ask-article" id="askAnswerBody">' + body + "</div>" +
     '<div class="wiki-ask-sources" id="askAnswerSources">' +
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
-    askFollowupHtml(turn)
+    askFollowupHtml(turn) +
+    askRememberHtml(turn)
   );
 }
 
-/** Enable/disable the follow-up controls by id (they may not exist yet at module
- *  load, and the article pane is re-rendered per turn — always look up fresh). */
+/** Enable/disable the follow-up + Remember controls by id (they may not exist yet
+ *  at module load, and the article pane is re-rendered per turn — always look up
+ *  fresh). The Remember button rides the same commit gate as the follow-up bar. */
 function setFollowupDisabled(disabled: boolean): void {
   const input = document.getElementById("wikiFollowupInput") as HTMLInputElement | null;
   const btn = document.getElementById("wikiFollowupBtn") as HTMLButtonElement | null;
   if (input) input.disabled = disabled;
   if (btn) btn.disabled = disabled;
+  const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
+  if (remember) remember.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
+  askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML =
@@ -1595,6 +1615,49 @@ function submitFollowup(): void {
   askPlainQuestion(q);
 }
 
+/** Persist the shown answer as a durable memory (POST /api/wiki/remember).
+ *  Pending → success swaps the bar to a non-interactive "✓ Remembered: …" line;
+ *  a failure re-enables the button and shows an inline error. Acts on
+ *  `askShownTurn` (set by `showAskAnswer`), sending its plain-markdown answer. */
+async function submitRemember(): Promise<void> {
+  const btn = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
+  const msg = document.getElementById("wikiRememberMsg");
+  const turn = askShownTurn;
+  if (!btn || btn.disabled || !turn || !turn.answer) return;
+  btn.disabled = true;
+  const prevLabel = btn.textContent || "Remember this";
+  btn.textContent = "Saving…";
+  if (msg) { msg.textContent = ""; msg.className = "wiki-remember-msg"; }
+  try {
+    const res = await fetch("/api/wiki/remember", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wiki: WIKI || undefined,
+        question: turn.question,
+        answer: turn.answer,
+      }),
+    });
+    const data = await res.json().catch(() => ({} as { saved?: boolean; summary?: string; error?: string }));
+    if (!res.ok || !data.saved) {
+      throw new Error(data.error || ("HTTP " + res.status));
+    }
+    const bar = document.getElementById("wikiRememberBar");
+    if (bar) {
+      bar.innerHTML =
+        '<span class="wiki-remember-done">✓ Remembered: ' + esc(data.summary || "") + "</span>";
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    if (msg) {
+      msg.textContent =
+        "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
+      msg.className = "wiki-remember-msg error";
+    }
+  }
+}
+
 // ── Ask session persistence (localStorage) ────────────────────────────
 // Persist the last N committed Ask/Explain turns so a page reload rehydrates the
 // "This session" list. Keyed per wiki (the bare /wiki reader may have no WIKI —
@@ -1671,7 +1734,9 @@ document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
 // Follow-up bar (in the article pane) — delegated at the document level because
 // `showAskAnswer` replaces the pane per turn, destroying any direct listeners.
 document.addEventListener("click", (e) => {
-  if ((e.target as HTMLElement).closest("#wikiFollowupBtn")) submitFollowup();
+  const t = e.target as HTMLElement;
+  if (t.closest("#wikiFollowupBtn")) submitFollowup();
+  else if (t.closest("#wikiRememberBtn")) submitRemember();
 });
 document.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;

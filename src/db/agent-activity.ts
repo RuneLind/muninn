@@ -168,9 +168,10 @@ export interface RecentExtractorRow {
  * weekly gardener's `watcher:wiki-gardener` trace row likewise carries no tokens
  * (gardener isn't wired to runner telemetry), so no token number is duplicated.
  *
- * `interest_profile` (the weekly profile distillation) is included on the same
- * reasoning: it runs through `callHaikuWithFallback`, so `haiku_usage` is the
- * only durable record of its tokens. Its `kind:"profile"` registry run is NOT in
+ * `interest_profile` (the weekly profile distillation) and `wiki_remember`
+ * (the /api/wiki/remember distill) are included on the same reasoning: they run
+ * through `callHaikuWithFallback`, so `haiku_usage` is the only durable record
+ * of their tokens. Its `kind:"profile"` registry run is NOT in
  * `RING_RECENT_KINDS`, so the ring row surfaces it live on Running only and
  * cannot double it up in Recent.
  */
@@ -182,7 +183,7 @@ export async function getRecentExtractorUsage(limit = 40, windowHours = 48): Pro
     WHERE source IN (
         'memory', 'goals', 'schedule',
         'wiki_gardener_cluster', 'wiki_gardener_triage', 'wiki_gardener_draft',
-        'interest_profile'
+        'interest_profile', 'wiki_remember'
       )
       AND created_at >= now() - make_interval(hours => ${windowHours})
     ORDER BY created_at DESC

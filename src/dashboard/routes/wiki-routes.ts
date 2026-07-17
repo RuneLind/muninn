@@ -50,6 +50,12 @@ import {
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
 import { EXPLAINER_BRIDGE_SCRIPT } from "../../wiki/explainer-bridge.ts";
+import { buildDistillPrompt, parseDistillResult } from "../../wiki/remember.ts";
+import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
+import { generateEmbedding } from "../../ai/embeddings.ts";
+import { saveMemory } from "../../db/memories.ts";
+import { getBotDefaultUser } from "../../db/chat-preferences.ts";
+import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
@@ -847,5 +853,115 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
       renderAnswerHtml: renderAskAnswerHtml,
     });
+  });
+
+  // Wiki "Remember this": persist a durable memory distilled from an Ask/Explain
+  // Q&A turn. The first dashboard-originated memory write (auth-less loopback like
+  // POST /feedback). Plain JSON route — normal REST semantics (400/404/409/502),
+  // NOT the SSE never-5xx contract — but no unhandled throws: the body is wrapped
+  // so a truly unexpected failure logs + returns a 500 JSON instead of crashing.
+  //
+  // Owner-routing: the memory is attributed to the wiki's synthesis bot (same
+  // `resolveWikiSynthesisBot` as Ask) and that bot's `bot_default_user` mapping —
+  // an explicit mapping, never a silent fallback user, so a wiki whose bot has no
+  // mapping gets a clean 409 rather than an orphaned memory. The stable `wiki-note`
+  // first tag is PR C's injection filter.
+  app.post("/api/wiki/remember", async (c) => {
+    try {
+      type RememberBody = { wiki?: string; bot?: string; question?: string; answer?: string };
+      const body = await c.req.json<RememberBody>().catch(() => ({} as RememberBody));
+      const question = typeof body.question === "string" ? body.question.trim() : "";
+      const answer = typeof body.answer === "string" ? body.answer.trim() : "";
+      if (!question) return c.json({ error: "question is required" }, 400);
+      if (!answer) return c.json({ error: "answer is required" }, 400);
+
+      const { entry, unknownWiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? body.wiki,
+        c.req.query("bot") ?? body.bot,
+        process.env.WIKI_DIR,
+      );
+      if (unknownWiki || !entry) {
+        return c.json({ error: "no wiki configured for that name" }, 404);
+      }
+
+      // Attribution bot — may be undefined (no fast bot, or the research-bot
+      // fallback resolves to nothing). Guard BEFORE touching bot.name.
+      const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      if (!bot) {
+        return c.json({ error: "No synthesis bot for this wiki" }, 409);
+      }
+
+      // Explicit owner mapping — never a silent fallback user.
+      const userId = await getBotDefaultUser(bot.name);
+      if (!userId) {
+        return c.json(
+          { error: `No default user mapped for bot ${bot.name} — memory would be orphaned` },
+          409,
+        );
+      }
+
+      // Distill via the bot's Haiku backend (same router the decomposer/extractors
+      // use; no MCP needed, so the one-shot router, not spawnHaiku). A null parse
+      // ⇒ 502; we do NOT save a verbatim fallback.
+      const prompt = buildDistillPrompt({ wikiName: entry.name, question, answer });
+      const haiku = await callHaikuWithFallback(prompt, {
+        source: "wiki_remember",
+        entrypoint: `${bot.name}-wiki-remember`,
+        botName: bot.name,
+        cwd: bot.dir,
+        connector: bot.connector,
+        haikuBackend: bot.haikuBackend,
+      });
+      const distilled = parseDistillResult(haiku.result);
+      if (!distilled) {
+        log.warn("Wiki remember: distill failed for wiki={wiki} bot={bot} raw={raw}", {
+          wiki: entry.name,
+          bot: bot.name,
+          raw: haiku.result.slice(0, 200),
+        });
+        return c.json({ error: "distill failed" }, 502);
+      }
+
+      // Embed the search line (the extractor's exact degrade — save without an
+      // embedding + warn if the model is unavailable).
+      const embedding = await generateEmbedding(distilled.summary);
+      if (!embedding) {
+        log.warn("Wiki remember: embedding returned null — saving without embedding", {
+          bot: bot.name,
+          summary: distilled.summary,
+        });
+      }
+
+      await saveMemory({
+        userId,
+        botName: bot.name,
+        content: distilled.content,
+        summary: distilled.summary,
+        // Stable `wiki-note` first tag + the wiki name, then the distilled topics.
+        tags: [...new Set(["wiki-note", entry.name, ...distilled.tags])],
+        scope: "personal",
+        embedding,
+      });
+
+      activityLog.push("system", `Wiki remember: ${entry.name} — ${distilled.summary}`, {
+        botName: bot.name,
+        userId,
+        metadata: { source: "wiki-remember", wiki: entry.name },
+      });
+      log.info("Wiki remember: wiki={wiki} bot={bot} user={user} summary={summary}", {
+        wiki: entry.name,
+        bot: bot.name,
+        user: userId,
+        summary: distilled.summary,
+      });
+
+      return c.json({ saved: true, summary: distilled.summary });
+    } catch (err) {
+      log.error("Wiki remember: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
   });
 }
