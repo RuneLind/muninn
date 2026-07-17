@@ -7,6 +7,7 @@ import { streamResearchSSE } from "./research-sse.ts";
 import { resolveProfile } from "../../research/corpus.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
+import { renderResearchAnswerHtml } from "../../wiki/ask-render.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
@@ -88,6 +89,11 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       // matched page name, so the research page can link them into the /wiki
       // reader. Non-wiki collections pass through unchanged.
       enrich: (citations) => enrichCitationsWithPages(citations, getWikiRegistry()),
+      // Render the final answer through the shared component-aware markdown
+      // pipeline and ship it as a trailing `answer_html` event. The research page
+      // swaps its streamed plain text for this (and re-linkifies `[n]` markers
+      // client-side). See renderResearchAnswerHtml for why it's not the Ask renderer.
+      renderAnswerHtml: (answer) => renderResearchAnswerHtml(answer),
     });
   });
 

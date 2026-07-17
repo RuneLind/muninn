@@ -3,6 +3,7 @@ import { markdownContentStyles, docPanelStyles, docPanelHtml, docPanelScript, MA
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
+import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
   const helpers = await helpersClientScript();
@@ -135,6 +136,7 @@ export async function renderResearchPage(): Promise<string> {
     }
     .answer-body.streaming { white-space: pre-wrap; }
     ${markdownContentStyles(".answer-body")}
+    ${componentBlockCss(".answer-body")}
 
     .cite {
       display: inline-block;
@@ -627,6 +629,24 @@ export async function renderResearchPage(): Promise<string> {
           active = null;
           btn.disabled = false;
           updateComposer();
+        },
+
+        // Trailing event the server emits AFTER 'done' (between 'done' and 'end'):
+        // the final answer rendered through the same component-aware pipeline the
+        // chat/wiki use, so block components (Callout, Verdict, …) render as styled
+        // HTML instead of the escaped tags a client-side markdown pass would show.
+        // Swap the body wholesale, then re-linkify [n] markers (research citations
+        // are linkified client-side; because we replace innerHTML first, this is a
+        // single linkify over fresh HTML, not a double one). We do NOT close here —
+        // the stream still closes on the 'end' sentinel below.
+        answer_html: function(e) {
+          if (currentSource !== conn) return; // superseded by a newer ask
+          var d;
+          try { d = JSON.parse(e.data); } catch { return; }
+          if (!d.html) return;
+          a.bodyEl.className = 'answer-body';
+          a.bodyEl.innerHTML = d.html;
+          linkifyCitations(a.bodyEl, a.citations);
         },
 
         // App-level failure from the server (synthesis error, no bot, etc.). Named

@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
-import { renderAskAnswerHtml } from "./ask-render.ts";
+import { renderAskAnswerHtml, renderResearchAnswerHtml } from "./ask-render.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
+import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import type { Citation } from "../research/answer.ts";
 
 function cite(n: number, extra: Partial<Citation> = {}): Citation {
@@ -64,4 +66,66 @@ test("linkifies the same marker used twice", () => {
   const citations = [cite(1, { pageName: "p1" })];
   const html = renderAskAnswerHtml("First [1], then again [1].", citations);
   expect((html.match(/wiki-ask-cite/g) || []).length).toBe(2);
+});
+
+// --- block components in Ask/Explain answers -------------------------------
+
+// An answer that leans on the whitelisted component vocabulary, with a citation
+// inside a component body ([1]) and one in plain prose ([2]).
+const COMPONENT_ANSWER = [
+  '<Callout tone="warn" title="Caveat">',
+  "Cold starts are slow [1].",
+  "</Callout>",
+  "",
+  "Overall it works well [2].",
+  "",
+  '<Verdict value="yes">Recommended</Verdict>',
+].join("\n");
+
+test("Ask: component-bearing answer renders styled HTML, citation inside a component still linkified", () => {
+  const citations = [cite(1, { pageName: "perf", title: "Perf" }), cite(2)];
+  const html = renderAskAnswerHtml(COMPONENT_ANSWER, citations);
+  // Components render as their styled markup, not escaped tags.
+  expect(html).toContain('class="callout callout-warn"');
+  expect(html).toContain('<span class="verdict verdict-yes">Recommended</span>');
+  expect(html).not.toContain("&lt;Callout");
+  expect(html).not.toContain("&lt;Verdict");
+  // [1] lives inside the Callout body and still becomes a wiki-page cite.
+  expect(html).toContain('class="wiki-ask-cite" data-page="perf"');
+  // [2] has no matched page → stays literal text.
+  expect((html.match(/wiki-ask-cite/g) || []).length).toBe(1);
+  expect(html).toContain("[2]");
+});
+
+test("/research: renderResearchAnswerHtml renders components but leaves [n] literal (client linkifies)", () => {
+  const html = renderResearchAnswerHtml(COMPONENT_ANSWER);
+  expect(html).toContain('class="callout callout-warn"');
+  expect(html).toContain('<span class="verdict verdict-yes">Recommended</span>');
+  // No server-side cite linkify — markers stay literal for the client TreeWalker.
+  expect(html).not.toContain("wiki-ask-cite");
+  expect(html).toContain("[1]");
+  expect(html).toContain("[2]");
+});
+
+test("/research: empty answer renders empty without throwing", () => {
+  expect(renderResearchAnswerHtml("")).toBe("");
+});
+
+// Platform-safety: the SAME component-bearing answer must degrade to legible
+// fallbacks on Telegram + Slack — never leak raw `<Callout …>` / `<Verdict …>`
+// tags to the user (pins the goal at the answer level, not just the formatter).
+test("platform fallback: component answer stays legible on Telegram", () => {
+  const out = formatTelegramHtml(COMPONENT_ANSWER);
+  expect(out).toContain("Caveat"); // Callout title survives as bold prefix
+  expect(out).toContain("✅ Recommended"); // Verdict → check + label
+  expect(out).not.toContain("<Callout");
+  expect(out).not.toContain("<Verdict");
+});
+
+test("platform fallback: component answer stays legible on Slack", () => {
+  const out = formatSlackMrkdwn(COMPONENT_ANSWER);
+  expect(out).toContain("*Caveat*"); // Callout title → bold
+  expect(out).toContain("✅ Recommended"); // Verdict → check + label
+  expect(out).not.toContain("<Callout");
+  expect(out).not.toContain("<Verdict");
 });
