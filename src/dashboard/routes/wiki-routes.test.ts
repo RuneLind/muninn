@@ -11,6 +11,10 @@ import {
   __setSimilarSearchForTest,
   digestCacheDecision,
   resolveExplainPreflight,
+  fetchSavedNotes,
+  fetchSavedNotesBlock,
+  raceTimeout,
+  type SavedNotesDeps,
 } from "./wiki-routes.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -662,6 +666,97 @@ describe("resolveExplainPreflight", () => {
     expect(
       resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: undefined, page: "Nope" }),
     ).toBe('No wiki page named "Nope".');
+  });
+});
+
+/**
+ * Saved-notes injection helper (PR C). `fetchSavedNotes` is fully injectable, so
+ * the load-bearing branches — the null-embedding guard, no-mapping skip, throwing
+ * lookup, and the `wiki-note` tag scoping — are unit-tested here without a DB. The
+ * `raceTimeout` bound (a hanging lookup degrades to the fallback within budget) is
+ * tested directly with a short override.
+ */
+describe("fetchSavedNotes", () => {
+  const baseDeps = (over: Partial<SavedNotesDeps> = {}): SavedNotesDeps => ({
+    botName: "jarvis",
+    question: "what is corrective retrieval?",
+    getBotDefaultUser: async () => "user-1",
+    generateEmbedding: async () => Array.from({ length: 384 }, () => 0.1),
+    searchMemoriesHybrid: async () => [{ content: "a saved note" }],
+    ...over,
+  });
+
+  test("happy path scopes the search to the wiki-note tag, limit 5", async () => {
+    let seen: { userId?: string; limit?: number; botName?: string; tags?: string[] } = {};
+    const notes = await fetchSavedNotes(
+      baseDeps({
+        searchMemoriesHybrid: async (userId, _q, _emb, limit, botName, tags) => {
+          seen = { userId, limit, botName, tags };
+          return [{ content: "a saved note" }];
+        },
+      }),
+    );
+    expect(notes).toEqual([{ content: "a saved note" }]);
+    expect(seen.userId).toBe("user-1");
+    expect(seen.limit).toBe(5);
+    expect(seen.botName).toBe("jarvis");
+    expect(seen.tags).toEqual(["wiki-note"]);
+  });
+
+  test("null-embedding guard: bails to [] WITHOUT calling searchMemoriesHybrid", async () => {
+    let searchCalled = false;
+    const notes = await fetchSavedNotes(
+      baseDeps({
+        generateEmbedding: async () => null,
+        searchMemoriesHybrid: async () => {
+          searchCalled = true;
+          return [{ content: "should not appear" }];
+        },
+      }),
+    );
+    expect(notes).toEqual([]);
+    expect(searchCalled).toBe(false);
+  });
+
+  test("no bot_default_user mapping: skips silently (no embed, no search)", async () => {
+    let embedCalled = false;
+    const notes = await fetchSavedNotes(
+      baseDeps({
+        getBotDefaultUser: async () => null,
+        generateEmbedding: async () => {
+          embedCalled = true;
+          return [];
+        },
+      }),
+    );
+    expect(notes).toEqual([]);
+    expect(embedCalled).toBe(false);
+  });
+
+  test("a throwing lookup degrades to [] (never rejects)", async () => {
+    const notes = await fetchSavedNotes(
+      baseDeps({
+        searchMemoriesHybrid: async () => {
+          throw new Error("db down");
+        },
+      }),
+    );
+    expect(notes).toEqual([]);
+  });
+
+  test("fetchSavedNotesBlock renders the block, null when empty", async () => {
+    const block = await fetchSavedNotesBlock(baseDeps());
+    expect(block).toContain("READER'S SAVED WIKI NOTES");
+    expect(block).toContain("- a saved note");
+
+    const empty = await fetchSavedNotesBlock(baseDeps({ searchMemoriesHybrid: async () => [] }));
+    expect(empty).toBeNull();
+  });
+
+  test("raceTimeout: a hanging lookup resolves to the fallback within budget", async () => {
+    const hang = new Promise<string | null>(() => {}); // never settles
+    const out = await raceTimeout(hang, null, 15);
+    expect(out).toBeNull();
   });
 });
 

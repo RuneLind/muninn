@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   buildDistillPrompt,
   parseDistillResult,
+  buildSavedNotesBlock,
   REMEMBER_ANSWER_TRUNCATE,
   REMEMBER_SUMMARY_MAX,
 } from "./remember.ts";
@@ -113,5 +114,45 @@ describe("parseDistillResult", () => {
     expect(parseDistillResult("[1,2,3]")).toBeNull();
     expect(parseDistillResult("")).toBeNull();
     expect(parseDistillResult("42")).toBeNull();
+  });
+});
+
+describe("buildSavedNotesBlock", () => {
+  test("returns null for an empty list", () => {
+    expect(buildSavedNotesBlock([])).toBeNull();
+  });
+
+  test("returns null when every content is blank (drops empties)", () => {
+    expect(buildSavedNotesBlock([{ content: "" }, { content: "   " }])).toBeNull();
+  });
+
+  test("carries the honest background/non-citable framing", () => {
+    const block = buildSavedNotesBlock([{ content: "a fact" }])!;
+    expect(block).toContain("READER'S SAVED WIKI NOTES");
+    expect(block.toLowerCase()).toContain("background only");
+    expect(block).toContain("do not cite these as [n]");
+    expect(block.toLowerCase()).toContain("trust the sources");
+  });
+
+  test("renders one bullet per note, order preserved", () => {
+    const block = buildSavedNotesBlock([
+      { content: "first note" },
+      { content: "second note" },
+      { content: "third note" },
+    ])!;
+    expect(block).toContain("- first note");
+    expect(block).toContain("- second note");
+    expect(block).toContain("- third note");
+    expect(block.indexOf("first note")).toBeLessThan(block.indexOf("second note"));
+    expect(block.indexOf("second note")).toBeLessThan(block.indexOf("third note"));
+  });
+
+  test("trims content and drops blank rows while keeping order", () => {
+    const block = buildSavedNotesBlock([
+      { content: "  kept one  " },
+      { content: "   " },
+      { content: "kept two" },
+    ])!;
+    expect(block).toContain("- kept one\n- kept two");
   });
 });

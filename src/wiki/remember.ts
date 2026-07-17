@@ -90,3 +90,31 @@ export function parseDistillResult(raw: string): DistilledMemory | null {
     tags,
   };
 }
+
+/**
+ * Build the "reader's saved wiki notes" background block injected into the Ask /
+ * Explain synthesis system prompt (PR C). `memories` are the tag-scoped
+ * (`wiki-note`) hits from the hybrid memory search — so the honest "saved from
+ * earlier wiki reading" framing holds and general chat memories never enter here.
+ *
+ * The framing is deliberate: notes are BACKGROUND, not a citable source. The model
+ * is told not to cite them as `[n]` and to trust the numbered sources on conflict,
+ * so a stale/wrong saved note can't override the retrieved corpus.
+ *
+ * Returns null for an empty list (⇒ the route leaves the prompt unchanged); blank
+ * `content` rows are dropped, and an all-blank list also yields null. Order is
+ * preserved (the caller's relevance order).
+ */
+export function buildSavedNotesBlock(memories: { content: string }[]): string | null {
+  const lines = (memories ?? [])
+    .map((m) => (typeof m.content === "string" ? m.content.trim() : ""))
+    .filter(Boolean)
+    .map((content) => `- ${content}`);
+  if (lines.length === 0) return null;
+  return (
+    "READER'S SAVED WIKI NOTES (notes the reader explicitly saved from earlier wiki reading —\n" +
+    "background only, NOT a citable source; do not cite these as [n]; if they conflict with\n" +
+    "the numbered sources, trust the sources):\n" +
+    lines.join("\n")
+  );
+}
