@@ -16,6 +16,11 @@ import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
 import {
+  serializeAskSession,
+  deserializeAskSession,
+  type StoredAskTurn,
+} from "./wiki-ask-session.ts";
+import {
   connectionTypeOrder,
   filterPages,
   folderCounts,
@@ -1349,9 +1354,25 @@ function askMetaText(turn: AskTurn): string {
   );
 }
 
+/** Follow-up bar rendered under every Ask/Explain answer (input + Ask button).
+ *  Bound via document-level delegation (`showAskAnswer` replaces the whole pane
+ *  per turn, destroying direct listeners). Disabled until the turn is committed
+ *  (`turn.answer` is assigned only in the `done` handler) — the `done`/`answer_html`
+ *  handlers re-enable it by id, since they replace only `#askAnswerBody`. */
+function askFollowupHtml(turn: AskTurn): string {
+  const disabled = turn.answer ? "" : " disabled";
+  return (
+    '<div class="wiki-followup" id="wikiFollowupBar">' +
+    '<input id="wikiFollowupInput" class="wiki-followup-input" type="text" ' +
+    'placeholder="Ask a follow-up…" autocomplete="off"' + disabled + " />" +
+    '<button id="wikiFollowupBtn" class="wiki-followup-btn"' + disabled + ">Ask</button>" +
+    "</div>"
+  );
+}
+
 /** Full article-pane HTML for one Ask turn: question headline, meta row, answer
  *  body (rendered final article once available, else the progressively-formatted
- *  streaming buffer), then Sources. */
+ *  streaming buffer), then Sources, then the follow-up bar. */
 function askArticleHtml(turn: AskTurn, buffer: string): string {
   const body = askAnswerBodyHtml(turn.html, buffer, turn.answer);
   return (
@@ -1360,8 +1381,18 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     esc(askMetaText(turn)) + "</span></div></div>" +
     '<div class="wiki-article wiki-ask-article" id="askAnswerBody">' + body + "</div>" +
     '<div class="wiki-ask-sources" id="askAnswerSources">' +
-    askSourcesHtml(turn.citations, turn.cited) + "</div>"
+    askSourcesHtml(turn.citations, turn.cited) + "</div>" +
+    askFollowupHtml(turn)
   );
+}
+
+/** Enable/disable the follow-up controls by id (they may not exist yet at module
+ *  load, and the article pane is re-rendered per turn — always look up fresh). */
+function setFollowupDisabled(disabled: boolean): void {
+  const input = document.getElementById("wikiFollowupInput") as HTMLInputElement | null;
+  const btn = document.getElementById("wikiFollowupBtn") as HTMLButtonElement | null;
+  if (input) input.disabled = disabled;
+  if (btn) btn.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -1389,7 +1420,10 @@ function renderAskHistory(): void {
   const el = document.getElementById("wikiAskHistory");
   if (!el) return;
   if (!askTurns.length) { el.innerHTML = ""; return; }
-  let html = '<div class="wiki-ask-hist-head">This session</div>';
+  let html =
+    '<div class="wiki-ask-hist-head">This session' +
+    '<span class="wiki-ask-hist-clear" id="wikiAskHistClear" title="Clear this session">clear</span>' +
+    "</div>";
   for (let i = askTurns.length - 1; i >= 0; i--) {
     html +=
       '<div class="wiki-ask-hist-item" data-ask-idx="' + i + '">' +
@@ -1415,6 +1449,7 @@ function runAskStream(url: string, turn: AskTurn): void {
   setAskStatus("Searching…", "");
   const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
   btn.disabled = true;
+  setFollowupDisabled(true);
 
   const conn = sseClient(url, {
     phase: (e: MessageEvent) => {
@@ -1456,7 +1491,9 @@ function runAskStream(url: string, turn: AskTurn): void {
       setAskStatus(statusText, "done");
       askTurns.push(turn);
       renderAskHistory();
+      persistAskSession();
       btn.disabled = false;
+      setFollowupDisabled(false); // committed — the follow-up bar is now usable
       // Do NOT close here — the server emits a trailing `answer_html` after `done`.
       // We close on `answer_html` (or the `end` fallback if it never comes).
     },
@@ -1473,6 +1510,8 @@ function runAskStream(url: string, turn: AskTurn): void {
       const b = document.getElementById("askAnswerBody");
       if (b && turn.html) b.innerHTML = turn.html;
       refreshAskSources(turn);
+      persistAskSession(); // re-store so the rehydrated turn carries the final HTML
+      setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
       askActive = null;
       conn.close();
       askConn = null;
@@ -1484,6 +1523,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       setAskStatus(msg, "error");
       askActive = null;
       btn.disabled = false;
+      setFollowupDisabled(false);
       // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
       conn.close();
       askConn = null;
@@ -1496,6 +1536,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       askConn = null;
       askActive = null;
       btn.disabled = false;
+      setFollowupDisabled(false);
     },
     onerror: () => {
       if (askConn !== conn) return;
@@ -1503,6 +1544,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       askConn = null;
       askActive = null;
       btn.disabled = false;
+      setFollowupDisabled(false);
       const wrap = document.getElementById("wikiAskStatus");
       if (wrap && !wrap.classList.contains("done") && !wrap.classList.contains("error")) {
         setAskStatus("Connection lost", "error");
@@ -1512,6 +1554,25 @@ function runAskStream(url: string, turn: AskTurn): void {
   askConn = conn;
 }
 
+/** Build the `/api/wiki/ask` URL for a plain question (the Ask box + follow-up
+ *  bar share this — same `q`/`wiki`/`history` params). */
+function buildAskUrl(q: string): string {
+  let url = "/api/wiki/ask?q=" + encodeURIComponent(q);
+  if (WIKI) url += "&wiki=" + encodeURIComponent(WIKI);
+  const hist = askHistoryParam();
+  if (hist) url += "&history=" + encodeURIComponent(hist);
+  return url;
+}
+
+/** Start an Ask turn from a plain question string (shared by the Ask box and the
+ *  in-pane follow-up bar). */
+function askPlainQuestion(q: string): void {
+  const turn: AskTurn = {
+    question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
+  };
+  runAskStream(buildAskUrl(q), turn);
+}
+
 function askQuestion(): void {
   const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement;
   const q = input.value.trim();
@@ -1519,17 +1580,71 @@ function askQuestion(): void {
   input.value = "";
   const hint = document.getElementById("wikiAskHint");
   if (hint) hint.style.display = "none";
+  askPlainQuestion(q);
+}
 
-  const turn: AskTurn = {
-    question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
-  };
+/** Submit the in-pane follow-up bar under an answer. Reads + clears the input,
+ *  then runs the same Ask stream — the turn lands in `askTurns` via the shared
+ *  `done` handler, carrying the prior turns as `history`. */
+function submitFollowup(): void {
+  const input = document.getElementById("wikiFollowupInput") as HTMLInputElement | null;
+  if (!input || input.disabled) return;
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = "";
+  askPlainQuestion(q);
+}
 
-  let url = "/api/wiki/ask?q=" + encodeURIComponent(q);
-  if (WIKI) url += "&wiki=" + encodeURIComponent(WIKI);
-  const hist = askHistoryParam();
-  if (hist) url += "&history=" + encodeURIComponent(hist);
-
-  runAskStream(url, turn);
+// ── Ask session persistence (localStorage) ────────────────────────────
+// Persist the last N committed Ask/Explain turns so a page reload rehydrates the
+// "This session" list. Keyed per wiki (the bare /wiki reader may have no WIKI —
+// fall back to a shared default key). localStorage works here (the reader is a
+// normal page); the no-storage constraint only applies inside explainer iframes.
+const ASK_SESSION_CAP = 10;
+const ASK_SESSION_CAP_FALLBACK = 5; // quota retry
+function askSessionKey(): string {
+  return "wikiAskSession:" + (WIKI || "__default__");
+}
+/** Store the current session; a quota error retries once at a smaller cap, then
+ *  gives up silently (persistence is best-effort). */
+function persistAskSession(): void {
+  const key = askSessionKey();
+  try {
+    localStorage.setItem(key, serializeAskSession(askTurns as StoredAskTurn[], ASK_SESSION_CAP));
+  } catch {
+    try {
+      localStorage.setItem(
+        key,
+        serializeAskSession(askTurns as StoredAskTurn[], ASK_SESSION_CAP_FALLBACK),
+      );
+    } catch {
+      /* out of quota even at 5 — drop persistence silently */
+    }
+  }
+}
+/** Rehydrate the stored session into `askTurns` + the history list at boot. Does
+ *  NOT auto-show an answer — the list is enough; clicking a turn re-shows it. */
+function rehydrateAskSession(): void {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(askSessionKey());
+  } catch {
+    return; // storage unavailable — nothing to rehydrate
+  }
+  const stored = deserializeAskSession(raw);
+  if (!stored.length) return;
+  for (const t of stored) askTurns.push(t as unknown as AskTurn);
+  renderAskHistory();
+}
+/** Clear the session (history + storage), from the "clear" affordance. */
+function clearAskSession(): void {
+  askTurns.length = 0;
+  renderAskHistory();
+  try {
+    localStorage.removeItem(askSessionKey());
+  } catch {
+    /* ignore */
+  }
 }
 
 document.querySelector(".wiki-conn-tabs")?.addEventListener("click", (e) => {
@@ -1541,13 +1656,30 @@ document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;
   if (ke.key === "Enter" && !ke.shiftKey) { e.preventDefault(); askQuestion(); }
 });
-// Re-open a stored answer from the session history (no re-ask).
+// Re-open a stored answer from the session history (no re-ask), or clear the
+// session via the header affordance.
 document.getElementById("wikiAskHistory")?.addEventListener("click", (e) => {
-  const item = (e.target as HTMLElement).closest("[data-ask-idx]");
+  const target = e.target as HTMLElement;
+  if (target.closest("#wikiAskHistClear")) { clearAskSession(); return; }
+  const item = target.closest("[data-ask-idx]");
   if (!item) return;
   const idx = parseInt(item.getAttribute("data-ask-idx") || "-1", 10);
   const turn = askTurns[idx];
   if (turn) showAskAnswer(turn, "");
+});
+
+// Follow-up bar (in the article pane) — delegated at the document level because
+// `showAskAnswer` replaces the pane per turn, destroying any direct listeners.
+document.addEventListener("click", (e) => {
+  if ((e.target as HTMLElement).closest("#wikiFollowupBtn")) submitFollowup();
+});
+document.addEventListener("keydown", (e) => {
+  const ke = e as KeyboardEvent;
+  if (ke.key !== "Enter" || ke.shiftKey) return;
+  if ((ke.target as HTMLElement)?.id === "wikiFollowupInput") {
+    ke.preventDefault();
+    submitFollowup();
+  }
 });
 
 // ── Select-to-Explain pill ────────────────────────────────────────────
@@ -1730,6 +1862,9 @@ window.addEventListener("message", (e: MessageEvent) => {
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────
+// Rehydrate any persisted Ask session into the "This session" list (does not
+// auto-show an answer). Safe at module load — the history element is static.
+rehydrateAskSession();
 fetch(withWiki("/api/wiki/pages"))
   .then((r) => r.json())
   .then((data: WikiPagesResponse) => {
