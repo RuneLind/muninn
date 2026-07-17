@@ -21,6 +21,64 @@ export const EXPLAIN_WINDOW = 1200;
 /** Bodies at or below this length skip locating — the whole page is sent as the excerpt. */
 export const EXPLAIN_FULL_BODY_MAX = 3000;
 
+/** Decode the handful of HTML entities that survive {@link htmlToText}'s tag strip.
+ *  Deliberately narrow — named `&amp; &lt; &gt; &quot; &nbsp;` plus numeric
+ *  `&#NNN;` / `&#xHH;` (which also covers `&#39;`). `&amp;` is decoded last so a
+ *  single `&amp;lt;` folds to `&lt;` rather than double-decoding to `<`. */
+function decodeExplainEntities(s: string): string {
+  const fromCode = (n: number): string => {
+    try {
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "";
+    } catch {
+      return "";
+    }
+  };
+  return s
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#x([0-9a-f]+);/gi, (_m, h: string) => fromCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_m, d: string) => fromCode(parseInt(d, 10)))
+    .replace(/&amp;/gi, "&");
+}
+
+/**
+ * Reduce an HTML explainer page to the plain prose a reader would have selected
+ * from the RENDERED page, so the same {@link locateExcerpt}/{@link buildExplainAskOptions}
+ * that serve markdown pages can run on explainers unchanged. This is an
+ * excerpt-quality transform for prompt input, NOT a sanitizer — its output is
+ * never re-inserted into HTML.
+ *
+ * Deterministically:
+ *  - drops `<script>`/`<style>`/`<svg>` blocks wholesale (mermaid SVGs are huge
+ *    and never selected as prose) and `<!-- comments -->`;
+ *  - turns an opening `<hN>` into `\n` + `#`×N + a space so the stripped text
+ *    carries markdown-style heading markers that {@link locateHeadingSection}'s
+ *    regex still matches (keeping the `ctx` heading hint a live fallback tier);
+ *  - emits `\n` at block-level boundary tags (`</p></div></li></h1..6></tr></section></blockquote>`
+ *    and `<br>`) so the locator's line-snapping has real lines to snap to;
+ *  - replaces every other tag with a single space;
+ *  - decodes the common entities and collapses 3+ newlines to 2.
+ */
+export function htmlToText(html: string): string {
+  return decodeExplainEntities(
+    html
+      // Script/style/svg blocks, content and all.
+      .replace(/<(script|style|svg)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+      // HTML comments.
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      // Opening headings → markdown heading markers on their own line.
+      .replace(/<h([1-6])\b[^>]*>/gi, (_m, n: string) => "\n" + "#".repeat(Number(n)) + " ")
+      // Block-level boundary close tags → newline (line-snapping fodder).
+      .replace(/<\/(p|div|li|h[1-6]|tr|section|blockquote)\s*>/gi, "\n")
+      // Line breaks.
+      .replace(/<br\s*\/?>/gi, "\n")
+      // Everything else → single space.
+      .replace(/<[^>]+>/g, " "),
+  ).replace(/\n{3,}/g, "\n\n");
+}
+
 /**
  * Collapse markdown source toward the plain, whitespace-normalized text a reader
  * would have selected from the RENDERED HTML, while recording, for every emitted

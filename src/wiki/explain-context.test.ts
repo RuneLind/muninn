@@ -4,6 +4,7 @@ import {
   buildExplainQuestion,
   buildExplainContextBlock,
   buildExplainAskOptions,
+  htmlToText,
   EXPLAIN_WINDOW,
   EXPLAIN_FULL_BODY_MAX,
 } from "./explain-context.ts";
@@ -90,6 +91,95 @@ describe("locateExcerpt", () => {
     const body = `${before}\n\n## Big Heading\n\n${hugeSection}\n\n${after}`;
     const excerpt = locateExcerpt(body, "no match at all here xyz", "Big Heading");
     expect(excerpt.length).toBeLessThanOrEqual(2 * EXPLAIN_WINDOW);
+  });
+});
+
+describe("htmlToText", () => {
+  test("strips tags, keeping inline text as prose", () => {
+    const out = htmlToText("<p>Hello <strong>bold</strong> and <a href='x'>link</a>.</p>");
+    expect(out).toContain("Hello");
+    expect(out).toContain("bold");
+    expect(out).toContain("link");
+    expect(out).not.toContain("<");
+    expect(out).not.toContain("href");
+  });
+
+  test("drops script/style/svg blocks wholesale", () => {
+    const out = htmlToText(
+      "<p>keep</p><script>var secret = 1;</script><style>.a{color:red}</style><svg><path d='M0 0'/></svg><p>tail</p>",
+    );
+    expect(out).toContain("keep");
+    expect(out).toContain("tail");
+    expect(out).not.toContain("secret");
+    expect(out).not.toContain("color:red");
+    expect(out).not.toContain("M0 0");
+  });
+
+  test("removes HTML comments", () => {
+    const out = htmlToText("<p>visible</p><!-- hidden note --><p>more</p>");
+    expect(out).toContain("visible");
+    expect(out).toContain("more");
+    expect(out).not.toContain("hidden note");
+  });
+
+  test("block boundaries become newlines", () => {
+    const out = htmlToText("<div>one</div><div>two</div><ul><li>a</li><li>b</li></ul>");
+    expect(out).toContain("one\n");
+    expect(out.split("\n").length).toBeGreaterThan(1);
+    // <br> also breaks a line.
+    expect(htmlToText("left<br>right")).toContain("left\nright");
+  });
+
+  test("opening headings become markdown heading markers", () => {
+    expect(htmlToText("<h2>Section Title</h2>")).toContain("\n## Section Title");
+    expect(htmlToText("<h1>Top</h1>")).toContain("\n# Top");
+    // Attributes on the heading tag are tolerated.
+    expect(htmlToText('<h3 id="x" class="y">Deep</h3>')).toContain("\n### Deep");
+  });
+
+  test("locateExcerpt heading fallback fires on stripped HTML", () => {
+    // A long explainer body (over the full-body cap) with the selection absent —
+    // the heading marker emitted by htmlToText lets the ctx heading hint locate.
+    const filler = Array.from({ length: 60 }, (_, i) => `<p>filler paragraph number ${i} lorem ipsum dolor</p>`).join("");
+    const html = `${filler}<h2>Corrective Retrieval</h2><p>The rescue re-queries huginn on a weak signal.</p>${filler}`;
+    const body = htmlToText(html);
+    expect(body.length).toBeGreaterThan(EXPLAIN_FULL_BODY_MAX);
+    const excerpt = locateExcerpt(body, "selection nowhere in the body zzz qqq", "Corrective Retrieval");
+    expect(excerpt.startsWith("## Corrective Retrieval")).toBe(true);
+    expect(excerpt).toContain("The rescue re-queries huginn");
+  });
+
+  test("decodes the common entities (named + numeric)", () => {
+    const out = htmlToText("<p>Tom &amp; Jerry &lt;tag&gt; &quot;q&quot; &#39;a&#39; &nbsp;x &#65; &#x42;</p>");
+    expect(out).toContain("Tom & Jerry");
+    expect(out).toContain("<tag>");
+    expect(out).toContain('"q"');
+    expect(out).toContain("'a'");
+    expect(out).toContain("A"); // &#65;
+    expect(out).toContain("B"); // &#x42;
+  });
+
+  test("end-to-end: locate a rendered-looking selection in stripped explainer HTML", () => {
+    const filler = Array.from({ length: 60 }, (_, i) => `<p>Background paragraph ${i} covering unrelated material.</p>`).join("");
+    const html =
+      `<h1>Overview</h1>${filler}` +
+      `<h2>How it works</h2>` +
+      `<p>The pipeline runs <strong>retrieval</strong> then <a href="/x">synthesis</a> over the wiki.</p>` +
+      filler;
+    const body = htmlToText(html);
+    expect(body.length).toBeGreaterThan(EXPLAIN_FULL_BODY_MAX);
+    // Reader selected the RENDERED text (markup collapsed away).
+    const excerpt = locateExcerpt(body, "The pipeline runs retrieval then synthesis over the wiki.");
+    expect(excerpt).toContain("The pipeline runs");
+    expect(excerpt).toContain("retrieval");
+    // Inline-markup strip leaves double spaces (the accepted known limitation) —
+    // the locator's space-collapse still matched; assert on the words, not spacing.
+    expect(excerpt).toContain("synthesis");
+    expect(excerpt).toContain("over the wiki");
+  });
+
+  test("collapses 3+ newlines to 2", () => {
+    expect(htmlToText("<p>a</p><div></div><div></div><div></div><p>b</p>")).not.toContain("\n\n\n");
   });
 });
 
