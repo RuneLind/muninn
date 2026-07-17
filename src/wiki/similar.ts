@@ -12,7 +12,20 @@
  */
 
 import { matchCitationToPage } from "./citation-links.ts";
-import type { WikiIndex, WikiPageMeta } from "./store.ts";
+import { readWikiPage, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import type { WikiRegistryEntry } from "./registry.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("wiki", "similar");
+
+/** Injectable Huginn searcher: `(baseUrl, path) → { results }`. The real impl is
+ *  `fetchKnowledgeApi`; tests override it. The `(baseUrl, path)` shape carries
+ *  neither an abort signal nor an options bag, so callers that need a timeout
+ *  must wrap the returned promise (e.g. `Promise.race`), never rely on it here. */
+export type SimilarSearchFn = (
+  baseUrl: string,
+  path: string,
+) => Promise<{ results?: SimilarSearchHit[] }>;
 
 /** The minimal shape of a Huginn `/api/search` hit this module reads. */
 export interface SimilarSearchHit {
@@ -153,4 +166,42 @@ export function resolveSimilarHits(
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/**
+ * The Similar-articles flow shared by `/api/wiki/similar` and the Select-to-
+ * Explain route: build the page's semantic query, search the wiki's backing
+ * collections (limit 8), and resolve the top 5 hits back onto pages in the SAME
+ * wiki. Best-effort by contract — a search failure (Huginn down) resolves to
+ * `[]` and logs a warn; it **never rejects**, so callers can hand the returned
+ * promise straight to `Promise.race` for a timeout bound without risking an
+ * unhandled rejection when the real fetch rejects after the race already settled.
+ * Explainers query on their sniffed head description; markdown pages on their body.
+ */
+export async function fetchSimilarPages(
+  entry: WikiRegistryEntry,
+  index: WikiIndex,
+  meta: WikiPageMeta,
+  config: { knowledgeApiUrl: string },
+  search: SimilarSearchFn,
+): Promise<SimilarPage[]> {
+  try {
+    const collections = entry.collections ?? [];
+    const body =
+      meta.type === "explainer"
+        ? (meta.description ?? "")
+        : (await readWikiPage(index, meta)) ?? "";
+    const query = buildSimilarQuery(meta, body);
+    const searchPath = buildSimilarSearchPath(query, collections, 8);
+    const resp = await search(config.knowledgeApiUrl, searchPath);
+    const hits = Array.isArray(resp?.results) ? resp.results : [];
+    return resolveSimilarHits(hits, index, meta, 5);
+  } catch (err) {
+    log.warn("Wiki similar: search failed for wiki={wiki} page={page}: {error}", {
+      wiki: entry.name,
+      page: meta.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
 }

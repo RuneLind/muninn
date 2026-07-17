@@ -12,11 +12,15 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
-  buildSimilarQuery,
-  buildSimilarSearchPath,
-  resolveSimilarHits,
-  type SimilarSearchHit,
+  fetchSimilarPages,
+  type SimilarPage,
+  type SimilarSearchFn,
 } from "../../wiki/similar.ts";
+import {
+  buildExplainAskOptions,
+  EXPLAIN_HEADING_MAX,
+  EXPLAIN_SELECTION_MAX,
+} from "../../wiki/explain-context.ts";
 import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
@@ -80,14 +84,15 @@ export function __seedWikiDigestForTest(name: string, digest: WikiDigest): void 
 }
 
 /**
- * Injectable Huginn searcher for the `/api/wiki/similar` route. Defaults to the
- * real `fetchKnowledgeApi`; tests override it to exercise the happy / self-
- * exclusion / unresolved-drop / huginn-down branches without a live Huginn.
+ * Injectable Huginn searcher for the `/api/wiki/similar` + `/api/wiki/explain`
+ * routes. Defaults to the real `fetchKnowledgeApi`; tests override it to exercise
+ * the happy / self-exclusion / unresolved-drop / huginn-down branches without a
+ * live Huginn. Shared by both routes via `fetchSimilarPages`.
  */
-type SimilarSearchFn = (baseUrl: string, path: string) => Promise<{ results?: SimilarSearchHit[] }>;
 let similarSearchFn: SimilarSearchFn | null = null;
 
-/** Test-only: override (or reset with `null`) the Huginn searcher used by `/api/wiki/similar`. */
+/** Test-only: override (or reset with `null`) the Huginn searcher used by the
+ *  Similar + Explain routes. */
 export function __setSimilarSearchForTest(fn: SimilarSearchFn | null): void {
   similarSearchFn = fn;
 }
@@ -598,31 +603,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     const meta = index.resolve(pageName);
     if (!meta) return c.json({ error: `no wiki page named "${pageName}"` }, 404);
 
-    // Explainers aren't markdown — use the sniffed head <meta description> as the
-    // body so the query is title + tags + description instead of title-only.
-    const body =
-      meta.type === "explainer"
-        ? (meta.description ?? "")
-        : (await readWikiPage(index, meta)) ?? "";
-    const query = buildSimilarQuery(meta, body);
-    const searchPath = buildSimilarSearchPath(query, collections, 8);
-
+    // Build query + search + resolve is shared with the Explain route. Best-effort:
+    // a Huginn failure resolves to [] (section hides), never errors the page.
     const search: SimilarSearchFn = similarSearchFn ?? ((baseUrl, p) => fetchKnowledgeApi(baseUrl, p));
-    let hits: SimilarSearchHit[];
-    try {
-      const resp = await search(config.knowledgeApiUrl, searchPath);
-      hits = Array.isArray(resp?.results) ? resp.results : [];
-    } catch (err) {
-      // Huginn unreachable — hide the section, never error the page.
-      log.warn("Wiki similar: search failed for wiki={wiki} page={page}: {error}", {
-        wiki: entry.name,
-        page: meta.name,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return c.json({ similar: [] });
-    }
-
-    return c.json({ similar: resolveSimilarHits(hits, index, meta, 5) });
+    const similar = await fetchSimilarPages(entry, index, meta, config, search);
+    return c.json({ similar });
   });
 
   // Raw HTML for a standalone explainer, served for the reader's <iframe>. The
@@ -725,6 +710,114 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // The reader renders the answer as a formatted article in its main pane, so
       // the route emits a trailing `answer_html` (markdown → reader HTML, `[n]`
       // markers linked to matched pages). `/research` leaves this unset.
+      renderAnswerHtml: renderAskAnswerHtml,
+    });
+  });
+
+  // Wiki Explain tab: Select-to-Explain. A sibling of `/api/wiki/ask` — the reader
+  // selects a passage on a page and we run the SAME research pipeline (retrieval
+  // over the wiki's collections → coverage gate → cited synthesis → answer_html)
+  // with a per-wiki system prompt carrying the selected passage's article context.
+  // v1 supports markdown pages only; an explainer page preflights out. The
+  // inherited coverage gate applies — a selection from a non-indexed page may get
+  // the canned "No strong match" decline (accepted). Never 5xx: param problems are
+  // 400 JSON; wiki/page problems are `app_error` events on the already-committed
+  // 200 SSE response.
+  app.get("/api/wiki/explain", async (c) => {
+    const sel = (c.req.query("sel") ?? "").trim().slice(0, EXPLAIN_SELECTION_MAX);
+    if (!sel) return c.json({ error: "Missing query parameter: sel" }, 400);
+    const page = c.req.query("page");
+    if (!page) return c.json({ error: "Missing query parameter: page" }, 400);
+    const ctx = (c.req.query("ctx") ?? "").trim().slice(0, EXPLAIN_HEADING_MAX) || undefined;
+    const history = parseResearchHistory(c.req.query("history"));
+
+    const registry = getWikiRegistry();
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    // Owner-routing, identical to the Ask route (jarvis wiki → jarvis, nav →
+    // melosys; standalone / opus-owned wikis fall back to the research bot).
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+    const collections = entry?.collections ?? [];
+
+    // Preflight (mirrors Ask's wiki/collection checks, plus the index/page checks
+    // the Similar route makes — but as app_error, since the SSE response is
+    // already committed to 200). Runs the index/meta dereference ONLY on the happy
+    // path; every earlier branch leaves index/meta unset.
+    let preflightError: string | null = null;
+    let index: WikiIndex | null = null;
+    let meta: WikiPageMeta | undefined;
+    if (unknownWiki || !entry) {
+      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
+    } else if (collections.length === 0) {
+      preflightError = "No search collection connected for this wiki.";
+    } else {
+      index = await getWikiIndex({ root: entry.root });
+      if (!index) {
+        preflightError = "wiki directory not found";
+      } else {
+        meta = index.resolve(page);
+        if (!meta) {
+          preflightError = `No wiki page named "${page}".`;
+        } else if (meta.type === "explainer") {
+          preflightError = "Explain is not available for HTML explainer pages yet.";
+        }
+      }
+    }
+
+    // Context assembly — ONLY when preflight passed (index/meta/entry are set).
+    let question = "";
+    let systemPrompt: string | undefined;
+    if (!preflightError && entry && index && meta) {
+      const body = (await readWikiPage(index, meta)) ?? "";
+      // Similar titles are best-effort background context: bounded by a short
+      // timeout via Promise.race so a slow-but-alive Huginn can't stall the stream
+      // open (this fetch runs BEFORE streamResearchSSE's heartbeat exists), and a
+      // dead Huginn can't block. `fetchSimilarPages` never rejects, so racing it is
+      // safe even if its real fetch settles after the timeout already won.
+      const search: SimilarSearchFn = similarSearchFn ?? ((baseUrl, p) => fetchKnowledgeApi(baseUrl, p));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<SimilarPage[]>((resolve) => {
+        timer = setTimeout(() => resolve([]), 3000);
+      });
+      const similar = await Promise.race([
+        fetchSimilarPages(entry, index, meta, config, search),
+        timeout,
+      ]);
+      clearTimeout(timer);
+      const similarTitles = similar.map((s) => s.title);
+
+      const opts = buildExplainAskOptions({
+        meta,
+        body,
+        sel,
+        ctx,
+        similarTitles,
+        wikiName: entry.name,
+      });
+      question = opts.question;
+      systemPrompt = opts.systemPrompt;
+      log.info("Wiki explain: wiki={wiki} bot={bot} page={page} sel={sel}", {
+        wiki: entry.name,
+        bot: botConfig?.name,
+        page,
+        sel: sel.slice(0, 80),
+      });
+    }
+
+    return streamResearchSSE(c, {
+      question,
+      config,
+      botConfig: botConfig ?? null,
+      history,
+      collections,
+      preflightError,
+      systemPrompt,
+      // Same per-wiki citation enrichment as Ask (pinned to the resolved wiki).
+      enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
       renderAnswerHtml: renderAskAnswerHtml,
     });
   });
