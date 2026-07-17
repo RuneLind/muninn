@@ -115,3 +115,37 @@ He found it ~~bad~~ very well explained.`;
   expect(result).toContain("<i>testing</i>");
   expect(result).toContain("<s>bad</s>");
 });
+
+test("component: Callout → bold title prefix + body", () => {
+  expect(formatTelegramHtml("<Callout tone=\"info\" title=\"Heads up\">\nbody\n</Callout>")).toBe(
+    "<b>Heads up</b>\nbody",
+  );
+});
+
+test("component: Callout without title → just body", () => {
+  expect(formatTelegramHtml("<Callout>\nbody\n</Callout>")).toBe("body");
+});
+
+test("component: Verdict → check/cross + label", () => {
+  expect(formatTelegramHtml("<Verdict value=\"yes\">Fast</Verdict>")).toBe("✅ Fast");
+  expect(formatTelegramHtml("<Verdict value=\"no\" />")).toBe("❌ No");
+});
+
+test("component: Pill → [text]", () => {
+  expect(formatTelegramHtml("<Pill>beta</Pill>")).toBe("[beta]");
+});
+
+test("component: FileRef self-closing → plain path", () => {
+  expect(formatTelegramHtml("<FileRef path=\"src/x.ts\" />")).toBe("src/x.ts");
+});
+
+test("component: ComparisonTable → its inner table (pipe form)", () => {
+  const out = formatTelegramHtml("<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>");
+  expect(out).toContain("| A | B |");
+});
+
+test("component: Callout title with angle brackets is escaped", () => {
+  const out = formatTelegramHtml("<Callout title=\"a<b\">\nx\n</Callout>");
+  expect(out).toContain("a&lt;b");
+  expect(out).not.toContain("<b>a<b</b>");
+});

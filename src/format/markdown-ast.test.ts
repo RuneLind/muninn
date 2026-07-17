@@ -145,3 +145,104 @@ describe("parseBlocks", () => {
     expect(blocks[2]).toEqual({ type: "blockquote", lines: ["next"] });
   });
 });
+
+describe("parseBlocks — component blocks", () => {
+  test("single-line component with inline close", () => {
+    expect(parseBlocks("<Verdict value=\"yes\">Fast</Verdict>")).toEqual([
+      { type: "component", name: "Verdict", attrs: { value: "yes" }, children: [{ type: "text", lines: ["Fast"] }] },
+    ]);
+  });
+
+  test("multi-line Callout parses its body as blocks", () => {
+    const input = "<Callout tone=\"warn\" title=\"Watch out\">\n## Inner heading\n\n- a\n- b\n</Callout>";
+    expect(parseBlocks(input)).toEqual([
+      {
+        type: "component",
+        name: "Callout",
+        attrs: { tone: "warn", title: "Watch out" },
+        children: [
+          { type: "heading", level: 2, content: "Inner heading" },
+          { type: "text", lines: [""] },
+          { type: "ul", items: ["a", "b"] },
+        ],
+      },
+    ]);
+  });
+
+  test("self-closing FileRef with path attr", () => {
+    expect(parseBlocks("<FileRef path=\"src/x.ts\" />")).toEqual([
+      { type: "component", name: "FileRef", attrs: { path: "src/x.ts" }, children: [] },
+    ]);
+  });
+
+  test("self-closing not allowed for Callout → falls through as text", () => {
+    expect(parseBlocks("<Callout tone=\"info\" />")).toEqual([
+      { type: "text", lines: ["<Callout tone=\"info\" />"] },
+    ]);
+  });
+
+  test("unknown tag is NOT a component (falls through as text)", () => {
+    expect(parseBlocks("<Widget foo=\"bar\">hi</Widget>")).toEqual([
+      { type: "text", lines: ["<Widget foo=\"bar\">hi</Widget>"] },
+    ]);
+  });
+
+  test("unknown attrs are dropped, known attrs kept", () => {
+    const blocks = parseBlocks("<Callout tone=\"good\" bogus=\"x\" onclick=\"evil()\">\nbody\n</Callout>");
+    expect(blocks[0]).toMatchObject({ type: "component", name: "Callout", attrs: { tone: "good" } });
+    expect((blocks[0] as any).attrs).toEqual({ tone: "good" });
+  });
+
+  test("unclosed component tag falls through as text", () => {
+    const input = "<Callout tone=\"info\">\nnever closed";
+    expect(parseBlocks(input)).toEqual([
+      { type: "text", lines: ["<Callout tone=\"info\">", "never closed"] },
+    ]);
+  });
+
+  test("nesting depth cap: a component at depth 2 is not parsed (body stays text)", () => {
+    // Callout(0) > Callout(1) > Pill — the innermost Pill is at depth 2, not parsed.
+    const input = "<Callout>\n<Callout>\n<Pill>x</Pill>\n</Callout>\n</Callout>";
+    const outer = parseBlocks(input);
+    expect(outer).toHaveLength(1);
+    expect(outer[0]).toMatchObject({ type: "component", name: "Callout" });
+    const mid = (outer[0] as any).children;
+    expect(mid).toHaveLength(1);
+    expect(mid[0]).toMatchObject({ type: "component", name: "Callout" });
+    // The innermost body is at depth 2 → the Pill is plain text, not a component.
+    expect(mid[0].children).toEqual([{ type: "text", lines: ["<Pill>x</Pill>"] }]);
+  });
+
+  test("code fence inside a Callout is preserved as a code block", () => {
+    const input = "<Callout tone=\"info\">\n```ts\nconst x = 1;\n```\n</Callout>";
+    expect(parseBlocks(input)).toEqual([
+      {
+        type: "component",
+        name: "Callout",
+        attrs: { tone: "info" },
+        children: [{ type: "code_block", lang: "ts", code: "const x = 1;" }],
+      },
+    ]);
+  });
+
+  test("same-name nesting: inner Callout does not close the outer early", () => {
+    const input = "<Callout>\nouter\n<Callout>\ninner\n</Callout>\nmore outer\n</Callout>";
+    const blocks = parseBlocks(input);
+    expect(blocks).toHaveLength(1);
+    const kids = (blocks[0] as any).children;
+    expect(kids.map((b: any) => b.type)).toEqual(["text", "component", "text"]);
+    expect(kids[1]).toMatchObject({ type: "component", name: "Callout" });
+  });
+
+  test("ComparisonTable wraps an inner table", () => {
+    const input = "<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>";
+    expect(parseBlocks(input)).toEqual([
+      {
+        type: "component",
+        name: "ComparisonTable",
+        attrs: {},
+        children: [{ type: "table", headers: ["A", "B"], rows: [["1", "2"]] }],
+      },
+    ]);
+  });
+});

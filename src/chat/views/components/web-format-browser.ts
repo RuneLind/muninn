@@ -22,7 +22,27 @@ const WEB_TAGS = [
   "blockquote", "hr",
   "table", "thead", "tbody", "tr", "th", "td",
   "p", "details", "summary",
+  // Component block markup (`web-format.ts`) + any raw component tags an answer
+  // might emit before parsing lands them. Without these the sanitizer would
+  // flatten components to text on the client re-render.
+  "div", "figure", "figcaption",
+  "callout", "verdict", "pill", "fileref", "comparisontable",
 ];
+
+// Class names emitted by the component renderers. `class` is normally stripped
+// from every tag but `code`; these are preserved so component styling survives.
+const COMPONENT_CLASS_ALLOW = new Set([
+  "callout", "callout-info", "callout-warn", "callout-good", "callout-bad",
+  "callout-title", "callout-body",
+  "verdict", "verdict-yes", "verdict-no",
+  "pill", "pill-rec", "pill-warn",
+  "figure", "figure-body", "caption", "fileref", "tablewrap",
+]);
+
+function classIsComponent(value: string): boolean {
+  const tokens = value.trim().split(/\s+/);
+  return tokens.length > 0 && tokens.every((t) => COMPONENT_CLASS_ALLOW.has(t));
+}
 
 function sanitizeHtml(html: string, isWeb: boolean): string {
   const allowedTags = isWeb ? WEB_TAGS : TG_TAGS;
@@ -45,6 +65,7 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         if (tag === "a" && attr.name === "href" && /^https?:\/\//.test(attr.value)) continue;
         if (tag === "a" && (attr.name === "target" || attr.name === "rel")) continue;
         if (tag === "code" && attr.name === "class") continue;
+        if (attr.name === "class" && classIsComponent(attr.value)) continue;
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {

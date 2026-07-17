@@ -1,4 +1,4 @@
-import type { Block } from "./markdown-ast.ts";
+import type { Block, ComponentName } from "./markdown-ast.ts";
 
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
@@ -22,6 +22,9 @@ export interface BlockRenderer {
   ul(items: string[]): string;
   ol(items: string[]): string;
   table(headers: string[], rows: string[][]): string;
+  /** Render a component block. `renderedChildren` is the component body already
+   *  walked through this same renderer, so the method only wraps/decorates it. */
+  component(name: ComponentName, attrs: Record<string, string>, renderedChildren: string): string;
   text(lines: string[]): string;
 }
 
@@ -47,6 +50,8 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return r.ol(block.items);
     case "table":
       return r.table(block.headers, block.rows);
+    case "component":
+      return r.component(block.name, block.attrs, renderBlocks(block.children, r));
     case "text":
       return r.text(block.lines);
     default: {

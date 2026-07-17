@@ -1,4 +1,4 @@
-import { parseBlocks } from "../format/markdown-ast.ts";
+import { parseBlocks, normalizeVerdictValue } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -29,6 +29,25 @@ const telegramRenderer: BlockRenderer = {
     const sepRow = "|" + headers.map(() => "---").join("|") + "|";
     const dataRows = rows.map((row) => `| ${row.map(renderInline).join(" | ")} |`);
     return [headerRow, sepRow, ...dataRows].join("\n");
+  },
+  component(name, attrs, children) {
+    switch (name) {
+      case "Callout":
+        return attrs.title ? `<b>${escapeHtml(attrs.title)}</b>\n${children}` : children;
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = children.trim() || (value === "yes" ? "Yes" : "No");
+        return `${value === "yes" ? "✅" : "❌"} ${label}`;
+      }
+      case "Pill":
+        return `[${children.trim()}]`;
+      case "Figure":
+        return attrs.caption ? `${children}\n${escapeHtml(attrs.caption)}` : children;
+      case "FileRef":
+        return children.trim() || escapeHtml(attrs.path ?? "");
+      case "ComparisonTable":
+        return children;
+    }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
 };

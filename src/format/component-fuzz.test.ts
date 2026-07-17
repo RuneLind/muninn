@@ -1,0 +1,99 @@
+import { test, expect, describe } from "bun:test";
+import { parseBlocks } from "./markdown-ast.ts";
+import { formatWebHtml } from "../web/web-format.ts";
+import { formatTelegramHtml } from "../bot/telegram-format.ts";
+import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+
+/**
+ * Hostile-input fuzz set for component blocks. The contract: the parser never
+ * throws or hangs, and no platform renderer ever emits an executable `<script>`
+ * from attacker-controlled attrs or bodies.
+ */
+
+const format = (md: string) => ({
+  web: formatWebHtml(md),
+  telegram: formatTelegramHtml(md),
+  slack: formatSlackMrkdwn(md),
+});
+
+describe("component fuzz — never throws, never injects", () => {
+  test("unclosed tags degrade to text on every platform", () => {
+    const md = "<Callout tone=\"info\">\nleft open forever\nmore lines";
+    const out = format(md);
+    // Web escapes the raw tag rather than opening a callout div.
+    expect(out.web).toContain("&lt;Callout");
+    expect(out.web).not.toContain('<div class="callout');
+    expect(() => format(md)).not.toThrow();
+  });
+
+  test("attr injection cannot escape into markup", () => {
+    const md = '<Callout title=""><script>alert(1)</script>">\nbody\n</Callout>';
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.telegram).not.toContain("<script>");
+    // Slack has no HTML surface, but must not carry a live tag either.
+    expect(out.slack).not.toContain("<script>");
+  });
+
+  test("attr value with quote-and-tag injection is neutralized", () => {
+    const md = '<Pill tone="rec\"><img src=x onerror=alert(1)>">payload</Pill>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    // The payload survives only as inert escaped text — no live tag reaches the DOM.
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+  });
+
+  test("10k inline-closed tag bomb parses in a single pass without hanging", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Pill>x</Pill>").join("\n");
+    const start = Date.now();
+    const blocks = parseBlocks(md);
+    expect(blocks).toHaveLength(10_000);
+    expect(blocks.every((b) => b.type === "component")).toBe(true);
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
+
+  test("10k unclosed-tag bomb terminates and degrades to text", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Callout>").join("\n");
+    const start = Date.now();
+    const blocks = parseBlocks(md);
+    // All unclosed → every line falls through to a single text block.
+    expect(blocks).toEqual([{ type: "text", lines: Array(10_000).fill("<Callout>") }]);
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
+
+  test("code fence inside a Callout is preserved verbatim, no premature close", () => {
+    const md = "<Callout tone=\"info\">\n```ts\n// </Callout> inside a fence must not close\nconst x = 1;\n```\n</Callout>";
+    const blocks = parseBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "component", name: "Callout" });
+    const kids = (blocks[0] as any).children;
+    expect(kids).toHaveLength(1);
+    expect(kids[0]).toMatchObject({ type: "code_block", lang: "ts" });
+    expect(kids[0].code).toContain("</Callout> inside a fence");
+    // Web output escapes the fence body and keeps the callout wrapper intact.
+    const web = formatWebHtml(md);
+    expect(web).toContain('<div class="callout callout-info">');
+    expect(web).toContain("&lt;/Callout&gt; inside a fence");
+  });
+
+  test("plain-prose line starting with a whitelisted tag now parses as a component (accepted edge)", () => {
+    // Locks in the intended behavior: a line-anchored whitelisted tag that used
+    // to be inert prose is newly a component. Only whitelisted names qualify.
+    const componentised = parseBlocks("<Pill>existing prose token</Pill>");
+    expect(componentised[0]).toMatchObject({ type: "component", name: "Pill" });
+
+    // A non-whitelisted look-alike stays plain text (today's behavior).
+    const inert = parseBlocks("<Sidebar>still just prose</Sidebar>");
+    expect(inert).toEqual([{ type: "text", lines: ["<Sidebar>still just prose</Sidebar>"] }]);
+  });
+
+  test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
+    const depth = 50;
+    const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;
+    expect(() => parseBlocks(md)).not.toThrow();
+    const blocks = parseBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ type: "component", name: "Callout" });
+  });
+});

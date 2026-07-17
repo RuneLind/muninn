@@ -11,6 +11,7 @@ const probe: BlockRenderer = {
   ul: (items) => `UL:${items.join("|")}`,
   ol: (items) => `OL:${items.join("|")}`,
   table: (headers, rows) => `TBL:${headers.join(",")};${rows.map((r) => r.join(",")).join(";")}`,
+  component: (name, attrs, kids) => `CMP[${name}]{${JSON.stringify(attrs)}}:${kids}`,
   text: (lines) => `TXT:${lines.join("|")}`,
 };
 
@@ -37,6 +38,18 @@ test("dispatches each block type to the matching method with the right args", ()
       "TBL:H1,H2;a,b",
     ].join("\n"),
   );
+});
+
+test("dispatches component blocks, rendering children through the same renderer", () => {
+  const blocks: Block[] = [
+    {
+      type: "component",
+      name: "Callout",
+      attrs: { tone: "info", title: "Heads up" },
+      children: [{ type: "text", lines: ["body"] }],
+    },
+  ];
+  expect(renderBlocks(blocks, probe)).toBe('CMP[Callout]{{"tone":"info","title":"Heads up"}}:TXT:body');
 });
 
 test("joins rendered blocks with a single newline", () => {
