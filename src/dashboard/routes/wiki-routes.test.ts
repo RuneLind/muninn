@@ -400,6 +400,124 @@ describe("GET /api/wiki/similar", () => {
   });
 });
 
+/**
+ * `/api/wiki/explain` — Select-to-Explain. Sibling of the Ask route. Like the Ask
+ * tests, we exercise only the seams the code allows without a live Huginn/`claude`:
+ * the 400s for missing params, the `app_error` preflights (unknown wiki / no
+ * collections / missing index / unknown page / explainer page), and the risk-note-4
+ * behavioral check that a THROWING similar-search fn still reaches
+ * `streamResearchSSE` without a 500. All prompt-composition assertions live in the
+ * pure `explain-context.test.ts` — the route stays a thin I/O shell here.
+ */
+describe("GET /api/wiki/explain — resolution + preflight", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-explain-route-"));
+    await mkdir(path.join(root, "blogs"), { recursive: true });
+    await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
+    await Bun.write(
+      path.join(root, "blogs/An Explainer.html"),
+      "<!doctype html><html><head><title>An Explainer</title></head><body>hi</body></html>",
+    );
+    prevExtra = process.env.WIKI_EXTRA;
+    // explwiki: has a collection (page-level preflights reachable).
+    // nocoll:   same dir, no collection.
+    // badidx:   has a collection but points at a missing dir (index unloadable).
+    process.env.WIKI_EXTRA =
+      `explwiki=${root}=explcoll,nocoll=${root},badidx=${path.join(root, "missing-subdir")}=badcoll`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:0" } as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    __setSimilarSearchForTest(null);
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("400 without a sel param", async () => {
+    const res = await app.request(
+      "/api/wiki/explain?wiki=explwiki&page=" + encodeURIComponent("A Concept"),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("400 without a page param", async () => {
+    const res = await app.request("/api/wiki/explain?wiki=explwiki&sel=hello");
+    expect(res.status).toBe(400);
+  });
+
+  test("unknown wiki → app_error SSE", async () => {
+    const res = await app.request("/api/wiki/explain?wiki=does-not-exist&sel=hi&page=X");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("event: app_error");
+    expect(body).toContain("No wiki configured");
+    expect(body).toContain("event: end");
+  });
+
+  test("wiki with no collections → app_error SSE", async () => {
+    const res = await app.request(
+      "/api/wiki/explain?wiki=nocoll&sel=hi&page=" + encodeURIComponent("A Concept"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("event: app_error");
+    expect(body).toContain("No search collection connected");
+  });
+
+  test("missing/unloadable index → app_error SSE", async () => {
+    const res = await app.request("/api/wiki/explain?wiki=badidx&sel=hi&page=X");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("event: app_error");
+    expect(body).toContain("wiki directory not found");
+  });
+
+  test("unknown page → app_error SSE", async () => {
+    const res = await app.request("/api/wiki/explain?wiki=explwiki&sel=hi&page=Nope");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("event: app_error");
+    expect(body).toContain("No wiki page named");
+    expect(body).toContain("Nope");
+  });
+
+  test("explainer page → app_error SSE (v1: markdown only)", async () => {
+    const res = await app.request(
+      "/api/wiki/explain?wiki=explwiki&sel=hi&page=" + encodeURIComponent("An Explainer"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("event: app_error");
+    expect(body).toContain("HTML explainer pages");
+  });
+
+  test("throwing similar search still reaches streamResearchSSE without a 500", async () => {
+    // risk-note-4: a thrown similar-search degrades to no Related-pages context and
+    // the request still streams (returns a 200 SSE Response). We assert only the
+    // status — reading the body would drive the real (unreachable) synthesis path.
+    __setSimilarSearchForTest(async () => {
+      throw new Error("Huginn unreachable");
+    });
+    const res = await app.request(
+      "/api/wiki/explain?wiki=explwiki&page=" +
+        encodeURIComponent("A Concept") +
+        "&sel=" +
+        encodeURIComponent("Body."),
+    );
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("digestCacheDecision", () => {
   const digest = { logMtimeMs: 1000 } as WikiDigest;
 
