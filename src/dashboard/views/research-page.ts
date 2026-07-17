@@ -2,10 +2,15 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { markdownContentStyles, docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from "./components/doc-panel.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
+import { webFormatClientScript } from "../../chat/views/components/web-format-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
+import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
-  const helpers = await helpersClientScript();
+  const [helpers, webFormat] = await Promise.all([
+    helpersClientScript(),
+    webFormatClientScript(),
+  ]);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -135,6 +140,7 @@ export async function renderResearchPage(): Promise<string> {
     }
     .answer-body.streaming { white-space: pre-wrap; }
     ${markdownContentStyles(".answer-body")}
+    ${componentBlockCss(".answer-body")}
 
     .cite {
       display: inline-block;
@@ -366,6 +372,7 @@ export async function renderResearchPage(): Promise<string> {
   ${MARKED_CDN_SCRIPT}
   <script>
     ${helpers}
+    ${webFormat}
 
     var CORPUS = ${clientCorpusJson()};
     var PROFILES = ${clientProfilesJson()};
@@ -610,7 +617,16 @@ export async function renderResearchPage(): Promise<string> {
           var d = JSON.parse(e.data);
           a.buffer = d.answer || a.buffer || '';
           a.bodyEl.className = 'answer-body';
-          a.bodyEl.innerHTML = renderMarkdown(a.buffer);
+          // Render through the SAME component-aware formatter the server's
+          // trailing 'answer_html' uses (formatWebHtml, attached to globalThis by
+          // the web-format bundle above), NOT the marked.js renderMarkdown — whose
+          // sanitizing renderer escapes raw HTML, so block components (Callout,
+          // Verdict, …) would show as literal escaped tags. 'answer_html' normally
+          // supersedes this, but if it never arrives (server render throw, empty
+          // html, or a drop between 'done' and 'answer_html') this fallback stands,
+          // so it must already be component-aware. innerHTML is reset here before
+          // the single linkify pass below — no double-linkify.
+          a.bodyEl.innerHTML = formatWebHtml(a.buffer);
           linkifyCitations(a.bodyEl, a.citations);
           a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
           bindSources(a.sourcesEl, a.citations);
@@ -627,6 +643,24 @@ export async function renderResearchPage(): Promise<string> {
           active = null;
           btn.disabled = false;
           updateComposer();
+        },
+
+        // Trailing event the server emits AFTER 'done' (between 'done' and 'end'):
+        // the final answer rendered through the same component-aware pipeline the
+        // chat/wiki use, so block components (Callout, Verdict, …) render as styled
+        // HTML instead of the escaped tags a client-side markdown pass would show.
+        // Swap the body wholesale, then re-linkify [n] markers (research citations
+        // are linkified client-side; because we replace innerHTML first, this is a
+        // single linkify over fresh HTML, not a double one). We do NOT close here —
+        // the stream still closes on the 'end' sentinel below.
+        answer_html: function(e) {
+          if (currentSource !== conn) return; // superseded by a newer ask
+          var d;
+          try { d = JSON.parse(e.data); } catch { return; }
+          if (!d.html) return;
+          a.bodyEl.className = 'answer-body';
+          a.bodyEl.innerHTML = d.html;
+          linkifyCitations(a.bodyEl, a.citations);
         },
 
         // App-level failure from the server (synthesis error, no bot, etc.). Named

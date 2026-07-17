@@ -48,3 +48,19 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
     (_m, idx: string) => tokens[parseInt(idx, 10)] ?? "",
   );
 }
+
+/**
+ * Render a `/research` answer's markdown to HTML for the trailing `answer_html`
+ * SSE event. Unlike {@link renderAskAnswerHtml} this does NOT server-linkify the
+ * `[n]` markers: the research page linkifies them client-side against the turn's
+ * citations (opening the doc panel), and its citations rarely carry a `pageName`
+ * anyway — so reusing `renderAskAnswerHtml`'s cite-linkify would be inert at best
+ * and, for the occasional wiki-collection hit that does resolve to a page, would
+ * emit `wiki-ask-cite` sups whose reader-only click delegate doesn't exist on the
+ * research page. A plain `formatWebHtml` pass is therefore the right seam: it runs
+ * the same component-aware markdown pipeline (Callout/Verdict/… render as styled
+ * HTML) and leaves `[n]` as literal text for the client to linkify.
+ */
+export function renderResearchAnswerHtml(answer: string): string {
+  return formatWebHtml(answer ?? "");
+}

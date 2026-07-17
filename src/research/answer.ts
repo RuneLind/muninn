@@ -166,7 +166,14 @@ const SYNTHESIS_RULES_BODY = `Rules:
 - Do NOT use any tools or outside knowledge — answer solely from the provided sources.
 - If the sources do not actually answer the question, say so plainly in one sentence instead of guessing. Never invent details, URLs, or version numbers.
 - This may be a follow-up in an ongoing conversation. When a "Conversation so far" block is present, use it ONLY to resolve what the new question refers to (pronouns, "that", "it") — still ground every claim in the numbered sources, never cite or treat the prior turns as fact.
-- Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.`;
+- Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.
+
+You may optionally use a few presentational block components to highlight structure. They are seasoning, not scaffolding — use at most 2-3 in an answer (only a genuine side-by-side comparison justifies more), and never wrap the whole answer in them. When in doubt, leave them out and write plain markdown.
+- <Callout tone="info|good|warn|bad" title="...">…</Callout> — a caveat, a TL;DR, or a highlighted note.
+- <Verdict value="yes|no">short label</Verdict> — a direct yes/no judgment.
+- <ComparisonTable>…</ComparisonTable> — wraps a normal markdown pipe table (its own lines between the tags) when the answer compares options side by side.
+- <Pill tone="rec|warn">label</Pill> — a small status/tag chip. <Figure caption="...">…</Figure> — a captioned block. <FileRef path="src/x.ts" /> — a file-path reference.
+Grammar (strict — break it and the tag renders as visible text): put each opening and closing tag on its own line, flush to the left margin; never place a tag inside a sentence, a list item, or a paragraph (they are block-level only). Use double-quoted attribute values. Keep [n] citations in the surrounding prose, not inside the tags.`;
 
 /**
  * Build a synthesis system prompt: a corpus-specific `framingLine` (the opening
