@@ -504,6 +504,19 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-followup-btn:hover { opacity: 0.9; }
     .wiki-followup-btn:disabled { opacity: 0.5; cursor: default; }
+    /* "Remember this" bar under the follow-up bar. */
+    .wiki-remember { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    .wiki-remember-btn {
+      padding: 6px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .wiki-remember-btn:hover { border-color: var(--accent); }
+    .wiki-remember-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-remember-msg { font-size: 12px; color: var(--text-secondary); }
+    .wiki-remember-msg.error { color: var(--danger, #e5534b); }
+    .wiki-remember-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
     .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {
       flex: 1; padding: 8px 10px; border-radius: 7px;

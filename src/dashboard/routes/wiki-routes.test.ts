@@ -165,6 +165,64 @@ describe("GET /api/wiki/ask — resolution errors", () => {
 });
 
 /**
+ * `POST /api/wiki/remember` resolution branches that never reach the DB / Haiku
+ * router: missing question/answer are 400, an unknown wiki is 404. The distill /
+ * save happy path and the no-mapping 409 both touch `getBotDefaultUser` (DB) and
+ * the Haiku router, which have no injection seam here — same discipline as the
+ * Ask-route tests (which only cover branches that never spawn / hit Huginn). Those
+ * are covered by the live smoke.
+ */
+describe("POST /api/wiki/remember — resolution branches", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  const post = (query: string, body: unknown) =>
+    app.request("/api/wiki/remember" + query, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-remember-route-"));
+    await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `remwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("400 when question is missing/empty", async () => {
+    const res = await post("?wiki=remwiki", { answer: "an answer" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("question");
+  });
+
+  test("400 when answer is missing/empty", async () => {
+    const res = await post("?wiki=remwiki", { question: "a question", answer: "   " });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("answer");
+  });
+
+  test("404 for an unknown wiki (before any DB touch)", async () => {
+    const res = await post("?wiki=does-not-exist", { question: "q", answer: "a" });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toContain("no wiki configured");
+  });
+});
+
+/**
  * `/api/wiki/index-coverage` resolution branches that never hit huginn: an
  * unknown wiki and a registered wiki with no backing collections both return a
  * clean 200 + `{ error }` with null coverage fields (never a 5xx). The happy path
