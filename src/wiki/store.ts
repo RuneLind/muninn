@@ -378,6 +378,41 @@ function asStringArray(v: string | string[] | undefined): string[] {
 const HTML_TITLE_SNIFF_BYTES = 4096;
 const HTML_TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
 
+/**
+ * Marker the MDX explainer pipeline stamps at the very top of every compiled
+ * `.html` (see mimir `scripts/mdx-explainer/build.ts`: `<!-- generated from
+ * blogs/src/<slug>.mdx … -->`). Used to positively identify a compiled sibling
+ * when deciding whether a same-stem `.mdx` is a pipeline SOURCE (below).
+ */
+const GENERATED_HTML_MARKER = "<!-- generated from";
+const GENERATED_MARKER_SNIFF_BYTES = 512;
+
+/**
+ * A `.mdx` is a compile-pipeline SOURCE (not a wiki page) when it sits at
+ * `<dir>/src/<stem>.mdx` AND a compiled sibling explainer `<dir>/<stem>.html`
+ * exists carrying the generated marker — mimir's documented pipeline: "Source
+ * lives at blogs/src/<slug>.mdx" compiled to `blogs/<slug>.html`. Returns the
+ * sibling html's relPath to verify, or null when the path isn't shaped like a
+ * source (immediate parent segment must be `src`).
+ *
+ * Chosen over a bare path-segment rule (skip anything under a `src/` dir) because
+ * it is surgical: it only fires when a compiled twin genuinely exists, so a stray
+ * or hand-authored `.mdx` — even one placed under a `src/` folder — stays a
+ * first-class native page rather than silently vanishing. The marker check rules
+ * out a coincidental same-stem `.html` that wasn't produced by the pipeline.
+ */
+function pipelineSourceSiblingHtml(relPath: string): string | null {
+  if (!relPath.toLowerCase().endsWith(".mdx")) return null;
+  const segs = relPath.split("/");
+  if (segs.length < 2) return null;
+  const file = segs[segs.length - 1]!;
+  const parent = segs[segs.length - 2]!;
+  if (parent.toLowerCase() !== "src") return null;
+  const stemHtml = file.replace(/\.mdx$/i, ".html");
+  // Drop the `src` segment: <…>/src/<stem>.mdx → <…>/<stem>.html
+  return [...segs.slice(0, segs.length - 2), stemHtml].join("/");
+}
+
 /** Every `<meta …>` tag in a prefix. Tolerates attribute order — attributes are
  *  read out of the matched tag by name, not by position. `[^>]*` naturally caps
  *  a tag with an unclosed quote at the next `>` so its attrs fail to parse (the
@@ -482,7 +517,7 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
  */
 export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const glob = new Bun.Glob("**/*.{md,mdx,html}");
-  const relPaths: string[] = [];
+  let relPaths: string[] = [];
   for await (const p of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
     // versions — filter path segments explicitly. node_modules can appear inside
@@ -492,6 +527,36 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     relPaths.push(p);
   }
   relPaths.sort();
+
+  // Exclude MDX compile-pipeline SOURCES before discovery. A source at
+  // `blogs/src/<slug>.mdx` shares its bare stem with the compiled explainer at
+  // `blogs/<slug>.html`; because stem-collision precedence ranks `.mdx` (1) above
+  // `.html` (2) globally across dirs, discovering the source as a native page
+  // would SHADOW the compiled explainer the reader is meant to serve — dropping it
+  // from pages/byKey/byRelPath and stripping all its backlinks. Skip the source so
+  // the explainer survives. This is expected pipeline shape, not an authoring
+  // mistake, so it's logged at debug (unlike the same-dir precedence warn below).
+  const scannedSet = new Set(relPaths.map((p) => p.toLowerCase()));
+  const isPipelineSource = await Promise.all(
+    relPaths.map(async (relPath) => {
+      const siblingHtml = pipelineSourceSiblingHtml(relPath);
+      if (!siblingHtml || !scannedSet.has(siblingHtml.toLowerCase())) return false;
+      try {
+        const head = await Bun.file(path.join(root, siblingHtml))
+          .slice(0, GENERATED_MARKER_SNIFF_BYTES)
+          .text();
+        if (!head.includes(GENERATED_HTML_MARKER)) return false;
+      } catch {
+        return false; // unreadable sibling — treat the .mdx as a normal page
+      }
+      log.debug("wiki compile-pipeline source {relPath} excluded (compiled sibling {sibling})", {
+        relPath,
+        sibling: siblingHtml,
+      });
+      return true;
+    }),
+  );
+  relPaths = relPaths.filter((_, i) => !isPipelineSource[i]);
 
   // Per-wiki type ontology — read once per build (inherits the index TTL). Absent
   // or malformed ⇒ null (built-in five-type behavior). `.wiki-reader.json` is not

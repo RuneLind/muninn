@@ -755,6 +755,62 @@ describe("buildWikiIndex", () => {
     expect(survivor[0]!.relPath).toBe("blogs/src/OnlyMdx.mdx");
   });
 
+  test("compile-pipeline source excluded: compiled explainer survives with backlinks, .mdx source absent", async () => {
+    // Capture wiki-store logs so we can assert the exclusion is logged at DEBUG
+    // (expected pipeline shape), NOT at WARN (which flags authoring mistakes).
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "blogs/src"), { recursive: true });
+      // Mirror the real mimir pipeline layout: SOURCE at blogs/src/<slug>.mdx,
+      // compiled explainer at blogs/<slug>.html carrying the generated marker.
+      await Bun.write(
+        path.join(root, "blogs/src/foo.mdx"),
+        "---\ntitle: Foo Source\n---\n\n# Foo\n\n```mermaid\ngraph TD; A-->B;\n```\n",
+      );
+      await Bun.write(
+        path.join(root, "blogs/foo.html"),
+        "<!-- generated from blogs/src/foo.mdx — edit the source -->\n" +
+          "<!doctype html><html><head><title>Foo Explainer</title></head><body>Compiled.</body></html>",
+      );
+      // A .md page backlinks the compiled explainer by relative path.
+      await Bun.write(
+        path.join(root, "concepts/Links Foo.md"),
+        "---\ntype: concept\n---\n\nSee [foo](../blogs/foo.html).",
+      );
+      const index = await buildWikiIndex(root);
+
+      // The compiled explainer stays listed…
+      const foo = index.pages.filter((p) => p.name.toLowerCase() === "foo");
+      expect(foo.length).toBe(1);
+      expect(foo[0]!.relPath).toBe("blogs/foo.html");
+      expect(foo[0]!.type).toBe("explainer");
+      expect(foo[0]!.title).toBe("Foo Explainer");
+      // …and keeps its backlink from the .md page.
+      expect(index.backlinks.get("blogs/foo.html")).toEqual(["concepts/links foo.md"]);
+      // The .mdx SOURCE is absent from pages, byKey, and byRelPath.
+      expect(index.pages.some((p) => p.relPath === "blogs/src/foo.mdx")).toBe(false);
+      expect(index.resolve("blogs/src/foo")).toBeUndefined();
+      // resolve("foo") lands on the explainer, not the shadowing source.
+      expect(index.resolve("foo")?.relPath).toBe("blogs/foo.html");
+    } finally {
+      await reset();
+    }
+    // Logged at debug (expected), never surfaced as a "shadowed" warn.
+    expect(records.some((r) => r.rawMessage.includes("shadowed") && r.level === "warning")).toBe(
+      false,
+    );
+    expect(
+      records.some(
+        (r) => r.level === "debug" && r.rawMessage.includes("compile-pipeline source"),
+      ),
+    ).toBe(true);
+  });
+
   test("getWikiIndex caches and refreshes via env-configured root", async () => {
     __resetWikiCacheForTest();
     const prev = process.env.WIKI_DIR;
