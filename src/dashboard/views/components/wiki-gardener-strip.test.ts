@@ -206,6 +206,52 @@ describe("backlogOutcomeHtml — cancelled runs", () => {
   });
 });
 
+describe("backlogOutcomeHtml — insufficient + zero-draft burn (PR 2)", () => {
+  test("insufficient batch → informational 'below the minimum cluster size; nothing offered'", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 2 });
+    expect(html).toContain("2 eligible doc(s)");
+    expect(html).toContain("below the minimum cluster size");
+    expect(html).toContain("nothing offered");
+    // Nothing was burned, so this is a plain note — NOT the warn style.
+    expect(html).not.toContain("bk-warn");
+  });
+
+  test("insufficient with zero eligible (or the field absent) → distinct empty-backlog copy", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient" });
+    expect(html).toContain("no eligible docs in the backlog");
+    expect(html).not.toContain("bk-warn");
+  });
+
+  test("insufficient renders the run's own minClusterSize threshold, defaulting to 3", () => {
+    const withMin = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 4, minClusterSize: 5,
+    });
+    expect(withMin).toContain("below the minimum cluster size of 5");
+    const withoutMin = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 2 });
+    expect(withoutMin).toContain("below the minimum cluster size of 3");
+  });
+
+  test("offered docs but drafted nothing → warn style + burn copy + Reset hint", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 9, drafted: 0 });
+    expect(html).toContain("bk-warn");
+    expect(html).toContain("⚠");
+    expect(html).toContain("offered 9 docs but drafted nothing");
+    expect(html).toContain("Reset to retry");
+  });
+
+  test("a real done run (drafted > 0) is unchanged — no warn", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 9, drafted: 2 });
+    expect(html).toContain("2 draft(s) from 9 docs");
+    expect(html).not.toContain("bk-warn");
+  });
+
+  test("nothing offered and nothing drafted → plain 'nothing to draft' note (not a warn)", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0 });
+    expect(html).toContain("nothing to draft");
+    expect(html).not.toContain("bk-warn");
+  });
+});
+
 describe("backlogStripModel — degraded response (live fields absent)", () => {
   // The GET's catch branch returns only { byCollection:[], total, ingested,
   // queued:0, wikiUrlCount, generatedAt, errors } — no remaining/running/

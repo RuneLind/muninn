@@ -35,6 +35,15 @@ export interface LastBacklogRun {
   error?: string;
   /** Set when the run was soft-cancelled — `drafted` of `of` clusters drafted. */
   cancelled?: { drafted: number; of: number };
+  /**
+   * Set when the eligible batch was below the cluster minimum — the run was
+   * provably unable to draft, so nothing was offered/journalled/run. `eligible`
+   * is the too-small batch size.
+   */
+  outcome?: "insufficient";
+  eligible?: number;
+  /** The resolved threshold the guard fired against — per-bot configurable, default 3. */
+  minClusterSize?: number;
 }
 
 /** Live progress of an in-flight backlog drain (mirrors the server shape). */
@@ -261,6 +270,17 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   if (run.error) {
     return ` <span class="bk-err">last run failed: ${esc(run.error)}</span>`;
   }
+  // Below-minimum batch: the run never touched the offered set (nothing burned),
+  // so this is an informational note, not the burn warning below. `eligible` is
+  // the too-small batch size (falls back to `offered`, which is 0 for this outcome).
+  if (run.outcome === "insufficient") {
+    const eligible = run.eligible ?? run.offered;
+    const min = run.minClusterSize ?? 3;
+    if (eligible === 0) {
+      return ` <span class="bk-run-note">last run: no eligible docs in the backlog — nothing offered</span>`;
+    }
+    return ` <span class="bk-run-note">last run: ${eligible} eligible doc(s) — below the minimum cluster size of ${min}; nothing offered</span>`;
+  }
   if (run.cancelled) {
     const { drafted, of } = run.cancelled;
     if (drafted === 0) {
@@ -271,7 +291,13 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   if (run.drafted > 0) {
     return ` <span class="bk-run-note">last run: ${run.drafted} draft(s) from ${run.offered} docs — see proposals below</span>`;
   }
-  return ` <span class="bk-run-note">last run finished — nothing clustered; ${run.offered} docs offered</span>`;
+  // Offered docs but drafted nothing: the batch was burned into the offered set
+  // (at-most-once) with zero result — the silent tail-burn this campaign guards.
+  // Warn (not a bland "done") so a reviewer notices and can Reset to retry.
+  if (run.offered > 0) {
+    return ` <span class="bk-warn">⚠ last run offered ${run.offered} docs but drafted nothing — those docs are now marked offered; Reset to retry</span>`;
+  }
+  return ` <span class="bk-run-note">last run finished — nothing to draft</span>`;
 }
 
 /**
