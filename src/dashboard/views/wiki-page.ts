@@ -441,7 +441,9 @@ export async function renderWikiPage(opts?: {
     .wiki-ask-bot code { font-size: 10px; background: var(--bg-hover); padding: 1px 4px; border-radius: 4px; }
     /* Session history — one clickable line per asked question, newest first. */
     .wiki-ask-history { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
-    .wiki-ask-hist-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); margin: 4px 4px 4px; }
+    .wiki-ask-hist-head { display: flex; align-items: center; justify-content: space-between; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); margin: 4px 4px 4px; }
+    .wiki-ask-hist-clear { cursor: pointer; color: var(--text-dim); font-weight: 600; padding: 1px 4px; border-radius: 4px; }
+    .wiki-ask-hist-clear:hover { color: var(--status-error); background: var(--bg-hover); }
     .wiki-ask-hist-item {
       font-size: 12.5px; color: var(--text-secondary); line-height: 1.4;
       padding: 6px 9px; border-radius: 6px; cursor: pointer;
@@ -486,6 +488,22 @@ export async function renderWikiPage(opts?: {
     .wiki-ask-src-badge { flex-shrink: 0; font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light); }
     .wiki-ask-src-title { flex: 1; font-size: 12px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-ask-src-page { flex-shrink: 0; font-size: 10px; color: var(--accent-light); }
+    /* Follow-up bar under the answer (in the article pane). */
+    .wiki-followup { display: flex; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-primary); }
+    .wiki-followup-input {
+      flex: 1; padding: 9px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 13px; font-family: inherit; line-height: 1.4;
+    }
+    .wiki-followup-input:focus { outline: none; border-color: var(--accent); }
+    .wiki-followup-input:disabled { opacity: 0.6; }
+    .wiki-followup-btn {
+      padding: 0 16px; border-radius: 8px; border: none;
+      background: var(--accent); color: #fff; font-size: 13px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .wiki-followup-btn:hover { opacity: 0.9; }
+    .wiki-followup-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {
       flex: 1; padding: 8px 10px; border-radius: 7px;
