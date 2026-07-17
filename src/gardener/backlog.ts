@@ -317,6 +317,14 @@ export interface LastBacklogRun {
   error?: string;
   /** Set when the run was soft-cancelled — `drafted` of `of` clusters drafted. */
   cancelled?: { drafted: number; of: number };
+  /**
+   * Set when the eligible batch was below `minClusterSize` — the run was provably
+   * incapable of drafting (the clusterer needs ≥ minClusterSize docs on one topic),
+   * so NOTHING was journalled, offered, or run. `eligible` is the too-small batch
+   * size. Distinct from a `drafted: 0`/`offered > 0` run, which DID burn its batch.
+   */
+  outcome?: "insufficient";
+  eligible?: number;
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
@@ -380,6 +388,14 @@ export interface StartBacklogRunDeps {
   gardenerEnabled: boolean;
   /** false ⇒ no `wiki-gardener` watcher row seeded (offered memory has no FK). */
   hasWatcher: boolean;
+  /**
+   * The bot's RESOLVED gardener `minClusterSize` (`resolveGardenerConfig`). A batch
+   * with fewer eligible docs than this cannot possibly cluster, so the work fn
+   * short-circuits to an `insufficient` outcome — writing no journal, no offered
+   * snapshot, and skipping `runGardener` — rather than burning the tail (see the
+   * guard in {@link startBacklogRun}). Populated at the route call site.
+   */
+  minClusterSize: number;
   assemble: () => Promise<AssembledBacklog>;
   /** Persist the new offered set (called BEFORE runGardener — at-most-once). */
   persistOffered: (keys: string[]) => Promise<void>;
@@ -404,6 +420,16 @@ export interface StartBacklogRunDeps {
 }
 
 export type StartBacklogRunResult = { state: "started" | "running" | "no-watcher" | "disabled" };
+
+/** What the detached work fn resolves with — read by the success settle handler. */
+interface BacklogRunResult {
+  offered: number;
+  drafted: number;
+  cancelled?: { drafted: number; of: number };
+  /** Set when the batch was below `minClusterSize` — nothing was journalled/offered/run. */
+  outcome?: "insufficient";
+  eligible?: number;
+}
 
 /**
  * Recover a pending run journal: return the batch's undrafted keys to the pool
@@ -452,7 +478,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   if (!deps.hasWatcher) return { state: "no-watcher" };
   if (!deps.gardenerEnabled) return { state: "disabled" };
 
-  const run = runExclusive(deps.botName, async () => {
+  const run = runExclusive(deps.botName, async (): Promise<BacklogRunResult> => {
     const startedAt = Date.now();
     // Seeded synchronously (before the first await) so the entry — and the cancel
     // flag `requestBacklogCancel` reads — exists the moment the mutex is acquired.
@@ -492,6 +518,22 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     await recoverRunJournal(deps);
 
     const assembled = await deps.assemble();
+
+    // Insufficient-batch guard: a batch below the cluster minimum is PROVABLY
+    // incapable of drafting (the clusterer requires ≥ minClusterSize docs on one
+    // topic), so running it would burn the whole batch into the offered set for
+    // nothing — permanently stranding a tiny old tail. Short-circuit: write NO
+    // journal, NO offered snapshot, and skip runGardener entirely; record an
+    // `insufficient` outcome so the UI warns instead of rendering a bland "done".
+    // (The registry run started above is still completed in the finally below.)
+    if (assembled.batchKeys.length < deps.minClusterSize) {
+      log.info(
+        "Backlog run: {n} eligible doc(s) below minClusterSize {min} for {bot} — nothing offered",
+        { botName: deps.botName, n: assembled.batchKeys.length, min: deps.minClusterSize },
+      );
+      return { offered: 0, drafted: 0, outcome: "insufficient", eligible: assembled.batchKeys.length };
+    }
+
     // Journal BEFORE offering — a crash between the two recovers as a harmless no-op
     // (subtracting keys never offered); the reverse order would recreate the strand.
     await deps.writeRunJournal({ startedAt, batchKeys: assembled.batchKeys });
@@ -585,6 +627,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         offered: r.offered,
         drafted: r.drafted,
         ...(r.cancelled ? { cancelled: r.cancelled } : {}),
+        ...(r.outcome ? { outcome: r.outcome, eligible: r.eligible } : {}),
       });
     },
     (err) => {

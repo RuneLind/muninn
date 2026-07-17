@@ -823,6 +823,10 @@ export function registerWikiGardenerRoutes(
       botName: bot.name,
       gardenerEnabled: bot.gardener?.enabled !== false,
       hasWatcher: !!watcher,
+      // A batch below the cluster minimum can't draft — the work fn short-circuits
+      // to an `insufficient` outcome (no journal/offer/run) rather than burning the
+      // tiny tail. Sourced from the SAME resolved config as the runner's clusterer.
+      minClusterSize: resolveGardenerConfig(bot.gardener).minClusterSize,
       assemble: () =>
         assembleBacklog({
           botName: bot.name,

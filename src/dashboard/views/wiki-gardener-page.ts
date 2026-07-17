@@ -82,6 +82,7 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-sep { color: var(--text-dim); }
     .gard-backlog .bk-err { color: var(--status-magenta); font-size: 12px; }
     .gard-backlog .bk-run-note { color: var(--text-muted); font-size: 12px; }
+    .gard-backlog .bk-warn { color: var(--status-warning, #d0a000); font-size: 12px; font-weight: 600; }
     .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
     /* Primary run button — deliberately reads as a button, not inline stat text. */
     .gard-backlog .gard-btn.bk-run {

@@ -26,8 +26,11 @@ import { agentStatus } from "../observability/agent-status.ts";
  * No-op journal seams (PR 3) — every `startBacklogRun` case that doesn't exercise
  * the run journal spreads these so the work fn's readRunJournal (top) and
  * clearRunJournal (settle) are harmless. `readRunJournal: null` ⇒ no auto-recover.
+ * `minClusterSize: 1` keeps the insufficient-batch guard inert for these cases (all
+ * their batches are ≥ 1); the guard's own tests override it.
  */
 const NOOP_JOURNAL = {
+  minClusterSize: 1,
   getOffered: async () => new Set<string>(),
   readRunJournal: async (): Promise<RunJournal | null> => null,
   writeRunJournal: async () => {},
@@ -413,6 +416,103 @@ describe("startBacklogRun", () => {
     // The journal is deliberately NOT cleared — the errored batch routes through
     // the same Recover/Dismiss banner as a crash.
     expect(cleared).toBe(false);
+  });
+
+  test("insufficient batch (< minClusterSize) → records insufficient, writes NO journal + NO offered snapshot + skips runGardener", async () => {
+    const calls: string[] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    let ranGardener = false;
+    let persistedWith: string[] | null = null;
+
+    // A batch of 2 eligible docs against minClusterSize 3 — provably can't cluster.
+    const tiny: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(["c/z"]),
+      queuedCount: 2,
+    };
+
+    const r = startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 3,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => {
+        calls.push("assemble");
+        return tiny;
+      },
+      writeRunJournal: async () => {
+        calls.push("journal");
+      },
+      clearRunJournal: async () => {
+        calls.push("clear");
+      },
+      persistOffered: async (keys) => {
+        calls.push("persist");
+        persistedWith = keys;
+      },
+      runGardener: async () => {
+        ranGardener = true;
+        return [];
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+
+    expect(r.state).toBe("started");
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The guard fires after assemble: no journal write, no offered persist, no run.
+    expect(ranGardener).toBe(false);
+    // persistOffered was NEVER called with the batch (never called at all here).
+    expect(persistedWith).toBeNull();
+    expect(calls).not.toContain("journal");
+    expect(calls).not.toContain("persist");
+    // The settle clears the journal harmlessly (idempotent) — assemble ran, guard hit.
+    expect(calls).toContain("assemble");
+
+    // The outcome is recorded so the UI can warn instead of rendering a bland "done".
+    expect(recorded).not.toBeNull();
+    expect(recorded!.outcome).toBe("insufficient");
+    expect(recorded!.eligible).toBe(2);
+    expect(recorded!.offered).toBe(0);
+    expect(recorded!.drafted).toBe(0);
+    expect(gardenerRunInFlight("jarvis")).toBe(false);
+  });
+
+  test("batch exactly at minClusterSize runs normally (no insufficient short-circuit)", async () => {
+    let ranGardener = false;
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const exact: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 3,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => exact,
+      persistOffered: async () => {},
+      runGardener: async () => {
+        ranGardener = true;
+        return [];
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(ranGardener).toBe(true);
+    expect(recorded!.outcome).toBeUndefined();
+    expect(recorded!.offered).toBe(3);
   });
 
   test("auto-recovers a pending journal (returns undrafted docs) BEFORE offering the new batch", async () => {
