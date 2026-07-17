@@ -120,6 +120,38 @@ ${list}
 const VALID_KINDS: ClusterKind[] = ["concept", "entity"];
 const VALID_DOMAINS: ClusterDomain[] = ["ai", "life"];
 
+/**
+ * Why a cluster the model proposed never became a draft. Deterministic, one per
+ * dropped cluster, computed WHERE the drop happens so PR 3's planned move of the
+ * size/cap gate to a post-resolve site is a mechanical relocation of the two push
+ * sites (not a re-derivation). Taxonomy subtlety (mirrors the filter order):
+ *  - `hallucinated`: EVERY docId was invalid (post-strip count is 0),
+ *  - `size`: some ids survived the strip but the cluster is still < minClusterSize
+ *    (a partially-stripped cluster is `size`, not `hallucinated` — `stripped`
+ *    records how many ids the strip removed so the two are distinguishable),
+ *  - `skip`: topicKey is in the skip set (live/recently-rejected),
+ *  - `duplicate`: a repeated topicKey within the run (first occurrence wins),
+ *  - `cap`: overflow past `maxProposalsPerRun` (smallest clusters).
+ */
+export type ClusterDropReason = "size" | "skip" | "hallucinated" | "duplicate" | "cap";
+
+/** One dropped-cluster tally entry (see {@link ClusterDropReason}). */
+export interface ClusterDropEntry {
+  topicKey: string;
+  kind: ClusterKind;
+  /** Post-strip valid+deduped docId count (0 for `hallucinated`). */
+  size: number;
+  reason: ClusterDropReason;
+  /** Count of invalid docIds the strip removed — present only when > 0. */
+  stripped?: number;
+}
+
+/** The result of {@link filterClusters}: the survivors plus a per-drop tally. */
+export interface FilterClustersResult {
+  kept: Cluster[];
+  dropped: ClusterDropEntry[];
+}
+
 /** Parse + validate the cluster model's JSON output into well-formed clusters. */
 export function parseClusters(raw: string): Cluster[] {
   let parsed: unknown;
@@ -177,26 +209,91 @@ export function filterClusters(
     maxProposalsPerRun: number;
     skipTopicKeys: Set<string>;
   },
-): Cluster[] {
-  const kept = clusters
-    .map((c) => ({
-      ...c,
-      docIds: [...new Set(c.docIds.filter((id) => opts.validDocKeys.has(id)))],
-    }))
-    .filter((c) => c.docIds.length >= opts.minClusterSize)
-    .filter((c) => !opts.skipTopicKeys.has(c.topicKey));
+): FilterClustersResult {
+  const dropped: ClusterDropEntry[] = [];
 
+  // Step 1+2: strip invalid docIds, then classify hallucinated vs size. The
+  // strip runs BEFORE the size check, so an all-invalid cluster is `hallucinated`
+  // (post-strip 0) while a partially-stripped one that still falls short is `size`.
+  const sizeOk: Cluster[] = [];
+  for (const c of clusters) {
+    const validUnique = [...new Set(c.docIds.filter((id) => opts.validDocKeys.has(id)))];
+    const size = validUnique.length;
+    const strippedCount = c.docIds.filter((id) => !opts.validDocKeys.has(id)).length;
+    const stripPart = strippedCount > 0 ? { stripped: strippedCount } : {};
+    if (size === 0) {
+      dropped.push({ topicKey: c.topicKey, kind: c.kind, size, reason: "hallucinated", ...stripPart });
+      continue;
+    }
+    if (size < opts.minClusterSize) {
+      dropped.push({ topicKey: c.topicKey, kind: c.kind, size, reason: "size", ...stripPart });
+      continue;
+    }
+    sizeOk.push({ ...c, docIds: validUnique });
+  }
+
+  // Step 3: skip live/recently-rejected topicKeys.
+  const notSkipped: Cluster[] = [];
+  for (const c of sizeOk) {
+    if (opts.skipTopicKeys.has(c.topicKey)) {
+      dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "skip" });
+      continue;
+    }
+    notSkipped.push(c);
+  }
+
+  // Step 4: dedupe repeated topicKeys within the run (first wins).
   const seen = new Set<string>();
-  const deduped = kept.filter((c) => {
+  const deduped: Cluster[] = [];
+  for (const c of notSkipped) {
     if (seen.has(c.topicKey)) {
+      dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "duplicate" });
       log.info("Dropping duplicate cluster for topicKey {topic} within the run", { topic: c.topicKey });
-      return false;
+      continue;
     }
     seen.add(c.topicKey);
-    return true;
-  });
+    deduped.push(c);
+  }
 
-  // Largest clusters first, then cap.
+  // Step 5: largest clusters first, then cap — overflow is tallied as `cap`.
   deduped.sort((a, b) => b.docIds.length - a.docIds.length);
-  return deduped.slice(0, opts.maxProposalsPerRun);
+  const kept = deduped.slice(0, opts.maxProposalsPerRun);
+  for (const c of deduped.slice(opts.maxProposalsPerRun)) {
+    dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "cap" });
+  }
+
+  return { kept, dropped };
+}
+
+/** Max chars of the compact per-drop topics string attached to the trace. */
+const DROP_TOPICS_MAX_CHARS = 500;
+
+/**
+ * Fold a per-drop tally into flat trace-span attributes + a compact topics string
+ * (capped ~500 chars) so the weekly gardener's `cluster` span answers "why 0
+ * clusters?" on `/traces` without an offline replay. Pure + reused by the log line.
+ */
+export function summarizeClusterDrops(dropped: ClusterDropEntry[]): {
+  clusters_dropped: number;
+  clusters_dropped_size: number;
+  clusters_dropped_skip: number;
+  clusters_dropped_hallucinated: number;
+  clusters_dropped_duplicate: number;
+  clusters_dropped_cap: number;
+  clusters_dropped_topics: string;
+} {
+  const count = (r: ClusterDropReason) => dropped.filter((d) => d.reason === r).length;
+  const topics = dropped
+    .map((d) => `${d.topicKey}(${d.reason},n:${d.size}${d.stripped ? `,strip:${d.stripped}` : ""})`)
+    .join(" ")
+    .slice(0, DROP_TOPICS_MAX_CHARS);
+  return {
+    clusters_dropped: dropped.length,
+    clusters_dropped_size: count("size"),
+    clusters_dropped_skip: count("skip"),
+    clusters_dropped_hallucinated: count("hallucinated"),
+    clusters_dropped_duplicate: count("duplicate"),
+    clusters_dropped_cap: count("cap"),
+    clusters_dropped_topics: topics,
+  };
 }
