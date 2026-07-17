@@ -470,8 +470,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const relPaths: string[] = [];
   for await (const p of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but still descends dot DIRS on some
-    // versions — filter path segments explicitly.
-    if (p.split("/").some((seg) => seg.startsWith("."))) continue;
+    // versions — filter path segments explicitly. node_modules can appear inside
+    // a wiki root (e.g. mimir's scripts/mdx-explainer/) and would flood the index
+    // with dependency READMEs/CHANGELOGs.
+    if (p.split("/").some((seg) => seg.startsWith(".") || seg === "node_modules")) continue;
     relPaths.push(p);
   }
   relPaths.sort();
