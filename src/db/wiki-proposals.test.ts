@@ -7,6 +7,7 @@ import {
   listWikiProposalsByStatus,
   getLiveTopicKeys,
   getRejectedTopicKeys,
+  getRecentlyRejectedTopicKeys,
   getConsumedDocIds,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
@@ -85,6 +86,32 @@ describe("wiki_proposals CRUD", () => {
     expect(await getRejectedTopicKeys("jarvis")).toEqual(["rejected-one"]);
     // guard against unused var lint on `live`
     expect(live!.status).toBe("draft");
+  });
+
+  test("getRecentlyRejectedTopicKeys applies the resolved_at TTL boundary", async () => {
+    // Three rejected rows: one resolved just INSIDE the 7-day window, one just
+    // OUTSIDE it, and one with a NULL resolved_at (ad-hoc ops row).
+    const inside = await insertWikiProposal(makeProposal({ topicKey: "inside-window" }));
+    const outside = await insertWikiProposal(makeProposal({ topicKey: "outside-window" }));
+    const nullres = await insertWikiProposal(makeProposal({ topicKey: "null-resolved" }));
+    const sql = getDb();
+    // Just inside: resolved 6 days + 23h ago.
+    await sql`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() - interval '6 days 23 hours' WHERE id = ${inside!.id}`;
+    // Just outside: resolved 7 days + 1h ago.
+    await sql`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() - interval '7 days 1 hour' WHERE id = ${outside!.id}`;
+    // Rejected but resolved_at left NULL → treated as expired (excluded from skip).
+    await sql`UPDATE wiki_proposals SET status = 'rejected', resolved_at = NULL WHERE id = ${nullres!.id}`;
+
+    const recent = await getRecentlyRejectedTopicKeys("jarvis", 7);
+    expect(recent).toContain("inside-window");
+    expect(recent).not.toContain("outside-window");
+    expect(recent).not.toContain("null-resolved");
+
+    // The unfiltered hint set still sees ALL three rejections.
+    const all = await getRejectedTopicKeys("jarvis");
+    expect(all).toContain("inside-window");
+    expect(all).toContain("outside-window");
+    expect(all).toContain("null-resolved");
   });
 
   test("consumed doc ids come from applied proposals' source_docs", async () => {

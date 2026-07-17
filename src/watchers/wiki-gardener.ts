@@ -26,9 +26,10 @@ import {
   getConsumedDocIds,
   getLiveTopicKeys,
   getRejectedTopicKeys,
+  getRecentlyRejectedTopicKeys,
   insertWikiProposal,
 } from "../db/wiki-proposals.ts";
-import { resolveGardenerConfig } from "../gardener/types.ts";
+import { resolveGardenerConfig, GARDENER_DEFAULTS } from "../gardener/types.ts";
 import { runGardener, type GardenerDeps } from "../gardener/runner.ts";
 import { DRAFT_TIMEOUT_MS, runExclusive } from "../gardener/backlog.ts";
 import type { Config } from "../config.ts";
@@ -54,6 +55,7 @@ export type SharedGardenerSeams = Pick<
   | "readWikiFile"
   | "liveTopicKeys"
   | "rejectedTopicKeys"
+  | "recentlyRejectedTopicKeys"
   | "insertProposal"
   // Optional content-dedup seam — threaded through here so both the weekly
   // checker and the backlog drain wire it identically. Without this member the
@@ -233,7 +235,10 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       }
     },
     liveTopicKeys: () => getLiveTopicKeys(name),
+    // Hint sees ALL rejections; skip set is TTL'd on resolved_at.
     rejectedTopicKeys: () => getRejectedTopicKeys(name),
+    recentlyRejectedTopicKeys: () =>
+      getRecentlyRejectedTopicKeys(name, GARDENER_DEFAULTS.rejectedSkipDays),
     insertProposal: (params) => insertWikiProposal(params),
   };
 

@@ -289,8 +289,21 @@ apply**.
   (the 2026-07-08/07-10 orphan-duplicate defect, fixed in PR #242).
   A pure skip/size/cap filter runs **before any draft call**: unknown docIds
   dropped, `docIds.length >= minClusterSize` (default 3), skip topicKeys with a
-  prior `rejected` OR a live `draft`/`approved` proposal, cap at
+  **recently** `rejected` OR a live `draft`/`approved` proposal, cap at
   `maxProposalsPerRun` (default 3).
+  - **Rejection SKIP is TTL'd (default 7 days, `GARDENER_DEFAULTS.rejectedSkipDays`
+    — a bare constant, not a per-bot config field).** A rejection is a verdict on
+    one draft, not a permanent verdict on the topic; before the TTL, healthy
+    clusters died on week-old rejections every run. Two seams feed off the single
+    rejection history: `rejectedTopicKeys()` (ALL rejections) feeds the
+    **cluster-prompt hint** (`rejectedLabels` — informed re-try, so the model
+    reuses a prior topicKey instead of coining a near-synonym), and
+    `recentlyRejectedTopicKeys(days)` (`resolved_at > now() − rejectedSkipDays`,
+    NULL `resolved_at` ⇒ expired/re-tryable) feeds ONLY the **skip set**. TTL-ing
+    the hint too would be amnesia — the two are deliberately split in the runner.
+    **Sub-TTL ops escape hatch** (a bad-draft rejection on a healthy topic that
+    shouldn't wait out even 7 days): move the row OUT of the `rejected` status so
+    it leaves the skip predicate immediately — there is deliberately no un-reject UI.
 - **Target-resolve** (`target-resolve.ts`): the LOCAL wiki store
   (`getWikiIndex({root: wikiDir})`, loaded before clustering and reused) is the
   oracle — `update` on a normalized title/alias match among **same-domain
