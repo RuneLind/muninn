@@ -104,7 +104,7 @@ export interface BacklogProgress {
   stage: "assembling" | "harvesting" | "clustering" | "resolving" | "drafting";
   /** Proposals persisted so far this run. */
   draftsDone: number;
-  /** Clusters that survived filtering (0 until clustering resolves them). */
+  /** Clusters that survived the post-resolve gate (0 until resolve gates them). */
   draftsTotal: number;
   /** Cluster label currently drafting. */
   currentTopic?: string;

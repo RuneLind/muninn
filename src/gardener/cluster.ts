@@ -1,13 +1,15 @@
 /**
  * Cluster stage — one Haiku call groups the harvested docs into candidate wiki
- * topics, then a pure skip/size/cap filter decides which clusters proceed to
- * drafting.
+ * topics. A pre-resolve `filterClusters` strips hallucinated docIds and drops
+ * skip/duplicate clusters; the size floor + run cap moved to the post-resolve
+ * `gateResolvedClusters` so an already-covered single-doc topic can flip to an
+ * update before the size floor is judged.
  *
  * Summary content is untrusted third-party data: the prompt delimits it in a
  * clearly-marked block and never treats it as instructions.
  */
 
-import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc } from "./types.ts";
+import type { Cluster, ClusterDomain, ClusterKind, HarvestedDoc, ResolvedTarget } from "./types.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
@@ -122,16 +124,21 @@ const VALID_DOMAINS: ClusterDomain[] = ["ai", "life"];
 
 /**
  * Why a cluster the model proposed never became a draft. Deterministic, one per
- * dropped cluster, computed WHERE the drop happens so PR 3's planned move of the
- * size/cap gate to a post-resolve site is a mechanical relocation of the two push
- * sites (not a re-derivation). Taxonomy subtlety (mirrors the filter order):
- *  - `hallucinated`: EVERY docId was invalid (post-strip count is 0),
- *  - `size`: some ids survived the strip but the cluster is still < minClusterSize
- *    (a partially-stripped cluster is `size`, not `hallucinated` — `stripped`
- *    records how many ids the strip removed so the two are distinguishable),
+ * dropped cluster, computed WHERE the drop happens. The drops now originate at
+ * TWO sites (PR 3 split): `filterClusters` (pre-resolve) emits hallucinated / skip
+ * / duplicate; the post-resolve {@link gateResolvedClusters} emits size / cap.
+ * Taxonomy:
+ *  - `hallucinated`: EVERY docId was invalid (post-strip count is 0); `stripped`
+ *    records how many ids the strip removed. This is the ONLY reason that carries
+ *    `stripped` — a partial strip that still leaves ≥1 doc no longer produces a
+ *    drop at filter time (the cluster survives to resolve), so a partially-stripped
+ *    cluster that later dies at the size gate has no `stripped` annotation.
  *  - `skip`: topicKey is in the skip set (live/recently-rejected),
  *  - `duplicate`: a repeated topicKey within the run (first occurrence wins),
- *  - `cap`: overflow past `maxProposalsPerRun` (smallest clusters).
+ *  - `size`: a CREATE-mode cluster below `minClusterSize`, judged POST-resolve so
+ *    an update-mode cluster survives at ≥1 doc (the human gate guards its quality),
+ *  - `cap`: overflow past `maxProposalsPerRun` at the post-resolve gate — shared
+ *    across modes, one slot reserved for the largest update.
  */
 export type ClusterDropReason = "size" | "skip" | "hallucinated" | "duplicate" | "cap";
 
@@ -192,49 +199,53 @@ export function parseClusters(raw: string): Cluster[] {
 }
 
 /**
- * Pure skip/size/cap filter, applied BEFORE any draft call is spent:
- *  1. drop docIds not in the harvested set (model hallucination / stale ref),
- *  2. drop clusters below `minClusterSize`,
- *  3. drop clusters whose topicKey is in `skipTopicKeys` (prior `rejected` OR a
+ * Pure pre-resolve strip/skip/dedupe filter, applied BEFORE target-resolve and
+ * any draft call is spent. The size floor and the run cap MOVED to the
+ * post-resolve {@link gateResolvedClusters} — a single-doc cluster labeled with an
+ * existing page's topic must reach resolve (which flips it to `update`) before the
+ * size floor is judged, or it dies as a `size` drop the moment before resolve
+ * would have rescued it (the 0→4-kept swing this pipeline fixes). Steps:
+ *  1. strip docIds not in the harvested set (model hallucination / stale ref);
+ *     an all-invalid cluster is dropped as `hallucinated`, a partial strip just
+ *     trims the docIds and the cluster survives,
+ *  2. drop clusters whose topicKey is in `skipTopicKeys` (prior `rejected` OR a
  *     live `draft`/`approved` proposal — one topic = at most one live proposal),
- *  4. dedupe repeated topicKeys within the run (first wins — a duplicate would
- *     waste a full draft call and then die on the insert's ON CONFLICT),
- *  5. cap at `maxProposalsPerRun` (largest clusters first).
+ *  3. dedupe repeated topicKeys within the run (first wins — a duplicate would
+ *     waste a full draft call and then die on the insert's ON CONFLICT).
  */
 export function filterClusters(
   clusters: Cluster[],
   opts: {
     validDocKeys: Set<string>;
-    minClusterSize: number;
-    maxProposalsPerRun: number;
     skipTopicKeys: Set<string>;
   },
 ): FilterClustersResult {
   const dropped: ClusterDropEntry[] = [];
 
-  // Step 1+2: strip invalid docIds, then classify hallucinated vs size. The
-  // strip runs BEFORE the size check, so an all-invalid cluster is `hallucinated`
-  // (post-strip 0) while a partially-stripped one that still falls short is `size`.
-  const sizeOk: Cluster[] = [];
+  // Step 1: strip invalid docIds. All-invalid ⇒ `hallucinated` (post-strip 0); a
+  // partial strip just trims the docIds and the cluster proceeds (its size, if it
+  // still falls short, is judged CREATE-only at the post-resolve gate).
+  const stripped: Cluster[] = [];
   for (const c of clusters) {
     const validUnique = [...new Set(c.docIds.filter((id) => opts.validDocKeys.has(id)))];
     const size = validUnique.length;
     const strippedCount = c.docIds.filter((id) => !opts.validDocKeys.has(id)).length;
-    const stripPart = strippedCount > 0 ? { stripped: strippedCount } : {};
     if (size === 0) {
-      dropped.push({ topicKey: c.topicKey, kind: c.kind, size, reason: "hallucinated", ...stripPart });
+      dropped.push({
+        topicKey: c.topicKey,
+        kind: c.kind,
+        size,
+        reason: "hallucinated",
+        ...(strippedCount > 0 ? { stripped: strippedCount } : {}),
+      });
       continue;
     }
-    if (size < opts.minClusterSize) {
-      dropped.push({ topicKey: c.topicKey, kind: c.kind, size, reason: "size", ...stripPart });
-      continue;
-    }
-    sizeOk.push({ ...c, docIds: validUnique });
+    stripped.push({ ...c, docIds: validUnique });
   }
 
-  // Step 3: skip live/recently-rejected topicKeys.
+  // Step 2: skip live/recently-rejected topicKeys.
   const notSkipped: Cluster[] = [];
-  for (const c of sizeOk) {
+  for (const c of stripped) {
     if (opts.skipTopicKeys.has(c.topicKey)) {
       dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "skip" });
       continue;
@@ -242,9 +253,9 @@ export function filterClusters(
     notSkipped.push(c);
   }
 
-  // Step 4: dedupe repeated topicKeys within the run (first wins).
+  // Step 3: dedupe repeated topicKeys within the run (first wins).
   const seen = new Set<string>();
-  const deduped: Cluster[] = [];
+  const kept: Cluster[] = [];
   for (const c of notSkipped) {
     if (seen.has(c.topicKey)) {
       dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "duplicate" });
@@ -252,16 +263,81 @@ export function filterClusters(
       continue;
     }
     seen.add(c.topicKey);
-    deduped.push(c);
+    kept.push(c);
   }
 
-  // Step 5: largest clusters first, then cap — overflow is tallied as `cap`.
-  deduped.sort((a, b) => b.docIds.length - a.docIds.length);
-  const kept = deduped.slice(0, opts.maxProposalsPerRun);
-  for (const c of deduped.slice(opts.maxProposalsPerRun)) {
-    dropped.push({ topicKey: c.topicKey, kind: c.kind, size: c.docIds.length, reason: "cap" });
+  return { kept, dropped };
+}
+
+/** A cluster paired with its resolved create/update target — the gate's I/O. */
+export interface ResolvedCluster {
+  cluster: Cluster;
+  target: ResolvedTarget;
+}
+
+/** The result of {@link gateResolvedClusters}: the survivors plus size/cap drops. */
+export interface GateResult {
+  kept: ResolvedCluster[];
+  dropped: ClusterDropEntry[];
+}
+
+/**
+ * Post-resolve size + cap gate. Runs AFTER target-resolve, so a single-doc cluster
+ * whose topic an existing page already covers (flipped to `update` by resolve)
+ * survives the size floor that would otherwise kill it pre-resolve.
+ *
+ *  - size gate: CREATE-mode clusters below `minClusterSize` are dropped; update-mode
+ *    clusters pass at ≥1 doc (the human review gate still guards their quality).
+ *  - cap gate: applied LAST, SHARED across both modes — but NOT plain largest-first.
+ *    A 1-doc update sorts last under largest-first and would be exactly the cluster
+ *    the cap evicts, defeating the fix, so one slot is RESERVED for the single
+ *    largest update-mode cluster whenever any update survives the size gate; the
+ *    remaining slots fill largest-first across both modes. Only the TOP update is
+ *    reserved — deliberately narrow (one rescue per run).
+ */
+export function gateResolvedClusters(
+  resolved: ResolvedCluster[],
+  opts: { minClusterSize: number; maxProposalsPerRun: number },
+): GateResult {
+  const dropped: ClusterDropEntry[] = [];
+
+  // Size gate — CREATE-only. Update clusters pass at ≥1 doc (docIds is never empty:
+  // filterClusters already dropped all-invalid clusters as `hallucinated`).
+  const sizeOk: ResolvedCluster[] = [];
+  for (const r of resolved) {
+    const size = r.cluster.docIds.length;
+    if (r.target.mode === "create" && size < opts.minClusterSize) {
+      dropped.push({ topicKey: r.cluster.topicKey, kind: r.cluster.kind, size, reason: "size" });
+      continue;
+    }
+    sizeOk.push(r);
   }
 
+  // Cap gate — largest-first, but reserve one slot for the largest update so a
+  // small update isn't evicted by larger creates.
+  const bySize = [...sizeOk].sort((a, b) => b.cluster.docIds.length - a.cluster.docIds.length);
+  if (bySize.length <= opts.maxProposalsPerRun) {
+    return { kept: bySize, dropped };
+  }
+  const reserved = bySize.find((r) => r.target.mode === "update");
+  const reservedSlots = reserved ? 1 : 0;
+  const kept: ResolvedCluster[] = [];
+  for (const r of bySize) {
+    if (r === reserved) continue; // appended after the fill, always kept
+    if (kept.length < opts.maxProposalsPerRun - reservedSlots) {
+      kept.push(r);
+    } else {
+      dropped.push({
+        topicKey: r.cluster.topicKey,
+        kind: r.cluster.kind,
+        size: r.cluster.docIds.length,
+        reason: "cap",
+      });
+    }
+  }
+  if (reserved) kept.push(reserved);
+  // Drafted order stays largest-first for determinism.
+  kept.sort((a, b) => b.cluster.docIds.length - a.cluster.docIds.length);
   return { kept, dropped };
 }
 

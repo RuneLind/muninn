@@ -2,12 +2,14 @@ import { test, expect, describe } from "bun:test";
 import {
   parseClusters,
   filterClusters,
+  gateResolvedClusters,
   excerptOf,
   buildClusterPrompt,
   summarizeClusterDrops,
   type ClusterDropEntry,
+  type ResolvedCluster,
 } from "./cluster.ts";
-import type { Cluster, HarvestedDoc } from "./types.ts";
+import type { Cluster, HarvestedDoc, ResolvedTarget } from "./types.ts";
 
 function doc(key: string): HarvestedDoc {
   return { key, collection: "c", id: key, url: "", title: key, text: "body" };
@@ -44,14 +46,14 @@ describe("filterClusters", () => {
   const validDocKeys = new Set(["c/1", "c/2", "c/3", "c/4"]);
   const opts = {
     validDocKeys,
-    minClusterSize: 3,
-    maxProposalsPerRun: 3,
     skipTopicKeys: new Set<string>(),
   };
 
-  test("drops unknown docIds then applies minClusterSize", () => {
+  test("strips unknown docIds; the cluster survives (size is judged post-resolve)", () => {
     const c = { ...base, docIds: ["c/1", "c/2", "hallucinated"] };
-    expect(filterClusters([c], opts).kept).toHaveLength(0); // only 2 valid < 3
+    const { kept } = filterClusters([c], opts);
+    expect(kept).toHaveLength(1); // NOT size-dropped here — 2 valid docs remain
+    expect(kept[0]!.docIds).toEqual(["c/1", "c/2"]); // hallucinated id stripped
   });
 
   test("skips clusters whose topicKey is in skipTopicKeys (rejected or live)", () => {
@@ -65,25 +67,12 @@ describe("filterClusters", () => {
     expect(kept).toHaveLength(1);
     expect(kept[0]!.docIds).toEqual(base.docIds); // the FIRST occurrence survived
   });
-
-  test("caps at maxProposalsPerRun, largest first", () => {
-    const clusters: Cluster[] = [
-      { ...base, topicKey: "small", docIds: ["c/1", "c/2", "c/3"] },
-      { ...base, topicKey: "big", docIds: ["c/1", "c/2", "c/3", "c/4"] },
-      { ...base, topicKey: "mid", docIds: ["c/1", "c/2", "c/3"] },
-    ];
-    const { kept } = filterClusters(clusters, { ...opts, maxProposalsPerRun: 1 });
-    expect(kept).toHaveLength(1);
-    expect(kept[0]!.topicKey).toBe("big");
-  });
 });
 
-describe("filterClusters drop taxonomy", () => {
+describe("filterClusters drop taxonomy (pre-resolve: hallucinated / skip / duplicate)", () => {
   const validDocKeys = new Set(["c/1", "c/2", "c/3", "c/4", "c/5", "c/6"]);
   const opts = {
     validDocKeys,
-    minClusterSize: 3,
-    maxProposalsPerRun: 3,
     skipTopicKeys: new Set<string>(),
   };
   const cluster = (topicKey: string, docIds: string[], kind: "concept" | "entity" = "concept"): Cluster => ({
@@ -105,21 +94,11 @@ describe("filterClusters drop taxonomy", () => {
     expect(entry.stripped).toBe(3);
   });
 
-  test("size: partial strip then below threshold ⇒ size (not hallucinated), strip visible", () => {
+  test("partial strip below threshold survives filter (size deferred to the gate), strip applied", () => {
     const { kept, dropped } = filterClusters([cluster("partial", ["c/1", "c/2", "x/9"])], opts);
-    expect(kept).toHaveLength(0);
-    const entry = only(dropped, "partial");
-    expect(entry.reason).toBe("size"); // 2 survived, < 3
-    expect(entry.size).toBe(2);
-    expect(entry.stripped).toBe(1);
-  });
-
-  test("size: below threshold with NO strip ⇒ size, no stripped field", () => {
-    const { dropped } = filterClusters([cluster("small", ["c/1", "c/2"])], opts);
-    const entry = only(dropped, "small");
-    expect(entry.reason).toBe("size");
-    expect(entry.size).toBe(2);
-    expect(entry.stripped).toBeUndefined();
+    expect(kept).toHaveLength(1); // 2 valid docs remain — no size drop here anymore
+    expect(kept[0]!.docIds).toEqual(["c/1", "c/2"]); // invalid id stripped
+    expect(dropped).toHaveLength(0);
   });
 
   test("skip: topicKey in the skip set ⇒ skip", () => {
@@ -139,17 +118,83 @@ describe("filterClusters drop taxonomy", () => {
     expect(kept).toHaveLength(1);
     expect(only(dropped, "dup").reason).toBe("duplicate");
   });
+});
 
-  test("cap: overflow past maxProposalsPerRun ⇒ cap (smallest dropped)", () => {
-    const clusters = [
-      cluster("big", ["c/1", "c/2", "c/3", "c/4"]),
-      cluster("small", ["c/1", "c/2", "c/3"]),
-    ];
-    const { kept, dropped } = filterClusters(clusters, { ...opts, maxProposalsPerRun: 1 });
-    expect(kept.map((c) => c.topicKey)).toEqual(["big"]);
+describe("gateResolvedClusters (post-resolve: CREATE-only size floor + shared cap)", () => {
+  const cluster = (topicKey: string, docIds: string[], kind: "concept" | "entity" = "concept"): Cluster => ({
+    topicKey,
+    kind,
+    domain: "ai",
+    label: topicKey,
+    docIds,
+  });
+  const rc = (
+    topicKey: string,
+    docIds: string[],
+    mode: "create" | "update",
+  ): ResolvedCluster => {
+    const target: ResolvedTarget =
+      mode === "update"
+        ? { mode: "update", targetPath: `concepts/${topicKey}.md`, existingRelPath: `concepts/${topicKey}.md` }
+        : { mode: "create", targetPath: `concepts/${topicKey}.md` };
+    return { cluster: cluster(topicKey, docIds), target };
+  };
+  const only = (dropped: ClusterDropEntry[], topicKey: string) =>
+    dropped.find((d) => d.topicKey === topicKey)!;
+  const opts = { minClusterSize: 3, maxProposalsPerRun: 3 };
+
+  test("size: a CREATE cluster below minClusterSize is dropped", () => {
+    const { kept, dropped } = gateResolvedClusters([rc("small", ["c/1", "c/2"], "create")], opts);
+    expect(kept).toHaveLength(0);
     const entry = only(dropped, "small");
-    expect(entry.reason).toBe("cap");
-    expect(entry.size).toBe(3);
+    expect(entry.reason).toBe("size");
+    expect(entry.size).toBe(2);
+    expect(entry.stripped).toBeUndefined(); // strip happened at the filter, not here
+  });
+
+  test("a 1-doc UPDATE cluster survives the size floor", () => {
+    const { kept, dropped } = gateResolvedClusters([rc("covered", ["c/1"], "update")], opts);
+    expect(kept.map((r) => r.cluster.topicKey)).toEqual(["covered"]);
+    expect(dropped).toHaveLength(0);
+  });
+
+  test("a CREATE cluster at/above minClusterSize survives", () => {
+    const { kept } = gateResolvedClusters([rc("ok", ["c/1", "c/2", "c/3"], "create")], opts);
+    expect(kept.map((r) => r.cluster.topicKey)).toEqual(["ok"]);
+  });
+
+  test("cap reservation: a 1-doc update survives a FULL cap that a larger create fills", () => {
+    // max=1: largest-first alone would keep only the big create and evict the update.
+    const { kept, dropped } = gateResolvedClusters(
+      [rc("big", ["c/1", "c/2", "c/3", "c/4", "c/5"], "create"), rc("upd", ["c/1"], "update")],
+      { ...opts, maxProposalsPerRun: 1 },
+    );
+    expect(kept.map((r) => r.cluster.topicKey)).toEqual(["upd"]); // reserved slot wins
+    expect(only(dropped, "big").reason).toBe("cap");
+  });
+
+  test("cap reservation: only the TOP update is reserved when several updates exist", () => {
+    // max=2: reserve the largest update (updBig, n:3); the create fills the other
+    // slot largest-first; the small update (n:1) is capped.
+    const { kept, dropped } = gateResolvedClusters(
+      [
+        rc("create5", ["c/1", "c/2", "c/3", "c/4", "c/5"], "create"),
+        rc("updBig", ["c/1", "c/2", "c/3"], "update"),
+        rc("updSmall", ["c/6"], "update"),
+      ],
+      { ...opts, maxProposalsPerRun: 2 },
+    );
+    expect(kept.map((r) => r.cluster.topicKey).sort()).toEqual(["create5", "updBig"]);
+    expect(only(dropped, "updSmall").reason).toBe("cap");
+  });
+
+  test("cap: no update present ⇒ plain largest-first (smallest capped)", () => {
+    const { kept, dropped } = gateResolvedClusters(
+      [rc("big", ["c/1", "c/2", "c/3", "c/4"], "create"), rc("small", ["c/1", "c/2", "c/3"], "create")],
+      { ...opts, maxProposalsPerRun: 1 },
+    );
+    expect(kept.map((r) => r.cluster.topicKey)).toEqual(["big"]);
+    expect(only(dropped, "small").reason).toBe("cap");
   });
 });
 

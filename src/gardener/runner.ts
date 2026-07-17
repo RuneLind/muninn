@@ -23,6 +23,7 @@ import {
   buildClusterPrompt,
   existingPageLines,
   filterClusters,
+  gateResolvedClusters,
   parseClusters,
   summarizeClusterDrops,
 } from "./cluster.ts";
@@ -181,23 +182,54 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     existingPages,
   });
   const clusterRaw = await deps.callCluster(clusterPrompt);
-  const { kept: clusters, dropped } = filterClusters(parseClusters(clusterRaw), {
+  // Pre-resolve filter: strip hallucinated docIds, drop skip/duplicate. The size
+  // floor + run cap moved to the POST-resolve gate below, so a single-doc cluster
+  // labeled with an existing page's topic survives until resolve can flip it to an
+  // update. `clusters` here is the filter survivor set — a superset of what drafts.
+  const { kept: clusters, dropped: clusterDropped } = filterClusters(parseClusters(clusterRaw), {
     validDocKeys,
-    minClusterSize: deps.minClusterSize,
-    maxProposalsPerRun: deps.maxProposalsPerRun,
     skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
   });
-  // Per-drop tally: on the `cluster` span so /traces answers "why 0 clusters?"
-  // without an offline replay, and as one structured log line per run.
-  const dropTally = summarizeClusterDrops(dropped);
-  tracer?.end("cluster", { clusters: clusters.length, ...dropTally });
+  // The `cluster` span now carries only the pre-resolve drops (skip / hallucinated
+  // / duplicate); the size/cap drops land on the `resolve` span below. `clusters`
+  // is the filter survivor count, not the final drafted count (draft span reports
+  // that). Both span attrs come from summarizeClusterDrops on the site's own drops.
+  const clusterTally = summarizeClusterDrops(clusterDropped);
+  tracer?.end("cluster", { clusters: clusters.length, ...clusterTally });
+
+  // --- Target-resolve (reuses the index loaded before clustering) ---
+  tracer?.start("resolve");
+  deps.onProgress?.({ stage: "resolving" });
+  const resolvedAll = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
+  // Post-resolve size/cap gate: size floor applies to CREATE clusters only (updates
+  // pass at ≥1 doc); the cap is shared across modes with one slot reserved for the
+  // largest update. This is the fix — a doc referencing an existing page's topic now
+  // becomes a kept update-mode cluster instead of dying at a pre-resolve size floor.
+  const { kept: resolved, dropped: gateDropped } = gateResolvedClusters(resolvedAll, {
+    minClusterSize: deps.minClusterSize,
+    maxProposalsPerRun: deps.maxProposalsPerRun,
+  });
+  const gateTally = summarizeClusterDrops(gateDropped);
+  // size/cap drops attach to the `resolve` span (the `cluster` span already ended
+  // before resolve ran). creates/updates count the full resolved set, pre-gate.
+  tracer?.end("resolve", {
+    creates: resolvedAll.filter((r) => r.target.mode === "create").length,
+    updates: resolvedAll.filter((r) => r.target.mode === "update").length,
+    ...gateTally,
+  });
+
+  // One structured per-run log line carries the FULL tally (both sites' drops) —
+  // size was the dominant zero-cluster cause in the live incident and must not fall
+  // off the record even though its span attrs are now split across two spans.
+  const allDropped = [...clusterDropped, ...gateDropped];
+  const dropTally = summarizeClusterDrops(allDropped);
   log.info(
     "Gardener cluster filter: {kept} kept, {dropped} dropped " +
       "(size {size}, skip {skip}, hallucinated {hallucinated}, duplicate {duplicate}, cap {cap}){topicsSuffix}",
     {
       botName,
-      kept: clusters.length,
-      dropped: dropped.length,
+      kept: resolved.length,
+      dropped: allDropped.length,
       size: dropTally.clusters_dropped_size,
       skip: dropTally.clusters_dropped_skip,
       hallucinated: dropTally.clusters_dropped_hallucinated,
@@ -208,32 +240,25 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     },
   );
 
-  if (clusters.length === 0) {
+  if (resolved.length === 0) {
     return [];
   }
 
-  // Cancel checkpoint right after clustering — a cancel during harvest/clustering
-  // shouldn't wait for resolve + the first draft. `resolved` doesn't exist yet, so
-  // the skipped set is the union of every surviving cluster's docs (nothing drafted
-  // to subtract); `draftsTotal = clusters.length` so the outcome records k/n, not 0/0.
+  // Cancel checkpoint right after the post-resolve gate — a cancel during
+  // harvest/clustering/resolve shouldn't wait for the first draft. The skipped set
+  // is the union of every GATED cluster's docs (nothing drafted yet to subtract);
+  // `draftsTotal = resolved.length` so the outcome records k/n, not 0/0. Reading the
+  // gated set (not the pre-gate `clusters`) keeps the drain's exact-accounting: a
+  // size-doomed singleton never re-enters the offered pool on cancel.
   if (deps.shouldAbort?.()) {
-    deps.onProgress?.({ stage: "drafting", draftsDone: 0, draftsTotal: clusters.length });
-    deps.onAborted?.([...new Set(clusters.flatMap((c) => c.docIds))]);
+    deps.onProgress?.({ stage: "drafting", draftsDone: 0, draftsTotal: resolved.length });
+    deps.onAborted?.([...new Set(resolved.flatMap((r) => r.cluster.docIds))]);
     log.info("Gardener run cancelled after 0/{n} drafts (before drafting)", {
       botName,
-      n: clusters.length,
+      n: resolved.length,
     });
     return [];
   }
-
-  // --- Target-resolve (reuses the index loaded before clustering) ---
-  tracer?.start("resolve");
-  deps.onProgress?.({ stage: "resolving" });
-  const resolved = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
-  tracer?.end("resolve", {
-    creates: resolved.filter((r) => r.target.mode === "create").length,
-    updates: resolved.filter((r) => r.target.mode === "update").length,
-  });
 
   // --- Draft + persist (each proposal persisted as its draft completes) ---
   tracer?.start("draft");
@@ -510,7 +535,9 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   if (persisted.length === 0) return [];
 
-  // Map cluster labels back onto persisted rows for the notification.
+  // Map cluster labels back onto persisted rows for the notification. Deliberately
+  // reads the PRE-gate `clusters` set (a superset of drafted topicKeys — resolve
+  // never changes a cluster's topicKey), so every persisted row resolves a label.
   const labelByTopic = new Map(clusters.map((c) => [c.topicKey, c.label]));
   const labels = persisted.map((p) => labelByTopic.get(p.topicKey) ?? p.topicKey);
   const ids = persisted.map((p) => p.id);

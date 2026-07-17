@@ -647,6 +647,141 @@ describe("runGardener — progress + soft cancel", () => {
   });
 });
 
+// ── Post-resolve size/cap gate (PR #292 reorder) ─────────────────────────────
+//
+// These pin the reorder itself: `filterClusters` (strip/skip/dedupe) → per-cluster
+// `resolveTarget` → `gateResolvedClusters` (size floor on CREATE only; update-mode
+// passes at ≥1 doc). Wiring the gate BEFORE resolve, or reintroducing a size floor
+// inside filterClusters, must fail these.
+describe("runGardener — post-resolve size/cap gate", () => {
+  // A concept page the wiki already has, so a 1-doc cluster labeled with its exact
+  // title flips to update-mode at resolve and survives the size floor.
+  function indexWith(title: string): WikiIndex {
+    const page: WikiPageMeta = {
+      name: title, title, type: "concept", domain: "ai", tags: [], aliases: [],
+      relPath: `concepts/${title}.md`,
+    };
+    return {
+      pages: [page],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+  }
+
+  test("GAP A: sub-minClusterSize update-flip is drafted while a sub-size create dies at the gate", async () => {
+    // Cluster 1: ONE doc, labeled with an existing page's title ⇒ resolve flips it
+    // to update-mode ⇒ survives the CREATE-only size floor ⇒ drafts.
+    // Cluster 2: TWO docs, no matching page ⇒ create-mode, size 2 < 3 ⇒ dies at the
+    // gate, never drafted. Pins the whole reorder: a pre-resolve size floor would
+    // kill cluster 1 before resolve could rescue it.
+    let draftCalls = 0;
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => indexWith("Context Compaction"),
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: [KEYS[0]], rationale: "one-doc update" },
+          { topicKey: "fresh-topic", kind: "concept", domain: "ai", label: "Fresh Topic", docIds: [KEYS[1], KEYS[2]], rationale: "two-doc create" },
+        ]),
+      callDraft: async () => {
+        draftCalls += 1;
+        return validDraft();
+      },
+    });
+    const alerts = await runGardener(deps);
+
+    // Exactly the update-flip cluster reached a persisted draft.
+    expect(draftCalls).toBe(1);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.topicKey).toBe("context-compaction");
+    expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
+    // The sub-3 create-mode cluster died at the gate — never drafted, never persisted.
+    expect(inserted.some((p) => p.topicKey === "fresh-topic")).toBe(false);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.summary).toContain("Context Compaction");
+  });
+
+  test("GAP B: abort at the post-resolve checkpoint returns ONLY gated clusters' docIds — the size-doomed cluster's docs are excluded", async () => {
+    // 4 harvested docs. Cluster 1 = 3 docs (create, survives the size floor);
+    // cluster 2 = 1 doc (create, size 1 < 3, dropped at the gate). An abort fires at
+    // the post-resolve checkpoint (before any draft). onAborted must carry only the
+    // gated cluster's docIds — the size-dropped cluster's doc must NOT re-enter the
+    // offered pool. Discriminates reading the gated `resolved` set vs the pre-gate
+    // `clusters`: keying on `clusters` would leak the size-doomed doc into the set.
+    const ids = ["a", "b", "c", "d"].map((x) => `2026-07-07_${x}.md`);
+    const keys = ids.map((id) => `youtube-summaries/${id}`);
+    const survivorKeys = keys.slice(0, 3); // a,b,c
+    const doomedKey = keys[3]!; // d — the sub-size create
+    const bodies: Record<string, RawFetchedDoc> = Object.fromEntries(
+      ids.map((id) => [id, { text: `# ${id}\n\nBody.`, metadata: { url: `https://${id}` } }]),
+    );
+    let draftCalls = 0;
+    let abortedKeys: string[] = [];
+    const { deps, inserted } = makeDeps({
+      listDocs: async () => ids.map((id) => ({ id })),
+      fetchDoc: async (_c, id) => bodies[id] ?? null,
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "big-topic", kind: "concept", domain: "ai", label: "Big Topic", docIds: survivorKeys, rationale: "3-doc create" },
+          { topicKey: "doomed", kind: "concept", domain: "ai", label: "Doomed", docIds: [doomedKey], rationale: "1-doc create" },
+        ]),
+      callDraft: async () => {
+        draftCalls += 1;
+        return validDraft();
+      },
+      shouldAbort: () => true, // fires at the post-resolve checkpoint
+      onAborted: (k) => {
+        abortedKeys = k;
+      },
+    });
+    const alerts = await runGardener(deps);
+
+    expect(draftCalls).toBe(0);
+    expect(inserted).toHaveLength(0);
+    expect(alerts).toEqual([]);
+    // Only the gated (surviving) cluster's docs are offered back.
+    expect(abortedKeys.slice().sort()).toEqual([...survivorKeys].sort());
+    // The size-doomed cluster's doc is NOT in the aborted set.
+    expect(abortedKeys).not.toContain(doomedKey);
+  });
+
+  test("GAP C: all-sub-size creates ⇒ gate empties the set ⇒ early return (no draft calls)", async () => {
+    // filterClusters KEEPS both clusters (valid docIds, not skipped, not dup), but
+    // both are 1-doc create-mode ⇒ the gate drops both ⇒ resolved is empty. The
+    // early return must key on the GATED set: if it keyed on the filter output
+    // (non-empty), the run would fall through and emit a "drafting" progress stage.
+    let draftCalls = 0;
+    const seen: GardenerProgress[] = [];
+    const { deps, inserted } = makeDeps({
+      // default getWikiIndex → null ⇒ both clusters resolve to create-mode.
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "topic-one", kind: "concept", domain: "ai", label: "Topic One", docIds: [KEYS[0]], rationale: "1-doc create" },
+          { topicKey: "topic-two", kind: "concept", domain: "ai", label: "Topic Two", docIds: [KEYS[1]], rationale: "1-doc create" },
+        ]),
+      callDraft: async () => {
+        draftCalls += 1;
+        return validDraft();
+      },
+      onProgress: (p) => seen.push({ ...p }),
+    });
+    const alerts = await runGardener(deps);
+
+    expect(draftCalls).toBe(0);
+    expect(inserted).toHaveLength(0);
+    expect(alerts).toEqual([]);
+    // The early return fired BEFORE the draft stage — no "drafting" progress emitted.
+    // (Keying on the filter output would have reached the pre-loop drafting emit.)
+    expect(seen.some((p) => p.stage === "drafting")).toBe(false);
+    expect(seen.map((p) => p.stage)).toEqual(["harvesting", "clustering", "resolving"]);
+  });
+});
+
 describe("runGardener — tracer threading (one connected trace)", () => {
   // The watcher checker now reuses the runner's `watcher:wiki-gardener` span as
   // `deps.tracer` (no self-minted second root). This asserts runGardener drives
@@ -691,14 +826,31 @@ describe("runGardener — tracer threading (one connected trace)", () => {
     // The draft `claude` span hangs off the "draft" stage span — a child, never
     // the root — so it can never make the watcher span token-bearing.
     expect(childSpans).toEqual([{ parent: "draft", name: "claude" }]);
-    // The drop tally rides the cluster span's end attributes — pin the wiring,
-    // not just the pure summarizeClusterDrops fold.
+    // GAP D — post-split span attrs. The `cluster` span carries only the drop
+    // reasons it genuinely owns (skip / hallucinated / duplicate); the size + cap
+    // drops moved to the `resolve` span. Pin the wiring, not just the pure fold.
     expect(endAttrs["cluster"]).toMatchObject({
+      clusters: expect.any(Number),
       clusters_dropped: expect.any(Number),
-      clusters_dropped_size: expect.any(Number),
       clusters_dropped_skip: expect.any(Number),
+      clusters_dropped_hallucinated: expect.any(Number),
+      clusters_dropped_duplicate: expect.any(Number),
       clusters_dropped_topics: expect.any(String),
     });
+    // The cluster span's size count is STRUCTURALLY 0 post-split — size drops can
+    // only originate at the post-resolve gate, never here. Not a vacuous any(Number).
+    expect(endAttrs["cluster"]!.clusters_dropped_size).toBe(0);
+    expect(endAttrs["cluster"]!.clusters_dropped_cap).toBe(0);
+    // The `resolve` span carries the size/cap tally plus the create/update split.
+    // (creates/updates asserted below via toBe — keeping them out of toMatchObject,
+    // which rewrites matched props into the matcher on the received object.)
+    expect(endAttrs["resolve"]).toMatchObject({
+      clusters_dropped_size: expect.any(Number),
+      clusters_dropped_cap: expect.any(Number),
+    });
+    // This fixture's single cluster (3 valid docs, null index) resolves to one create.
+    expect(endAttrs["resolve"]!.creates).toBe(1);
+    expect(endAttrs["resolve"]!.updates).toBe(0);
   });
 
   test("runs unchanged when no tracer is injected (drain path / tracing off)", async () => {
