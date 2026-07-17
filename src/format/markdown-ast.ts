@@ -123,6 +123,15 @@ function parseBlocksInner(
   let textBuffer: string[] = [];
   let i = 0;
 
+  // Per-parse memo of scan futility: once a multi-line scan for `<Name>` runs to
+  // EOF without seeing a single `</Name>` line, no close can exist at or after
+  // that point, so every later open of the same name skips the (identical,
+  // futile) EOF scan. Without this, a page of thousands of bare open tags is
+  // O(n²) — each open re-scans the whole tail — which this parser can't afford
+  // since it re-runs on every streaming chat/wiki-Ask delta. Keyed to THIS
+  // `lines` array; recursion into component bodies gets its own memo.
+  const noCloseFrom = new Map<string, number>();
+
   function flushText() {
     if (textBuffer.length > 0) {
       blocks.push({ type: "text", lines: textBuffer });
@@ -134,7 +143,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, codeBlocks, depth);
+      const comp = tryParseComponent(lines, i, codeBlocks, depth, noCloseFrom);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -245,6 +254,7 @@ function tryParseComponent(
   i: number,
   codeBlocks: { lang: string; code: string }[],
   depth: number,
+  noCloseFrom: Map<string, number>,
 ): { block: Block; next: number } | null {
   const m = lines[i]!.trim().match(COMPONENT_OPEN_RE);
   if (!m) return null;
@@ -276,12 +286,21 @@ function tryParseComponent(
   // close, honoring same-name nesting so an inner `<Callout>` doesn't close the
   // outer one early.
   if (rest.trim() !== "") return null;
+
+  // Known-futile: a prior scan already proved no `</name>` line exists at or
+  // after `known`, so this open (at index >= known - 1) can never close. Skip
+  // the identical EOF scan — same null result, but O(1) instead of O(tail).
+  const known = noCloseFrom.get(name);
+  if (known !== undefined && i + 1 >= known) return null;
+
   let nesting = 1;
   let j = i + 1;
+  let sawClose = false;
   const body: string[] = [];
   while (j < lines.length) {
     const trimmed = lines[j]!.trim();
     if (trimmed === closeTag) {
+      sawClose = true;
       nesting--;
       if (nesting === 0) break;
       body.push(lines[j]!);
@@ -291,7 +310,14 @@ function tryParseComponent(
     }
     j++;
   }
-  if (nesting !== 0) return null; // unclosed → fall through as text
+  if (nesting !== 0) {
+    // Reached EOF unclosed. If we never saw a single `</name>` line, then no
+    // close exists anywhere in [i+1, EOF) — record it so later same-name opens
+    // (all at a >= index) skip this scan. Only safe when sawClose is false: a
+    // seen-but-unbalanced close means a later open could still match it.
+    if (!sawClose) noCloseFrom.set(name, i + 1);
+    return null; // unclosed → fall through as text
+  }
 
   const children = parseBlocksInner(body.join("\n"), codeBlocks, depth + 1);
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };

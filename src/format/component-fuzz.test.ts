@@ -62,6 +62,20 @@ describe("component fuzz — never throws, never injects", () => {
     expect(Date.now() - start).toBeLessThan(5_000);
   });
 
+  test("5k unclosed-open bomb parses linearly (no O(n²) EOF re-scan)", () => {
+    // Regression guard: before the futility memo, each bare `<Callout>` open
+    // re-scanned the whole tail looking for a close that never comes — O(n²),
+    // ~3.3s at 10k, and re-run on every streaming delta. The memo makes it
+    // linear. Assert generously (< 2s) to avoid CI flake; locally this is tens
+    // of ms.
+    const md = Array.from({ length: 5_000 }, () => "<Callout>").join("\n");
+    const start = Date.now();
+    const blocks = parseBlocks(md);
+    // Semantics unchanged: all unclosed → one text block of every raw line.
+    expect(blocks).toEqual([{ type: "text", lines: Array(5_000).fill("<Callout>") }]);
+    expect(Date.now() - start).toBeLessThan(2_000);
+  });
+
   test("code fence inside a Callout is preserved verbatim, no premature close", () => {
     const md = "<Callout tone=\"info\">\n```ts\n// </Callout> inside a fence must not close\nconst x = 1;\n```\n</Callout>";
     const blocks = parseBlocks(md);
