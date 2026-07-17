@@ -62,6 +62,27 @@ describe("computeIndexCoverage", () => {
     expect(cov.htmlPages).toBe(2); // case-insensitive extension
   });
 
+  test("native .mdx counts as markdown (indexed/missing), never htmlPages", () => {
+    // A .mdx page indexed by huginn resolves like a first-class .md page; an
+    // un-indexed .mdx is a real gap (missing), not a silently-ignored file.
+    const pages = ["blogs/src/Native.mdx", "blogs/src/Gap.mdx", "blogs/Ex.html"];
+    const cov = computeIndexCoverage(pages, [["blogs/src/Native.mdx"]]);
+    expect(cov.totalMd).toBe(2); // both .mdx count as markdown
+    expect(cov.indexed).toBe(1); // the indexed .mdx id matched
+    expect(cov.missing).toEqual(["blogs/src/Gap.mdx"]); // the un-indexed .mdx
+    expect(cov.htmlPages).toBe(1); // only the .html
+    expect(cov.ghosts).toEqual([]); // the .mdx id matched a file
+  });
+
+  test("a .mdx doc id whose file is gone is a ghost (indexable, case-insensitive)", () => {
+    const cov = computeIndexCoverage(
+      ["blogs/src/Native.mdx"],
+      [["blogs/src/Native.mdx", "blogs/src/Renamed.MDX"]],
+    );
+    expect(cov.indexed).toBe(1);
+    expect(cov.ghosts).toEqual(["blogs/src/Renamed.MDX"]);
+  });
+
   test("ghost: indexed id with no file", () => {
     const cov = computeIndexCoverage(["concepts/A.md"], [["concepts/A.md", "concepts/Renamed.md"]]);
     expect(cov.indexed).toBe(1);

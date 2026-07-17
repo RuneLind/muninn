@@ -82,12 +82,15 @@ function isHtml(relPath: string): boolean {
 }
 
 /** A doc id is "indexable" (comparable to a wiki page file) only when it names a
- *  `.md` or `.html` file. Collections may also index `.gitignore`/`.txt`/`.json`/
- *  `.sh` files (mimir) — the store's page walk is md/html only, so those ids would
+ *  `.md`, `.mdx`, or `.html` file. Native `.mdx` pages are first-class markdown in
+ *  the store's page walk, so their ids must count here too — without this, every
+ *  huginn-indexed `.mdx` doc id is dropped from `indexedByKey` and the page shows
+ *  `missing` forever. Collections may also index `.gitignore`/`.txt`/`.json`/`.sh`
+ *  files (mimir) — the store's page walk is md/mdx/html only, so those ids would
  *  otherwise show as false ghosts. Ignore them everywhere. */
 function isIndexableId(id: string): boolean {
   const l = id.toLowerCase();
-  return l.endsWith(".md") || l.endsWith(".html");
+  return l.endsWith(".md") || l.endsWith(".mdx") || l.endsWith(".html");
 }
 
 /** Compiled fullmatch rules for one collection. `usable` is false when the

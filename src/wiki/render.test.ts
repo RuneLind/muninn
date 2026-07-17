@@ -65,4 +65,56 @@ describe("renderWikiHtml", () => {
     expect(html).not.toContain("<script>alert(1)");
     expect(html).toContain("<strong>bold</strong>");
   });
+
+  test("native .mdx body renders: frontmatter stripped, prose + component + code fence + wikilink", () => {
+    const mdx = [
+      "---",
+      'title: "The Drain Saga"',
+      "tags: [muninn, tracing]",
+      "---",
+      "",
+      "# The Drain Saga",
+      "",
+      "Intro prose about draining. See [[Claude Code]] for the harness.",
+      "",
+      '<Callout tone="warn" title="Heads up">',
+      "A drain can stall. Watch the **heartbeat**.",
+      "</Callout>",
+      "",
+      "```ts",
+      "const drain = true;",
+      "```",
+    ].join("\n");
+    const html = renderWikiHtml(mdx, resolve, { stripTitle: "The Drain Saga" });
+
+    // Frontmatter fence never renders as an <hr>/text.
+    expect(html).not.toContain("title: &quot;The Drain Saga");
+    expect(html).not.toContain("tags: [muninn");
+    // The leading H1 matching the title is stripped by stripTitle.
+    expect(html).not.toContain("The Drain Saga</h2>");
+    // Prose + resolved wikilink (inside prose).
+    expect(html).toContain("Intro prose about draining.");
+    expect(html).toContain('data-wiki-page="Claude Code"');
+    // Component from the shared AST renders as a Callout (not escaped text).
+    expect(html).toContain('class="callout callout-warn"');
+    expect(html).toContain("Heads up");
+    expect(html).toContain("<strong>heartbeat</strong>");
+    // Code fence renders as a code block, unescaped tag text.
+    expect(html).toContain('<pre><code class="language-ts">');
+    expect(html).toContain("const drain = true;");
+  });
+
+  test("wikilinks inside a component body resolve to internal anchors", () => {
+    const mdx = ['<Callout tone="info">', "Nested link to [[Claude Code]].", "</Callout>"].join("\n");
+    const html = renderWikiHtml(mdx, resolve);
+    expect(html).toContain('class="callout callout-info"');
+    expect(html).toContain('href="/wiki?page=Claude%20Code"');
+  });
+
+  test("a ```mermaid fence renders as a plain code block (muninn has no mermaid renderer)", () => {
+    const html = renderWikiHtml("```mermaid\ngraph TD; A-->B;\n```", resolve);
+    // v1: no diagram rendering — the fence degrades to a labeled code block.
+    expect(html).toContain('<pre><code class="language-mermaid">');
+    expect(html).toContain("graph TD; A--&gt;B;");
+  });
 });
