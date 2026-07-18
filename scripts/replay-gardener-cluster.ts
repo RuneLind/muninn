@@ -53,6 +53,12 @@ import {
   summarizeClusterDrops,
 } from "../src/gardener/cluster.ts";
 import { resolveTarget } from "../src/gardener/target-resolve.ts";
+import {
+  buildDocPageMapPrompt,
+  mappablePages,
+  mergeDocPageMappings,
+  parseDocPageMap,
+} from "../src/gardener/doc-page-map.ts";
 import { buildGardenerSeams } from "../src/watchers/wiki-gardener.ts";
 import { resolveGardenerConfig, GARDENER_DEFAULTS } from "../src/gardener/types.ts";
 import { SUMMARY_SOURCES } from "../src/summaries/sources.ts";
@@ -161,11 +167,56 @@ async function main() {
     skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
   });
   const resolvedAll = filtered.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
+
+  // ── Pass-1 doc→page map (mirrors runGardener: after resolve, before the gate) ─
+  const candidatePages = mappablePages(index);
+  let mapSkipDrops: import("../src/gardener/cluster.ts").ClusterDropEntry[] = [];
+  if (candidatePages.length > 0) {
+    console.log(`\nCalling the doc→page map model (one Haiku call, ${candidatePages.length} candidate pages)…`);
+    const mapRaw = await seams.callDocPageMap(buildDocPageMapPrompt(docs, candidatePages));
+    const mappings = parseDocPageMap(mapRaw);
+    console.log(`Model proposed ${mappings.length} raw mapping(s).`);
+    const needle = process.env.TARGET_DOC ?? "Claude prepares for the END GAME";
+    for (const m of mappings) {
+      if (m.docId.includes(needle)) console.log(`  → target doc raw-mapped to page: "${m.pageTitle}"`);
+    }
+    const preLen = resolvedAll.length; // synthesized clusters are appended past here
+    const merged = mergeDocPageMappings(resolvedAll, mappings, {
+      pages: candidatePages,
+      index,
+      validDocKeys,
+      skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
+      botName: bot.name,
+    });
+    mapSkipDrops = merged.skipDrops;
+    const o = merged.outcome;
+    console.log(
+      `Map outcome:    mapped:${o.mapped} synthesized:${o.synthesized} appended:${o.appended} ` +
+        `deduped:${o.deduped} skip-dropped:${mapSkipDrops.length}`,
+    );
+    for (const r of resolvedAll.slice(preLen)) {
+      console.log(
+        `  + SYNTH  ${r.cluster.topicKey} (${r.cluster.kind}, ${r.target.mode}, n:${r.cluster.docIds.length}) — ` +
+          `${r.cluster.label} ← ${r.cluster.docIds.join(", ")}`,
+      );
+    }
+  } else {
+    console.log("\nNo concept/entity pages in the wiki index — pass-1 map skipped.");
+  }
+
+  // Diagnostic-only: MAX_PROPOSALS env overrides the resolved weekly cap (default
+  // 3). Lets the replay show what the backlog drain (cap 8) would keep — the weekly
+  // cap, not the two-pass mapping, is the binding constraint on a mature wiki.
+  const capOverride = process.env.MAX_PROPOSALS ? Number(process.env.MAX_PROPOSALS) : undefined;
+  const effectiveCap = capOverride && capOverride > 0 ? capOverride : resolved.maxProposalsPerRun;
+  if (effectiveCap !== resolved.maxProposalsPerRun) {
+    console.log(`\n(cap override: maxProposalsPerRun ${resolved.maxProposalsPerRun} → ${effectiveCap})`);
+  }
   const { kept: gated, dropped: gateDropped } = gateResolvedClusters(resolvedAll, {
     minClusterSize: resolved.minClusterSize,
-    maxProposalsPerRun: resolved.maxProposalsPerRun,
+    maxProposalsPerRun: effectiveCap,
   });
-  const dropped = [...clusterDropped, ...gateDropped];
+  const dropped = [...clusterDropped, ...mapSkipDrops, ...gateDropped];
   const tally = summarizeClusterDrops(dropped);
 
   console.log("\n═══ VERDICT ══════════════════════════════════════════════════");
@@ -186,6 +237,37 @@ async function main() {
     console.log(`  ✗ DROP   ${d.topicKey} (${d.kind}, n:${d.size}${strip}) — reason: ${d.reason}`);
   }
   const kept = gated;
+
+  // ── Acceptance tracker: where did a specific target doc end up? ───────────────
+  // Set TARGET_DOC to a substring of the harvested doc key (default: the END GAME
+  // acceptance doc). Reports whether it landed in a KEPT update-mode cluster.
+  const targetNeedle = process.env.TARGET_DOC ?? "Claude prepares for the END GAME";
+  const targetKeys = [...validDocKeys].filter((k) => k.includes(targetNeedle));
+  console.log(`\n─── TARGET DOC ("${targetNeedle}") ─────────────────────────────`);
+  if (targetKeys.length === 0) {
+    console.log("  NOT IN WINDOW — the target doc was not harvested this run (consumed or out of lookback).");
+  } else {
+    for (const key of targetKeys) {
+      const keptHit = gated.find((r) => r.cluster.docIds.includes(key));
+      if (keptHit) {
+        console.log(
+          `  ✓ KEPT   ${key}\n           in cluster "${keptHit.cluster.topicKey}" ` +
+            `(${keptHit.cluster.kind}, ${keptHit.target.mode}, n:${keptHit.cluster.docIds.length}) — ${keptHit.cluster.label}`,
+        );
+      } else {
+        const inCluster = resolvedAll.find((r) => r.cluster.docIds.includes(key));
+        if (!inCluster) {
+          console.log(`  ✗ UNCLUSTERED  ${key} — neither pass-0 nor pass-1 placed it in a cluster.`);
+        } else {
+          const drop = dropped.find((d) => d.topicKey === inCluster.cluster.topicKey);
+          console.log(
+            `  ✗ DROPPED  ${key}\n           was in cluster "${inCluster.cluster.topicKey}" ` +
+              `(${inCluster.target.mode}) but that cluster was dropped${drop ? ` — reason: ${drop.reason}` : ""}.`,
+          );
+        }
+      }
+    }
+  }
 
   if (kept.length === 0) {
     console.log(

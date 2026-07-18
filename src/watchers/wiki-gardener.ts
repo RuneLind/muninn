@@ -49,6 +49,7 @@ export type SharedGardenerSeams = Pick<
   GardenerDeps,
   | "fetchDoc"
   | "callCluster"
+  | "callDocPageMap"
   | "loadInterestProfile"
   | "getWikiIndex"
   | "callDraft"
@@ -200,6 +201,20 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
         // haiku_usage row ties back to the trace (trackUsage stamps
         // `tracer.traceId`; NULL without it) — the #267 join, now for the
         // gardener cluster/triage rows too.
+        tracer,
+      });
+      return result;
+    },
+    callDocPageMap: async (prompt) => {
+      // Pass-1 doc→page map — same backend + thinking conventions as `callCluster`
+      // (a cheap Haiku call). Its `wiki_gardener_map` haiku_usage row joins the
+      // trace via the threaded tracer, exactly like the cluster row.
+      const { result } = await callHaikuWithFallback(prompt, {
+        source: "wiki_gardener_map",
+        entrypoint: `${name}-watcher`,
+        botName: name,
+        connector: botConfig.connector,
+        haikuBackend: botConfig.haikuBackend,
         tracer,
       });
       return result;
