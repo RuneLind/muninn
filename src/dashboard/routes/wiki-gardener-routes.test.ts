@@ -15,6 +15,8 @@ import {
 } from "./wiki-gardener-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { computeWatcherNextRun } from "../agents-overview.ts";
+import type { Watcher } from "../../types.ts";
 
 /**
  * Route-level resolution tests for `/api/wiki/linter-findings`. Mirrors the
@@ -157,6 +159,76 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
  * cached (by-reference) payload, so a second merge with fresh `running` reflects
  * the new value while the cached object is unchanged (and never leaks `queuedKeys`).
  */
+describe("watcher nextRunAt projection honors the time-of-day gate (FIX 1)", () => {
+  // The wire `nextRunAt` is `computeWatcherNextRun(...).nextRunAt`, mapped so any
+  // result at-or-before `now` becomes null ("due on next tick"). This mirrors the
+  // route's exact mapping. The bug being guarded: naive `lastRunAt + intervalMs`
+  // math projected a PAST instant once the 7d interval elapsed at, say, 03:00 Oslo,
+  // making the strip say "due on next tick" though the run actually fires ~10:00.
+  const DAY = 86_400_000;
+  const HOUR = 3_600_000;
+
+  function gardenerWatcher(over: Partial<Watcher> = {}): Watcher {
+    return {
+      id: "gard-1",
+      userId: "u",
+      botName: "jarvis",
+      name: "wiki-gardener",
+      type: "wiki-gardener",
+      config: { hour: 10 }, // Oslo time-of-day gate
+      intervalMs: 7 * DAY,
+      enabled: true,
+      lastRunAt: null,
+      lastNotifiedIds: [],
+      forceNextRun: false,
+      createdAt: 0,
+      updatedAt: 0,
+      ...over,
+    } as Watcher;
+  }
+
+  /** The route's exact mapping from the projection onto the `number | null` wire field. */
+  function wireNextRunAt(w: Watcher, now: number): number | null {
+    const projected = computeWatcherNextRun(w, now).nextRunAt;
+    return projected > now ? projected : null;
+  }
+
+  test("interval elapsed at 03:00 Oslo ⇒ projects the ~10:00 slot, NOT null/past-due", () => {
+    // 2026-06-15 03:00 Oslo (CEST = UTC+2) ⇒ 01:00 UTC.
+    const now = Date.parse("2026-06-15T01:00:00Z");
+    // Last run ~7d+1h ago ⇒ the 7d interval gate has just elapsed (naive math =
+    // lastRunAt + 7d = now − 1h, which is in the PAST → the old bug).
+    const lastRunAt = now - (7 * DAY + HOUR);
+    expect(lastRunAt + 7 * DAY).toBeLessThan(now); // naive math is past-due
+
+    const wire = wireNextRunAt(gardenerWatcher({ lastRunAt }), now);
+    // The canonical projection returns today's 10:00 Oslo slot (08:00 UTC) — a real
+    // FUTURE instant, so the wire carries a number the strip renders as "~7h".
+    expect(wire).not.toBeNull();
+    expect(wire).toBe(Date.parse("2026-06-15T08:00:00Z"));
+    expect(wire! - now).toBe(7 * HOUR);
+  });
+
+  test("never-run gardener still projects the next 10:00 slot (the hour gate applies)", () => {
+    // At 03:00 Oslo, a never-run watcher WITH an hour gate projects today's 10:00
+    // slot (08:00 UTC), not the pure-interval "due now" sentinel — the gate applies.
+    const now = Date.parse("2026-06-15T01:00:00Z");
+    expect(wireNextRunAt(gardenerWatcher({ lastRunAt: null }), now)).toBe(
+      Date.parse("2026-06-15T08:00:00Z"),
+    );
+  });
+
+  test("force-queued ⇒ maps to null (due on next tick; the queued note owns the copy)", () => {
+    const now = Date.parse("2026-06-15T01:00:00Z");
+    // Force-queued: computeWatcherNextRun returns `now` regardless of the gate ⇒ the
+    // route maps it to null, so the strip's queued note owns the "starts on the next
+    // scheduler tick" copy instead of a contradicting next-run time.
+    expect(
+      wireNextRunAt(gardenerWatcher({ lastRunAt: now - 3 * DAY, forceNextRun: true }), now),
+    ).toBeNull();
+  });
+});
+
 describe("mergeBacklogLiveFields — live fields outside the cache", () => {
   const cached: IngestBacklogResponse = {
     byCollection: [],

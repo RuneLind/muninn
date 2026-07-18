@@ -194,10 +194,12 @@ describe("backlogStripModel — Run-gardener-now watcher affordance", () => {
     expect(m.nextRunText).toBe("next weekly run in ~3h");
   });
 
-  test("forceQueued ⇒ no button, watcherQueued true (still shows next-run text)", () => {
+  test("forceQueued ⇒ no button, watcherQueued true (model still carries next-run text; renderer suppresses it)", () => {
     const m = backlogStripModel(freshBase({ watcher: watcher({ forceQueued: true }) }), 0, NOW);
     expect(m.watcherRunNow).toBeNull();
     expect(m.watcherQueued).toBe(true);
+    // The model still derives the text — it's the renderer (freshWatcherSuffixHtml)
+    // that suppresses it while the run is queued (asserted in the sentence tests).
     expect(m.nextRunText).toBe("next weekly run in ~4d");
   });
 
@@ -284,13 +286,15 @@ describe("backlogSentenceHtml — Run-gardener-now fresh segment", () => {
     expect(html).not.toContain("weekly watcher's turf");
   });
 
-  test("queued state: the note replaces the button", () => {
+  test("queued state: the note replaces the button AND suppresses the next-run text", () => {
     const html = backlogSentenceHtml(
       backlogStripModel(freshBase({ watcher: watcher({ forceQueued: true }) }), 0, NOW),
     );
-    expect(html).toContain("gardener run queued — starts within ~1 min");
+    expect(html).toContain("gardener run queued — starts on the next scheduler tick");
     expect(html).not.toContain('data-backlog-action="run-watcher"');
-    expect(html).toContain("next weekly run in ~4d");
+    // Queued wins: showing "next weekly run in ~4d" beside "queued" reads as a
+    // contradiction, so the next-run text is suppressed while a run is queued.
+    expect(html).not.toContain("next weekly run in ~4d");
   });
 
   test("a run in flight: next-run text shows, but no button/queued note (control area owns run state)", () => {

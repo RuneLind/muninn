@@ -129,7 +129,8 @@ export interface BacklogStripModel {
   watcherRunNow: { id: string } | null;
   /**
    * A force-run is already queued for the (enabled) watcher — the strip shows a
-   * "queued — starts within ~1 min" note instead of the button. Only meaningful
+   * "queued — starts on the next scheduler tick" note instead of the button (and
+   * the next-run text is suppressed so the two don't contradict). Only meaningful
    * when fresh > 0 (the renderer gates on that).
    */
   watcherQueued: boolean;
@@ -279,7 +280,8 @@ function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
  * The fresh segment's trailing affordance (pure HTML). With watcher info present
  * (enabled watcher + a live response): the next-weekly-run time, plus either a
  * "Run gardener now" button ({@link BacklogStripModel.watcherRunNow}) or a
- * "queued — starts within ~1 min" note ({@link BacklogStripModel.watcherQueued}).
+ * "queued — starts on the next scheduler tick" note ({@link BacklogStripModel.watcherQueued}),
+ * which suppresses the next-run text so the queued state doesn't contradict it.
  * While a run is in flight only the next-run time shows (the control area's
  * running/progress rendering already owns the run state — no double-render). With
  * NO watcher info (a degraded/older server) it falls back to the original dead-end
@@ -293,10 +295,16 @@ function freshWatcherSuffixHtml(model: BacklogStripModel): string {
     return ` <span class="bk-note">— weekly watcher's turf</span>`;
   }
   const parts: string[] = [];
-  if (model.nextRunText) parts.push(`<span class="bk-note">${esc(model.nextRunText)}</span>`);
+  // A queued force-run wins: showing "next weekly run in ~Nd" alongside "queued —
+  // starts on the next scheduler tick" reads as a contradiction, so the queued note
+  // suppresses the next-run text.
+  const queuedNoteShows = !model.running && model.watcherQueued;
+  if (model.nextRunText && !queuedNoteShows) {
+    parts.push(`<span class="bk-note">${esc(model.nextRunText)}</span>`);
+  }
   if (!model.running) {
     if (model.watcherQueued) {
-      parts.push(`<span class="bk-note bk-queued">gardener run queued — starts within ~1 min</span>`);
+      parts.push(`<span class="bk-note bk-queued">gardener run queued — starts on the next scheduler tick</span>`);
     } else if (model.watcherRunNow) {
       parts.push(
         `<button class="gard-btn bk-run-watcher" data-backlog-action="run-watcher" ` +
