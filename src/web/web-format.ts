@@ -3,6 +3,7 @@ import {
   normalizeCalloutTone,
   normalizePillTone,
   normalizeVerdictValue,
+  parseMeterAttrs,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
@@ -69,6 +70,19 @@ const webRenderer: BlockRenderer = {
         return `<code class="fileref">${children.trim() || escapeHtml(attrs.path ?? "")}</code>`;
       case "ComparisonTable":
         return `<div class="tablewrap">${children}</div>`;
+      case "Meter": {
+        const meter = parseMeterAttrs(attrs);
+        if (!meter) return children; // missing/non-numeric value → label as plain text
+        const pct = Math.round((meter.value / meter.max) * 100);
+        const cls = meter.tone === "default" ? "meter" : `meter meter-${meter.tone}`;
+        return (
+          `<div class="${cls}">` +
+          `<span class="meter-label">${children}</span>` +
+          `<span class="meter-bar"><span class="meter-fill" style="width:${pct}%"></span></span>` +
+          `<span class="meter-value">${meter.value}/${meter.max}</span>` +
+          `</div>`
+        );
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

@@ -39,6 +39,7 @@ export const COMPONENT_NAMES = [
   "Figure",
   "FileRef",
   "ComparisonTable",
+  "Meter",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -59,6 +60,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Figure: ["caption"],
   FileRef: ["path"],
   ComparisonTable: [],
+  Meter: ["value", "max", "tone"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -84,6 +86,34 @@ export function normalizePillTone(tone: string | undefined): "default" | "rec" |
 /** Normalize an untrusted `value` attr for Verdict. */
 export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
   return value === "no" ? "no" : "yes";
+}
+
+/** Normalize an untrusted `tone` attr for Meter (good/warn/bad → green/amber/red). */
+export function normalizeMeterTone(tone: string | undefined): "default" | "good" | "warn" | "bad" {
+  return tone === "good" || tone === "warn" || tone === "bad" ? tone : "default";
+}
+
+/**
+ * Parse + clamp + default the Meter component's attrs, shared by every platform
+ * so the value/max/tone logic lives in exactly one place. Returns `null` when
+ * `value` is missing or non-numeric — the identical-degrade contract: every
+ * platform then renders the children (the label) as plain text. Out-of-range
+ * `value` is clamped into `[0, max]`; a missing/non-positive/non-numeric `max`
+ * falls back to the default of 5.
+ */
+export function parseMeterAttrs(
+  attrs: Record<string, string>,
+): { value: number; max: number; tone: "default" | "good" | "warn" | "bad" } | null {
+  const raw = attrs.value;
+  if (raw === undefined || raw.trim() === "") return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+
+  let max = Number(attrs.max);
+  if (!Number.isFinite(max) || max <= 0) max = 5;
+
+  const clamped = Math.min(Math.max(value, 0), max);
+  return { value: clamped, max, tone: normalizeMeterTone(attrs.tone) };
 }
 
 const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;

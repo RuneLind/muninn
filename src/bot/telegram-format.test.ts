@@ -149,3 +149,17 @@ test("component: Callout title with angle brackets is escaped", () => {
   expect(out).toContain("a&lt;b");
   expect(out).not.toContain("<b>a<b</b>");
 });
+
+test("component: Meter → label: value/max fallback", () => {
+  expect(formatTelegramHtml("<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>")).toBe(
+    "Autonomy: 4/5",
+  );
+});
+
+test("component: Meter clamps out-of-range value", () => {
+  expect(formatTelegramHtml("<Meter value=\"9\" max=\"5\">Over</Meter>")).toBe("Over: 5/5");
+});
+
+test("component: Meter with non-numeric value degrades to plain label", () => {
+  expect(formatTelegramHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
+});
