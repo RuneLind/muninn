@@ -15,7 +15,7 @@ import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
-import { enhanceMermaid } from "./wiki-mermaid-browser.ts";
+import { enhanceMermaid } from "./wiki-mermaid.ts";
 import {
   serializeAskSession,
   deserializeAskSession,

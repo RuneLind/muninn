@@ -1,9 +1,10 @@
 import { test, expect } from "bun:test";
 import {
   MERMAID_CDN_URL,
+  MERMAID_SRI,
   mermaidThemeFor,
   hasMermaid,
-} from "./wiki-mermaid-browser.ts";
+} from "./wiki-mermaid.ts";
 
 /**
  * The client-side mermaid enhancer is DOM-driven and the repo has no browser
@@ -21,6 +22,17 @@ test("MERMAID_CDN_URL is a pinned https mermaid@11 UMD build", () => {
   expect(MERMAID_CDN_URL.startsWith("https://")).toBe(true);
   // Full version pinned (not a floating @11 / @latest tag).
   expect(MERMAID_CDN_URL).toContain("mermaid@11.16.0");
+});
+
+test("MERMAID_SRI is a well-formed sha384 subresource-integrity value", () => {
+  // `sha384-` prefix + base64 of a 48-byte (384-bit) digest. Base64 of 48
+  // bytes is 64 chars ending in a single `=`-free group (48 % 3 === 0).
+  expect(MERMAID_SRI).toMatch(/^sha384-[A-Za-z0-9+/]{64}$/);
+  // Verified against what jsdelivr serves for MERMAID_CDN_URL:
+  //   curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A
+  expect(MERMAID_SRI).toBe(
+    "sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E",
+  );
 });
 
 test("mermaidThemeFor: explicit data-theme wins over OS preference", () => {
