@@ -73,6 +73,9 @@ export class Tracer {
         platform: opts.platform,
         startedAt: new Date(),
       });
+      // Standalone catch: keeps a never-finished trace from leaking an unhandled
+      // rejection. Deliberate tradeoff: if finish() also runs, an insert failure
+      // is logged twice (here + the chained update's catch).
       this.rootInsertPromise.catch(logError);
     }
   }
@@ -95,6 +98,8 @@ export class Tracer {
         startedAt: new Date(),
         attributes,
       });
+      // Same deliberate double-log tradeoff as the root insert above: a span
+      // that is never end()ed must not leak an unhandled rejection.
       insertPromise.catch(logError);
     }
 
