@@ -67,6 +67,19 @@ describe("buildDocPageMapPrompt", () => {
     // The doc's stable key is what the model must echo as docId.
     expect(prompt).toContain("ID: youtube-summaries/2026-07-15_c.md");
   });
+
+  test("carries the multi-topic roundup → overview/landscape calibration", () => {
+    const prompt = buildDocPageMapPrompt(
+      [doc("2026-07-15_c.md", "Some Doc")],
+      [{ title: "AI Industry Landscape", aliases: [], domain: "ai", type: "concept" }],
+    );
+    // The roundup exception must be present without weakening the single-topic rule.
+    expect(prompt).toContain("Roundup rule");
+    expect(prompt).toMatch(/OVERVIEW \/ LANDSCAPE \/ SURVEY/);
+    expect(prompt).toContain("never overrides the single-topic rule");
+    // Still leads with the conservative "SQUARELY about" instruction.
+    expect(prompt).toContain("SQUARELY about");
+  });
 });
 
 // ── Parser ───────────────────────────────────────────────────────────────────
