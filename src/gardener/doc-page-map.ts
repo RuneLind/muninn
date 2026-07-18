@@ -51,6 +51,15 @@ export interface MapMergeOutcome {
   appended: number;
   /** True no-ops: the mapped page's update cluster already contains the doc. */
   deduped: number;
+  /**
+   * Synthesis suppressed because a DIFFERENT resolvedAll cluster already carries
+   * the synthesized topicKey (e.g. a pass-0 create whose slug coincides). Drafting
+   * both would waste a draft call — the pass-1 rescue always loses to the pass-0
+   * cluster's earlier `insertWikiProposal` `ON CONFLICT (bot_name, topic_key) DO
+   * NOTHING`. Not a `deduped` no-op (that's the mapped page's OWN update cluster);
+   * a genuine topicKey collision with an unrelated cluster.
+   */
+  collision: number;
 }
 
 /**
@@ -173,9 +182,14 @@ ${docList}
 /**
  * Parse + shape-validate the map model's JSON output into well-formed mappings.
  * Defensive like `parseClusters`: strips fences (via {@link extractJson}), tolerates
- * junk, and drops any element missing a string `docId`/`pageTitle`. Semantic
- * validation (is the docId real? does the pageTitle exist?) happens in
- * {@link mergeDocPageMappings}, which owns the wiki index + harvested set.
+ * junk, and drops any element missing a string `docId`/`pageTitle`.
+ *
+ * SHAPE-ONLY: this does NOT check that a `docId` was actually harvested — a
+ * fabricated or stale id passes here and is dropped later at MERGE, where
+ * {@link mergeDocPageMappings} filters against its `validDocKeys` set. So callers
+ * MUST pass a correct `validDocKeys` (the harvested set) to the merge — a wrong
+ * or empty set silently drops (or, if over-broad, admits) mappings here. Semantic
+ * validation (is the docId real? does the pageTitle exist?) is the merge's job.
  */
 export function parseDocPageMap(raw: string): DocPageMapping[] {
   let parsed: unknown;
@@ -242,7 +256,12 @@ export function slugifyTopicKey(title: string): string {
  *    kind/domain = page's, topicKey = slug of the title), resolved through the SAME
  *    {@link resolveTarget}. It honors the SAME skip set as pass-0 (live drafts +
  *    recent rejections): a synthesized topicKey in `skipTopicKeys` is dropped and
- *    tallied as `skip`.
+ *    tallied as `skip`. A synthesized topicKey that collides with a DIFFERENT
+ *    resolvedAll cluster (not the mapped page's own update — that was caught above)
+ *    is dropped and tallied as `collision` (see {@link MapMergeOutcome.collision}):
+ *    both would pass the gate, but the pass-0 cluster drafts+inserts first and the
+ *    pass-1 synthesis loses to the proposal table's `(bot_name, topic_key)` uniqueness
+ *    — so we skip the wasted draft call.
  *
  * The doc's memberships in OTHER clusters (create or update, targeting other
  * pages) are left untouched — shared docs across proposals are an already-handled
@@ -259,7 +278,7 @@ export function mergeDocPageMappings(
     botName?: string;
   },
 ): { outcome: MapMergeOutcome; skipDrops: ClusterDropEntry[] } {
-  const outcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0 };
+  const outcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0, collision: 0 };
   const skipDrops: ClusterDropEntry[] = [];
   const botName = opts.botName;
 
@@ -329,6 +348,28 @@ export function mergeDocPageMappings(
     // Honor the same skip set as pass-0 (live drafts + recent rejections).
     if (opts.skipTopicKeys.has(topicKey)) {
       skipDrops.push({ topicKey, kind: synth.kind, size: 1, reason: "skip" });
+      continue;
+    }
+
+    // Collision guard: a DIFFERENT resolvedAll cluster already carries this
+    // topicKey (its own update cluster was matched by relPath above, so this is a
+    // create — or an unrelated update — whose slug coincides). Synthesizing anyway
+    // would draft two proposals for one `(bot_name, topic_key)`; the pass-0 cluster
+    // wins the insert's ON CONFLICT DO NOTHING and the rescue's draft is wasted. Skip.
+    const collidingWith = resolvedAll.find((r) => r.cluster.topicKey === topicKey);
+    if (collidingWith) {
+      log.info(
+        "doc→page map: synthesized topicKey {topicKey} (page {page}) collides with existing " +
+          "{otherMode} cluster {otherLabel} — skipping synthesis to avoid a wasted draft",
+        {
+          botName,
+          topicKey,
+          page: page.title,
+          otherMode: collidingWith.target.mode,
+          otherLabel: collidingWith.cluster.label,
+        },
+      );
+      outcome.collision++;
       continue;
     }
 

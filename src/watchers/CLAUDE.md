@@ -324,17 +324,26 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
   one existing concept/entity page (candidate policy = `resolveTarget`'s; the map
   excerpt `mapExcerptOf` surfaces section HEADINGS so a multi-topic news-roundup doc
   reveals its breadth, unlike the cluster prompt's heading-stripped `excerptOf`).
-  `mergeDocPageMappings` folds each valid mapping into `resolvedAll`: **covered** (doc
-  already in ANY update cluster → skip), **append** (a resolvedAll update cluster
+  `mergeDocPageMappings` folds each valid mapping into `resolvedAll` — **the mapped
+  page WINS** (a strong doc→P mapping lands on P regardless of the doc's membership in
+  OTHER clusters; the old covered-skip that dropped the mapping whenever the doc sat in
+  any update cluster is gone): **deduped** (the mapped page's OWN update cluster already
+  contains the doc → the one true no-op), **append** (a resolvedAll update cluster
   already targets that page → add the doc, deduped), else **synthesize** a 1-doc
   update cluster (label = page title, topicKey = slug, resolved through the SAME
-  `resolveTarget`; honors the same live/recently-rejected skip set as pass-0). A doc
-  may end up in both a create AND a synthesized update (no cross-mode dedup). Skipped
-  entirely when the wiki has no concept/entity pages (no candidates ⇒ no call);
-  best-effort (a map-call error degrades to "no mappings", never aborts the run). A
-  `map` stage span carries `{mapped, synthesized, appended, covered_skipped,
-  skip_dropped}`; one adjacent structured log line reports the outcome. **Known
-  limit:** the synthesized/mapped update still competes in the size/cap gate
+  `resolveTarget`; honors the same live/recently-rejected skip set as pass-0 → tallied
+  `skip`). Before synthesizing, a **collision guard**: if a DIFFERENT resolvedAll
+  cluster already carries the synthesized topicKey (e.g. a pass-0 create whose slug
+  coincides — NOT the mapped page's own update, caught by the dedup/append above), the
+  synthesis is dropped and tallied `collision` — drafting both would waste a draft call
+  since the pass-1 rescue always loses to the pass-0 cluster's earlier
+  `insertWikiProposal` `ON CONFLICT (bot_name, topic_key) DO NOTHING`. A doc may end up
+  in both a create AND a synthesized update (no cross-mode dedup). Skipped entirely when
+  the wiki has no concept/entity pages (no candidates ⇒ no call); best-effort (a
+  map-call error degrades to "no mappings", never aborts the run). A `map` stage span
+  carries `{mapped, synthesized, appended, deduped, collision, skip_dropped}`; one
+  adjacent structured log line reports the outcome. **Known limit:** the
+  synthesized/mapped update still competes in the size/cap gate
   unchanged — on a mature wiki where most single docs match an existing page, the
   weekly `maxProposalsPerRun` (3) is the binding constraint on which mapped docs
   actually draft; the backlog drain's higher cap (8) keeps more.

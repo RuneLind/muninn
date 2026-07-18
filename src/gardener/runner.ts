@@ -226,7 +226,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // in the gate below like any update. Skipped entirely when the wiki has no
   // concept/entity pages (no candidates ⇒ no call). Best-effort: a map-call error
   // degrades to "no mappings" and never aborts the run.
-  let mapOutcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0 };
+  let mapOutcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0, collision: 0 };
   let mapSkipDrops: ClusterDropEntry[] = [];
   const candidatePages = mappablePages(index);
   if (candidatePages.length > 0) {
@@ -255,6 +255,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       synthesized: mapOutcome.synthesized,
       appended: mapOutcome.appended,
       deduped: mapOutcome.deduped,
+      collision: mapOutcome.collision,
       skip_dropped: mapSkipDrops.length,
     });
   }
@@ -280,13 +281,14 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // cluster-drop tally below — its synthesized clusters may have drafted).
   log.info(
     "Gardener doc→page map: {mapped} mapped → {synthesized} synthesized, {appended} appended, " +
-      "{deduped} already-on-page, {skipped} skipped (live/recently-rejected)",
+      "{deduped} already-on-page, {collision} topicKey-collision, {skipped} skipped (live/recently-rejected)",
     {
       botName,
       mapped: mapOutcome.mapped,
       synthesized: mapOutcome.synthesized,
       appended: mapOutcome.appended,
       deduped: mapOutcome.deduped,
+      collision: mapOutcome.collision,
       skipped: mapSkipDrops.length,
     },
   );

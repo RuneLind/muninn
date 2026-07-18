@@ -886,7 +886,101 @@ describe("runGardener — pass-1 doc→page mapping", () => {
     await runGardener(deps);
 
     expect(started).toContain("map");
-    expect(endAttrs["map"]).toMatchObject({ mapped: 1, synthesized: 1, appended: 0, deduped: 0 });
+    expect(endAttrs["map"]).toMatchObject({ mapped: 1, synthesized: 1, appended: 0, deduped: 0, collision: 0 });
+  });
+
+  test("a rejecting callDocPageMap degrades to pass-0-only: drafts still produced, no throw", async () => {
+    // The runner's map try-block degrades a map-call failure to "no mappings" and
+    // never aborts the run. Pins that guarantee: with a candidate page present (so
+    // the map stage actually runs) but callDocPageMap REJECTING, the pass-0 create
+    // must still draft + persist, and runGardener must not throw. Removing the
+    // try/catch makes the rejection propagate and this test throw.
+    let draftCalls = 0;
+    const { deps, inserted } = makeDeps({
+      // A candidate page that does NOT match the pass-0 label ⇒ map stage runs,
+      // pass-0 "Context Compaction" stays a 3-doc create.
+      getWikiIndex: async () => conceptIndex("Some Other Concept"),
+      callDocPageMap: async () => {
+        throw new Error("map backend down");
+      },
+      callDraft: async () => {
+        draftCalls += 1;
+        return validDraft();
+      },
+    });
+    const alerts = await runGardener(deps); // must NOT throw
+    expect(draftCalls).toBe(1);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("create");
+    expect(inserted[0]!.topicKey).toBe("context-compaction");
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("headline cap: a synthesized 1-doc update survives via the reserved slot; the smallest create is cap-dropped", async () => {
+    // maxProposalsPerRun = 3. Pass-0 yields three ≥minClusterSize creates (5/4/3
+    // docs); pass-1 synthesizes a 1-doc update. The gate reserves one slot for the
+    // largest update, fills the other two largest-first (creates A+B), and cap-drops
+    // the smallest create (C) — so the synthesized update reaches a persisted draft
+    // even though it's the smallest cluster overall. Zeroing the reserved slot would
+    // evict the update instead and fail this.
+    const mkIds = (n: number, p: string) => Array.from({ length: n }, (_, i) => `2026-07-07_${p}${i}.md`);
+    const aIds = mkIds(5, "a");
+    const bIds = mkIds(4, "b");
+    const cIds = mkIds(3, "c");
+    const mIds = mkIds(1, "m");
+    const allIds = [...aIds, ...bIds, ...cIds, ...mIds];
+    const key = (id: string) => `youtube-summaries/${id}`;
+    const bodies: Record<string, RawFetchedDoc> = Object.fromEntries(
+      allIds.map((id) => [id, { text: `# ${id}\n\nBody.`, metadata: { url: `https://${id}` } }]),
+    );
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => conceptIndex("Mapped Page"),
+      readWikiFile: async () => "# Mapped Page\n\nExisting body.",
+      listDocs: async () => allIds.map((id) => ({ id })),
+      fetchDoc: async (_c, id) => bodies[id] ?? null,
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "create-a", kind: "concept", domain: "ai", label: "Create A", docIds: aIds.map(key), rationale: "r" },
+          { topicKey: "create-b", kind: "concept", domain: "ai", label: "Create B", docIds: bIds.map(key), rationale: "r" },
+          { topicKey: "create-c", kind: "concept", domain: "ai", label: "Create C", docIds: cIds.map(key), rationale: "r" },
+        ]),
+      callDocPageMap: async () => JSON.stringify([{ docId: key(mIds[0]!), pageTitle: "Mapped Page" }]),
+    });
+    await runGardener(deps);
+
+    const topics = inserted.map((p) => p.topicKey).sort();
+    expect(inserted).toHaveLength(3);
+    expect(topics).toEqual(["create-a", "create-b", "mapped-page"]);
+    // The synthesized update survived …
+    const upd = inserted.find((p) => p.topicKey === "mapped-page")!;
+    expect(upd.mode).toBe("update");
+    expect(upd.targetPath).toBe("concepts/Mapped Page.md");
+    // … and the smallest create was the one the cap evicted.
+    expect(inserted.some((p) => p.topicKey === "create-c")).toBe(false);
+  });
+
+  test("append end-to-end: a doc mapped onto an existing pass-0 update cluster reaches its persisted sourceDocs", async () => {
+    // Pass-0 makes a 2-doc UPDATE cluster of an existing page (update passes at ≥1);
+    // pass-1 maps the THIRD harvested doc onto the SAME page ⇒ append path, which
+    // mutates the cluster's docIds IN PLACE. The persisted proposal must carry all
+    // three source docs — proving the in-place mutation reaches the draft/persist
+    // loop. Breaking the append push drops it back to two.
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => conceptIndex("Context Compaction"),
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: [KEYS[0], KEYS[1]], rationale: "r" },
+        ]),
+      callDocPageMap: async () => JSON.stringify([{ docId: KEYS[2], pageTitle: "Context Compaction" }]),
+    });
+    await runGardener(deps);
+
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.topicKey).toBe("context-compaction");
+    expect(inserted[0]!.sourceDocs).toHaveLength(3);
+    expect(inserted[0]!.sourceDocs.map((d) => d.docId).sort()).toEqual([IDS[0]!, IDS[1]!, IDS[2]!].sort());
   });
 });
 
