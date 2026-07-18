@@ -14,6 +14,7 @@
 import path from "node:path";
 import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
+import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
 
 const log = getLog("wiki", "store");
 
@@ -52,11 +53,25 @@ export interface WikiPageMeta {
   /** External URL for source pages (YouTube video, X article, …). */
   url?: string;
   /**
-   * Short prose summary. Explainers only — sniffed from the head `<meta
-   * name="description">`; markdown pages leave it undefined. Feeds the Similar
-   * endpoint's query so explainers match on more than their title.
+   * Short prose summary. Explainers sniff it from the head `<meta
+   * name="description">`; native blog `.mdx` pages read it from frontmatter
+   * `description`; other markdown pages leave it undefined. For explainers it
+   * feeds the Similar endpoint's query (blog pages use their full body there);
+   * renders as the article subtitle for `type: blog` pages.
    */
   description?: string;
+  /**
+   * Validated CSS color token from a page's frontmatter `accent` — the article's
+   * brand color for `type: blog` pages (tints headings/links/callouts in the
+   * reader). Sanitized at parse time via `sanitizeColorToken`: only a strict
+   * `#hex` / `rgb()` / `hsl()` token survives; anything else is dropped, so a
+   * malformed value never reaches the client's `<style>` sink. Undefined when
+   * absent or rejected.
+   */
+  accent?: string;
+  /** Dark-theme counterpart of `accent` (frontmatter `accentDark`), same
+   *  sanitization. Undefined ⇒ the light `accent` is used in both themes. */
+  accentDark?: string;
   /** Path relative to the wiki root — unique even when stems collide. */
   relPath: string;
   /**
@@ -609,6 +624,13 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         created: typeof fm.created === "string" ? fm.created : undefined,
         updated: typeof fm.updated === "string" ? fm.updated : undefined,
         url: typeof fm.url === "string" ? fm.url : undefined,
+        // Native blog `.mdx` pages carry these; `.md` pages that don't declare
+        // them stay undefined (unchanged). `accent`/`accentDark` are user text
+        // bound for a `<style>` sink — sanitized to a strict color token here so a
+        // malformed value is dropped at the source, never at the DOM.
+        description: typeof fm.description === "string" ? fm.description : undefined,
+        accent: sanitizeColorToken(fm.accent),
+        accentDark: sanitizeColorToken(fm.accentDark),
         relPath,
         mtimeMs,
       };

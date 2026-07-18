@@ -28,6 +28,7 @@ import {
   hubTypeList,
   pageDateLabel,
   ROOT_FOLDER,
+  sanitizeColorToken,
   sortPages,
   tagCounts,
   topPages,
@@ -1034,7 +1035,15 @@ function loadSimilar(pageName: string): void {
 /** Article-head block (title, badges, tags, dates, source link) — shared by
  *  markdown pages and HTML explainers. */
 function articleHeadHtml(m: WikiListing): string {
-  let head = `<div class="wiki-article-head"><h1>${esc(m.title)}</h1><div class="wiki-meta-row">` + badgeHtml(m);
+  // Explainer-style subtitle under the H1 for blog pages that declared a
+  // `description` (user text → escaped into innerHTML). Non-blog pages are unchanged.
+  const subtitle =
+    m.type === "blog" && m.description
+      ? `<p class="wiki-subtitle">${esc(m.description)}</p>`
+      : "";
+  let head =
+    `<div class="wiki-article-head"><h1>${esc(m.title)}</h1>${subtitle}<div class="wiki-meta-row">` +
+    badgeHtml(m);
   m.tags.forEach((t) => {
     head += `<span class="wiki-tag">${esc(t)}</span>`;
   });
@@ -1082,6 +1091,36 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   renderList();
 }
 
+/**
+ * Per-page accent `<style>` block for a `type: blog` page that declared an
+ * `accent`. Overrides `--accent`/`--accent-light` on the `.wiki-article-blog`
+ * scope so the page's headings/links/callouts tint to its brand color. The values
+ * are re-validated here (defense-in-depth — the server already sanitized them to a
+ * strict color token, so `</style>` / `;}` breakouts are structurally impossible).
+ *
+ * Theme correctness across all three toggle states: the light `accent` is the base;
+ * `accentDark` (when present) is applied under BOTH `html[data-theme="dark"]` (the
+ * explicit-dark override) AND `@media (prefers-color-scheme: dark) html:not([data-theme="light"])`
+ * (system-follow on a dark OS, but NOT when the user forced light). So: system+light
+ * OS → base accent; system+dark OS → accentDark; explicit light → base accent (the
+ * media rule's `:not([data-theme="light"])` excludes it); explicit dark → accentDark.
+ *
+ * The block is injected INSIDE `#articleWrap` alongside the article, so a page flip
+ * (or the Ask/Explain answer that replaces `#articleWrap`) drops it automatically —
+ * it never leaks onto another page.
+ */
+function blogAccentStyleBlock(m: WikiListing): string {
+  const light = sanitizeColorToken(m.accent);
+  if (!light) return "";
+  const dark = sanitizeColorToken(m.accentDark);
+  let css = `.wiki-article-blog{--accent:${light};--accent-light:${light};}`;
+  if (dark) {
+    css += `html[data-theme="dark"] .wiki-article-blog{--accent:${dark};--accent-light:${dark};}`;
+    css += `@media (prefers-color-scheme:dark){html:not([data-theme="light"]) .wiki-article-blog{--accent:${dark};--accent-light:${dark};}}`;
+  }
+  return `<style>${css}</style>`;
+}
+
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   const listing = allPages.find((p) => p.name === name);
@@ -1101,8 +1140,14 @@ function loadPage(name: string, push: boolean): void {
       if (push) {
         history.pushState({ page: currentName }, "", pageUrl(currentName));
       }
+      // Blog pages get explainer-ish article chrome: an accent-tinted scope
+      // (`.wiki-article-blog` + a per-page accent style block) plus the subtitle
+      // rendered in `articleHeadHtml`. Non-blog pages render exactly as before.
+      const isBlog = data.meta.type === "blog";
+      const articleClass = isBlog ? "wiki-article wiki-article-blog" : "wiki-article";
+      const accentBlock = isBlog ? blogAccentStyleBlock(data.meta) : "";
       document.getElementById("articleWrap")!.innerHTML =
-        articleHeadHtml(data.meta) + `<div class="wiki-article">${data.html}</div>`;
+        accentBlock + articleHeadHtml(data.meta) + `<div class="${articleClass}">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,

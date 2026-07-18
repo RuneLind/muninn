@@ -10,6 +10,7 @@ import {
   pageFolder,
   pageTimeMs,
   ROOT_FOLDER,
+  sanitizeColorToken,
   sortPages,
   tagCounts,
   topPages,
@@ -310,4 +311,39 @@ test("topPages: backlinked-only predicate (untyped fallback) drops orphans", () 
   // Nothing linked → empty (drives the muted empty-state in hubsHtml).
   const none: WikiListing[] = [page({ name: "x", type: "note", backlinkCount: 0 })];
   expect(topPages(none, (p) => p.backlinkCount > 0)).toEqual([]);
+});
+
+test("sanitizeColorToken accepts strict hex color tokens", () => {
+  for (const v of ["#abc", "#abcd", "#a1b2c3", "#a1b2c3d4", "#FFF", "  #6c63ff  "]) {
+    expect(sanitizeColorToken(v)).toBe(v.trim());
+  }
+});
+
+test("sanitizeColorToken accepts rgb/rgba/hsl/hsla with numeric args", () => {
+  for (const v of ["rgb(108, 99, 255)", "rgba(0,0,0,0.5)", "hsl(240, 100%, 60%)", "HSLA(240, 100%, 60%, 0.4)"]) {
+    expect(sanitizeColorToken(v)).toBe(v);
+  }
+});
+
+test("sanitizeColorToken drops named colors, functions with non-numeric args, and non-strings", () => {
+  for (const v of ["red", "blue", "transparent", "var(--accent)", "url(x)", "#12", "#12345", "rgb(a,b,c)", "#xyz"]) {
+    expect(sanitizeColorToken(v)).toBeUndefined();
+  }
+  expect(sanitizeColorToken(undefined)).toBeUndefined();
+  expect(sanitizeColorToken(["#fff"])).toBeUndefined(); // frontmatter array value
+  expect(sanitizeColorToken("")).toBeUndefined();
+});
+
+test("sanitizeColorToken drops a CSS-injection attempt (style-sink breakout)", () => {
+  // The load-bearing security case: a value crafted to escape the <style> sink and
+  // inject arbitrary rules must never survive validation.
+  for (const attack of [
+    "red;} body{display:none}",
+    "#fff;} html{background:url(evil)}",
+    "#fff</style><script>alert(1)</script>",
+    "rgb(0,0,0);} .x{color:red",
+    "#fff /* comment */",
+  ]) {
+    expect(sanitizeColorToken(attack)).toBeUndefined();
+  }
 });

@@ -234,6 +234,8 @@ export async function renderWikiPage(opts?: {
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }
+    /* Explainer-style subtitle (blog pages only) — muted lede under the H1. */
+    .wiki-subtitle { font-size: 14.5px; line-height: 1.5; color: var(--text-muted); margin: -4px 0 12px; max-width: 68ch; }
     .wiki-meta-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     .wiki-badge {
       font-size: 10.5px;
@@ -285,6 +287,14 @@ export async function renderWikiPage(opts?: {
     .wiki-article hr { border: none; border-top: 1px solid var(--border-primary); margin: 16px 0; }
     .wiki-article a[target="_blank"] { color: var(--status-info); }
     ${componentBlockCss(".wiki-article")}
+
+    /* Blog-type article chrome (native .mdx pages with type: blog):
+       explainer-style h2 underline for stronger section separation. The accent
+       tint itself rides the --accent / --accent-light tokens, overridden per-page
+       on this scope by a style block the client injects (blogAccentStyleBlock) —
+       so wikilinks and callouts (which already read those tokens) pick up the
+       page brand color without any extra hookup here. */
+    .wiki-article-blog h2 { border-bottom: 1px solid var(--border-primary); padding-bottom: 4px; }
 
     .wiki-link { color: var(--accent-light); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .wiki-link:hover { color: var(--accent); border-bottom-color: var(--accent); }

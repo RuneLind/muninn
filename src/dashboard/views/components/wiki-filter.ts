@@ -23,8 +23,19 @@ export interface WikiListing {
   created?: string;
   updated?: string;
   url?: string;
-  /** Short prose summary — explainers only (sniffed from `<meta description>`). */
+  /** Short prose summary — explainers (sniffed from `<meta description>`) and
+   *  native blog `.mdx` pages (frontmatter `description`). Rendered as the article
+   *  subtitle for `type: blog` pages; feeds the Similar query for explainers only. */
   description?: string;
+  /** Validated CSS color token (`#hex` / `rgb()` / `hsl()`) from a blog page's
+   *  frontmatter `accent`. Server-sanitized (see `sanitizeColorToken`) — anything
+   *  that isn't a strict color token is dropped before it reaches this field, so
+   *  it is safe to inject into a `<style>` sink. Only carried by `type: blog` pages
+   *  that declared it. */
+  accent?: string;
+  /** Dark-theme counterpart of `accent` (frontmatter `accentDark`), same
+   *  sanitization. Absent ⇒ the light `accent` is used in both themes. */
+  accentDark?: string;
   relPath: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
@@ -39,6 +50,28 @@ export interface WikiFilters {
   folder: string;
   type: string;
   tag: string;
+}
+
+/**
+ * Strict CSS color-token validator for the user-controlled `accent` / `accentDark`
+ * frontmatter fields. These are injected into a `<style>` sink (the per-page accent
+ * block in the reader), so the ONLY accepted shapes are a `#rgb` / `#rgba` / `#rrggbb`
+ * / `#rrggbbaa` hex literal, or a `rgb()/rgba()/hsl()/hsla()` call whose argument list
+ * contains only digits, dots, commas, percent signs, and whitespace. Anything else —
+ * a named color, a `var(...)`, or an injection attempt like `red;} body{display:none`
+ * — returns `undefined` and is dropped. Shared by the server (parse-time sanitize in
+ * `src/wiki/store.ts`) and the client (defense-in-depth re-check before injection), so
+ * there is exactly one regex. Lives here because this module is pure (no DOM/server
+ * deps) and already imported by both sides.
+ */
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const FUNC_COLOR_RE = /^(?:rgb|rgba|hsl|hsla)\(\s*[0-9.,%\s]+\)$/i;
+export function sanitizeColorToken(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  if (!v) return undefined;
+  if (HEX_COLOR_RE.test(v) || FUNC_COLOR_RE.test(v)) return v;
+  return undefined;
 }
 
 /** Filter sentinel for pages sitting at the wiki root — no real folder can
