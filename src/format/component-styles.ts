@@ -12,10 +12,13 @@
  * research answer body (`.answer-body`), and the web chat bubble (`.web-content`).
  *
  * Spacing and table/diagram treatment are tuned to match the compiled MDX
- * explainer shell (`scripts/mdx-explainer/template.ts`, `baseCss`) so a native
- * `.mdx` page reads the same as its compiled twin. Rem-scale spacing and `em`
- * font-sizes are used (rather than the explainer's literal rem font-sizes) so the
- * blocks scale with each scope's own base size (14px wiki, 13px chat).
+ * explainer shell (`scripts/mdx-explainer/template.ts`, `baseCss`). Block
+ * spacing is rem-scale (root-relative, so fixed across scopes — matching the
+ * explainer's absolute rhythm); font-sizes use `em` so text tracks each scope's
+ * own base size (14px wiki, 15px research, 13px chat).
+ *
+ * `.diagram*` matches no markup yet — it lands with client-side mermaid
+ * (visual-parity PR C), which wraps rendered diagrams in this class family.
  */
 export function componentBlockCss(scope: string): string {
   return `
@@ -56,6 +59,7 @@ export function componentBlockCss(scope: string): string {
     ${scope} .tablewrap { overflow-x: auto; margin: 1.2rem 0; }
     ${scope} .tablewrap table {
       border-collapse: collapse;
+      margin: 0;
       width: 100%;
       font-size: 0.92em;
       background: var(--bg-surface);
@@ -72,7 +76,6 @@ export function componentBlockCss(scope: string): string {
     ${scope} .figure-body { overflow-x: auto; }
     ${scope} .figure img { max-width: 100%; height: auto; }
     ${scope} .diagram {
-      overflow-x: auto;
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);
       border-radius: 10px;
