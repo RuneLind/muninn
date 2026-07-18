@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { parseBlocks } from "./markdown-ast.ts";
+import { parseBlocks, scanInlineComponents } from "./markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
@@ -219,6 +219,10 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.web).toContain("&lt;CodeTabs&gt;");
     expect(out.web).not.toContain('<div class="code-tabs">');
     expect(out.telegram).toContain("&lt;CodeTabs&gt;");
+    // Folded from the #306 review: Slack strips the angle-bracket tags, but the
+    // body must survive as text and no tab-section markup may be emitted.
+    expect(out.slack).toContain("left open");
+    expect(out.slack).not.toContain("— A —");
   });
 
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
@@ -228,5 +232,60 @@ describe("component fuzz — never throws, never injects", () => {
     const blocks = parseBlocks(md);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({ type: "component", name: "Callout" });
+  });
+});
+
+describe("inline component fuzz — never throws, never injects", () => {
+  test("attr injection through an inline Verdict/Pill cannot escape into markup", () => {
+    const md =
+      'mid <Pill tone="rec"><img src=x onerror=alert(1)></Pill> and <Verdict value="yes"><script>alert(1)</script></Verdict> end';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<img");
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).toContain("&lt;img");
+    expect(out.web).toContain("&lt;script&gt;");
+    expect(out.telegram).not.toContain("<img");
+    expect(out.telegram).not.toContain("<script>");
+    expect(out.slack).not.toContain("<img");
+    expect(out.slack).not.toContain("<script>");
+  });
+
+  test("unclosed inline component degrades to literal text on every platform", () => {
+    const md = "go <Verdict value=\"yes\">no close here";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    // Web escapes the raw tag rather than emitting a verdict span.
+    expect(out.web).toContain("&lt;Verdict");
+    expect(out.web).not.toContain('<span class="verdict');
+    // Telegram/Slack keep the trailing prose; no ✅ chip is emitted.
+    expect(out.telegram).toContain("no close here");
+    expect(out.telegram).not.toContain("✅");
+    expect(out.slack).toContain("no close here");
+    expect(out.slack).not.toContain("✅");
+  });
+
+  test("10k inline-component bomb scans in a single linear pass", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Pill>x</Pill>").join(" ");
+    const start = Date.now();
+    const segs = scanInlineComponents(md);
+    expect(segs.filter((s) => s.kind === "component")).toHaveLength(10_000);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    // And the full web render of the bomb terminates well under the same budget.
+    const renderStart = Date.now();
+    expect(() => formatWebHtml(md)).not.toThrow();
+    expect(Date.now() - renderStart).toBeLessThan(5_000);
+  });
+
+  test("inline component embedded inside a block component renders inline, safely", () => {
+    // Callout body paragraph carries a mid-text Verdict → inline chip on web,
+    // plain fallback in-sentence on telegram/slack. No injection, no throw.
+    const md = "<Callout tone=\"info\">\nOutcome: <Verdict value=\"yes\">pass</Verdict> confirmed\n</Callout>";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).toContain('<div class="callout callout-info">');
+    expect(out.web).toContain('Outcome: <span class="verdict verdict-yes">pass</span> confirmed');
+    expect(out.telegram).toContain("Outcome: ✅ pass confirmed");
+    expect(out.slack).toContain("Outcome: ✅ pass confirmed");
   });
 });

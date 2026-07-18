@@ -12,6 +12,7 @@ const probe: BlockRenderer = {
   ol: (items) => `OL:${items.join("|")}`,
   table: (headers, rows) => `TBL:${headers.join(",")};${rows.map((r) => r.join(",")).join(";")}`,
   component: (name, attrs, kids) => `CMP[${name}]{${JSON.stringify(attrs)}}:${kids}`,
+  inlineComponent: (name, attrs, text) => `ICMP[${name}]{${JSON.stringify(attrs)}}:${text}`,
   text: (lines) => `TXT:${lines.join("|")}`,
 };
 

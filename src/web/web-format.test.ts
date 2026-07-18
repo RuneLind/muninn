@@ -529,4 +529,95 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain("<script>");
     expect(out).toContain("a&lt;script&gt;");
   });
+
+  // Folded from the #306 review: web unclosed-degrade pins for the fence/list
+  // components, mirroring the Telegram unclosed pins. An open tag with no close
+  // must escape rather than emit component markup.
+  test("unclosed Diff degrades to escaped text (no diff div)", () => {
+    const out = formatWebHtml("<Diff>\nno close here");
+    expect(out).toContain("&lt;Diff");
+    expect(out).not.toContain('<div class="diff">');
+  });
+
+  test("unclosed FileTree degrades to escaped text (no filetree div)", () => {
+    const out = formatWebHtml("<FileTree>\nno close here");
+    expect(out).toContain("&lt;FileTree");
+    expect(out).not.toContain('<div class="filetree">');
+  });
+
+  test("unclosed Checklist degrades to escaped text (no checklist ul)", () => {
+    const out = formatWebHtml("<Checklist>\n- [x] no close");
+    expect(out).toContain("&lt;Checklist");
+    expect(out).not.toContain('<ul class="checklist">');
+  });
+
+  test("unclosed AnnotatedCode degrades to escaped text (no annotated-code div)", () => {
+    const out = formatWebHtml("<AnnotatedCode file=\"x.ts\">\nno close here");
+    expect(out).toContain("&lt;AnnotatedCode");
+    expect(out).not.toContain('<div class="annotated-code">');
+  });
+
+  // Folded from the #306 review: components NOT in SELF_CLOSING_ALLOWED that are
+  // written self-closing fall through to text and render as escaped tags.
+  test.each(["Diff", "FileTree", "Checklist", "AnnotatedCode", "CodeTabs", "Tab"])(
+    "self-closing <%s/> is not allowed → escaped text",
+    (tag) => {
+      const out = formatWebHtml(`<${tag}/>`);
+      expect(out).toContain(`&lt;${tag}`);
+    },
+  );
+});
+
+describe("formatWebHtml — inline components (Verdict/Pill mid-text)", () => {
+  test("mid-list Verdict renders as an inline chip", () => {
+    const out = formatWebHtml("- <Verdict value=\"yes\">shipped</Verdict>");
+    expect(out).toBe('<ul><li><span class="verdict verdict-yes">shipped</span></li></ul>');
+  });
+
+  test("mid-heading Verdict renders inline inside the heading", () => {
+    const out = formatWebHtml("## Status: <Verdict value=\"no\">blocked</Verdict>");
+    expect(out).toBe('<h3>Status: <span class="verdict verdict-no">blocked</span></h3>');
+  });
+
+  test("mid-emphasis Pill nests inside the surrounding strong", () => {
+    const out = formatWebHtml("This is **very <Pill tone=\"rec\">go</Pill>** now");
+    expect(out).toContain('<strong>very <span class="pill pill-rec">go</span></strong>');
+  });
+
+  test("table-cell Verdict renders inline in the cell", () => {
+    const out = formatWebHtml("| Status |\n| --- |\n| <Verdict value=\"yes\">ok</Verdict> |");
+    expect(out).toContain('<td><span class="verdict verdict-yes">ok</span></td>');
+  });
+
+  test("inline Verdict inside a block Callout body renders as a chip in the sentence", () => {
+    const out = formatWebHtml("<Callout tone=\"info\">\nResult: <Verdict value=\"yes\">pass</Verdict>\n</Callout>");
+    expect(out).toContain('<div class="callout callout-info">');
+    expect(out).toContain('Result: <span class="verdict verdict-yes">pass</span>');
+  });
+
+  test("self-closing inline Verdict uses the default label", () => {
+    const out = formatWebHtml("done <Verdict value=\"no\"/> today");
+    expect(out).toContain('done <span class="verdict verdict-no">No</span> today');
+  });
+
+  test("inline Pill inner text is escaped (no HTML injection)", () => {
+    const out = formatWebHtml("tag <Pill tone=\"rec\"><img src=x onerror=alert(1)></Pill> here");
+    expect(out).not.toContain("<img");
+    expect(out).toContain("&lt;img");
+    expect(out).toContain('<span class="pill pill-rec">');
+  });
+
+  test("unclosed inline Verdict stays literal escaped text", () => {
+    const out = formatWebHtml("go <Verdict value=\"yes\">no close here");
+    expect(out).toContain("&lt;Verdict");
+    expect(out).not.toContain('<span class="verdict');
+  });
+
+  test("an own-line Verdict is still the block form (byte-identical chip)", () => {
+    // Dual behavior at the render level: block and inline Verdict happen to emit
+    // the same chip span, but the own-line one travels the block path.
+    expect(formatWebHtml("<Verdict value=\"yes\">shipped</Verdict>")).toBe(
+      '<span class="verdict verdict-yes">shipped</span>',
+    );
+  });
 });

@@ -57,3 +57,23 @@ describe("table renders without throwing and matches each platform's shape", () 
   test("telegram → pipe table preserved", () => expect(formatTelegramHtml(md)).toContain("| H1 | H2 |"));
   test("slack → labeled bullets", () => expect(formatSlackMrkdwn(md)).toBe("• *H1:* a  *H2:* b"));
 });
+
+describe("inline Verdict mid-list — chip on web, plain fallback in-sentence elsewhere", () => {
+  const md = "- Result: <Verdict value=\"yes\">shipped</Verdict>";
+  test("web → inline chip inside the <li>", () =>
+    expect(formatWebHtml(md)).toBe('<ul><li>Result: <span class="verdict verdict-yes">shipped</span></li></ul>'));
+  test("telegram → ✅ label sits inline in the list line", () =>
+    expect(formatTelegramHtml(md)).toBe("- Result: ✅ shipped"));
+  test("slack → ✅ label sits inline in the list line", () =>
+    expect(formatSlackMrkdwn(md)).toBe("- Result: ✅ shipped"));
+});
+
+describe("inline Pill mid-sentence — chip on web, [text] fallback elsewhere", () => {
+  const md = "Ship it <Pill tone=\"rec\">beta</Pill> today";
+  test("web → inline pill span", () =>
+    expect(formatWebHtml(md)).toBe('Ship it <span class="pill pill-rec">beta</span> today'));
+  test("telegram → [beta] inline", () =>
+    expect(formatTelegramHtml(md)).toBe("Ship it [beta] today"));
+  test("slack → [beta] inline", () =>
+    expect(formatSlackMrkdwn(md)).toBe("Ship it [beta] today"));
+});

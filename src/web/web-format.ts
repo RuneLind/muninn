@@ -1,5 +1,6 @@
 import {
   parseBlocks,
+  scanInlineComponents,
   normalizeCalloutTone,
   normalizePillTone,
   normalizeVerdictValue,
@@ -171,6 +172,28 @@ const webRenderer: BlockRenderer = {
         const label = attrs.label ? escapeHtml(attrs.label) : "Tab";
         return `<div class="code-tab-standalone"><div class="code-tab-label">${label}</div>${children}</div>`;
       }
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
+    }
+  },
+  inlineComponent(name, attrs, text) {
+    switch (name) {
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = text.trim() ? escapeHtml(text.trim()) : value === "yes" ? "Yes" : "No";
+        return `<span class="verdict verdict-${value}">${label}</span>`;
+      }
+      case "Pill": {
+        const tone = normalizePillTone(attrs.tone);
+        const cls = tone === "default" ? "pill" : `pill pill-${tone}`;
+        return `<span class="${cls}">${escapeHtml(text.trim())}</span>`;
+      }
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
@@ -178,7 +201,18 @@ const webRenderer: BlockRenderer = {
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
-  let result = text;
+
+  // Inline components (Verdict, Pill) first. Their generated HTML must be parked
+  // BEFORE the escapeHtml pass below — otherwise the escape would turn the chip
+  // markup into visible text. Same trick inline code uses at :add("INLINE"). The
+  // inner text is escaped inside inlineComponent, so the parked value is safe.
+  let result = scanInlineComponents(text)
+    .map((seg) =>
+      seg.kind === "text"
+        ? seg.text
+        : ph.add("INLINECMP", webRenderer.inlineComponent(seg.name, seg.attrs, seg.text)),
+    )
+    .join("");
 
   // Inline code first — protect content from further markdown processing.
   result = result.replace(/`([^`]+)`/g, (_m, code: string) =>

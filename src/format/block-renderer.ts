@@ -1,4 +1,4 @@
-import type { Block, ComponentName } from "./markdown-ast.ts";
+import type { Block, ComponentName, InlineComponentName } from "./markdown-ast.ts";
 
 /**
  * Per-platform block rendering strategy. Each platform formatter (web HTML,
@@ -36,6 +36,13 @@ export interface BlockRenderer {
     renderedChildren: string,
     rawChildren: Block[],
   ): string;
+  /** Render an INLINE component (Verdict, Pill) embedded mid-text — a distinct
+   *  seam from the block `component` method above. `text` is the raw inner text
+   *  of the tag (empty for a self-closing occurrence); the platform emits its
+   *  inline representation (a chip on web, a plain ✅/`[…]` fallback elsewhere).
+   *  Called directly by each platform's `renderInline`, not via `renderBlocks`;
+   *  living on the interface is what forces every platform to implement it. */
+  inlineComponent(name: InlineComponentName, attrs: Record<string, string>, text: string): string;
   text(lines: string[]): string;
 }
 

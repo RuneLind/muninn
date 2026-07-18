@@ -325,4 +325,23 @@ Found it ~~wrong~~ correct.`;
       expect(out).toBe("— Only —\n```\nx\n```");
     });
   });
+
+  describe("inline components (Verdict/Pill mid-text)", () => {
+    test("inline Verdict → ✅ label in the sentence flow", () => {
+      expect(formatSlackMrkdwn("Build is <Verdict value=\"yes\">green</Verdict> now")).toBe(
+        "Build is ✅ green now",
+      );
+    });
+
+    test("inline Pill → [text] in the sentence flow", () => {
+      expect(formatSlackMrkdwn("Rollout <Pill tone=\"rec\">beta</Pill> today")).toBe(
+        "Rollout [beta] today",
+      );
+    });
+
+    test("inline component inner-text tag is stripped (no live markup)", () => {
+      const out = formatSlackMrkdwn("tag <Pill><img src=x onerror=alert(1)></Pill> here");
+      expect(out).not.toContain("<img");
+    });
+  });
 });

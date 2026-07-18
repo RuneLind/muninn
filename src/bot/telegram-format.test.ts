@@ -220,3 +220,26 @@ test("component: unclosed CodeTabs degrades to escaped text", () => {
   const out = formatTelegramHtml("<CodeTabs>\n<Tab label=\"A\">no close");
   expect(out).toContain("&lt;CodeTabs&gt;");
 });
+
+test("component: standalone Tab → labeled section fallback", () => {
+  const out = formatTelegramHtml("<Tab label=\"Only\">\n```ts\nx\n```\n</Tab>");
+  expect(out).toBe('— Only —\n<pre><code class="language-ts">x</code></pre>');
+});
+
+test("inline Verdict mid-sentence → ✅ label in the sentence flow", () => {
+  expect(formatTelegramHtml("Build is <Verdict value=\"yes\">green</Verdict> now")).toBe(
+    "Build is ✅ green now",
+  );
+});
+
+test("inline Pill mid-sentence → [text] in the sentence flow", () => {
+  expect(formatTelegramHtml("Rollout <Pill tone=\"rec\">beta</Pill> today")).toBe(
+    "Rollout [beta] today",
+  );
+});
+
+test("inline component injection through inner text cannot emit a live tag", () => {
+  const out = formatTelegramHtml("tag <Pill tone=\"rec\"><img src=x onerror=alert(1)></Pill> here");
+  expect(out).not.toContain("<img");
+  expect(out).toContain("&lt;img");
+});
