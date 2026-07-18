@@ -25,7 +25,7 @@ export interface WikiListing {
   url?: string;
   /** Short prose summary — explainers (sniffed from `<meta description>`) and
    *  native blog `.mdx` pages (frontmatter `description`). Rendered as the article
-   *  subtitle for `type: blog` pages; also feeds the Similar query. */
+   *  subtitle for `type: blog` pages; feeds the Similar query for explainers only. */
   description?: string;
   /** Validated CSS color token (`#hex` / `rgb()` / `hsl()`) from a blog page's
    *  frontmatter `accent`. Server-sanitized (see `sanitizeColorToken`) — anything

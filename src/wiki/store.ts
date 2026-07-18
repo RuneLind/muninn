@@ -55,9 +55,9 @@ export interface WikiPageMeta {
   /**
    * Short prose summary. Explainers sniff it from the head `<meta
    * name="description">`; native blog `.mdx` pages read it from frontmatter
-   * `description`; other markdown pages leave it undefined. Feeds the Similar
-   * endpoint's query so a page matches on more than its title, and renders as the
-   * article subtitle for `type: blog` pages.
+   * `description`; other markdown pages leave it undefined. For explainers it
+   * feeds the Similar endpoint's query (blog pages use their full body there);
+   * renders as the article subtitle for `type: blog` pages.
    */
   description?: string;
   /**
