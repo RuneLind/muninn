@@ -158,6 +158,20 @@ function truncate(text: string, max: number): string {
 }
 
 /**
+ * The presentational block-component vocabulary + restraint + grammar block,
+ * shared verbatim between research synthesis and (opt-in) chat prompts. Ends at
+ * the corpus-agnostic grammar rules; the research-specific "Keep [n] citations…"
+ * sentence is re-appended only by {@link SYNTHESIS_RULES_BODY} (chat answers have
+ * no [n] citations, so chat bots must not be taught a citation rule).
+ */
+export const COMPONENT_VOCABULARY_RULES = `You may optionally use a few presentational block components to highlight structure. They are seasoning, not scaffolding — use at most 2-3 in an answer (only a genuine side-by-side comparison justifies more), and never wrap the whole answer in them. When in doubt, leave them out and write plain markdown.
+- <Callout tone="info|good|warn|bad" title="...">…</Callout> — a caveat, a TL;DR, or a highlighted note.
+- <Verdict value="yes|no">short label</Verdict> — a direct yes/no judgment.
+- <ComparisonTable>…</ComparisonTable> — wraps a normal markdown pipe table (its own lines between the tags) when the answer compares options side by side.
+- <Pill tone="rec|warn">label</Pill> — a small status/tag chip. <Figure caption="...">…</Figure> — a captioned block. <FileRef path="src/x.ts" /> — a file-path reference.
+Grammar (strict — break it and the tag renders as visible text): put each opening and closing tag on its own line, flush to the left margin; never place a tag inside a sentence, a list item, or a paragraph (they are block-level only). Use double-quoted attribute values.`;
+
+/**
  * The shared rules body appended after the (corpus-specific) framing line. Kept
  * verbatim across every consumer so only the opening sentence changes per corpus.
  */
@@ -168,12 +182,7 @@ const SYNTHESIS_RULES_BODY = `Rules:
 - This may be a follow-up in an ongoing conversation. When a "Conversation so far" block is present, use it ONLY to resolve what the new question refers to (pronouns, "that", "it") — still ground every claim in the numbered sources, never cite or treat the prior turns as fact.
 - Be concise and direct. Use markdown: short paragraphs, bullet points for lists, **bold** for key terms. Lead with the answer, not a preamble.
 
-You may optionally use a few presentational block components to highlight structure. They are seasoning, not scaffolding — use at most 2-3 in an answer (only a genuine side-by-side comparison justifies more), and never wrap the whole answer in them. When in doubt, leave them out and write plain markdown.
-- <Callout tone="info|good|warn|bad" title="...">…</Callout> — a caveat, a TL;DR, or a highlighted note.
-- <Verdict value="yes|no">short label</Verdict> — a direct yes/no judgment.
-- <ComparisonTable>…</ComparisonTable> — wraps a normal markdown pipe table (its own lines between the tags) when the answer compares options side by side.
-- <Pill tone="rec|warn">label</Pill> — a small status/tag chip. <Figure caption="...">…</Figure> — a captioned block. <FileRef path="src/x.ts" /> — a file-path reference.
-Grammar (strict — break it and the tag renders as visible text): put each opening and closing tag on its own line, flush to the left margin; never place a tag inside a sentence, a list item, or a paragraph (they are block-level only). Use double-quoted attribute values. Keep [n] citations in the surrounding prose, not inside the tags.`;
+${COMPONENT_VOCABULARY_RULES} Keep [n] citations in the surrounding prose, not inside the tags.`;
 
 /**
  * Build a synthesis system prompt: a corpus-specific `framingLine` (the opening

@@ -9,6 +9,7 @@ import { generateEmbedding } from "./embeddings.ts";
 import type { RestrictedTools } from "../bots/config.ts";
 import { getRestrictedToolsForUser, buildToolRestrictionPrompt } from "./tool-restrictions.ts";
 import type { ConversationMessage, Goal, Memory, ScheduledTask, UserIdentity } from "../types.ts";
+import { COMPONENT_VOCABULARY_RULES } from "../research/answer.ts";
 
 export interface PromptBuildResult {
   systemPrompt: string;
@@ -42,6 +43,10 @@ export interface BuildPromptOptions {
    *  `research_knowledge` for multi-part questions. Caller sets this from
    *  `botConfig.hasResearchKnowledge`. */
   researchKnowledgeAvailable?: boolean;
+  /** When true, append the presentational block-component vocabulary + restraint
+   *  block so the bot may emit Callout/Verdict/etc. in chat. Caller sets this
+   *  from `botConfig.componentAnswers`. */
+  componentAnswersEnabled?: boolean;
 }
 
 /**
@@ -59,7 +64,7 @@ export const RESEARCH_KNOWLEDGE_NUDGE =
   "For multi-part or comparison questions (e.g. \"how does X differ from Y\", \"what triggers Z and W\"), prefer `research_knowledge` — it decomposes the question and searches each part. For simple single-topic lookups, use `search_knowledge`.";
 
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled, researchKnowledgeAvailable } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, correctiveRetrievalEnabled, researchKnowledgeAvailable, componentAnswersEnabled } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
@@ -137,6 +142,9 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
   }
   if (correctiveRetrievalEnabled) {
     systemParts.push(CORRECTIVE_RETRIEVAL_PROMPT);
+  }
+  if (componentAnswersEnabled) {
+    systemParts.push(COMPONENT_VOCABULARY_RULES);
   }
 
   // The last message is dropped when it matches `currentMessage` because the

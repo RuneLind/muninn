@@ -95,6 +95,7 @@ mock.module("./embeddings.ts", () => ({
 }));
 
 const { buildPrompt, formatAlerts, CORRECTIVE_RETRIEVAL_PROMPT, RESEARCH_KNOWLEDGE_NUDGE } = await import("./prompt-builder.ts");
+const { COMPONENT_VOCABULARY_RULES } = await import("../research/answer.ts");
 
 const bp = (overrides: Partial<Parameters<typeof buildPrompt>[0]> = {}) =>
   buildPrompt({ userId: "u1", currentMessage: "hello", persona: "persona", botName: "testbot", ...overrides });
@@ -222,6 +223,27 @@ describe("buildPrompt", () => {
 
     const explicitlyOff = await bp({ researchKnowledgeAvailable: false });
     expect(explicitlyOff.systemPrompt).not.toContain(RESEARCH_KNOWLEDGE_NUDGE);
+  });
+
+  test("appends the component-vocabulary block when componentAnswers is on", async () => {
+    const result = await bp({ componentAnswersEnabled: true });
+    expect(result.systemPrompt).toContain(COMPONENT_VOCABULARY_RULES);
+    // It sits in the tail region, after the persona/context blocks so it's near
+    // the user turn where instruction-following is strongest.
+    const blockIdx = result.systemPrompt.indexOf(COMPONENT_VOCABULARY_RULES);
+    const personaIdx = result.systemPrompt.indexOf("persona");
+    expect(blockIdx).toBeGreaterThan(personaIdx);
+    // Chat answers have no [n] citations — the research-only citation sentence
+    // must not ride along.
+    expect(result.systemPrompt).not.toContain("Keep [n] citations in the surrounding prose");
+  });
+
+  test("omits the component-vocabulary block when componentAnswers is off/absent", async () => {
+    const offByDefault = await bp();
+    expect(offByDefault.systemPrompt).not.toContain(COMPONENT_VOCABULARY_RULES);
+
+    const explicitlyOff = await bp({ componentAnswersEnabled: false });
+    expect(explicitlyOff.systemPrompt).not.toContain(COMPONENT_VOCABULARY_RULES);
   });
 });
 
