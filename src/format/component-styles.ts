@@ -141,5 +141,17 @@ export function componentBlockCss(scope: string): string {
       white-space: pre;
     }
     ${scope} .filetree code { background: transparent; padding: 0; color: inherit; }
+    ${scope} .checklist { list-style: none; margin: 1.2rem 0; padding: 0; }
+    ${scope} .check-item {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      padding: 0.15rem 0;
+      line-height: 1.5;
+    }
+    ${scope} .check-mark { flex: none; font-weight: 700; font-variant-numeric: tabular-nums; }
+    ${scope} .check-done .check-mark { color: var(--status-success); }
+    ${scope} .check-todo .check-mark { color: var(--text-muted); }
+    ${scope} .check-todo { color: var(--text-muted); }
   `;
 }

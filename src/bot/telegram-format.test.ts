@@ -184,3 +184,13 @@ test("component: unclosed FileTree degrades to escaped text", () => {
   const out = formatTelegramHtml("<FileTree>\nno close");
   expect(out).toContain("&lt;FileTree&gt;");
 });
+
+test("component: Checklist → ☑/☐-prefixed lines fallback", () => {
+  const out = formatTelegramHtml("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>");
+  expect(out).toBe("☑ Done\n☐ Todo");
+});
+
+test("component: unclosed Checklist degrades to escaped text", () => {
+  const out = formatTelegramHtml("<Checklist>\n- [x] no close");
+  expect(out).toContain("&lt;Checklist&gt;");
+});

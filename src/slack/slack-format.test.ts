@@ -288,5 +288,16 @@ Found it ~~wrong~~ correct.`;
       expect(out).toContain("no close");
       expect(out).not.toContain("```");
     });
+
+    test("Checklist → ☑/☐-prefixed lines fallback", () => {
+      const out = formatSlackMrkdwn("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>");
+      expect(out).toBe("☑ Done\n☐ Todo");
+    });
+
+    test("unclosed Checklist degrades to text (the raw open tag survives)", () => {
+      const out = formatSlackMrkdwn("<Checklist>\n- [x] no close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("☑");
+    });
   });
 });

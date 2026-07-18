@@ -1,5 +1,11 @@
 import { test, expect, describe } from "bun:test";
-import { parseBlocks, parseMeterAttrs, normalizeMeterTone } from "./markdown-ast.ts";
+import {
+  parseBlocks,
+  parseMeterAttrs,
+  normalizeMeterTone,
+  parseChecklistItem,
+  parseChecklist,
+} from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
   test("parses heading", () => {
@@ -272,6 +278,34 @@ describe("parseBlocks — component blocks", () => {
         children: [{ type: "code_block", lang: "diff", code: "-old\n+new" }],
       },
     ]);
+  });
+
+  test("Checklist parses its task items as a ul child", () => {
+    expect(parseBlocks("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>")).toEqual([
+      {
+        type: "component",
+        name: "Checklist",
+        attrs: {},
+        children: [{ type: "ul", items: ["[x] Done", "[ ] Todo"] }],
+      },
+    ]);
+  });
+});
+
+describe("parseChecklistItem / parseChecklist", () => {
+  test("marker parsing: checked, unchecked, uppercase, unmarked", () => {
+    expect(parseChecklistItem("[x] Done")).toEqual({ checked: true, text: "Done" });
+    expect(parseChecklistItem("[X] Done")).toEqual({ checked: true, text: "Done" });
+    expect(parseChecklistItem("[ ] Todo")).toEqual({ checked: false, text: "Todo" });
+    expect(parseChecklistItem("no marker")).toEqual({ checked: false, text: "no marker" });
+  });
+
+  test("parseChecklist reads the first ul block's items; empty without a list", () => {
+    expect(parseChecklist([{ type: "ul", items: ["[x] A", "[ ] B"] }])).toEqual([
+      { checked: true, text: "A" },
+      { checked: false, text: "B" },
+    ]);
+    expect(parseChecklist([{ type: "text", lines: ["prose"] }])).toEqual([]);
   });
 });
 

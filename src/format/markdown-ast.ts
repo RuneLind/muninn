@@ -42,6 +42,7 @@ export const COMPONENT_NAMES = [
   "Meter",
   "Diff",
   "FileTree",
+  "Checklist",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -65,6 +66,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Meter: ["value", "max", "tone"],
   Diff: [],
   FileTree: [],
+  Checklist: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -139,6 +141,22 @@ export function diffLineClass(line: string): "add" | "del" | "ctx" {
   if (line.startsWith("+") && !line.startsWith("+++")) return "add";
   if (line.startsWith("-") && !line.startsWith("---")) return "del";
   return "ctx";
+}
+
+/** Parse one Checklist list item's leading `[x]`/`[ ]` marker. Anchored, linear:
+ *  an unmarked item is treated as unchecked with its full text. */
+export function parseChecklistItem(item: string): { checked: boolean; text: string } {
+  const m = item.match(/^\[([ xX])\]\s*(.*)$/);
+  if (m) return { checked: m[1] !== " ", text: m[2]! };
+  return { checked: false, text: item };
+}
+
+/** Extract a Checklist's rows from its raw children — the first `ul` block's
+ *  items, each parsed for its task marker. Empty when the body has no list. */
+export function parseChecklist(children: Block[]): { checked: boolean; text: string }[] {
+  const ul = children.find((c) => c.type === "ul");
+  if (!ul || ul.type !== "ul") return [];
+  return ul.items.map(parseChecklistItem);
 }
 
 const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;

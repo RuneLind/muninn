@@ -437,4 +437,27 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).toContain("&lt;script&gt;");
     expect(out).toContain('<div class="filetree">');
   });
+
+  test("Checklist renders styled check/cross rows from the raw task items", () => {
+    const out = formatWebHtml("<Checklist>\n- [x] Done thing\n- [ ] Todo thing\n</Checklist>");
+    expect(out).toBe(
+      '<ul class="checklist">' +
+        '<li class="check-item check-done"><span class="check-mark">✓</span> Done thing</li>' +
+        '<li class="check-item check-todo"><span class="check-mark">✗</span> Todo thing</li>' +
+        "</ul>",
+    );
+  });
+
+  test("Checklist item text runs through inline formatting + escaping", () => {
+    const out = formatWebHtml("<Checklist>\n- [x] ship **now** <b>\n</Checklist>");
+    expect(out).toContain("<strong>now</strong>");
+    expect(out).toContain("&lt;b&gt;");
+    expect(out).not.toContain("ship <b>");
+  });
+
+  test("Checklist with no task list falls back to the rendered children", () => {
+    const out = formatWebHtml("<Checklist>\njust prose, no list\n</Checklist>");
+    expect(out).not.toContain('<ul class="checklist">');
+    expect(out).toContain("just prose, no list");
+  });
 });

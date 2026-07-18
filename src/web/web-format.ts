@@ -6,6 +6,7 @@ import {
   parseMeterAttrs,
   firstCodeBlock,
   diffLineClass,
+  parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
@@ -101,6 +102,21 @@ const webRenderer: BlockRenderer = {
         // Wrap-only: the rendered fence (a <pre><code>) is the tree; CSS gives it
         // the monospace box + guide styling.
         return `<div class="filetree">${children}</div>`;
+      case "Checklist": {
+        const items = parseChecklist(rawChildren);
+        if (items.length === 0) return children; // no task list → render body as-is
+        const rows = items
+          .map((it) => {
+            const state = it.checked ? "done" : "todo";
+            const mark = it.checked ? "✓" : "✗";
+            return (
+              `<li class="check-item check-${state}">` +
+              `<span class="check-mark">${mark}</span> ${renderInline(it.text)}</li>`
+            );
+          })
+          .join("");
+        return `<ul class="checklist">${rows}</ul>`;
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
