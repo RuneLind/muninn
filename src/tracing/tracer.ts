@@ -36,6 +36,10 @@ interface TracerOpts {
 interface SpanEntry {
   id: string;
   startedAt: Date;
+  // Resolves when this span's INSERT has landed. end() chains the UPDATE on it
+  // so the UPDATE can never race ahead of the INSERT on a different pool
+  // connection (zero-duration spans would otherwise update 0 rows).
+  insertPromise: Promise<unknown>;
 }
 
 export class Tracer {
@@ -45,6 +49,9 @@ export class Tracer {
   private spans = new Map<string, SpanEntry>();
   private opts: TracerOpts;
   private enabled: boolean;
+  // Resolves when the root span's INSERT has landed. finish()/error() chain the
+  // root UPDATE on it so it can't race ahead of the INSERT.
+  private rootInsertPromise: Promise<unknown> = Promise.resolve();
 
   constructor(name: string, opts: TracerOpts = {}) {
     this.timing = new Timing();
@@ -54,7 +61,7 @@ export class Tracer {
     this.rootSpanId = crypto.randomUUID();
 
     if (this.enabled) {
-      saveSpan({
+      this.rootInsertPromise = saveSpan({
         id: this.rootSpanId,
         traceId: this.traceId,
         parentId: opts.parentId ?? null,
@@ -65,7 +72,8 @@ export class Tracer {
         username: opts.username,
         platform: opts.platform,
         startedAt: new Date(),
-      }).catch(logError);
+      });
+      this.rootInsertPromise.catch(logError);
     }
   }
 
@@ -73,10 +81,10 @@ export class Tracer {
   start(label: string, attributes?: Record<string, unknown>): string {
     this.timing.start(label);
     const id = crypto.randomUUID();
-    this.spans.set(label, { id, startedAt: new Date() });
 
+    let insertPromise: Promise<unknown> = Promise.resolve();
     if (this.enabled) {
-      saveSpan({
+      insertPromise = saveSpan({
         id,
         traceId: this.traceId,
         parentId: this.rootSpanId,
@@ -86,8 +94,11 @@ export class Tracer {
         userId: this.opts.userId,
         startedAt: new Date(),
         attributes,
-      }).catch(logError);
+      });
+      insertPromise.catch(logError);
     }
+
+    this.spans.set(label, { id, startedAt: new Date(), insertPromise });
 
     return id;
   }
@@ -98,11 +109,17 @@ export class Tracer {
     const span = this.spans.get(label);
 
     if (this.enabled && span) {
-      updateSpan(span.id, {
-        durationMs: Math.round(durationMs),
-        status: "ok",
-        attributes,
-      }).catch(logError);
+      // Chain the UPDATE on the span's INSERT so it can never run first on a
+      // different pool connection (zero-duration spans would lose their update).
+      span.insertPromise
+        .then(() =>
+          updateSpan(span.id, {
+            durationMs: Math.round(durationMs),
+            status: "ok",
+            attributes,
+          }),
+        )
+        .catch(logError);
     }
 
     return durationMs;
@@ -202,11 +219,16 @@ export class Tracer {
   finish(status: "ok" | "error" = "ok", attributes?: Record<string, unknown>): void {
     if (!this.enabled) return;
 
-    updateSpan(this.rootSpanId, {
-      durationMs: Math.round(this.totalMs()),
-      status,
-      attributes,
-    }).catch(logError);
+    // Chain the root UPDATE on the root INSERT to avoid the same start/end race.
+    this.rootInsertPromise
+      .then(() =>
+        updateSpan(this.rootSpanId, {
+          durationMs: Math.round(this.totalMs()),
+          status,
+          attributes,
+        }),
+      )
+      .catch(logError);
   }
 
   /** End root span with error */
