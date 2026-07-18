@@ -281,7 +281,7 @@ export async function renderGraphPage(): Promise<string> {
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/force-graph@1/dist/force-graph.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/force-graph@1.51.4/dist/force-graph.min.js" integrity="sha384-Hm6GpQcTNI5VqGgGS7lLxTGtEFcxu/kOVV0B7ozIZRu9blWVvigv5httJQZ2qZmY" crossorigin="anonymous"></script>
   <script>
   (function() {
     ${helpers}

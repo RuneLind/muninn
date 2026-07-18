@@ -226,4 +226,4 @@ export function docPanelScript(): string {
 }
 
 /** The marked.js CDN script tag */
-export const MARKED_CDN_SCRIPT = '<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>';
+export const MARKED_CDN_SCRIPT = '<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>';
