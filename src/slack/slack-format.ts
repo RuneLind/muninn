@@ -1,4 +1,4 @@
-import { parseBlocks, normalizeVerdictValue, parseMeterAttrs } from "../format/markdown-ast.ts";
+import { parseBlocks, normalizeVerdictValue, parseMeterAttrs, parseChecklist } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders } from "../format/markdown-core.ts";
 
@@ -24,7 +24,7 @@ const slackRenderer: BlockRenderer = {
   ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
   ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
   table: (headers, rows) => renderTable(headers, rows),
-  component(name, attrs, children) {
+  component(name, attrs, children, rawChildren) {
     switch (name) {
       case "Callout":
         return attrs.title ? `*${renderInline(attrs.title)}*\n${children}` : children;
@@ -46,6 +46,23 @@ const slackRenderer: BlockRenderer = {
         if (!meter) return children; // missing/non-numeric value → label as plain text
         return `${children}: ${meter.value}/${meter.max}`;
       }
+      case "Diff":
+        return children; // fence-as-is: Slack already renders the ``` code block
+      case "FileTree":
+        return children; // fence-as-is: the indented-path fence renders verbatim
+      case "Checklist": {
+        const items = parseChecklist(rawChildren);
+        if (items.length === 0) return children;
+        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+      }
+      case "AnnotatedCode":
+        // file line + fence + annotation paragraphs (already in children).
+        return attrs.file ? `*${renderInline(attrs.file)}*\n${children}` : children;
+      case "CodeTabs":
+        // Each Tab child already rendered itself as a `— label —` section.
+        return children;
+      case "Tab":
+        return attrs.label ? `— ${renderInline(attrs.label)} —\n${children}` : children;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

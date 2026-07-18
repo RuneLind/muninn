@@ -23,8 +23,19 @@ export interface BlockRenderer {
   ol(items: string[]): string;
   table(headers: string[], rows: string[][]): string;
   /** Render a component block. `renderedChildren` is the component body already
-   *  walked through this same renderer, so the method only wraps/decorates it. */
-  component(name: ComponentName, attrs: Record<string, string>, renderedChildren: string): string;
+   *  walked through this same renderer, so most components only wrap/decorate it.
+   *  `rawChildren` is the same body as un-rendered `Block[]` — the pre-render
+   *  structure a few components must introspect (a Diff's fence lines, a
+   *  Checklist's `[x]`/`[ ]` markers, a CodeTabs' `<Tab>` children) that the
+   *  rendered string has already flattened past. Components that don't need it
+   *  simply omit the fourth parameter — a narrower implementation still satisfies
+   *  this wider signature. */
+  component(
+    name: ComponentName,
+    attrs: Record<string, string>,
+    renderedChildren: string,
+    rawChildren: Block[],
+  ): string;
   text(lines: string[]): string;
 }
 
@@ -51,7 +62,7 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "table":
       return r.table(block.headers, block.rows);
     case "component":
-      return r.component(block.name, block.attrs, renderBlocks(block.children, r));
+      return r.component(block.name, block.attrs, renderBlocks(block.children, r), block.children);
     case "text":
       return r.text(block.lines);
     default: {

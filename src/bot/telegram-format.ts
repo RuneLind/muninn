@@ -1,4 +1,4 @@
-import { parseBlocks, normalizeVerdictValue, parseMeterAttrs } from "../format/markdown-ast.ts";
+import { parseBlocks, normalizeVerdictValue, parseMeterAttrs, parseChecklist } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -30,7 +30,7 @@ const telegramRenderer: BlockRenderer = {
     const dataRows = rows.map((row) => `| ${row.map(renderInline).join(" | ")} |`);
     return [headerRow, sepRow, ...dataRows].join("\n");
   },
-  component(name, attrs, children) {
+  component(name, attrs, children, rawChildren) {
     switch (name) {
       case "Callout":
         return attrs.title ? `<b>${escapeHtml(attrs.title)}</b>\n${children}` : children;
@@ -52,6 +52,24 @@ const telegramRenderer: BlockRenderer = {
         if (!meter) return children; // missing/non-numeric value → label as plain text
         return `${children}: ${meter.value}/${meter.max}`;
       }
+      case "Diff":
+        return children; // fence-as-is: Telegram already renders the ```diff block
+      case "FileTree":
+        return children; // fence-as-is: the indented-path fence renders verbatim
+      case "Checklist": {
+        const items = parseChecklist(rawChildren);
+        if (items.length === 0) return children;
+        return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
+      }
+      case "AnnotatedCode":
+        // file line + fence + annotation paragraphs (already in children).
+        return attrs.file ? `<b>${escapeHtml(attrs.file)}</b>\n${children}` : children;
+      case "CodeTabs":
+        // Each Tab child already rendered itself as a `— label —` section, so the
+        // sequential fallback is just the rendered body.
+        return children;
+      case "Tab":
+        return attrs.label ? `— ${escapeHtml(attrs.label)} —\n${children}` : children;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

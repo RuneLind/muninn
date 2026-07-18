@@ -40,6 +40,12 @@ export const COMPONENT_NAMES = [
   "FileRef",
   "ComparisonTable",
   "Meter",
+  "Diff",
+  "FileTree",
+  "Checklist",
+  "AnnotatedCode",
+  "CodeTabs",
+  "Tab",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -61,6 +67,12 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   FileRef: ["path"],
   ComparisonTable: [],
   Meter: ["value", "max", "tone"],
+  Diff: [],
+  FileTree: [],
+  Checklist: [],
+  AnnotatedCode: ["file", "lang"],
+  CodeTabs: [],
+  Tab: ["label"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -114,6 +126,43 @@ export function parseMeterAttrs(
 
   const clamped = Math.min(Math.max(value, 0), max);
   return { value: clamped, max, tone: normalizeMeterTone(attrs.tone) };
+}
+
+/**
+ * First fenced code block among a component's raw children, or `null`. Shared by
+ * the blocks whose body is "one fence" (Diff, FileTree, AnnotatedCode) — they
+ * introspect the fence's raw source rather than its already-escaped render.
+ */
+export function firstCodeBlock(children: Block[]): { lang: string; code: string } | null {
+  for (const c of children) {
+    if (c.type === "code_block") return { lang: c.lang, code: c.code };
+  }
+  return null;
+}
+
+/** Classify one line of a unified diff for per-line styling. Linear, no regex:
+ *  a leading `+`/`-` (but not the `+++`/`---` file headers) marks add/del; every
+ *  other line — context, `@@` hunks, headers — is context. */
+export function diffLineClass(line: string): "add" | "del" | "ctx" {
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "del";
+  return "ctx";
+}
+
+/** Parse one Checklist list item's leading `[x]`/`[ ]` marker. Anchored, linear:
+ *  an unmarked item is treated as unchecked with its full text. */
+export function parseChecklistItem(item: string): { checked: boolean; text: string } {
+  const m = item.match(/^\[([ xX])\]\s*(.*)$/);
+  if (m) return { checked: m[1] !== " ", text: m[2]! };
+  return { checked: false, text: item };
+}
+
+/** Extract a Checklist's rows from its raw children — the first `ul` block's
+ *  items, each parsed for its task marker. Empty when the body has no list. */
+export function parseChecklist(children: Block[]): { checked: boolean; text: string }[] {
+  const ul = children.find((c) => c.type === "ul");
+  if (!ul || ul.type !== "ul") return [];
+  return ul.items.map(parseChecklistItem);
 }
 
 const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;

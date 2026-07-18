@@ -266,5 +266,63 @@ Found it ~~wrong~~ correct.`;
     test("Meter with non-numeric value degrades to plain label", () => {
       expect(formatSlackMrkdwn("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
     });
+
+    test("Diff → fence as-is (Slack renders the code block)", () => {
+      const out = formatSlackMrkdwn("<Diff>\n```diff\n context\n-old\n+new\n```\n</Diff>");
+      expect(out).toBe("```\n context\n-old\n+new\n```");
+    });
+
+    test("unclosed Diff degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<Diff>\nno close here");
+      expect(out).toContain("no close here");
+      expect(out).not.toContain("```");
+    });
+
+    test("FileTree → fence as-is (Slack renders the code block)", () => {
+      const out = formatSlackMrkdwn("<FileTree>\n```\nsrc/\n  a.ts\n```\n</FileTree>");
+      expect(out).toBe("```\nsrc/\n  a.ts\n```");
+    });
+
+    test("unclosed FileTree degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<FileTree>\nno close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("```");
+    });
+
+    test("Checklist → ☑/☐-prefixed lines fallback", () => {
+      const out = formatSlackMrkdwn("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>");
+      expect(out).toBe("☑ Done\n☐ Todo");
+    });
+
+    test("unclosed Checklist degrades to text (the raw open tag survives)", () => {
+      const out = formatSlackMrkdwn("<Checklist>\n- [x] no close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("☑");
+    });
+
+    test("AnnotatedCode → file line + fence + notes fallback", () => {
+      const out = formatSlackMrkdwn(
+        "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>",
+      );
+      expect(out).toBe("*src/x.ts*\n```\nconst x = 1;\n```\n\nSets x.");
+    });
+
+    test("unclosed AnnotatedCode degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<AnnotatedCode file=\"x.ts\">\nno close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("```");
+    });
+
+    test("CodeTabs → sequential — label — sections fallback", () => {
+      const out = formatSlackMrkdwn(
+        "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+      );
+      expect(out).toBe("— TS —\n```\nconst x=1;\n```\n— JS —\n```\nvar x=1;\n```");
+    });
+
+    test("standalone Tab renders a labeled section", () => {
+      const out = formatSlackMrkdwn("<Tab label=\"Only\">\n```ts\nx\n```\n</Tab>");
+      expect(out).toBe("— Only —\n```\nx\n```");
+    });
   });
 });

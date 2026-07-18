@@ -145,6 +145,82 @@ describe("component fuzz — never throws, never injects", () => {
     expect(Date.now() - start).toBeLessThan(5_000);
   });
 
+  test("unclosed Meter renders as escaped text on every platform (not a meter div)", () => {
+    // Mirrors the Callout unclosed-degrade pin at the RENDERED-output level: an
+    // open Meter with no close must escape rather than emit meter markup.
+    const md = "<Meter value=\"4\" max=\"5\">\nleft open forever\nmore lines";
+    const out = format(md);
+    expect(out.web).toContain("&lt;Meter");
+    expect(out.web).not.toContain('<div class="meter"');
+    expect(out.telegram).toContain("&lt;Meter");
+    // Slack's catch-all strips the angle-bracket tag; the body survives as text,
+    // and crucially no `label: value/max` meter render is emitted.
+    expect(out.slack).toContain("left open forever");
+    expect(out.slack).not.toContain(": 4/5");
+    expect(() => format(md)).not.toThrow();
+  });
+
+  test("Diff fence injection cannot escape into markup on any platform", () => {
+    const md = "<Diff>\n```diff\n+<img src=x onerror=alert(1)>\n```\n</Diff>";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<img");
+    // Slack has no HTML surface; the payload is inert text inside a code fence.
+    expect(out.slack.startsWith("```")).toBe(true);
+  });
+
+  test("FileTree fence content cannot inject markup on web/telegram", () => {
+    const md = "<FileTree>\n```\n<img src=x onerror=alert(1)>\n```\n</FileTree>";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<img");
+  });
+
+  test("Checklist item injection cannot escape into markup", () => {
+    const md = "<Checklist>\n- [x] <img src=x onerror=alert(1)>\n</Checklist>";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<img");
+    expect(out.slack).not.toContain("<img");
+  });
+
+  test("AnnotatedCode file attr + fence injection cannot escape into markup", () => {
+    const md =
+      '<AnnotatedCode file="x\"><script>alert(1)</script>" lang="ts">\n```ts\n<img src=x onerror=alert(1)>\n```\n</AnnotatedCode>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<script>");
+  });
+
+  test("CodeTabs/Tab label + body injection cannot escape into markup", () => {
+    const md =
+      '<CodeTabs>\n<Tab label="x\"><script>alert(1)</script>">\n```ts\n<img src=x onerror=alert(1)>\n```\n</Tab>\n</CodeTabs>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<script>");
+  });
+
+  test("unclosed CodeTabs degrades to text on every platform", () => {
+    const md = "<CodeTabs>\n<Tab label=\"A\">\nleft open";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).toContain("&lt;CodeTabs&gt;");
+    expect(out.web).not.toContain('<div class="code-tabs">');
+    expect(out.telegram).toContain("&lt;CodeTabs&gt;");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

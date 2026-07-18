@@ -370,4 +370,163 @@ describe("formatWebHtml — component blocks", () => {
   test("Meter with non-numeric value degrades to plain label text", () => {
     expect(formatWebHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
   });
+
+  test("Meter nests one deep inside a Callout (depth 1 renders)", () => {
+    const out = formatWebHtml("<Callout tone=\"info\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>");
+    expect(out).toContain('<div class="callout callout-info">');
+    expect(out).toContain('<div class="meter">');
+    expect(out).toContain('<span class="meter-value">4/5</span>');
+  });
+
+  test("Meter at depth 2 degrades to escaped text (component depth cap)", () => {
+    const out = formatWebHtml(
+      "<Callout tone=\"info\">\n<Callout tone=\"warn\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>\n</Callout>",
+    );
+    // Two nested components put the Meter at depth 2, past MAX_COMPONENT_DEPTH.
+    expect(out).toContain("&lt;Meter");
+    expect(out).not.toContain('<span class="meter-fill"');
+  });
+
+  test("Meter label with angle brackets is escaped in the rendered output", () => {
+    const out = formatWebHtml("<Meter value=\"4\" max=\"5\">A <b> tag</Meter>");
+    expect(out).toContain('<span class="meter-label">A &lt;b&gt; tag</span>');
+    expect(out).not.toContain("<b> tag");
+  });
+
+  test("self-closing Meter is not allowed → degrades to escaped text", () => {
+    // Meter is not in SELF_CLOSING_ALLOWED, so `<Meter/>` falls through to text
+    // and the renderer escapes the tag rather than emitting a meter div.
+    const out = formatWebHtml("<Meter value=\"4\" max=\"5\" />");
+    expect(out).toContain("&lt;Meter");
+    expect(out).not.toContain('<div class="meter"');
+  });
+
+  test("Diff emits per-line +/− classed rows from the raw fence", () => {
+    const out = formatWebHtml("<Diff>\n```diff\n context\n-old line\n+new line\n```\n</Diff>");
+    expect(out).toBe(
+      '<div class="diff">' +
+        '<div class="diff-line diff-ctx"> context</div>' +
+        '<div class="diff-line diff-del">-old line</div>' +
+        '<div class="diff-line diff-add">+new line</div>' +
+        "</div>",
+    );
+  });
+
+  test("Diff escapes fence content (no raw HTML injection)", () => {
+    const out = formatWebHtml("<Diff>\n```diff\n+<script>alert(1)</script>\n```\n</Diff>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain('class="diff-line diff-add"');
+  });
+
+  test("Diff without a fenced body falls back to the rendered children", () => {
+    // No ```diff fence → nothing to introspect; the body renders as-is.
+    const out = formatWebHtml("<Diff>\njust prose\n</Diff>");
+    expect(out).not.toContain('<div class="diff">');
+    expect(out).toContain("just prose");
+  });
+
+  test("FileTree wraps the rendered path fence in a monospace box", () => {
+    const out = formatWebHtml("<FileTree>\n```\nsrc/\n  index.ts\n```\n</FileTree>");
+    expect(out).toBe('<div class="filetree"><pre><code>src/\n  index.ts</code></pre></div>');
+  });
+
+  test("FileTree escapes path content (no raw HTML injection)", () => {
+    const out = formatWebHtml("<FileTree>\n```\n<script>x</script>\n```\n</FileTree>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain('<div class="filetree">');
+  });
+
+  test("Checklist renders styled check/cross rows from the raw task items", () => {
+    const out = formatWebHtml("<Checklist>\n- [x] Done thing\n- [ ] Todo thing\n</Checklist>");
+    expect(out).toBe(
+      '<ul class="checklist">' +
+        '<li class="check-item check-done"><span class="check-mark">✓</span> Done thing</li>' +
+        '<li class="check-item check-todo"><span class="check-mark">✗</span> Todo thing</li>' +
+        "</ul>",
+    );
+  });
+
+  test("Checklist item text runs through inline formatting + escaping", () => {
+    const out = formatWebHtml("<Checklist>\n- [x] ship **now** <b>\n</Checklist>");
+    expect(out).toContain("<strong>now</strong>");
+    expect(out).toContain("&lt;b&gt;");
+    expect(out).not.toContain("ship <b>");
+  });
+
+  test("Checklist with no task list falls back to the rendered children", () => {
+    const out = formatWebHtml("<Checklist>\njust prose, no list\n</Checklist>");
+    expect(out).not.toContain('<ul class="checklist">');
+    expect(out).toContain("just prose, no list");
+  });
+
+  test("AnnotatedCode renders file header + code panel + annotation notes", () => {
+    const out = formatWebHtml(
+      "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nThis sets x.\n</AnnotatedCode>",
+    );
+    expect(out).toContain('<div class="annotated-code">');
+    expect(out).toContain('<div class="annotated-code-file">src/x.ts</div>');
+    expect(out).toContain('<div class="annotated-code-panel"><pre><code class="language-ts">const x = 1;</code></pre></div>');
+    expect(out).toContain('<div class="annotated-code-notes">');
+    expect(out).toContain("This sets x.");
+  });
+
+  test("AnnotatedCode escapes the file header and code (no HTML injection)", () => {
+    const out = formatWebHtml(
+      "<AnnotatedCode file=\"a<b\" lang=\"ts\">\n```ts\n<script>alert(1)</script>\n```\n</AnnotatedCode>",
+    );
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain("a&lt;b");
+  });
+
+  test("AnnotatedCode with no fence falls back to the rendered children", () => {
+    const out = formatWebHtml("<AnnotatedCode file=\"x.ts\">\njust notes\n</AnnotatedCode>");
+    expect(out).not.toContain('<div class="annotated-code">');
+    expect(out).toContain("just notes");
+  });
+
+  test("CodeTabs renders a tab bar + panels; first tab/panel active", () => {
+    const out = formatWebHtml(
+      "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+    );
+    expect(out).toContain('<div class="code-tabs">');
+    expect(out).toContain('<button class="code-tabs-tab is-active" type="button">TS</button>');
+    expect(out).toContain('<button class="code-tabs-tab" type="button">JS</button>');
+    expect(out).toContain('<div class="code-tabs-panel is-active"><pre><code class="language-ts">const x=1;</code></pre></div>');
+    expect(out).toContain('<div class="code-tabs-panel"><pre><code class="language-js">var x=1;</code></pre></div>');
+  });
+
+  test("CodeTabs with zero recognized Tab children renders a visible fallback", () => {
+    const out = formatWebHtml("<CodeTabs>\njust prose, no tabs\n</CodeTabs>");
+    expect(out).toContain('<div class="code-tabs-fallback">');
+    expect(out).toContain("just prose, no tabs");
+    expect(out).not.toContain('<div class="code-tabs-bar"');
+  });
+
+  test("CodeTabs nested past the depth cap degrades: Tab is text, fallback shown", () => {
+    // Callout(0) → CodeTabs(1) → Tab(2). Tab at depth 2 is not parsed as a
+    // component, so CodeTabs sees zero Tab children → visible fallback, not raw tags.
+    const out = formatWebHtml(
+      "<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>",
+    );
+    expect(out).toContain('<div class="code-tabs-fallback">');
+    expect(out).toContain("&lt;Tab");
+    expect(out).not.toContain('<button class="code-tabs-tab');
+  });
+
+  test("standalone Tab (outside CodeTabs) renders its own labeled panel", () => {
+    const out = formatWebHtml("<Tab label=\"Only\">\n```ts\nx\n```\n</Tab>");
+    expect(out).toBe(
+      '<div class="code-tab-standalone"><div class="code-tab-label">Only</div>' +
+        '<pre><code class="language-ts">x</code></pre></div>',
+    );
+  });
+
+  test("CodeTabs escapes tab labels (no attr injection)", () => {
+    const out = formatWebHtml("<CodeTabs>\n<Tab label=\"a<script>\">\nx\n</Tab>\n</CodeTabs>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("a&lt;script&gt;");
+  });
 });

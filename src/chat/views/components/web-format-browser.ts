@@ -13,6 +13,7 @@
 
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { renderSlackMrkdwn } from "./slack-mrkdwn.ts";
+import { enhanceCodeTabs } from "../../../dashboard/views/components/code-tabs.ts";
 
 const TG_TAGS = ["b", "strong", "i", "em", "u", "s", "del", "code", "pre", "a", "br", "span"];
 const WEB_TAGS = [
@@ -27,6 +28,8 @@ const WEB_TAGS = [
   // flatten components to text on the client re-render.
   "div", "figure", "figcaption",
   "callout", "verdict", "pill", "fileref", "comparisontable",
+  // CodeTabs needs its <button> tabs to survive so the enhancer can wire them.
+  "button",
 ];
 
 // Class names emitted by the component renderers. `class` is normally stripped
@@ -37,6 +40,13 @@ const COMPONENT_CLASS_ALLOW = new Set([
   "verdict", "verdict-yes", "verdict-no",
   "pill", "pill-rec", "pill-warn",
   "figure", "figure-body", "caption", "fileref", "tablewrap",
+  // CodeTabs markup — kept so the enhancer can find/switch tabs and the CSS
+  // applies. (The other tier-1 blocks render as unstyled-but-present markup in
+  // the chat re-render, matching the Meter precedent; CodeTabs is the only one
+  // whose classes are load-bearing for behavior, so only it is allowlisted.)
+  "code-tabs", "code-tabs-bar", "code-tabs-tab", "code-tabs-panels",
+  "code-tabs-panel", "code-tabs-fallback", "code-tab-standalone", "code-tab-label",
+  "is-active",
 ]);
 
 function classIsComponent(value: string): boolean {
@@ -79,4 +89,4 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
   return tmp.innerHTML;
 }
 
-Object.assign(globalThis, { formatWebHtml, renderSlackMrkdwn, sanitizeHtml });
+Object.assign(globalThis, { formatWebHtml, renderSlackMrkdwn, sanitizeHtml, enhanceCodeTabs });

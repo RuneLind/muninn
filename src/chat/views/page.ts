@@ -959,6 +959,7 @@ const CHAT_SCRIPT = `
       body.className = 'msg-body' + platformClass;
       if (isWeb || isTg) {
         body.innerHTML = sanitizeHtml(msg.text, isWeb);
+        if (isWeb) enhanceCodeTabs(body);
         augmentIndexLinks(body);
         augmentIssueLinks(body);
       } else {
@@ -974,6 +975,7 @@ const CHAT_SCRIPT = `
       // Format it here like bot messages so it renders as rich HTML.
       body.className = 'msg-body web-content';
       body.innerHTML = sanitizeHtml(formatWebHtml(msg.text), true);
+      enhanceCodeTabs(body);
       augmentIndexLinks(body);
       augmentIssueLinks(body);
       headName = peerLabelForMessage(msg);

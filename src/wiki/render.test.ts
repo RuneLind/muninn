@@ -111,6 +111,15 @@ describe("renderWikiHtml", () => {
     expect(html).toContain('href="/wiki?page=Claude%20Code"');
   });
 
+  test("a Meter inside a native page body renders as a meter component (not escaped text)", () => {
+    // Mirrors the Callout body-render pin: the shared AST renders Meter through
+    // formatWebHtml, so a wiki page carries the styled bar, not escaped tags.
+    const html = renderWikiHtml("Score:\n\n<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>", resolve);
+    expect(html).toContain('<div class="meter meter-good">');
+    expect(html).toContain('<span class="meter-value">4/5</span>');
+    expect(html).not.toContain("&lt;Meter");
+  });
+
   test("a ```mermaid fence renders as a plain code block (muninn has no mermaid renderer)", () => {
     const html = renderWikiHtml("```mermaid\ngraph TD; A-->B;\n```", resolve);
     // v1: no diagram rendering — the fence degrades to a labeled code block.

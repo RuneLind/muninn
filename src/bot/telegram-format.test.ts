@@ -163,3 +163,60 @@ test("component: Meter clamps out-of-range value", () => {
 test("component: Meter with non-numeric value degrades to plain label", () => {
   expect(formatTelegramHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
 });
+
+test("component: Diff falls back to the fence as-is (Telegram renders code)", () => {
+  const out = formatTelegramHtml("<Diff>\n```diff\n context\n-old\n+new\n```\n</Diff>");
+  expect(out).toBe('<pre><code class="language-diff"> context\n-old\n+new</code></pre>');
+});
+
+test("component: unclosed Diff degrades to escaped text", () => {
+  const out = formatTelegramHtml("<Diff>\nno close here");
+  expect(out).toContain("&lt;Diff&gt;");
+  expect(out).not.toContain('class="language-diff"');
+});
+
+test("component: FileTree falls back to the fence as-is", () => {
+  const out = formatTelegramHtml("<FileTree>\n```\nsrc/\n  a.ts\n```\n</FileTree>");
+  expect(out).toBe("<pre><code>src/\n  a.ts</code></pre>");
+});
+
+test("component: unclosed FileTree degrades to escaped text", () => {
+  const out = formatTelegramHtml("<FileTree>\nno close");
+  expect(out).toContain("&lt;FileTree&gt;");
+});
+
+test("component: Checklist → ☑/☐-prefixed lines fallback", () => {
+  const out = formatTelegramHtml("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>");
+  expect(out).toBe("☑ Done\n☐ Todo");
+});
+
+test("component: unclosed Checklist degrades to escaped text", () => {
+  const out = formatTelegramHtml("<Checklist>\n- [x] no close");
+  expect(out).toContain("&lt;Checklist&gt;");
+});
+
+test("component: AnnotatedCode → file line + fence + notes fallback", () => {
+  const out = formatTelegramHtml(
+    "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>",
+  );
+  expect(out).toBe('<b>src/x.ts</b>\n<pre><code class="language-ts">const x = 1;</code></pre>\n\nSets x.');
+});
+
+test("component: unclosed AnnotatedCode degrades to escaped text", () => {
+  const out = formatTelegramHtml("<AnnotatedCode file=\"x.ts\">\nno close");
+  expect(out).toContain("&lt;AnnotatedCode");
+});
+
+test("component: CodeTabs → sequential — label — sections fallback", () => {
+  const out = formatTelegramHtml(
+    "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+  );
+  expect(out).toBe(
+    '— TS —\n<pre><code class="language-ts">const x=1;</code></pre>\n— JS —\n<pre><code class="language-js">var x=1;</code></pre>',
+  );
+});
+
+test("component: unclosed CodeTabs degrades to escaped text", () => {
+  const out = formatTelegramHtml("<CodeTabs>\n<Tab label=\"A\">no close");
+  expect(out).toContain("&lt;CodeTabs&gt;");
+});

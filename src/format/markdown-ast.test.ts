@@ -1,5 +1,11 @@
 import { test, expect, describe } from "bun:test";
-import { parseBlocks, parseMeterAttrs, normalizeMeterTone } from "./markdown-ast.ts";
+import {
+  parseBlocks,
+  parseMeterAttrs,
+  normalizeMeterTone,
+  parseChecklistItem,
+  parseChecklist,
+} from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
   test("parses heading", () => {
@@ -261,6 +267,88 @@ describe("parseBlocks — component blocks", () => {
     expect(parseBlocks("<Meter value=\"4\" max=\"5\" />")).toEqual([
       { type: "text", lines: ["<Meter value=\"4\" max=\"5\" />"] },
     ]);
+  });
+
+  test("Diff wraps a fenced diff block as its child (fence parsed inside)", () => {
+    expect(parseBlocks("<Diff>\n```diff\n-old\n+new\n```\n</Diff>")).toEqual([
+      {
+        type: "component",
+        name: "Diff",
+        attrs: {},
+        children: [{ type: "code_block", lang: "diff", code: "-old\n+new" }],
+      },
+    ]);
+  });
+
+  test("AnnotatedCode keeps file/lang attrs and body fence + paragraphs", () => {
+    expect(
+      parseBlocks("<AnnotatedCode file=\"x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>"),
+    ).toEqual([
+      {
+        type: "component",
+        name: "AnnotatedCode",
+        attrs: { file: "x.ts", lang: "ts" },
+        children: [
+          { type: "code_block", lang: "ts", code: "const x = 1;" },
+          { type: "text", lines: ["", "Sets x."] },
+        ],
+      },
+    ]);
+  });
+
+  test("Checklist parses its task items as a ul child", () => {
+    expect(parseBlocks("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>")).toEqual([
+      {
+        type: "component",
+        name: "Checklist",
+        attrs: {},
+        children: [{ type: "ul", items: ["[x] Done", "[ ] Todo"] }],
+      },
+    ]);
+  });
+
+  test("CodeTabs parses repeated <Tab label> children as component blocks", () => {
+    const blocks = parseBlocks(
+      "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nx\n```\n</Tab>\n<Tab label=\"JS\">\n```js\ny\n```\n</Tab>\n</CodeTabs>",
+    );
+    expect(blocks).toHaveLength(1);
+    const tabs = (blocks[0] as { children: { name: string; attrs: Record<string, string> }[] }).children;
+    expect(tabs.map((t) => t.name)).toEqual(["Tab", "Tab"]);
+    expect(tabs.map((t) => t.attrs.label)).toEqual(["TS", "JS"]);
+  });
+
+  test("Tab is globally parseable (standalone), not scoped to CodeTabs", () => {
+    expect(parseBlocks("<Tab label=\"Only\">\nx\n</Tab>")[0]).toMatchObject({
+      type: "component",
+      name: "Tab",
+      attrs: { label: "Only" },
+    });
+  });
+
+  test("a CodeTabs nested in a component puts Tab at depth 2 → Tab degrades to text", () => {
+    // Documented top-level-only constraint: MAX_COMPONENT_DEPTH = 2.
+    const blocks = parseBlocks("<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>");
+    const callout = blocks[0] as { children: { type: string; name?: string; children?: unknown[] }[] };
+    const codeTabs = callout.children.find((c) => c.name === "CodeTabs")!;
+    // CodeTabs at depth 1 IS a component, but its <Tab> body is at depth 2 → text.
+    expect(codeTabs.children!.every((c) => (c as { type: string }).type === "text")).toBe(true);
+  });
+});
+
+describe("parseChecklistItem / parseChecklist", () => {
+  test("marker parsing: checked, unchecked, uppercase, unmarked", () => {
+    expect(parseChecklistItem("[x] Done")).toEqual({ checked: true, text: "Done" });
+    expect(parseChecklistItem("[X] Done")).toEqual({ checked: true, text: "Done" });
+    expect(parseChecklistItem("[ ] Todo")).toEqual({ checked: false, text: "Todo" });
+    expect(parseChecklistItem("no marker")).toEqual({ checked: false, text: "no marker" });
+  });
+
+  test("parseChecklist reads the first ul block's items; empty without a list", () => {
+    expect(parseChecklist([{ type: "ul", items: ["[x] A", "[ ] B"] }])).toEqual([
+      { checked: true, text: "A" },
+      { checked: false, text: "B" },
+    ]);
+    expect(parseChecklist([{ type: "text", lines: ["prose"] }])).toEqual([]);
   });
 });
 
