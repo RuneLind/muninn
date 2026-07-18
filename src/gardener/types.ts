@@ -36,6 +36,16 @@ export const GARDENER_DEFAULTS = {
    * un-reject UI.
    */
   rejectedSkipDays: 7,
+  /**
+   * Max harvest-window docs inlined into the pass-1 doc→page MAP prompt (the
+   * deterministic "does this doc squarely belong on an existing page?" call that
+   * runs alongside the cluster call). Bounds the map prompt the same way the
+   * cluster prompt bounds its existing-page list — a busy fortnight can harvest
+   * well past this, so the map call sees the most-recent `mapMaxDocs` (docs are
+   * date-prefixed ids ⇒ a descending id sort is a recency sort). The pass-0
+   * cluster call is unaffected (it still sees every harvested doc).
+   */
+  mapMaxDocs: 60,
 } as const;
 
 /** Merge a partial config with the defaults into a fully-resolved shape. */

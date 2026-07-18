@@ -270,8 +270,8 @@ approves a draft into the wiki (muninn's first wiki write) or rejects it. The
 Telegram alert (🌱) names the `/wiki/gardener` route.
 
 Pipeline (`src/gardener/runner.ts` `runGardener`): harvest → cluster →
-target-resolve → draft → shape-gate → persist → notify → **(web gate) approve →
-apply**.
+target-resolve → **map (pass-1)** → draft → shape-gate → persist → notify →
+**(web gate) approve → apply**.
 
 - **Harvest** (`harvest.ts`): list docs across the summary collections
   (`GET /api/collection/<c>/documents?include_dates=1`), filter to `date >= now −
@@ -316,6 +316,28 @@ apply**.
   stays a `create` — nothing downstream re-checks the existing page's type
   before an update overwrites it). Otherwise `create` (huginn scores are never
   consulted).
+- **Map — pass-1 doc→page mapping** (`doc-page-map.ts`, runs AFTER target-resolve,
+  BEFORE the size/cap gate): whether a doc gets *clustered at all* is pass-0's roll;
+  a doc that squarely belongs on an existing page shouldn't depend on it. A second
+  cheap Haiku call (`callDocPageMap` seam, `source: "wiki_gardener_map"`, same
+  backend + tracer as the cluster call) maps each harvest-window doc onto AT MOST
+  one existing concept/entity page (candidate policy = `resolveTarget`'s; the map
+  excerpt `mapExcerptOf` surfaces section HEADINGS so a multi-topic news-roundup doc
+  reveals its breadth, unlike the cluster prompt's heading-stripped `excerptOf`).
+  `mergeDocPageMappings` folds each valid mapping into `resolvedAll`: **covered** (doc
+  already in ANY update cluster → skip), **append** (a resolvedAll update cluster
+  already targets that page → add the doc, deduped), else **synthesize** a 1-doc
+  update cluster (label = page title, topicKey = slug, resolved through the SAME
+  `resolveTarget`; honors the same live/recently-rejected skip set as pass-0). A doc
+  may end up in both a create AND a synthesized update (no cross-mode dedup). Skipped
+  entirely when the wiki has no concept/entity pages (no candidates ⇒ no call);
+  best-effort (a map-call error degrades to "no mappings", never aborts the run). A
+  `map` stage span carries `{mapped, synthesized, appended, covered_skipped,
+  skip_dropped}`; one adjacent structured log line reports the outcome. **Known
+  limit:** the synthesized/mapped update still competes in the size/cap gate
+  unchanged — on a mature wiki where most single docs match an existing page, the
+  weekly `maxProposalsPerRun` (3) is the binding constraint on which mapped docs
+  actually draft; the backlog drain's higher cap (8) keeps more.
 - **Draft** (`draft.ts`): one `executeOneShot` per cluster on the bot's connector
   (explicit `timeoutMs: 300000`, no extraDirs). Summaries are inlined as
   **untrusted** delimited data. The **shape-gate** rejects a draft unless the

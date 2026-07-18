@@ -37,6 +37,8 @@ function makeDeps(overrides: Partial<GardenerDeps> = {}): { deps: GardenerDeps; 
       JSON.stringify([
         { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
       ]),
+    // Pass-1 map defaults to "nothing maps" so existing cases are unaffected.
+    callDocPageMap: async () => "[]",
     loadInterestProfile: async () => null,
     getWikiIndex: async () => null,
     callDraft: async () => validDraft(),
@@ -469,6 +471,7 @@ function makeTwoClusterDeps(overrides: Partial<GardenerDeps> = {}): {
         { topicKey: "topic-one", kind: "concept", domain: "ai", label: "Topic One", docIds: c1Keys, rationale: "r" },
         { topicKey: "topic-two", kind: "concept", domain: "ai", label: "Topic Two", docIds: c2Keys, rationale: "r" },
       ]),
+    callDocPageMap: async () => "[]",
     loadInterestProfile: async () => null,
     getWikiIndex: async () => null,
     callDraft: async () => validDraft(),
@@ -779,6 +782,111 @@ describe("runGardener — post-resolve size/cap gate", () => {
     // (Keying on the filter output would have reached the pre-loop drafting emit.)
     expect(seen.some((p) => p.stage === "drafting")).toBe(false);
     expect(seen.map((p) => p.stage)).toEqual(["harvesting", "clustering", "resolving"]);
+  });
+});
+
+// ── Pass-1 doc→page mapping (two-pass rescue) ────────────────────────────────
+describe("runGardener — pass-1 doc→page mapping", () => {
+  function conceptIndex(title: string): WikiIndex {
+    const p: WikiPageMeta = {
+      name: title, title, type: "concept", domain: "ai", tags: [], aliases: [],
+      relPath: `concepts/${title}.md`,
+    };
+    return {
+      pages: [p],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+  }
+
+  test("a doc pass-0 left unclustered but mapped to an existing page → persisted UPDATE draft", async () => {
+    let draftCalls = 0;
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => conceptIndex("Context Compaction"),
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+      // Pass-0 clusters NOTHING — the whole point: the mapping is the only path.
+      callCluster: async () => "[]",
+      // Pass-1 maps the target doc onto the existing page.
+      callDocPageMap: async () =>
+        JSON.stringify([{ docId: KEYS[0], pageTitle: "Context Compaction" }]),
+      callDraft: async () => {
+        draftCalls += 1;
+        return validDraft();
+      },
+    });
+    const alerts = await runGardener(deps);
+
+    expect(draftCalls).toBe(1);
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.topicKey).toBe("context-compaction");
+    expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
+    expect(inserted[0]!.baseHash).toBeTruthy();
+    expect(inserted[0]!.sourceDocs).toHaveLength(1);
+    // The alert names the page (label resolved from the synthesized cluster).
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.summary).toContain("Context Compaction");
+  });
+
+  test("a doc already in a pass-0 UPDATE cluster is not duplicated by a mapping of the same doc", async () => {
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => conceptIndex("Context Compaction"),
+      readWikiFile: async () => "# Context Compaction\n\nExisting body.",
+      // Pass-0 already produces an UPDATE cluster over all three docs.
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
+        ]),
+      // Pass-1 maps one of those same docs onto the same page — must be covered-skipped.
+      callDocPageMap: async () =>
+        JSON.stringify([{ docId: KEYS[0], pageTitle: "Context Compaction" }]),
+    });
+    await runGardener(deps);
+
+    // Exactly one proposal — the pass-0 update; the mapping added nothing.
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]!.mode).toBe("update");
+    expect(inserted[0]!.sourceDocs).toHaveLength(3);
+  });
+
+  test("null wiki index → no candidate pages → map stage skipped (no callDocPageMap)", async () => {
+    let mapCalls = 0;
+    const { deps } = makeDeps({
+      // default getWikiIndex → null
+      callDocPageMap: async () => {
+        mapCalls += 1;
+        return "[]";
+      },
+    });
+    await runGardener(deps);
+    expect(mapCalls).toBe(0);
+  });
+
+  test("the map stage opens a `map` span when candidate pages exist", async () => {
+    const started: string[] = [];
+    const endAttrs: Record<string, Record<string, unknown>> = {};
+    const tracer = {
+      start: (label: string) => { started.push(label); return "id"; },
+      end: (label: string, attrs?: Record<string, unknown>) => { if (attrs) endAttrs[label] = attrs; return 0; },
+      addChildSpan: () => "child-id",
+      traceId: "t",
+    } as unknown as import("../tracing/index.ts").Tracer;
+
+    const { deps } = makeDeps({
+      tracer,
+      getWikiIndex: async () => conceptIndex("Context Compaction"),
+      readWikiFile: async () => "# Context Compaction\n\nBody.",
+      callCluster: async () => "[]",
+      callDocPageMap: async () => JSON.stringify([{ docId: KEYS[0], pageTitle: "Context Compaction" }]),
+    });
+    await runGardener(deps);
+
+    expect(started).toContain("map");
+    expect(endAttrs["map"]).toMatchObject({ mapped: 1, synthesized: 1, appended: 0, covered_skipped: 0 });
   });
 });
 

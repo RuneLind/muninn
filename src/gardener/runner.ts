@@ -26,8 +26,16 @@ import {
   gateResolvedClusters,
   parseClusters,
   summarizeClusterDrops,
+  type ClusterDropEntry,
 } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
+import {
+  buildDocPageMapPrompt,
+  mappablePages,
+  mergeDocPageMappings,
+  parseDocPageMap,
+  type MapMergeOutcome,
+} from "./doc-page-map.ts";
 import {
   appendPendingIngestionCallout,
   buildDraftPrompt,
@@ -64,6 +72,13 @@ export interface GardenerDeps {
 
   // Cluster seams.
   callCluster: (prompt: string) => Promise<string>;
+  /**
+   * Pass-1 doc→page MAP call (cheap Haiku, same backend as `callCluster`). Maps
+   * harvest-window docs onto existing concept/entity pages so a doc that squarely
+   * belongs on a page becomes a 1-doc update cluster even when pass-0 clustering
+   * left it out. Never called when the wiki has no concept/entity pages.
+   */
+  callDocPageMap: (prompt: string) => Promise<string>;
   loadInterestProfile: () => Promise<string | null>;
 
   // Resolve seam.
@@ -201,6 +216,49 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   tracer?.start("resolve");
   deps.onProgress?.({ stage: "resolving" });
   const resolvedAll = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
+
+  // --- Pass-1 doc→page map (deterministic rescue, before the size/cap gate) ---
+  // Whether a doc gets clustered at all is pass-0's roll; a doc that squarely
+  // belongs on an existing page shouldn't depend on it. A cheap Haiku call maps
+  // each harvest-window doc onto AT MOST one existing concept/entity page, and the
+  // merge folds each mapping into `resolvedAll` (as a synthesized 1-doc update, or
+  // an append onto an update cluster already targeting that page) so it competes
+  // in the gate below like any update. Skipped entirely when the wiki has no
+  // concept/entity pages (no candidates ⇒ no call). Best-effort: a map-call error
+  // degrades to "no mappings" and never aborts the run.
+  let mapOutcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, coveredSkipped: 0 };
+  let mapSkipDrops: ClusterDropEntry[] = [];
+  const candidatePages = mappablePages(index);
+  if (candidatePages.length > 0) {
+    tracer?.start("map");
+    try {
+      const mapRaw = await deps.callDocPageMap(buildDocPageMapPrompt(docs, candidatePages));
+      const mappings = parseDocPageMap(mapRaw);
+      const merged = mergeDocPageMappings(resolvedAll, mappings, {
+        pages: candidatePages,
+        index,
+        validDocKeys,
+        // Same skip set as pass-0: live drafts + recently-rejected topics.
+        skipTopicKeys: new Set([...liveKeys, ...recentlyRejectedKeys]),
+        botName,
+      });
+      mapOutcome = merged.outcome;
+      mapSkipDrops = merged.skipDrops;
+    } catch (err) {
+      log.warn("Gardener doc→page map failed — proceeding without mappings: {error}", {
+        botName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    tracer?.end("map", {
+      mapped: mapOutcome.mapped,
+      synthesized: mapOutcome.synthesized,
+      appended: mapOutcome.appended,
+      covered_skipped: mapOutcome.coveredSkipped,
+      skip_dropped: mapSkipDrops.length,
+    });
+  }
+
   // Post-resolve size/cap gate: size floor applies to CREATE clusters only (updates
   // pass at ≥1 doc); the cap is shared across modes with one slot reserved for the
   // largest update. This is the fix — a doc referencing an existing page's topic now
@@ -218,10 +276,27 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     ...gateTally,
   });
 
-  // One structured per-run log line carries the FULL tally (both sites' drops) —
-  // size was the dominant zero-cluster cause in the live incident and must not fall
-  // off the record even though its span attrs are now split across two spans.
-  const allDropped = [...clusterDropped, ...gateDropped];
+  // Adjacent structured line for the pass-1 mapping outcome (independent of the
+  // cluster-drop tally below — its synthesized clusters may have drafted).
+  log.info(
+    "Gardener doc→page map: {mapped} mapped → {synthesized} synthesized, {appended} appended, " +
+      "{covered} already-covered, {skipped} skipped (live/recently-rejected)",
+    {
+      botName,
+      mapped: mapOutcome.mapped,
+      synthesized: mapOutcome.synthesized,
+      appended: mapOutcome.appended,
+      covered: mapOutcome.coveredSkipped,
+      skipped: mapSkipDrops.length,
+    },
+  );
+
+  // One structured per-run log line carries the FULL tally (all drop sites) — size
+  // was the dominant zero-cluster cause in the live incident and must not fall off
+  // the record even though its span attrs are now split across spans. The pass-1
+  // map's own `skip` drops (a synthesized update whose topic is live/recently
+  // rejected) join the aggregate so the run-level skip count stays complete.
+  const allDropped = [...clusterDropped, ...mapSkipDrops, ...gateDropped];
   const dropTally = summarizeClusterDrops(allDropped);
   log.info(
     "Gardener cluster filter: {kept} kept, {dropped} dropped " +
@@ -535,10 +610,12 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
 
   if (persisted.length === 0) return [];
 
-  // Map cluster labels back onto persisted rows for the notification. Deliberately
-  // reads the PRE-gate `clusters` set (a superset of drafted topicKeys — resolve
-  // never changes a cluster's topicKey), so every persisted row resolves a label.
-  const labelByTopic = new Map(clusters.map((c) => [c.topicKey, c.label]));
+  // Map cluster labels back onto persisted rows for the notification. Reads the
+  // PRE-gate `resolvedAll` set (a superset of drafted topicKeys — resolve/map never
+  // change a cluster's topicKey), so every persisted row resolves a label —
+  // including the pass-1 synthesized update clusters, which are absent from the
+  // pass-0 `clusters` set but present in `resolvedAll`.
+  const labelByTopic = new Map(resolvedAll.map((r) => [r.cluster.topicKey, r.cluster.label]));
   const labels = persisted.map((p) => labelByTopic.get(p.topicKey) ?? p.topicKey);
   const ids = persisted.map((p) => p.id);
 
