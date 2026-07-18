@@ -4,11 +4,24 @@ import { test, expect, describe, beforeEach, mock } from "bun:test";
 const saveSpanCalls: Array<Record<string, unknown>> = [];
 const updateSpanCalls: Array<{ id: string; params: Record<string, unknown> }> = [];
 
+// Ordered log of DB write completions — lets the race regression test assert
+// that an UPDATE only fires after its INSERT has resolved.
+const writeOrder: string[] = [];
+// When true, every saveSpan parks until a resolver in `pendingSaves` is fired,
+// simulating an INSERT that lands on a slow pool connection.
+let deferSaveSpan = false;
+let pendingSaves: Array<() => void> = [];
+
 mock.module("../db/traces.ts", () => ({
   saveSpan: async (params: Record<string, unknown>) => {
     saveSpanCalls.push(params);
+    if (deferSaveSpan) {
+      await new Promise<void>((resolve) => pendingSaves.push(resolve));
+    }
+    writeOrder.push("insert");
   },
   updateSpan: async (id: string, params: Record<string, unknown>) => {
+    writeOrder.push("update");
     updateSpanCalls.push({ id, params });
   },
 }));
@@ -22,10 +35,18 @@ mock.module("../config.ts", () => ({
 // Must import after mocks are set up
 const { Tracer } = await import("./tracer.ts");
 
+// end()/finish() now chain the UPDATE on the span's INSERT promise, so the
+// UPDATE lands a microtask after the call returns rather than synchronously.
+// Tests that assert on updateSpanCalls must flush the microtask queue first.
+const flushWrites = () => Bun.sleep(0);
+
 describe("Tracer", () => {
   beforeEach(() => {
     saveSpanCalls.length = 0;
     updateSpanCalls.length = 0;
+    writeOrder.length = 0;
+    deferSaveSpan = false;
+    pendingSaves = [];
     tracingEnabledValue = true;
     // Reset the cached _tracingEnabled by creating fresh tracers
     // The module-level cache is set once; we re-import or accept it.
@@ -124,6 +145,7 @@ describe("Tracer", () => {
       await Bun.sleep(5);
 
       const durationMs = tracer.end("claude");
+      await flushWrites();
 
       expect(durationMs).toBeGreaterThan(0);
       expect(updateSpanCalls).toHaveLength(1);
@@ -139,6 +161,7 @@ describe("Tracer", () => {
 
       await Bun.sleep(1);
       tracer.end("claude", { outputTokens: 1000 });
+      await flushWrites();
 
       const update = updateSpanCalls[0]!;
       expect(update.params.attributes).toEqual({ outputTokens: 1000 });
@@ -150,6 +173,7 @@ describe("Tracer", () => {
 
       await Bun.sleep(2);
       tracer.end("work");
+      await flushWrites();
 
       const update = updateSpanCalls[0]!;
       expect(Number.isInteger(update.params.durationMs)).toBe(true);
@@ -308,6 +332,7 @@ describe("Tracer", () => {
 
       await Bun.sleep(2);
       tracer.finish();
+      await flushWrites();
 
       expect(updateSpanCalls).toHaveLength(1);
       const update = updateSpanCalls[0]!;
@@ -315,9 +340,10 @@ describe("Tracer", () => {
       expect(update.params.durationMs).toBeGreaterThan(0);
     });
 
-    test("finishes root span with error status", () => {
+    test("finishes root span with error status", async () => {
       const tracer = new Tracer("request");
       tracer.finish("error", { reason: "timeout" });
+      await flushWrites();
 
       expect(updateSpanCalls).toHaveLength(1);
       const update = updateSpanCalls[0]!;
@@ -325,9 +351,10 @@ describe("Tracer", () => {
       expect(update.params.attributes).toEqual({ reason: "timeout" });
     });
 
-    test("finish includes attributes", () => {
+    test("finish includes attributes", async () => {
       const tracer = new Tracer("request");
       tracer.finish("ok", { inputTokens: 3000, outputTokens: 500 });
+      await flushWrites();
 
       const update = updateSpanCalls[0]!;
       expect(update.params.attributes).toEqual({
@@ -338,9 +365,10 @@ describe("Tracer", () => {
   });
 
   describe("error", () => {
-    test("finishes with error status and Error message", () => {
+    test("finishes with error status and Error message", async () => {
       const tracer = new Tracer("request");
       tracer.error(new Error("Something went wrong"));
+      await flushWrites();
 
       expect(updateSpanCalls).toHaveLength(1);
       const update = updateSpanCalls[0]!;
@@ -350,9 +378,10 @@ describe("Tracer", () => {
       });
     });
 
-    test("finishes with error status and string message", () => {
+    test("finishes with error status and string message", async () => {
       const tracer = new Tracer("request");
       tracer.error("timeout after 120s");
+      await flushWrites();
 
       expect(updateSpanCalls).toHaveLength(1);
       const update = updateSpanCalls[0]!;
@@ -415,7 +444,7 @@ describe("Tracer", () => {
   });
 
   describe("disabled/no-op mode", () => {
-    test("does not save spans when tracing is disabled", () => {
+    test("does not save spans when tracing is disabled", async () => {
       // The cached _tracingEnabled was set on the first Tracer construction.
       // Since mock.module is module-scoped, we need a different approach.
       // We test the no-op behavior by checking the Tracer still functions
@@ -436,6 +465,7 @@ describe("Tracer", () => {
       tracer.event("something-happened");
       tracer.end("work");
       tracer.finish();
+      await flushWrites();
 
       // Verify calls were made (tracing is enabled in this test process)
       expect(saveSpanCalls.length).toBeGreaterThan(0);
@@ -451,6 +481,55 @@ describe("Tracer", () => {
 
       expect(durationMs).toBeGreaterThan(0);
       expect(tracer.totalMs()).toBeGreaterThan(0);
+    });
+  });
+
+  describe("insert/update ordering (span-attr race)", () => {
+    test("end() UPDATE waits for start() INSERT even on a zero-duration span", async () => {
+      // Simulate the production race: the INSERT lands on a slow pool
+      // connection while start→end runs with ~0ms between them. The UPDATE
+      // (carrying attributes) must not fire before the INSERT resolves,
+      // otherwise it updates 0 rows and the attributes are silently lost.
+      deferSaveSpan = true;
+      const tracer = new Tracer("request");
+      tracer.start("resolve");
+      tracer.end("resolve", { creates: 3, updates: 1 });
+
+      // Synchronously after end(): the INSERT is still parked, so the UPDATE
+      // must not have run yet.
+      expect(updateSpanCalls).toHaveLength(0);
+      expect(writeOrder).toEqual([]);
+
+      // Land all parked INSERTs, then flush the chained microtasks.
+      pendingSaves.forEach((r) => r());
+      await Bun.sleep(5);
+
+      // The UPDATE ran after the span's INSERT, and carries the attributes.
+      const spanUpdate = updateSpanCalls.find(
+        (u) => u.params.attributes && (u.params.attributes as Record<string, unknown>).creates === 3,
+      );
+      expect(spanUpdate).toBeDefined();
+      expect(spanUpdate!.params.attributes).toEqual({ creates: 3, updates: 1 });
+      // Every update in the ordered log is preceded by at least one insert.
+      const firstUpdate = writeOrder.indexOf("update");
+      expect(firstUpdate).toBeGreaterThan(-1);
+      expect(writeOrder.slice(0, firstUpdate)).toContain("insert");
+    });
+
+    test("finish() root UPDATE waits for the root INSERT", async () => {
+      deferSaveSpan = true;
+      const tracer = new Tracer("request");
+      tracer.finish("ok", { inputTokens: 10 });
+
+      // Root INSERT still parked → root UPDATE must not have run.
+      expect(updateSpanCalls).toHaveLength(0);
+
+      pendingSaves.forEach((r) => r());
+      await Bun.sleep(5);
+
+      expect(updateSpanCalls).toHaveLength(1);
+      expect(writeOrder).toEqual(["insert", "update"]);
+      expect(updateSpanCalls[0]!.params.attributes).toEqual({ inputTokens: 10 });
     });
   });
 
@@ -471,6 +550,7 @@ describe("Tracer", () => {
       tracer.start("memory_extract");
       await Bun.sleep(1);
       tracer.end("memory_extract");
+      await flushWrites();
 
       // 3 spans created, 3 spans ended
       expect(saveSpanCalls).toHaveLength(3);
