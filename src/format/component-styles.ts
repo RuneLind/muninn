@@ -86,5 +86,21 @@ export function componentBlockCss(scope: string): string {
     ${scope} .diagram-body { overflow-x: auto; }
     ${scope} .diagram svg { max-width: 100%; height: auto; }
     ${scope} .caption { color: var(--text-muted); font-size: 0.85em; text-align: center; margin-top: 0.5rem; }
+    ${scope} .meter { display: flex; align-items: center; gap: 0.6rem; margin: 1rem 0; }
+    ${scope} .meter-label { font-weight: 600; color: var(--text-primary); }
+    ${scope} .meter-bar {
+      flex: 1;
+      height: 0.5rem;
+      min-width: 3rem;
+      background: var(--bg-inset);
+      border: 1px solid var(--border-secondary);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    ${scope} .meter-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+    ${scope} .meter-value { color: var(--text-muted); font-size: 0.85em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    ${scope} .meter-good .meter-fill { background: var(--status-success); }
+    ${scope} .meter-warn .meter-fill { background: var(--status-warning); }
+    ${scope} .meter-bad .meter-fill { background: var(--status-error); }
   `;
 }

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { parseBlocks } from "./markdown-ast.ts";
+import { parseBlocks, parseMeterAttrs, normalizeMeterTone } from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
   test("parses heading", () => {
@@ -244,5 +244,68 @@ describe("parseBlocks — component blocks", () => {
         children: [{ type: "table", headers: ["A", "B"], rows: [["1", "2"]] }],
       },
     ]);
+  });
+
+  test("Meter is a block component; label is its children, attrs kept", () => {
+    expect(parseBlocks("<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>")).toEqual([
+      {
+        type: "component",
+        name: "Meter",
+        attrs: { value: "4", max: "5", tone: "good" },
+        children: [{ type: "text", lines: ["Autonomy"] }],
+      },
+    ]);
+  });
+
+  test("Meter is NOT self-closing → falls through as text", () => {
+    expect(parseBlocks("<Meter value=\"4\" max=\"5\" />")).toEqual([
+      { type: "text", lines: ["<Meter value=\"4\" max=\"5\" />"] },
+    ]);
+  });
+});
+
+describe("parseMeterAttrs", () => {
+  test("parses value/max/tone", () => {
+    expect(parseMeterAttrs({ value: "4", max: "5", tone: "good" })).toEqual({
+      value: 4,
+      max: 5,
+      tone: "good",
+    });
+  });
+
+  test("max defaults to 5 when absent", () => {
+    expect(parseMeterAttrs({ value: "3" })).toEqual({ value: 3, max: 5, tone: "default" });
+  });
+
+  test("missing value → null (identical-degrade signal)", () => {
+    expect(parseMeterAttrs({ max: "5" })).toBeNull();
+  });
+
+  test("non-numeric value → null", () => {
+    expect(parseMeterAttrs({ value: "abc" })).toBeNull();
+    expect(parseMeterAttrs({ value: "" })).toBeNull();
+    expect(parseMeterAttrs({ value: "   " })).toBeNull();
+  });
+
+  test("value above max clamps down to max", () => {
+    expect(parseMeterAttrs({ value: "8", max: "5" })).toEqual({ value: 5, max: 5, tone: "default" });
+  });
+
+  test("negative value clamps up to 0", () => {
+    expect(parseMeterAttrs({ value: "-2", max: "5" })).toEqual({ value: 0, max: 5, tone: "default" });
+  });
+
+  test("non-numeric or non-positive max falls back to default 5", () => {
+    expect(parseMeterAttrs({ value: "3", max: "abc" })).toEqual({ value: 3, max: 5, tone: "default" });
+    expect(parseMeterAttrs({ value: "3", max: "0" })).toEqual({ value: 3, max: 5, tone: "default" });
+    expect(parseMeterAttrs({ value: "3", max: "-4" })).toEqual({ value: 3, max: 5, tone: "default" });
+  });
+
+  test("unknown tone normalizes to default", () => {
+    expect(normalizeMeterTone("bogus")).toBe("default");
+    expect(normalizeMeterTone(undefined)).toBe("default");
+    expect(normalizeMeterTone("good")).toBe("good");
+    expect(normalizeMeterTone("warn")).toBe("warn");
+    expect(normalizeMeterTone("bad")).toBe("bad");
   });
 });

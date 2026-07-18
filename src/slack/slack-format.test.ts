@@ -252,5 +252,19 @@ Found it ~~wrong~~ correct.`;
       const out = formatSlackMrkdwn("<ComparisonTable>\n| A | B |\n| --- | --- |\n| 1 | 2 |\n</ComparisonTable>");
       expect(out).toBe("• *A:* 1  *B:* 2");
     });
+
+    test("Meter → label: value/max fallback", () => {
+      expect(formatSlackMrkdwn("<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>")).toBe(
+        "Autonomy: 4/5",
+      );
+    });
+
+    test("Meter clamps out-of-range value", () => {
+      expect(formatSlackMrkdwn("<Meter value=\"9\" max=\"5\">Over</Meter>")).toBe("Over: 5/5");
+    });
+
+    test("Meter with non-numeric value degrades to plain label", () => {
+      expect(formatSlackMrkdwn("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
+    });
   });
 });

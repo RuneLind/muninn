@@ -102,6 +102,49 @@ describe("component fuzz — never throws, never injects", () => {
     expect(inert).toEqual([{ type: "text", lines: ["<Sidebar>still just prose</Sidebar>"] }]);
   });
 
+  test("Meter with missing/non-numeric value degrades IDENTICALLY to plain label on all platforms", () => {
+    // The identical-degrade contract: a Meter whose value is missing or
+    // non-numeric renders its children (the label) as plain text everywhere.
+    for (const md of [
+      "<Meter max=\"5\">Autonomy</Meter>", // missing value
+      "<Meter value=\"abc\" max=\"5\">Autonomy</Meter>", // non-numeric value
+      "<Meter value=\"\" max=\"5\">Autonomy</Meter>", // empty value
+    ]) {
+      const out = format(md);
+      expect(out.web).toBe("Autonomy");
+      expect(out.telegram).toBe("Autonomy");
+      expect(out.slack).toBe("Autonomy");
+    }
+  });
+
+  test("Meter attr injection through value/tone cannot escape into markup", () => {
+    const md = '<Meter value="4\"><script>alert(1)</script>" tone="good\"><img src=x onerror=alert(1)>">Autonomy</Meter>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.telegram).not.toContain("<script>");
+    expect(out.slack).not.toContain("<script>");
+  });
+
+  test("10k inline-closed Meter bomb parses in a single pass without hanging", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Meter value=\"4\" max=\"5\">L</Meter>").join("\n");
+    const start = Date.now();
+    const blocks = parseBlocks(md);
+    expect(blocks).toHaveLength(10_000);
+    expect(blocks.every((b) => b.type === "component")).toBe(true);
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
+
+  test("10k unclosed Meter bomb terminates and degrades to text", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Meter value=\"4\">").join("\n");
+    const start = Date.now();
+    const blocks = parseBlocks(md);
+    // Meter is not self-closing, so a bare open never closes → one text block.
+    expect(blocks).toEqual([{ type: "text", lines: Array(10_000).fill("<Meter value=\"4\">") }]);
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

@@ -1,4 +1,4 @@
-import { parseBlocks, normalizeVerdictValue } from "../format/markdown-ast.ts";
+import { parseBlocks, normalizeVerdictValue, parseMeterAttrs } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -47,6 +47,11 @@ const telegramRenderer: BlockRenderer = {
         return children.trim() || escapeHtml(attrs.path ?? "");
       case "ComparisonTable":
         return children;
+      case "Meter": {
+        const meter = parseMeterAttrs(attrs);
+        if (!meter) return children; // missing/non-numeric value → label as plain text
+        return `${children}: ${meter.value}/${meter.max}`;
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

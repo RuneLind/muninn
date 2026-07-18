@@ -342,4 +342,32 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain("<script>");
     expect(out).toContain("&lt;script&gt;");
   });
+
+  test("Meter renders label + bar (width = value/max) + value/max text", () => {
+    const out = formatWebHtml("<Meter value=\"4\" max=\"5\" tone=\"good\">Autonomy</Meter>");
+    expect(out).toBe(
+      '<div class="meter meter-good">' +
+        '<span class="meter-label">Autonomy</span>' +
+        '<span class="meter-bar"><span class="meter-fill" style="width:80%"></span></span>' +
+        '<span class="meter-value">4/5</span>' +
+        "</div>",
+    );
+  });
+
+  test("Meter default tone omits the tone modifier class", () => {
+    const out = formatWebHtml("<Meter value=\"2\" max=\"4\">Focus</Meter>");
+    expect(out).toContain('<div class="meter">');
+    expect(out).toContain('style="width:50%"');
+    expect(out).toContain('<span class="meter-value">2/4</span>');
+  });
+
+  test("Meter clamps value above max (bar caps at 100%)", () => {
+    const out = formatWebHtml("<Meter value=\"9\" max=\"5\">Over</Meter>");
+    expect(out).toContain('style="width:100%"');
+    expect(out).toContain('<span class="meter-value">5/5</span>');
+  });
+
+  test("Meter with non-numeric value degrades to plain label text", () => {
+    expect(formatWebHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
+  });
 });
