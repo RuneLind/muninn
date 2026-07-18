@@ -19,6 +19,14 @@ test("wikiClientScript bundles to a non-empty IIFE", async () => {
   expect(js).toContain("/api/wiki/page?name=");
 });
 
+test("wikiClientScript bundles the client-side mermaid enhancer", async () => {
+  const js = await wikiClientScript();
+  // The enhance logic and the pinned CDN URL are reachable in the wiki client
+  // bundle (so a headless-Chromium harness can exercise the render path).
+  expect(js).toContain("code.language-mermaid");
+  expect(js).toContain("https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js");
+});
+
 test("renderWikiPage embeds the bundled script and the pane skeleton", async () => {
   const html = await renderWikiPage();
   expect(html).toContain("<!DOCTYPE html>");
