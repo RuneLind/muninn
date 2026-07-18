@@ -82,6 +82,14 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-sep { color: var(--text-dim); }
     .gard-backlog .bk-err { color: var(--status-magenta); font-size: 12px; }
     .gard-backlog .bk-run-note { color: var(--text-muted); font-size: 12px; }
+    .gard-backlog .bk-note { color: var(--text-muted); font-size: 12px; }
+    /* Collapsed all-time accounting — its own de-emphasized row below the strip. */
+    .gard-backlog .bk-tail { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
+    .gard-backlog .bk-tail summary { cursor: pointer; }
+    .gard-backlog .bk-tail summary::marker { color: var(--text-dim); }
+    .gard-backlog .bk-tail .bk-strong { font-weight: 600; color: var(--text-muted); }
+    .gard-backlog .bk-tail .bk-n { color: var(--text-muted); }
+    .gard-backlog .bk-tail-body { display: inline-block; margin-left: 18px; margin-top: 3px; }
     .gard-backlog .bk-warn { color: var(--status-warning, #d0a000); font-size: 12px; font-weight: 600; }
     .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
     /* Primary run button — deliberately reads as a button, not inline stat text. */

@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import {
   backlogStripModel,
+  backlogSentenceHtml,
+  backlogTailHtml,
   backlogControlHtml,
   backlogConfirmHtml,
   backlogProgressText,
@@ -40,6 +42,9 @@ function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse 
     offered: 200, // all-time offered (includes since-consumed) — deliberately ≠ offeredStillQueued
     remaining: 260,
     offeredStillQueued: 69, // queued ∩ offered — the honest count (server-computed)
+    fresh: 0,
+    freshBySource: [],
+    freshWindowDays: 14,
     watcherSeeded: true,
     batchSize: 40,
     maxProposals: 8,
@@ -78,6 +83,82 @@ describe("backlogStripModel — honest numbers", () => {
   });
 });
 
+describe("recency-first sentence + collapsed tail", () => {
+  test("fresh arrivals lead the sentence with per-source breakdown + window label", () => {
+    const m = backlogStripModel(
+      base({
+        fresh: 5,
+        freshBySource: [
+          { label: "YouTube", count: 4 },
+          { label: "X", count: 1 },
+        ],
+      }),
+      2,
+    );
+    expect(m.freshTotal).toBe(5);
+    const html = backlogSentenceHtml(m);
+    // Order: new → drainable → drafts. The all-time totals are NOT in the sentence.
+    expect(html).toContain("new (last 14d)");
+    expect(html.indexOf("new (last 14d)")).toBeLessThan(html.indexOf("drainable now"));
+    expect(html).toContain("YouTube");
+    expect(html).toContain("weekly watcher");
+    expect(html).toContain("drafts awaiting review");
+    expect(html).not.toContain("never ingested");
+  });
+
+  test("zero fresh still shows the honest '0 new' lead (live response)", () => {
+    const html = backlogSentenceHtml(backlogStripModel(base(), 0));
+    expect(html).toContain("0</span> new (last 14d)");
+    expect(html).not.toContain("weekly watcher"); // no breakdown when empty
+  });
+
+  test("degraded response (no live fields) hides the fresh segment instead of lying '0 new'", () => {
+    const degraded = base();
+    delete degraded.fresh;
+    delete degraded.freshBySource;
+    delete degraded.freshWindowDays;
+    const m = backlogStripModel(degraded, 0);
+    expect(m.freshWindowDays).toBe(0);
+    expect(backlogSentenceHtml(m)).not.toContain("new (last");
+  });
+
+  test("tail holds the all-time accounting: offered summary + per-source breakdown", () => {
+    const html = backlogTailHtml(backlogStripModel(base({ remaining: 0, offeredStillQueued: 255 }), 0));
+    expect(html).toContain("<details");
+    expect(html).toContain("255</span> offered in past runs, never drafted");
+    expect(html).toContain("329</span> never ingested all-time");
+    expect(html).toContain("YouTube"); // per-source breakdown behind the toggle
+    expect(html).toContain("310");
+  });
+
+  test("tail without an offered set still shows the all-time summary; empty backlog renders nothing", () => {
+    const noOffered = backlogTailHtml(backlogStripModel(base({ offeredStillQueued: 0 }), 0));
+    expect(noOffered).not.toContain("offered in past runs");
+    expect(noOffered).toContain("never ingested all-time");
+    const empty = backlogTailHtml(
+      backlogStripModel(base({ queued: 0, remaining: 0, offeredStillQueued: 0, byCollection: [] }), 0),
+    );
+    expect(empty).toBe("");
+  });
+
+  test("malformed freshBySource entries are dropped, zero-count entries hidden", () => {
+    const m = backlogStripModel(
+      base({
+        fresh: 3,
+        // deliberately malformed shapes a degraded/older server might emit
+        freshBySource: [
+          { label: "YouTube", count: 3 },
+          { label: "X", count: 0 },
+          { label: 7, count: "x" },
+          null,
+        ] as never,
+      }),
+      0,
+    );
+    expect(m.freshPerSource).toEqual([{ label: "YouTube", count: 3 }]);
+  });
+});
+
 describe("backlogStripModel — control gating", () => {
   test("zero queued → no run, no reset, not all-offered", () => {
     const m = backlogStripModel(
@@ -110,15 +191,17 @@ describe("backlogStripModel — control gating", () => {
     expect(html).not.toContain("data-backlog-action");
   });
 
-  test("all-offered (remaining 0, queued>0) → 'all offered' + reset with re-run wording", () => {
+  test("nothing drainable (remaining 0, queued>0) → 'nothing drainable' + reset with re-run wording", () => {
     const m = backlogStripModel(base({ remaining: 0, offeredStillQueued: 329 }), 0);
     expect(m.allOffered).toBe(true);
     expect(m.showRun).toBe(false);
     expect(m.showReset).toBe(true); // 329 offered-still-queued
     const html = backlogControlHtml(m);
-    expect(html).toContain("all offered");
+    // Not "all offered" — fresh in-window docs are un-offered too, so that wording
+    // lies whenever new arrivals exist; the note states what the missing button means.
+    expect(html).toContain("nothing drainable");
     expect(html).toContain("Reset to re-run");
-    expect(html).not.toContain("Reset offered ("); // keep the all-offered wording
+    expect(html).not.toContain("Reset offered ("); // keep the re-run wording
   });
 
   test("offered-still-queued 0 (everything consumed) → no reset button", () => {
