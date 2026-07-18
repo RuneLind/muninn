@@ -370,4 +370,34 @@ describe("formatWebHtml — component blocks", () => {
   test("Meter with non-numeric value degrades to plain label text", () => {
     expect(formatWebHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
   });
+
+  test("Meter nests one deep inside a Callout (depth 1 renders)", () => {
+    const out = formatWebHtml("<Callout tone=\"info\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>");
+    expect(out).toContain('<div class="callout callout-info">');
+    expect(out).toContain('<div class="meter">');
+    expect(out).toContain('<span class="meter-value">4/5</span>');
+  });
+
+  test("Meter at depth 2 degrades to escaped text (component depth cap)", () => {
+    const out = formatWebHtml(
+      "<Callout tone=\"info\">\n<Callout tone=\"warn\">\n<Meter value=\"4\" max=\"5\">Focus</Meter>\n</Callout>\n</Callout>",
+    );
+    // Two nested components put the Meter at depth 2, past MAX_COMPONENT_DEPTH.
+    expect(out).toContain("&lt;Meter");
+    expect(out).not.toContain('<span class="meter-fill"');
+  });
+
+  test("Meter label with angle brackets is escaped in the rendered output", () => {
+    const out = formatWebHtml("<Meter value=\"4\" max=\"5\">A <b> tag</Meter>");
+    expect(out).toContain('<span class="meter-label">A &lt;b&gt; tag</span>');
+    expect(out).not.toContain("<b> tag");
+  });
+
+  test("self-closing Meter is not allowed → degrades to escaped text", () => {
+    // Meter is not in SELF_CLOSING_ALLOWED, so `<Meter/>` falls through to text
+    // and the renderer escapes the tag rather than emitting a meter div.
+    const out = formatWebHtml("<Meter value=\"4\" max=\"5\" />");
+    expect(out).toContain("&lt;Meter");
+    expect(out).not.toContain('<div class="meter"');
+  });
 });

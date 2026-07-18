@@ -1,6 +1,7 @@
 /**
  * CSS for the component block vocabulary (Callout, Verdict, Pill, Figure,
- * FileRef, ComparisonTable), scoped to a caller-supplied selector.
+ * FileRef, ComparisonTable, Meter, Diff, FileTree, Checklist, AnnotatedCode,
+ * CodeTabs + its Tab child), scoped to a caller-supplied selector.
  *
  * The class names and markup mirror mimir's MDX explainer set
  * (`scripts/mdx-explainer/components.tsx` + `template.ts`) so the vocabulary

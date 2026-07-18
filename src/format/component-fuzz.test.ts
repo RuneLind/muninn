@@ -145,6 +145,21 @@ describe("component fuzz — never throws, never injects", () => {
     expect(Date.now() - start).toBeLessThan(5_000);
   });
 
+  test("unclosed Meter renders as escaped text on every platform (not a meter div)", () => {
+    // Mirrors the Callout unclosed-degrade pin at the RENDERED-output level: an
+    // open Meter with no close must escape rather than emit meter markup.
+    const md = "<Meter value=\"4\" max=\"5\">\nleft open forever\nmore lines";
+    const out = format(md);
+    expect(out.web).toContain("&lt;Meter");
+    expect(out.web).not.toContain('<div class="meter"');
+    expect(out.telegram).toContain("&lt;Meter");
+    // Slack's catch-all strips the angle-bracket tag; the body survives as text,
+    // and crucially no `label: value/max` meter render is emitted.
+    expect(out.slack).toContain("left open forever");
+    expect(out.slack).not.toContain(": 4/5");
+    expect(() => format(md)).not.toThrow();
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;
