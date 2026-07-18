@@ -317,10 +317,11 @@ export function mergeBacklogLiveFields(
  *
  * Pure + injectable so the route's floor branch is unit-testable. `q.id` is the
  * bare doc id (the floor's filename-prefix fallback needs it, not the key);
- * the fresh bucket's collection is the `<collection>/` prefix of `q.key`.
+ * `q.collection` is carried through from the listing so the fresh bucket never
+ * has to re-parse it out of the synthetic key.
  */
 export function computeBacklogFloorCounts(
-  queuedKeys: { key: string; id: string; date?: string }[],
+  queuedKeys: { key: string; id: string; collection: string; date?: string }[],
   offeredSet: Set<string>,
   minAgeDays: number,
   now: number,
@@ -336,8 +337,7 @@ export function computeBacklogFloorCounts(
     if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) {
       remaining++;
     } else {
-      const collection = q.key.slice(0, q.key.indexOf("/"));
-      freshByCollection[collection] = (freshByCollection[collection] ?? 0) + 1;
+      freshByCollection[q.collection] = (freshByCollection[q.collection] ?? 0) + 1;
     }
   }
   return { remaining, offeredStillQueued, freshByCollection };
@@ -380,7 +380,7 @@ export interface IngestBacklogResponse {
    * undated doc reads its date from the id prefix. STRIPPED before the wire by
    * {@link mergeBacklogLiveFields}.
    */
-  queuedKeys?: { key: string; id: string; date?: string }[];
+  queuedKeys?: { key: string; id: string; collection: string; date?: string }[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -449,6 +449,7 @@ export async function computeIngestBacklogResponse(
     c.queuedDocs.map((d) => ({
       key: `${d.collection}/${d.id}`,
       id: d.id,
+      collection: d.collection,
       ...(d.date ? { date: d.date } : {}),
     })),
   );

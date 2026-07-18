@@ -110,8 +110,8 @@ export interface BacklogStripModel {
   controlHidden: boolean;
   showRun: boolean;
   showReset: boolean;
-  /** Queued but nothing drainable (all past-floor docs already offered). */
-  allOffered: boolean;
+  /** Queued but nothing drainable now (every past-floor doc already offered). */
+  nothingDrainable: boolean;
   batchSize: number;
   maxProposals: number;
   /** How many docs a click drains now: min(batchSize, eligibleNow). */
@@ -170,7 +170,7 @@ export function backlogStripModel(
     // gating on `offered > 0` could render "Reset offered (0)" once every offered
     // key is consumed, where a reset would be a no-op anyway.
     showReset: !controlHidden && !running && offeredStillQueued > 0,
-    allOffered: !controlHidden && !running && remaining <= 0 && queued > 0,
+    nothingDrainable: !controlHidden && !running && remaining <= 0 && queued > 0,
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
@@ -179,6 +179,13 @@ export function backlogStripModel(
 
 function strong(n: number): string {
   return `<span class="bk-strong">${n}</span>`;
+}
+
+/** "Label 4 · Label 2" — the per-source breakdown markup (sentence + tail share it). */
+function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
+  return items
+    .map((s) => `${esc(s.label)} <span class="bk-n">${s.n}</span>`)
+    .join('<span class="bk-sep"> · </span>');
 }
 
 /**
@@ -195,10 +202,7 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
     let freshSeg = `${strong(model.freshTotal)} new (last ${model.freshWindowDays}d)`;
     if (model.freshPerSource.length) {
       freshSeg +=
-        ": " +
-        model.freshPerSource
-          .map((s) => `${esc(s.label)} <span class="bk-n">${s.count}</span>`)
-          .join('<span class="bk-sep"> · </span>');
+        ": " + perSourceBreakdownHtml(model.freshPerSource.map((s) => ({ label: s.label, n: s.count })));
       freshSeg += ` <span class="bk-note">— weekly watcher's turf</span>`;
     }
     segs.push(freshSeg);
@@ -224,9 +228,7 @@ export function backlogTailHtml(model: BacklogStripModel): string {
     summaryParts.push(`${strong(model.offeredStillQueued)} offered in past runs, never drafted`);
   }
   summaryParts.push(`${strong(model.totalNeverIngested)} never ingested all-time`);
-  const breakdown = model.perSource
-    .map((s) => `${esc(s.label)} <span class="bk-n">${s.queued}</span>`)
-    .join('<span class="bk-sep"> · </span>');
+  const breakdown = perSourceBreakdownHtml(model.perSource.map((s) => ({ label: s.label, n: s.queued })));
   return (
     '<details class="bk-tail">' +
     `<summary>${summaryParts.join('<span class="bk-sep"> · </span>')}</summary>` +
@@ -290,13 +292,13 @@ export function backlogControlHtml(model: BacklogStripModel): string {
   let inner = "";
   if (model.showRun) {
     inner += `<button class="gard-btn bk-run" data-backlog-action="confirm">Drain a batch (${model.drainNow})</button>`;
-  } else if (model.allOffered) {
+  } else if (model.nothingDrainable) {
     // Not "all offered": fresh in-window docs are un-offered too, so that wording
     // lies whenever new arrivals exist. This states what the button's absence means.
     inner += `<span class="bk-run-note">nothing drainable</span>`;
   }
   if (model.showReset) {
-    const label = model.allOffered ? "Reset to re-run" : `Reset offered (${model.offeredStillQueued})`;
+    const label = model.nothingDrainable ? "Reset to re-run" : `Reset offered (${model.offeredStillQueued})`;
     inner += `<button class="gard-btn bk-reset" data-backlog-action="reset">${label}</button>`;
   }
   if (!inner) return ""; // nothing queued at all
@@ -312,7 +314,7 @@ export function backlogConfirmHtml(model: BacklogStripModel): string {
   return (
     '<div class="bk-confirm">' +
     `<div class="bk-confirm-copy">Drain a batch of <strong>${model.drainNow}</strong> ` +
-    `(of ${model.eligibleNow} eligible) through the gardener? ~10–20 min in the background — ` +
+    `(of ${model.eligibleNow} drainable) through the gardener? ~10–20 min in the background — ` +
     `you can leave this page. 1 Haiku clustering call + up to ${model.maxProposals} drafts on this ` +
     `bot's model. Produces <strong>draft proposals</strong> below — nothing is written to the wiki ` +
     "until you approve.</div>" +

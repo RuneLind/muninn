@@ -167,7 +167,7 @@ describe("backlogStripModel — control gating", () => {
     );
     expect(m.showRun).toBe(false);
     expect(m.showReset).toBe(false);
-    expect(m.allOffered).toBe(false);
+    expect(m.nothingDrainable).toBe(false);
     expect(backlogControlHtml(m)).toBe("");
   });
 
@@ -175,7 +175,7 @@ describe("backlogStripModel — control gating", () => {
     const m = backlogStripModel(base(), 0);
     expect(m.showRun).toBe(true);
     expect(m.showReset).toBe(true);
-    expect(m.allOffered).toBe(false);
+    expect(m.nothingDrainable).toBe(false);
     const html = backlogControlHtml(m);
     expect(html).toContain('data-backlog-action="confirm"'); // run button opens confirm
     expect(html).toContain("Reset offered (69)");
@@ -193,7 +193,7 @@ describe("backlogStripModel — control gating", () => {
 
   test("nothing drainable (remaining 0, queued>0) → 'nothing drainable' + reset with re-run wording", () => {
     const m = backlogStripModel(base({ remaining: 0, offeredStillQueued: 329 }), 0);
-    expect(m.allOffered).toBe(true);
+    expect(m.nothingDrainable).toBe(true);
     expect(m.showRun).toBe(false);
     expect(m.showReset).toBe(true); // 329 offered-still-queued
     const html = backlogControlHtml(m);
