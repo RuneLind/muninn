@@ -32,7 +32,7 @@ export async function renderDashboardPage(): Promise<string> {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   ${buildHashMetaTag(buildHash)}
   <title>Muninn Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js" integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ" crossorigin="anonymous"></script>
   <style>
     ${SHARED_STYLES}
     ${connectionStyles()}

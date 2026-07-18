@@ -1471,6 +1471,10 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
   askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
+  // Rehydrated turns (history re-show) inject stored answer HTML that may carry
+  // mermaid fences; the streaming paths hook separately. No-op when absent.
+  const askBody = document.getElementById("askAnswerBody");
+  if (askBody) enhanceMermaid(askBody);
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Showing an Ask answer — sources are listed under it.</div>';
@@ -1554,7 +1558,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) b.innerHTML = renderStreamingBody(turn.answer);
+      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); }
       refreshAskSources(turn);
       let statusText: string;
       if (d.lowConfidence) statusText = "No strong match — closest sources below";
@@ -1580,7 +1584,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) b.innerHTML = turn.html;
+      if (b && turn.html) { b.innerHTML = turn.html; enhanceMermaid(b); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
