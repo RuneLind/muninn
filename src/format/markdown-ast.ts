@@ -40,6 +40,7 @@ export const COMPONENT_NAMES = [
   "FileRef",
   "ComparisonTable",
   "Meter",
+  "Diff",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -61,6 +62,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   FileRef: ["path"],
   ComparisonTable: [],
   Meter: ["value", "max", "tone"],
+  Diff: [],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -114,6 +116,27 @@ export function parseMeterAttrs(
 
   const clamped = Math.min(Math.max(value, 0), max);
   return { value: clamped, max, tone: normalizeMeterTone(attrs.tone) };
+}
+
+/**
+ * First fenced code block among a component's raw children, or `null`. Shared by
+ * the blocks whose body is "one fence" (Diff, FileTree, AnnotatedCode) — they
+ * introspect the fence's raw source rather than its already-escaped render.
+ */
+export function firstCodeBlock(children: Block[]): { lang: string; code: string } | null {
+  for (const c of children) {
+    if (c.type === "code_block") return { lang: c.lang, code: c.code };
+  }
+  return null;
+}
+
+/** Classify one line of a unified diff for per-line styling. Linear, no regex:
+ *  a leading `+`/`-` (but not the `+++`/`---` file headers) marks add/del; every
+ *  other line — context, `@@` hunks, headers — is context. */
+export function diffLineClass(line: string): "add" | "del" | "ctx" {
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "del";
+  return "ctx";
 }
 
 const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;

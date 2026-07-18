@@ -4,6 +4,8 @@ import {
   normalizePillTone,
   normalizeVerdictValue,
   parseMeterAttrs,
+  firstCodeBlock,
+  diffLineClass,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
@@ -41,7 +43,7 @@ const webRenderer: BlockRenderer = {
     ).join("") + "</tbody>";
     return `<table>${thead}${tbody}</table>`;
   },
-  component(name, attrs, children) {
+  component(name, attrs, children, rawChildren) {
     switch (name) {
       case "Callout": {
         const tone = normalizeCalloutTone(attrs.tone);
@@ -82,6 +84,18 @@ const webRenderer: BlockRenderer = {
           `<span class="meter-value">${meter.value}/${meter.max}</span>` +
           `</div>`
         );
+      }
+      case "Diff": {
+        const fence = firstCodeBlock(rawChildren);
+        if (!fence) return children; // no fenced diff → fall back to the rendered body
+        const rows = fence.code
+          .split("\n")
+          .map((line) => {
+            const content = escapeHtml(line);
+            return `<div class="diff-line diff-${diffLineClass(line)}">${content || "&nbsp;"}</div>`;
+          })
+          .join("");
+        return `<div class="diff">${rows}</div>`;
       }
     }
   },

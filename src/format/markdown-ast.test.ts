@@ -262,6 +262,17 @@ describe("parseBlocks — component blocks", () => {
       { type: "text", lines: ["<Meter value=\"4\" max=\"5\" />"] },
     ]);
   });
+
+  test("Diff wraps a fenced diff block as its child (fence parsed inside)", () => {
+    expect(parseBlocks("<Diff>\n```diff\n-old\n+new\n```\n</Diff>")).toEqual([
+      {
+        type: "component",
+        name: "Diff",
+        attrs: {},
+        children: [{ type: "code_block", lang: "diff", code: "-old\n+new" }],
+      },
+    ]);
+  });
 });
 
 describe("parseMeterAttrs", () => {

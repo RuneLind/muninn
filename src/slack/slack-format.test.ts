@@ -266,5 +266,16 @@ Found it ~~wrong~~ correct.`;
     test("Meter with non-numeric value degrades to plain label", () => {
       expect(formatSlackMrkdwn("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
     });
+
+    test("Diff → fence as-is (Slack renders the code block)", () => {
+      const out = formatSlackMrkdwn("<Diff>\n```diff\n context\n-old\n+new\n```\n</Diff>");
+      expect(out).toBe("```\n context\n-old\n+new\n```");
+    });
+
+    test("unclosed Diff degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<Diff>\nno close here");
+      expect(out).toContain("no close here");
+      expect(out).not.toContain("```");
+    });
   });
 });

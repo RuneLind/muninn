@@ -400,4 +400,29 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).toContain("&lt;Meter");
     expect(out).not.toContain('<div class="meter"');
   });
+
+  test("Diff emits per-line +/− classed rows from the raw fence", () => {
+    const out = formatWebHtml("<Diff>\n```diff\n context\n-old line\n+new line\n```\n</Diff>");
+    expect(out).toBe(
+      '<div class="diff">' +
+        '<div class="diff-line diff-ctx"> context</div>' +
+        '<div class="diff-line diff-del">-old line</div>' +
+        '<div class="diff-line diff-add">+new line</div>' +
+        "</div>",
+    );
+  });
+
+  test("Diff escapes fence content (no raw HTML injection)", () => {
+    const out = formatWebHtml("<Diff>\n```diff\n+<script>alert(1)</script>\n```\n</Diff>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain('class="diff-line diff-add"');
+  });
+
+  test("Diff without a fenced body falls back to the rendered children", () => {
+    // No ```diff fence → nothing to introspect; the body renders as-is.
+    const out = formatWebHtml("<Diff>\njust prose\n</Diff>");
+    expect(out).not.toContain('<div class="diff">');
+    expect(out).toContain("just prose");
+  });
 });

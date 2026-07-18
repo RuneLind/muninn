@@ -46,6 +46,8 @@ const slackRenderer: BlockRenderer = {
         if (!meter) return children; // missing/non-numeric value → label as plain text
         return `${children}: ${meter.value}/${meter.max}`;
       }
+      case "Diff":
+        return children; // fence-as-is: Slack already renders the ``` code block
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

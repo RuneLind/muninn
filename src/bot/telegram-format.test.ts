@@ -163,3 +163,14 @@ test("component: Meter clamps out-of-range value", () => {
 test("component: Meter with non-numeric value degrades to plain label", () => {
   expect(formatTelegramHtml("<Meter value=\"abc\">Autonomy</Meter>")).toBe("Autonomy");
 });
+
+test("component: Diff falls back to the fence as-is (Telegram renders code)", () => {
+  const out = formatTelegramHtml("<Diff>\n```diff\n context\n-old\n+new\n```\n</Diff>");
+  expect(out).toBe('<pre><code class="language-diff"> context\n-old\n+new</code></pre>');
+});
+
+test("component: unclosed Diff degrades to escaped text", () => {
+  const out = formatTelegramHtml("<Diff>\nno close here");
+  expect(out).toContain("&lt;Diff&gt;");
+  expect(out).not.toContain('class="language-diff"');
+});

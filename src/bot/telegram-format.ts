@@ -52,6 +52,8 @@ const telegramRenderer: BlockRenderer = {
         if (!meter) return children; // missing/non-numeric value → label as plain text
         return `${children}: ${meter.value}/${meter.max}`;
       }
+      case "Diff":
+        return children; // fence-as-is: Telegram already renders the ```diff block
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

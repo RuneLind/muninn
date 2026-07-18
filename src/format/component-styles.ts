@@ -103,5 +103,24 @@ export function componentBlockCss(scope: string): string {
     ${scope} .meter-good .meter-fill { background: var(--status-success); }
     ${scope} .meter-warn .meter-fill { background: var(--status-warning); }
     ${scope} .meter-bad .meter-fill { background: var(--status-error); }
+    ${scope} .diff {
+      margin: 1.2rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.85em;
+      background: var(--bg-surface);
+    }
+    ${scope} .diff-line {
+      display: block;
+      padding: 0.05rem 0.7rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border-left: 3px solid transparent;
+    }
+    ${scope} .diff-add { background: color-mix(in srgb, var(--status-success) 16%, transparent); border-left-color: var(--status-success); }
+    ${scope} .diff-del { background: color-mix(in srgb, var(--status-error) 16%, transparent); border-left-color: var(--status-error); }
+    ${scope} .diff-ctx { color: var(--text-muted); }
   `;
 }
