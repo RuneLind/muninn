@@ -384,6 +384,14 @@ describe("scanInlineComponents", () => {
     ]);
   });
 
+  test("malformed unquoted attr is not a component → single literal text run", () => {
+    // Only double-quoted attrs are valid; `value=yes` (unquoted) fails the tag
+    // shape, so the whole string stays literal for the escape path.
+    expect(scanInlineComponents("<Verdict value=yes>x</Verdict>")).toEqual([
+      { kind: "text", text: "<Verdict value=yes>x</Verdict>" },
+    ]);
+  });
+
   test("10k inline components scan linearly in a single pass", () => {
     const md = Array.from({ length: 10_000 }, () => "<Pill>x</Pill>").join(" ");
     const start = Date.now();

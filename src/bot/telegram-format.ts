@@ -101,24 +101,27 @@ const telegramRenderer: BlockRenderer = {
 };
 
 function renderInline(text: string): string {
-  // Inline components (Verdict, Pill) first: substitute each occurrence with its
-  // plain-text fallback (✅/❌ + label, or [label]) directly into the string. No
-  // parking needed — the fallback is plain text, so the label rides through the
-  // ampersand + tag-escape passes below exactly like surrounding prose.
-  const substituted = scanInlineComponents(text)
+  const ph = new Placeholders();
+
+  // Inline code FIRST — park it before the component scan so a complete
+  // component tag inside backticks stays literal code instead of being
+  // interpreted (the parked sentinel carries no `<`, shielding it from the scan).
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
+    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
+  );
+
+  // Inline components (Verdict, Pill) on the code-shielded text: substitute each
+  // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
+  // into the string. No parking needed — the fallback is plain text, so the label
+  // rides through the ampersand + tag-escape passes below exactly like prose.
+  result = scanInlineComponents(result)
     .map((seg) =>
       seg.kind === "text" ? seg.text : telegramRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )
     .join("");
 
   // Selective ampersand escape — preserve existing entities verbatim.
-  let result = substituted.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
-
-  const ph = new Placeholders();
-
-  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
-  );
+  result = result.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
 
   // Link text is NOT inline-processed — prevents nested-tag tangles like
   // <a><i>...</a></i> that Telegram rejects.

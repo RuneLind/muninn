@@ -202,22 +202,27 @@ const webRenderer: BlockRenderer = {
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
-  // Inline components (Verdict, Pill) first. Their generated HTML must be parked
-  // BEFORE the escapeHtml pass below — otherwise the escape would turn the chip
-  // markup into visible text. Same trick inline code uses at :add("INLINE"). The
-  // inner text is escaped inside inlineComponent, so the parked value is safe.
-  let result = scanInlineComponents(text)
+  // Inline code FIRST — protect its content from further markdown processing.
+  // Parking code before the component scan is what keeps a component tag inside
+  // backticks (`` `<Verdict …>x</Verdict>` ``) literal: the parked sentinel
+  // contains no `<`, so the scan below never sees the tag and it stays code.
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
+    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
+  );
+
+  // Inline components (Verdict, Pill) on the code-shielded text. Their generated
+  // HTML must be parked BEFORE the escapeHtml pass below — otherwise the escape
+  // would turn the chip markup into visible text. The inner text is escaped
+  // inside inlineComponent, so the parked value is safe. A component whose label
+  // contained backticks now embeds an INLINE sentinel; the fixed-point restore
+  // in Placeholders resolves that nesting.
+  result = scanInlineComponents(result)
     .map((seg) =>
       seg.kind === "text"
         ? seg.text
         : ph.add("INLINECMP", webRenderer.inlineComponent(seg.name, seg.attrs, seg.text)),
     )
     .join("");
-
-  // Inline code first — protect content from further markdown processing.
-  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
-  );
 
   // Defensive: Claude occasionally outputs Slack-style angle-bracket links;
   // normalize them to markdown form before HTML-escaping (which would otherwise

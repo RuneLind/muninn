@@ -120,19 +120,24 @@ function renderTable(headers: string[], rows: string[][]): string {
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
-  // Inline components (Verdict, Pill) first: substitute each occurrence with its
-  // plain-text fallback (✅/❌ + label, or [label]) directly into the string. No
-  // parking needed — the fallback is plain mrkdwn, so the label rides through the
-  // passes below (the trailing tag-strip neutralizes any tag in the label text).
-  let result = scanInlineComponents(text)
+  // Inline code FIRST — park it before the component scan so a complete
+  // component tag inside backticks stays literal code (backticked) instead of
+  // being interpreted. The parked sentinel carries no `<`, shielding the code
+  // content from the scan below and from the trailing tag-strip.
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
+    ph.add("INLINE", `\`${code}\``),
+  );
+
+  // Inline components (Verdict, Pill) on the code-shielded text: substitute each
+  // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
+  // into the string. No parking needed — the fallback is plain mrkdwn, so the
+  // label rides through the passes below (the trailing tag-strip neutralizes any
+  // tag in the label text).
+  result = scanInlineComponents(result)
     .map((seg) =>
       seg.kind === "text" ? seg.text : slackRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )
     .join("");
-
-  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
-    ph.add("INLINE", `\`${code}\``),
-  );
 
   result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
   result = result.replace(/~~(.+?)~~/g, "~$1~");

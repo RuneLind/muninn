@@ -77,3 +77,67 @@ describe("inline Pill mid-sentence — chip on web, [text] fallback elsewhere", 
   test("slack → [beta] inline", () =>
     expect(formatSlackMrkdwn(md)).toBe("Ship it [beta] today"));
 });
+
+// Regression (PR #307 review): a COMPLETE component tag inside an inline-code
+// span must stay literal code on every platform — never get interpreted as a
+// chip, and never leak a raw NUL sentinel into the served output. This is the
+// two-reviewer BLOCKER + the all-platform code-literal finding.
+describe("complete component tag inside backticks stays literal code", () => {
+  const md = 'Use `<Verdict value="yes">x</Verdict>` in code.';
+  test("web → <code> with the escaped tag, no NUL, no INLINECMP", () => {
+    const out = formatWebHtml(md);
+    expect(out).toBe(
+      "Use <code>&lt;Verdict value=&quot;yes&quot;&gt;x&lt;/Verdict&gt;</code> in code.",
+    );
+    expect(out).not.toContain("\x00");
+    expect(out).not.toContain("INLINECMP");
+  });
+  test("telegram → <code> with the escaped literal tag, no NUL", () => {
+    const out = formatTelegramHtml(md);
+    expect(out).toBe(
+      "Use <code>&lt;Verdict value=&quot;yes&quot;&gt;x&lt;/Verdict&gt;</code> in code.",
+    );
+    expect(out).not.toContain("\x00");
+    expect(out).not.toContain("✅");
+  });
+  test("slack → backticked literal tag, no NUL", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out).toBe('Use `<Verdict value="yes">x</Verdict>` in code.');
+    expect(out).not.toContain("\x00");
+    expect(out).not.toContain("✅");
+  });
+});
+
+// Regression (PR #307 review): the REVERSE nesting — a mid-text component whose
+// label itself contains an inline-code span. The fixed-point restore must resolve
+// the component→code sentinel nesting; the pinned rendering is the label backticks
+// as code, and crucially never a raw NUL byte.
+describe("component label containing inline code renders without a sentinel leak", () => {
+  const md = "mid <Pill>label with `code` inside</Pill> end";
+  test("web → pill span with a nested <code>, no NUL", () => {
+    const out = formatWebHtml(md);
+    expect(out).toBe('mid <span class="pill">label with <code>code</code> inside</span> end');
+    expect(out).not.toContain("\x00");
+  });
+  test("telegram → [label…] fallback, no NUL", () => {
+    const out = formatTelegramHtml(md);
+    expect(out).not.toContain("\x00");
+    expect(out).toContain("label with");
+  });
+  test("slack → [label…] fallback, no NUL", () => {
+    const out = formatSlackMrkdwn(md);
+    expect(out).not.toContain("\x00");
+    expect(out).toContain("label with");
+  });
+});
+
+// Coverage review fold-in: an unquoted (malformed) attr is not a valid component
+// tag — it must render as an escaped literal, not a chip.
+describe("malformed unquoted attr renders as escaped literal, not a chip", () => {
+  const md = "<Verdict value=yes>x</Verdict>";
+  test("web → escaped literal, no verdict span", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain("&lt;Verdict value=yes&gt;");
+    expect(out).not.toContain('<span class="verdict');
+  });
+});

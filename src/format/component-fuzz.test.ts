@@ -10,11 +10,20 @@ import { formatSlackMrkdwn } from "../slack/slack-format.ts";
  * from attacker-controlled attrs or bodies.
  */
 
-const format = (md: string) => ({
-  web: formatWebHtml(md),
-  telegram: formatTelegramHtml(md),
-  slack: formatSlackMrkdwn(md),
-});
+const format = (md: string) => {
+  const out = {
+    web: formatWebHtml(md),
+    telegram: formatTelegramHtml(md),
+    slack: formatSlackMrkdwn(md),
+  };
+  // Battery-wide invariant (PR #307 review): a placeholder NUL sentinel must
+  // never leak into served output on any platform, for any fuzz case. Runs on
+  // every `format()` call in this file.
+  expect(out.web).not.toContain("\x00");
+  expect(out.telegram).not.toContain("\x00");
+  expect(out.slack).not.toContain("\x00");
+  return out;
+};
 
 describe("component fuzz — never throws, never injects", () => {
   test("unclosed tags degrade to text on every platform", () => {
