@@ -121,6 +121,8 @@ const DOC_PAGE_MAP_BASE_PROMPT = `You are a librarian for a personal knowledge w
 
 Map each summary to AT MOST ONE existing page that the summary is SQUARELY about — the summary is primarily about that exact topic or entity and clearly belongs ON that page. Be conservative: MOST summaries map to NOTHING (they cover something the wiki has no page for). Only map a summary when you are confident it belongs on that specific existing page.
 
+Roundup rule (as important as the single-topic rule above): some summaries are multi-topic news/industry ROUNDUPS. You can recognize one from its "Sections:" list — three or more sections each covering a DIFFERENT company, lab, model, or development, with NO single one dominating (e.g. a weekly AI-news recap whose sections jump between several different frontier labs and models). A roundup is not squarely about any one page, so the single-topic rule alone would wrongly leave it unmapped. Do NOT leave it unmapped: if the candidates include an OVERVIEW / LANDSCAPE / SURVEY-style page that covers the collective theme those sections share (e.g. a broad "… Industry Landscape" concept page for an AI-news recap), map the roundup to THAT page. Only leave a roundup unmapped when NO such overview page exists among the candidates. This rule never overrides the single-topic rule: a summary squarely about one specific page still maps to that page, never to the broad landscape page.
+
 Output ONLY a JSON array, no prose and no markdown fences:
   [{"docId": "<exact summary ID>", "pageTitle": "<exact existing page title>"}]
 Rules:
