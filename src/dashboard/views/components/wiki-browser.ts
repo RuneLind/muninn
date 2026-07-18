@@ -15,6 +15,7 @@ import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
+import { enhanceMermaid } from "./wiki-mermaid.ts";
 import {
   serializeAskSession,
   deserializeAskSession,
@@ -1149,6 +1150,12 @@ function loadPage(name: string, push: boolean): void {
       document.getElementById("articleWrap")!.innerHTML =
         accentBlock + articleHeadHtml(data.meta) + `<div class="${articleClass}">${data.html}</div>`;
       document.getElementById("articleWrap")!.scrollTop = 0;
+      // Client-side enhancement: upgrade any ```mermaid fences to inline SVG.
+      // No-op (zero mermaid bytes) for pages without a mermaid fence. Covers
+      // every navigation path — direct clicks, popstate, and boot deep-link all
+      // funnel through loadPage. (The Ask/Explain answer replaces #articleWrap
+      // with its own markup, so rendered diagrams disappear with it — not hooked.)
+      enhanceMermaid(document.getElementById("articleWrap")!);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
