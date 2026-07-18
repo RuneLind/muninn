@@ -12,6 +12,7 @@ import {
   backlogStripModel,
   backlogStripHtml,
   backlogOutcomeHtml,
+  backlogTailHtml,
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
@@ -340,7 +341,19 @@ function renderBacklog(data: IngestBacklogResponse): void {
   }
   lastBacklogData = data;
   const model = backlogStripModel(data, pendingDraftCount());
-  el.innerHTML = backlogStripHtml(model, data.errors) + backlogOutcomeHtml(data.lastBacklogRun);
+  // Tail (collapsed all-time accounting) renders last — below the sentence,
+  // control, and last-run note, so the recency-first rows stay the headline.
+  // Re-renders (drain polls every 3s) must not slam an open tail shut: capture
+  // its open state before replacing the HTML and re-apply after.
+  const tailWasOpen = el.querySelector<HTMLDetailsElement>(".bk-tail")?.open === true;
+  el.innerHTML =
+    backlogStripHtml(model, data.errors) +
+    backlogOutcomeHtml(data.lastBacklogRun) +
+    backlogTailHtml(model);
+  if (tailWasOpen) {
+    const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
+    if (tail) tail.open = true;
+  }
   const confirm = el.querySelector(".bk-confirm");
   if (confirm) {
     if (backlogConfirmOpen) confirm.classList.add("open");

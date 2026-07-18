@@ -255,6 +255,17 @@ export interface BacklogLiveFields {
    * Gates the strip's Reset button + picks its label.
    */
   offeredStillQueued: number;
+  /**
+   * Queued docs still inside the weekly gardener's window (not offered, fails the
+   * drain's age floor) — the "new arrivals" the strip leads with. These are the
+   * weekly watcher's turf: the drain refuses them, so without this count they are
+   * invisible (in `queued` but in neither `remaining` nor `offeredStillQueued`).
+   */
+  fresh: number;
+  /** Per-source breakdown of `fresh` (non-zero sources only, listing order). */
+  freshBySource: { label: string; count: number }[];
+  /** The resolved age-floor window in days — lets the client label "new (last Nd)". */
+  freshWindowDays: number;
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
   /** Live progress of an in-flight drain (null when idle — including weekly runs). */
@@ -296,27 +307,40 @@ export function mergeBacklogLiveFields(
  *    set the "Drain a batch" button acts on);
  *  - `offeredStillQueued` = queued AND in the offered set (the exact "offered in
  *    past runs" count — replaces the old client-side `queued − remaining`, which
- *    the floor inflated by counting merely-too-fresh docs as offered).
+ *    the floor inflated by counting merely-too-fresh docs as offered);
+ *  - `freshByCollection` = queued, NOT offered, and INSIDE the window (fails the
+ *    floor) — the per-collection "new arrivals" bucket the strip leads with.
+ *    Offered docs never count as fresh (pre-#288 burns belong to the tail).
+ *
+ * The three buckets partition the queued set exactly:
+ * `remaining + offeredStillQueued + Σ freshByCollection === queuedKeys.length`.
  *
  * Pure + injectable so the route's floor branch is unit-testable. `q.id` is the
- * bare doc id (the floor's filename-prefix fallback needs it, not the key).
+ * bare doc id (the floor's filename-prefix fallback needs it, not the key);
+ * `q.collection` is carried through from the listing so the fresh bucket never
+ * has to re-parse it out of the synthetic key.
  */
 export function computeBacklogFloorCounts(
-  queuedKeys: { key: string; id: string; date?: string }[],
+  queuedKeys: { key: string; id: string; collection: string; date?: string }[],
   offeredSet: Set<string>,
   minAgeDays: number,
   now: number,
-): { remaining: number; offeredStillQueued: number } {
+): { remaining: number; offeredStillQueued: number; freshByCollection: Record<string, number> } {
   let remaining = 0;
   let offeredStillQueued = 0;
+  const freshByCollection: Record<string, number> = {};
   for (const q of queuedKeys) {
     if (offeredSet.has(q.key)) {
       offeredStillQueued++;
       continue;
     }
-    if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) remaining++;
+    if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) {
+      remaining++;
+    } else {
+      freshByCollection[q.collection] = (freshByCollection[q.collection] ?? 0) + 1;
+    }
   }
-  return { remaining, offeredStillQueued };
+  return { remaining, offeredStillQueued, freshByCollection };
 }
 
 /**
@@ -356,7 +380,7 @@ export interface IngestBacklogResponse {
    * undated doc reads its date from the id prefix. STRIPPED before the wire by
    * {@link mergeBacklogLiveFields}.
    */
-  queuedKeys?: { key: string; id: string; date?: string }[];
+  queuedKeys?: { key: string; id: string; collection: string; date?: string }[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -425,6 +449,7 @@ export async function computeIngestBacklogResponse(
     c.queuedDocs.map((d) => ({
       key: `${d.collection}/${d.id}`,
       id: d.id,
+      collection: d.collection,
       ...(d.date ? { date: d.date } : {}),
     })),
   );
@@ -753,12 +778,18 @@ export function registerWikiGardenerRoutes(
       // kept). `offeredStillQueued` (queued ∩ offered) is emitted explicitly so the
       // strip no longer derives it as `queued − remaining` (which the floor inflates).
       const minAgeDays = resolveGardenerConfig(bot.gardener).lookbackDays;
-      const { remaining, offeredStillQueued } = computeBacklogFloorCounts(
+      const { remaining, offeredStillQueued, freshByCollection } = computeBacklogFloorCounts(
         queuedKeys,
         offeredSet,
         minAgeDays,
         Date.now(),
       );
+      // Per-source fresh breakdown in listing order, labels from the cached
+      // byCollection rows (non-zero only — the wire stays compact).
+      const freshBySource = data.byCollection
+        .filter((c) => (freshByCollection[c.collection] ?? 0) > 0)
+        .map((c) => ({ label: c.label, count: freshByCollection[c.collection]! }));
+      const fresh = Object.values(freshByCollection).reduce((s, n) => s + n, 0);
       const running = gardenerRunInFlight(bot.name);
 
       // Last-run: the in-memory record wins; after a restart it's gone, so fall back
@@ -790,6 +821,9 @@ export function registerWikiGardenerRoutes(
           offered: offeredSet.size,
           remaining,
           offeredStillQueued,
+          fresh,
+          freshBySource,
+          freshWindowDays: minAgeDays,
           lastBacklogRun,
           watcherSeeded: !!watcher,
           progress: getBacklogProgress(bot.name),

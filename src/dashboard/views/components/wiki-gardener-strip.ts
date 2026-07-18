@@ -71,6 +71,12 @@ export interface IngestBacklogResponse {
   remaining?: number;
   /** Queued docs also in the offered set — the honest "offered in past runs" count. */
   offeredStillQueued?: number;
+  /** Queued docs still inside the weekly watcher's window — the "new arrivals" lead. */
+  fresh?: number;
+  /** Per-source breakdown of `fresh` (non-zero sources only). */
+  freshBySource?: { label: string; count: number }[];
+  /** The resolved age-floor window in days — labels "new (last Nd)"; 0/absent ⇒ degraded. */
+  freshWindowDays?: number;
   watcherSeeded?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
@@ -89,6 +95,11 @@ export interface BacklogStripModel {
   perSource: { label: string; queued: number }[];
   eligibleNow: number;
   offeredStillQueued: number;
+  /** New arrivals inside the watcher window (the sentence's lead segment). */
+  freshTotal: number;
+  freshPerSource: { label: string; count: number }[];
+  /** Age-floor window in days; 0 ⇒ degraded response, hide the fresh segment. */
+  freshWindowDays: number;
   draftsAwaitingReview: number;
   running: boolean;
   /** Live drain progress when this bot's own drain holds the mutex (else null). */
@@ -99,8 +110,8 @@ export interface BacklogStripModel {
   controlHidden: boolean;
   showRun: boolean;
   showReset: boolean;
-  /** Everything queued has been offered — keep the "all offered" wording. */
-  allOffered: boolean;
+  /** Queued but nothing drainable now (every past-floor doc already offered). */
+  nothingDrainable: boolean;
   batchSize: number;
   maxProposals: number;
   /** How many docs a click drains now: min(batchSize, eligibleNow). */
@@ -128,6 +139,15 @@ export function backlogStripModel(
   // floor would inflate by counting merely-too-fresh docs as offered. Falls back
   // to 0 on a degraded response (no live fields ⇒ "none offered yet").
   const offeredStillQueued = Math.max(0, numOr(data.offeredStillQueued, 0));
+  // Fresh bucket (new arrivals inside the watcher window). freshWindowDays doubles
+  // as the presence marker: 0/absent ⇒ degraded response ⇒ the sentence hides the
+  // fresh segment rather than showing a false "0 new".
+  const freshWindowDays = Math.max(0, numOr(data.freshWindowDays, 0));
+  const freshTotal = Math.max(0, numOr(data.fresh, 0));
+  const freshPerSource = (Array.isArray(data.freshBySource) ? data.freshBySource : []).filter(
+    (s): s is { label: string; count: number } =>
+      !!s && typeof s.label === "string" && typeof s.count === "number" && s.count > 0,
+  );
   const running = data.running === true;
   const controlHidden = data.watcherSeeded === false;
   const batchSize = numOr(data.batchSize, 0);
@@ -137,6 +157,9 @@ export function backlogStripModel(
     perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
     eligibleNow: remaining,
     offeredStillQueued,
+    freshTotal,
+    freshPerSource,
+    freshWindowDays,
     draftsAwaitingReview: Math.max(0, numOr(pendingDraftCount, 0)),
     running,
     progress: data.progress ?? null,
@@ -147,7 +170,7 @@ export function backlogStripModel(
     // gating on `offered > 0` could render "Reset offered (0)" once every offered
     // key is consumed, where a reset would be a no-op anyway.
     showReset: !controlHidden && !running && offeredStillQueued > 0,
-    allOffered: !controlHidden && !running && remaining <= 0 && queued > 0,
+    nothingDrainable: !controlHidden && !running && remaining <= 0 && queued > 0,
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
@@ -158,24 +181,60 @@ function strong(n: number): string {
   return `<span class="bk-strong">${n}</span>`;
 }
 
-/** The honest labeled sentence (pure HTML string). */
+/** "Label 4 · Label 2" — the per-source breakdown markup (sentence + tail share it). */
+function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
+  return items
+    .map((s) => `${esc(s.label)} <span class="bk-n">${s.n}</span>`)
+    .join('<span class="bk-sep"> · </span>');
+}
+
+/**
+ * The honest labeled sentence (pure HTML string) — recency-first: the lead is
+ * "how many NEW summaries aren't in the wiki" (the number the all-time totals
+ * used to bury), then what a drain can act on now. The all-time accounting moved
+ * into the collapsed tail ({@link backlogTailHtml}). On a degraded response
+ * (no live fields ⇒ `freshWindowDays` 0) the fresh segment is hidden rather than
+ * showing a false "0 new".
+ */
 export function backlogSentenceHtml(model: BacklogStripModel): string {
-  const segs: string[] = [`${strong(model.totalNeverIngested)} never ingested`];
-  if (model.perSource.length) {
-    segs.push(
-      model.perSource
-        .map((s) => `${esc(s.label)} <span class="bk-n">${s.queued}</span>`)
-        .join('<span class="bk-sep"> · </span>'),
-    );
+  const segs: string[] = [];
+  if (model.freshWindowDays > 0) {
+    let freshSeg = `${strong(model.freshTotal)} new (last ${model.freshWindowDays}d)`;
+    if (model.freshPerSource.length) {
+      freshSeg +=
+        ": " + perSourceBreakdownHtml(model.freshPerSource.map((s) => ({ label: s.label, n: s.count })));
+      freshSeg += ` <span class="bk-note">— weekly watcher's turf</span>`;
+    }
+    segs.push(freshSeg);
   }
-  segs.push(`${strong(model.eligibleNow)} eligible now`);
-  if (model.offeredStillQueued > 0) {
-    segs.push(`${strong(model.offeredStillQueued)} offered in past runs`);
-  }
+  segs.push(`${strong(model.eligibleNow)} drainable now`);
   if (model.draftsAwaitingReview > 0) {
     segs.push(`${strong(model.draftsAwaitingReview)} drafts awaiting review`);
   }
   return `<span class="bk-sentence">${segs.join('<span class="bk-sep"> · </span>')}</span>`;
+}
+
+/**
+ * The de-emphasized, collapsed all-time accounting (pure HTML): the exhausted
+ * tail ("offered in past runs, never drafted") + the all-time never-ingested
+ * total in the always-visible summary, with the per-source breakdown behind the
+ * toggle. Empty when nothing is queued. This is where "280 never ingested ·
+ * YouTube 269" went — true numbers, but dead weight as a headline.
+ */
+export function backlogTailHtml(model: BacklogStripModel): string {
+  if (model.totalNeverIngested <= 0) return "";
+  const summaryParts: string[] = [];
+  if (model.offeredStillQueued > 0) {
+    summaryParts.push(`${strong(model.offeredStillQueued)} offered in past runs, never drafted`);
+  }
+  summaryParts.push(`${strong(model.totalNeverIngested)} never ingested all-time`);
+  const breakdown = perSourceBreakdownHtml(model.perSource.map((s) => ({ label: s.label, n: s.queued })));
+  return (
+    '<details class="bk-tail">' +
+    `<summary>${summaryParts.join('<span class="bk-sep"> · </span>')}</summary>` +
+    `<span class="bk-tail-body">${breakdown}</span>` +
+    "</details>"
+  );
 }
 
 /** Friendly stage text for a live drain (drafting shows k/n + the current topic). */
@@ -233,11 +292,13 @@ export function backlogControlHtml(model: BacklogStripModel): string {
   let inner = "";
   if (model.showRun) {
     inner += `<button class="gard-btn bk-run" data-backlog-action="confirm">Drain a batch (${model.drainNow})</button>`;
-  } else if (model.allOffered) {
-    inner += `<span class="bk-run-note">all offered</span>`;
+  } else if (model.nothingDrainable) {
+    // Not "all offered": fresh in-window docs are un-offered too, so that wording
+    // lies whenever new arrivals exist. This states what the button's absence means.
+    inner += `<span class="bk-run-note">nothing drainable</span>`;
   }
   if (model.showReset) {
-    const label = model.allOffered ? "Reset to re-run" : `Reset offered (${model.offeredStillQueued})`;
+    const label = model.nothingDrainable ? "Reset to re-run" : `Reset offered (${model.offeredStillQueued})`;
     inner += `<button class="gard-btn bk-reset" data-backlog-action="reset">${label}</button>`;
   }
   if (!inner) return ""; // nothing queued at all
@@ -253,7 +314,7 @@ export function backlogConfirmHtml(model: BacklogStripModel): string {
   return (
     '<div class="bk-confirm">' +
     `<div class="bk-confirm-copy">Drain a batch of <strong>${model.drainNow}</strong> ` +
-    `(of ${model.eligibleNow} eligible) through the gardener? ~10–20 min in the background — ` +
+    `(of ${model.eligibleNow} drainable) through the gardener? ~10–20 min in the background — ` +
     `you can leave this page. 1 Haiku clustering call + up to ${model.maxProposals} drafts on this ` +
     `bot's model. Produces <strong>draft proposals</strong> below — nothing is written to the wiki ` +
     "until you approve.</div>" +

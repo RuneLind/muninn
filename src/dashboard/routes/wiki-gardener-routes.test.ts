@@ -165,7 +165,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     queued: 2,
     wikiUrlCount: 5,
     generatedAt: 111,
-    queuedKeys: [{ key: "c/a", id: "a" }, { key: "c/b", id: "b" }],
+    queuedKeys: [{ key: "c/a", id: "a", collection: "c" }, { key: "c/b", id: "b", collection: "c" }],
   };
 
   test("merges live fields without mutating the cached payload; strips queuedKeys", () => {
@@ -174,6 +174,9 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
       progress: null,
@@ -189,6 +192,9 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 2,
       remaining: 0,
       offeredStillQueued: 2,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
       lastBacklogRun: { finishedAt: 222, offered: 2, drafted: 1 },
       watcherSeeded: true,
       progress: {
@@ -213,7 +219,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     });
 
     // The cached object was never mutated by either merge.
-    expect(cached.queuedKeys).toEqual([{ key: "c/a", id: "a" }, { key: "c/b", id: "b" }]);
+    expect(cached.queuedKeys).toEqual([{ key: "c/a", id: "a", collection: "c" }, { key: "c/b", id: "b", collection: "c" }]);
     expect("running" in cached).toBe(false);
   });
 
@@ -223,6 +229,9 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
       progress: null,
@@ -238,6 +247,9 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 2,
       remaining: 0,
       offeredStillQueued: 2,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
       progress: null,
@@ -251,6 +263,9 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
       progress: null,
@@ -274,11 +289,11 @@ describe("computeBacklogFloorCounts — route age-floor branch", () => {
 
   test("fresh dated doc excluded from remaining; old + undated counted", () => {
     const queuedKeys = [
-      { key: "youtube-summaries/2026-07-16-fresh", id: "2026-07-16-fresh", date: day("2026-07-16") }, // 1 day old → too fresh
-      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old", date: day("2026-06-01") }, // 46 days → eligible
-      { key: "youtube-summaries/undated", id: "undated" }, // no date → old backlog, eligible
+      { key: "youtube-summaries/2026-07-16-fresh", id: "2026-07-16-fresh", collection: "youtube-summaries", date: day("2026-07-16") }, // 1 day old → too fresh
+      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old", collection: "youtube-summaries", date: day("2026-06-01") }, // 46 days → eligible
+      { key: "youtube-summaries/undated", id: "undated", collection: "youtube-summaries" }, // no date → old backlog, eligible
     ];
-    const { remaining, offeredStillQueued } = computeBacklogFloorCounts(
+    const { remaining, offeredStillQueued, freshByCollection } = computeBacklogFloorCounts(
       queuedKeys,
       new Set<string>(),
       MIN_AGE_DAYS,
@@ -286,12 +301,15 @@ describe("computeBacklogFloorCounts — route age-floor branch", () => {
     );
     expect(remaining).toBe(2); // old + undated
     expect(offeredStillQueued).toBe(0);
+    // The held-back fresh doc lands in the fresh bucket, keyed by its collection —
+    // the three buckets partition the queued set exactly.
+    expect(freshByCollection).toEqual({ "youtube-summaries": 1 });
   });
 
   test("offered docs land in offeredStillQueued and never in remaining (even when old)", () => {
     const queuedKeys = [
-      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old", date: day("2026-06-01") },
-      { key: "youtube-summaries/2026-05-01-older", id: "2026-05-01-older", date: day("2026-05-01") },
+      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old", collection: "youtube-summaries", date: day("2026-06-01") },
+      { key: "youtube-summaries/2026-05-01-older", id: "2026-05-01-older", collection: "youtube-summaries", date: day("2026-05-01") },
     ];
     const offered = new Set(["youtube-summaries/2026-06-01-old"]);
     const { remaining, offeredStillQueued } = computeBacklogFloorCounts(queuedKeys, offered, MIN_AGE_DAYS, NOW);
@@ -299,12 +317,29 @@ describe("computeBacklogFloorCounts — route age-floor branch", () => {
     expect(offeredStillQueued).toBe(1); // the offered old doc
   });
 
+  test("offered fresh docs count as tail, never fresh (pre-#288 burns stay in the offered bucket)", () => {
+    const queuedKeys = [
+      { key: "youtube-summaries/2026-07-16-a", id: "2026-07-16-a", collection: "youtube-summaries", date: day("2026-07-16") }, // fresh, offered
+      { key: "x-articles/2026-07-16-b", id: "2026-07-16-b", collection: "x-articles", date: day("2026-07-16") }, // fresh, un-offered
+    ];
+    const offered = new Set(["youtube-summaries/2026-07-16-a"]);
+    const { remaining, offeredStillQueued, freshByCollection } = computeBacklogFloorCounts(
+      queuedKeys,
+      offered,
+      MIN_AGE_DAYS,
+      NOW,
+    );
+    expect(remaining).toBe(0);
+    expect(offeredStillQueued).toBe(1); // the offered-while-fresh doc
+    expect(freshByCollection).toEqual({ "x-articles": 1 }); // only the un-offered one
+  });
+
   test("bare id drives the filename-prefix date fallback (composite key would defeat it)", () => {
     // No explicit `date` — the floor must read the YYYY-MM-DD prefix from the BARE
     // id. A fresh-prefixed undated doc is therefore correctly held back.
     const queuedKeys = [
-      { key: "youtube-summaries/2026-07-16-fresh", id: "2026-07-16-fresh" }, // fresh via id prefix
-      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old" }, // old via id prefix
+      { key: "youtube-summaries/2026-07-16-fresh", id: "2026-07-16-fresh", collection: "youtube-summaries" }, // fresh via id prefix
+      { key: "youtube-summaries/2026-06-01-old", id: "2026-06-01-old", collection: "youtube-summaries" }, // old via id prefix
     ];
     const { remaining } = computeBacklogFloorCounts(queuedKeys, new Set<string>(), MIN_AGE_DAYS, NOW);
     expect(remaining).toBe(1); // only the old-prefixed doc
