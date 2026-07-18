@@ -277,5 +277,16 @@ Found it ~~wrong~~ correct.`;
       expect(out).toContain("no close here");
       expect(out).not.toContain("```");
     });
+
+    test("FileTree → fence as-is (Slack renders the code block)", () => {
+      const out = formatSlackMrkdwn("<FileTree>\n```\nsrc/\n  a.ts\n```\n</FileTree>");
+      expect(out).toBe("```\nsrc/\n  a.ts\n```");
+    });
+
+    test("unclosed FileTree degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<FileTree>\nno close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("```");
+    });
   });
 });

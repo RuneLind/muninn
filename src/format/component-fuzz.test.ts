@@ -171,6 +171,15 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.slack.startsWith("```")).toBe(true);
   });
 
+  test("FileTree fence content cannot inject markup on web/telegram", () => {
+    const md = "<FileTree>\n```\n<img src=x onerror=alert(1)>\n```\n</FileTree>";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<img");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

@@ -174,3 +174,13 @@ test("component: unclosed Diff degrades to escaped text", () => {
   expect(out).toContain("&lt;Diff&gt;");
   expect(out).not.toContain('class="language-diff"');
 });
+
+test("component: FileTree falls back to the fence as-is", () => {
+  const out = formatTelegramHtml("<FileTree>\n```\nsrc/\n  a.ts\n```\n</FileTree>");
+  expect(out).toBe("<pre><code>src/\n  a.ts</code></pre>");
+});
+
+test("component: unclosed FileTree degrades to escaped text", () => {
+  const out = formatTelegramHtml("<FileTree>\nno close");
+  expect(out).toContain("&lt;FileTree&gt;");
+});

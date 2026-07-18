@@ -425,4 +425,16 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain('<div class="diff">');
     expect(out).toContain("just prose");
   });
+
+  test("FileTree wraps the rendered path fence in a monospace box", () => {
+    const out = formatWebHtml("<FileTree>\n```\nsrc/\n  index.ts\n```\n</FileTree>");
+    expect(out).toBe('<div class="filetree"><pre><code>src/\n  index.ts</code></pre></div>');
+  });
+
+  test("FileTree escapes path content (no raw HTML injection)", () => {
+    const out = formatWebHtml("<FileTree>\n```\n<script>x</script>\n```\n</FileTree>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain('<div class="filetree">');
+  });
 });

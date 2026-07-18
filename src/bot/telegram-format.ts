@@ -54,6 +54,8 @@ const telegramRenderer: BlockRenderer = {
       }
       case "Diff":
         return children; // fence-as-is: Telegram already renders the ```diff block
+      case "FileTree":
+        return children; // fence-as-is: the indented-path fence renders verbatim
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

@@ -97,6 +97,10 @@ const webRenderer: BlockRenderer = {
           .join("");
         return `<div class="diff">${rows}</div>`;
       }
+      case "FileTree":
+        // Wrap-only: the rendered fence (a <pre><code>) is the tree; CSS gives it
+        // the monospace box + guide styling.
+        return `<div class="filetree">${children}</div>`;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

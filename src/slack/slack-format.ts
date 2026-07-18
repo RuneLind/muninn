@@ -48,6 +48,8 @@ const slackRenderer: BlockRenderer = {
       }
       case "Diff":
         return children; // fence-as-is: Slack already renders the ``` code block
+      case "FileTree":
+        return children; // fence-as-is: the indented-path fence renders verbatim
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

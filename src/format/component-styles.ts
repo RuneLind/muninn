@@ -122,5 +122,24 @@ export function componentBlockCss(scope: string): string {
     ${scope} .diff-add { background: color-mix(in srgb, var(--status-success) 16%, transparent); border-left-color: var(--status-success); }
     ${scope} .diff-del { background: color-mix(in srgb, var(--status-error) 16%, transparent); border-left-color: var(--status-error); }
     ${scope} .diff-ctx { color: var(--text-muted); }
+    ${scope} .filetree {
+      margin: 1.2rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      overflow-x: auto;
+    }
+    ${scope} .filetree pre {
+      margin: 0;
+      padding: 0.8rem 1rem;
+      background: transparent;
+      border: 0;
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.85em;
+      line-height: 1.5;
+      color: var(--text-primary);
+      white-space: pre;
+    }
+    ${scope} .filetree code { background: transparent; padding: 0; color: inherit; }
   `;
 }
