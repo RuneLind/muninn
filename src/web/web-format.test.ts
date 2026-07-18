@@ -486,4 +486,47 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain('<div class="annotated-code">');
     expect(out).toContain("just notes");
   });
+
+  test("CodeTabs renders a tab bar + panels; first tab/panel active", () => {
+    const out = formatWebHtml(
+      "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+    );
+    expect(out).toContain('<div class="code-tabs">');
+    expect(out).toContain('<button class="code-tabs-tab is-active" type="button">TS</button>');
+    expect(out).toContain('<button class="code-tabs-tab" type="button">JS</button>');
+    expect(out).toContain('<div class="code-tabs-panel is-active"><pre><code class="language-ts">const x=1;</code></pre></div>');
+    expect(out).toContain('<div class="code-tabs-panel"><pre><code class="language-js">var x=1;</code></pre></div>');
+  });
+
+  test("CodeTabs with zero recognized Tab children renders a visible fallback", () => {
+    const out = formatWebHtml("<CodeTabs>\njust prose, no tabs\n</CodeTabs>");
+    expect(out).toContain('<div class="code-tabs-fallback">');
+    expect(out).toContain("just prose, no tabs");
+    expect(out).not.toContain('<div class="code-tabs-bar"');
+  });
+
+  test("CodeTabs nested past the depth cap degrades: Tab is text, fallback shown", () => {
+    // Callout(0) → CodeTabs(1) → Tab(2). Tab at depth 2 is not parsed as a
+    // component, so CodeTabs sees zero Tab children → visible fallback, not raw tags.
+    const out = formatWebHtml(
+      "<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>",
+    );
+    expect(out).toContain('<div class="code-tabs-fallback">');
+    expect(out).toContain("&lt;Tab");
+    expect(out).not.toContain('<button class="code-tabs-tab');
+  });
+
+  test("standalone Tab (outside CodeTabs) renders its own labeled panel", () => {
+    const out = formatWebHtml("<Tab label=\"Only\">\n```ts\nx\n```\n</Tab>");
+    expect(out).toBe(
+      '<div class="code-tab-standalone"><div class="code-tab-label">Only</div>' +
+        '<pre><code class="language-ts">x</code></pre></div>',
+    );
+  });
+
+  test("CodeTabs escapes tab labels (no attr injection)", () => {
+    const out = formatWebHtml("<CodeTabs>\n<Tab label=\"a<script>\">\nx\n</Tab>\n</CodeTabs>");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("a&lt;script&gt;");
+  });
 });

@@ -306,6 +306,33 @@ describe("parseBlocks — component blocks", () => {
       },
     ]);
   });
+
+  test("CodeTabs parses repeated <Tab label> children as component blocks", () => {
+    const blocks = parseBlocks(
+      "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nx\n```\n</Tab>\n<Tab label=\"JS\">\n```js\ny\n```\n</Tab>\n</CodeTabs>",
+    );
+    expect(blocks).toHaveLength(1);
+    const tabs = (blocks[0] as { children: { name: string; attrs: Record<string, string> }[] }).children;
+    expect(tabs.map((t) => t.name)).toEqual(["Tab", "Tab"]);
+    expect(tabs.map((t) => t.attrs.label)).toEqual(["TS", "JS"]);
+  });
+
+  test("Tab is globally parseable (standalone), not scoped to CodeTabs", () => {
+    expect(parseBlocks("<Tab label=\"Only\">\nx\n</Tab>")[0]).toMatchObject({
+      type: "component",
+      name: "Tab",
+      attrs: { label: "Only" },
+    });
+  });
+
+  test("a CodeTabs nested in a component puts Tab at depth 2 → Tab degrades to text", () => {
+    // Documented top-level-only constraint: MAX_COMPONENT_DEPTH = 2.
+    const blocks = parseBlocks("<Callout>\n<CodeTabs>\n<Tab label=\"A\">\nx\n</Tab>\n</CodeTabs>\n</Callout>");
+    const callout = blocks[0] as { children: { type: string; name?: string; children?: unknown[] }[] };
+    const codeTabs = callout.children.find((c) => c.name === "CodeTabs")!;
+    // CodeTabs at depth 1 IS a component, but its <Tab> body is at depth 2 → text.
+    expect(codeTabs.children!.every((c) => (c as { type: string }).type === "text")).toBe(true);
+  });
 });
 
 describe("parseChecklistItem / parseChecklist", () => {

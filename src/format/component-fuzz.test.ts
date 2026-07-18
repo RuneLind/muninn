@@ -201,6 +201,26 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.telegram).not.toContain("<script>");
   });
 
+  test("CodeTabs/Tab label + body injection cannot escape into markup", () => {
+    const md =
+      '<CodeTabs>\n<Tab label="x\"><script>alert(1)</script>">\n```ts\n<img src=x onerror=alert(1)>\n```\n</Tab>\n</CodeTabs>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<script>");
+  });
+
+  test("unclosed CodeTabs degrades to text on every platform", () => {
+    const md = "<CodeTabs>\n<Tab label=\"A\">\nleft open";
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).toContain("&lt;CodeTabs&gt;");
+    expect(out.web).not.toContain('<div class="code-tabs">');
+    expect(out.telegram).toContain("&lt;CodeTabs&gt;");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

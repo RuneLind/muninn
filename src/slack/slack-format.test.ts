@@ -312,5 +312,17 @@ Found it ~~wrong~~ correct.`;
       expect(out).toContain("no close");
       expect(out).not.toContain("```");
     });
+
+    test("CodeTabs → sequential — label — sections fallback", () => {
+      const out = formatSlackMrkdwn(
+        "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+      );
+      expect(out).toBe("— TS —\n```\nconst x=1;\n```\n— JS —\n```\nvar x=1;\n```");
+    });
+
+    test("standalone Tab renders a labeled section", () => {
+      const out = formatSlackMrkdwn("<Tab label=\"Only\">\n```ts\nx\n```\n</Tab>");
+      expect(out).toBe("— Only —\n```\nx\n```");
+    });
   });
 });

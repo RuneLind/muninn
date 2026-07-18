@@ -8,8 +8,12 @@ import {
   diffLineClass,
   parseChecklist,
 } from "../format/markdown-ast.ts";
+import type { Block } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+
+type ComponentBlock = Extract<Block, { type: "component" }>;
+const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
 
 /**
  * Converts Claude's markdown output to rich HTML for the web chat.
@@ -136,6 +140,36 @@ const webRenderer: BlockRenderer = {
           `<div class="annotated-code">${fileHeader}` +
           `<div class="annotated-code-panel">${codeHtml}</div>${notesBlock}</div>`
         );
+      }
+      case "CodeTabs": {
+        const tabs = rawChildren.filter(isTab);
+        if (tabs.length === 0) {
+          // No recognized <Tab> children (e.g. nested past the depth cap) → a
+          // visible fallback panel rather than raw escaped tags.
+          return `<div class="code-tabs-fallback">${children}</div>`;
+        }
+        const bar = tabs
+          .map((t, i) => {
+            const label = t.attrs.label ? escapeHtml(t.attrs.label) : `Tab ${i + 1}`;
+            return `<button class="code-tabs-tab${i === 0 ? " is-active" : ""}" type="button">${label}</button>`;
+          })
+          .join("");
+        const panels = tabs
+          .map((t, i) => {
+            const body = renderBlocks(t.children, webRenderer);
+            return `<div class="code-tabs-panel${i === 0 ? " is-active" : ""}">${body}</div>`;
+          })
+          .join("");
+        return (
+          `<div class="code-tabs">` +
+          `<div class="code-tabs-bar" role="tablist">${bar}</div>` +
+          `<div class="code-tabs-panels">${panels}</div></div>`
+        );
+      }
+      case "Tab": {
+        // A standalone <Tab> (outside CodeTabs) gets its own labeled panel.
+        const label = attrs.label ? escapeHtml(attrs.label) : "Tab";
+        return `<div class="code-tab-standalone"><div class="code-tab-label">${label}</div>${children}</div>`;
       }
     }
   },

@@ -16,6 +16,7 @@ import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
+import { enhanceCodeTabs } from "./code-tabs.ts";
 import {
   serializeAskSession,
   deserializeAskSession,
@@ -1156,6 +1157,7 @@ function loadPage(name: string, push: boolean): void {
       // funnel through loadPage. (The Ask/Explain answer replaces #articleWrap
       // with its own markup, so rendered diagrams disappear with it — not hooked.)
       enhanceMermaid(document.getElementById("articleWrap")!);
+      enhanceCodeTabs(document.getElementById("articleWrap")!);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
@@ -1474,7 +1476,10 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   // Rehydrated turns (history re-show) inject stored answer HTML that may carry
   // mermaid fences; the streaming paths hook separately. No-op when absent.
   const askBody = document.getElementById("askAnswerBody");
-  if (askBody) enhanceMermaid(askBody);
+  if (askBody) {
+    enhanceMermaid(askBody);
+    enhanceCodeTabs(askBody);
+  }
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Showing an Ask answer — sources are listed under it.</div>';
@@ -1558,7 +1563,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); }
+      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); }
       refreshAskSources(turn);
       let statusText: string;
       if (d.lowConfidence) statusText = "No strong match — closest sources below";
@@ -1584,7 +1589,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = turn.html; enhanceMermaid(b); }
+      if (b && turn.html) { b.innerHTML = turn.html; enhanceMermaid(b); enhanceCodeTabs(b); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since

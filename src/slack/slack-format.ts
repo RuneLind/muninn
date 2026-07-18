@@ -58,6 +58,11 @@ const slackRenderer: BlockRenderer = {
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).
         return attrs.file ? `*${renderInline(attrs.file)}*\n${children}` : children;
+      case "CodeTabs":
+        // Each Tab child already rendered itself as a `— label —` section.
+        return children;
+      case "Tab":
+        return attrs.label ? `— ${renderInline(attrs.label)} —\n${children}` : children;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

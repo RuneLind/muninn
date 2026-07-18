@@ -206,3 +206,17 @@ test("component: unclosed AnnotatedCode degrades to escaped text", () => {
   const out = formatTelegramHtml("<AnnotatedCode file=\"x.ts\">\nno close");
   expect(out).toContain("&lt;AnnotatedCode");
 });
+
+test("component: CodeTabs → sequential — label — sections fallback", () => {
+  const out = formatTelegramHtml(
+    "<CodeTabs>\n<Tab label=\"TS\">\n```ts\nconst x=1;\n```\n</Tab>\n<Tab label=\"JS\">\n```js\nvar x=1;\n```\n</Tab>\n</CodeTabs>",
+  );
+  expect(out).toBe(
+    '— TS —\n<pre><code class="language-ts">const x=1;</code></pre>\n— JS —\n<pre><code class="language-js">var x=1;</code></pre>',
+  );
+});
+
+test("component: unclosed CodeTabs degrades to escaped text", () => {
+  const out = formatTelegramHtml("<CodeTabs>\n<Tab label=\"A\">no close");
+  expect(out).toContain("&lt;CodeTabs&gt;");
+});

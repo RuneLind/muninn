@@ -177,5 +177,59 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .annotated-code-notes > :first-child { margin-top: 0; }
     ${scope} .annotated-code-notes > :last-child { margin-bottom: 0; }
+    ${scope} .code-tabs {
+      margin: 1.2rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-surface);
+    }
+    ${scope} .code-tabs-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.15rem;
+      padding: 0.3rem 0.3rem 0;
+      background: var(--bg-inset);
+      border-bottom: 1px solid var(--border-secondary);
+    }
+    ${scope} .code-tabs-tab {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      font: inherit;
+      font-size: 0.85em;
+      padding: 0.4rem 0.8rem;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+    }
+    ${scope} .code-tabs-tab:hover { color: var(--text-primary); }
+    ${scope} .code-tabs-tab.is-active {
+      color: var(--accent-light);
+      background: var(--bg-surface);
+      font-weight: 600;
+    }
+    /* The server marks the first panel .is-active, so it shows before (and
+     * without) the client enhancer; the enhancer moves .is-active on tab click. */
+    ${scope} .code-tabs-panel { display: none; }
+    ${scope} .code-tabs-panel.is-active { display: block; }
+    ${scope} .code-tabs-panel pre { margin: 0.6rem; }
+    ${scope} .code-tabs-fallback { margin: 1.2rem 0; }
+    ${scope} .code-tab-standalone {
+      margin: 1.2rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-surface);
+    }
+    ${scope} .code-tab-label {
+      padding: 0.4rem 0.8rem;
+      font-size: 0.8em;
+      font-weight: 600;
+      color: var(--accent-light);
+      background: var(--bg-inset);
+      border-bottom: 1px solid var(--border-secondary);
+    }
+    ${scope} .code-tab-standalone pre { margin: 0.6rem; }
   `;
 }

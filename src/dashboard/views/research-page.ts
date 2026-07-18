@@ -4,14 +4,16 @@ import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { webFormatClientScript } from "../../chat/views/components/web-format-client.ts";
 import { wikiMermaidClientScript } from "./components/wiki-mermaid-client.ts";
+import { codeTabsClientScript } from "./components/code-tabs-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
 import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
-  const [helpers, webFormat, wikiMermaid] = await Promise.all([
+  const [helpers, webFormat, wikiMermaid, codeTabs] = await Promise.all([
     helpersClientScript(),
     webFormatClientScript(),
     wikiMermaidClientScript(),
+    codeTabsClientScript(),
   ]);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -376,6 +378,7 @@ export async function renderResearchPage(): Promise<string> {
     ${helpers}
     ${webFormat}
     ${wikiMermaid}
+    ${codeTabs}
 
     var CORPUS = ${clientCorpusJson()};
     var PROFILES = ${clientProfilesJson()};
@@ -632,6 +635,7 @@ export async function renderResearchPage(): Promise<string> {
           a.bodyEl.innerHTML = formatWebHtml(a.buffer);
           linkifyCitations(a.bodyEl, a.citations);
           enhanceMermaid(a.bodyEl); // upgrade any mermaid fences; no-op when absent
+          enhanceCodeTabs(a.bodyEl); // wire any CodeTabs blocks; no-op when absent
           a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
           bindSources(a.sourcesEl, a.citations);
           var statusText;
@@ -666,6 +670,7 @@ export async function renderResearchPage(): Promise<string> {
           a.bodyEl.innerHTML = d.html;
           linkifyCitations(a.bodyEl, a.citations);
           enhanceMermaid(a.bodyEl); // upgrade any mermaid fences; no-op when absent
+          enhanceCodeTabs(a.bodyEl); // wire any CodeTabs blocks; no-op when absent
         },
 
         // App-level failure from the server (synthesis error, no bot, etc.). Named

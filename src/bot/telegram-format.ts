@@ -64,6 +64,12 @@ const telegramRenderer: BlockRenderer = {
       case "AnnotatedCode":
         // file line + fence + annotation paragraphs (already in children).
         return attrs.file ? `<b>${escapeHtml(attrs.file)}</b>\n${children}` : children;
+      case "CodeTabs":
+        // Each Tab child already rendered itself as a `— label —` section, so the
+        // sequential fallback is just the rendered body.
+        return children;
+      case "Tab":
+        return attrs.label ? `— ${escapeHtml(attrs.label)} —\n${children}` : children;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
