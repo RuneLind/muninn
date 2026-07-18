@@ -1,4 +1,10 @@
-import { parseBlocks, normalizeVerdictValue, parseMeterAttrs, parseChecklist } from "../format/markdown-ast.ts";
+import {
+  parseBlocks,
+  scanInlineComponents,
+  normalizeVerdictValue,
+  parseMeterAttrs,
+  parseChecklist,
+} from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders } from "../format/markdown-core.ts";
 
@@ -63,6 +69,25 @@ const slackRenderer: BlockRenderer = {
         return children;
       case "Tab":
         return attrs.label ? `— ${renderInline(attrs.label)} —\n${children}` : children;
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
+    }
+  },
+  inlineComponent(name, attrs, text) {
+    switch (name) {
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = text.trim() || (value === "yes" ? "Yes" : "No");
+        return `${value === "yes" ? "✅" : "❌"} ${label}`;
+      }
+      case "Pill":
+        return `[${text.trim()}]`;
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
@@ -93,12 +118,26 @@ function renderTable(headers: string[], rows: string[][]): string {
 }
 
 function renderInline(text: string): string {
-  let result = text;
   const ph = new Placeholders();
 
-  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
+  // Inline code FIRST — park it before the component scan so a complete
+  // component tag inside backticks stays literal code (backticked) instead of
+  // being interpreted. The parked sentinel carries no `<`, shielding the code
+  // content from the scan below and from the trailing tag-strip.
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
     ph.add("INLINE", `\`${code}\``),
   );
+
+  // Inline components (Verdict, Pill) on the code-shielded text: substitute each
+  // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
+  // into the string. No parking needed — the fallback is plain mrkdwn, so the
+  // label rides through the passes below (the trailing tag-strip neutralizes any
+  // tag in the label text).
+  result = scanInlineComponents(result)
+    .map((seg) =>
+      seg.kind === "text" ? seg.text : slackRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
+    )
+    .join("");
 
   result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
   result = result.replace(/~~(.+?)~~/g, "~$1~");

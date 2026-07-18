@@ -5,6 +5,7 @@ import {
   normalizeMeterTone,
   parseChecklistItem,
   parseChecklist,
+  scanInlineComponents,
 } from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
@@ -332,6 +333,93 @@ describe("parseBlocks — component blocks", () => {
     const codeTabs = callout.children.find((c) => c.name === "CodeTabs")!;
     // CodeTabs at depth 1 IS a component, but its <Tab> body is at depth 2 → text.
     expect(codeTabs.children!.every((c) => (c as { type: string }).type === "text")).toBe(true);
+  });
+});
+
+describe("scanInlineComponents", () => {
+  test("plain text with no tag → single text run", () => {
+    expect(scanInlineComponents("just prose")).toEqual([{ kind: "text", text: "just prose" }]);
+  });
+
+  test("splits surrounding text and an inline Verdict token", () => {
+    expect(scanInlineComponents('see <Verdict value="yes">ok</Verdict> here')).toEqual([
+      { kind: "text", text: "see " },
+      { kind: "component", name: "Verdict", attrs: { value: "yes" }, text: "ok" },
+      { kind: "text", text: " here" },
+    ]);
+  });
+
+  test("self-closing inline component has empty inner text", () => {
+    expect(scanInlineComponents("x <Verdict value=\"no\"/> y")).toEqual([
+      { kind: "text", text: "x " },
+      { kind: "component", name: "Verdict", attrs: { value: "no" }, text: "" },
+      { kind: "text", text: " y" },
+    ]);
+  });
+
+  test("inline Pill keeps its whitelisted tone attr, drops unknown attrs", () => {
+    expect(scanInlineComponents('<Pill tone="rec" bogus="x">go</Pill>')).toEqual([
+      { kind: "component", name: "Pill", attrs: { tone: "rec" }, text: "go" },
+    ]);
+  });
+
+  test("only Verdict/Pill are inline; other whitelisted names stay literal text", () => {
+    // Callout is a BLOCK-only component — it is not in the inline whitelist, so
+    // an embedded <Callout> is left as literal text for the block/escape path.
+    expect(scanInlineComponents("mid <Callout>x</Callout> line")).toEqual([
+      { kind: "text", text: "mid <Callout>x</Callout> line" },
+    ]);
+  });
+
+  test("unclosed inline tag → whole string stays literal text", () => {
+    expect(scanInlineComponents("go <Verdict value=\"yes\">no close")).toEqual([
+      { kind: "text", text: "go <Verdict value=\"yes\">no close" },
+    ]);
+  });
+
+  test("non-greedy: the FIRST close wins, trailing stray close is text", () => {
+    expect(scanInlineComponents("<Pill>a</Pill>b</Pill>")).toEqual([
+      { kind: "component", name: "Pill", attrs: {}, text: "a" },
+      { kind: "text", text: "b</Pill>" },
+    ]);
+  });
+
+  test("malformed unquoted attr is not a component → single literal text run", () => {
+    // Only double-quoted attrs are valid; `value=yes` (unquoted) fails the tag
+    // shape, so the whole string stays literal for the escape path.
+    expect(scanInlineComponents("<Verdict value=yes>x</Verdict>")).toEqual([
+      { kind: "text", text: "<Verdict value=yes>x</Verdict>" },
+    ]);
+  });
+
+  test("10k inline components scan linearly in a single pass", () => {
+    const md = Array.from({ length: 10_000 }, () => "<Pill>x</Pill>").join(" ");
+    const start = Date.now();
+    const segs = scanInlineComponents(md);
+    expect(segs.filter((s) => s.kind === "component")).toHaveLength(10_000);
+    expect(Date.now() - start).toBeLessThan(2_000);
+  });
+});
+
+describe("dual behavior: own-line = block, mid-text = inline", () => {
+  test("a Verdict alone on its line parses as a BLOCK component", () => {
+    expect(parseBlocks('<Verdict value="yes">shipped</Verdict>')[0]).toMatchObject({
+      type: "component",
+      name: "Verdict",
+    });
+  });
+
+  test("a Verdict mid-text is left as a text block by the block parser", () => {
+    // The block parser only claims a component that owns its whole trimmed line;
+    // mid-sentence occurrences fall through to text and are picked up inline.
+    expect(parseBlocks('see <Verdict value="yes">shipped</Verdict> now')).toEqual([
+      { type: "text", lines: ['see <Verdict value="yes">shipped</Verdict> now'] },
+    ]);
+    expect(scanInlineComponents('see <Verdict value="yes">shipped</Verdict> now')).toEqual([
+      { kind: "text", text: "see " },
+      { kind: "component", name: "Verdict", attrs: { value: "yes" }, text: "shipped" },
+      { kind: "text", text: " now" },
+    ]);
   });
 });
 

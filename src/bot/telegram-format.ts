@@ -1,4 +1,10 @@
-import { parseBlocks, normalizeVerdictValue, parseMeterAttrs, parseChecklist } from "../format/markdown-ast.ts";
+import {
+  parseBlocks,
+  scanInlineComponents,
+  normalizeVerdictValue,
+  parseMeterAttrs,
+  parseChecklist,
+} from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
@@ -70,20 +76,52 @@ const telegramRenderer: BlockRenderer = {
         return children;
       case "Tab":
         return attrs.label ? `— ${escapeHtml(attrs.label)} —\n${children}` : children;
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
+    }
+  },
+  inlineComponent(name, attrs, text) {
+    switch (name) {
+      case "Verdict": {
+        const value = normalizeVerdictValue(attrs.value);
+        const label = text.trim() || (value === "yes" ? "Yes" : "No");
+        return `${value === "yes" ? "✅" : "❌"} ${label}`;
+      }
+      case "Pill":
+        return `[${text.trim()}]`;
+      default: {
+        const _exhaustive: never = name;
+        return _exhaustive;
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),
 };
 
 function renderInline(text: string): string {
-  // Selective ampersand escape — preserve existing entities verbatim.
-  let result = text.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
-
   const ph = new Placeholders();
 
-  result = result.replace(/`([^`]+)`/g, (_m, code: string) =>
+  // Inline code FIRST — park it before the component scan so a complete
+  // component tag inside backticks stays literal code instead of being
+  // interpreted (the parked sentinel carries no `<`, shielding it from the scan).
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
     ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
   );
+
+  // Inline components (Verdict, Pill) on the code-shielded text: substitute each
+  // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
+  // into the string. No parking needed — the fallback is plain text, so the label
+  // rides through the ampersand + tag-escape passes below exactly like prose.
+  result = scanInlineComponents(result)
+    .map((seg) =>
+      seg.kind === "text" ? seg.text : telegramRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
+    )
+    .join("");
+
+  // Selective ampersand escape — preserve existing entities verbatim.
+  result = result.replace(/&(?!amp;|lt;|gt;|quot;)/g, "&amp;");
 
   // Link text is NOT inline-processed — prevents nested-tag tangles like
   // <a><i>...</a></i> that Telegram rejects.

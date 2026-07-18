@@ -73,4 +73,16 @@ describe("Placeholders", () => {
     // Manually-crafted sentinel pointing at a slot that does not exist
     expect(p.restore("a \x00CODE5\x00 b")).toBe("a  b");
   });
+
+  test("restores to a fixed point when a value re-introduces an earlier marker", () => {
+    // Nested parking: INNER is stored first, then OUTER's value embeds INNER's
+    // sentinel. A single pass (INNER visited before OUTER re-introduced it) would
+    // leak a raw NUL; the fixed-point loop must resolve it.
+    const p = new Placeholders();
+    const inner = p.add("INNER", "<code>x</code>");
+    const outer = p.add("OUTER", `<span>${inner}</span>`);
+    const restored = p.restore(outer);
+    expect(restored).toBe("<span><code>x</code></span>");
+    expect(restored).not.toContain("\x00");
+  });
 });

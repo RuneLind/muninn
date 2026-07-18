@@ -402,6 +402,65 @@ function tryParseComponent(
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 
+// ── Inline components ───────────────────────────────────────────────────────
+// A strict subset of the block vocabulary may ALSO appear inline — embedded
+// mid-sentence, mid-heading, in a list item, blockquote line, or table cell —
+// not just as an own-line block. `scanInlineComponents` splits one inline string
+// into literal text runs and component tokens for exactly these names, using the
+// same attr whitelist + escape contract as the block parser. Each platform's
+// `renderInline` calls it at its top and routes component tokens through the
+// renderer's `inlineComponent` method.
+//
+// Dual behavior is deliberate: a component that owns its whole (trimmed) line is
+// still claimed by the BLOCK parser first (`tryParseComponent` runs before any
+// line-render), so a `<Verdict>` alone on a line is a block; only leftover
+// mid-text occurrences ever reach a `renderInline` string and take this path.
+// Unclosed / malformed tags stay literal text — the same degradation contract as
+// blocks (the platform renderer then escapes them).
+
+export const INLINE_COMPONENT_NAMES = ["Verdict", "Pill"] as const;
+export type InlineComponentName = (typeof INLINE_COMPONENT_NAMES)[number];
+
+export type InlineSegment =
+  | { kind: "text"; text: string }
+  | { kind: "component"; name: InlineComponentName; attrs: Record<string, string>; text: string };
+
+// `<Name …>text</Name>` or `<Name …/>` for the inline whitelist only. Attr shape
+// mirrors COMPONENT_OPEN_RE (double-quoted values); the paired form's inner text
+// is captured non-greedily so the FIRST matching close wins. Built from the name
+// list so the whitelist lives in one place. Global — callers reset lastIndex.
+const INLINE_COMPONENT_RE = new RegExp(
+  `<(${INLINE_COMPONENT_NAMES.join("|")})((?:\\s+[A-Za-z][\\w-]*="[^"]*")*)\\s*(?:/>|>([\\s\\S]*?)</\\1>)`,
+  "g",
+);
+
+/**
+ * Split an inline string into literal-text runs and inline-component tokens.
+ * Linear in input length (one global-regex sweep), so a page of thousands of
+ * inline components stays single-pass — this runs on every streaming delta the
+ * same way the block parser does. A string with no `<` short-circuits to a
+ * single text run.
+ */
+export function scanInlineComponents(text: string): InlineSegment[] {
+  if (text.indexOf("<") === -1) return [{ kind: "text", text }];
+
+  const segments: InlineSegment[] = [];
+  INLINE_COMPONENT_RE.lastIndex = 0;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_COMPONENT_RE.exec(text)) !== null) {
+    if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
+    const name = m[1] as InlineComponentName;
+    const attrs = parseAttrs(m[2] ?? "", name);
+    // Self-closing → group 3 is undefined; treat as empty inner text.
+    segments.push({ kind: "component", name, attrs, text: m[3] ?? "" });
+    last = INLINE_COMPONENT_RE.lastIndex;
+  }
+  if (segments.length === 0) return [{ kind: "text", text }];
+  if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });
+  return segments;
+}
+
 /** Extract whitelisted double-quoted attributes for `name`; drop the rest. */
 function parseAttrs(attrStr: string, name: ComponentName): Record<string, string> {
   const allowed = COMPONENT_ATTRS[name];
