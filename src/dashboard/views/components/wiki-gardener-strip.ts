@@ -46,6 +46,24 @@ export interface LastBacklogRun {
   minClusterSize?: number;
 }
 
+/**
+ * The bot's `wiki-gardener` watcher, projected for the strip's fresh segment (the
+ * "Run gardener now" affordance + next-run time). Merged into the LIVE fields on
+ * every GET (never cached), mirroring the server's `BacklogWatcherInfo`. Absent on
+ * a degraded/older server ⇒ the fresh segment falls back to the plain
+ * "weekly watcher's turf" note.
+ */
+export interface BacklogWatcherInfo {
+  id: string;
+  enabled: boolean;
+  /** Epoch ms of the last run (null ⇒ never run ⇒ due on the next tick). */
+  lastRunAt: number | null;
+  /** Epoch ms of the next scheduled run (null ⇒ due on the next tick). */
+  nextRunAt: number | null;
+  /** A force-run is already queued (a just-clicked "Run now", or an external trigger). */
+  forceQueued: boolean;
+}
+
 /** Live progress of an in-flight backlog drain (mirrors the server shape). */
 export interface BacklogProgress {
   stage: "assembling" | "harvesting" | "clustering" | "resolving" | "drafting";
@@ -77,6 +95,8 @@ export interface IngestBacklogResponse {
   freshBySource?: { label: string; count: number }[];
   /** The resolved age-floor window in days — labels "new (last Nd)"; 0/absent ⇒ degraded. */
   freshWindowDays?: number;
+  /** The bot's wiki-gardener watcher (next-run + Run-now affordance). Null/absent ⇒ no affordance. */
+  watcher?: BacklogWatcherInfo | null;
   watcherSeeded?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
@@ -100,6 +120,26 @@ export interface BacklogStripModel {
   freshPerSource: { label: string; count: number }[];
   /** Age-floor window in days; 0 ⇒ degraded response, hide the fresh segment. */
   freshWindowDays: number;
+  /**
+   * The wiki-gardener watcher id when a manual "Run gardener now" is offered:
+   * non-null iff there are fresh docs, no run is in flight, and the watcher is
+   * enabled with no force-run already queued. Null otherwise (renderer shows the
+   * next-run text and/or the fallback note instead of a button).
+   */
+  watcherRunNow: { id: string } | null;
+  /**
+   * A force-run is already queued for the (enabled) watcher — the strip shows a
+   * "queued — starts on the next scheduler tick" note instead of the button (and
+   * the next-run text is suppressed so the two don't contradict). Only meaningful
+   * when fresh > 0 (the renderer gates on that).
+   */
+  watcherQueued: boolean;
+  /**
+   * Relative next-weekly-run copy for the fresh segment ("next weekly run in ~4d"
+   * / "~3h", or "next weekly run due on next tick" when never-run/past-due). Null
+   * when there is no enabled watcher or the response is degraded (freshWindowDays 0).
+   */
+  nextRunText: string | null;
   draftsAwaitingReview: number;
   running: boolean;
   /** Live drain progress when this bot's own drain holds the mutex (else null). */
@@ -123,6 +163,38 @@ function numOr(v: unknown, fallback: number): number {
 }
 
 /**
+ * Defensive parse of the live `watcher` block (a degraded/older server may omit it
+ * or emit a malformed shape). Returns null unless the id + booleans are the right
+ * types; `lastRunAt`/`nextRunAt` are coerced to `number | null`.
+ */
+function parseWatcher(v: unknown): BacklogWatcherInfo | null {
+  if (!v || typeof v !== "object") return null;
+  const w = v as Record<string, unknown>;
+  if (typeof w.id !== "string" || !w.id) return null;
+  if (typeof w.enabled !== "boolean") return null;
+  const lastRunAt = typeof w.lastRunAt === "number" && Number.isFinite(w.lastRunAt) ? w.lastRunAt : null;
+  const nextRunAt = typeof w.nextRunAt === "number" && Number.isFinite(w.nextRunAt) ? w.nextRunAt : null;
+  return { id: w.id, enabled: w.enabled, lastRunAt, nextRunAt, forceQueued: w.forceQueued === true };
+}
+
+/**
+ * Relative "next weekly run" copy from the watcher's `nextRunAt`. Days granularity
+ * at ≥1d, hours below; a never-run or past-due watcher is due on the next scheduler
+ * tick. `now` is injected so the derivation stays pure/testable.
+ */
+function computeNextRunText(w: BacklogWatcherInfo, now: number): string {
+  if (w.lastRunAt == null || w.nextRunAt == null || w.nextRunAt <= now) {
+    return "next weekly run due on next tick";
+  }
+  const ms = w.nextRunAt - now;
+  const hours = ms / 3_600_000;
+  if (hours >= 24) {
+    return `next weekly run in ~${Math.round(hours / 24)}d`;
+  }
+  return `next weekly run in ~${Math.max(1, Math.round(hours))}h`;
+}
+
+/**
  * Pure model derivation. `pendingDraftCount` comes from the proposal list the
  * page already loads (count of `status === "draft"`), passed in so this stays
  * DOM-free.
@@ -130,6 +202,7 @@ function numOr(v: unknown, fallback: number): number {
 export function backlogStripModel(
   data: IngestBacklogResponse,
   pendingDraftCount: number,
+  now: number = Date.now(),
 ): BacklogStripModel {
   const queued = numOr(data.queued, 0);
   // Degraded response (no live fields) ⇒ remaining falls back to queued, i.e.
@@ -152,6 +225,18 @@ export function backlogStripModel(
   const controlHidden = data.watcherSeeded === false;
   const batchSize = numOr(data.batchSize, 0);
   const maxProposals = numOr(data.maxProposals, 0);
+  // Watcher affordance (fresh segment). Only an ENABLED watcher offers a next-run
+  // time / Run-now button — a disabled watcher never fires even when force-queued
+  // (getWatchersDueNow filters enabled=true), so it degrades to the plain note. The
+  // fresh window doubles as the presence marker (0 ⇒ degraded ⇒ no watcher affordance).
+  const watcher = parseWatcher(data.watcher);
+  const watcherUsable = !!watcher && watcher.enabled && freshWindowDays > 0;
+  const watcherQueued = watcherUsable && watcher!.forceQueued;
+  const watcherRunNow =
+    watcherUsable && !running && freshTotal > 0 && !watcher!.forceQueued
+      ? { id: watcher!.id }
+      : null;
+  const nextRunText = watcherUsable ? computeNextRunText(watcher!, now) : null;
   return {
     totalNeverIngested: queued,
     perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
@@ -160,6 +245,9 @@ export function backlogStripModel(
     freshTotal,
     freshPerSource,
     freshWindowDays,
+    watcherRunNow,
+    watcherQueued,
+    nextRunText,
     draftsAwaitingReview: Math.max(0, numOr(pendingDraftCount, 0)),
     running,
     progress: data.progress ?? null,
@@ -189,6 +277,45 @@ function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
 }
 
 /**
+ * The fresh segment's trailing affordance (pure HTML). With watcher info present
+ * (enabled watcher + a live response): the next-weekly-run time, plus either a
+ * "Run gardener now" button ({@link BacklogStripModel.watcherRunNow}) or a
+ * "queued — starts on the next scheduler tick" note ({@link BacklogStripModel.watcherQueued}),
+ * which suppresses the next-run text so the queued state doesn't contradict it.
+ * While a run is in flight only the next-run time shows (the control area's
+ * running/progress rendering already owns the run state — no double-render). With
+ * NO watcher info (a degraded/older server) it falls back to the original dead-end
+ * "weekly watcher's turf" note. Empty when there are no fresh docs.
+ */
+function freshWatcherSuffixHtml(model: BacklogStripModel): string {
+  if (model.freshTotal <= 0) return "";
+  const hasWatcherInfo = model.nextRunText != null || !!model.watcherRunNow || model.watcherQueued;
+  if (!hasWatcherInfo) {
+    // Degraded/older server (no watcher block) — the original dead-end note.
+    return ` <span class="bk-note">— weekly watcher's turf</span>`;
+  }
+  const parts: string[] = [];
+  // A queued force-run wins: showing "next weekly run in ~Nd" alongside "queued —
+  // starts on the next scheduler tick" reads as a contradiction, so the queued note
+  // suppresses the next-run text.
+  const queuedNoteShows = !model.running && model.watcherQueued;
+  if (model.nextRunText && !queuedNoteShows) {
+    parts.push(`<span class="bk-note">${esc(model.nextRunText)}</span>`);
+  }
+  if (!model.running) {
+    if (model.watcherQueued) {
+      parts.push(`<span class="bk-note bk-queued">gardener run queued — starts on the next scheduler tick</span>`);
+    } else if (model.watcherRunNow) {
+      parts.push(
+        `<button class="gard-btn bk-run-watcher" data-backlog-action="run-watcher" ` +
+          `data-watcher-id="${esc(model.watcherRunNow.id)}">Run gardener now</button>`,
+      );
+    }
+  }
+  return parts.map((p) => `<span class="bk-sep"> · </span>${p}`).join("");
+}
+
+/**
  * The honest labeled sentence (pure HTML string) — recency-first: the lead is
  * "how many NEW summaries aren't in the wiki" (the number the all-time totals
  * used to bury), then what a drain can act on now. The all-time accounting moved
@@ -203,8 +330,8 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
     if (model.freshPerSource.length) {
       freshSeg +=
         ": " + perSourceBreakdownHtml(model.freshPerSource.map((s) => ({ label: s.label, n: s.count })));
-      freshSeg += ` <span class="bk-note">— weekly watcher's turf</span>`;
     }
+    freshSeg += freshWatcherSuffixHtml(model);
     segs.push(freshSeg);
   }
   segs.push(`${strong(model.eligibleNow)} drainable now`);

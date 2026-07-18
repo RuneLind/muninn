@@ -180,7 +180,10 @@ function sameOsloDay(a: number, b: number): boolean {
  * (interval 7d + hour 10) reads ~next Sunday 10:00, not "due now" every day —
  * the interval gate dominates until a week has elapsed.
  */
-export function computeWatcherNextRun(w: Watcher, now: number): { nextRunAt: number; label?: string } {
+export function computeWatcherNextRun(
+  w: Pick<Watcher, "config" | "forceNextRun" | "lastRunAt" | "intervalMs">,
+  now: number,
+): { nextRunAt: number; label?: string } {
   if (w.forceNextRun) return { nextRunAt: now, label: "queued for next tick" };
   const cfg = (w.config ?? {}) as { hour?: number; minute?: number };
 
