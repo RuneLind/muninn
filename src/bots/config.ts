@@ -139,6 +139,11 @@ export interface BotConfig {
   channelListening?: ChannelListeningConfig;
   /** Show the request progress waterfall overlay in the web chat (default true) */
   showWaterfall?: boolean;
+  /** Opt in to teaching the bot the presentational block-component vocabulary
+   *  (Callout/Verdict/Pill/Figure/FileRef/ComparisonTable) in its chat system
+   *  prompt. Absent/false ⇒ plain markdown only. Web chat renders the components;
+   *  Telegram/Slack show the compiler-enforced plain-text fallbacks. */
+  componentAnswers?: boolean;
   /** Configurable prompts for research flows */
   prompts?: BotPrompts;
   /**
@@ -582,7 +587,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -601,6 +606,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateScalarField(botSettings, "timeoutMs", "number", name);
         validateScalarField(botSettings, "contextWindow", "number", name);
         validateScalarField(botSettings, "showWaterfall", "boolean", name);
+        validateScalarField(botSettings, "componentAnswers", "boolean", name);
         validateGardenerConfig(botSettings, name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
@@ -668,6 +674,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       restrictedTools: botSettings.restrictedTools as RestrictedTools | undefined,
       channelListening: botSettings.channelListening as ChannelListeningConfig | undefined,
       showWaterfall: botSettings.showWaterfall as boolean | undefined,
+      componentAnswers: botSettings.componentAnswers as boolean | undefined,
       prompts: loadPromptsFromDir(dir, name),
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,

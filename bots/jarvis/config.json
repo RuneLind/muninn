@@ -8,5 +8,6 @@
     "wiki",
     "wiki-life"
   ],
-  "haikuBackend": "anthropic"
+  "haikuBackend": "anthropic",
+  "componentAnswers": true
 }
