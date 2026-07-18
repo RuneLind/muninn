@@ -30,8 +30,10 @@
  *  - Fail-visible: on any render rejection the original `<pre>` is left exactly
  *    as-is — never blanked, never an error graphic.
  *
- * Scope is the wiki reader only. Chat, research answers, and explainer iframes
- * are untouched; the server render pipeline is unchanged.
+ * Consumers: the wiki reader (direct import), the wiki Ask pane, and the
+ * /research answer render (via the wiki-mermaid-client globalThis bundle) all
+ * call the same exported enhanceMermaid. Chat and explainer iframes are
+ * untouched; the server render pipeline is unchanged.
  */
 
 /**
