@@ -11,6 +11,7 @@ import {
   backlogBannerHtml,
   backlogStripHtml,
   type BacklogProgress,
+  type BacklogWatcherInfo,
   type IngestBacklogResponse,
 } from "./wiki-gardener-strip.ts";
 
@@ -156,6 +157,156 @@ describe("recency-first sentence + collapsed tail", () => {
       0,
     );
     expect(m.freshPerSource).toEqual([{ label: "YouTube", count: 3 }]);
+  });
+});
+
+describe("backlogStripModel — Run-gardener-now watcher affordance", () => {
+  const NOW = 1_700_000_000_000;
+  const DAY = 86_400_000;
+  function watcher(over: Partial<BacklogWatcherInfo> = {}): BacklogWatcherInfo {
+    return {
+      id: "w-1",
+      enabled: true,
+      lastRunAt: NOW - 3 * DAY,
+      nextRunAt: NOW + 4 * DAY, // 3d ago + 7d interval ⇒ in ~4d
+      forceQueued: false,
+      ...over,
+    };
+  }
+  // Fresh docs present by default so the button's fresh-gate is satisfied.
+  function freshBase(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse {
+    return base({ fresh: 5, freshBySource: [{ label: "YouTube", count: 5 }], ...over });
+  }
+
+  test("happy path: fresh + enabled + not queued + idle ⇒ Run-now button + next-run text", () => {
+    const m = backlogStripModel(freshBase({ watcher: watcher() }), 0, NOW);
+    expect(m.watcherRunNow).toEqual({ id: "w-1" });
+    expect(m.watcherQueued).toBe(false);
+    expect(m.nextRunText).toBe("next weekly run in ~4d");
+  });
+
+  test("hours granularity below a day", () => {
+    const m = backlogStripModel(
+      freshBase({ watcher: watcher({ nextRunAt: NOW + 3 * 3_600_000 }) }),
+      0,
+      NOW,
+    );
+    expect(m.nextRunText).toBe("next weekly run in ~3h");
+  });
+
+  test("forceQueued ⇒ no button, watcherQueued true (still shows next-run text)", () => {
+    const m = backlogStripModel(freshBase({ watcher: watcher({ forceQueued: true }) }), 0, NOW);
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.watcherQueued).toBe(true);
+    expect(m.nextRunText).toBe("next weekly run in ~4d");
+  });
+
+  test("a run in flight ⇒ no button even with fresh + enabled watcher", () => {
+    const m = backlogStripModel(freshBase({ running: true, watcher: watcher() }), 0, NOW);
+    expect(m.watcherRunNow).toBeNull();
+  });
+
+  test("no watcher block (degraded/older server) ⇒ no affordance, no next-run text", () => {
+    const m = backlogStripModel(freshBase({ watcher: null }), 0, NOW);
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.watcherQueued).toBe(false);
+    expect(m.nextRunText).toBeNull();
+  });
+
+  test("disabled watcher ⇒ no affordance, no next-run text (never fires even if force-queued)", () => {
+    const m = backlogStripModel(
+      freshBase({ watcher: watcher({ enabled: false, forceQueued: true }) }),
+      0,
+      NOW,
+    );
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.watcherQueued).toBe(false);
+    expect(m.nextRunText).toBeNull();
+  });
+
+  test("zero fresh ⇒ no Run-now button (but next-run text still derived for an enabled watcher)", () => {
+    const m = backlogStripModel(base({ fresh: 0, freshBySource: [], watcher: watcher() }), 0, NOW);
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.nextRunText).toBe("next weekly run in ~4d");
+  });
+
+  test("nextRunText: never-run (lastRunAt null) or past-due ⇒ due on next tick", () => {
+    const neverRun = backlogStripModel(
+      freshBase({ watcher: watcher({ lastRunAt: null, nextRunAt: null }) }),
+      0,
+      NOW,
+    );
+    expect(neverRun.nextRunText).toBe("next weekly run due on next tick");
+    const pastDue = backlogStripModel(
+      freshBase({ watcher: watcher({ nextRunAt: NOW - 1 }) }),
+      0,
+      NOW,
+    );
+    expect(pastDue.nextRunText).toBe("next weekly run due on next tick");
+  });
+
+  test("degraded response (freshWindowDays 0) ⇒ no watcher affordance even with a watcher block", () => {
+    const degraded = freshBase({ watcher: watcher() });
+    delete degraded.freshWindowDays;
+    const m = backlogStripModel(degraded, 0, NOW);
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.nextRunText).toBeNull();
+  });
+
+  test("malformed watcher block ⇒ parsed to null (no affordance)", () => {
+    const m = backlogStripModel(
+      freshBase({ watcher: { id: 7, enabled: "yes" } as never }),
+      0,
+      NOW,
+    );
+    expect(m.watcherRunNow).toBeNull();
+    expect(m.nextRunText).toBeNull();
+  });
+});
+
+describe("backlogSentenceHtml — Run-gardener-now fresh segment", () => {
+  const NOW = 1_700_000_000_000;
+  const DAY = 86_400_000;
+  function watcher(over: Partial<BacklogWatcherInfo> = {}): BacklogWatcherInfo {
+    return { id: "w-1", enabled: true, lastRunAt: NOW - 3 * DAY, nextRunAt: NOW + 4 * DAY, forceQueued: false, ...over };
+  }
+  function freshBase(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse {
+    return base({ fresh: 5, freshBySource: [{ label: "YouTube", count: 5 }], ...over });
+  }
+
+  test("happy path: fresh segment carries next-run text + the Run-now button markup", () => {
+    const html = backlogSentenceHtml(backlogStripModel(freshBase({ watcher: watcher() }), 0, NOW));
+    expect(html).toContain("next weekly run in ~4d");
+    expect(html).toContain('data-backlog-action="run-watcher"');
+    expect(html).toContain('data-watcher-id="w-1"');
+    expect(html).toContain("Run gardener now");
+    // The dead-end fallback note is replaced, not appended.
+    expect(html).not.toContain("weekly watcher's turf");
+  });
+
+  test("queued state: the note replaces the button", () => {
+    const html = backlogSentenceHtml(
+      backlogStripModel(freshBase({ watcher: watcher({ forceQueued: true }) }), 0, NOW),
+    );
+    expect(html).toContain("gardener run queued — starts within ~1 min");
+    expect(html).not.toContain('data-backlog-action="run-watcher"');
+    expect(html).toContain("next weekly run in ~4d");
+  });
+
+  test("a run in flight: next-run text shows, but no button/queued note (control area owns run state)", () => {
+    const html = backlogSentenceHtml(
+      backlogStripModel(freshBase({ running: true, watcher: watcher({ forceQueued: true }) }), 0, NOW),
+    );
+    expect(html).toContain("next weekly run in ~4d");
+    expect(html).not.toContain('data-backlog-action="run-watcher"');
+    expect(html).not.toContain("gardener run queued");
+  });
+
+  test("degrades to the old 'weekly watcher's turf' label when there is no watcher block", () => {
+    const html = backlogSentenceHtml(backlogStripModel(freshBase({ watcher: null }), 0, NOW));
+    expect(html).toContain("weekly watcher's turf");
+    expect(html).not.toContain('data-backlog-action="run-watcher"');
+    expect(html).not.toContain("next weekly run");
   });
 });
 

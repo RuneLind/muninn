@@ -6,6 +6,7 @@ import { getWikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
 import { buildIndexEntry, selectWirablePages } from "../../gardener/wire.ts";
 import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
+import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
@@ -185,9 +186,18 @@ async function finishProposal(
  *  the shared {@link CoverageDeps} shape (also used by the summaries Stats route). */
 export type IngestBacklogDeps = CoverageDeps;
 
-/** A minimal `wiki-gardener` watcher projection — just the FK the offered memory needs. */
+/**
+ * A minimal `wiki-gardener` watcher projection: the FK the offered memory needs
+ * (`id`), plus the scheduling fields the strip's fresh-segment affordance reads
+ * (`enabled`/`lastRunAt`/`intervalMs`/`forceNextRun`) to render the next-weekly-run
+ * time + the "Run gardener now" button.
+ */
 export interface GardenerWatcherRef {
   id: string;
+  enabled: boolean;
+  lastRunAt: number | null;
+  intervalMs: number;
+  forceNextRun: boolean;
 }
 
 /**
@@ -208,7 +218,9 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   ...DEFAULT_COVERAGE_DEPS,
   getWikiGardenerWatcher: async (botName) => {
     const w = await getWikiGardenerWatcher(botName);
-    return w ? { id: w.id } : null;
+    return w
+      ? { id: w.id, enabled: w.enabled, lastRunAt: w.lastRunAt, intervalMs: w.intervalMs, forceNextRun: w.forceNextRun }
+      : null;
   },
   getSnapshot: (watcherId, key) => getWatcherSnapshot(watcherId, key),
   setSnapshot: (watcherId, key, value) => setWatcherSnapshot(watcherId, key, value),
@@ -268,6 +280,13 @@ export interface BacklogLiveFields {
   freshWindowDays: number;
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
+  /**
+   * The bot's wiki-gardener watcher, projected for the strip's fresh-segment
+   * affordance (next-weekly-run time + "Run gardener now"). Null when the bot has
+   * no seeded watcher. `nextRunAt` is `lastRunAt + intervalMs` (null ⇒ never run ⇒
+   * due on the next tick); `forceQueued` reflects a pending manual/external trigger.
+   */
+  watcher?: BacklogWatcherInfo | null;
   /** Live progress of an in-flight drain (null when idle — including weekly runs). */
   progress: BacklogProgress | null;
   /**
@@ -815,6 +834,19 @@ export function registerWikiGardenerRoutes(
         }
       }
 
+      // Watcher projection for the strip's fresh-segment affordance. `nextRunAt` is
+      // the interval-based next fire (lastRunAt + intervalMs); a never-run watcher
+      // (lastRunAt null) is due on the next tick, so nextRunAt stays null too.
+      const watcherInfo: BacklogWatcherInfo | null = watcher
+        ? {
+            id: watcher.id,
+            enabled: watcher.enabled,
+            lastRunAt: watcher.lastRunAt ?? null,
+            nextRunAt: watcher.lastRunAt != null ? watcher.lastRunAt + watcher.intervalMs : null,
+            forceQueued: watcher.forceNextRun === true,
+          }
+        : null;
+
       return c.json(
         mergeBacklogLiveFields(data, {
           running,
@@ -826,6 +858,7 @@ export function registerWikiGardenerRoutes(
           freshWindowDays: minAgeDays,
           lastBacklogRun,
           watcherSeeded: !!watcher,
+          watcher: watcherInfo,
           progress: getBacklogProgress(bot.name),
           interrupted,
         }),

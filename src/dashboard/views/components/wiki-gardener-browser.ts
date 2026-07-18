@@ -436,6 +436,81 @@ async function startBacklogRun(): Promise<void> {
   }
 }
 
+// Poll the backlog GET after a manual "Run gardener now" until the scheduler
+// claims the forced run (`running` true → hand off to pollBacklogUntilDone) or the
+// force flag clears without a visible run (a very fast run we missed between polls —
+// do one final refresh + reload proposals). The forced run fires within one
+// scheduler tick (~60s), so cap the wait at ~3 min to avoid an endless loop if the
+// scheduler is disabled (dev:chat) or the flag is externally cleared.
+let runStartPolling = false;
+function pollBacklogUntilRunStarts(): void {
+  if (runStartPolling || backlogPolling) return;
+  runStartPolling = true;
+  let attempts = 0;
+  const tick = (): void => {
+    fetch(withBot("/api/wiki/ingest-backlog"))
+      .then((r) => r.json())
+      .then((data: IngestBacklogResponse) => {
+        renderBacklog(data);
+        if (data.running) {
+          runStartPolling = false;
+          pollBacklogUntilDone(); // the run started — the drain poller owns it now
+          return;
+        }
+        attempts++;
+        const stillQueued = data.watcher?.forceQueued === true;
+        if (stillQueued && attempts < 60) {
+          setTimeout(tick, 3000);
+          return;
+        }
+        // Flag cleared with no visible run (fast run we missed), or we gave up: do a
+        // final refresh + reload proposals so any drafts land, then stop.
+        runStartPolling = false;
+        fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
+          .then((r) => r.json())
+          .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+          .catch(() => {});
+        loadProposals();
+      })
+      .catch(() => {
+        runStartPolling = false;
+      });
+  };
+  setTimeout(tick, 3000);
+}
+
+// Manually queue a wiki-gardener watcher run (fresh, in-window docs are the weekly
+// watcher's turf — the drain refuses them, so this is the only affordance to act on
+// them without waiting up to a week). Reuses the generic watcher trigger endpoint
+// (sets force_next_run; the scheduler claims it on the next tick). Optimistically
+// swaps the button to a queued state, then lets the strip refresh pick up
+// forceQueued/running from the server.
+async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<void> {
+  btn.disabled = true;
+  btn.textContent = "Queuing…";
+  try {
+    const res = await fetch("/api/watchers/" + encodeURIComponent(id) + "/trigger", { method: "POST" });
+    if (!res.ok) throw new Error("status " + res.status);
+    // Refresh the strip: the POST persisted force_next_run, so the GET now reports
+    // forceQueued → the fresh segment renders the queued note in place of the button.
+    const data = await fetch(withBot("/api/wiki/ingest-backlog"))
+      .then((r) => r.json())
+      .catch(() => null);
+    if (data) renderBacklog(data as IngestBacklogResponse);
+    pollBacklogUntilRunStarts();
+  } catch {
+    // Restore the button + surface the error the same way startBacklogRun does.
+    if (lastBacklogData) renderBacklog(lastBacklogData);
+    const el = document.getElementById("gardBacklog");
+    if (el) {
+      const note = document.createElement("span");
+      note.className = "bk-err";
+      note.textContent = " failed to queue gardener run";
+      el.appendChild(note);
+    }
+  }
+}
+
 async function resetBacklog(): Promise<void> {
   try {
     await fetch(withBot("/api/wiki/gardener/backlog-reset"), { method: "POST" });
@@ -513,6 +588,10 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     void startBacklogRun();
   } else if (action === "reset") {
     void resetBacklog();
+  } else if (action === "run-watcher") {
+    // "Run gardener now" on the fresh segment — queue the weekly watcher.
+    const id = btn.getAttribute("data-watcher-id");
+    if (id) void triggerWatcherRun(id, btn as HTMLButtonElement);
   } else if (action === "cancel-run") {
     // Soft-cancel the in-flight drain (distinct from the confirm panel's "cancel").
     void cancelBacklogRun();

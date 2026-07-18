@@ -105,6 +105,16 @@ export async function renderWikiGardenerPage(opts?: {
       font-size: 12px; padding: 4px 12px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-reset:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Inline "Run gardener now" on the fresh segment — compact accent-outlined so it
+       reads as an affordance without dominating the sentence. */
+    .gard-backlog .gard-btn.bk-run-watcher {
+      background: transparent; border: 1px solid var(--accent); color: var(--accent-light);
+      font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 7px;
+      font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .gard-btn.bk-run-watcher:hover:not(:disabled) { background: var(--accent); color: #fff; }
+    .gard-backlog .gard-btn.bk-run-watcher:disabled { opacity: 0.55; cursor: default; }
+    .gard-backlog .bk-queued { color: var(--accent-light); font-size: 12px; font-weight: 600; }
     /* Inline informed-consent panel — full-width row below the strip, hidden until confirm. */
     .gard-backlog .bk-confirm {
       display: none; flex-basis: 100%; flex-direction: column; gap: 10px;

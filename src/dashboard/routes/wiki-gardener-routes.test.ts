@@ -241,6 +241,45 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     expect(merged.maxProposals).toBe(8);
   });
 
+  test("carries the watcher block through to the wire (Run-gardener-now affordance)", () => {
+    const merged = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      offeredStillQueued: 0,
+      fresh: 3,
+      freshBySource: [{ label: "YouTube", count: 3 }],
+      freshWindowDays: 14,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+      watcher: { id: "w-1", enabled: true, lastRunAt: 1000, nextRunAt: 1000 + 604_800_000, forceQueued: false },
+      progress: null,
+    });
+    expect(merged.watcher).toEqual({
+      id: "w-1",
+      enabled: true,
+      lastRunAt: 1000,
+      nextRunAt: 1000 + 604_800_000,
+      forceQueued: false,
+    });
+
+    // No seeded watcher ⇒ null carries through cleanly (no affordance).
+    const noWatcher = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      offeredStillQueued: 0,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
+      lastBacklogRun: null,
+      watcherSeeded: false,
+      watcher: null,
+      progress: null,
+    });
+    expect(noWatcher.watcher).toBeNull();
+  });
+
   test("carries the interrupted-run field through to the wire (PR 3 recovery banner)", () => {
     const merged = mergeBacklogLiveFields(cached, {
       running: false,
