@@ -55,6 +55,9 @@ const slackRenderer: BlockRenderer = {
         if (items.length === 0) return children;
         return items.map((it) => `${it.checked ? "☑" : "☐"} ${renderInline(it.text)}`).join("\n");
       }
+      case "AnnotatedCode":
+        // file line + fence + annotation paragraphs (already in children).
+        return attrs.file ? `*${renderInline(attrs.file)}*\n${children}` : children;
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

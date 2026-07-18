@@ -460,4 +460,30 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).not.toContain('<ul class="checklist">');
     expect(out).toContain("just prose, no list");
   });
+
+  test("AnnotatedCode renders file header + code panel + annotation notes", () => {
+    const out = formatWebHtml(
+      "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nThis sets x.\n</AnnotatedCode>",
+    );
+    expect(out).toContain('<div class="annotated-code">');
+    expect(out).toContain('<div class="annotated-code-file">src/x.ts</div>');
+    expect(out).toContain('<div class="annotated-code-panel"><pre><code class="language-ts">const x = 1;</code></pre></div>');
+    expect(out).toContain('<div class="annotated-code-notes">');
+    expect(out).toContain("This sets x.");
+  });
+
+  test("AnnotatedCode escapes the file header and code (no HTML injection)", () => {
+    const out = formatWebHtml(
+      "<AnnotatedCode file=\"a<b\" lang=\"ts\">\n```ts\n<script>alert(1)</script>\n```\n</AnnotatedCode>",
+    );
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;script&gt;");
+    expect(out).toContain("a&lt;b");
+  });
+
+  test("AnnotatedCode with no fence falls back to the rendered children", () => {
+    const out = formatWebHtml("<AnnotatedCode file=\"x.ts\">\njust notes\n</AnnotatedCode>");
+    expect(out).not.toContain('<div class="annotated-code">');
+    expect(out).toContain("just notes");
+  });
 });

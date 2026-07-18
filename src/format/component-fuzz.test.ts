@@ -190,6 +190,17 @@ describe("component fuzz — never throws, never injects", () => {
     expect(out.slack).not.toContain("<img");
   });
 
+  test("AnnotatedCode file attr + fence injection cannot escape into markup", () => {
+    const md =
+      '<AnnotatedCode file="x\"><script>alert(1)</script>" lang="ts">\n```ts\n<img src=x onerror=alert(1)>\n```\n</AnnotatedCode>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.web).toContain("&lt;img");
+    expect(out.telegram).not.toContain("<script>");
+  });
+
   test("deeply nested same-name tags do not blow the stack or mis-nest", () => {
     const depth = 50;
     const md = `${"<Callout>\n".repeat(depth)}core${"\n</Callout>".repeat(depth)}`;

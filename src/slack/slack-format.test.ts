@@ -299,5 +299,18 @@ Found it ~~wrong~~ correct.`;
       expect(out).toContain("no close");
       expect(out).not.toContain("☑");
     });
+
+    test("AnnotatedCode → file line + fence + notes fallback", () => {
+      const out = formatSlackMrkdwn(
+        "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>",
+      );
+      expect(out).toBe("*src/x.ts*\n```\nconst x = 1;\n```\n\nSets x.");
+    });
+
+    test("unclosed AnnotatedCode degrades to text (no code block emitted)", () => {
+      const out = formatSlackMrkdwn("<AnnotatedCode file=\"x.ts\">\nno close");
+      expect(out).toContain("no close");
+      expect(out).not.toContain("```");
+    });
   });
 });

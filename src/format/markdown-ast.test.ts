@@ -280,6 +280,22 @@ describe("parseBlocks — component blocks", () => {
     ]);
   });
 
+  test("AnnotatedCode keeps file/lang attrs and body fence + paragraphs", () => {
+    expect(
+      parseBlocks("<AnnotatedCode file=\"x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>"),
+    ).toEqual([
+      {
+        type: "component",
+        name: "AnnotatedCode",
+        attrs: { file: "x.ts", lang: "ts" },
+        children: [
+          { type: "code_block", lang: "ts", code: "const x = 1;" },
+          { type: "text", lines: ["", "Sets x."] },
+        ],
+      },
+    ]);
+  });
+
   test("Checklist parses its task items as a ul child", () => {
     expect(parseBlocks("<Checklist>\n- [x] Done\n- [ ] Todo\n</Checklist>")).toEqual([
       {

@@ -117,6 +117,26 @@ const webRenderer: BlockRenderer = {
           .join("");
         return `<ul class="checklist">${rows}</ul>`;
       }
+      case "AnnotatedCode": {
+        const fence = firstCodeBlock(rawChildren);
+        if (!fence) return children; // no code fence → nothing to annotate; body as-is
+        const lang = attrs.lang || fence.lang;
+        const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+        const codeHtml = `<pre><code${langClass}>${escapeHtml(fence.code)}</code></pre>`;
+        const fileHeader = attrs.file
+          ? `<div class="annotated-code-file">${escapeHtml(attrs.file)}</div>`
+          : "";
+        // Annotations are every non-fence body block (the paragraphs after it).
+        const notes = rawChildren.filter((b) => b.type !== "code_block");
+        const notesHtml = renderBlocks(notes, webRenderer);
+        const notesBlock = notesHtml.trim()
+          ? `<div class="annotated-code-notes">${notesHtml}</div>`
+          : "";
+        return (
+          `<div class="annotated-code">${fileHeader}` +
+          `<div class="annotated-code-panel">${codeHtml}</div>${notesBlock}</div>`
+        );
+      }
     }
   },
   text: (lines) => lines.map(renderInline).join("\n"),

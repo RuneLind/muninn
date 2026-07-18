@@ -43,6 +43,7 @@ export const COMPONENT_NAMES = [
   "Diff",
   "FileTree",
   "Checklist",
+  "AnnotatedCode",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -67,6 +68,7 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   Diff: [],
   FileTree: [],
   Checklist: [],
+  AnnotatedCode: ["file", "lang"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the

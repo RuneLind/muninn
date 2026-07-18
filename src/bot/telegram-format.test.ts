@@ -194,3 +194,15 @@ test("component: unclosed Checklist degrades to escaped text", () => {
   const out = formatTelegramHtml("<Checklist>\n- [x] no close");
   expect(out).toContain("&lt;Checklist&gt;");
 });
+
+test("component: AnnotatedCode → file line + fence + notes fallback", () => {
+  const out = formatTelegramHtml(
+    "<AnnotatedCode file=\"src/x.ts\" lang=\"ts\">\n```ts\nconst x = 1;\n```\n\nSets x.\n</AnnotatedCode>",
+  );
+  expect(out).toBe('<b>src/x.ts</b>\n<pre><code class="language-ts">const x = 1;</code></pre>\n\nSets x.');
+});
+
+test("component: unclosed AnnotatedCode degrades to escaped text", () => {
+  const out = formatTelegramHtml("<AnnotatedCode file=\"x.ts\">\nno close");
+  expect(out).toContain("&lt;AnnotatedCode");
+});

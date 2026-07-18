@@ -153,5 +153,29 @@ export function componentBlockCss(scope: string): string {
     ${scope} .check-done .check-mark { color: var(--status-success); }
     ${scope} .check-todo .check-mark { color: var(--text-muted); }
     ${scope} .check-todo { color: var(--text-muted); }
+    ${scope} .annotated-code {
+      margin: 1.2rem 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-surface);
+    }
+    ${scope} .annotated-code-file {
+      padding: 0.45rem 0.9rem;
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.8em;
+      color: var(--accent-light);
+      background: var(--bg-inset);
+      border-bottom: 1px solid var(--border-secondary);
+    }
+    ${scope} .annotated-code-panel pre { margin: 0; border-radius: 0; }
+    ${scope} .annotated-code-notes {
+      padding: 0.6rem 0.9rem;
+      font-size: 0.9em;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-secondary);
+    }
+    ${scope} .annotated-code-notes > :first-child { margin-top: 0; }
+    ${scope} .annotated-code-notes > :last-child { margin-bottom: 0; }
   `;
 }
