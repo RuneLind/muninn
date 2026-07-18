@@ -231,6 +231,67 @@ describe("buildWikiIndex", () => {
     expect(idx.type).toBe("note");
   });
 
+  test("blog .mdx page carries description + sanitized accent/accentDark in meta", async () => {
+    // Mirror mimir: the `blogs/` folder maps to the `blog` type via .wiki-reader.json.
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeMap: { blogs: "blog" }, typeLabels: { blog: "Blogs" } }),
+    );
+    await Bun.write(
+      path.join(root, "blogs/campaign-status.mdx"),
+      [
+        "---",
+        'title: "Campaign Status"',
+        'description: "How campaigns move through the pipeline & why <it> matters"',
+        "accent: #6c63ff",
+        "accentDark: #a5a0ff",
+        "---",
+        "",
+        "# Campaign Status",
+        "",
+        "Body with a [[Harness Engineering]] link.",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const blog = index.resolve("campaign-status")!;
+    expect(blog.type).toBe("blog");
+    expect(blog.description).toBe("How campaigns move through the pipeline & why <it> matters");
+    expect(blog.accent).toBe("#6c63ff");
+    expect(blog.accentDark).toBe("#a5a0ff");
+    // The .mdx page joins the wikilink graph like any .md page.
+    expect(index.outgoing.get("blogs/campaign-status.mdx")).toContain(
+      "concepts/harness engineering.md",
+    );
+  });
+
+  test("malformed accent frontmatter is dropped at parse time (never reaches meta)", async () => {
+    await Bun.write(
+      path.join(root, "blogs/bad-accent.mdx"),
+      [
+        "---",
+        "type: blog",
+        "title: Bad Accent",
+        "accent: red;} body{display:none}", // CSS-injection attempt
+        "accentDark: not-a-color",
+        "---",
+        "",
+        "# Bad Accent",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const bad = index.resolve("bad-accent")!;
+    expect(bad.accent).toBeUndefined();
+    expect(bad.accentDark).toBeUndefined();
+  });
+
+  test("a .md page without accent/description leaves the fields undefined", async () => {
+    const index = await buildWikiIndex(root);
+    const harness = index.resolve("harness engineering")!;
+    expect(harness.accent).toBeUndefined();
+    expect(harness.accentDark).toBeUndefined();
+    expect(harness.description).toBeUndefined();
+  });
+
   test("resolves aliases and builds backlinks both ways (relPath-keyed)", async () => {
     const index = await buildWikiIndex(root);
     // alias resolution: [[Harness Engineer]] → Harness Engineering
