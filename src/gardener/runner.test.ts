@@ -841,7 +841,7 @@ describe("runGardener — pass-1 doc→page mapping", () => {
         JSON.stringify([
           { topicKey: "context-compaction", kind: "concept", domain: "ai", label: "Context Compaction", docIds: KEYS, rationale: "clusters" },
         ]),
-      // Pass-1 maps one of those same docs onto the same page — must be covered-skipped.
+      // Pass-1 maps one of those same docs onto the same page it already sits on — a true no-op (deduped).
       callDocPageMap: async () =>
         JSON.stringify([{ docId: KEYS[0], pageTitle: "Context Compaction" }]),
     });
@@ -886,7 +886,7 @@ describe("runGardener — pass-1 doc→page mapping", () => {
     await runGardener(deps);
 
     expect(started).toContain("map");
-    expect(endAttrs["map"]).toMatchObject({ mapped: 1, synthesized: 1, appended: 0, covered_skipped: 0 });
+    expect(endAttrs["map"]).toMatchObject({ mapped: 1, synthesized: 1, appended: 0, deduped: 0 });
   });
 });
 

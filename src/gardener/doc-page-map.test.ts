@@ -185,7 +185,7 @@ describe("mergeDocPageMappings", () => {
       [{ docId: "youtube-summaries/game.md", pageTitle: "AI Industry Landscape" }],
       { pages, index, validDocKeys: new Set(["youtube-summaries/game.md"]), skipTopicKeys: new Set() },
     );
-    expect(outcome).toEqual({ mapped: 1, synthesized: 1, appended: 0, coveredSkipped: 0 });
+    expect(outcome).toEqual({ mapped: 1, synthesized: 1, appended: 0, deduped: 0 });
     expect(skipDrops).toHaveLength(0);
     expect(resolvedAll).toHaveLength(1);
     const rc = resolvedAll[0]!;
@@ -212,7 +212,7 @@ describe("mergeDocPageMappings", () => {
     expect(resolvedAll[0]!.target.existingRelPath).toBe("concepts/AI Industry Landscape.md");
   });
 
-  test("covered-skip: a doc already in an update cluster is not duplicated", () => {
+  test("deduped: a doc already in the update cluster of its OWN mapped page is a no-op", () => {
     const resolvedAll: ResolvedCluster[] = [
       {
         cluster: cluster({ topicKey: "landscape", label: "AI Industry Landscape", docIds: ["youtube-summaries/game.md"] }),
@@ -224,9 +224,70 @@ describe("mergeDocPageMappings", () => {
       [{ docId: "youtube-summaries/game.md", pageTitle: "AI Industry Landscape" }],
       { pages, index, validDocKeys: new Set(["youtube-summaries/game.md"]), skipTopicKeys: new Set() },
     );
-    expect(outcome).toEqual({ mapped: 1, synthesized: 0, appended: 0, coveredSkipped: 1 });
+    expect(outcome).toEqual({ mapped: 1, synthesized: 0, appended: 0, deduped: 1 });
     expect(resolvedAll).toHaveLength(1); // nothing added
     expect(resolvedAll[0]!.cluster.docIds).toEqual(["youtube-summaries/game.md"]); // not doubled
+  });
+
+  test("run-2 regression: a doc in a DIFFERENT update cluster still lands on its mapped page", () => {
+    // The defect: the doc sat in a weak update cluster U1 (targeting page Q), so its
+    // strong mapping to P (AI Industry Landscape) was covered-skipped and P drafted
+    // without it. New semantics: the mapped page wins — the doc is appended to P's
+    // update cluster AND stays in U1.
+    const OTHER = page({
+      title: "Moonshot AI", type: "concept", domain: "ai",
+      relPath: "concepts/Moonshot AI.md",
+    });
+    const idx = indexOf([LANDSCAPE, OTHER]);
+    const allPages = mappablePages(idx);
+    const u1: ResolvedCluster = {
+      cluster: cluster({ topicKey: "moonshot-ai", label: "Moonshot AI", docIds: ["youtube-summaries/game.md"] }),
+      target: { mode: "update", targetPath: "concepts/Moonshot AI.md", existingRelPath: "concepts/Moonshot AI.md" },
+    };
+    const p: ResolvedCluster = {
+      cluster: cluster({ topicKey: "landscape", label: "AI Industry Landscape", docIds: ["youtube-summaries/existing.md"] }),
+      target: { mode: "update", targetPath: "concepts/AI Industry Landscape.md", existingRelPath: "concepts/AI Industry Landscape.md" },
+    };
+    const resolvedAll: ResolvedCluster[] = [u1, p];
+    const { outcome } = mergeDocPageMappings(
+      resolvedAll,
+      [{ docId: "youtube-summaries/game.md", pageTitle: "AI Industry Landscape" }],
+      { pages: allPages, index: idx, validDocKeys: new Set(["youtube-summaries/game.md", "youtube-summaries/existing.md"]), skipTopicKeys: new Set() },
+    );
+    expect(outcome).toEqual({ mapped: 1, synthesized: 0, appended: 1, deduped: 0 });
+    // Appended to P's cluster …
+    expect(p.cluster.docIds).toEqual(["youtube-summaries/existing.md", "youtube-summaries/game.md"]);
+    // … and left untouched in U1.
+    expect(u1.cluster.docIds).toEqual(["youtube-summaries/game.md"]);
+    expect(resolvedAll).toHaveLength(2);
+  });
+
+  test("run-2 regression, synthesize variant: doc in a DIFFERENT update cluster, no P cluster yet ⇒ synthesized", () => {
+    // Same defect shape but P has no update cluster this run — the mapping must
+    // synthesize one for P rather than being covered-skipped by U1.
+    const OTHER = page({
+      title: "Moonshot AI", type: "concept", domain: "ai",
+      relPath: "concepts/Moonshot AI.md",
+    });
+    const idx = indexOf([LANDSCAPE, OTHER]);
+    const allPages = mappablePages(idx);
+    const u1: ResolvedCluster = {
+      cluster: cluster({ topicKey: "moonshot-ai", label: "Moonshot AI", docIds: ["youtube-summaries/game.md"] }),
+      target: { mode: "update", targetPath: "concepts/Moonshot AI.md", existingRelPath: "concepts/Moonshot AI.md" },
+    };
+    const resolvedAll: ResolvedCluster[] = [u1];
+    const { outcome } = mergeDocPageMappings(
+      resolvedAll,
+      [{ docId: "youtube-summaries/game.md", pageTitle: "AI Industry Landscape" }],
+      { pages: allPages, index: idx, validDocKeys: new Set(["youtube-summaries/game.md"]), skipTopicKeys: new Set() },
+    );
+    expect(outcome).toEqual({ mapped: 1, synthesized: 1, appended: 0, deduped: 0 });
+    expect(resolvedAll).toHaveLength(2);
+    const synth = resolvedAll[1]!;
+    expect(synth.target.existingRelPath).toBe("concepts/AI Industry Landscape.md");
+    expect(synth.cluster.docIds).toEqual(["youtube-summaries/game.md"]);
+    // Still in U1 too.
+    expect(u1.cluster.docIds).toEqual(["youtube-summaries/game.md"]);
   });
 
   test("append-dedupe: a new doc mapped to a page already targeted by an update cluster joins it", () => {
@@ -245,7 +306,7 @@ describe("mergeDocPageMappings", () => {
       ],
       { pages, index, validDocKeys: new Set(["youtube-summaries/game.md", "youtube-summaries/existing.md"]), skipTopicKeys: new Set() },
     );
-    expect(outcome).toEqual({ mapped: 2, synthesized: 0, appended: 1, coveredSkipped: 1 });
+    expect(outcome).toEqual({ mapped: 2, synthesized: 0, appended: 1, deduped: 1 });
     expect(resolvedAll).toHaveLength(1); // no new cluster
     expect(resolvedAll[0]!.cluster.docIds).toEqual(["youtube-summaries/existing.md", "youtube-summaries/game.md"]);
   });
@@ -260,7 +321,7 @@ describe("mergeDocPageMappings", () => {
         skipTopicKeys: new Set(["ai-industry-landscape"]),
       },
     );
-    expect(outcome).toEqual({ mapped: 1, synthesized: 0, appended: 0, coveredSkipped: 0 });
+    expect(outcome).toEqual({ mapped: 1, synthesized: 0, appended: 0, deduped: 0 });
     expect(resolvedAll).toHaveLength(0); // nothing synthesized
     expect(skipDrops).toEqual([{ topicKey: "ai-industry-landscape", kind: "concept", size: 1, reason: "skip" }]);
   });
@@ -275,7 +336,7 @@ describe("mergeDocPageMappings", () => {
       ],
       { pages, index, validDocKeys: new Set(["youtube-summaries/game.md"]), skipTopicKeys: new Set() },
     );
-    expect(outcome).toEqual({ mapped: 0, synthesized: 0, appended: 0, coveredSkipped: 0 });
+    expect(outcome).toEqual({ mapped: 0, synthesized: 0, appended: 0, deduped: 0 });
     expect(resolvedAll).toHaveLength(0);
   });
 

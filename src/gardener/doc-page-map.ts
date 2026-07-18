@@ -49,8 +49,8 @@ export interface MapMergeOutcome {
   synthesized: number;
   /** Docs appended onto an update cluster that already targets the same page. */
   appended: number;
-  /** Mappings skipped because the doc is already heading to an update cluster. */
-  coveredSkipped: number;
+  /** True no-ops: the mapped page's update cluster already contains the doc. */
+  deduped: number;
 }
 
 /**
@@ -225,20 +225,28 @@ export function slugifyTopicKey(title: string): string {
  * AFTER pass-0 `resolveTarget`, BEFORE the size/cap gate — so a synthesized update
  * competes in the gate like any pass-0 update.
  *
- * Per valid mapping (docId in the harvested set AND pageTitle a known candidate):
- *  - **covered** — the docId already appears in ANY resolvedAll update cluster ⇒
- *    skip (it's already heading to an update);
- *  - **append**  — some resolvedAll update cluster already targets that same page
- *    (existingRelPath match) ⇒ append the docId to it (deduped);
+ * The mapped page WINS: a strong docId→P mapping lands on P regardless of the
+ * doc's membership in OTHER clusters. (An earlier design covered-skipped the
+ * mapping whenever the doc sat in any update cluster — even a weak, later
+ * cap-evicted one targeting a DIFFERENT page — so the doc's mapped page could
+ * draft without it. Live replay caught that; the only skip left is the true
+ * no-op below.)
+ *
+ * Per valid mapping (docId in the harvested set AND pageTitle a known candidate),
+ * let P = the mapped page's own update cluster (existingRelPath match):
+ *  - **deduped** — P already exists AND already contains docId ⇒ nothing to do
+ *    (the one true no-op);
+ *  - **append**  — P already exists (targets that page) ⇒ append docId to it,
+ *    even if docId is also in other clusters;
  *  - **synthesize** — else build a 1-doc update cluster (label = page title,
  *    kind/domain = page's, topicKey = slug of the title), resolved through the SAME
  *    {@link resolveTarget}. It honors the SAME skip set as pass-0 (live drafts +
  *    recent rejections): a synthesized topicKey in `skipTopicKeys` is dropped and
  *    tallied as `skip`.
  *
- * A doc may legitimately end up in BOTH a pass-0 create cluster and a synthesized
- * update — that's the point (a create and an update aren't the same proposal). No
- * cross-mode dedup.
+ * The doc's memberships in OTHER clusters (create or update, targeting other
+ * pages) are left untouched — shared docs across proposals are an already-handled
+ * case. No cross-cluster dedup.
  */
 export function mergeDocPageMappings(
   resolvedAll: ResolvedCluster[],
@@ -251,7 +259,7 @@ export function mergeDocPageMappings(
     botName?: string;
   },
 ): { outcome: MapMergeOutcome; skipDrops: ClusterDropEntry[] } {
-  const outcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, coveredSkipped: 0 };
+  const outcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0 };
   const skipDrops: ClusterDropEntry[] = [];
   const botName = opts.botName;
 
@@ -262,13 +270,13 @@ export function mergeDocPageMappings(
     for (const a of p.aliases) pageByLabel.set(normalizeLabel(a), p);
   }
 
-  // Update-mode coverage of the CURRENT resolvedAll (pass-0 updates), grown as we
-  // synthesize/append so later mappings of the same doc/page see them.
-  const updateCoveredDocs = new Set<string>();
+  // Update clusters of the CURRENT resolvedAll (pass-0 updates), keyed by the page
+  // they target. Grown as we synthesize/append so later mappings of the same page
+  // fold into the first one. We intentionally do NOT track which docs are in OTHER
+  // update clusters — the mapped page wins regardless of that membership.
   const updateByRelPath = new Map<string, ResolvedCluster>();
   for (const r of resolvedAll) {
     if (r.target.mode !== "update") continue;
-    for (const k of r.cluster.docIds) updateCoveredDocs.add(k);
     if (r.target.existingRelPath) updateByRelPath.set(r.target.existingRelPath, r);
   }
 
@@ -283,13 +291,6 @@ export function mergeDocPageMappings(
       continue;
     }
     outcome.mapped++;
-
-    // Already heading to an update — leave it there (create-mode coverage is fine
-    // to double up: a create and a synthesized update aren't the same proposal).
-    if (updateCoveredDocs.has(m.docId)) {
-      outcome.coveredSkipped++;
-      continue;
-    }
 
     // Synthesize a 1-doc update cluster + resolve it exactly like a pass-0 cluster
     // (exact-title match ⇒ update; the cross-domain rule stays intact because
@@ -312,14 +313,16 @@ export function mergeDocPageMappings(
       continue;
     }
 
-    // The page already has an update cluster this run → fold the doc into it.
+    // The mapped page already has an update cluster this run → the doc belongs on
+    // it. This holds REGARDLESS of whether the doc is also in other clusters.
     const existing = updateByRelPath.get(target.existingRelPath);
     if (existing) {
-      if (!existing.cluster.docIds.includes(m.docId)) {
+      if (existing.cluster.docIds.includes(m.docId)) {
+        outcome.deduped++; // the one true no-op: already on this exact page
+      } else {
         existing.cluster.docIds.push(m.docId);
         outcome.appended++;
       }
-      updateCoveredDocs.add(m.docId);
       continue;
     }
 
@@ -332,7 +335,6 @@ export function mergeDocPageMappings(
     const rc: ResolvedCluster = { cluster: synth, target };
     resolvedAll.push(rc);
     updateByRelPath.set(target.existingRelPath, rc);
-    updateCoveredDocs.add(m.docId);
     outcome.synthesized++;
   }
 

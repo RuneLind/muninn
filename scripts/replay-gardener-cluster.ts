@@ -192,7 +192,7 @@ async function main() {
     const o = merged.outcome;
     console.log(
       `Map outcome:    mapped:${o.mapped} synthesized:${o.synthesized} appended:${o.appended} ` +
-        `covered-skipped:${o.coveredSkipped} skip-dropped:${mapSkipDrops.length}`,
+        `deduped:${o.deduped} skip-dropped:${mapSkipDrops.length}`,
     );
     for (const r of resolvedAll.slice(preLen)) {
       console.log(
