@@ -171,16 +171,16 @@ export const SUMMARY_STRUCTURE_BULLETS = [
 
 /**
  * Build the shared CATEGORY:/SUMMARY: system-prompt scaffold used by the
- * youtube / x-article / anthropic summarizers. Only the intro sentence, the
- * category allowlist, and (occasionally) the structure bullets vary; the
- * CATEGORY-line + blank-line + SUMMARY-line contract is identical so the shared
- * `parseSummaryResponse` parser works unchanged. (TikTok's prompt is a bespoke
- * multi-turn frame-reading variant and doesn't use this.)
+ * youtube / x-article / anthropic summarizers. Only the intro sentence and the
+ * category allowlist vary; the CATEGORY-line + blank-line + SUMMARY-line
+ * contract is identical so the shared `parseSummaryResponse` parser works
+ * unchanged. (TikTok's prompt is a bespoke multi-turn frame-reading variant
+ * and doesn't use this — it interpolates {@link SUMMARY_STRUCTURE_BULLETS}
+ * inline instead.)
  */
 export function buildSummarySystemPrompt(
   intro: string,
   categories: readonly string[],
-  structureBullets: readonly string[] = SUMMARY_STRUCTURE_BULLETS,
 ): string {
   return `${intro}
 
@@ -189,7 +189,7 @@ Instructions:
    Choose from: ${categories.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   ${structureBullets.join("\n   ")}`;
+   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`;
 }
 
 /**
