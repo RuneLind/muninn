@@ -56,7 +56,16 @@ export interface LintReport {
  * everything must not mask a page that nothing else references), and skipped by
  * the stale-updated + missing-sources checks.
  */
-const RESERVED_BASENAMES = new Set(["log.md", "index.md", "claude.md"]);
+const RESERVED_BASENAMES = new Set([
+  "log.md",
+  "index.md",
+  "claude.md",
+  // `.mdx` twins — the source-page drafter writes native `.mdx`, so the gardener's
+  // `FORBIDDEN_BASENAMES` reserves both extensions; mirror that here.
+  "log.mdx",
+  "index.mdx",
+  "claude.mdx",
+]);
 
 function reservedBasename(relPathOrKey: string): boolean {
   return RESERVED_BASENAMES.has(path.posix.basename(relPathOrKey).toLowerCase());

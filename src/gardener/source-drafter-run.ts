@@ -43,13 +43,14 @@ function firstHttpUrl(...candidates: (string | undefined)[]): string {
 
 /**
  * Build the real-seam deps and run `draftSourcePage` for one input. `wikiDir` must
- * be the bot's resolved wiki root. `apiUrl` defaults to the env knowledge API.
+ * be the bot's resolved wiki root. Every seam is either injected or reads the env
+ * knowledge API directly, so this path takes no `apiUrl` — the run-now entry point
+ * does its own huginn fetches with one.
  */
 export async function runSourceDraftForInput(
   botConfig: BotConfig,
   wikiDir: string,
   input: SourceDraftInput,
-  apiUrl: string = DEFAULT_API_URL,
 ): Promise<SourceDraftOutcome> {
   const config = loadConfig();
   const index = await getWikiIndex({ root: wikiDir });
@@ -127,12 +128,7 @@ export async function runSourceDraftForNewest(
   if (!url) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no public URL` };
 
   log.info("Source drafter run-now: newest doc {collection}/{id}", { collection, id: newest.id });
-  return runSourceDraftForInput(
-    botConfig,
-    wikiDir,
-    { collection, docId: newest.id, url, body },
-    apiUrl,
-  );
+  return runSourceDraftForInput(botConfig, wikiDir, { collection, docId: newest.id, url, body });
 }
 
 /**
@@ -144,11 +140,10 @@ export async function runSourceDraftForNewest(
 export function triggerSourceDraftFromCapture(
   botConfig: BotConfig,
   input: SourceDraftInput,
-  apiUrl: string = DEFAULT_API_URL,
 ): void {
   if (!botConfig.wikiDir) return;
   const wikiDir = botConfig.wikiDir;
-  void runSourceDraftForInput(botConfig, wikiDir, input, apiUrl)
+  void runSourceDraftForInput(botConfig, wikiDir, input)
     .then((outcome) => {
       log.info("Source drafter auto-trigger for {collection}/{id}: {outcome}", {
         collection: input.collection,

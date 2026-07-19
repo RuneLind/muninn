@@ -281,6 +281,42 @@ export function appendPendingIngestionCallout(
 }
 
 /**
+ * Persist-time `url:` pin: force the frontmatter `url:` line to the KNOWN capture
+ * URL, overwriting whatever the model emitted (or inserting the line when absent).
+ * The drafter is handed the real source URL in its prompt, but a hallucinated or
+ * prompt-injected `url:` could otherwise survive into the persisted draft — the one
+ * frontmatter value we have ground truth for, so we don't trust the model with it.
+ *
+ * Only the FIRST `url:` line in the frontmatter head is rewritten (a duplicate key
+ * is dropped so a smuggled second `url:` can't win); insertion places the line just
+ * before the closing fence. Body text (which may legitimately contain `url:` prose)
+ * is untouched — only the frontmatter head is scanned. Returns the draft unchanged
+ * when there's no terminated frontmatter fence (defensive; the shape-gate guarantees
+ * one on the runner path).
+ */
+export function pinFrontmatterUrl(draft: string, url: string): string {
+  if (!draft.startsWith("---")) return draft;
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return draft;
+
+  const head = draft.slice(0, fenceEnd);
+  const rest = draft.slice(fenceEnd);
+  const pinned = `url: ${url}`;
+
+  let replaced = false;
+  const lines = head.split("\n").filter((line) => {
+    if (!/^url:\s*/.test(line)) return true;
+    if (replaced) return false; // drop any duplicate url: keys
+    replaced = true;
+    return true;
+  });
+  const out = lines.map((line) => (/^url:\s*/.test(line) ? pinned : line));
+  if (!replaced) out.push(pinned); // no url: line — insert before the closing fence
+
+  return out.join("\n") + rest;
+}
+
+/**
  * Persist-time source-link guard — the invariant it enforces: after this runs a
  * `sources:` line contains ONLY public http(s) URLs and RESOLVED `[[wikilinks]]`.
  * Two kinds of junk are removed:

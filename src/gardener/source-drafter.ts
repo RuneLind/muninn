@@ -32,6 +32,7 @@ import {
   containDraftBodyLinks,
   isHttpUrl,
   normalizeDraftOutput,
+  pinFrontmatterUrl,
   replaceUnresolvedSourceLinks,
   shapeGate,
   stripOwnedAliases,
@@ -241,11 +242,17 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     }
 
     // Persist-time containment (same seams the gardener runs): drop aliases another
-    // page owns, replace unresolved `sources:` wikilinks with the real URL, and
+    // page owns, pin `url:` to the known capture URL (a hallucinated/injected url
+    // can't survive), replace unresolved `sources:` wikilinks with the real URL, and
     // de-link unresolvable body wikilinks to bold.
     const dealiased = stripOwnedAliases(draftText, { index });
+    // Pin only a real public URL — a URL-less doc has no ground-truth url to pin, and
+    // its pending-ingestion callout names the doc independently below.
+    const pinned = isHttpUrl(input.url)
+      ? pinFrontmatterUrl(dealiased.draft, input.url)
+      : dealiased.draft;
     const sourceUrls = isHttpUrl(input.url) ? [input.url] : [];
-    const relinked = replaceUnresolvedSourceLinks(dealiased.draft, { index, urls: sourceUrls });
+    const relinked = replaceUnresolvedSourceLinks(pinned, { index, urls: sourceUrls });
 
     let containedDraft = relinked.draft;
     let containedLinks: string[] = [];

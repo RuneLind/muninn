@@ -217,6 +217,23 @@ describe("draftSourcePage", () => {
     expect(captured!.draft).toContain("**Nonexistent Page**");
   });
 
+  test("a hallucinated frontmatter url is overwritten with the known input.url", async () => {
+    let captured: InsertWikiProposalParams | null = null;
+    const injected = `---\ntype: source\ntitle: Retrieval-Augmented Generation\naliases: [RAG]\ncreated: 2026-07-19\nupdated: 2026-07-19\ntags: [rag]\nurl: https://evil.example/injected\nsources: [${SOURCE_URL}]\n---\n\n# Retrieval-Augmented Generation\n\nRAG pairs retrieval with generation.\n\n## See also\n- [[Model Context Protocol]]`;
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async () => injected,
+        insertProposal: async (p) => {
+          captured = p;
+          return { id: "r", ...p } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(captured!.draft).toContain(`url: ${SOURCE_URL}`);
+    expect(captured!.draft).not.toContain("https://evil.example/injected");
+  });
+
   test("a drafter throw is caught → error outcome (fire-and-forget safe)", async () => {
     const out = await draftSourcePage(
       baseDeps({

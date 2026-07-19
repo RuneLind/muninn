@@ -23,7 +23,6 @@ import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
-import { loadConfig } from "../config.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "source-drafter");
@@ -65,32 +64,41 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
     opts.tracer ??
     new Tracer("draft:source", { botName: botConfig.name, platform: "capture" });
 
-  const reqId = agentStatus.startRequest(botConfig.name, "drafting", undefined, {
-    kind: "capture",
-    name: `Source page: ${title}`,
-  });
-  agentStatus.setSourcePage(reqId, "/wiki/gardener");
-  agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
-  if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
-
-  // Only cap thinking where the field IS a thinking budget (claude-cli / claude-sdk);
-  // on openai-compat it is max_tokens, so overriding it would clamp the draft length.
-  const thinking = !connectorCapabilities(botConfig).supportsThinkingBudget
-    ? null
-    : opts.thinkingMaxTokens === undefined
-      ? DRAFTER_THINKING_MAX_TOKENS
-      : opts.thinkingMaxTokens;
-
-  tracer.start("claude", {
-    source: "source-draft",
-    title,
-    url,
-    connector: botConfig.connector ?? "claude-cli",
-    model: botConfig.model,
-    ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-  });
-
+  // Setup runs INSIDE the try so a throw in `startRequest` / `connectorCapabilities` /
+  // `tracer.start` still finishes the root span and completes the /agents run, instead
+  // of leaking an unfinished trace + a run stuck in "drafting". Staged with two flags so
+  // the catch only touches what was actually created: `tracer.end("claude")` throws on an
+  // unstarted mark (Timing.end), so it is gated on `claudeStarted`; `completeRequest` is
+  // gated on `reqId`.
+  let reqId: string | undefined;
+  let claudeStarted = false;
   try {
+    reqId = agentStatus.startRequest(botConfig.name, "drafting", undefined, {
+      kind: "capture",
+      name: `Source page: ${title}`,
+    });
+    agentStatus.setSourcePage(reqId, "/wiki/gardener");
+    agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
+    if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
+
+    // Only cap thinking where the field IS a thinking budget (claude-cli / claude-sdk);
+    // on openai-compat it is max_tokens, so overriding it would clamp the draft length.
+    const thinking = !connectorCapabilities(botConfig).supportsThinkingBudget
+      ? null
+      : opts.thinkingMaxTokens === undefined
+        ? DRAFTER_THINKING_MAX_TOKENS
+        : opts.thinkingMaxTokens;
+
+    tracer.start("claude", {
+      source: "source-draft",
+      title,
+      url,
+      connector: botConfig.connector ?? "claude-cli",
+      model: botConfig.model,
+      ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+    });
+    claudeStarted = true;
+
     const result = await oneShot(opts.prompt, config, botConfig, {
       ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -120,15 +128,10 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.end("claude", { error: message });
+    if (claudeStarted) tracer.end("claude", { error: message });
     tracer.finish("error", { source: "source-draft", error: message });
-    agentStatus.completeRequest(reqId, {});
+    if (reqId) agentStatus.completeRequest(reqId, {});
     log.warn("Source-page draft one-shot failed for {title}: {error}", { title, error: message });
     throw err;
   }
-}
-
-/** Resolve the muninn Config once for a fire-and-forget drafter run (route/capture callers). */
-export function drafterConfig(): Config {
-  return loadConfig();
 }

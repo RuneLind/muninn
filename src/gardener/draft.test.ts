@@ -12,6 +12,7 @@ import {
   scanUnresolvedBodyLinks,
   containBodyLinks,
   containDraftBodyLinks,
+  pinFrontmatterUrl,
   WIKI_CONVENTIONS_DIGEST,
 } from "./draft.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
@@ -215,6 +216,44 @@ describe("WIKI_CONVENTIONS_DIGEST sources rule (URLs by default)", () => {
   test("prefers URLs over [[source page]] refs and warns against invented refs", () => {
     expect(WIKI_CONVENTIONS_DIGEST).toContain("prefer URLs over [[source page]] refs");
     expect(WIKI_CONVENTIONS_DIGEST).toContain("never fabricate source-page names");
+  });
+});
+
+describe("pinFrontmatterUrl", () => {
+  const KNOWN = "https://youtu.be/abc12345678";
+
+  test("overwrites a model-emitted (hallucinated) url with the known one", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://evil.example/injected\nsources: [https://youtu.be/abc12345678]\n---\n\n# T\n\nBody.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain(`url: ${KNOWN}`);
+    expect(out).not.toContain("https://evil.example/injected");
+  });
+
+  test("inserts a url: line when the frontmatter has none", () => {
+    const draft = `---\ntype: source\ntitle: T\n---\n\n# T\n\nBody.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain(`url: ${KNOWN}`);
+    // The closing fence + body survive verbatim.
+    expect(out).toContain("\n---\n\n# T\n\nBody.");
+  });
+
+  test("drops a smuggled duplicate url: key, keeping one pinned value", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://a.example\nurl: https://b.example\n---\n\n# T`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out.match(/^url:/gm)?.length).toBe(1);
+    expect(out).toContain(`url: ${KNOWN}`);
+  });
+
+  test("only the frontmatter head is scanned — body 'url:' prose is untouched", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://old.example\n---\n\n# T\n\nSet url: https://in-body.example in your config.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain("Set url: https://in-body.example in your config.");
+    expect(out).toContain(`url: ${KNOWN}`);
+  });
+
+  test("no terminated frontmatter fence → unchanged", () => {
+    const draft = "no frontmatter here";
+    expect(pinFrontmatterUrl(draft, KNOWN)).toBe(draft);
   });
 });
 

@@ -98,6 +98,72 @@ test("ingestSummary POSTs the body and passes returned similar articles to onSim
   expect(seen).toEqual([{ title: "S", url: "https://s" }]);
 });
 
+test("ingestSummary surfaces the stored doc file_path via onIngested", async () => {
+  const restore = stubFetch(
+    () =>
+      new Response(JSON.stringify({ file_path: "ai/general/My Title.md", similar: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  let ingested: { filePath?: string } | undefined;
+  try {
+    await ingestSummary({
+      knowledgeApiUrl: "http://kb.test",
+      ingestPath: "/api/youtube/ingest",
+      body: {},
+      onSimilar: () => {},
+      onIngested: (info) => {
+        ingested = info;
+      },
+    });
+  } finally {
+    restore();
+  }
+  expect(ingested).toEqual({ filePath: "ai/general/My Title.md" });
+});
+
+test("ingestSummary calls onIngested with undefined filePath when the response omits it", async () => {
+  const restore = stubFetch(() => new Response(JSON.stringify({}), { status: 200 }));
+  let called = false;
+  let ingested: { filePath?: string } | undefined;
+  try {
+    await ingestSummary({
+      knowledgeApiUrl: "http://kb.test",
+      ingestPath: "/api/youtube/ingest",
+      body: {},
+      onSimilar: () => {},
+      onIngested: (info) => {
+        called = true;
+        ingested = info;
+      },
+    });
+  } finally {
+    restore();
+  }
+  expect(called).toBe(true);
+  expect(ingested).toEqual({ filePath: undefined });
+});
+
+test("ingestSummary does not call onIngested on a non-ok response", async () => {
+  const restore = stubFetch(() => new Response("nope", { status: 500 }));
+  let called = false;
+  try {
+    await ingestSummary({
+      knowledgeApiUrl: "http://kb.test",
+      ingestPath: "/api/youtube/ingest",
+      body: {},
+      onSimilar: () => {},
+      onIngested: () => {
+        called = true;
+      },
+    });
+  } finally {
+    restore();
+  }
+  expect(called).toBe(false);
+});
+
 test("ingestSummary does not call onSimilar when there are no similar articles", async () => {
   const restore = stubFetch(() => new Response(JSON.stringify({}), { status: 200 }));
   let called = false;
