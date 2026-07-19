@@ -591,17 +591,35 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     const alerts = await deps.runGardener(assembled, hooks);
     const drafted = draftedCount(alerts);
 
-    // On cancel, return exactly the not-yet-drafted clusters' docs to the offered
-    // set — declined/never-clustered docs stay offered (at-most-once). Subtract the
-    // skipped keys from the offered-with-batch union persisted above.
+    // Zero-draft burn guard (audit rec 2 / #289 extension): a run that COMPLETED
+    // (not cancelled) but drafted NOTHING has nothing to show for burning its batch —
+    // every doc was declined by clustering/gate/draft with no proposal produced.
+    // Roll the offered snapshot back to its pre-run state so the whole batch stays
+    // eligible for the next run, instead of permanently stranding a small old tail
+    // (yesterday's `offered: 4, drafted: 0` case). `offeredBefore` is exactly
+    // `offeredWithBatch − batchKeys` (selectBacklogBatch excludes already-offered
+    // keys, so the batch and offeredBefore are disjoint). Distinct from the cancel
+    // path below, whose deliberate semantics keep declined/never-clustered docs
+    // offered (soft cancel is a user choice, not "the run had nothing to show").
+    const zeroDraftBurn = !aborted && drafted === 0;
     if (aborted && skippedKeys.length) {
+      // On cancel, return exactly the not-yet-drafted clusters' docs to the offered
+      // set — declined/never-clustered docs stay offered (at-most-once). Subtract the
+      // skipped keys from the offered-with-batch union persisted above.
       const offeredAfter = new Set(offeredWithBatch);
       for (const k of skippedKeys) offeredAfter.delete(k);
       await deps.persistOffered([...offeredAfter]);
+    } else if (zeroDraftBurn) {
+      await deps.persistOffered([...assembled.offeredBefore]);
+      log.info(
+        "Backlog run: drafted 0 of {n} offered doc(s) for {bot} — offered set rolled back, batch stays eligible",
+        { botName: deps.botName, n: assembled.batchKeys.length },
+      );
     }
 
     return {
-      offered: assembled.batchKeys.length,
+      // A rolled-back zero-draft run reports offered:0 — nothing stayed burned.
+      offered: zeroDraftBurn ? 0 : assembled.batchKeys.length,
       drafted,
       ...(aborted ? { cancelled: { drafted, of: lastTotal } } : {}),
     };
