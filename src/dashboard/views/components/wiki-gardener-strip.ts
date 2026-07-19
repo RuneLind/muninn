@@ -156,6 +156,12 @@ export interface BacklogStripModel {
   maxProposals: number;
   /** How many docs a click drains now: min(batchSize, eligibleNow). */
   drainNow: number;
+  /**
+   * The per-article source-page drafter is offered: there are uncovered docs and
+   * no run is in flight. Distinct from the gardener drain — it drafts one `.mdx`
+   * source page per doc (batched, on an explicit click) into the SAME review gate.
+   */
+  sourceDraftAvailable: boolean;
 }
 
 function numOr(v: unknown, fallback: number): number {
@@ -262,6 +268,9 @@ export function backlogStripModel(
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
+    // Independent of the watcher/drain (source pages need no offered-memory): offer
+    // it whenever there's an uncovered tail and nothing is currently running.
+    sourceDraftAvailable: !running && queued > 0,
   };
 }
 
@@ -452,6 +461,58 @@ export function backlogConfirmHtml(model: BacklogStripModel): string {
   );
 }
 
+/**
+ * The per-article "Draft source pages" control (pure HTML). Offered whenever the
+ * source-drafter is available (uncovered docs, nothing running). A single explicit
+ * click POSTs a small batch — the drafts land in the same review gate below. Empty
+ * when unavailable.
+ */
+export function backlogSourceDraftHtml(model: BacklogStripModel): string {
+  if (!model.sourceDraftAvailable) return "";
+  return (
+    '<span class="bk-control bk-source-draft">' +
+    '<button class="gard-btn bk-source-draft-btn" data-backlog-action="source-draft" ' +
+    'title="Draft one .mdx source page each for a small batch of uncovered YouTube docs — into the review gate below">' +
+    "Draft source pages</button></span>"
+  );
+}
+
+/** The per-doc outcomes + rolled-up totals a source-draft batch returns. */
+export interface SourceBacklogResult {
+  results: {
+    collection: string;
+    docId: string;
+    outcome: string;
+    reason?: string;
+    proposalId?: string;
+    title?: string;
+  }[];
+  totals: { selected: number; drafted: number; covered: number; skipped: number; error: number };
+  totalQueued: number;
+  limit: number;
+}
+
+/**
+ * Result note for the last source-draft batch (pure HTML). `{error}` renders a
+ * failure note; a real result rolls up "N drafted, …" with only the non-zero
+ * buckets. Empty for a null (no run yet).
+ */
+export function sourceDraftResultHtml(r: SourceBacklogResult | { error: string } | null): string {
+  if (!r) return "";
+  if ("error" in r) {
+    return ` <span class="bk-err">source draft failed: ${esc(r.error)}</span>`;
+  }
+  const t = r.totals;
+  if (t.selected === 0) {
+    return ` <span class="bk-run-note">source draft: no uncovered docs to draft</span>`;
+  }
+  const parts = [`${t.drafted} drafted`];
+  if (t.covered) parts.push(`${t.covered} covered`);
+  if (t.skipped) parts.push(`${t.skipped} skipped`);
+  if (t.error) parts.push(`${t.error} error`);
+  return ` <span class="bk-run-note">source pages: ${esc(parts.join(", "))} of ${t.selected} — see proposals below</span>`;
+}
+
 /** Last-run outcome note (pure HTML string). */
 export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): string {
   if (!run) return "";
@@ -521,6 +582,7 @@ export function backlogStripHtml(model: BacklogStripModel, errors?: unknown[]): 
     backlogSentenceHtml(model) +
     errNote +
     " " +
-    backlogControlHtml(model)
+    backlogControlHtml(model) +
+    backlogSourceDraftHtml(model)
   );
 }

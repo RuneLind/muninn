@@ -13,7 +13,9 @@ import {
   backlogStripHtml,
   backlogOutcomeHtml,
   backlogTailHtml,
+  sourceDraftResultHtml,
   type IngestBacklogResponse,
+  type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
@@ -325,6 +327,13 @@ let lastBacklogData: IngestBacklogResponse | null = null;
 // the user is reading.
 let backlogConfirmOpen = false;
 
+// Last source-draft batch result (client-only) — survives the strip's wholesale
+// re-renders so the "N drafted…" note stays visible after a refresh.
+let lastSourceDraftResult: SourceBacklogResult | { error: string } | null = null;
+// True while a source-draft batch POST is in flight — keeps the button disabled
+// (the batch awaits minutes of model calls) across any interleaved re-render.
+let sourceDraftInFlight = false;
+
 function pendingDraftCount(): number {
   return allProposals.filter((p) => p.status === "draft").length;
 }
@@ -349,10 +358,20 @@ function renderBacklog(data: IngestBacklogResponse): void {
   el.innerHTML =
     backlogStripHtml(model, data.errors) +
     backlogOutcomeHtml(data.lastBacklogRun) +
+    sourceDraftResultHtml(lastSourceDraftResult) +
     backlogTailHtml(model);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
+  }
+  // Re-apply the in-flight disabled state after a re-render (a concurrent drain
+  // poll could otherwise re-enable the button mid-batch).
+  if (sourceDraftInFlight) {
+    const sd = el.querySelector<HTMLButtonElement>(".bk-source-draft-btn");
+    if (sd) {
+      sd.disabled = true;
+      sd.textContent = "Drafting…";
+    }
   }
   const confirm = el.querySelector(".bk-confirm");
   if (confirm) {
@@ -511,6 +530,37 @@ async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<vo
   }
 }
 
+// Draft per-article source pages for a small batch of uncovered docs. An explicit
+// click: disables the button (the batch awaits minutes of model calls), POSTs the
+// batch, then renders the totals + reloads the strip and proposal list so the fresh
+// drafts appear in the gate. Skip-not-fail — a per-doc error is a recorded outcome
+// the totals surface, never a failed request.
+async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
+  if (sourceDraftInFlight) return;
+  sourceDraftInFlight = true;
+  btn.disabled = true;
+  btn.textContent = "Drafting…";
+  try {
+    const res = await fetch(withBot("/api/wiki/gardener/source-draft-backlog"), { method: "POST" });
+    const data = await res.json();
+    lastSourceDraftResult =
+      res.ok && !data.error ? (data as SourceBacklogResult) : { error: data.error || "failed (" + res.status + ")" };
+  } catch (err) {
+    lastSourceDraftResult = { error: (err as Error).message };
+  } finally {
+    sourceDraftInFlight = false;
+  }
+  // Refresh the strip (newly-covered docs drop from the queue) + reload proposals so
+  // the drafts show up in the gate. renderBacklog picks up lastSourceDraftResult.
+  fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
+    .then((r) => r.json())
+    .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+    .catch(() => {
+      if (lastBacklogData) renderBacklog(lastBacklogData);
+    });
+  loadProposals();
+}
+
 async function resetBacklog(): Promise<void> {
   try {
     await fetch(withBot("/api/wiki/gardener/backlog-reset"), { method: "POST" });
@@ -599,6 +649,9 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     void recoverBacklog();
   } else if (action === "dismiss") {
     void dismissBacklog();
+  } else if (action === "source-draft") {
+    // Draft per-article source pages for a small batch of uncovered docs.
+    void startSourceDraftBacklog(btn as HTMLButtonElement);
   }
 });
 

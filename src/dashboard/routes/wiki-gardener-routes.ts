@@ -60,7 +60,11 @@ import {
   type RunJournal,
 } from "../../gardener/backlog.ts";
 import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
-import { runSourceDraftForNewest } from "../../gardener/source-drafter-run.ts";
+import {
+  runSourceDraftForNewest,
+  runSourceDraftBacklog,
+  clampSourceBacklogLimit,
+} from "../../gardener/source-drafter-run.ts";
 import {
   getWikiGardenerWatcher,
   getWatcherSnapshot,
@@ -1099,6 +1103,54 @@ export function registerWikiGardenerRoutes(
       outcome: outcome.outcome,
     });
     return c.json(outcome, outcome.outcome === "error" ? 500 : 200);
+  });
+
+  // Backlog source drafter — draft per-article `.mdx` source pages for up to
+  // `limit` UNCOVERED docs in a collection (default youtube-summaries), on an
+  // explicit click. Sequential (each is a real model one-shot on the summarizer
+  // bot), capped at SOURCE_BACKLOG_MAX_LIMIT, and skip-not-fail per doc so one bad
+  // doc can't abort the batch. Drafts land in this same gate — nothing is
+  // auto-approved. Awaits the whole batch (a deliberate manual action) and returns
+  // per-doc outcomes + totals; a batch always returns 200 (a per-doc error is a
+  // recorded outcome, not a route failure).
+  app.post("/api/wiki/gardener/source-draft-backlog", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot, root } = resolved;
+
+    if (bot.gardener?.enabled === false) {
+      return c.json({ error: "the wiki gardener is disabled for this bot" }, 400);
+    }
+
+    const collection = c.req.query("collection") ?? "youtube-summaries";
+    if (!SUMMARY_SOURCES.some((s) => s.collection === collection)) {
+      return c.json({ error: `unknown summary collection "${collection}"` }, 400);
+    }
+
+    // `limit` clamps to [1, SOURCE_BACKLOG_MAX_LIMIT]; a missing/bad value ⇒ the
+    // small default. Parse defensively — an unparseable query is a bad request.
+    const rawLimit = c.req.query("limit");
+    const parsedLimit = rawLimit === undefined ? undefined : Number(rawLimit);
+    if (rawLimit !== undefined && !Number.isFinite(parsedLimit)) {
+      return c.json({ error: `invalid limit "${rawLimit}"` }, 400);
+    }
+    const limit = clampSourceBacklogLimit(parsedLimit);
+
+    // Never-500 contract for the batch itself: per-doc failures are recorded
+    // outcomes; only an unexpected orchestration throw (listing / sweep / coverage)
+    // reaches here and degrades to a 500 with the message.
+    try {
+      const result = await runSourceDraftBacklog(bot, root, collection, limit, KNOWLEDGE_API_URL);
+      return c.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("Source-draft backlog failed for {bot} ({collection}): {error}", {
+        bot: bot.name,
+        collection,
+        error: message,
+      });
+      return c.json({ error: message }, 500);
+    }
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.
