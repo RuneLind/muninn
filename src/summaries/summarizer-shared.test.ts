@@ -4,6 +4,7 @@ import {
   ingestSummary,
   runCaptureOneShot,
   CAPTURE_THINKING_MAX_TOKENS,
+  SUMMARY_STRUCTURE_BULLETS,
 } from "./summarizer-shared.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -27,11 +28,18 @@ Instructions:
    Choose from: ${cats.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Keep it concise but comprehensive`;
+   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`;
   expect(built).toBe(expected);
+});
+
+test("the default structure leads with a `## Key takeaways` section and forbids components", () => {
+  const built = buildSummarySystemPrompt("intro", ["ai/general"]);
+  // Key-takeaways-first is the campaign's headline structural guarantee.
+  expect(built).toContain("## Key takeaways` section FIRST");
+  // Plain-markdown-only: stored summaries must never carry block components.
+  expect(built).toContain("no custom block components");
+  // Tables only where content is genuinely comparative.
+  expect(built).toContain("markdown table when the content is genuinely comparative");
 });
 
 test("buildSummarySystemPrompt honors a custom structure-bullet list (anthropic variant)", () => {

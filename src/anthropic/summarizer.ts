@@ -57,15 +57,14 @@ function collectionRelativeId(filePath: string): string {
   return filePath.replace(/^\.?\//, "");
 }
 
+// The vertical's framing nuance ("lead with what changed and why it matters")
+// now rides in the intro sentence — the structured-output rules are the shared
+// SUMMARY_STRUCTURE_BULLETS (key-takeaways-first, tables-for-comparative,
+// consistent ## headings, plain markdown), so it steers the `## Key takeaways`
+// section instead of duplicating the whole bullet list per vertical.
 const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.",
+  "You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf. Lead the Key takeaways with what changed and why it matters.",
   AI_CATEGORIES,
-  [
-    "- ### Section headers for key topics",
-    "- Bullet points with emoji prefixes",
-    "- **Bold** for key terms and takeaways",
-    "- Lead with what changed and why it matters; keep it concise but comprehensive",
-  ],
 );
 
 /**
@@ -75,14 +74,8 @@ const SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
  * only the framing (a personal note, not an Anthropic release) differs.
  */
 const X_SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
-  "You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer.",
+  "You are an analyst summarizing a long-form X (Twitter) post or article for a personal learning shelf. The content below is one author's note/thread — distill its argument and takeaways for a senior AI engineer. Lead the Key takeaways with the author's main point and why it matters.",
   AI_CATEGORIES,
-  [
-    "- ### Section headers for key topics",
-    "- Bullet points with emoji prefixes",
-    "- **Bold** for key terms and takeaways",
-    "- Lead with the author's main point and why it matters; keep it concise but comprehensive",
-  ],
 );
 
 interface ResolvedContent {
