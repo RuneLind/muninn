@@ -162,6 +162,7 @@ describe("assembleBacklog", () => {
           "x-articles": [],
           "anthropic-summaries": [],
           "tiktok-summaries": [],
+          "article-summaries": [],
         },
         errors: [],
       }),

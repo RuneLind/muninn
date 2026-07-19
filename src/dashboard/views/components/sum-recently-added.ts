@@ -234,7 +234,7 @@ export function sumRecentlyAddedScript(): string {
         var docs = activeSource ? domainDocs.filter(function(d) { return d.source === activeSource; }) : domainDocs.slice();
 
         if (docs.length === 0) {
-          list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste a YouTube URL above or use the Chrome extension to get started.</div>';
+          list.innerHTML = '<div style="color:var(--text-dim);font-size:13px;padding:20px 0;text-align:center;">No summaries yet. Paste article text above or use the Chrome extension to get started.</div>';
           document.getElementById('recentlyAddedCount').textContent = '';
           if (typeof updateTabCount === 'function') updateTabCount('recently', 0);
           return;

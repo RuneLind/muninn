@@ -1,7 +1,7 @@
 /**
  * Observability seam for the source-page drafter's model call.
  *
- * The four capture summarizers route their one-shot through `runCaptureOneShot`
+ * The capture summarizers route their one-shot through `runCaptureOneShot`
  * (`src/summaries/summarizer-shared.ts`), but that helper is coupled to the capture
  * job-store — it takes a `jobId` and an `attachRun(jobId, meta)` callback that
  * late-binds telemetry onto a job created at route level. The source-page drafter

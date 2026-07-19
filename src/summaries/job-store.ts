@@ -2,7 +2,7 @@ import { getLog } from "../logging.ts";
 import { agentStatus } from "../observability/agent-status.ts";
 
 // Generic in-memory job store shared by the capture verticals (youtube,
-// x-article, tiktok, anthropic). Each vertical's `state.ts` instantiates this
+// x-article, tiktok, anthropic, article). Each vertical's `state.ts` instantiates this
 // with its own status union + identity fields and re-exports a vertical-typed
 // API, so routes/summarizers keep importing from `<vertical>/state.ts` unchanged.
 
@@ -131,7 +131,7 @@ export function createJobStore<S extends string, F>(
   const subscribers = new Map<string, Set<JobSubscriber<S>>>();
 
   // AgentRun registry mirror (/agents dashboard). One hook in the shared factory
-  // covers all four capture verticals (youtube / x-article / tiktok / anthropic):
+  // covers all the capture verticals (youtube / x-article / tiktok / anthropic / article):
   // createJob → startRequest(kind "capture"), the terminal completeJob/failJob →
   // completeRequest. `jobRuns` maps jobId → requestId for the completion lookup.
   // `opts.label` is the vertical name shown in the run name.

@@ -43,8 +43,8 @@ export interface SummaryVerticalConfig<S extends string, F> {
 }
 
 /**
- * Register the route plumbing shared verbatim by the four capture verticals
- * (youtube, x-article, tiktok, anthropic): the SSE stream, the recent-jobs list,
+ * Register the route plumbing shared verbatim by the capture verticals
+ * (youtube, x-article, tiktok, anthropic, article): the SSE stream, the recent-jobs list,
  * the knowledge-API `document/*` + `similar` proxies, the CORS preflight, and the
  * bare-path redirect. Each vertical's routes module still owns its own
  * `POST <apiBase>/summarize` (different request shapes/validation/dedup) plus any

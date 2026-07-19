@@ -22,6 +22,7 @@ function fixtures() {
     "x-articles": [{ id: "xa1", date: iso(now - 4 * DAY), url: "https://x/1" }],
     "anthropic-summaries": [{ id: "an-old", date: iso(now - 200 * DAY) }], // out of 30d window
     "tiktok-summaries": [{ id: "tt-undated" }], // no date ⇒ undated, but kept in window
+    "article-summaries": [],
   } as Record<string, Array<Record<string, unknown>>>;
 }
 
@@ -129,13 +130,13 @@ test("caches within the TTL (no re-fetch) and ?refresh=1 bypasses the cache read
   const app = appWith(fakeDeps());
   await app.request("/api/summaries/stats");
   const afterFirst = fetchCalls.length;
-  expect(afterFirst).toBe(4); // one fetch per collection
+  expect(afterFirst).toBe(5); // one fetch per collection
 
   await app.request("/api/summaries/stats");
   expect(fetchCalls.length).toBe(afterFirst); // served from cache
 
   await app.request("/api/summaries/stats?refresh=1");
-  expect(fetchCalls.length).toBe(afterFirst + 4); // refresh re-fetched
+  expect(fetchCalls.length).toBe(afterFirst + 5); // refresh re-fetched
 });
 
 test("a degraded (errors) payload is NOT cached — the next request re-fetches", async () => {
@@ -150,12 +151,12 @@ test("a degraded (errors) payload is NOT cached — the next request re-fetches"
   // stale degraded payload from cache for the whole TTL.
   failCollections = new Set();
   const second = await (await app.request("/api/summaries/stats")).json();
-  expect(fetchCalls.length).toBe(afterFirst + 4); // re-fetched all collections
+  expect(fetchCalls.length).toBe(afterFirst + 5); // re-fetched all collections
   expect(second.errors).toBeUndefined();
 
   // The now-clean result IS cached.
   await app.request("/api/summaries/stats");
-  expect(fetchCalls.length).toBe(afterFirst + 4);
+  expect(fetchCalls.length).toBe(afterFirst + 5);
 });
 
 test("passes ?bot= through to the coverage lookups (default jarvis)", async () => {
