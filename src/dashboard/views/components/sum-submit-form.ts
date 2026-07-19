@@ -144,7 +144,7 @@ export function sumSubmitFormScript(): string {
 
     // Ctrl/Cmd+Enter in the textarea submits (a plain Enter is a newline).
     document.getElementById('articleText').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitArticle();
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !document.getElementById('submitBtn').disabled) submitArticle();
     });
   `;
 }

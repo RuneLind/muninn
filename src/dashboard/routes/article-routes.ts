@@ -44,7 +44,7 @@ async function findExistingByUrl(
 function deriveTitle(text: string): string {
   const firstLine = text
     .split("\n")
-    .map((l) => l.trim())
+    .map((l) => l.trim().replace(/^#+\s+/, ""))
     .find((l) => l.length > 0) ?? "Untitled article";
   return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine;
 }
