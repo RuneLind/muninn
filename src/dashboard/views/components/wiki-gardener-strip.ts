@@ -98,6 +98,12 @@ export interface IngestBacklogResponse {
   /** The bot's wiki-gardener watcher (next-run + Run-now affordance). Null/absent ⇒ no affordance. */
   watcher?: BacklogWatcherInfo | null;
   watcherSeeded?: boolean;
+  /**
+   * Whether the wiki gardener is enabled for this bot. Gates the source-draft
+   * button — the source-draft route 400s when the gardener is disabled, so the
+   * button must hide to match. Absent (degraded/older server) ⇒ treated as enabled.
+   */
+  gardenerEnabled?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
   progress?: BacklogProgress | null;
@@ -243,6 +249,12 @@ export function backlogStripModel(
       ? { id: watcher!.id }
       : null;
   const nextRunText = watcherUsable ? computeNextRunText(watcher!, now) : null;
+  // The source-draft action only drafts youtube-summaries, so its availability
+  // gates on THAT collection's uncovered count — not the all-source `queued`.
+  const youtubeQueued = numOr(
+    (data.byCollection || []).find((c) => c.collection === "youtube-summaries")?.queued,
+    0,
+  );
   return {
     totalNeverIngested: queued,
     perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
@@ -269,8 +281,13 @@ export function backlogStripModel(
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
     // Independent of the watcher/drain (source pages need no offered-memory): offer
-    // it whenever there's an uncovered tail and nothing is currently running.
-    sourceDraftAvailable: !running && queued > 0,
+    // it whenever there's an uncovered YOUTUBE tail and nothing is running. Gated on
+    // the youtube-summaries queued count specifically — the action only drafts that
+    // collection (the tooltip says YouTube), so gating on the all-source `queued`
+    // would light the button up for a wiki whose only backlog is X/TikTok. Also
+    // hidden when the gardener is disabled (the route 400s then, mirroring the
+    // control-hidden pattern); an absent `gardenerEnabled` (degraded server) ⇒ shown.
+    sourceDraftAvailable: !running && data.gardenerEnabled !== false && youtubeQueued > 0,
   };
 }
 

@@ -41,17 +41,16 @@ describe("clampSourceBacklogLimit", () => {
 });
 
 describe("selectSourceBacklogDocs", () => {
-  test("all uncovered when nothing credited; caps at limit; reports full queue", () => {
+  test("returns the full uncovered queue in listing order (no cap — the loop applies the limit)", () => {
     const docs = [ytDoc(1), ytDoc(2), ytDoc(3), ytDoc(4)];
-    const { selected, totalQueued } = selectSourceBacklogDocs(
+    const { queued, totalQueued } = selectSourceBacklogDocs(
       { "youtube-summaries": docs },
       emptyRefs,
       new Set(),
       new Set(),
-      2,
     );
     expect(totalQueued).toBe(4);
-    expect(selected.map((d) => d.id)).toEqual([docs[0]!.id, docs[1]!.id]);
+    expect(queued.map((d) => d.id)).toEqual(docs.map((d) => d.id));
   });
 
   test("consumed / pending / url-referenced docs are excluded from the queue", () => {
@@ -60,15 +59,14 @@ describe("selectSourceBacklogDocs", () => {
     const pending = new Set([`youtube-summaries/${docs[1]!.id}`]);
     // docs[2] credited by URL reference in the wiki.
     const refs: WikiRefs = { urls: new Set([docs[2]!.url!]), idTokens: new Set() };
-    const { selected, totalQueued } = selectSourceBacklogDocs(
+    const { queued, totalQueued } = selectSourceBacklogDocs(
       { "youtube-summaries": docs },
       refs,
       consumed,
       pending,
-      10,
     );
     expect(totalQueued).toBe(0);
-    expect(selected).toEqual([]);
+    expect(queued).toEqual([]);
   });
 });
 
@@ -110,6 +108,31 @@ describe("runSourceDraftBacklog", () => {
     // Sequential in listing order.
     expect(draftCalls).toEqual([res.results[0]!.docId, res.results[1]!.docId, res.results[2]!.docId]);
     expect(res.results[0]!.proposalId).toBe(`p-${res.results[0]!.docId}`);
+  });
+
+  test("scans past cheap skips: [skip, skip, draft, draft] with limit 1 drafts exactly the first draftable", async () => {
+    // The two head docs have no url + fetch returns no body ⇒ cheap deterministic
+    // skips (no model call). They must NOT consume the limit, so the loop reaches
+    // the first draftable doc and drafts it; the limit is then spent (draft2 unreached).
+    const skip1: BacklogListedDoc = { collection: "youtube-summaries", id: "skip00000001" };
+    const skip2: BacklogListedDoc = { collection: "youtube-summaries", id: "skip00000002" };
+    const draft1 = ytDoc(1);
+    const draft2 = ytDoc(2);
+    const { deps, draftCalls } = stubDeps({
+      docs: [skip1, skip2, draft1, draft2],
+      fetch: async (_c, id) =>
+        id.startsWith("skip")
+          ? { text: "", metadata: {} } // no body + no url ⇒ cheap skip
+          : { text: `body of ${id}`, metadata: { url: `https://youtu.be/${id}` } },
+    });
+    const res = await runSourceDraftBacklog(fakeBot, "/wiki", "youtube-summaries", 1, "http://x", deps);
+    // Exactly ONE model attempt — the first draftable doc; draft2 is never reached.
+    expect(draftCalls).toEqual([draft1.id]);
+    expect(res.totals.drafted).toBe(1);
+    expect(res.totals.skipped).toBe(2);
+    // `selected` is the VISITED count (2 skips + 1 draft) — it exceeds the limit of 1.
+    expect(res.totals.selected).toBe(3);
+    expect(res.limit).toBe(1);
   });
 
   test("limit above max clamps to the hard cap", async () => {

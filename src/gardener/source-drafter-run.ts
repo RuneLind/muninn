@@ -145,7 +145,7 @@ export async function runSourceDraftForNewest(
 // ── Backlog drafter (batched, on-demand over the UNCOVERED tail) ─────────────
 
 /** Default number of source pages drafted per backlog-button click (kept small —
- *  each draft is a real model one-shot on the summarizer bot). */
+ *  each draft is a real model one-shot on the resolved wiki bot). */
 export const SOURCE_BACKLOG_DEFAULT_LIMIT = 3;
 /** Hard cap on a single backlog batch so one click can't hammer the summarizer. */
 export const SOURCE_BACKLOG_MAX_LIMIT = 10;
@@ -175,7 +175,12 @@ export interface SourceBacklogDocResult {
 export interface SourceBacklogResult {
   results: SourceBacklogDocResult[];
   totals: {
-    /** Docs actually attempted (≤ limit; ≤ the uncovered queue). */
+    /**
+     * Docs VISITED this run (every outcome is reported). The batch scans past cheap
+     * deterministic skips (`covered`/`skipped`) — only real model attempts
+     * (`drafted`/`error`) are bounded by `limit` — so this can exceed `limit` when
+     * the head of the queue is a run of skips.
+     */
     selected: number;
     drafted: number;
     covered: number;
@@ -246,10 +251,13 @@ export function defaultSourceBacklogDeps(
 }
 
 /**
- * The uncovered docs selected for a batch, capped at `limit`, plus the full
- * queue size. Pure: reuses the SAME partition the ingest-backlog counter uses
- * ({@link computeIngestBacklog}) — consumed-wins / pending-wins / URL-referenced-wins
- * / id-referenced-wins — so the batch drains exactly the "queued" tail. Selection
+ * The FULL uncovered queue (listing order) plus its size. Pure: reuses the SAME
+ * partition the ingest-backlog counter uses ({@link computeIngestBacklog}) —
+ * consumed-wins / pending-wins / URL-referenced-wins / id-referenced-wins — so the
+ * batch drains exactly the "queued" tail. Deliberately NOT capped here: the batch
+ * loop ({@link runSourceDraftBacklog}) scans the whole queue in order and applies
+ * the `limit` to real model attempts only, so cheap deterministic skips at the head
+ * (no body/url, covered, stem collision) never strand the reachable tail. Selection
  * is listing order (newest-first is the drain's job, not this producer's — the
  * backlog tail is genuinely un-paged either way).
  */
@@ -258,23 +266,31 @@ export function selectSourceBacklogDocs(
   wikiRefs: WikiRefs,
   consumed: Set<string>,
   pending: Set<string>,
-  limit: number,
-): { selected: QueuedDoc[]; totalQueued: number } {
+): { queued: QueuedDoc[]; totalQueued: number } {
   const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
   const queued = backlog.byCollection.flatMap((c) => c.queuedDocs);
-  return { selected: queued.slice(0, limit), totalQueued: queued.length };
+  return { queued, totalQueued: queued.length };
 }
 
 /**
  * BACKLOG batch: draft source pages for up to `limit` UNCOVERED docs in a
  * collection, sequentially (never parallel — each is a real model one-shot on the
- * summarizer bot). Drafts land in the same `/wiki/gardener` review gate; nothing
+ * resolved wiki bot). Drafts land in the same `/wiki/gardener` review gate; nothing
  * is auto-approved. Skip-not-fail: a per-doc fetch/draft failure is recorded as an
  * `error` outcome and the batch continues — one bad doc never aborts the run.
  *
  * `covered`/`skipped` outcomes come from {@link draftSourcePage} itself (its own
- * url-covered + live-proposal guards + shape gate), so a doc that was credited
+ * url-covered + live-proposal guards + shape gate) OR from {@link draftOneBacklogDoc}'s
+ * cheap pre-fetch guards (no body / no public URL), so a doc that was credited
  * between selection and drafting is honestly reported rather than double-drafted.
+ *
+ * **Head-of-line fairness:** the loop scans the FULL queue in listing order and
+ * counts only real MODEL attempts (`drafted`/`error`) toward `limit`. Cheap
+ * deterministic skips (`skipped`/`covered`) don't consume the limit — the loop
+ * continues deeper — so a run of poisoned docs at the head can't wedge the batch on
+ * the same unreachable tail every click. Model calls stay bounded at `limit`; only
+ * the (cheap HTTP) doc fetches for skip detection go past it. `totals.selected` is
+ * the VISITED count, so it can exceed `limit` when the head is a run of skips.
  */
 export async function runSourceDraftBacklog(
   botConfig: BotConfig,
@@ -293,17 +309,22 @@ export async function runSourceDraftBacklog(
     deps.getPending(botConfig.name),
   ]);
 
-  const { selected, totalQueued } = selectSourceBacklogDocs(
+  const { queued, totalQueued } = selectSourceBacklogDocs(
     { [collection]: listed },
     wikiRefs,
     consumed,
     pending,
-    cap,
   );
 
+  // Scan the whole queue in order; only real model attempts (drafted/error) count
+  // toward `cap`, so cheap skips at the head don't strand the reachable tail.
   const results: SourceBacklogDocResult[] = [];
-  for (const doc of selected) {
-    results.push(await draftOneBacklogDoc(doc, deps));
+  let modelAttempts = 0;
+  for (const doc of queued) {
+    if (modelAttempts >= cap) break;
+    const result = await draftOneBacklogDoc(doc, deps);
+    results.push(result);
+    if (result.outcome === "drafted" || result.outcome === "error") modelAttempts++;
   }
 
   const totals = {

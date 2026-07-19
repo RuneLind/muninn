@@ -588,6 +588,49 @@ describe("source-page drafter control", () => {
     expect(m.sourceDraftAvailable).toBe(false);
     expect(backlogSourceDraftHtml(m)).toBe("");
   });
+
+  test("gated on the youtube-summaries queue specifically, not the all-source total", () => {
+    // A wiki whose only backlog is X/TikTok — the source-draft action drafts only
+    // youtube-summaries, so the button must stay hidden even though `queued` > 0.
+    const m = backlogStripModel(
+      base({
+        byCollection: [
+          { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 0 },
+          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 12 },
+        ],
+        queued: 12,
+      }),
+      0,
+    );
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("available when the youtube queue has uncovered docs even if others are empty", () => {
+    const m = backlogStripModel(
+      base({
+        byCollection: [
+          { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 4 },
+          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 0 },
+        ],
+        queued: 4,
+      }),
+      0,
+    );
+    expect(m.sourceDraftAvailable).toBe(true);
+  });
+
+  test("hidden when the gardener is disabled (the source-draft route 400s then)", () => {
+    const m = backlogStripModel(base({ gardenerEnabled: false }), 0);
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("an absent gardenerEnabled (degraded/older server) is treated as enabled", () => {
+    // base() has youtube queued 310 and omits gardenerEnabled → shown.
+    const m = backlogStripModel(base(), 0);
+    expect(m.sourceDraftAvailable).toBe(true);
+  });
 });
 
 describe("sourceDraftResultHtml", () => {

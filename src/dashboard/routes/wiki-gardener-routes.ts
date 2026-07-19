@@ -297,6 +297,12 @@ export interface BacklogLiveFields {
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
   /**
+   * Whether the wiki gardener is enabled for this bot (`bot.gardener?.enabled !==
+   * false`). The source-draft route 400s when it's disabled, so the strip reads this
+   * to hide the "Draft source pages" button rather than let it POST into a 400.
+   */
+  gardenerEnabled: boolean;
+  /**
    * The bot's wiki-gardener watcher, projected for the strip's fresh-segment
    * affordance (next-weekly-run time + "Run gardener now"). Null when the bot has
    * no seeded watcher. `nextRunAt` is `lastRunAt + intervalMs` (null ⇒ never run ⇒
@@ -885,6 +891,7 @@ export function registerWikiGardenerRoutes(
           freshWindowDays: minAgeDays,
           lastBacklogRun,
           watcherSeeded: !!watcher,
+          gardenerEnabled: bot.gardener?.enabled !== false,
           watcher: watcherInfo,
           progress: getBacklogProgress(bot.name),
           interrupted,
@@ -1107,7 +1114,7 @@ export function registerWikiGardenerRoutes(
 
   // Backlog source drafter — draft per-article `.mdx` source pages for up to
   // `limit` UNCOVERED docs in a collection (default youtube-summaries), on an
-  // explicit click. Sequential (each is a real model one-shot on the summarizer
+  // explicit click. Sequential (each is a real model one-shot on the resolved wiki
   // bot), capped at SOURCE_BACKLOG_MAX_LIMIT, and skip-not-fail per doc so one bad
   // doc can't abort the batch. Drafts land in this same gate — nothing is
   // auto-approved. Awaits the whole batch (a deliberate manual action) and returns
@@ -1136,11 +1143,21 @@ export function registerWikiGardenerRoutes(
     }
     const limit = clampSourceBacklogLimit(parsedLimit);
 
+    // Serialize under the same per-bot gardener mutex the drain routes use, so
+    // concurrent source-draft clicks (or a click racing a backlog drain) can't
+    // double-spend model calls. `runExclusive` is a try-lock: it returns null WITHOUT
+    // starting when a run is already in flight — respond 409 like the recover/dismiss
+    // routes rather than queue behind a potentially long drain.
+    const run = runExclusive(bot.name, () =>
+      runSourceDraftBacklog(bot, root, collection, limit, KNOWLEDGE_API_URL),
+    );
+    if (run === null) return c.json({ error: "a gardener run is already in flight for this bot" }, 409);
+
     // Never-500 contract for the batch itself: per-doc failures are recorded
     // outcomes; only an unexpected orchestration throw (listing / sweep / coverage)
     // reaches here and degrades to a 500 with the message.
     try {
-      const result = await runSourceDraftBacklog(bot, root, collection, limit, KNOWLEDGE_API_URL);
+      const result = await run;
       return c.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
