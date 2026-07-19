@@ -503,7 +503,9 @@ describe("startBacklogRun", () => {
       persistOffered: async () => {},
       runGardener: async () => {
         ranGardener = true;
-        return [];
+        // Draft one proposal so this stays a "runs normally" case (a bare [] would
+        // trip the zero-draft rollback guard and report offered:0).
+        return [{ id: "wiki-gardener:p1", source: "wiki-gardener", summary: "", urgency: "low" }];
       },
       recordLastRun: (rec) => {
         recorded = rec;
@@ -513,6 +515,86 @@ describe("startBacklogRun", () => {
     expect(ranGardener).toBe(true);
     expect(recorded!.outcome).toBeUndefined();
     expect(recorded!.offered).toBe(3);
+  });
+
+  test("zero-draft run rolls the offered set back to offeredBefore (batch stays eligible)", async () => {
+    // A batch of 3 eligible docs against minClusterSize 1 clears the insufficient
+    // guard, so the run offers + journals + runs — but runGardener drafts NOTHING
+    // (returns []). The offered snapshot must be rolled back to offeredBefore so the
+    // batch stays eligible next run (the `offered: 4, drafted: 0` burn case).
+    const persists: string[][] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(["c/z"]),
+      queuedCount: 4,
+    };
+
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async (keys) => {
+        persists.push([...keys].sort());
+      },
+      runGardener: async () => [], // drafted nothing
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // Two persists: the pre-run offered union, then the rollback to offeredBefore.
+    expect(persists).toEqual([["c/a", "c/b", "c/c", "c/z"], ["c/z"]]);
+    // The batch keys are NOT in the final offered set — they stay eligible.
+    expect(persists[persists.length - 1]).toEqual(["c/z"]);
+    // The last-run record reports offered:0 — nothing stayed burned.
+    expect(recorded).not.toBeNull();
+    expect(recorded!.offered).toBe(0);
+    expect(recorded!.drafted).toBe(0);
+    expect(recorded!.outcome).toBeUndefined(); // not the insufficient short-circuit
+    expect(gardenerRunInFlight("jarvis")).toBe(false);
+  });
+
+  test("a run that drafts ≥1 keeps the offered set burned (no rollback)", async () => {
+    // Legitimate persistence: a run that produced a proposal must NOT roll back —
+    // the drafted batch stays offered so it isn't re-clustered next run.
+    const persists: string[][] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(["c/z"]),
+      queuedCount: 4,
+    };
+
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async (keys) => {
+        persists.push([...keys].sort());
+      },
+      runGardener: async () => [
+        { id: "wiki-gardener:p1", source: "wiki-gardener", summary: "", urgency: "low" },
+      ],
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // Exactly ONE persist — the pre-run offered union. No rollback.
+    expect(persists).toEqual([["c/a", "c/b", "c/c", "c/z"]]);
+    expect(recorded!.offered).toBe(3);
+    expect(recorded!.drafted).toBe(1);
   });
 
   test("auto-recovers a pending journal (returns undrafted docs) BEFORE offering the new batch", async () => {
@@ -549,7 +631,11 @@ describe("startBacklogRun", () => {
         calls.push("persist");
         persists.push([...keys].sort());
       },
-      runGardener: async () => [],
+      // Draft one proposal so the zero-draft rollback guard doesn't add an extra
+      // persist — this case exercises journal recovery, not the zero-draft path.
+      runGardener: async () => [
+        { id: "wiki-gardener:p1", source: "wiki-gardener", summary: "", urgency: "low" },
+      ],
       recordLastRun: () => {},
     });
     await new Promise((res) => setTimeout(res, 10));
