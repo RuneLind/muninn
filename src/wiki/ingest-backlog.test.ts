@@ -1,9 +1,13 @@
 import { test, expect, describe } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   normalizeUrl,
   extractUrls,
   docIdFromUrl,
   computeIngestBacklog,
+  collectWikiRefs,
   type ListedDoc,
   type WikiRefs,
 } from "./ingest-backlog.ts";
@@ -259,5 +263,30 @@ describe("computeIngestBacklog — credit rules + partition math", () => {
       "anthropic-summaries",
       "tiktok-summaries",
     ]);
+  });
+});
+
+describe("collectWikiRefs — sweeps .md AND .mdx pages", () => {
+  test("a native .mdx source page's url: + body URLs credit their docs", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "wikirefs-"));
+    try {
+      // A .md page (existing behavior) and a .mdx source page (the new glob).
+      await Bun.write(
+        path.join(root, "concepts", "RAG.md"),
+        "---\ntype: concept\n---\n\nSee https://example.com/a\n",
+      );
+      await Bun.write(
+        path.join(root, "sources", "Some Video.mdx"),
+        "---\ntype: source\nurl: https://youtu.be/deFvnmibzow\n---\n\n# Some Video\n\nRef `deFvnmibzow`\n",
+      );
+      const refsOut = await collectWikiRefs(root);
+      // .md still swept.
+      expect(refsOut.urls.has("https://example.com/a")).toBe(true);
+      // .mdx frontmatter url swept + its YouTube id derived into idTokens.
+      expect(refsOut.urls.has("https://youtu.be/deFvnmibzow")).toBe(true);
+      expect(refsOut.idTokens.has("deFvnmibzow")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

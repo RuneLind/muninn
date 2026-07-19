@@ -60,6 +60,7 @@ import {
   type RunJournal,
 } from "../../gardener/backlog.ts";
 import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
+import { runSourceDraftForNewest } from "../../gardener/source-drafter-run.ts";
 import {
   getWikiGardenerWatcher,
   getWatcherSnapshot,
@@ -699,7 +700,9 @@ export function registerWikiGardenerRoutes(
           );
           wiring = {
             indexLine: entry ? entry.line : null,
-            indexSkipEntity: p.kind === "entity",
+            // Any non-concept kind is left out of the Concepts index (entity → manual
+            // filing; source → flat per-article archive, no index line at all).
+            indexSkipEntity: p.kind !== "concept",
             seeAlso,
             legacyNoRelated: p.relatedPages === null,
           };
@@ -1068,6 +1071,34 @@ export function registerWikiGardenerRoutes(
     if (run === null) return c.json({ error: "a run is in flight" }, 409);
     await run;
     return c.json({ ok: true });
+  });
+
+  // Run-now source drafter — draft a per-article `.mdx` source page for the NEWEST
+  // doc in a summary collection (default youtube-summaries), on demand. Persists a
+  // `wiki_proposals` row (kind `source`) that appears in this same gate. Awaits the
+  // one traced model call (a deliberate manual action) and returns the outcome; a
+  // covered/empty collection is a normal 200, a model/DB failure a 500.
+  app.post("/api/wiki/gardener/source-draft-run", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot, root } = resolved;
+
+    if (bot.gardener?.enabled === false) {
+      return c.json({ error: "the wiki gardener is disabled for this bot" }, 400);
+    }
+
+    const collection = c.req.query("collection") ?? "youtube-summaries";
+    if (!SUMMARY_SOURCES.some((s) => s.collection === collection)) {
+      return c.json({ error: `unknown summary collection "${collection}"` }, 400);
+    }
+
+    const outcome = await runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL);
+    log.info("Source-draft run-now for {bot} ({collection}): {outcome}", {
+      bot: bot.name,
+      collection,
+      outcome: outcome.outcome,
+    });
+    return c.json(outcome, outcome.outcome === "error" ? 500 : 200);
   });
 
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.

@@ -9,7 +9,8 @@
  */
 
 import path from "node:path";
-import type { Cluster, ClusterKind, HarvestedDoc } from "./types.ts";
+import type { Cluster, HarvestedDoc } from "./types.ts";
+import type { WikiProposalKind } from "../db/wiki-proposals.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import { parseFrontmatter, extractWikilinks } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
@@ -529,14 +530,31 @@ function toPosixRel(rel: string): string {
   return rel.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
-/** Basenames the gardener must never target — wiki infrastructure, not pages. */
-const FORBIDDEN_BASENAMES = new Set(["log.md", "index.md", "claude.md"]);
+/**
+ * Basenames the gardener must never target — wiki infrastructure, not pages. Both
+ * the `.md` and `.mdx` variants are reserved: the source-page drafter writes native
+ * `.mdx`, so an `index.mdx`/`log.mdx`/`claude.mdx` must be rejected just like its
+ * `.md` twin.
+ */
+const FORBIDDEN_BASENAMES = new Set([
+  "log.md",
+  "index.md",
+  "claude.md",
+  "log.mdx",
+  "index.mdx",
+  "claude.mdx",
+]);
 
 /**
  * Path confinement: `target_path` must be relative, `..`-free, resolve inside
- * `wikiDir`, end in `.md`, not be a reserved infrastructure file (log.md,
- * index.md, CLAUDE.md), and either (create) sit under the domain+kind's
+ * `wikiDir`, end in `.md` or `.mdx`, not be a reserved infrastructure file (log,
+ * index, CLAUDE — either extension), and either (create) sit under the domain+kind's
  * expected dir, or (update) exactly equal the existing page's path.
+ *
+ * `.mdx` is accepted alongside `.md` because the source-page drafter emits native
+ * `.mdx` (mermaid + block components render inline in the reader); the gardener's
+ * concept/entity drafts stay `.md`. Both the shape-gate (persist time) and
+ * `applyWikiProposal` (apply time) route through here.
  *
  * Confinement is LEXICAL (path normalization + prefix check), not realpath-based:
  * a symlink inside `wikiDir` pointing elsewhere is outside the threat model — the
@@ -546,7 +564,7 @@ export function isPathConfined(opts: {
   targetPath: string;
   wikiDir: string;
   domain: "ai" | "life";
-  kind: ClusterKind;
+  kind: WikiProposalKind;
   existingRelPath?: string;
 }): boolean {
   const { targetPath, wikiDir, domain, kind, existingRelPath } = opts;
@@ -554,7 +572,7 @@ export function isPathConfined(opts: {
 
   const norm = toPosixRel(path.normalize(targetPath));
   if (norm === ".." || norm.startsWith("../") || norm.split("/").includes("..")) return false;
-  if (!norm.toLowerCase().endsWith(".md")) return false;
+  if (!/\.mdx?$/i.test(norm)) return false;
   if (FORBIDDEN_BASENAMES.has(norm.split("/").pop()!.toLowerCase())) return false;
 
   const root = path.resolve(wikiDir);
@@ -579,7 +597,7 @@ export function isPathConfined(opts: {
 export function shapeGate(
   draft: string,
   opts: {
-    kind: ClusterKind;
+    kind: WikiProposalKind;
     targetPath: string;
     wikiDir: string;
     domain: "ai" | "life";

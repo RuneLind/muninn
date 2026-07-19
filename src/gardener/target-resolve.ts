@@ -7,6 +7,7 @@
 
 import path from "node:path";
 import type { Cluster, ResolvedTarget } from "./types.ts";
+import type { WikiProposalKind } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 
 /** Normalize a title/alias/label for near-match comparison. */
@@ -14,9 +15,15 @@ export function normalizeLabel(s: string): string {
   return s.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-/** The wiki dir a cluster's new page belongs in, given its domain + kind. */
-export function expectedDir(domain: "ai" | "life", kind: "concept" | "entity"): string {
-  const sub = kind === "concept" ? "concepts" : "entities";
+/**
+ * The wiki dir a page belongs in, given its domain + kind. Mirrors the wiki's
+ * folder layout: `concepts/`, `entities/`, `sources/` (each under `life/` for the
+ * life domain). Typed `WikiProposalKind` (not `ClusterKind`) so the source-page
+ * drafter — which produces `source` proposals the weekly clusterer never emits —
+ * shares this one mapping; `resolveTarget` below only ever passes concept/entity.
+ */
+export function expectedDir(domain: "ai" | "life", kind: WikiProposalKind): string {
+  const sub = kind === "concept" ? "concepts" : kind === "source" ? "sources" : "entities";
   return domain === "life" ? `life/${sub}` : sub;
 }
 

@@ -21,7 +21,7 @@
  */
 
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
-import type { WikiProposalRelatedPage } from "../db/wiki-proposals.ts";
+import type { WikiProposalKind, WikiProposalRelatedPage } from "../db/wiki-proposals.ts";
 
 /** A related page the wire stage will attempt to backlink (title + resolved page). */
 export interface WirablePage {
@@ -65,7 +65,7 @@ const ONE_LINER_MAX = 120;
 
 export interface IndexEntryInput {
   title: string;
-  kind: "concept" | "entity";
+  kind: WikiProposalKind;
   domain: "ai" | "life";
   /** The proposal's rationale — preferred one-liner source. */
   rationale?: string | null;
@@ -82,13 +82,14 @@ export interface IndexEntry {
 
 /**
  * Build the `- [[Title]] — <one-liner>` index bullet for a new page, plus the
- * `### ` section it belongs under. Returns null for `entity` pages: the Entities
- * index is split People / Organizations / Products & projects, and which one a
- * given entity is isn't derivable from the proposal — guessing mis-files a
- * curated index, so entities are left for manual filing.
+ * `### ` section it belongs under. Returns null for any non-`concept` kind: the
+ * Entities index is split People / Organizations / Products & projects (which one
+ * an entity is isn't derivable from the proposal), and `source` pages are a flat
+ * per-article archive with no `## Concepts` index line at all — both are left out
+ * of the index (surfaced in the gate's wiring preview as an "entity/source skip").
  */
 export function buildIndexEntry(input: IndexEntryInput): IndexEntry | null {
-  if (input.kind === "entity") return null;
+  if (input.kind !== "concept") return null;
   const section = CONCEPT_SECTION[input.domain];
   const oneLiner = indexOneLiner(input.rationale, input.body);
   const line = oneLiner ? `- [[${input.title}]] — ${oneLiner}` : `- [[${input.title}]]`;

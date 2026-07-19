@@ -319,7 +319,11 @@ export async function checkWikiGardener(
         );
         return Array.isArray(data?.documents) ? data.documents : [];
       },
-      consumedDocIds: () => getConsumedDocIds(name),
+      // Concept/entity only: a doc that only ever became an `applied` SOURCE page
+      // stays eligible for concept/entity synthesis (source + concept pages about
+      // the same video are complementary). The backlog-crediting path keeps the
+      // unfiltered set, so a source-paged doc still counts as ingested there.
+      consumedDocIds: () => getConsumedDocIds(name, ["concept", "entity"]),
       ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir, profileUserId: watcher.userId, tracer }),
     }),
   );

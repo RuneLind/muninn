@@ -4,6 +4,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   attachRun,
   updateStatus,
@@ -118,6 +119,18 @@ Video URL: ${url}`;
 
     // 5. Complete
     completeJob(jobId, summary, category);
+
+    // 6. Fire-and-forget: draft a per-article source page from this summary
+    //    IN-PROCESS (no huginn re-fetch — ingest above is best-effort and indexing
+    //    may lag). Skips silently when the summarizer bot has no wikiDir; any
+    //    failure is swallowed inside the trigger and never touches the capture job.
+    triggerSourceDraftFromCapture(botConfig, {
+      collection: "youtube-summaries",
+      docId: videoId,
+      url,
+      body: summary,
+      sourceTitle: title,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("YouTube summarization failed for job {jobId}: {error}", { jobId, error: msg });

@@ -189,15 +189,20 @@ export interface WikiRefs {
 }
 
 /**
- * Sweep every `.md` file under a wiki root for URLs + bare id tokens and return
- * the normalized refs. Plain recursive read (mirrors `src/wiki/lint.ts`) — a full
- * scan of ~700 small files is well under a second and the caller TTL-caches the
+ * Sweep every `.md`/`.mdx` file under a wiki root for URLs + bare id tokens and
+ * return the normalized refs. Plain recursive read (mirrors `src/wiki/lint.ts`) — a
+ * full scan of ~700 small files is well under a second and the caller TTL-caches the
  * result. Unreadable files are skipped, never fatal.
+ *
+ * The glob includes `.mdx` (matching the store's md/mdx/html page discovery) so
+ * native `.mdx` pages — the source-page drafter's output — credit their `url:` and
+ * body URLs against the ingest backlog. Without it, an applied `.mdx` source page
+ * would leave its own video sitting in the "queued" tail forever.
  */
 export async function collectWikiRefs(root: string): Promise<WikiRefs> {
   const urls = new Set<string>();
   const idTokens = new Set<string>();
-  const glob = new Bun.Glob("**/*.md");
+  const glob = new Bun.Glob("**/*.{md,mdx}");
   for await (const rel of glob.scan({ cwd: root, dot: false })) {
     // Bun.Glob's dot:false skips dot FILES but may still descend dot DIRS —
     // filter path segments explicitly (same guard as store.ts).

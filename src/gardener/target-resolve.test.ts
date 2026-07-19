@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { resolveTarget } from "./target-resolve.ts";
+import { resolveTarget, expectedDir } from "./target-resolve.ts";
 import type { Cluster } from "./types.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 
@@ -107,5 +107,19 @@ describe("resolveTarget", () => {
     expect(out.mode).toBe("create");
     expect(out.targetPath).toBe("concepts/Wiki Gardener.md");
     expect(out.kind).toBeUndefined();
+  });
+});
+
+describe("expectedDir — folder layout per domain + kind", () => {
+  test("ai domain: concept/entity/source map to their folders", () => {
+    expect(expectedDir("ai", "concept")).toBe("concepts");
+    expect(expectedDir("ai", "entity")).toBe("entities");
+    expect(expectedDir("ai", "source")).toBe("sources");
+  });
+
+  test("life domain nests each under life/", () => {
+    expect(expectedDir("life", "concept")).toBe("life/concepts");
+    expect(expectedDir("life", "entity")).toBe("life/entities");
+    expect(expectedDir("life", "source")).toBe("life/sources");
   });
 });

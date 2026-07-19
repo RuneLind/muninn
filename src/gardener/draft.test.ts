@@ -68,6 +68,27 @@ describe("isPathConfined", () => {
     // A page merely containing one of the words is fine.
     expect(isPathConfined({ targetPath: "concepts/Logging.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(true);
   });
+
+  test("accepts a native .mdx source page under sources/", () => {
+    expect(isPathConfined({ targetPath: "sources/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(true);
+    expect(isPathConfined({ targetPath: "life/sources/Sleep.mdx", wikiDir: WIKI, domain: "life", kind: "source" })).toBe(true);
+    // .mdx also allowed on the update path when it equals the existing page.
+    expect(isPathConfined({ targetPath: "sources/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source", existingRelPath: "sources/RAG.mdx" })).toBe(true);
+  });
+
+  test("a source .mdx outside sources/ (create) is rejected", () => {
+    expect(isPathConfined({ targetPath: "concepts/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+  });
+
+  test("forbidden basenames reject the .mdx variant too", () => {
+    for (const base of ["log.mdx", "index.mdx", "CLAUDE.mdx"]) {
+      expect(isPathConfined({ targetPath: `sources/${base}`, wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+    }
+  });
+
+  test("a non-md/mdx extension is still rejected", () => {
+    expect(isPathConfined({ targetPath: "sources/RAG.html", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+  });
 });
 
 describe("shapeGate", () => {
@@ -113,6 +134,28 @@ describe("shapeGate", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("does not match cluster kind");
     expect(WIKI_CONVENTIONS_DIGEST).not.toMatch(/^type: concept\s+#/m);
+  });
+
+  test("accepts a source draft at a sources/*.mdx target", () => {
+    const draft = draftFile({ type: "source", title: "RAG" });
+    const res = shapeGate(draft, {
+      kind: "source",
+      targetPath: "sources/RAG.mdx",
+      wikiDir: WIKI,
+      domain: "ai",
+    });
+    expect(res).toEqual({ ok: true });
+  });
+
+  test("rejects a source draft whose frontmatter type isn't source", () => {
+    const draft = draftFile({ type: "concept", title: "RAG" });
+    const res = shapeGate(draft, {
+      kind: "source",
+      targetPath: "sources/RAG.mdx",
+      wikiDir: WIKI,
+      domain: "ai",
+    });
+    expect(res.ok).toBe(false);
   });
 });
 
