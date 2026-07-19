@@ -127,4 +127,25 @@ describe("wiki_proposals CRUD", () => {
     expect(consumed.has("youtube-summaries/2026-07-07_a.md")).toBe(true);
     expect(consumed.has("x-articles/draft-doc.md")).toBe(false);
   });
+
+  test("consumed kind filter: an applied SOURCE page is excluded for the weekly gardener but still credits unfiltered", async () => {
+    const src = await insertWikiProposal(
+      makeProposal({
+        topicKey: "source:youtube-summaries:vidZ",
+        kind: "source",
+        targetPath: "sources/Some Video.mdx",
+        sourceDocs: [{ collection: "youtube-summaries", docId: "vidZ", title: "Z", url: "https://z" }],
+      }),
+    );
+    await getDb()`UPDATE wiki_proposals SET status = 'applied' WHERE id = ${src!.id}`;
+
+    // Weekly gardener seam passes ["concept","entity"] → source doc NOT excluded
+    // from harvest (stays eligible for concept/entity synthesis).
+    const filtered = await getConsumedDocIds("jarvis", ["concept", "entity"]);
+    expect(filtered.has("youtube-summaries/vidZ")).toBe(false);
+
+    // Backlog-crediting path (unfiltered) → the source-paged doc DOES count as consumed.
+    const all = await getConsumedDocIds("jarvis");
+    expect(all.has("youtube-summaries/vidZ")).toBe(true);
+  });
 });

@@ -48,7 +48,7 @@ export interface WikiProposalRelatedPage {
   relPath?: string;
 }
 
-export type WikiProposalKind = "concept" | "entity";
+export type WikiProposalKind = "concept" | "entity" | "source";
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
   | "draft"
@@ -293,13 +293,30 @@ export async function getRecentlyRejectedTopicKeys(
 /**
  * Doc ids consumed by `applied` proposals — the harvest-time exclusion set, keyed
  * as `<collection>/<docId>` to match how the gardener tags window docs.
+ *
+ * `kinds` (optional) narrows the scan to those proposal kinds via `kind = ANY(…)`.
+ * The **weekly gardener** passes `["concept", "entity"]` so a doc that only ever
+ * became an `applied` **source** page is NOT excluded from harvest — it stays
+ * eligible for concept/entity synthesis (a source page and a concept page about
+ * the same video are complementary, not duplicates). The backlog-crediting caller
+ * (`DEFAULT_COVERAGE_DEPS`) passes NO filter, so a source-paged doc still counts
+ * as covered/ingested and drops out of the ingest-backlog "queued" tail.
  */
-export async function getConsumedDocIds(botName: string): Promise<Set<string>> {
+export async function getConsumedDocIds(
+  botName: string,
+  kinds?: WikiProposalKind[],
+): Promise<Set<string>> {
   const sql = getDb();
-  const rows = await sql`
-    SELECT source_docs FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status = 'applied'
-  `;
+  const rows =
+    kinds && kinds.length > 0
+      ? await sql`
+          SELECT source_docs FROM wiki_proposals
+          WHERE bot_name = ${botName} AND status = 'applied' AND kind = ANY(${kinds})
+        `
+      : await sql`
+          SELECT source_docs FROM wiki_proposals
+          WHERE bot_name = ${botName} AND status = 'applied'
+        `;
   const consumed = new Set<string>();
   for (const row of rows) {
     const docs = (row.source_docs ?? []) as WikiProposalSourceDoc[];

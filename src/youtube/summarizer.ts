@@ -4,6 +4,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   attachRun,
   updateStatus,
@@ -103,6 +104,11 @@ Video URL: ${url}`;
     // 4. Ingest into knowledge base (best-effort)
     updateStatus(jobId, "ingesting");
 
+    // Capture huginn's stored doc id (`file_path` = <category>/<title-slug>.md) so
+    // the source-draft trigger below keys off the SAME id the run-now drafter uses
+    // (`newest.id`) — otherwise a run-now click on a just-auto-drafted video would
+    // mint a duplicate proposal under a different topic_key.
+    let ingestedDocId: string | undefined;
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/youtube/ingest",
@@ -114,10 +120,29 @@ Video URL: ${url}`;
         date: new Date().toISOString().split("T")[0],
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
+      onIngested: (info) => {
+        ingestedDocId = info.filePath;
+      },
     });
 
     // 5. Complete
     completeJob(jobId, summary, category);
+
+    // 6. Fire-and-forget: draft a per-article source page from this summary
+    //    IN-PROCESS (no huginn re-fetch — ingest above is best-effort and indexing
+    //    may lag). Skips silently when the summarizer bot has no wikiDir; any
+    //    failure is swallowed inside the trigger and never touches the capture job.
+    //    Prefer huginn's stored doc id (identical to the run-now drafter's docId);
+    //    fall back to videoId only when the ingest returned no file_path (older
+    //    huginn / failed ingest — in which case the doc isn't listed anyway, so
+    //    run-now can't draft a colliding duplicate).
+    triggerSourceDraftFromCapture(botConfig, {
+      collection: "youtube-summaries",
+      docId: ingestedDocId ?? videoId,
+      url,
+      body: summary,
+      sourceTitle: title,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("YouTube summarization failed for job {jobId}: {error}", { jobId, error: msg });

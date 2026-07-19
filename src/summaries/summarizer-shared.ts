@@ -210,6 +210,15 @@ export async function ingestSummary(opts: {
   body: Record<string, unknown>;
   /** Called with the returned similar articles when the ingest succeeds. */
   onSimilar: (similar: SimilarArticle[]) => void;
+  /**
+   * Called on a successful ingest with the stored doc's `file_path` — huginn's
+   * wiki-relative doc id (`<category>/<title-slug>.md`), the SAME id the run-now
+   * source drafter lists as `newest.id`. The auto source-drafter threads this so
+   * both entry points key their proposal off the identical doc id (no duplicate
+   * proposal, and the consumed-set crediting `<collection>/<docId>` matches).
+   * `undefined` when the response omits it (older huginn).
+   */
+  onIngested?: (info: { filePath?: string }) => void;
   /** Abort timeout (default 15s). */
   timeoutMs?: number;
 }): Promise<void> {
@@ -225,9 +234,14 @@ export async function ingestSummary(opts: {
     clearTimeout(timeout);
 
     if (res.ok) {
-      const data = (await res.json()) as { similar?: SimilarArticle[] };
+      const data = (await res.json()) as { similar?: SimilarArticle[]; file_path?: string };
       if (data.similar && data.similar.length > 0) {
         opts.onSimilar(data.similar);
+      }
+      if (opts.onIngested) {
+        opts.onIngested({
+          filePath: typeof data.file_path === "string" ? data.file_path : undefined,
+        });
       }
     } else {
       log.warn("Knowledge API ingest returned {status}", { status: res.status });

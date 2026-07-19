@@ -12,6 +12,7 @@ import {
   scanUnresolvedBodyLinks,
   containBodyLinks,
   containDraftBodyLinks,
+  pinFrontmatterUrl,
   WIKI_CONVENTIONS_DIGEST,
 } from "./draft.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
@@ -68,6 +69,27 @@ describe("isPathConfined", () => {
     // A page merely containing one of the words is fine.
     expect(isPathConfined({ targetPath: "concepts/Logging.md", wikiDir: WIKI, domain: "ai", kind: "concept" })).toBe(true);
   });
+
+  test("accepts a native .mdx source page under sources/", () => {
+    expect(isPathConfined({ targetPath: "sources/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(true);
+    expect(isPathConfined({ targetPath: "life/sources/Sleep.mdx", wikiDir: WIKI, domain: "life", kind: "source" })).toBe(true);
+    // .mdx also allowed on the update path when it equals the existing page.
+    expect(isPathConfined({ targetPath: "sources/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source", existingRelPath: "sources/RAG.mdx" })).toBe(true);
+  });
+
+  test("a source .mdx outside sources/ (create) is rejected", () => {
+    expect(isPathConfined({ targetPath: "concepts/RAG.mdx", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+  });
+
+  test("forbidden basenames reject the .mdx variant too", () => {
+    for (const base of ["log.mdx", "index.mdx", "CLAUDE.mdx"]) {
+      expect(isPathConfined({ targetPath: `sources/${base}`, wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+    }
+  });
+
+  test("a non-md/mdx extension is still rejected", () => {
+    expect(isPathConfined({ targetPath: "sources/RAG.html", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
+  });
 });
 
 describe("shapeGate", () => {
@@ -113,6 +135,28 @@ describe("shapeGate", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("does not match cluster kind");
     expect(WIKI_CONVENTIONS_DIGEST).not.toMatch(/^type: concept\s+#/m);
+  });
+
+  test("accepts a source draft at a sources/*.mdx target", () => {
+    const draft = draftFile({ type: "source", title: "RAG" });
+    const res = shapeGate(draft, {
+      kind: "source",
+      targetPath: "sources/RAG.mdx",
+      wikiDir: WIKI,
+      domain: "ai",
+    });
+    expect(res).toEqual({ ok: true });
+  });
+
+  test("rejects a source draft whose frontmatter type isn't source", () => {
+    const draft = draftFile({ type: "concept", title: "RAG" });
+    const res = shapeGate(draft, {
+      kind: "source",
+      targetPath: "sources/RAG.mdx",
+      wikiDir: WIKI,
+      domain: "ai",
+    });
+    expect(res.ok).toBe(false);
   });
 });
 
@@ -172,6 +216,44 @@ describe("WIKI_CONVENTIONS_DIGEST sources rule (URLs by default)", () => {
   test("prefers URLs over [[source page]] refs and warns against invented refs", () => {
     expect(WIKI_CONVENTIONS_DIGEST).toContain("prefer URLs over [[source page]] refs");
     expect(WIKI_CONVENTIONS_DIGEST).toContain("never fabricate source-page names");
+  });
+});
+
+describe("pinFrontmatterUrl", () => {
+  const KNOWN = "https://youtu.be/abc12345678";
+
+  test("overwrites a model-emitted (hallucinated) url with the known one", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://evil.example/injected\nsources: [https://youtu.be/abc12345678]\n---\n\n# T\n\nBody.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain(`url: ${KNOWN}`);
+    expect(out).not.toContain("https://evil.example/injected");
+  });
+
+  test("inserts a url: line when the frontmatter has none", () => {
+    const draft = `---\ntype: source\ntitle: T\n---\n\n# T\n\nBody.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain(`url: ${KNOWN}`);
+    // The closing fence + body survive verbatim.
+    expect(out).toContain("\n---\n\n# T\n\nBody.");
+  });
+
+  test("drops a smuggled duplicate url: key, keeping one pinned value", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://a.example\nurl: https://b.example\n---\n\n# T`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out.match(/^url:/gm)?.length).toBe(1);
+    expect(out).toContain(`url: ${KNOWN}`);
+  });
+
+  test("only the frontmatter head is scanned — body 'url:' prose is untouched", () => {
+    const draft = `---\ntype: source\ntitle: T\nurl: https://old.example\n---\n\n# T\n\nSet url: https://in-body.example in your config.`;
+    const out = pinFrontmatterUrl(draft, KNOWN);
+    expect(out).toContain("Set url: https://in-body.example in your config.");
+    expect(out).toContain(`url: ${KNOWN}`);
+  });
+
+  test("no terminated frontmatter fence → unchanged", () => {
+    const draft = "no frontmatter here";
+    expect(pinFrontmatterUrl(draft, KNOWN)).toBe(draft);
   });
 });
 

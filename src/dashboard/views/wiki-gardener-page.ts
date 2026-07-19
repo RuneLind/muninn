@@ -186,6 +186,7 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-badge { font-size: 10.5px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600; }
     .badge-concept { background: var(--tint-purple); color: var(--accent-light); }
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
+    .badge-source { background: var(--tint-warning); color: var(--status-warning); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }
     .badge-update { background: var(--tint-info); color: var(--status-info); }
     .chip-draft { background: var(--tint-neutral); color: var(--text-muted); }

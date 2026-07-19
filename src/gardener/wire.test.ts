@@ -65,6 +65,12 @@ describe("buildIndexEntry", () => {
   test("entity → null (People/Orgs/Products not derivable, file manually)", () => {
     expect(buildIndexEntry({ title: "Anthropic", kind: "entity", domain: "ai", rationale: "AI lab" })).toBeNull();
   });
+
+  test("source → null (per-article archive, no Concepts index line)", () => {
+    expect(
+      buildIndexEntry({ title: "RAG Explained", kind: "source", domain: "ai", rationale: "video" }),
+    ).toBeNull();
+  });
 });
 
 describe("insertIndexLine", () => {
