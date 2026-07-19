@@ -164,7 +164,7 @@ export const SUMMARY_STRUCTURE_BULLETS = [
   "- Open with a `## Key takeaways` section FIRST — 3–6 tight bullet points, one line each, capturing the most important points.",
   "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
   "- Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.",
-  "- **Bold** for key terms; bullet lists for enumerations.",
+  "- **Bold** for key terms; bullet lists for enumerations, with emoji prefixes where they aid scanning.",
   "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
   "- Keep it concise but comprehensive.",
 ];
