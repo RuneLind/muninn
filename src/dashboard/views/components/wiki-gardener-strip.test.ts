@@ -10,9 +10,12 @@ import {
   backlogOutcomeHtml,
   backlogBannerHtml,
   backlogStripHtml,
+  backlogSourceDraftHtml,
+  sourceDraftResultHtml,
   type BacklogProgress,
   type BacklogWatcherInfo,
   type IngestBacklogResponse,
+  type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 
 /**
@@ -553,5 +556,109 @@ describe("backlogBannerHtml — interrupted-run recovery (PR 3)", () => {
     const html = backlogBannerHtml(m);
     expect(html).toContain(">3<");
     expect(html).toContain(">40<");
+  });
+});
+
+describe("source-page drafter control", () => {
+  test("available when uncovered docs exist and nothing is running", () => {
+    const m = backlogStripModel(base(), 0);
+    expect(m.sourceDraftAvailable).toBe(true);
+    expect(backlogSourceDraftHtml(m)).toContain('data-backlog-action="source-draft"');
+    // The button is appended to the full strip.
+    expect(backlogStripHtml(m)).toContain("Draft source pages");
+  });
+
+  test("hidden while a run is in flight", () => {
+    const m = backlogStripModel(base({ running: true }), 0);
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("hidden when nothing is queued", () => {
+    const m = backlogStripModel(
+      base({
+        byCollection: [],
+        queued: 0,
+        remaining: 0,
+        offeredStillQueued: 0,
+        fresh: 0,
+      }),
+      0,
+    );
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("gated on the youtube-summaries queue specifically, not the all-source total", () => {
+    // A wiki whose only backlog is X/TikTok — the source-draft action drafts only
+    // youtube-summaries, so the button must stay hidden even though `queued` > 0.
+    const m = backlogStripModel(
+      base({
+        byCollection: [
+          { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 0 },
+          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 12 },
+        ],
+        queued: 12,
+      }),
+      0,
+    );
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("available when the youtube queue has uncovered docs even if others are empty", () => {
+    const m = backlogStripModel(
+      base({
+        byCollection: [
+          { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 4 },
+          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 0 },
+        ],
+        queued: 4,
+      }),
+      0,
+    );
+    expect(m.sourceDraftAvailable).toBe(true);
+  });
+
+  test("hidden when the gardener is disabled (the source-draft route 400s then)", () => {
+    const m = backlogStripModel(base({ gardenerEnabled: false }), 0);
+    expect(m.sourceDraftAvailable).toBe(false);
+    expect(backlogSourceDraftHtml(m)).toBe("");
+  });
+
+  test("an absent gardenerEnabled (degraded/older server) is treated as enabled", () => {
+    // base() has youtube queued 310 and omits gardenerEnabled → shown.
+    const m = backlogStripModel(base(), 0);
+    expect(m.sourceDraftAvailable).toBe(true);
+  });
+});
+
+describe("sourceDraftResultHtml", () => {
+  const result = (over: Partial<SourceBacklogResult["totals"]> = {}): SourceBacklogResult => ({
+    results: [],
+    totals: { selected: 3, drafted: 2, covered: 0, skipped: 1, error: 0, ...over },
+    totalQueued: 100,
+    limit: 3,
+  });
+
+  test("null → empty", () => {
+    expect(sourceDraftResultHtml(null)).toBe("");
+  });
+
+  test("error → failure note", () => {
+    expect(sourceDraftResultHtml({ error: "boom" })).toContain("source draft failed: boom");
+  });
+
+  test("rolls up only the non-zero buckets", () => {
+    const html = sourceDraftResultHtml(result());
+    expect(html).toContain("2 drafted");
+    expect(html).toContain("1 skipped");
+    expect(html).not.toContain("covered");
+    expect(html).toContain("of 3");
+  });
+
+  test("nothing selected → explicit note", () => {
+    const html = sourceDraftResultHtml(result({ selected: 0, drafted: 0, skipped: 0 }));
+    expect(html).toContain("no uncovered docs to draft");
   });
 });

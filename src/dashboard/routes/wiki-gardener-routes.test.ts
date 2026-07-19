@@ -251,6 +251,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
+      gardenerEnabled: true,
       progress: null,
     });
     expect(first.running).toBe(false);
@@ -269,6 +270,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: { finishedAt: 222, offered: 2, drafted: 1 },
       watcherSeeded: true,
+      gardenerEnabled: true,
       progress: {
         stage: "drafting",
         draftsDone: 1,
@@ -306,6 +308,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
+      gardenerEnabled: true,
       progress: null,
     });
     // Sourced from src/gardener/backlog.ts — the client never hardcodes them.
@@ -324,6 +327,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
+      gardenerEnabled: true,
       watcher: { id: "w-1", enabled: true, lastRunAt: 1000, nextRunAt: 1000 + 604_800_000, forceQueued: false },
       progress: null,
     });
@@ -346,6 +350,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: false,
+      gardenerEnabled: true,
       watcher: null,
       progress: null,
     });
@@ -363,6 +368,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
+      gardenerEnabled: true,
       progress: null,
       interrupted: { at: 1700, batchSize: 40, drafted: 0 },
     });
@@ -379,6 +385,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       freshWindowDays: 14,
       lastBacklogRun: null,
       watcherSeeded: true,
+      gardenerEnabled: true,
       progress: null,
       interrupted: null,
     });

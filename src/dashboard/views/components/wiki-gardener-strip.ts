@@ -98,6 +98,12 @@ export interface IngestBacklogResponse {
   /** The bot's wiki-gardener watcher (next-run + Run-now affordance). Null/absent ⇒ no affordance. */
   watcher?: BacklogWatcherInfo | null;
   watcherSeeded?: boolean;
+  /**
+   * Whether the wiki gardener is enabled for this bot. Gates the source-draft
+   * button — the source-draft route 400s when the gardener is disabled, so the
+   * button must hide to match. Absent (degraded/older server) ⇒ treated as enabled.
+   */
+  gardenerEnabled?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
   progress?: BacklogProgress | null;
@@ -156,6 +162,12 @@ export interface BacklogStripModel {
   maxProposals: number;
   /** How many docs a click drains now: min(batchSize, eligibleNow). */
   drainNow: number;
+  /**
+   * The per-article source-page drafter is offered: there are uncovered docs and
+   * no run is in flight. Distinct from the gardener drain — it drafts one `.mdx`
+   * source page per doc (batched, on an explicit click) into the SAME review gate.
+   */
+  sourceDraftAvailable: boolean;
 }
 
 function numOr(v: unknown, fallback: number): number {
@@ -237,6 +249,12 @@ export function backlogStripModel(
       ? { id: watcher!.id }
       : null;
   const nextRunText = watcherUsable ? computeNextRunText(watcher!, now) : null;
+  // The source-draft action only drafts youtube-summaries, so its availability
+  // gates on THAT collection's uncovered count — not the all-source `queued`.
+  const youtubeQueued = numOr(
+    (data.byCollection || []).find((c) => c.collection === "youtube-summaries")?.queued,
+    0,
+  );
   return {
     totalNeverIngested: queued,
     perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
@@ -262,6 +280,14 @@ export function backlogStripModel(
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
+    // Independent of the watcher/drain (source pages need no offered-memory): offer
+    // it whenever there's an uncovered YOUTUBE tail and nothing is running. Gated on
+    // the youtube-summaries queued count specifically — the action only drafts that
+    // collection (the tooltip says YouTube), so gating on the all-source `queued`
+    // would light the button up for a wiki whose only backlog is X/TikTok. Also
+    // hidden when the gardener is disabled (the route 400s then, mirroring the
+    // control-hidden pattern); an absent `gardenerEnabled` (degraded server) ⇒ shown.
+    sourceDraftAvailable: !running && data.gardenerEnabled !== false && youtubeQueued > 0,
   };
 }
 
@@ -452,6 +478,58 @@ export function backlogConfirmHtml(model: BacklogStripModel): string {
   );
 }
 
+/**
+ * The per-article "Draft source pages" control (pure HTML). Offered whenever the
+ * source-drafter is available (uncovered docs, nothing running). A single explicit
+ * click POSTs a small batch — the drafts land in the same review gate below. Empty
+ * when unavailable.
+ */
+export function backlogSourceDraftHtml(model: BacklogStripModel): string {
+  if (!model.sourceDraftAvailable) return "";
+  return (
+    '<span class="bk-control bk-source-draft">' +
+    '<button class="gard-btn bk-source-draft-btn" data-backlog-action="source-draft" ' +
+    'title="Draft one .mdx source page each for a small batch of uncovered YouTube docs — into the review gate below">' +
+    "Draft source pages</button></span>"
+  );
+}
+
+/** The per-doc outcomes + rolled-up totals a source-draft batch returns. */
+export interface SourceBacklogResult {
+  results: {
+    collection: string;
+    docId: string;
+    outcome: string;
+    reason?: string;
+    proposalId?: string;
+    title?: string;
+  }[];
+  totals: { selected: number; drafted: number; covered: number; skipped: number; error: number };
+  totalQueued: number;
+  limit: number;
+}
+
+/**
+ * Result note for the last source-draft batch (pure HTML). `{error}` renders a
+ * failure note; a real result rolls up "N drafted, …" with only the non-zero
+ * buckets. Empty for a null (no run yet).
+ */
+export function sourceDraftResultHtml(r: SourceBacklogResult | { error: string } | null): string {
+  if (!r) return "";
+  if ("error" in r) {
+    return ` <span class="bk-err">source draft failed: ${esc(r.error)}</span>`;
+  }
+  const t = r.totals;
+  if (t.selected === 0) {
+    return ` <span class="bk-run-note">source draft: no uncovered docs to draft</span>`;
+  }
+  const parts = [`${t.drafted} drafted`];
+  if (t.covered) parts.push(`${t.covered} covered`);
+  if (t.skipped) parts.push(`${t.skipped} skipped`);
+  if (t.error) parts.push(`${t.error} error`);
+  return ` <span class="bk-run-note">source pages: ${esc(parts.join(", "))} of ${t.selected} — see proposals below</span>`;
+}
+
 /** Last-run outcome note (pure HTML string). */
 export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): string {
   if (!run) return "";
@@ -521,6 +599,7 @@ export function backlogStripHtml(model: BacklogStripModel, errors?: unknown[]): 
     backlogSentenceHtml(model) +
     errNote +
     " " +
-    backlogControlHtml(model)
+    backlogControlHtml(model) +
+    backlogSourceDraftHtml(model)
   );
 }
