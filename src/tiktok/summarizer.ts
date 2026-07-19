@@ -6,7 +6,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
-import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { ingestSummary, runCaptureOneShot, SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
 import {
   downloadVideo,
   transcribeVideo,
@@ -38,10 +38,7 @@ Instructions:
    Choose from: ${VALID_CATEGORIES.join(", ")}
 4. Then add a blank line, then SUMMARY: on its own line
 5. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Keep it concise but comprehensive
+   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}
 6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.`;
 
 export interface SummarizeOptions {

@@ -27,37 +27,25 @@ Instructions:
    Choose from: ${cats.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Keep it concise but comprehensive`;
+   - Open with a \`## Key takeaways\` section FIRST — 3–6 tight bullet points, one line each, capturing the most important points.
+   - Then \`##\`-level section headers for each major topic; use \`###\` only for sub-sections. Keep the heading hierarchy consistent.
+   - Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.
+   - **Bold** for key terms; bullet lists for enumerations.
+   - Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).
+   - Keep it concise but comprehensive.`;
+  // Hardcoded literals on purpose: this test is the change-detector that forces
+  // any edit to SUMMARY_STRUCTURE_BULLETS through an intentional review.
   expect(built).toBe(expected);
 });
 
-test("buildSummarySystemPrompt honors a custom structure-bullet list (anthropic variant)", () => {
-  const cats = ["ai/general", "ai/claude"];
-  const built = buildSummarySystemPrompt(
-    "You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.",
-    cats,
-    [
-      "- ### Section headers for key topics",
-      "- Bullet points with emoji prefixes",
-      "- **Bold** for key terms and takeaways",
-      "- Lead with what changed and why it matters; keep it concise but comprehensive",
-    ],
-  );
-  const expected = `You are an analyst summarizing a new Anthropic / Claude ecosystem release (a docs page, blog post, changelog, or commit) for a personal learning shelf.
-
-Instructions:
-1. Start your response with EXACTLY this line: CATEGORY: <category>
-   Choose from: ${cats.join(", ")}
-2. Then add a blank line, then SUMMARY: on its own line
-3. Then write a structured summary with:
-   - ### Section headers for key topics
-   - Bullet points with emoji prefixes
-   - **Bold** for key terms and takeaways
-   - Lead with what changed and why it matters; keep it concise but comprehensive`;
-  expect(built).toBe(expected);
+test("the default structure leads with a `## Key takeaways` section and forbids components", () => {
+  const built = buildSummarySystemPrompt("intro", ["ai/general"]);
+  // Key-takeaways-first is the campaign's headline structural guarantee.
+  expect(built).toContain("## Key takeaways` section FIRST");
+  // Plain-markdown-only: stored summaries must never carry block components.
+  expect(built).toContain("no custom block components");
+  // Tables only where content is genuinely comparative.
+  expect(built).toContain("markdown table when the content is genuinely comparative");
 });
 
 // --- ingestSummary ---

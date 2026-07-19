@@ -149,26 +149,38 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
   }
 }
 
-/** Default structured-summary bullet list under step 3 of the scaffold. */
-const DEFAULT_STRUCTURE_BULLETS = [
-  "- ### Section headers for key topics",
-  "- Bullet points with emoji prefixes",
-  "- **Bold** for key terms and takeaways",
-  "- Keep it concise but comprehensive",
+/**
+ * Shared structured-summary rules used by every capture vertical (youtube /
+ * x-article / anthropic via {@link buildSummarySystemPrompt}, and tiktok inline).
+ *
+ * The contract is deliberately uniform so stored summaries read consistently on
+ * /summaries AND make clean drafter input downstream: a `## Key takeaways`
+ * section leads every summary, `##`-level headings structure the body, tables
+ * appear only for genuinely comparative content, and the output is PLAIN
+ * markdown — no block components (Callout/Verdict/Pill/etc.), a stated non-goal
+ * for stored summaries.
+ */
+export const SUMMARY_STRUCTURE_BULLETS = [
+  "- Open with a `## Key takeaways` section FIRST — 3–6 tight bullet points, one line each, capturing the most important points.",
+  "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
+  "- Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.",
+  "- **Bold** for key terms; bullet lists for enumerations.",
+  "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
+  "- Keep it concise but comprehensive.",
 ];
 
 /**
  * Build the shared CATEGORY:/SUMMARY: system-prompt scaffold used by the
- * youtube / x-article / anthropic summarizers. Only the intro sentence, the
- * category allowlist, and (occasionally) the structure bullets vary; the
- * CATEGORY-line + blank-line + SUMMARY-line contract is identical so the shared
- * `parseSummaryResponse` parser works unchanged. (TikTok's prompt is a bespoke
- * multi-turn frame-reading variant and doesn't use this.)
+ * youtube / x-article / anthropic summarizers. Only the intro sentence and the
+ * category allowlist vary; the CATEGORY-line + blank-line + SUMMARY-line
+ * contract is identical so the shared `parseSummaryResponse` parser works
+ * unchanged. (TikTok's prompt is a bespoke multi-turn frame-reading variant
+ * and doesn't use this — it interpolates {@link SUMMARY_STRUCTURE_BULLETS}
+ * inline instead.)
  */
 export function buildSummarySystemPrompt(
   intro: string,
   categories: readonly string[],
-  structureBullets: readonly string[] = DEFAULT_STRUCTURE_BULLETS,
 ): string {
   return `${intro}
 
@@ -177,7 +189,7 @@ Instructions:
    Choose from: ${categories.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   ${structureBullets.join("\n   ")}`;
+   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`;
 }
 
 /**
