@@ -60,8 +60,8 @@ export interface CaptureOneShotOptions {
 /**
  * Run a capture vertical's model call with observability attached.
  *
- * The four capture summarizers (youtube / x-article / tiktok / anthropic) used
- * to call `executeOneShot` bare: no `Tracer`, so a user-triggered summarize left
+ * The capture summarizers (youtube / x-article / tiktok / anthropic / article)
+ * used to call `executeOneShot` bare: no `Tracer`, so a user-triggered summarize left
  * NOTHING on `/traces`, and its `/agents` row carried no bot, model, tokens or
  * trace link. This is the one seam they all route through, so a capture job now
  * traces like a chat turn does — a `capture:<source>` root with a `claude` child
@@ -151,7 +151,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
 
 /**
  * Shared structured-summary rules used by every capture vertical (youtube /
- * x-article / anthropic via {@link buildSummarySystemPrompt}, and tiktok inline).
+ * x-article / anthropic / article via {@link buildSummarySystemPrompt}, and tiktok inline).
  *
  * The contract is deliberately uniform so stored summaries read consistently on
  * /summaries AND make clean drafter input downstream: a `## Key takeaways`
@@ -171,7 +171,7 @@ export const SUMMARY_STRUCTURE_BULLETS = [
 
 /**
  * Build the shared CATEGORY:/SUMMARY: system-prompt scaffold used by the
- * youtube / x-article / anthropic summarizers. Only the intro sentence and the
+ * youtube / x-article / anthropic / article summarizers. Only the intro sentence and the
  * category allowlist vary; the CATEGORY-line + blank-line + SUMMARY-line
  * contract is identical so the shared `parseSummaryResponse` parser works
  * unchanged. (TikTok's prompt is a bespoke multi-turn frame-reading variant
@@ -194,7 +194,7 @@ Instructions:
 
 /**
  * Best-effort POST of a finished summary to a Huginn `<vertical>/ingest`
- * endpoint, shared by the youtube / x-article / tiktok summarizers. A failure
+ * endpoint, shared by the youtube / x-article / tiktok / article summarizers. A failure
  * here never fails the job (the summary already streamed to the client) — it
  * logs a warn and skips the "similar" enrichment. On success, any returned
  * `similar` articles are handed back via `onSimilar`.

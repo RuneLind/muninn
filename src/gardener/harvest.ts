@@ -1,5 +1,5 @@
 /**
- * Harvest stage — list recent summary docs across the four summary collections,
+ * Harvest stage — list recent summary docs across the summary collections,
  * filter to the lookback window, drop consumed docs, and fetch full bodies.
  *
  * The listing endpoint returns only `{id, url, date}`, so titles/categories are

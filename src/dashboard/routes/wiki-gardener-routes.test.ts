@@ -486,6 +486,7 @@ describe("ingest-backlog pipeline + cache", () => {
     "x-articles": [{ id: "x1", url: "https://x.com/a/1" }], // referenced in wiki
     "anthropic-summaries": [],
     "tiktok-summaries": [],
+    "article-summaries": [],
   };
 
   function deps(overrides?: { consumed?: string[]; pending?: string[] }): IngestBacklogDeps {
@@ -546,8 +547,8 @@ describe("ingest-backlog pipeline + cache", () => {
     expect(x.total).toBe(1);
     expect(x.queued).toBe(0); // x1 referenced by url in the wiki
 
-    // byCollection is in SUMMARY_SOURCES order and covers all four collections.
-    expect(data.byCollection.map((c) => c.source)).toEqual(["youtube", "x-article", "anthropic", "tiktok"]);
+    // byCollection is in SUMMARY_SOURCES order and covers every collection.
+    expect(data.byCollection.map((c) => c.source)).toEqual(["youtube", "x-article", "anthropic", "tiktok", "article"]);
 
     expect(data.total).toBe(4);
     expect(data.ingested).toBe(3);
@@ -558,7 +559,7 @@ describe("ingest-backlog pipeline + cache", () => {
 
   test("fetches each collection SEQUENTIALLY, one request per collection", async () => {
     await computeIngestBacklogResponse(root, "jarvis", deps());
-    expect(fetchCalls.length).toBe(4);
+    expect(fetchCalls.length).toBe(5);
   });
 
   test("a failed collection lands in errors with partial data (never a throw)", async () => {
@@ -574,15 +575,15 @@ describe("ingest-backlog pipeline + cache", () => {
     const d = deps({ consumed: ["youtube-summaries/y2"] });
 
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(4);
+    expect(fetchCalls.length).toBe(5);
 
     // Served from cache — no new fetches.
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(4);
+    expect(fetchCalls.length).toBe(5);
 
     // refresh bypasses the cache read.
     await getIngestBacklogCached(root, "jarvis", d, true);
-    expect(fetchCalls.length).toBe(8);
+    expect(fetchCalls.length).toBe(10);
 
     // Concurrent misses share one computation (single-flight).
     __resetIngestBacklogCacheForTest();
@@ -591,7 +592,7 @@ describe("ingest-backlog pipeline + cache", () => {
       getIngestBacklogCached(root, "jarvis", d, false),
       getIngestBacklogCached(root, "jarvis", d, false),
     ]);
-    expect(fetchCalls.length).toBe(4);
+    expect(fetchCalls.length).toBe(5);
   });
 
   test("a degraded (errors) result is NOT cached — the next request re-fetches", async () => {
@@ -599,16 +600,16 @@ describe("ingest-backlog pipeline + cache", () => {
     failCollections = new Set(["anthropic-summaries"]);
     const first = await getIngestBacklogCached(root, "jarvis", d, false);
     expect(first.errors).toBeDefined();
-    expect(fetchCalls.length).toBe(4);
+    expect(fetchCalls.length).toBe(5);
 
     // Huginn recovers — a plain request must re-fetch (not serve the degraded cache).
     failCollections = new Set();
     const second = await getIngestBacklogCached(root, "jarvis", d, false);
     expect(second.errors).toBeUndefined();
-    expect(fetchCalls.length).toBe(8);
+    expect(fetchCalls.length).toBe(10);
 
     // The clean result IS cached now.
     await getIngestBacklogCached(root, "jarvis", d, false);
-    expect(fetchCalls.length).toBe(8);
+    expect(fetchCalls.length).toBe(10);
   });
 });

@@ -204,7 +204,7 @@ test("TTL cleanup timer evicts expired jobs and keeps fresh ones", async () => {
 });
 
 // ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────
-// One hook in the shared factory covers ALL four capture verticals — the tests
+// One hook in the shared factory covers ALL the capture verticals — the tests
 // below parametrize `label` to prove the same createJob→complete/fail lifecycle
 // registers + settles a `kind:"capture"` run whatever the vertical is.
 
@@ -258,7 +258,7 @@ describe("createJobStore — AgentRun registry mirror", () => {
     expect(captureRuns()[0]!.completed).toBe(true);
   });
 
-  test("all four verticals register + settle via the SAME factory hook", () => {
+  test("every vertical registers + settles via the SAME factory hook", () => {
     for (const label of ["YouTube", "X", "TikTok", "Claude"]) {
       const store = labelledStore(label);
       const id = store.createJob({ videoId: "v", title: "T", url: "u" });

@@ -99,7 +99,7 @@ export async function renderSummariesPage(): Promise<string> {
     <!-- Live presence: a capture job or gardener drain running/about to run. -->
     <div style="margin-bottom:14px;">${agentPresenceHtml("sumPresence")}</div>
 
-    <!-- Manual submit form (YouTube; X comes from the Chrome extension) -->
+    <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome extension) -->
     ${sumSubmitFormHtml()}
 
     <!-- Active job card (hidden until a job is active) — stays above the tabs so a
