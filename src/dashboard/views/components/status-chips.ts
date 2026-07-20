@@ -37,12 +37,19 @@ export const ORIGIN_CHIP_CLASS: Record<Origin, string> = {
   none: "dchip-none",
 };
 
-/** AgentKind chip label → chip modifier class. Unknown kinds fall back to task. */
+/** AgentKind chip label → chip modifier class. Unknown kinds fall back to task.
+ *  The first four are the design-canonical job kinds; the rest are the remaining
+ *  AgentKinds the `/agents` page emits (see shared-styles `.kind-*`). */
 export const KIND_CHIP_CLASS: Record<string, string> = {
   WATCHER: "kind-watcher",
   TASK: "kind-task",
   CAPTURE: "kind-capture",
   DIGEST: "kind-digest",
+  CHAT: "kind-chat",
+  GARDENER: "kind-gardener",
+  RESEARCH: "kind-research",
+  EXTRACTOR: "kind-extractor",
+  PROFILE: "kind-profile",
 };
 
 /**
@@ -115,7 +122,8 @@ export function statusChipsScript(): string {
     if (!window.__statusChips) {
       window.__statusChips = true;
       var _e = window.esc || function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
-      var KIND = { WATCHER:'kind-watcher', TASK:'kind-task', CAPTURE:'kind-capture', DIGEST:'kind-digest' };
+      var KIND = { WATCHER:'kind-watcher', TASK:'kind-task', CAPTURE:'kind-capture', DIGEST:'kind-digest',
+        CHAT:'kind-chat', GARDENER:'kind-gardener', RESEARCH:'kind-research', EXTRACTOR:'kind-extractor', PROFILE:'kind-profile' };
       var RUN_TONE = {
         succeeded:'run-success', success:'run-success',
         degraded:'run-warning', warning:'run-warning', stale:'run-warning',
