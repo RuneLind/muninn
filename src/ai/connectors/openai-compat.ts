@@ -2,10 +2,9 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
-import { truncateOutput } from "../truncate-output.ts";
-import { processMcpToolResult } from "../huginn-trace-pointer.ts";
+import { abbreviateInput, formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import type { ToolCall } from "../../types.ts";
+import { recordToolSpan } from "./tool-span.ts";
 import { callTool } from "../mcp-tool-caller.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
@@ -183,9 +182,12 @@ export async function executePrompt(
     for (const tc of streamResult!.toolCalls) {
       const toolStart = performance.now();
       const displayName = formatToolDisplayName(tc.name);
-      const inputPreview = tc.arguments.length > 500
-        ? tc.arguments.slice(0, 500) + "…"
-        : tc.arguments;
+      // Align input abbreviation with the SDK connectors: parse the model's raw
+      // arguments string into the object form the SDKs pass, then run the shared
+      // `abbreviateInput` (stream-parser.ts — the tool-timing seam). Falls back
+      // to the raw string on unparseable args (essentially never — the tool
+      // executor JSON-parses the same string below).
+      const input = abbreviateInput(safeParseArgs(tc.arguments));
 
       // Surface report_intent calls as inline intent bubbles in chat, in
       // addition to keeping them as a regular tool span in the waterfall.
@@ -193,7 +195,7 @@ export async function executePrompt(
         const intentText = extractIntentText(tc.arguments);
         if (intentText) onProgress?.({ type: "intent", text: intentText });
       }
-      onProgress?.({ type: "tool_start", name: tc.name, displayName, input: inputPreview });
+      onProgress?.({ type: "tool_start", name: tc.name, displayName, input });
 
       let rawResult: unknown;
       try {
@@ -217,37 +219,29 @@ export async function executePrompt(
         });
       }
 
-      const toolDurationMs = Math.round(performance.now() - toolStart);
-
-      // cleanedText loops back into messages.push below — feeding the inner
-      // payload (not the full envelope) saves thousands of tokens per tool
-      // call on small-context local models like qwen3.
-      const processed = processMcpToolResult(rawResult);
-      onProgress?.({
-        type: "tool_end",
-        name: tc.name,
-        displayName,
-        outputSize: processed.cleanedText ? processed.cleanedText.length : undefined,
-      });
-
-      trackedToolCalls.push({
+      // Shared completion tail — same span shape + tool_end event as the SDK
+      // connectors. `cleanedText` loops back into messages.push below (feeding
+      // the inner payload, not the full envelope, saves thousands of tokens per
+      // tool call on small-context local models like qwen3).
+      const { toolCall, toolEndEvent, cleanedText } = recordToolSpan({
         id: tc.id,
         name: tc.name,
-        displayName,
-        durationMs: toolDurationMs,
-        startOffsetMs: Math.round(toolStart - wallStart),
-        input: inputPreview,
-        output: truncateOutput(processed.cleanedText),
-        searchTrace: processed.searchTrace,
-        searchTracePointer: processed.searchTracePointer,
-        searchTraceFetch: processed.searchTraceFetch,
+        input,
+        rawResult,
+        startMs: toolStart,
+        endMs: performance.now(),
+        wallStart,
       });
+      const toolDurationMs = toolCall.durationMs;
+
+      onProgress?.(toolEndEvent);
+      trackedToolCalls.push(toolCall);
 
       // Add tool result to conversation
       messages.push({
         role: "tool",
         tool_call_id: tc.id,
-        content: processed.cleanedText,
+        content: cleanedText,
       });
 
       log.info("Tool {tool} completed in {ms}ms", {
@@ -277,4 +271,19 @@ export async function executePrompt(
     contextTokens: lastTurnInputTokens || undefined,
     toolCalls: trackedToolCalls.length > 0 ? trackedToolCalls : undefined,
   };
+}
+
+/**
+ * Parse a model's raw tool-arguments JSON string into the object form the SDK
+ * connectors hand to `abbreviateInput`. Returns the raw string unchanged if it
+ * is not valid JSON, so abbreviation still produces *something* on the rare
+ * malformed-args path (the tool executor JSON-parses the same string, so a real
+ * tool call practically never reaches here with unparseable args).
+ */
+function safeParseArgs(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }

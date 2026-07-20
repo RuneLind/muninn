@@ -15,10 +15,9 @@ import {
   extractIntentText,
   type StreamProgressCallback,
 } from "../stream-parser.ts";
-import { truncateOutput } from "../truncate-output.ts";
-import { processMcpToolResult } from "../huginn-trace-pointer.ts";
 import { hasHaikuDirectAuth } from "../haiku-direct.ts";
 import type { ToolCall } from "../../types.ts";
+import { recordToolSpan } from "./tool-span.ts";
 import { parseMcpConfig } from "./claude-sdk-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
@@ -238,34 +237,23 @@ export async function executePrompt(
         if (block.type !== "tool_result") continue;
         const pending = pendingTools.get(block.tool_use_id);
         if (!pending) continue;
-        const endMs = performance.now();
-        const displayName = formatToolDisplayName(pending.name);
 
         const rawPayload = block.is_error
           ? { error: block.content ?? "tool execution failed" }
           : block.content;
-        const processed = processMcpToolResult(rawPayload);
-        const truncated = truncateOutput(processed.cleanedText);
-
-        toolCalls.push({
+        const { toolCall, toolEndEvent } = recordToolSpan({
           id: block.tool_use_id,
           name: pending.name,
-          displayName,
-          durationMs: Math.round(endMs - pending.startMs),
-          startOffsetMs: Math.round(pending.startMs - wallStart),
           input: pending.input,
-          output: truncated,
-          searchTrace: processed.searchTrace,
-          searchTracePointer: processed.searchTracePointer,
-          searchTraceFetch: processed.searchTraceFetch,
+          rawResult: rawPayload,
+          startMs: pending.startMs,
+          endMs: performance.now(),
+          wallStart,
         });
+
+        toolCalls.push(toolCall);
         pendingTools.delete(block.tool_use_id);
-        onProgress?.({
-          type: "tool_end",
-          name: pending.name,
-          displayName,
-          outputSize: truncated ? truncated.length : undefined,
-        });
+        onProgress?.(toolEndEvent);
       }
       return;
     }
