@@ -2,7 +2,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
-import { normalizeHandle, getAuthorScore } from "../summaries/author-scores.ts";
+import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -78,6 +78,16 @@ interface XWatcherConfig {
   captureCandidates?: boolean;
   /** Inbox capture floor — long-form tweets scored ≥ this by the capture gate are queued (default 0.6). */
   candidateMinScore?: number;
+  /**
+   * Stricter capture floor applied to NON-top-5%-author tweets (default 0.75). The
+   * author PageRank score is the strongest capture prior, so a note from a top-5%
+   * tracked author keeps the base `candidateMinScore`, while everyone else (incl.
+   * unknown authors / when the scores file is unavailable) must clear
+   * `max(candidateMinScore, candidateMinScoreNonTop)`. When the scores file is
+   * unavailable EVERY author is treated as non-top, so the stricter floor applies
+   * globally — a safe direction (fewer captures), never a silent widening.
+   */
+  candidateMinScoreNonTop?: number;
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -455,6 +465,48 @@ async function fetchFromPython(
 
 /** Inbox capture floor when `config.candidateMinScore` is unset. */
 const DEFAULT_CANDIDATE_MIN_SCORE = 0.6;
+/** Stricter capture floor for non-top-5%-author tweets when `config.candidateMinScoreNonTop` is unset. */
+const DEFAULT_CANDIDATE_MIN_SCORE_NONTOP = 0.75;
+
+/** Author percentile tier, derived from the current x-feed author-score thresholds. */
+export type AuthorTier = "top1" | "top5";
+
+/**
+ * Resolve a candidate author's percentile tier from their PageRank score against the
+ * current thresholds. Null when the author is unknown/unranked OR the scores file is
+ * unavailable (no thresholds) — the deliberate degrade: treat as non-top.
+ */
+export function resolveAuthorTier(
+  score: number | null,
+  thresholds: AuthorTierThresholds | null,
+): AuthorTier | null {
+  if (score == null || !thresholds) return null;
+  if (score >= thresholds.top1) return "top1";
+  if (score >= thresholds.top5) return "top5";
+  return null;
+}
+
+/**
+ * Per-tier inbox capture floor. A top-5% (or top-1%) author keeps the base
+ * `candidateMinScore`; every other author (incl. unknown / thresholds unavailable ⇒
+ * tier `null`) must clear `max(candidateMinScore, candidateMinScoreNonTop)` — one knob,
+ * raise-only (a raised base is never undercut). See {@link resolveAuthorTier}.
+ */
+export function captureFloorForTier(
+  tier: AuthorTier | null,
+  config: Pick<XWatcherConfig, "candidateMinScore" | "candidateMinScoreNonTop">,
+): number {
+  const base = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
+  const nonTop = config.candidateMinScoreNonTop ?? DEFAULT_CANDIDATE_MIN_SCORE_NONTOP;
+  return tier != null ? base : Math.max(base, nonTop);
+}
+
+/** Gate-prompt author prior line for a tier (tier only, never the raw score), or null when unknown. */
+function authorTierLabel(tier: AuthorTier | null): string | null {
+  if (tier === "top1") return "author rank: top 1% of tracked authors";
+  if (tier === "top5") return "author rank: top 5% of tracked authors";
+  return null;
+}
 /**
  * A tweet body must reach this many chars (measured PRE-truncation on the extracted
  * body, not the raw doc) to count as long-form, unless the doc already carries the
@@ -508,15 +560,22 @@ function truncateTitle(s: string, max = 140): string {
  */
 async function runCaptureGate(
   docs: TweetDoc[],
+  tiers: (AuthorTier | null)[],
   botName: string | undefined,
   interestProfile: string | null,
   telemetry?: HaikuTelemetry,
 ): Promise<GateScore[]> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
   // judging whether the FULL long-form post is worth summarizing, and every eligible
-  // post is by definition longer than the compact line shows.
+  // post is by definition longer than the compact line shows. The author-rank prior
+  // (tier only, when known) lets the gate judge content WITH the strongest prior; the
+  // deterministic per-tier floor stays the backstop.
   const list = docs
-    .map((d, i) => `${i + 1}. ${d.isNote ? "[ARTICLE/NOTE] " : ""}${d.handle}: ${d.gateExcerpt}\n   URL: ${d.url}`)
+    .map((d, i) => {
+      const tierLine = authorTierLabel(tiers[i] ?? null);
+      const priorPart = tierLine ? `\n   (${tierLine})` : "";
+      return `${i + 1}. ${d.isNote ? "[ARTICLE/NOTE] " : ""}${d.handle}: ${d.gateExcerpt}${priorPart}\n   URL: ${d.url}`;
+    })
     .join("\n\n");
   const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
   const prompt = `${criteria}\n\nPosts:\n\n${list}`;
@@ -556,9 +615,23 @@ async function captureXCandidates(
     return;
   }
 
+  // Resolve author score + percentile tier ONCE per eligible doc, BEFORE the floor check
+  // (moved above from the old persist-time lookup) — the tier feeds both the gate-prompt
+  // author prior AND the per-tier capture floor. The thresholds are fetched once per run.
+  // Both the score and the thresholds degrade to null (unknown handle / scores file
+  // unavailable) ⇒ tier null ⇒ treated as non-top (the stricter floor), never wider.
+  const thresholds = await getAuthorTierThresholds();
+  const authorInfo = await Promise.all(
+    eligible.map(async (doc) => {
+      const author = normalizeHandle(doc.handle);
+      const authorScore = await getAuthorScore(author);
+      return { author, authorScore, tier: resolveAuthorTier(authorScore, thresholds) };
+    }),
+  );
+
   let scored: GateScore[];
   try {
-    scored = await runCaptureGate(eligible, botName, interestProfile, telemetry);
+    scored = await runCaptureGate(eligible, authorInfo.map((a) => a.tier), botName, interestProfile, telemetry);
   } catch (err) {
     log.error("Capture gate failed, proceeding with alert path ({n} long-form tweet(s) lost to inbox): {error}", {
       botName,
@@ -568,20 +641,20 @@ async function captureXCandidates(
     return;
   }
 
-  const minScore = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
   const byN = indexScoresByN(scored, eligible.length);
 
   let captured = 0;
   for (let i = 0; i < eligible.length; i++) {
     const score = byN.get(i + 1);
-    if (!score || score.score < minScore) continue;
+    if (!score) continue;
+    const { author, authorScore, tier } = authorInfo[i]!;
+    // Per-tier floor: top-5% authors keep candidateMinScore; everyone else (incl. unknown
+    // author / thresholds unavailable) must clear the stricter non-top floor.
+    if (score.score < captureFloorForTier(tier, config)) continue;
     const doc = eligible[i]!;
     const firstLine = doc.firstLine.trim() || doc.text;
     // Author transparency: the normalized handle keys huginn's ranking; the score is a
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
-    // Both degrade to null (unknown handle / scores file unavailable) — best-effort.
-    const author = normalizeHandle(doc.handle);
-    const authorScore = await getAuthorScore(author);
     try {
       await upsertCandidate({
         source: "x",

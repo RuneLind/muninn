@@ -36,6 +36,9 @@ let upsertThrow = false;
 // normalizeHandle keeps its real behavior (so candidateSrc/author normalization is
 // exercised); getAuthorScore returns a fixed lookup keyed by normalized handle.
 const authorScoreByHandle: Record<string, number> = {};
+// Percentile cuts returned by the mocked getAuthorTierThresholds — mutable per test so
+// the tier-floor + prompt-prior paths can be exercised (null = scores file unavailable).
+let authorThresholds: { top1: number; top5: number } | null = null;
 mock.module("../summaries/author-scores.ts", () => ({
   normalizeHandle: (raw: string | null | undefined) => {
     if (!raw) return null;
@@ -48,7 +51,7 @@ mock.module("../summaries/author-scores.ts", () => ({
     const bare = raw.trim().replace(/^@+/, "").toLowerCase();
     return authorScoreByHandle[bare] ?? null;
   },
-  getAuthorTierThresholds: async () => null,
+  getAuthorTierThresholds: async () => authorThresholds,
 }));
 // NB: mock.module leaks across the watcher test files (one process). Export the FULL
 // public surface — sibling files' graphs (summarizer.ts et al.) statically import
@@ -83,6 +86,8 @@ const {
   isLongFormTweet,
   fetchFromCollection,
   checkX,
+  resolveAuthorTier,
+  captureFloorForTier,
 } = await import("./x.ts");
 
 // ── Score extraction from markdown (tests the real exported function) ─
@@ -313,6 +318,55 @@ describe("isLongFormTweet", () => {
   });
 });
 
+// ── Author tier resolution + per-tier capture floor (pure) ──────────
+
+describe("resolveAuthorTier", () => {
+  const th = { top1: 0.9, top5: 0.5 };
+
+  test("score at/above top1 cut is top1", () => {
+    expect(resolveAuthorTier(0.95, th)).toBe("top1");
+    expect(resolveAuthorTier(0.9, th)).toBe("top1");
+  });
+
+  test("score between top5 and top1 is top5", () => {
+    expect(resolveAuthorTier(0.6, th)).toBe("top5");
+    expect(resolveAuthorTier(0.5, th)).toBe("top5");
+  });
+
+  test("score below top5 is null (non-top)", () => {
+    expect(resolveAuthorTier(0.49, th)).toBeNull();
+  });
+
+  test("unknown score (null) is null", () => {
+    expect(resolveAuthorTier(null, th)).toBeNull();
+  });
+
+  test("thresholds unavailable ⇒ null even for a high score (degrade to non-top)", () => {
+    expect(resolveAuthorTier(0.99, null)).toBeNull();
+  });
+});
+
+describe("captureFloorForTier", () => {
+  test("top5/top1 authors keep the base candidateMinScore", () => {
+    expect(captureFloorForTier("top5", { candidateMinScore: 0.6 })).toBe(0.6);
+    expect(captureFloorForTier("top1", { candidateMinScore: 0.6 })).toBe(0.6);
+  });
+
+  test("non-top authors get max(base, non-top floor)", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 })).toBe(0.75); // default non-top
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6, candidateMinScoreNonTop: 0.8 })).toBe(0.8);
+  });
+
+  test("non-top floor is raise-only — never undercuts a higher base", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.85, candidateMinScoreNonTop: 0.75 })).toBe(0.85);
+  });
+
+  test("defaults: base 0.6 for top, 0.75 for non-top when unset", () => {
+    expect(captureFloorForTier("top5", {})).toBe(0.6);
+    expect(captureFloorForTier(null, {})).toBe(0.75);
+  });
+});
+
 // ── Collection path + capture (mocked fetch + Haiku) ────────────────
 
 describe("fetchFromCollection + checkX capture", () => {
@@ -368,6 +422,7 @@ describe("fetchFromCollection + checkX capture", () => {
     upsertCalls.length = 0;
     upsertThrow = false;
     for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    authorThresholds = null;
     stub();
   });
   afterEach(() => {
@@ -411,10 +466,12 @@ describe("fetchFromCollection + checkX capture", () => {
 
   test("capture runs on long-form only, and BEFORE the minScore silencing", async () => {
     // Gate scores the two long-form posts (alice=note, bob=long body); carol is
-    // pre-filtered out and never reaches the gate.
+    // pre-filtered out and never reaches the gate. Both scores clear the stricter
+    // non-top floor (0.75) — thresholds is null here, so tier gating isn't the subject
+    // of this test (the per-tier floor has its own cases below).
     gateResult = JSON.stringify([
       { n: 1, score: 0.82, why: "sharp eval insight" },
-      { n: 2, score: 0.71, why: "worthwhile deep dive" },
+      { n: 2, score: 0.78, why: "worthwhile deep dive" },
     ]);
     authorScoreByHandle["alice"] = 0.55; // ranked author → captured with a score
     // bob intentionally absent → authorScore null (handle still normalized + stored)
@@ -526,5 +583,90 @@ describe("fetchFromCollection + checkX capture", () => {
     );
     expect(upsertCalls).toHaveLength(0);
     expect(lastGatePrompt).toBe(""); // gate never called
+  });
+
+  test("per-tier floor: a top-5% author keeps 0.6 while a non-top author needs 0.75", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    authorScoreByHandle["alice"] = 0.55; // top-5% (>= top5, < top1)
+    // bob absent from the ranking → tier null → stricter non-top floor (default 0.75)
+    // Both score 0.65 from the gate: alice clears her 0.6 floor, bob is below 0.75.
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.65, why: "alice keep" },
+      { n: 2, score: 0.65, why: "bob drop" },
+    ]);
+    await checkX(
+      baseWatcher({
+        config: {
+          collection: "x-feed",
+          windowDays: 1,
+          captureCandidates: true,
+          candidateMinScore: 0.6,
+          // candidateMinScoreNonTop unset → default 0.75
+        },
+      }),
+    );
+    expect(upsertCalls.map((c) => c.url)).toEqual(["https://x.com/alice/status/1"]);
+    expect(upsertCalls[0]!.authorScore).toBe(0.55);
+  });
+
+  test("thresholds unavailable ⇒ every author is non-top ⇒ stricter floor applies globally", async () => {
+    authorThresholds = null; // scores file unavailable
+    authorScoreByHandle["alice"] = 0.99; // would be top-tier, but no thresholds ⇒ non-top
+    // alice scores 0.7 — clears 0.6 but not the non-top 0.75.
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.7, why: "alice" },
+      { n: 2, score: 0.8, why: "bob" },
+    ]);
+    await checkX(
+      baseWatcher({
+        config: {
+          collection: "x-feed",
+          windowDays: 1,
+          captureCandidates: true,
+          candidateMinScore: 0.6,
+        },
+      }),
+    );
+    // alice dropped (0.7 < 0.75), bob kept (0.8 >= 0.75) — the safe degrade direction.
+    expect(upsertCalls.map((c) => c.url)).toEqual(["https://x.com/bob/status/2"]);
+  });
+
+  test("gate prompt carries the author-rank prior (tier only) for ranked authors, none for unknown", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    authorScoreByHandle["alice"] = 0.95; // top 1%
+    authorScoreByHandle["bob"] = 0.6; // top 5%
+    gateResult = "[]"; // scoring irrelevant — we assert the prompt only
+    await checkX(
+      baseWatcher({
+        config: {
+          collection: "x-feed",
+          windowDays: 1,
+          captureCandidates: true,
+          candidateMinScore: 0.6,
+        },
+      }),
+    );
+    expect(lastGatePrompt).toContain("author rank: top 1% of tracked authors");
+    expect(lastGatePrompt).toContain("author rank: top 5% of tracked authors");
+    // Tier only — never the raw float.
+    expect(lastGatePrompt).not.toContain("0.95");
+    expect(lastGatePrompt).not.toContain("0.6 of");
+  });
+
+  test("no author-rank line when thresholds are unavailable", async () => {
+    authorThresholds = null;
+    authorScoreByHandle["alice"] = 0.95;
+    gateResult = "[]";
+    await checkX(
+      baseWatcher({
+        config: {
+          collection: "x-feed",
+          windowDays: 1,
+          captureCandidates: true,
+          candidateMinScore: 0.6,
+        },
+      }),
+    );
+    expect(lastGatePrompt).not.toContain("author rank:");
   });
 });
