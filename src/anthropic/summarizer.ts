@@ -6,8 +6,8 @@ import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
+import { extractDocLinks } from "../summaries/doc-links.ts";
 import {
-  extractDocLinks,
   pickEnrichmentLink,
   youTubeVideoId,
   type EnrichmentLink,

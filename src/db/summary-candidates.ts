@@ -20,9 +20,10 @@ export type SummaryCandidateStatus =
 /**
  * Capture-time classification, stored so the inbox can filter one uniform column.
  * `commit`/`release`/`doc`/`blog` mirror `candidateKind()` (URL shape, anthropic
- * vertical); `x-post` tags every X candidate.
+ * vertical); `x-post` tags a long-form X tweet, `x-link` a pointer tweet whose
+ * value is the external link it points at (summarized from the linked content).
  */
-export type SummaryCandidateKind = "commit" | "release" | "doc" | "blog" | "x-post";
+export type SummaryCandidateKind = "commit" | "release" | "doc" | "blog" | "x-post" | "x-link";
 
 export interface SummaryCandidate {
   id: string;
@@ -387,7 +388,7 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
   // --- byKind: group by (source, kind) ---
   const kindMap = new Map<string, KindOutcomeStats>();
   for (const c of cells) {
-    const key = `${c.source} ${c.kind ?? ""}`;
+    const key = `${c.source}\x00${c.kind ?? ""}`;
     let entry = kindMap.get(key);
     if (!entry) {
       entry = { source: c.source, kind: c.kind, ...emptyCounts() };

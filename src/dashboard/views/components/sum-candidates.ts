@@ -449,6 +449,7 @@ export function sumCandidatesScript(): string {
     // and the stored kind deliberately differ — we filter on 'blog', never 'news').
     var CANDIDATE_KINDS = [
       { kind: 'x-post', label: 'X posts' },
+      { kind: 'x-link', label: 'X links' },
       { kind: 'blog', label: 'News' },
       { kind: 'doc', label: 'Docs' },
       { kind: 'commit', label: 'Commits' },

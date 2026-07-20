@@ -379,9 +379,10 @@ CREATE TABLE summary_candidates (
     CHECK (status IN ('new', 'summarizing', 'summarized', 'dismissed', 'error')),
   doc_id        TEXT,
   source_doc_id TEXT,
-  -- Capture-time classification (mirror of migration 049). Keep the CHECK value-set
-  -- order identical to the migration so schema-drift.test.ts's constraintdef diff matches.
-  kind          TEXT CHECK (kind IN ('commit', 'release', 'doc', 'blog', 'x-post')),
+  -- Capture-time classification (mirror of migrations 049 + 063). Keep the CHECK
+  -- value-set order identical to the migrations so schema-drift.test.ts's
+  -- constraintdef diff matches ('x-link' appended last by migration 063).
+  kind          TEXT CHECK (kind IN ('commit', 'release', 'doc', 'blog', 'x-post', 'x-link')),
   -- X author transparency (mirror of migration 050). `author` = normalized (lowercased,
   -- bare) handle = huginn author-scores key; `author_score` = capture-time ranking
   -- snapshot (0–1). Both nullable (anthropic rows, unknown handles, unavailable file).
