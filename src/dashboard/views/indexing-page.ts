@@ -88,9 +88,20 @@ export async function renderIndexingPage(): Promise<string> {
     .ph .ph-fatal { color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px; }
     .ph-arrow { display: flex; align-items: center; color: var(--text-disabled); padding: 0 6px; font-size: 13px; }
 
-    /* Sparkline */
+    /* Sparkline. SVG geometry is colored via CSS classes — var() does NOT resolve
+       in SVG presentation attributes (fill=/stroke=), only in CSS rules. The sv0-sv3
+       variant palette here MUST mirror VARIANT_COLORS in the client script (the legend
+       swatches read that array for their style="background:…"). */
     .spark-wrap { display: flex; flex-direction: column; gap: 6px; }
     .spark svg { display: block; }
+    .spark .sv0 { fill: var(--accent); stroke: var(--accent); }
+    .spark .sv1 { fill: var(--status-magenta); stroke: var(--status-magenta); }
+    .spark .sv2 { fill: var(--status-warning); stroke: var(--status-warning); }
+    .spark .sv3 { fill: var(--status-info); stroke: var(--status-info); }
+    .spark .line { fill: none; }                          /* polyline: variant stroke, no fill */
+    .spark .dot { stroke: var(--bg-primary); }            /* normal dot: variant fill, bg-colored rim */
+    .spark .dot-fail { stroke: var(--status-error); }     /* failed/degraded dot: red rim */
+    .spark .err { fill: none; stroke: var(--status-error); } /* null-duration hollow diamond */
     .spark-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-muted); }
     .spark-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
     .spark-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
@@ -167,8 +178,12 @@ export async function renderIndexingPage(): Promise<string> {
     // ---- Per-collection depth (expansion row) -----------------------------
 
     // Palette used to distinguish run variants (incremental vs rebuild vs …).
+    // The legend swatches use these values as inline style="background:…"; the SVG
+    // geometry uses the mirrored .sv0-.sv3 CSS classes (var() can't resolve in SVG
+    // presentation attributes). Both wrap via % length, so keep them the same length.
     var VARIANT_COLORS = ['var(--accent)', 'var(--status-magenta)', 'var(--status-warning)', 'var(--status-info)'];
     function variantColor(i) { return VARIANT_COLORS[i % VARIANT_COLORS.length]; }
+    function variantClass(i) { return 'sv' + (i % VARIANT_COLORS.length); }
 
     function phaseHtml(p) {
       var cls = 'ph' + (p.nonFatalFailure || (p.status && p.status.status === 'failed') ? ' fail' : '');
@@ -208,7 +223,7 @@ export async function renderIndexingPage(): Promise<string> {
           if (p.variant === v && p.durationSeconds != null) seg.push(xOf(i) + ',' + yOf(p.durationSeconds));
         });
         if (seg.length < 2) return '';
-        return '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + variantColor(vi) +
+        return '<polyline points="' + seg.join(' ') + '" class="line ' + variantClass(vi) +
           '" stroke-width="1.5" stroke-opacity="0.55" />';
       }).join('');
 
@@ -218,14 +233,14 @@ export async function renderIndexingPage(): Promise<string> {
         if (p.durationSeconds == null) {
           // Null duration (failed/incomplete) — a hollow red marker at baseline. NEVER a 0 dot.
           return '<path d="M' + (x - 3) + ',' + baseY + ' L' + x + ',' + (baseY - 4) + ' L' + (x + 3) + ',' + baseY +
-            ' L' + x + ',' + (baseY + 4) + ' Z" fill="none" stroke="var(--status-error)" stroke-width="1.3">' +
+            ' L' + x + ',' + (baseY + 4) + ' Z" class="err" stroke-width="1.3">' +
             '<title>' + esc(title) + '</title></path>';
         }
         var y = yOf(p.durationSeconds);
         var failed = p.status.status === 'failed' || p.status.status === 'degraded';
-        var stroke = failed ? 'var(--status-error)' : 'var(--bg-primary)';
-        return '<circle cx="' + x + '" cy="' + y + '" r="2.6" fill="' + variantColor(p.variantIndex) +
-          '" stroke="' + stroke + '" stroke-width="1"><title>' + esc(title) + '</title></circle>';
+        var dotCls = variantClass(p.variantIndex) + (failed ? ' dot-fail' : ' dot');
+        return '<circle cx="' + x + '" cy="' + y + '" r="2.6" class="' + dotCls +
+          '" stroke-width="1"><title>' + esc(title) + '</title></circle>';
       }).join('');
 
       return '<div class="spark"><svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H +
@@ -267,7 +282,8 @@ export async function renderIndexingPage(): Promise<string> {
 
     function rowHtml(row) {
       var isOpen = expanded.has(row.collection);
-      var summary = '<tr class="summary' + (isOpen ? ' open' : '') + '" data-col="' + esc(row.collection) + '">' +
+      var summary = '<tr class="summary' + (isOpen ? ' open' : '') + '" data-col="' + esc(row.collection) +
+        '" tabindex="0" role="button" aria-expanded="' + (isOpen ? 'true' : 'false') + '">' +
         '<td><span class="caret">▸</span> <strong>' + esc(row.collection) + '</strong></td>' +
         '<td>' + loadDot(row.loaded) + '</td>' +
         '<td>' + lastRunCell(row) + '</td>' +
@@ -305,6 +321,15 @@ export async function renderIndexingPage(): Promise<string> {
       var total = data.total != null ? data.total : 0;
       document.getElementById('updated').textContent =
         total + ' collection' + (total === 1 ? '' : 's') + ' · updated ' + new Date(data.generatedAt || Date.now()).toLocaleTimeString();
+
+      // Prune expansion state for collections no longer in the payload, so a
+      // collection that disappears and later reappears doesn't ghost-re-expand.
+      var present = new Set();
+      (data.classes || []).forEach(function (cls) {
+        (cls.rows || []).forEach(function (row) { present.add(row.collection); });
+      });
+      expanded.forEach(function (col) { if (!present.has(col)) expanded.delete(col); });
+
       document.getElementById('classes').innerHTML = (data.classes || []).map(classHtml).join('');
     }
 
@@ -318,23 +343,36 @@ export async function renderIndexingPage(): Promise<string> {
       }
     }
 
-    // Toggle a collection's depth row. Delegated because the table is re-rendered
-    // on every poll — direct listeners would die each cycle.
-    document.getElementById('classes').addEventListener('click', function (ev) {
-      var tr = ev.target.closest ? ev.target.closest('tr.summary') : null;
-      if (!tr) return;
+    // Toggle a collection's depth row. Delegated (click + keyboard) because the
+    // table is re-rendered on every poll — direct listeners would die each cycle.
+    function toggleSummary(tr) {
       var col = tr.getAttribute('data-col');
       if (!col) return;
       var detail = tr.nextElementSibling;
       if (expanded.has(col)) {
         expanded.delete(col);
         tr.classList.remove('open');
+        tr.setAttribute('aria-expanded', 'false');
         if (detail && detail.classList.contains('detail-row')) detail.style.display = 'none';
       } else {
         expanded.add(col);
         tr.classList.add('open');
+        tr.setAttribute('aria-expanded', 'true');
         if (detail && detail.classList.contains('detail-row')) detail.style.display = '';
       }
+    }
+
+    var classesEl = document.getElementById('classes');
+    classesEl.addEventListener('click', function (ev) {
+      var tr = ev.target.closest ? ev.target.closest('tr.summary') : null;
+      if (tr) toggleSummary(tr);
+    });
+    classesEl.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
+      var tr = ev.target.closest ? ev.target.closest('tr.summary') : null;
+      if (!tr) return;
+      ev.preventDefault(); // stop Space from scrolling the page
+      toggleSummary(tr);
     });
 
     load();
