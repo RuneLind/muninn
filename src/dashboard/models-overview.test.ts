@@ -321,6 +321,73 @@ test("wiki synthesis: pin matching no bot → ignoredPin note + owner/fallback r
   expect(rows.mimir).toMatchObject({ bot: "jarvis", origin: "fallback", ignoredPin: "ghost" });
 });
 
+test("mismatch field: substring-tolerant, offending models listed", async () => {
+  const { computeModelMismatch } = _internalsForTest();
+  // Exact match ⇒ no mismatch.
+  expect(computeModelMismatch("claude-sonnet-4-6", ["claude-sonnet-4-6"])).toEqual([]);
+  // Bidirectional substring tolerance (id-shape drift): a date-suffixed id whose
+  // prefix is the configured short id ⇒ no mismatch (used contains configured).
+  expect(computeModelMismatch("claude-sonnet-4-6", ["claude-sonnet-4-6-20250219"])).toEqual([]);
+  // …and the reverse (configured contains used).
+  expect(computeModelMismatch("claude-haiku-4-5-full", ["claude-haiku-4-5"])).toEqual([]);
+  // A genuinely different model ⇒ flagged.
+  expect(computeModelMismatch("claude-sonnet-5", ["claude-opus-4", "claude-sonnet-5"])).toEqual(["claude-opus-4"]);
+});
+
+test("bot row carries mismatch + mismatchModels from the pure predicate", async () => {
+  const chat: ChatModelRow[] = [
+    { botName: "jarvis", model: "claude-sonnet-5" }, // matches configured
+    { botName: "jarvis", model: "claude-opus-4" }, // diverges
+  ];
+  const o = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis", { model: "claude-sonnet-5" })], chat }),
+  );
+  const j = o.bots[0]!;
+  expect(j.mismatch).toBe(true);
+  expect(j.mismatchModels).toEqual(["claude-opus-4"]);
+
+  // A bot whose only used model matches ⇒ no mismatch.
+  const o2 = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis", { model: "claude-sonnet-5" })], chat: [{ botName: "jarvis", model: "claude-sonnet-5" }] }),
+  );
+  expect(o2.bots[0]!.mismatch).toBe(false);
+  expect(o2.bots[0]!.mismatchModels).toEqual([]);
+});
+
+test("why-chain: exactly one winning row, mirrors resolveBackendWithReason", async () => {
+  // 1. Plain claude-cli bot ⇒ floor folds into the connector row.
+  let o = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis")] }));
+  let chain = o.bots[0]!.chain;
+  expect(chain.filter((r) => r.wins)).toHaveLength(1);
+  let winner = chain.find((r) => r.wins)!;
+  expect(winner.source).toBe("connector");
+  expect(winner.value).toBe("cli");
+  // Legacy row absent when the flag is unset.
+  expect(chain.some((r) => r.source === "legacy")).toBe(false);
+
+  // 2. copilot-sdk bot ⇒ connector row wins with copilot.
+  o = await assembleModelsOverview("b", deps({ bots: [bot("b", { connector: "copilot-sdk" })] }));
+  winner = o.bots[0]!.chain.find((r) => r.wins)!;
+  expect(winner.source).toBe("connector");
+  expect(winner.value).toBe("copilot");
+
+  // 3. per-bot config wins ⇒ config row.
+  o = await assembleModelsOverview("b", deps({ bots: [bot("b", { haikuBackend: "anthropic" })] }));
+  winner = o.bots[0]!.chain.find((r) => r.wins)!;
+  expect(winner.source).toBe("config");
+  expect(winner.value).toBe("anthropic");
+
+  // 4. env wins + legacy row rendered when the flag is set.
+  process.env.HAIKU_BACKEND = "cli";
+  process.env.HAIKU_DIRECT_ENABLED = "1";
+  o = await assembleModelsOverview("b", deps({ bots: [bot("b", { connector: "copilot-sdk" })] }));
+  chain = o.bots[0]!.chain;
+  expect(chain.find((r) => r.wins)!.source).toBe("env");
+  expect(chain.some((r) => r.source === "legacy")).toBe(true);
+});
+
 test("degraded sources are collected, never thrown", async () => {
   const o = await assembleModelsOverview(
     "jarvis",

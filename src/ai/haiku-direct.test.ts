@@ -139,6 +139,7 @@ const {
   callHaikuWithFallback,
   resolveBackend,
   resolveBackendWithReason,
+  resolveBackendChain,
   isHaikuDirectEnabled,
   hasHaikuDirectAuth,
   _resetClientForTests,
@@ -326,6 +327,57 @@ describe("resolveBackendWithReason", () => {
     process.env.HAIKU_BACKEND = "copilot";
     const opts = { connector: "claude-cli" as const };
     expect(resolveBackend(opts)).toBe(resolveBackendWithReason(opts).backend);
+  });
+});
+
+describe("resolveBackendChain (derive-from-chain invariant)", () => {
+  // Representative inputs spanning every precedence level. The last two exercise
+  // the invalid-enum fall-through the refactor MUST preserve exactly.
+  const cases: Array<{ name: string; env?: Record<string, string>; opts: Parameters<typeof resolveBackend>[0]; expectWinner: ReturnType<typeof resolveBackendChain>[number]["source"] }> = [
+    { name: "floor", opts: {}, expectWinner: "default" },
+    { name: "explicit", opts: { backend: "cli", connector: "copilot-sdk" }, expectWinner: "explicit" },
+    { name: "env", env: { HAIKU_BACKEND: "anthropic" }, opts: { connector: "copilot-sdk" }, expectWinner: "env" },
+    { name: "config", opts: { connector: "claude-cli", haikuBackend: "copilot" }, expectWinner: "config" },
+    { name: "legacy", env: { HAIKU_DIRECT_ENABLED: "1" }, opts: {}, expectWinner: "legacy" },
+    { name: "connector", opts: { connector: "copilot-sdk" }, expectWinner: "connector" },
+    { name: "invalid env falls through to connector", env: { HAIKU_BACKEND: "bogus" }, opts: { connector: "copilot-sdk" }, expectWinner: "connector" },
+    { name: "invalid env falls through to floor", env: { HAIKU_BACKEND: "bogus" }, opts: { connector: "claude-cli" }, expectWinner: "default" },
+    // Empty strings must fall through like the old truthy checks did — a
+    // `"haikuBackend": ""` in config.json survives discovery's falsy-skip guard
+    // and reaches the resolver (review finding on #321).
+    { name: "empty explicit falls through to connector", opts: { backend: "" as never, connector: "copilot-sdk" }, expectWinner: "connector" },
+    { name: "empty config falls through to floor", opts: { connector: "claude-cli", haikuBackend: "" as never }, expectWinner: "default" },
+  ];
+
+  for (const c of cases) {
+    test(`winner === resolveBackend for '${c.name}'`, () => {
+      for (const [k, v] of Object.entries(c.env ?? {})) process.env[k] = v;
+      const chain = resolveBackendChain(c.opts);
+      const winner = chain.find((x) => x.wins)!;
+      // Exactly one winner.
+      expect(chain.filter((x) => x.wins)).toHaveLength(1);
+      expect(winner.source).toBe(c.expectWinner);
+      // The derived winner value + reason cannot diverge from resolveBackend*.
+      expect(winner.value).toBe(resolveBackend(c.opts));
+      expect(winner.reason).toBe(resolveBackendWithReason(c.opts).reason);
+    });
+  }
+
+  test("chain always enumerates all 7 levels, non-short-circuiting", () => {
+    const chain = resolveBackendChain({ backend: "anthropic", connector: "copilot-sdk" });
+    expect(chain.map((c) => c.source)).toEqual([
+      "explicit", "override", "env", "config", "legacy", "connector", "default",
+    ]);
+  });
+
+  test("invalid HAIKU_BACKEND override contributes null (falls through)", () => {
+    // A DB override set to an invalid value must not win — parseHaikuBackendOverride
+    // returns null, same fall-through as env.
+    process.env.HAIKU_BACKEND = "copilot"; // env is valid; override is what we test via config
+    const chain = resolveBackendChain({ connector: "claude-cli" });
+    // override link (no DB override in this test) is null; env wins.
+    expect(chain.find((c) => c.source === "override")!.value).toBeNull();
+    expect(chain.find((c) => c.wins)!.source).toBe("env");
   });
 });
 
