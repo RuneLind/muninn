@@ -114,10 +114,10 @@ export interface BackendChainLink {
  */
 export function resolveBackendChain(opts: BackendResolutionInput): BackendChainLink[] {
   const links: Array<Omit<BackendChainLink, "wins">> = [
-    { source: "explicit", reason: "explicit override", value: opts.backend ?? null },
+    { source: "explicit", reason: "explicit override", value: opts.backend || null },
     { source: "override", reason: "HAIKU_BACKEND override", value: parseHaikuBackendOverride() },
     { source: "env", reason: "HAIKU_BACKEND env", value: parseHaikuBackendEnv() },
-    { source: "config", reason: "bot config haikuBackend", value: opts.haikuBackend ?? null },
+    { source: "config", reason: "bot config haikuBackend", value: opts.haikuBackend || null },
     { source: "legacy", reason: "legacy HAIKU_DIRECT_ENABLED", value: isHaikuDirectEnabled() ? "anthropic" : null },
     { source: "connector", reason: "connector default (copilot-sdk)", value: opts.connector === "copilot-sdk" ? "copilot" : null },
     { source: "default", reason: "default", value: "cli" },

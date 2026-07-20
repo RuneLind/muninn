@@ -342,6 +342,11 @@ describe("resolveBackendChain (derive-from-chain invariant)", () => {
     { name: "connector", opts: { connector: "copilot-sdk" }, expectWinner: "connector" },
     { name: "invalid env falls through to connector", env: { HAIKU_BACKEND: "bogus" }, opts: { connector: "copilot-sdk" }, expectWinner: "connector" },
     { name: "invalid env falls through to floor", env: { HAIKU_BACKEND: "bogus" }, opts: { connector: "claude-cli" }, expectWinner: "default" },
+    // Empty strings must fall through like the old truthy checks did — a
+    // `"haikuBackend": ""` in config.json survives discovery's falsy-skip guard
+    // and reaches the resolver (review finding on #321).
+    { name: "empty explicit falls through to connector", opts: { backend: "" as never, connector: "copilot-sdk" }, expectWinner: "connector" },
+    { name: "empty config falls through to floor", opts: { connector: "claude-cli", haikuBackend: "" as never }, expectWinner: "default" },
   ];
 
   for (const c of cases) {
