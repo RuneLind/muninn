@@ -76,6 +76,13 @@ mock.module("../db/summary-candidates.ts", () => ({
   },
 }));
 
+// Link-enrichment (X path) fetch behaviour: the youtube transcript endpoint and
+// the article direct fetch. Reset to a happy default in beforeEach.
+let transcriptOk = true;
+let transcriptText = "TRANSCRIPT: the linked 28-minute video walks through agent loops.";
+let articleOk = true;
+let articleText = "ARTICLE BODY: the linked long-form write-up.";
+
 const originalFetch = globalThis.fetch;
 function installFetchMock() {
   // @ts-expect-error — minimal Response stand-in is enough for the summarizer.
@@ -87,6 +94,22 @@ function installFetchMock() {
         status: ingestStatus,
         json: async () => ingestBody,
         text: async () => JSON.stringify(ingestBody),
+      };
+    }
+    // YouTube transcript enrichment (X path).
+    if (url.includes("/api/youtube/transcript/")) {
+      return {
+        ok: transcriptOk,
+        status: transcriptOk ? 200 : 404,
+        json: async () => ({ transcript: transcriptText }),
+      };
+    }
+    // Article enrichment — a direct fetch of the external destination URL.
+    if (url.startsWith("https://article.test/")) {
+      return {
+        ok: articleOk,
+        status: articleOk ? 200 : 404,
+        text: async () => articleText,
       };
     }
     // Direct-fetch fallback.
@@ -120,6 +143,10 @@ beforeEach(() => {
   ingestBody = { status: "ok", file_path: `/abs/data/sources/anthropic-summaries/${SUMMARY_DOC_ID}` };
   statusCalls = [];
   throwOnStatus = null;
+  transcriptOk = true;
+  transcriptText = "TRANSCRIPT: the linked 28-minute video walks through agent loops.";
+  articleOk = true;
+  articleText = "ARTICLE BODY: the linked long-form write-up.";
   installFetchMock();
 });
 
@@ -279,4 +306,75 @@ test("X candidate: errors the job when the x-feed doc is empty (no url fallback)
   const job = getJob(jobId)!;
   expect(job.status).toBe("error");
   expect(statusCalls[0]).toEqual({ id: "x-2", status: "error", docId: null });
+});
+
+// --- Link enrichment (PR 2) ---
+
+const YT_LINK = "https://youtu.be/dQw4w9WgXcQ";
+// An x-feed doc footer with the plural **Links:** line carrying the destination.
+function xDocWithLink(link: string): string {
+  return [
+    "# @karpathy — Andrej Karpathy",
+    "",
+    "just dropped a 28-minute video on agent design — watch it",
+    "",
+    "---",
+    "",
+    "- **Type:** tweet",
+    "- **Link:** https://x.com/karpathy/status/1789",
+    `- **Links:** ${link}`,
+  ].join("\n");
+}
+
+test("X candidate: enriches a pointer tweet with the linked YouTube transcript", async () => {
+  docText = xDocWithLink(YT_LINK);
+  const jobId = createJob("x-yt", "@karpathy: 28-min video", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-yt", "@karpathy: 28-min video", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  // The prompt fed to Claude carries BOTH the tweet text and the delimited linked
+  // content — the transcript, not just the pointer tweet.
+  expect(lastPrompt).toContain("just dropped a 28-minute video");
+  expect(lastPrompt).toContain(`--- LINKED CONTENT (${YT_LINK}) ---`);
+  expect(lastPrompt).toContain("TRANSCRIPT: the linked 28-minute video");
+  // x-post framing: linked content is supporting context, the post stays the subject.
+  expect(lastSystemPrompt).toContain("SUPPORTING CONTEXT");
+});
+
+test("X candidate: enriches with a direct article fetch for a non-youtube link", async () => {
+  docText = xDocWithLink("https://article.test/deep-dive");
+  const jobId = createJob("x-art", "@author: read this", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-art", "@author: read this", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(lastPrompt).toContain("--- LINKED CONTENT (https://article.test/deep-dive) ---");
+  expect(lastPrompt).toContain("ARTICLE BODY: the linked long-form write-up.");
+});
+
+test("X candidate: a failed link fetch degrades to tweet-only content, job still completes", async () => {
+  docText = xDocWithLink(YT_LINK);
+  transcriptOk = false; // transcript endpoint 404s
+  const jobId = createJob("x-fail", "@karpathy: 28-min video", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-fail", "@karpathy: 28-min video", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  // Tweet text survives; no LINKED CONTENT section was added.
+  expect(lastPrompt).toContain("just dropped a 28-minute video");
+  expect(lastPrompt).not.toContain("LINKED CONTENT");
+  // No enrichment framing when nothing was folded in.
+  expect(lastSystemPrompt).not.toContain("SUPPORTING CONTEXT");
+  expect(statusCalls[0]!.status).toBe("summarized");
+});
+
+test("X candidate: a doc with no external link is byte-identical tweet-only content", async () => {
+  docText = "# @someone\n\nA long-form note with no links at all.\n\n- **Type:** note";
+  const jobId = createJob("x-nolink", "@someone: note", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-nolink", "@someone: note", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(lastPrompt).not.toContain("LINKED CONTENT");
 });

@@ -950,6 +950,7 @@ async function maybeAutoPromote(
         title: row.title,
         url: row.url,
         sourceDocId: row.sourceDocId,
+        kind: row.kind,
       });
       if (jobId) {
         promoted++;

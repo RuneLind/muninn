@@ -52,6 +52,13 @@ export interface CaptureOneShotOptions {
    * no first-token latency to protect).
    */
   thinkingMaxTokens?: number | null;
+  /**
+   * Extra string attributes stamped onto the `claude` span (alongside model /
+   * tokens), for vertical-specific observability — e.g. the X path records its
+   * link-enrichment outcome (`enrichment: youtube|article|none|failed`). Other
+   * verticals pass nothing and are unaffected.
+   */
+  extraTraceAttrs?: Record<string, string>;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
   tracer?: Tracer;
@@ -109,6 +116,7 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     connector: botConfig.connector ?? "claude-cli",
     model: botConfig.model,
     ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+    ...(opts.extraTraceAttrs ?? {}),
   });
 
   try {
