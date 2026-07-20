@@ -21,6 +21,7 @@ import { registerWikiRoutes } from "./routes/wiki-routes.ts";
 import { registerWikiGardenerRoutes } from "./routes/wiki-gardener-routes.ts";
 import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 import { registerModelsRoutes } from "./routes/models-routes.ts";
+import { registerIndexingRoutes } from "./routes/indexing-routes.ts";
 import { registerAgentsRoutes } from "./routes/agents-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
@@ -57,6 +58,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerWikiGardenerRoutes(app);
   registerBenchmarkRoutes(app);
   registerModelsRoutes(app);
+  registerIndexingRoutes(app, config);
   registerAgentsRoutes(app);
 
   return app;
