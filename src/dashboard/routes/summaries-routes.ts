@@ -15,6 +15,8 @@ interface SummaryDocumentMeta {
   id: string;
   url?: string;
   date?: string;
+  /** Full-precision ingest timestamp from huginn — intra-day sort tiebreaker. */
+  modifiedTime?: string;
   title?: string;
   [key: string]: unknown;
 }
