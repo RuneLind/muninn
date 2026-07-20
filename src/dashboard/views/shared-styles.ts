@@ -226,6 +226,100 @@ export const SHARED_STYLES = `
       background: linear-gradient(90deg, transparent, var(--accent), transparent);
       animation: shimmer 1.4s linear infinite;
     }
+
+    /* --- Nav cluster separators (thin vertical rule between the 3 nav groups) --- */
+    header nav { display: inline-flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+    .nav-sep {
+      display: inline-block; width: 1px; height: 14px;
+      background: var(--border-secondary); margin: 0 6px; align-self: center;
+    }
+
+    /* ========================================================================
+       Shared dashboard-redesign primitives (PR 1). Consumed by /agents,
+       /models and /indexing in PRs 2–4. Every tint is expressed through
+       color-mix on a status/accent variable so the LIGHT palette works — the
+       design prototypes hardcode the dark rgba values of these same tokens.
+       ======================================================================== */
+
+    /* --- Summary tiles (stat row under a page header) ------------------------
+       tileHtml() (summary-tiles.ts client script) builds these. Attention rule:
+       a tile gets a colored border ONLY when its tone says it needs attention;
+       neutral (toneless) tiles stay quiet. The tone also colors the label. */
+    .summary-tiles { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0 20px; }
+    .s-tile {
+      background: var(--bg-panel); border: 1px solid var(--border-primary);
+      border-radius: 10px; padding: 11px 16px; min-width: 130px;
+    }
+    .s-tile-label { font-size: 10px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+    .s-tile-value { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+    .s-tile-sub   { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+    .s-tile-warning { border-color: color-mix(in srgb, var(--status-warning) 35%, transparent); }
+    .s-tile-warning .s-tile-label { color: var(--status-warning); }
+    .s-tile-success { border-color: color-mix(in srgb, var(--status-success) 30%, transparent); }
+    .s-tile-success .s-tile-label { color: var(--status-success); }
+    .s-tile-error   { border-color: color-mix(in srgb, var(--status-error) 35%, transparent); }
+    .s-tile-error .s-tile-label { color: var(--status-error); }
+    .s-tile-info    { border-color: color-mix(in srgb, var(--status-info) 30%, transparent); }
+    .s-tile-info .s-tile-label { color: var(--status-info); }
+
+    /* --- Unified status chips (9px geometry) --------------------------------
+       Attention (STALE), origin/routing (full 11-value Origin union), job-kind
+       (fixed 68px) and run-status. status-chips.ts renders these. */
+    .dchip {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+      padding: 1px 7px; border-radius: 9px; line-height: 1.7;
+      text-transform: uppercase; white-space: nowrap; vertical-align: middle;
+    }
+    /* Attention chip — shown ONLY when something is wrong. */
+    .dchip-attn     { background: color-mix(in srgb, var(--status-warning) 16%, transparent); color: var(--status-warning); }
+    /* Origin / routing chips (config env override default derived legacy fixed none pinned owner fallback). */
+    .dchip-config,
+    .dchip-pinned   { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-light); }
+    .dchip-override,
+    .dchip-owner    { background: color-mix(in srgb, var(--status-success) 14%, transparent); color: var(--status-success); }
+    .dchip-env      { background: color-mix(in srgb, var(--status-info) 16%, transparent); color: var(--status-info); }
+    /* derived adopts the design's neutral gray (was cyan) — decision from the plan. */
+    .dchip-derived,
+    .dchip-default  { background: var(--tint-neutral); color: var(--text-muted); }
+    .dchip-fallback,
+    .dchip-legacy   { background: color-mix(in srgb, var(--status-warning) 16%, transparent); color: var(--status-warning); }
+    .dchip-fixed    { background: color-mix(in srgb, var(--status-magenta) 16%, transparent); color: var(--status-magenta); }
+    .dchip-none     { background: var(--tint-neutral); color: var(--text-disabled); }
+
+    /* Job-kind chips (Agents) — fixed 68px, centered. */
+    .kind-chip {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 68px; text-align: center; flex-shrink: 0;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+      padding: 1px 7px; border-radius: 9px; line-height: 1.7;
+      text-transform: uppercase; white-space: nowrap;
+    }
+    .kind-watcher { background: color-mix(in srgb, var(--status-info) 14%, transparent); color: var(--status-info); }
+    .kind-task    { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-light); }
+    .kind-capture { background: color-mix(in srgb, var(--status-magenta) 16%, transparent); color: var(--status-magenta); }
+    .kind-digest  { background: color-mix(in srgb, var(--status-cyan) 13%, transparent); color: var(--status-cyan); }
+
+    /* Run status — 7px colored dot + lowercase text (NOT an uppercase pill).
+       Failure/staleness also tints the text. */
+    .run-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-soft); white-space: nowrap; }
+    .run-status .run-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--text-disabled); }
+    .run-success .run-dot { background: var(--status-success); }
+    .run-warning .run-dot { background: var(--status-warning); }
+    .run-error   .run-dot { background: var(--status-error); }
+    .run-warning { color: var(--status-warning); }
+    .run-error   { color: var(--status-error); }
+
+    /* Aging / stale relative-time text (design's #d0a94a) — a muted warning that
+       works in both themes. */
+    .text-aging { color: color-mix(in srgb, var(--status-warning) 65%, var(--text-muted)); }
+
+    /* Expand caret — rotates 90° on open (shared by the PR 2–4 expandable rows). */
+    .caret { display: inline-block; transition: transform 0.12s ease; color: var(--text-dim); font-size: 9px; }
+    .caret.open { transform: rotate(90deg); }
+
+    /* Row hover wash (accent 5%). */
+    .hover-wash:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 `;
 
 /** Shared header HTML with nav links */
@@ -273,14 +367,16 @@ export function renderNav(
         <a href="/agents" class="nav-link${activePage === "agents" ? " active" : ""}">Agents</a>
         <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
         <a href="/logs" class="nav-link${activePage === "logs" ? " active" : ""}">Logs</a>
+        <span class="nav-sep" aria-hidden="true"></span>
         <a href="/chat" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
-        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
         <a href="/research" class="nav-link${activePage === "research" ? " active" : ""}">Research</a>
         <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">Search</a>
         <a href="/summaries" class="nav-link${activePage === "summaries" ? " active" : ""}">Summaries</a>
-        <a href="/serena" class="nav-link${activePage === "serena" ? " active" : ""}">Serena</a>
         <a href="/wiki" class="nav-link${activePage === "wiki" ? " active" : ""}">Wiki</a>
         <a href="/graph" class="nav-link${activePage === "graph" ? " active" : ""}">Graph</a>
+        <span class="nav-sep" aria-hidden="true"></span>
+        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
+        <a href="/serena" class="nav-link${activePage === "serena" ? " active" : ""}">Serena</a>
         <a href="/benchmark" class="nav-link${activePage === "benchmark" ? " active" : ""}">Benchmark</a>
         <a href="/models" class="nav-link${activePage === "models" ? " active" : ""}">Models</a>
         <a href="/indexing" class="nav-link${activePage === "indexing" ? " active" : ""}">Indexing</a>
