@@ -28,6 +28,16 @@ const log = getLog("dashboard", "indexing");
 /** How much run history to request from huginn (per-collection `history[]`). */
 export const DEFAULT_HISTORY_N = 20;
 
+/** Staleness thresholds for tracked-but-unscheduled jobs (no schedule to drift
+ *  against, so age is the only signal). `aging` is a muted middle band (warning-
+ *  tinted text, no chip); `stale` earns the STALE chip. Scheduled jobs use drift
+ *  (missed cycles) instead — see `assessRowHealth`. */
+export const AGING_MS = 7 * 24 * 60 * 60 * 1000;
+export const STALE_MS = 14 * 24 * 60 * 60 * 1000;
+/** A scheduled job is "drifting" once it has missed more than this many full
+ *  schedule cycles without a run (grace for a slightly-late launchd tick). */
+export const DRIFT_CYCLES = 2;
+
 // ---- Raw huginn contract (only the fields we read) -------------------------
 
 /** One phase of a run (reindex / embed / …). */
@@ -140,6 +150,25 @@ export interface IndexingRow {
   /** Per-collection depth for the expansion row (phase timeline + sparkline +
    *  in-flight phases) — derived by the pure `buildIndexingDetail`. */
   detail: IndexingDetail;
+  /** Row attention state driving the STALE chip + relative-time text tint:
+   *  `stale` (unscheduled >14d, or a drifting scheduled job) ⇒ chip + warning
+   *  text; `aging` (unscheduled 7–14d) ⇒ warning-tinted text, no chip; null ⇒
+   *  quiet. Never-tracked rows have no run to age ⇒ null. */
+  attention: "stale" | "aging" | null;
+  /** True when the last run is old past the stale threshold (unscheduled jobs). */
+  stale: boolean;
+  /** True when the last run is in the aging band (unscheduled jobs). */
+  aging: boolean;
+  /** True when a scheduled job has missed enough cycles to be drifting. */
+  drifting: boolean;
+  /** True when the last run failed or degraded. */
+  failed: boolean;
+  /** Age of the last run in ms (now − lastStartedAt); null when never tracked. */
+  ageMs: number | null;
+  /** Projected next scheduled fire (epoch ms); null for unscheduled jobs. */
+  nextRunAtMs: number | null;
+  /** Forward countdown to the next fire ("in 18h 40m"); null when unscheduled. */
+  nextRelative: string | null;
 }
 
 export type IndexingClassKey = "scheduled" | "tracked" | "never";
@@ -151,10 +180,23 @@ export interface IndexingClass {
   rows: IndexingRow[];
 }
 
+/** A summary stat tile shipped ready-to-render in the overview payload (the page
+ *  maps `tileHtml` over these; the plan puts tile derivation in the pure assembly,
+ *  not the client). `tone` drives the attention border + label color per the
+ *  shared summary-tiles rule; absent ⇒ neutral. */
+export interface IndexingTile {
+  label: string;
+  value: string;
+  sub: string;
+  tone?: "warning" | "success" | "error" | "info";
+}
+
 export interface IndexingOverview {
   generatedAt: number;
   total: number;
   classes: IndexingClass[];
+  /** Summary tiles (Healthy / Stale / Drift / Running), derived server-side. */
+  tiles: IndexingTile[];
   errors?: string[];
 }
 
@@ -276,6 +318,131 @@ export function describeSchedule(schedule: RawSchedule | null): string | null {
   return null;
 }
 
+/** Expected cadence of a schedule in ms (drives drift detection). Null when a
+ *  schedule carries no usable interval (e.g. `interval` with 0 seconds). */
+export function scheduleIntervalMs(schedule: RawSchedule | null): number | null {
+  if (!schedule) return null;
+  if (schedule.kind === "calendar") {
+    return schedule.weekday == null ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+  }
+  if (schedule.kind === "hourly") return 60 * 60 * 1000;
+  if (schedule.kind === "interval") {
+    const ms = (schedule.seconds ?? 0) * 1000;
+    return ms > 0 ? ms : null;
+  }
+  return null;
+}
+
+/**
+ * Project the next fire of a schedule (epoch ms), or null for no/undatable
+ * schedule. Calendar/hourly are computed in the SERVER's local timezone (launchd
+ * schedules are local), so the countdown matches the wall-clock the jobs fire on.
+ * Interval jobs advance from the last start (or now when never run).
+ */
+export function computeNextRunMs(
+  schedule: RawSchedule | null,
+  lastStartedAt: number | null,
+  now: number,
+): number | null {
+  if (!schedule) return null;
+  if (schedule.kind === "interval") {
+    const iv = (schedule.seconds ?? 0) * 1000;
+    if (iv <= 0) return null;
+    const base = lastStartedAt ?? now;
+    if (base > now) return base;
+    const cycles = Math.floor((now - base) / iv) + 1;
+    return base + cycles * iv;
+  }
+  if (schedule.kind === "hourly") {
+    const d = new Date(now);
+    d.setSeconds(0, 0);
+    d.setMinutes(schedule.minute ?? 0);
+    if (d.getTime() <= now) d.setTime(d.getTime() + 60 * 60 * 1000);
+    return d.getTime();
+  }
+  if (schedule.kind === "calendar") {
+    const d = new Date(now);
+    d.setHours(schedule.hour ?? 0, schedule.minute ?? 0, 0, 0);
+    if (schedule.weekday == null) {
+      if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+      return d.getTime();
+    }
+    const target = ((schedule.weekday % 7) + 7) % 7;
+    let guard = 0;
+    while ((d.getDay() !== target || d.getTime() <= now) && guard < 8) {
+      d.setDate(d.getDate() + 1);
+      guard += 1;
+    }
+    return d.getTime();
+  }
+  return null;
+}
+
+/** Forward countdown string ("in 45m" / "in 18h 40m" / "in 3d 4h"). Null when
+ *  the target is unknown; "due now" when it's already past. Unlike
+ *  `formatDuration` (which stops at hours), this rolls into days for weekly jobs. */
+export function formatCountdown(nextRunAtMs: number | null, now: number): string | null {
+  if (nextRunAtMs == null) return null;
+  const delta = nextRunAtMs - now;
+  if (delta <= 0) return "due now";
+  const totalMin = Math.floor(delta / 60000);
+  if (totalMin < 60) return `in ${Math.max(1, totalMin)}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 48) return `in ${h}h${m ? ` ${m}m` : ""}`;
+  const days = Math.floor(h / 24);
+  const rh = h % 24;
+  return `in ${days}d${rh ? ` ${rh}h` : ""}`;
+}
+
+/** Short age label for the worst-offender tile sub-line ("69d" / "5h" / "12m"). */
+export function formatAge(ms: number | null): string | null {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}m`;
+  const h = Math.floor(s / 3600);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+export interface RowHealth {
+  attention: "stale" | "aging" | null;
+  stale: boolean;
+  aging: boolean;
+  drifting: boolean;
+  failed: boolean;
+  ageMs: number | null;
+}
+
+/**
+ * Assess a job's health. Scheduled jobs use drift (missed cycles) — the 7/14d
+ * age rule would never fire on a daily job. Unscheduled tracked jobs use the
+ * age bands. Never-tracked jobs (no last run) are quiet — no run to age against.
+ */
+export function assessRowHealth(job: RawJob, lastStartedAt: number | null, now: number): RowHealth {
+  const failed = job.lastRun ? isFailedStatus(job.lastRun.status) : false;
+  const ageMs = lastStartedAt != null ? Math.max(0, now - lastStartedAt) : null;
+  let stale = false;
+  let aging = false;
+  let drifting = false;
+
+  if (job.schedule != null) {
+    const iv = scheduleIntervalMs(job.schedule);
+    drifting = ageMs != null && iv != null && ageMs > iv * DRIFT_CYCLES;
+  } else if (job.lastRun != null && ageMs != null) {
+    if (ageMs > STALE_MS) stale = true;
+    else if (ageMs > AGING_MS) aging = true;
+  }
+
+  const attention: RowHealth["attention"] = stale || drifting ? "stale" : aging ? "aging" : null;
+  return { attention, stale, aging, drifting, failed, ageMs };
+}
+
+function isFailedStatus(raw: string | null | undefined): boolean {
+  const s = normalizeStatus(raw);
+  return s === "failed" || s === "degraded";
+}
+
 /** Sort medians incremental-first, then alphabetically — stable output. */
 function sortMedians(median: Record<string, number>): MedianEntry[] {
   return Object.entries(median ?? {})
@@ -304,6 +471,9 @@ export function toRow(job: RawJob, now: number): IndexingRow {
       ? formatDuration(Math.max(0, (now - currentStarted) / 1000))
       : null;
 
+  const health = assessRowHealth(job, lastStartedAt, now);
+  const nextRunAtMs = computeNextRunMs(job.schedule, lastStartedAt, now);
+
   return {
     collection: job.collection,
     loaded: Boolean(job.loaded),
@@ -318,6 +488,14 @@ export function toRow(job: RawJob, now: number): IndexingRow {
     running,
     runningElapsed,
     detail: buildIndexingDetail(job),
+    attention: health.attention,
+    stale: health.stale,
+    aging: health.aging,
+    drifting: health.drifting,
+    failed: health.failed,
+    ageMs: health.ageMs,
+    nextRunAtMs,
+    nextRelative: formatCountdown(nextRunAtMs, now),
   };
 }
 
@@ -344,6 +522,74 @@ const CLASS_META: Record<IndexingClassKey, { title: string; subtitle: string }> 
 };
 
 const CLASS_ORDER: IndexingClassKey[] = ["scheduled", "tracked", "never"];
+
+/**
+ * Derive the four summary tiles from the flattened rows. Pure + unit-tested.
+ *   - Healthy = rows needing no attention (not stale/aging/drifting/failed/running).
+ *     Never-tracked rows count as healthy — loaded and searchable, no evidence of
+ *     a problem (no timestamp to age).
+ *   - Stale   = unscheduled rows past the stale threshold; sub names the worst.
+ *   - Drift   = scheduled rows that have missed cycles.
+ *   - Running = in-flight rows; idle sub shows the soonest next scheduled fire.
+ */
+export function computeTiles(rows: IndexingRow[], now: number): IndexingTile[] {
+  const total = rows.length;
+  const staleRows = rows.filter((r) => r.stale);
+  const driftRows = rows.filter((r) => r.drifting);
+  const runningRows = rows.filter((r) => r.running);
+  const healthy = rows.filter(
+    (r) => !r.stale && !r.aging && !r.drifting && !r.failed && !r.running,
+  ).length;
+
+  const worstStale = [...staleRows].sort((a, b) => (b.ageMs ?? 0) - (a.ageMs ?? 0))[0];
+  const staleSub = worstStale
+    ? `${worstStale.collection} · ${formatAge(worstStale.ageMs) ?? "old"}`
+    : "all fresh";
+
+  const worstDrift = [...driftRows].sort((a, b) => (b.ageMs ?? 0) - (a.ageMs ?? 0))[0];
+  const driftSub = worstDrift
+    ? `${worstDrift.collection} · ${formatAge(worstDrift.ageMs) ?? "overdue"}`
+    : "all schedules on time";
+
+  // Soonest upcoming scheduled fire (for the idle Running sub-line).
+  const upcoming = rows
+    .filter((r) => r.nextRunAtMs != null)
+    .sort((a, b) => (a.nextRunAtMs ?? 0) - (b.nextRunAtMs ?? 0))[0];
+  let runningSub: string;
+  if (runningRows.length > 0) {
+    const r = runningRows[0]!;
+    runningSub = r.runningElapsed
+      ? `${r.collection} · ${r.runningElapsed} elapsed`
+      : r.collection;
+  } else if (upcoming) {
+    const cd = formatCountdown(upcoming.nextRunAtMs, now);
+    runningSub = `next: ${upcoming.collection}${cd ? ` · ${cd}` : ""}`;
+  } else {
+    runningSub = "no schedules";
+  }
+
+  return [
+    { label: "Healthy", value: `${healthy} / ${total}`, sub: "last run succeeded" },
+    {
+      label: "Stale",
+      value: String(staleRows.length),
+      sub: staleSub,
+      ...(staleRows.length > 0 ? { tone: "warning" as const } : {}),
+    },
+    {
+      label: "Drift",
+      value: String(driftRows.length),
+      sub: driftSub,
+      ...(driftRows.length > 0 ? { tone: "warning" as const } : {}),
+    },
+    {
+      label: "Running",
+      value: String(runningRows.length),
+      sub: runningSub,
+      ...(runningRows.length > 0 ? { tone: "success" as const } : {}),
+    },
+  ];
+}
 
 /**
  * Assemble the full overview. Pure over its injected `fetchJobs` — the route
@@ -382,6 +628,8 @@ export async function assembleIndexingOverview(
     rows: grouped[key],
   }));
 
+  const allRows = CLASS_ORDER.flatMap((key) => grouped[key]);
+
   if (errors.length > 0) {
     log.warn("indexing overview assembled with {count} degraded source(s)", { count: errors.length });
   }
@@ -390,6 +638,7 @@ export async function assembleIndexingOverview(
     generatedAt: now,
     total: jobs.length,
     classes,
+    tiles: computeTiles(allRows, now),
     ...(errors.length > 0 ? { errors } : {}),
   };
 }
