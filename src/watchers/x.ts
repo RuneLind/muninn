@@ -3,6 +3,7 @@ import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/exe
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
+import { extractDocLinks } from "../summaries/doc-links.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -88,6 +89,15 @@ interface XWatcherConfig {
    * globally — a safe direction (fewer captures), never a silent widening.
    */
   candidateMinScoreNonTop?: number;
+  /**
+   * Per-kind capture-floor overrides (name + semantics mirror the anthropic vertical's
+   * `candidateMinScoreByKind`). Two X kinds:
+   *   - `"x-post"` — overrides the long-form base floor (else `candidateMinScore`, 0.6);
+   *     the non-top-author raise (`candidateMinScoreNonTop`) still applies on top.
+   *   - `"x-link"` — the pointer-tweet floor (else 0.7). `candidateMinScoreNonTop` NEVER
+   *     applies here — link-tweets are already top-author-only by eligibility.
+   */
+  candidateMinScoreByKind?: { "x-post"?: number; "x-link"?: number };
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -136,6 +146,12 @@ interface CompactedTweet {
   firstLine: string;
   /** Body slice up to {@link GATE_EXCERPT_CHARS} for the capture gate (text caps at 500). */
   gateBody: string;
+  /**
+   * External destination URLs parsed from the doc's plural `**Links:**` footer line
+   * (self/t.co hosts already filtered — see {@link extractDocLinks}). Empty for a tweet
+   * that links nowhere. The link-tweet capture eligibility ({@link isLinkTweet}) reads this.
+   */
+  links: string[];
 }
 
 /**
@@ -164,6 +180,11 @@ export interface TweetDoc {
   text: string;
   /** Longer body slice for the capture gate — see {@link GATE_EXCERPT_CHARS}. */
   gateExcerpt: string;
+  /**
+   * External destination URLs from the doc footer (see {@link CompactedTweet.links}).
+   * Drives link-tweet capture eligibility ({@link isLinkTweet}) + the x-link gate line.
+   */
+  links: string[];
 }
 
 /**
@@ -233,7 +254,11 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
   const gateBody = bodyRaw.length > GATE_EXCERPT_CHARS
     ? bodyRaw.slice(0, bodyRaw.lastIndexOf(" ", GATE_EXCERPT_CHARS)) + "…"
     : bodyRaw;
-  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine, gateBody };
+  // Parse the footer's external destination links from the RAW doc (the compact `text`
+  // and `gateBody` slices don't carry the `**Links:**` footer line). Drives link-tweet
+  // capture eligibility downstream.
+  const links = extractDocLinks(rawText);
+  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine, gateBody, links };
 }
 
 function extractTweetId(docId: string): string {
@@ -339,6 +364,7 @@ export async function fetchFromCollection(
         firstLine: r.firstLine,
         text: r.text,
         gateExcerpt: r.gateBody,
+        links: r.links,
       }))
     : undefined;
 
@@ -467,6 +493,8 @@ async function fetchFromPython(
 const DEFAULT_CANDIDATE_MIN_SCORE = 0.6;
 /** Stricter capture floor for non-top-5%-author tweets when `config.candidateMinScoreNonTop` is unset. */
 const DEFAULT_CANDIDATE_MIN_SCORE_NONTOP = 0.75;
+/** Capture floor for `x-link` (pointer) tweets when `config.candidateMinScoreByKind["x-link"]` is unset. */
+const DEFAULT_CANDIDATE_MIN_SCORE_XLINK = 0.7;
 
 /** Author percentile tier, derived from the current x-feed author-score thresholds. */
 export type AuthorTier = "top1" | "top5";
@@ -487,18 +515,33 @@ export function resolveAuthorTier(
 }
 
 /**
- * Per-tier inbox capture floor. A top-5% (or top-1%) author keeps the base
- * `candidateMinScore`; every other author (incl. unknown / thresholds unavailable ⇒
- * tier `null`) must clear `max(candidateMinScore, candidateMinScoreNonTop)` — one knob,
- * raise-only (a raised base is never undercut). See {@link resolveAuthorTier}.
+ * Per-tier inbox capture floor for `x-post` (long-form) tweets. Base precedence:
+ * `candidateMinScoreByKind["x-post"]` → `candidateMinScore` → 0.6. A top-5% (or top-1%)
+ * author keeps the base; every other author (incl. unknown / thresholds unavailable ⇒
+ * tier `null`) must clear `max(base, candidateMinScoreNonTop)` — one knob, raise-only
+ * (a raised base is never undercut). See {@link resolveAuthorTier}.
  */
 export function captureFloorForTier(
   tier: AuthorTier | null,
-  config: Pick<XWatcherConfig, "candidateMinScore" | "candidateMinScoreNonTop">,
+  config: Pick<XWatcherConfig, "candidateMinScore" | "candidateMinScoreNonTop" | "candidateMinScoreByKind">,
 ): number {
-  const base = config.candidateMinScore ?? DEFAULT_CANDIDATE_MIN_SCORE;
+  const base =
+    config.candidateMinScoreByKind?.["x-post"] ??
+    config.candidateMinScore ??
+    DEFAULT_CANDIDATE_MIN_SCORE;
   const nonTop = config.candidateMinScoreNonTop ?? DEFAULT_CANDIDATE_MIN_SCORE_NONTOP;
   return tier != null ? base : Math.max(base, nonTop);
+}
+
+/**
+ * Inbox capture floor for `x-link` (pointer) tweets: `candidateMinScoreByKind["x-link"]`
+ * → 0.7. `candidateMinScoreNonTop` NEVER applies — link-tweets are already top-author-only
+ * by eligibility ({@link isLinkTweet}), so there's no non-top band to raise for.
+ */
+export function captureFloorForXLink(
+  config: Pick<XWatcherConfig, "candidateMinScoreByKind">,
+): number {
+  return config.candidateMinScoreByKind?.["x-link"] ?? DEFAULT_CANDIDATE_MIN_SCORE_XLINK;
 }
 
 /** Gate-prompt author prior line for a tier (tier only, never the raw score), or null when unknown. */
@@ -545,6 +588,27 @@ export function isLongFormTweet(doc: Pick<TweetDoc, "bodyLength" | "isNote">): b
   return doc.isNote || doc.bodyLength >= LONGFORM_MIN_CHARS;
 }
 
+/**
+ * Link-tweet (pointer-tweet) capture eligibility — the second capture class alongside
+ * {@link isLongFormTweet}. A pointer tweet's value is the external link it points at (a
+ * 28-min video, an article), not its own short text, so the summarizer follows the link
+ * (`kind: "x-link"`, PR 2's enrichment path treats the linked content as the primary
+ * subject). Eligible iff ALL of:
+ *   1. NOT long-form (long-form tweets are captured as `x-post` regardless of links);
+ *   2. carries ≥1 external destination link (`doc.links`, already host-filtered by
+ *      {@link extractDocLinks} — a raw link count would match every tweet via its own
+ *      permalink, but that's on the singular `**Link:**` line which the parser ignores);
+ *   3. the author is top-5% (or top-1%) of tracked authors (`tier != null`). Restricting
+ *      to top authors keeps link-tweet volume — and the gate cost — bounded; the tier is
+ *      the PR-1 per-run resolution, reused here.
+ */
+export function isLinkTweet(
+  doc: Pick<TweetDoc, "bodyLength" | "isNote" | "links">,
+  tier: AuthorTier | null,
+): boolean {
+  return !isLongFormTweet(doc) && doc.links.length >= 1 && tier != null;
+}
+
 /** Truncate a candidate title at a word boundary near `max` chars. */
 function truncateTitle(s: string, max = 140): string {
   const clean = s.replace(/\s+/g, " ").trim();
@@ -553,28 +617,54 @@ function truncateTitle(s: string, max = 140): string {
   return `${clean.slice(0, cut > 0 ? cut : max)}…`;
 }
 
+/** The two X capture classes. `x-post` = long-form tweet; `x-link` = pointer tweet. */
+type CaptureKind = "x-post" | "x-link";
+
+/** One capture-eligible doc with its resolved author + kind (built in captureXCandidates). */
+interface EligibleTweet {
+  doc: TweetDoc;
+  author: string | null;
+  authorScore: number | null;
+  tier: AuthorTier | null;
+  kind: CaptureKind;
+}
+
+/** Host of a link's URL for the x-link gate line, or the raw URL if it won't parse. */
+function linkDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 /**
- * Score the long-form subset with one Haiku call. Returns the parsed `{n,score,why}`
- * array (model omits the not-worth-saving). Throws on a model error or unparseable
- * output so the caller can log + fall back to the alert path.
+ * Score the eligible subset (long-form `x-post` + pointer `x-link` tweets) with one Haiku
+ * call. Returns the parsed `{n,score,why}` array (model omits the not-worth-saving).
+ * Throws on a model error or unparseable output so the caller can log + fall back to the
+ * alert path.
  */
 async function runCaptureGate(
-  docs: TweetDoc[],
-  tiers: (AuthorTier | null)[],
+  eligible: EligibleTweet[],
   botName: string | undefined,
   interestProfile: string | null,
   telemetry?: HaikuTelemetry,
 ): Promise<GateScore[]> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
-  // judging whether the FULL long-form post is worth summarizing, and every eligible
-  // post is by definition longer than the compact line shows. The author-rank prior
-  // (tier only, when known) lets the gate judge content WITH the strongest prior; the
-  // deterministic per-tier floor stays the backstop.
-  const list = docs
-    .map((d, i) => {
-      const tierLine = authorTierLabel(tiers[i] ?? null);
+  // judging whether the FULL post is worth summarizing. The author-rank prior (tier only,
+  // when known) lets the gate judge content WITH the strongest prior; the deterministic
+  // per-kind/tier floor stays the backstop. For an x-link (pointer) tweet the value is the
+  // LINKED content, so the line names the destination (`links to: <domain> — <url>`) — the
+  // gate weighs "a 28-min video by Claude Code's creator", not just the short tweet text.
+  const list = eligible
+    .map(({ doc, tier, kind }, i) => {
+      const tierLine = authorTierLabel(tier);
       const priorPart = tierLine ? `\n   (${tierLine})` : "";
-      return `${i + 1}. ${d.isNote ? "[ARTICLE/NOTE] " : ""}${d.handle}: ${d.gateExcerpt}${priorPart}\n   URL: ${d.url}`;
+      const linkPart =
+        kind === "x-link" && doc.links[0]
+          ? `\n   links to: ${linkDomain(doc.links[0])} — ${doc.links[0]}`
+          : "";
+      return `${i + 1}. ${doc.isNote ? "[ARTICLE/NOTE] " : ""}${doc.handle}: ${doc.gateExcerpt}${linkPart}${priorPart}\n   URL: ${doc.url}`;
     })
     .join("\n\n");
   const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
@@ -593,13 +683,14 @@ async function runCaptureGate(
 }
 
 /**
- * Persist high-value long-form tweets into the `summary_candidates` inbox. Runs on the
- * FULL fetched batch, INDEPENDENT of the alert `minScore`/`quietMode` silencing — a run
- * that alerts nothing can still capture. Best-effort throughout: a capture-gate error is
- * logged and the run proceeds with its normal alert path (the batch's shelf-worthy
- * tweets are lost to the inbox this run — we deliberately do NOT hold tweet IDs back
- * from tracking, so alert dedup never re-surfaces already-alerted tweets). Dedup rides
- * the table's `UNIQUE(source,url)` + the upstream `lastNotifiedIds` filter.
+ * Persist high-value tweets into the `summary_candidates` inbox — two capture classes fed
+ * to ONE gate call: long-form tweets (`x-post`) and top-author pointer tweets (`x-link`).
+ * Runs on the FULL fetched batch, INDEPENDENT of the alert `minScore`/`quietMode`
+ * silencing — a run that alerts nothing can still capture. Best-effort throughout: a
+ * capture-gate error is logged and the run proceeds with its normal alert path (the
+ * batch's shelf-worthy tweets are lost to the inbox this run — we deliberately do NOT hold
+ * tweet IDs back from tracking, so alert dedup never re-surfaces already-alerted tweets).
+ * Dedup rides the table's `UNIQUE(source,url)` + the upstream `lastNotifiedIds` filter.
  */
 async function captureXCandidates(
   docs: TweetDoc[],
@@ -609,31 +700,47 @@ async function captureXCandidates(
   interestProfile: string | null = null,
   telemetry?: HaikuTelemetry,
 ): Promise<void> {
-  const eligible = docs.filter(isLongFormTweet);
-  if (eligible.length === 0) {
-    log.info("Capture: no long-form tweets in the batch of {n}", { botName, n: docs.length });
+  // Pre-candidates: long-form OR link-carrying. A link-carrying tweet still needs its
+  // author tier resolved (top-5%-only eligibility), so it can't be filtered before the
+  // author lookup below; a tweet that's neither long-form nor links anywhere can never
+  // be captured, so it's dropped here to bound the author lookups.
+  const preCandidates = docs.filter((d) => isLongFormTweet(d) || d.links.length >= 1);
+  if (preCandidates.length === 0) {
+    log.info("Capture: no long-form or link tweets in the batch of {n}", { botName, n: docs.length });
     return;
   }
 
-  // Resolve author score + percentile tier ONCE per eligible doc, BEFORE the floor check
-  // (moved above from the old persist-time lookup) — the tier feeds both the gate-prompt
-  // author prior AND the per-tier capture floor. The thresholds are fetched once per run.
-  // Both the score and the thresholds degrade to null (unknown handle / scores file
-  // unavailable) ⇒ tier null ⇒ treated as non-top (the stricter floor), never wider.
+  // Resolve author score + percentile tier ONCE per pre-candidate, BEFORE eligibility +
+  // the floor check — the tier feeds link-tweet eligibility, the gate-prompt author prior,
+  // AND the per-tier x-post floor. The thresholds are fetched once per run. Both the score
+  // and the thresholds degrade to null (unknown handle / scores file unavailable) ⇒ tier
+  // null ⇒ x-post treated as non-top (stricter floor) and x-link excluded — never wider.
   const thresholds = await getAuthorTierThresholds();
-  const authorInfo = await Promise.all(
-    eligible.map(async (doc) => {
+  const resolved = await Promise.all(
+    preCandidates.map(async (doc) => {
       const author = normalizeHandle(doc.handle);
       const authorScore = await getAuthorScore(author);
-      return { author, authorScore, tier: resolveAuthorTier(authorScore, thresholds) };
+      return { doc, author, authorScore, tier: resolveAuthorTier(authorScore, thresholds) };
     }),
   );
 
+  // Build the eligible list with a per-doc kind. Long-form wins outright (captured as
+  // x-post regardless of any links); otherwise a top-author link-tweet is x-link.
+  const eligible: EligibleTweet[] = [];
+  for (const r of resolved) {
+    if (isLongFormTweet(r.doc)) eligible.push({ ...r, kind: "x-post" });
+    else if (isLinkTweet(r.doc, r.tier)) eligible.push({ ...r, kind: "x-link" });
+  }
+  if (eligible.length === 0) {
+    log.info("Capture: no eligible tweets after author-tier gating in the batch of {n}", { botName, n: docs.length });
+    return;
+  }
+
   let scored: GateScore[];
   try {
-    scored = await runCaptureGate(eligible, authorInfo.map((a) => a.tier), botName, interestProfile, telemetry);
+    scored = await runCaptureGate(eligible, botName, interestProfile, telemetry);
   } catch (err) {
-    log.error("Capture gate failed, proceeding with alert path ({n} long-form tweet(s) lost to inbox): {error}", {
+    log.error("Capture gate failed, proceeding with alert path ({n} eligible tweet(s) lost to inbox): {error}", {
       botName,
       n: eligible.length,
       error: err instanceof Error ? err.message : String(err),
@@ -647,11 +754,12 @@ async function captureXCandidates(
   for (let i = 0; i < eligible.length; i++) {
     const score = byN.get(i + 1);
     if (!score) continue;
-    const { author, authorScore, tier } = authorInfo[i]!;
-    // Per-tier floor: top-5% authors keep candidateMinScore; everyone else (incl. unknown
-    // author / thresholds unavailable) must clear the stricter non-top floor.
-    if (score.score < captureFloorForTier(tier, config)) continue;
-    const doc = eligible[i]!;
+    const { doc, author, authorScore, tier, kind } = eligible[i]!;
+    // Per-kind floor (single source of truth): x-post → per-tier floor (non-top raise
+    // applies); x-link → the pointer-tweet floor (already top-author-only by eligibility,
+    // so no non-top raise).
+    const floor = kind === "x-link" ? captureFloorForXLink(config) : captureFloorForTier(tier, config);
+    if (score.score < floor) continue;
     const firstLine = doc.firstLine.trim() || doc.text;
     // Author transparency: the normalized handle keys huginn's ranking; the score is a
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
@@ -663,7 +771,7 @@ async function captureXCandidates(
         candidateSrc: `X (${doc.handle})`,
         score: score.score,
         why: score.why,
-        kind: "x-post",
+        kind,
         author,
         authorScore,
         sourceDocId: doc.docId,
@@ -680,7 +788,7 @@ async function captureXCandidates(
     }
   }
   if (captured > 0) {
-    log.info("Capture: queued {n} long-form X candidate(s) to the inbox", { botName, n: captured });
+    log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: captured });
   }
 }
 

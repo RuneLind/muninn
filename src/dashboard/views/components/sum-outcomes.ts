@@ -149,10 +149,13 @@ export function sumOutcomesHtml(): string {
 
 export function sumOutcomesScript(): string {
   return `
-    // candidateMinScoreByKind keys (the anthropic vertical). 'x-post' is intentionally
-    // excluded from the copyable snippet — the X watcher uses a single flat floor, not
-    // a per-kind map — though it still appears in the per-kind + suggested-floor tables.
-    var OUTCOME_CONFIG_KINDS = ['commit', 'release', 'doc', 'blog'];
+    // candidateMinScoreByKind keys, split by watcher so each snippet pastes into the
+    // RIGHT config (suggestedFloors is source-agnostic — keyed by kind only — so a single
+    // merged blob would carry a wrong paste target). Anthropic kinds → the Anthropic
+    // Highlights watcher; the X kinds ('x-post' long-form, 'x-link' pointer tweets) → the
+    // X Highlights watcher, which now also reads a per-kind candidateMinScoreByKind map.
+    var OUTCOME_ANTHROPIC_KINDS = ['commit', 'release', 'doc', 'blog'];
+    var OUTCOME_X_KINDS = ['x-post', 'x-link'];
 
     function outcomeAcc(o) {
       if (o.acceptanceRate == null) return '<span class="outcomes-acc" data-band="none">—</span>';
@@ -220,27 +223,41 @@ export function sumOutcomesScript(): string {
         '<thead><tr><th>Kind</th><th>Suggested floor</th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div>';
 
-      // Build the candidateMinScoreByKind snippet from the config-relevant kinds only,
-      // dropping any with no suggestion (null) — a floor we can't recommend shouldn't
-      // silently ship as a key.
-      var snippet = {};
-      suggestedFloors.forEach(function(s) {
-        if (s.suggestedFloor != null && OUTCOME_CONFIG_KINDS.indexOf(s.kind) !== -1) {
-          snippet[s.kind] = s.suggestedFloor;
-        }
-      });
-      var hasSnippet = Object.keys(snippet).length > 0;
-      var json = JSON.stringify({ candidateMinScoreByKind: snippet }, null, 2);
-      var snippetHtml = hasSnippet
-        ? '<div class="outcomes-snippet">' +
-            '<div class="outcomes-snippet-hint">Paste into the Anthropic Highlights watcher config ' +
-            '(heuristic: lowest 0.1 band whose at-or-above acceptance ≥ 50%). Review before applying.</div>' +
-            '<pre id="outcomesSnippet">' + esc(json) + '</pre>' +
-            '<button class="outcomes-copy-btn" id="outcomesCopyBtn" type="button">Copy JSON</button>' +
-          '</div>'
+      // Two source-scoped snippets, each pasting into its OWN watcher config. Each
+      // snippet is built from that watcher's config-relevant kinds only, dropping any
+      // with no suggestion (null) — a floor we can't recommend shouldn't silently ship
+      // as a key. A snippet renders only when its kind set has at least one suggestion.
+      var anthropicHtml = renderSnippetGroup(suggestedFloors, OUTCOME_ANTHROPIC_KINDS,
+        'anthropic', 'Anthropic Highlights');
+      var xHtml = renderSnippetGroup(suggestedFloors, OUTCOME_X_KINDS, 'x', 'X Highlights');
+      var anySnippet = anthropicHtml.hasSnippet || xHtml.hasSnippet;
+      var snippetHtml = anySnippet
+        ? anthropicHtml.html + xHtml.html
         : '<div class="outcomes-snippet-hint">Not enough labeled outcomes yet to suggest floors for the config kinds.</div>';
 
       return '<div class="outcomes-block"><h3>Suggested capture floors</h3>' + table + snippetHtml + '</div>';
+    }
+
+    // Build one candidateMinScoreByKind snippet for a watcher's kind set. idSuffix
+    // makes the pre/button ids unique (outcomesSnippet-anthropic / -x) so both
+    // Copy buttons work independently. Returns { hasSnippet, html } — empty html when
+    // no kind in the set has a suggestion (that snippet is simply omitted).
+    function renderSnippetGroup(suggestedFloors, kinds, idSuffix, watcherLabel) {
+      var snippet = {};
+      suggestedFloors.forEach(function(s) {
+        if (s.suggestedFloor != null && kinds.indexOf(s.kind) !== -1) {
+          snippet[s.kind] = s.suggestedFloor;
+        }
+      });
+      if (Object.keys(snippet).length === 0) return { hasSnippet: false, html: '' };
+      var json = JSON.stringify({ candidateMinScoreByKind: snippet }, null, 2);
+      var html = '<div class="outcomes-snippet">' +
+        '<div class="outcomes-snippet-hint">Paste into the ' + esc(watcherLabel) + ' watcher config ' +
+        '(heuristic: lowest 0.1 band whose at-or-above acceptance ≥ 50%). Review before applying.</div>' +
+        '<pre id="outcomesSnippet-' + idSuffix + '">' + esc(json) + '</pre>' +
+        '<button class="outcomes-copy-btn" id="outcomesCopyBtn-' + idSuffix + '" type="button">Copy JSON</button>' +
+      '</div>';
+      return { hasSnippet: true, html: html };
     }
 
     function renderOutcomes(stats) {
@@ -257,19 +274,25 @@ export function sumOutcomesScript(): string {
         renderByBandBlock(stats.byBand) +
         renderSuggestedBlock(stats.suggestedFloors);
 
-      var copyBtn = document.getElementById('outcomesCopyBtn');
-      if (copyBtn) {
-        copyBtn.addEventListener('click', function() {
-          var pre = document.getElementById('outcomesSnippet');
-          var text = pre ? pre.textContent : '';
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(function() {
-              copyBtn.textContent = 'Copied';
-              setTimeout(function() { copyBtn.textContent = 'Copy JSON'; }, 1500);
-            }).catch(function() {});
-          }
-        });
-      }
+      // Wire each snippet's Copy button to its OWN <pre> by matching id suffix, so both
+      // the Anthropic and X snippets copy independently.
+      wireCopyButton('outcomesCopyBtn-anthropic', 'outcomesSnippet-anthropic');
+      wireCopyButton('outcomesCopyBtn-x', 'outcomesSnippet-x');
+    }
+
+    function wireCopyButton(btnId, preId) {
+      var copyBtn = document.getElementById(btnId);
+      if (!copyBtn) return;
+      copyBtn.addEventListener('click', function() {
+        var pre = document.getElementById(preId);
+        var text = pre ? pre.textContent : '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function() {
+            copyBtn.textContent = 'Copied';
+            setTimeout(function() { copyBtn.textContent = 'Copy JSON'; }, 1500);
+          }).catch(function() {});
+        }
+      });
     }
 
     async function loadOutcomes() {

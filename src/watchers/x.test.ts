@@ -88,6 +88,8 @@ const {
   checkX,
   resolveAuthorTier,
   captureFloorForTier,
+  isLinkTweet,
+  captureFloorForXLink,
 } = await import("./x.ts");
 
 // ── Score extraction from markdown (tests the real exported function) ─
@@ -289,6 +291,18 @@ It continues across several lines with substance.
     expect(c.firstLine).toBe("short tweet");
   });
 
+  test("extracts external footer links from the plural **Links:** line only (not the permalink)", () => {
+    const doc = `# @karpathy — Andrej Karpathy\n\njust dropped a 28-min video\n\n---\n\n- **Engagement:** 1,200 likes\n- **Link:** https://x.com/karpathy/status/1789\n- **Links:** https://youtu.be/abc123XYZ98`;
+    const c = compactTweetText(doc, "https://x.com/karpathy/status/1789");
+    // The singular **Link:** permalink is ignored; only the plural **Links:** destination.
+    expect(c.links).toEqual(["https://youtu.be/abc123XYZ98"]);
+  });
+
+  test("no plural **Links:** line ⇒ empty links (permalink-only tweet)", () => {
+    const doc = `# @a — A\n\nplain\n\n---\n\n- **Engagement:** 3 likes\n- **Link:** https://x.com/a/status/9`;
+    expect(compactTweetText(doc, "https://x.com/a/status/9").links).toEqual([]);
+  });
+
   test("an internal --- horizontal rule does not truncate the body (footer is the LAST ---)", () => {
     const before = "Part one of a long article. ".repeat(20).trim(); // ~560 chars
     const after = "Part two continues after the rule. ".repeat(20).trim(); // ~700 chars
@@ -364,6 +378,48 @@ describe("captureFloorForTier", () => {
   test("defaults: base 0.6 for top, 0.75 for non-top when unset", () => {
     expect(captureFloorForTier("top5", {})).toBe(0.6);
     expect(captureFloorForTier(null, {})).toBe(0.75);
+  });
+
+  test("candidateMinScoreByKind['x-post'] overrides the base (non-top raise still applies)", () => {
+    expect(captureFloorForTier("top5", { candidateMinScoreByKind: { "x-post": 0.7 } })).toBe(0.7);
+    // Non-top raise sits on top of the overridden base: max(0.7, 0.75) = 0.75.
+    expect(captureFloorForTier(null, { candidateMinScoreByKind: { "x-post": 0.7 } })).toBe(0.75);
+    // Override beats candidateMinScore.
+    expect(captureFloorForTier("top5", { candidateMinScore: 0.6, candidateMinScoreByKind: { "x-post": 0.8 } })).toBe(0.8);
+  });
+});
+
+// ── isLinkTweet: the pointer-tweet capture pre-filter ───────────────
+
+describe("isLinkTweet", () => {
+  const short = { bodyLength: 100, isNote: false }; // not long-form
+
+  test("eligible: not long-form + ≥1 link + top-author (tier set)", () => {
+    expect(isLinkTweet({ ...short, links: ["https://youtu.be/x"] }, "top5")).toBe(true);
+    expect(isLinkTweet({ ...short, links: ["https://youtu.be/x"] }, "top1")).toBe(true);
+  });
+
+  test("non-top author (tier null) is excluded even with a link", () => {
+    expect(isLinkTweet({ ...short, links: ["https://youtu.be/x"] }, null)).toBe(false);
+  });
+
+  test("no external link ⇒ not a link-tweet", () => {
+    expect(isLinkTweet({ ...short, links: [] }, "top5")).toBe(false);
+  });
+
+  test("a long-form tweet is never a link-tweet (captured as x-post instead)", () => {
+    expect(isLinkTweet({ bodyLength: 900, isNote: false, links: ["https://youtu.be/x"] }, "top1")).toBe(false);
+    expect(isLinkTweet({ bodyLength: 10, isNote: true, links: ["https://youtu.be/x"] }, "top1")).toBe(false);
+  });
+});
+
+describe("captureFloorForXLink", () => {
+  test("default pointer-tweet floor is 0.7", () => {
+    expect(captureFloorForXLink({})).toBe(0.7);
+  });
+
+  test("candidateMinScoreByKind['x-link'] overrides the default", () => {
+    expect(captureFloorForXLink({ candidateMinScoreByKind: { "x-link": 0.6 } })).toBe(0.6);
   });
 });
 
@@ -668,5 +724,119 @@ describe("fetchFromCollection + checkX capture", () => {
       }),
     );
     expect(lastGatePrompt).not.toContain("author rank:");
+  });
+});
+
+// ── Link-tweet (x-link) capture: pointer tweets by top authors ───────
+
+describe("link-tweet (x-link) capture", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  // dave: a SHORT tweet (not long-form) pointing at a YouTube video via the plural
+  // **Links:** footer. erin: a short tweet with NO external link (control — never x-link).
+  const docs: Record<string, { text: string; url: string }> = {
+    [`${today}_dave_10.md`]: {
+      url: "https://x.com/dave/status/10",
+      text: `# @dave — Dave\n\nMust-watch: 28-min deep dive on agent design\n\n---\n\n- **Engagement:** 800 likes, 90,000 views\n- **Link:** https://x.com/dave/status/10\n- **Links:** https://youtu.be/AGENTvid001`,
+    },
+    [`${today}_erin_11.md`]: {
+      url: "https://x.com/erin/status/11",
+      text: `# @erin — Erin\n\njust a plain short take, no link\n\n---\n\n- **Engagement:** 10 likes\n- **Link:** https://x.com/erin/status/11`,
+    },
+  };
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: d.text, metadata: { url: d.url } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    upsertThrow = false;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    authorThresholds = null;
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const baseWatcher = (over: Partial<Watcher>): Watcher => ({
+    id: "xw2",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    config: { collection: "x-feed", windowDays: 1 },
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+    ...over,
+  });
+
+  // minScore + quietMode silence the digest path (fixtures carry no rank field ⇒
+  // rankScore 0 < 0.6 ⇒ silent early return, no digest spawnHaiku), so lastGatePrompt
+  // reflects ONLY the capture gate — not the digest prompt that also runs otherwise.
+  const captureOnly = { collection: "x-feed", windowDays: 1, captureCandidates: true, minScore: 0.6, quietMode: true } as const;
+
+  test("a top-author pointer tweet is captured as x-link, gate line names the destination", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    authorScoreByHandle["dave"] = 0.7; // top-5%
+    gateResult = JSON.stringify([{ n: 1, score: 0.75, why: "worth the watch" }]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+    // Only dave (the pointer tweet) is eligible; erin has no link, is not long-form.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.url).toBe("https://x.com/dave/status/10");
+    expect(upsertCalls[0]!.kind).toBe("x-link");
+    expect(upsertCalls[0]!.sourceDocId).toBe(`${today}_dave_10.md`);
+    // Gate line names the destination for the x-link, so the model weighs the linked video.
+    expect(lastGatePrompt).toContain("links to: youtu.be — https://youtu.be/AGENTvid001");
+    // erin (no link) never reached the gate.
+    expect(lastGatePrompt).not.toContain("@erin");
+  });
+
+  test("a non-top-author pointer tweet is NOT captured (link-tweets are top-author-only)", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    authorScoreByHandle["dave"] = 0.3; // below top5 ⇒ tier null ⇒ excluded
+    gateResult = JSON.stringify([{ n: 1, score: 0.95, why: "high but ineligible" }]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+    expect(upsertCalls).toHaveLength(0);
+    // The capture gate was never even called — eligibility (dave non-top, erin no
+    // link) excluded every doc before the gate, so lastGatePrompt stays untouched.
+    expect(lastGatePrompt).toBe("");
+  });
+
+  test("x-link floor is 0.7 by default: a 0.65 pointer tweet is dropped", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    authorScoreByHandle["dave"] = 0.7; // top-5% (eligible), but score below the 0.7 x-link floor
+    gateResult = JSON.stringify([{ n: 1, score: 0.65, why: "borderline" }]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+    expect(upsertCalls).toHaveLength(0);
   });
 });

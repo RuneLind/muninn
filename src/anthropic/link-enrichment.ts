@@ -6,56 +6,13 @@
  * the tweet text alone. These helpers parse the ONE fetchable external destination
  * out of the doc footer so the summarizer can follow it.
  *
- * Footer contract (huginn `x_fetcher.py`): a tweet doc carries TWO distinct
- * footer lines and they must not be confused —
- *   - `**Link:**  <url>`  (SINGULAR) — on EVERY tweet, the tweet's OWN x.com
- *     permalink. Never a destination; ignored here.
- *   - `**Links:** <url> <url> …` (PLURAL) — only when the tweet carries external
- *     destinations, the t.co-expanded URLs space-joined on ONE line.
- * So the "has a link" predicate parses ONLY the plural `**Links:**` line and
- * token-splits it on whitespace, then filters out x.com/twitter.com/t.co hosts so
- * only true external destinations remain.
+ * The footer-link parser itself (`extractDocLinks`) is hoisted to
+ * `src/summaries/doc-links.ts` and re-exported here — the X watcher's link-tweet
+ * eligibility parses the same footer, and one definition keeps the load-bearing
+ * singular-`**Link:**`-vs-plural-`**Links:**` distinction from drifting.
  */
 
-/** Hosts that are never an external destination (self-links + un-expanded t.co). */
-const SKIP_HOSTS = ["x.com", "twitter.com", "t.co"];
-
-/** Matches the plural `**Links:**` footer marker (NOT the singular `**Link:**`). */
-const LINKS_MARKER = "**Links:**";
-
-/** Is `host` one of the skip hosts, or a subdomain of one? */
-function isSkippedHost(host: string): boolean {
-  const h = host.toLowerCase();
-  return SKIP_HOSTS.some((skip) => h === skip || h.endsWith(`.${skip}`));
-}
-
-/**
- * Extract the external destination URLs from an x-feed doc's `**Links:**` footer
- * line. Parses ONLY the plural marker (see contract above), token-splits it on
- * whitespace keeping `https?://` tokens, and drops x.com/twitter.com/t.co hosts.
- * Returns [] when there is no plural `**Links:**` line or it carries only
- * self/unexpanded hosts.
- */
-export function extractDocLinks(docText: string): string[] {
-  const out: string[] = [];
-  for (const line of docText.split("\n")) {
-    const idx = line.indexOf(LINKS_MARKER);
-    if (idx === -1) continue;
-    const after = line.slice(idx + LINKS_MARKER.length);
-    for (const token of after.split(/\s+/)) {
-      if (!/^https?:\/\//i.test(token)) continue;
-      let host: string;
-      try {
-        host = new URL(token).hostname;
-      } catch {
-        continue;
-      }
-      if (isSkippedHost(host)) continue;
-      out.push(token);
-    }
-  }
-  return out;
-}
+export { extractDocLinks } from "../summaries/doc-links.ts";
 
 /** YouTube hosts whose URLs may carry a fetchable video id. */
 const YOUTUBE_HOSTS = [
