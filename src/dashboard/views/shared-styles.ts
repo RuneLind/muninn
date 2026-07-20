@@ -307,8 +307,20 @@ export const SHARED_STYLES = `
     .run-success .run-dot { background: var(--status-success); }
     .run-warning .run-dot { background: var(--status-warning); }
     .run-error   .run-dot { background: var(--status-error); }
+    .run-info    .run-dot { background: var(--status-info); }
+    .run-magenta .run-dot { background: var(--status-magenta); }
     .run-warning { color: var(--status-warning); }
     .run-error   { color: var(--status-error); }
+    .run-info    { color: var(--status-info); }
+    .run-magenta { color: var(--status-magenta); }
+    /* running → pulsing dot (reuses the shared pulse-ring idiom; --pulse-anim: none stops it). */
+    .run-info .run-dot { position: relative; }
+    .run-info .run-dot::after {
+      content: ''; position: absolute; inset: -3px; border-radius: 50%;
+      background: inherit; opacity: 0.5;
+      animation: pulse-ring 1.6s ease-out infinite;
+      animation-name: var(--pulse-anim, pulse-ring);
+    }
 
     /* Aging / stale relative-time text (design's #d0a94a) — a muted warning that
        works in both themes. */

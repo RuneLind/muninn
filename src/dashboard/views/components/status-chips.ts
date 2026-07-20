@@ -45,8 +45,14 @@ export const KIND_CHIP_CLASS: Record<string, string> = {
   DIGEST: "kind-digest",
 };
 
-/** Run-status → run-status modifier class + whether it tints the text. */
-export type RunStatusTone = "success" | "warning" | "error";
+/**
+ * Run-status tone. The server helper takes a tone directly; the client helper
+ * (`runStatusChip`) maps a RAW run status onto one of these tones (see the
+ * `statusChipsScript` doc-comment for the status→tone mapping).
+ *   - success → green   - warning → amber   - error → red
+ *   - info    → blue (running, with a pulse dot)   - magenta → incomplete
+ */
+export type RunStatusTone = "success" | "warning" | "error" | "info" | "magenta";
 
 const ESCAPE_MAP: Record<string, string> = {
   "&": "&amp;",
@@ -88,12 +94,21 @@ export function statusChipsStyles(): string {
 }
 
 /**
- * Installs the client-side chip builders — hand-mirrors of the server helpers
- * above (they live in a template literal and cannot import). Globals:
+ * Installs the client-side chip builders. These are CLOSE COUSINS of the server
+ * helpers above, not exact mirrors: they live in a template literal and cannot
+ * import, so `runStatusChip` differs by design — the server `runStatusHtml`
+ * takes a resolved {@link RunStatusTone}, whereas the client maps a RAW run
+ * status (as emitted by huginn's indexing ledger) onto a tone. Globals:
  *   - `originChip(origin)` — origin lowercased, rendered uppercase via CSS
  *   - `attentionChip(label)` — default "STALE"
  *   - `kindChip(kind)` — uppercased, fixed 68px
- *   - `runStatusChip(status, text)` — success|succeeded / warning|stale / error|failed
+ *   - `runStatusChip(status, text)` — full 7-status vocabulary:
+ *       succeeded/success → run-success (green)
+ *       degraded          → run-warning (amber; degraded is NEVER success)
+ *       failed/error      → run-error   (red)
+ *       running           → run-info    (blue, pulsing dot)
+ *       incomplete        → run-magenta (magenta)
+ *       skipped/unknown/warning/stale → run-warning for warning/stale, else neutral
  */
 export function statusChipsScript(): string {
   return `
@@ -101,6 +116,14 @@ export function statusChipsScript(): string {
       window.__statusChips = true;
       var _e = window.esc || function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
       var KIND = { WATCHER:'kind-watcher', TASK:'kind-task', CAPTURE:'kind-capture', DIGEST:'kind-digest' };
+      var RUN_TONE = {
+        succeeded:'run-success', success:'run-success',
+        degraded:'run-warning', warning:'run-warning', stale:'run-warning',
+        failed:'run-error', error:'run-error',
+        running:'run-info',
+        incomplete:'run-magenta',
+        skipped:'', unknown:''
+      };
       window.originChip = function(origin){
         var o = String(origin || '').toLowerCase();
         return '<span class="dchip dchip-' + _e(o) + '">' + _e(o) + '</span>';
@@ -114,9 +137,7 @@ export function statusChipsScript(): string {
       };
       window.runStatusChip = function(status, text){
         var s = String(status || '').toLowerCase();
-        var cls = (s === 'success' || s === 'succeeded') ? 'run-success'
-                : (s === 'warning' || s === 'stale') ? 'run-warning'
-                : (s === 'error' || s === 'failed') ? 'run-error' : '';
+        var cls = RUN_TONE.hasOwnProperty(s) ? RUN_TONE[s] : '';
         return '<span class="run-status ' + cls + '"><span class="run-dot"></span>' + _e(text) + '</span>';
       };
     }
