@@ -233,12 +233,12 @@ export async function renderIndexingPage(): Promise<string> {
 
     function phaseHtml(p) {
       var bad = p.nonFatalFailure || (p.status && (p.status.status === 'failed' || p.status.status === 'degraded'));
-      var dot = '<span class="ph-dot' + (bad ? ' bad' : '') + '"></span>';
+      var chip = p.status ? runStatusChip(p.status.status, p.status.label) : '<span class="ph-dot"></span>';
       var dur = p.duration ? '<span class="ph-dur">' + esc(p.duration) + '</span>' : '<span class="empty">—</span>';
       var fatal = p.fatal ? '<span class="ph-fatal" title="fatal to the run">fatal</span>' : '';
       return '<div class="ph' + (bad ? ' fail' : '') + '">' +
         '<span class="ph-name">' + esc(p.name) + '</span>' +
-        '<span class="ph-meta">' + dot + dur + fatal + '</span>' +
+        '<span class="ph-meta">' + chip + dur + fatal + '</span>' +
       '</div>';
     }
 

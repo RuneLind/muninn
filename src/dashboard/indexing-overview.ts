@@ -569,7 +569,7 @@ export function computeTiles(rows: IndexingRow[], now: number): IndexingTile[] {
   }
 
   return [
-    { label: "Healthy", value: `${healthy} / ${total}`, sub: "last run succeeded" },
+    { label: "Healthy", value: `${healthy} / ${total}`, sub: "no failures or staleness" },
     {
       label: "Stale",
       value: String(staleRows.length),
