@@ -241,12 +241,20 @@ export function sumRecentlyAddedScript(): string {
         }
 
         var now = new Date();
-        docs.forEach(function(d) { d._date = parseDocDate(d.date); });
+        docs.forEach(function(d) {
+          d._date = parseDocDate(d.date);
+          // Full-precision ingest timestamp (huginn modifiedTime) breaks ties
+          // within a day — the frontmatter date is day-precision only, so
+          // without it "Today" lists in whatever order the API returned.
+          var ts = d.modifiedTime ? Date.parse(d.modifiedTime) : NaN;
+          d._ts = isNaN(ts) ? -Infinity : ts;
+        });
         // Newest first; undated docs sink to the bottom.
         docs.sort(function(a, b) {
           var ta = a._date ? a._date.getTime() : -Infinity;
           var tb = b._date ? b._date.getTime() : -Infinity;
-          return tb - ta;
+          if (tb !== ta) return tb - ta;
+          return b._ts - a._ts;
         });
 
         document.getElementById('recentlyAddedCount').textContent = docs.length + ' articles';
