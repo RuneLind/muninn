@@ -11,16 +11,19 @@ import path from "node:path";
 
 const log = getLog("watchers", "x");
 
-export const DEFAULT_X_PROMPT = `Create a digest with two sections:
+export const DEFAULT_X_PROMPT = `This digest covers AI, LLMs and agents, developer tools, software engineering, open source, cloud/infrastructure, and tech industry news.
+
+Create a digest with two sections:
 
 **Top Picks** (3-5 items) — the most interesting, impactful, or high-engagement content:
 - Give each a brief description with context on why it matters
 - Link @handles to the original tweet URL (markdown link)
-- Prioritize: articles/long-form notes, original insights, high view-to-like ratio, threads
+- Prioritize: articles/long-form notes, original insights, threads
 
 **Also Notable** (up to 10 items) — everything else worth mentioning:
 - One-line bullets only, with linked @handle
 - Skip: ads, spam, generic motivational, low-effort retweets, engagement bait, promotional
+- Skip: content outside those topics — sport, football, celebrity, politics, viral memes, engagement-bait — regardless of how high its engagement is
 
 Format rules:
 - Do NOT start with a heading — jump straight into "**Top Picks**"
@@ -34,6 +37,8 @@ Format rules:
  * "SKIP" (case-insensitive) to suppress the alert entirely. Pair with config.quietMode: true.
  */
 export const DEFAULT_X_HIGHLIGHTS_PROMPT = `You are a quality gate for daytime Twitter alerts. The user only wants to be interrupted for content that is genuinely exceptional — a breakthrough result, a must-read long-form note, a news event they'd want to know about immediately, or an insight they'd otherwise miss.
+
+"Exceptional" is scoped to these topics: AI, LLMs and agents, developer tools, software engineering, open source, cloud/infrastructure, and tech industry news. Exclude content outside those topics — sport, football, celebrity, politics, viral memes, engagement-bait — regardless of how high its engagement is.
 
 If NOTHING in the list above meets that bar, respond with exactly:
 
@@ -332,10 +337,19 @@ export async function fetchFromCollection(
         try {
           const resp = await fetch(`${apiUrl}/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(doc.id)}`);
           if (!resp.ok) return null;
-          const data = await resp.json() as { text: string; metadata?: { url?: string } };
+          const data = await resp.json() as { text: string; metadata?: { url?: string; combined_score?: string | number } };
           const resolvedUrl = data.metadata?.url || doc.url;
           const compact = compactTweetText(data.text, resolvedUrl);
-          return { docId: doc.id, url: resolvedUrl, ...compact };
+          // Prefer huginn's whitelisted `combined_score` metadata over the text-regex
+          // fallback. `Number(...)` is LOAD-BEARING, not defensive style: huginn's
+          // read_frontmatter serves frontmatter values as STRINGS (e.g. "0.5991"), which
+          // would sort lexicographically if used raw. `Number.isFinite` rejects absent
+          // (undefined ⇒ NaN) metadata, so pre-whitelist docs fall back to
+          // `compact.rankScore` (extractRankScore, which returns 0 for those) — never
+          // worse than today.
+          const metaScore = Number(data.metadata?.combined_score);
+          const rankScore = Number.isFinite(metaScore) ? metaScore : compact.rankScore;
+          return { docId: doc.id, url: resolvedUrl, ...compact, rankScore };
         } catch (err) {
           log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
           return null;
@@ -885,7 +899,7 @@ async function runAlertPath(
 
   const prompt = `You are curating a user's X/Twitter timeline into a digest.
 
-Here are ${texts.length} tweets from the home timeline, pre-ranked by engagement score (highest engagement first):
+Here are ${texts.length} tweets from the home timeline, pre-ranked by relevance to the user's interests:
 
 ${texts.join(separator)}
 
