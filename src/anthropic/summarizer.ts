@@ -5,7 +5,13 @@ import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
-import { setCandidateStatus } from "../db/summary-candidates.ts";
+import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
+import {
+  extractDocLinks,
+  pickEnrichmentLink,
+  youTubeVideoId,
+  type EnrichmentLink,
+} from "./link-enrichment.ts";
 import {
   attachRun,
   createJob,
@@ -78,10 +84,21 @@ const X_SUMMARIZE_SYSTEM_PROMPT = buildSummarySystemPrompt(
   AI_CATEGORIES,
 );
 
+/**
+ * Which link-enrichment path ran on the X source-doc branch, for the capture
+ * trace + log. `none` = no enrichable link on the doc (tweet-only, today's
+ * behavior); `failed` = a link was picked but its fetch failed (tweet-only,
+ * degraded); `youtube`/`article` = the linked content was folded in. Undefined
+ * on the non-X (anthropic-by-URL) path, where enrichment doesn't apply.
+ */
+export type EnrichmentOutcome = "youtube" | "article" | "none" | "failed";
+
 interface ResolvedContent {
   text: string;
   /** Original publish/commit date from the source doc's metadata, if available. */
   date?: string;
+  /** Link-enrichment outcome for the X path (see {@link EnrichmentOutcome}). */
+  enrichment?: EnrichmentOutcome;
 }
 
 interface DocMeta {
@@ -161,13 +178,41 @@ async function resolveContent(
       const text = typeof doc?.text === "string" ? doc.text : "";
       const date = typeof doc?.metadata?.date === "string" ? doc.metadata.date : undefined;
       if (text.trim()) {
+        // Follow the ONE external link the tweet points to (a YouTube video, an
+        // article) so the summary reflects the linked content, not just the tweet
+        // text. Single-link by design; any failure degrades to tweet-only content
+        // (byte-identical to pre-enrichment behavior) — a dead link never fails the job.
+        const picked = pickEnrichmentLink(extractDocLinks(text));
+        let combined = text;
+        let enrichment: EnrichmentOutcome = "none";
+        if (picked) {
+          const linked = await fetchEnrichmentContent(baseUrl, picked);
+          if (linked) {
+            combined = `${text}\n\n--- LINKED CONTENT (${picked.url}) ---\n${linked}`;
+            enrichment = picked.kind;
+            log.info("Enriched {url} with {kind} link {link} ({len} chars)", {
+              url,
+              kind: picked.kind,
+              link: picked.url,
+              len: linked.length,
+            });
+          } else {
+            enrichment = "failed";
+            log.warn("Enrichment fetch failed for {kind} link {link} on {url} — tweet-only", {
+              url,
+              kind: picked.kind,
+              link: picked.url,
+            });
+          }
+        }
         log.info("Resolved {url} from {collection} doc {docId} ({len} chars)", {
           url,
           collection: X_FEED_COLLECTION,
           docId: sourceDocId,
           len: text.length,
         });
-        return { text: capContent(text), date };
+        // Cap the COMBINED string (tweet text first ⇒ always survives the cap).
+        return { text: capContent(combined), date, enrichment };
       }
       log.warn("{collection} doc {docId} was empty for {url}", {
         collection: X_FEED_COLLECTION,
@@ -259,6 +304,79 @@ function directFetchUrl(url: string): string {
 }
 
 /**
+ * Fetch the ONE picked enrichment link's content. YouTube ⇒ huginn's transcript
+ * endpoint (same shape/timeout as {@link "../youtube/summarizer.ts"}); article ⇒
+ * a direct fetch (raw HTML is fine — `capContent` bounds it). Returns the text,
+ * or null on any failure (missing id, non-200, empty body, timeout, throw) so the
+ * caller degrades to tweet-only content. NEVER throws — enrichment is best-effort.
+ */
+async function fetchEnrichmentContent(
+  baseUrl: string,
+  picked: EnrichmentLink,
+): Promise<string | null> {
+  if (picked.kind === "youtube") {
+    const id = youTubeVideoId(picked.url);
+    if (!id) return null;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const res = await fetch(`${baseUrl}/api/youtube/transcript/${id}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        log.warn("Transcript fetch for {id} returned {status}", { id, status: res.status });
+        return null;
+      }
+      const data = (await res.json()) as { transcript?: string };
+      const transcript = data.transcript ?? "";
+      return transcript.trim() ? transcript : null;
+    } catch (err) {
+      clearTimeout(timeout);
+      log.warn("Transcript fetch for {id} failed: {error}", {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  // article: direct fetch (mirrors the anthropic direct-fetch fallback).
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  try {
+    const res = await fetch(picked.url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      log.warn("Article fetch of {url} returned {status}", { url: picked.url, status: res.status });
+      return null;
+    }
+    const text = await res.text();
+    return text.trim() ? text : null;
+  } catch (err) {
+    clearTimeout(timeout);
+    log.warn("Article fetch of {url} failed: {error}", {
+      url: picked.url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Kind-scoped framing appended to the system prompt when the tweet's linked
+ * content was folded in. `x-link` (arrives with PR 3) treats the destination as
+ * the PRIMARY subject; every other kind (`x-post`, the pre-PR-3 long-form
+ * population) treats it as SUPPORTING CONTEXT only, keeping the post the subject.
+ */
+function enrichmentFraming(kind: string | null | undefined): string {
+  if (kind === "x-link") {
+    return "The content below includes a `--- LINKED CONTENT ---` section fetched from the link this tweet points to. Treat that linked content as the PRIMARY subject — summarize what the destination says; the tweet itself is just the pointer and context.";
+  }
+  return "The content below includes a `--- LINKED CONTENT ---` section fetched from a link in the post. Treat it as SUPPORTING CONTEXT only — the author's own post stays the subject of the summary.";
+}
+
+/**
  * Background pipeline for one candidate: resolve content → summarize → ingest
  * into `anthropic-summaries` → flip the candidate to `summarized` (+ doc_id) or
  * `error`. The route/auto-promote caller is responsible for setting the
@@ -273,11 +391,12 @@ export async function summarizeCandidate(
   config: Config,
   botConfig: BotConfig,
   sourceDocId?: string | null,
+  kind?: SummaryCandidateKind | null,
 ): Promise<void> {
   try {
     // 1. Resolve full content (still `pending` — no separate UI step, per plan). For X
     //    the candidate carries a source doc id; anthropic resolves by URL (sourceDocId
-    //    null).
+    //    null). The X path may fold in the tweet's linked content (see resolveContent).
     const content = await resolveContent(config, url, title, sourceDocId);
     if (!content) {
       failJob(jobId, "Could not resolve candidate content from its source doc or URL");
@@ -287,13 +406,15 @@ export async function summarizeCandidate(
 
     // 2. Summarize with Claude. Source-aware system prompt: an X post gets the note
     //    framing; anthropic keeps the ecosystem-release framing. Same CATEGORY contract.
+    //    When linked content was folded in, add kind-scoped framing (supporting vs primary).
     updateStatus(jobId, "summarizing");
 
+    const enriched = content.enrichment === "youtube" || content.enrichment === "article";
     const basePrompt = sourceDocId ? X_SUMMARIZE_SYSTEM_PROMPT : SUMMARIZE_SYSTEM_PROMPT;
     const systemPrompt = `${basePrompt}
 
 Title: ${title}
-URL: ${url}`;
+URL: ${url}${enriched ? `\n\n${enrichmentFraming(kind)}` : ""}`;
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {
@@ -314,6 +435,8 @@ URL: ${url}`;
       botConfig,
       attachRun,
       onProgress,
+      // Record which enrichment path ran on the capture trace (X path only).
+      ...(content.enrichment ? { extraTraceAttrs: { enrichment: content.enrichment } } : {}),
     });
 
     // 3. Parse response. Clamp to ai/* — the anthropic-summaries collection only
@@ -414,6 +537,8 @@ export interface CandidateRef {
   url: string;
   /** Origin doc id for source-doc resolution (X carries the `x-feed` doc id; anthropic null). */
   sourceDocId?: string | null;
+  /** Capture-time kind — scopes the linked-content framing (x-post vs x-link). */
+  kind?: SummaryCandidateKind | null;
 }
 
 /**
@@ -444,6 +569,7 @@ export async function kickCandidateSummarize(
     config,
     botConfig,
     candidate.sourceDocId,
+    candidate.kind,
   ).catch((err) => {
     log.error("Anthropic summarization failed: {error}", {
       error: err instanceof Error ? err.message : String(err),
