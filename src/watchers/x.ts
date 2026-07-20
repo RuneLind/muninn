@@ -561,18 +561,25 @@ const CAPTURE_GATE_TIMEOUT_MS = 90_000;
 
 /**
  * Capture-gate prompt (mirrors the anthropic watcher's `{n,score,why}` contract). Scores
- * whether a SUMMARY of a long-form X post is worth a spot on a personal learning shelf —
- * i.e. whether reading the full note would teach a senior AI engineer something. Only
- * long-form notes/articles reach it (short tweets are pre-filtered out).
+ * whether a SUMMARY is worth a spot on a personal learning shelf. Two item species reach
+ * it: long-form notes/articles (judged on their own content) and top-author pointer tweets
+ * (`x-link`, judged on the linked destination — marked by the per-item `links to:` line
+ * `runCaptureGate` appends). The prompt teaches the model to tell them apart off that line.
  */
-export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of LONG-FORM X posts (notes/articles). For EACH one, decide whether a written summary of the FULL post is worth saving to read later.
+export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of X posts. For EACH one, decide whether a written summary is worth saving to read later.
 
-Weight HIGHEST: substantive technical insight, original analysis, research findings, agent/LLM/retrieval engineering lessons, thoughtful essays.
-Weight LOW (omit): hot takes, self-promotion, threads that are mostly links, engagement bait, news the engineer would already know, anything where the tweet already says everything.
+The list mixes two kinds of item:
+• Long-form notes/articles — the value is the post's OWN text. Judge whether reading the full post is worth it.
+• Pointer tweets — a short post whose value is the external destination it links to (a video, an article), marked by a "links to:" line. Judge the value of that LINKED destination given WHO is pointing at it: a top author flagging a 28-min video or an in-depth article is a strong signal even when the tweet itself says little.
 
-For EACH post worth saving, output one object:
-  {"n": <the post number>, "score": <0.0-1.0>, "why": "<one short line on what reading it would teach>"}
-Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT posts that aren't worth a summary — do not output them at all.
+For long-form notes:
+  Weight HIGHEST: substantive technical insight, original analysis, research findings, agent/LLM/retrieval engineering lessons, thoughtful essays.
+  Weight LOW (omit): hot takes, self-promotion, threads that are mostly links, engagement bait, news the engineer would already know, anything where the tweet already says everything.
+For pointer tweets (a "links to:" line), the "mostly links" / "already says everything" down-weights do NOT apply — a bare pointer to a substantive destination is exactly what we want. Omit one only when the destination itself looks like self-promotion, engagement bait, or something the engineer would already know.
+
+For EACH item worth saving, output one object:
+  {"n": <the post number>, "score": <0.0-1.0>, "why": "<one short line on what reading it (or the linked content) would teach>"}
+Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT items that aren't worth a summary — do not output them at all.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
 

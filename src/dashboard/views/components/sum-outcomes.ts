@@ -90,7 +90,9 @@ export function sumOutcomesStyles(): string {
       display: flex;
       flex-direction: column;
       gap: 8px;
+      margin-bottom: 16px;
     }
+    .outcomes-snippet:last-child { margin-bottom: 0; }
     .outcomes-snippet-hint {
       font-size: 12px;
       color: var(--text-dim);
