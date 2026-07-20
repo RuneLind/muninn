@@ -74,28 +74,67 @@ export interface BackendResolution {
   reason: string;
 }
 
+/** A stable id for each precedence level, for keying + UI mapping. */
+export type BackendChainSource =
+  | "explicit"
+  | "override"
+  | "env"
+  | "config"
+  | "legacy"
+  | "connector"
+  | "default";
+
+/** One precedence level in the backend-resolution chain. `value` is what the
+ *  level contributes (null when the level is inactive/unset/invalid — e.g. an
+ *  invalid `HAIKU_BACKEND` env value parses to null and the chain falls through
+ *  exactly as the old short-circuit did). Exactly one link has `wins: true`. */
+export interface BackendChainLink {
+  source: BackendChainSource;
+  reason: string;
+  value: HaikuBackend | null;
+  wins: boolean;
+}
+
 /**
- * Single source of truth for backend precedence (top wins). Returns the chosen
- * backend plus a human-readable reason. `resolveBackend` and the startup
- * diagnostic both delegate here, so the order lives in exactly one place:
+ * Non-short-circuiting enumerator over EVERY precedence level (top wins).
+ * The single source of truth for backend precedence — `resolveBackendWithReason`
+ * (and thus `resolveBackend` + the startup diagnostic + the /models "why" chain)
+ * all derive from `chain.find(c => c.wins)`, so the order lives in exactly one
+ * place. Levels, top to bottom:
  *   1. explicit opts.backend
  *   2. HAIKU_BACKEND DB override (edited from /models) — hot, beats env
  *   3. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
  *   4. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
  *   5. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
  *   6. opts.connector === "copilot-sdk" → copilot
- *   7. floor → cli
+ *   7. floor → cli (always contributes, so a winner is guaranteed)
+ *
+ * Invalid-enum fall-through is preserved by reusing `parseHaikuBackendOverride`
+ * / `parseHaikuBackendEnv` (both return null on an unrecognised value).
+ */
+export function resolveBackendChain(opts: BackendResolutionInput): BackendChainLink[] {
+  const links: Array<Omit<BackendChainLink, "wins">> = [
+    { source: "explicit", reason: "explicit override", value: opts.backend ?? null },
+    { source: "override", reason: "HAIKU_BACKEND override", value: parseHaikuBackendOverride() },
+    { source: "env", reason: "HAIKU_BACKEND env", value: parseHaikuBackendEnv() },
+    { source: "config", reason: "bot config haikuBackend", value: opts.haikuBackend ?? null },
+    { source: "legacy", reason: "legacy HAIKU_DIRECT_ENABLED", value: isHaikuDirectEnabled() ? "anthropic" : null },
+    { source: "connector", reason: "connector default (copilot-sdk)", value: opts.connector === "copilot-sdk" ? "copilot" : null },
+    { source: "default", reason: "default", value: "cli" },
+  ];
+  const winnerIdx = links.findIndex((l) => l.value != null);
+  return links.map((l, i) => ({ ...l, wins: i === winnerIdx }));
+}
+
+/**
+ * Resolve the effective Haiku backend + the winning precedence rule. Derived
+ * from {@link resolveBackendChain} so ordering has one home. The `default` floor
+ * always contributes "cli", so a winner is guaranteed.
  */
 export function resolveBackendWithReason(opts: BackendResolutionInput): BackendResolution {
-  if (opts.backend) return { backend: opts.backend, reason: "explicit override" };
-  const fromOverride = parseHaikuBackendOverride();
-  if (fromOverride) return { backend: fromOverride, reason: "HAIKU_BACKEND override" };
-  const fromEnv = parseHaikuBackendEnv();
-  if (fromEnv) return { backend: fromEnv, reason: "HAIKU_BACKEND env" };
-  if (opts.haikuBackend) return { backend: opts.haikuBackend, reason: "bot config haikuBackend" };
-  if (isHaikuDirectEnabled()) return { backend: "anthropic", reason: "legacy HAIKU_DIRECT_ENABLED" };
-  if (opts.connector === "copilot-sdk") return { backend: "copilot", reason: "connector default (copilot-sdk)" };
-  return { backend: "cli", reason: "default" };
+  const winner = resolveBackendChain(opts).find((c) => c.wins);
+  if (!winner || winner.value == null) return { backend: "cli", reason: "default" };
+  return { backend: winner.value, reason: winner.reason };
 }
 
 /** Resolve the effective Haiku backend. See {@link resolveBackendWithReason}. */

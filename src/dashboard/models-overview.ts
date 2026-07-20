@@ -20,7 +20,9 @@ import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import { getWikiRegistry } from "../wiki/registry-memo.ts";
-import { resolveBackendWithReason } from "../ai/haiku-direct.ts";
+import { resolveBackendWithReason, resolveBackendChain } from "../ai/haiku-direct.ts";
+import type { BackendChainSource, HaikuBackend } from "../ai/haiku-direct.ts";
+import type { ConnectorType } from "../bots/config.ts";
 import { connectorCapabilities } from "../ai/one-shot.ts";
 import { DEFAULT_MODEL as HAIKU_DEFAULT_MODEL } from "../scheduler/executor.ts";
 import { getAllWatchers } from "../db/watchers.ts";
@@ -56,6 +58,25 @@ export interface EffectiveValue {
   origin: Origin;
 }
 
+/**
+ * One display row of the per-bot Haiku-backend resolution chain, powering the
+ * "▸ why this Haiku backend?" panel. Derived from `resolveBackendChain`
+ * (haiku-direct.ts) — the winning row has `wins: true` (rendered bright + green
+ * dot + WINS chip). The five UI levels; the call-site-only `explicit` level is
+ * excluded and the `cli` floor is folded into the `connector` row so a plain
+ * claude-cli bot still shows a winner. See {@link buildWhyChain}. */
+export interface BackendChainRow {
+  source: "override" | "env" | "config" | "legacy" | "connector";
+  /** Human label, e.g. "DB override (HAIKU_BACKEND)". */
+  label: string;
+  /** Resolved value at this level, or null when inactive/unset. */
+  value: string | null;
+  /** Secondary dim detail. */
+  detail?: string;
+  /** The winning level (exactly one true row per bot). */
+  wins: boolean;
+}
+
 export interface BotEntry {
   name: string;
   connector: EffectiveValue;
@@ -64,10 +85,18 @@ export interface BotEntry {
   haikuBackend: EffectiveValue;
   /** Human-readable reason from `resolveBackendWithReason` (the winning rule). */
   haikuBackendReason: string;
+  /** The per-bot Haiku-backend resolution chain (why-panel rows). */
+  chain: BackendChainRow[];
   /** Distinct chat models seen in traces over the last window ("—" when empty). */
   usedChatModels: string[];
   /** Distinct Haiku models seen across all sources over the last window. */
   usedHaikuModels: string[];
+  /** True when a used chat model diverged from the configured one (the #191
+   *  silent-fallback class). Computed once in the pure assembly so the warning
+   *  border / callout / "N mismatch" meta all consume this single field. */
+  mismatch: boolean;
+  /** The specific used-but-not-configured chat models (drives the callout text). */
+  mismatchModels: string[];
   /** Raw config.json values (undefined = unset) — the editor writes these, not
    *  the resolved effective values above. */
   rawConfig: {
@@ -234,6 +263,54 @@ function haikuBackendOrigin(reason: string): Origin {
   return "default"; // "default" (cli floor)
 }
 
+/**
+ * The used-vs-configured mismatch predicate (the #191 silent-fallback class),
+ * lifted out of the client so the warning border, callout, and "N mismatch"
+ * meta all consume ONE rule. A used chat model counts as a mismatch when it is
+ * neither equal to the configured model nor a bidirectional substring of it —
+ * the substring tolerance absorbs id-shape drift (Copilot `claude-haiku-4.5` vs
+ * Anthropic `claude-haiku-4-5-20251001`). Returns the offending models.
+ */
+export function computeModelMismatch(configured: string, usedChatModels: string[]): string[] {
+  return usedChatModels.filter(
+    (m) => m !== configured && !m.includes(configured) && !configured.includes(m),
+  );
+}
+
+/**
+ * Build the five-level "why this Haiku backend?" display chain from the raw
+ * 7-level `resolveBackendChain`. Excludes the call-site-only `explicit` level
+ * and folds the `cli` floor into the `connector` row (so a plain claude-cli bot
+ * still shows a winning row). Legacy renders only when the flag is set.
+ */
+export function buildWhyChain(opts: { connector?: ConnectorType; haikuBackend?: HaikuBackend }): BackendChainRow[] {
+  const links = resolveBackendChain({ connector: opts.connector, haikuBackend: opts.haikuBackend });
+  const winner = links.find((l) => l.wins);
+  const won = (src: BackendChainSource) => winner?.source === src;
+  const link = (src: BackendChainSource) => links.find((l) => l.source === src)!;
+
+  const rows: BackendChainRow[] = [
+    { source: "override", label: "DB override (HAIKU_BACKEND)", value: link("override").value, detail: "hot — beats env", wins: won("override") },
+    { source: "env", label: "env HAIKU_BACKEND", value: link("env").value, detail: "process-wide debug knob", wins: won("env") },
+    { source: "config", label: "per-bot config (haikuBackend)", value: link("config").value, detail: "bots/<name>/config.json", wins: won("config") },
+  ];
+  // Legacy is deprecated — surface it only when actually set.
+  if (link("legacy").value != null) {
+    rows.push({ source: "legacy", label: "legacy HAIKU_DIRECT_ENABLED", value: link("legacy").value, detail: "deprecated alias for anthropic", wins: won("legacy") });
+  }
+  // Connector default folds the cli floor: copilot-sdk → copilot, else → cli.
+  // Wins when either the connector link OR the floor `default` link won.
+  const isCopilot = opts.connector === "copilot-sdk";
+  rows.push({
+    source: "connector",
+    label: "connector default",
+    value: isCopilot ? "copilot" : "cli",
+    detail: isCopilot ? "copilot-sdk → copilot" : `${opts.connector ?? "claude-cli"} → cli floor`,
+    wins: won("connector") || won("default"),
+  });
+  return rows;
+}
+
 /** Add a model to a `key → Set<model>` map, creating the set on first use. */
 function addModel(map: Map<string, Set<string>>, key: string, model: string): void {
   let set = map.get(key);
@@ -296,6 +373,9 @@ export async function assembleModelsOverview(
       connector: bot.connector,
       haikuBackend: bot.haikuBackend,
     });
+    const usedChatModels = uniqSorted(chatByBot.get(bot.name) ?? []);
+    const configuredModel = bot.model ?? globalModelDefault;
+    const mismatchModels = computeModelMismatch(configuredModel, usedChatModels);
     return {
       name: bot.name,
       connector: {
@@ -303,14 +383,17 @@ export async function assembleModelsOverview(
         origin: bot.connector ? "config" : "default",
       },
       model: {
-        value: bot.model ?? globalModelDefault,
+        value: configuredModel,
         origin: bot.model ? "config" : "default",
       },
       thinkingMaxTokens: bot.thinkingMaxTokens ?? null,
       haikuBackend: { value: backend, origin: haikuBackendOrigin(reason) },
       haikuBackendReason: reason,
-      usedChatModels: uniqSorted(chatByBot.get(bot.name) ?? []),
+      chain: buildWhyChain({ connector: bot.connector, haikuBackend: bot.haikuBackend }),
+      usedChatModels,
       usedHaikuModels: uniqSorted(haikuByBot.get(bot.name) ?? []),
+      mismatch: mismatchModels.length > 0,
+      mismatchModels,
       rawConfig: {
         connector: bot.connector,
         model: bot.model,
@@ -571,5 +654,5 @@ export async function assembleModelsOverview(
 }
 
 export function _internalsForTest() {
-  return { haikuBackendOrigin, uniqSorted, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
 }
