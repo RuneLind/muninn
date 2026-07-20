@@ -192,6 +192,8 @@ test("normalizeStatus folds unknowns to 'unknown'", () => {
 test("formatRelative buckets", () => {
   expect(formatRelative(null, NOW)).toBeNull();
   expect(formatRelative(NOW - 10_000, NOW)).toBe("just now");
+  expect(formatRelative(NOW - 50_000, NOW)).toBe("just now");
+  expect(formatRelative(NOW - 61_000, NOW)).toBe("1m ago");
   expect(formatRelative(NOW - 5 * 60_000, NOW)).toBe("5m ago");
   expect(formatRelative(NOW - 2 * 3600_000, NOW)).toBe("2h ago");
   expect(formatRelative(NOW - 3 * 86400_000, NOW)).toBe("3d ago");

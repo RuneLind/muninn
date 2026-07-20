@@ -223,7 +223,7 @@ export function formatRelative(then: number | null, now: number): string | null 
   const diff = now - then;
   if (diff < 0) return "just now";
   const secs = Math.floor(diff / 1000);
-  if (secs < 45) return "just now";
+  if (secs < 60) return "just now";
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
