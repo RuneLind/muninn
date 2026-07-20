@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { recordToolSpan } from "./tool-span.ts";
 import { TOOL_OUTPUT_MAX_BYTES } from "../truncate-output.ts";
+import { loadConfig } from "../../config.ts";
 
 test("recordToolSpan builds the ToolCall shape from a plain string result", () => {
   const { toolCall, toolEndEvent, cleanedText } = recordToolSpan({
@@ -82,6 +83,28 @@ test("rounds fractional timings and clamps via Math.round", () => {
   expect(toolCall.startOffsetMs).toBe(Math.round(100.6 - 50.1));
   // A null/undefined tool result yields no output and no outputSize.
   expect(toolCall.output).toBeUndefined();
+});
+
+test("pointer-mode trace fields are forwarded onto the span", async () => {
+  // Pointer origin must match the KNOWLEDGE_API_URL allow-list; the trace id
+  // is fake, so fetchHuginnTrace (which never throws) resolves null.
+  const origin = new URL(loadConfig().knowledgeApiUrl).origin;
+  const pointer = `${origin}/api/trace/aabbccddeeff0011`;
+  const { toolCall } = recordToolSpan({
+    id: "call_6",
+    name: "mcp__knowledge__search_knowledge",
+    input: undefined,
+    rawResult: `2 hits for corrective retrieval\n\nhuginn-trace-url: ${pointer}`,
+    startMs: 0,
+    endMs: 1,
+    wallStart: 0,
+  });
+
+  expect(toolCall.searchTracePointer).toBe(pointer);
+  expect(toolCall.searchTraceFetch).toBeInstanceOf(Promise);
+  // The pointer line is peeled out of the stored output.
+  expect(toolCall.output).toBe("2 hits for corrective retrieval");
+  await expect(toolCall.searchTraceFetch).resolves.toBeNull();
 });
 
 test("error payloads are serialized into the output snapshot", () => {
