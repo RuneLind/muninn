@@ -67,6 +67,36 @@ export async function renderIndexingPage(): Promise<string> {
     .medians .mv { font-size: 11px; }
     .medians .mv .variant { color: var(--text-dim); }
 
+    /* Expansion affordance */
+    .i-table tbody tr.summary { cursor: pointer; }
+    .caret { display: inline-block; width: 12px; color: var(--text-dim); transition: transform 0.12s ease; font-size: 10px; }
+    tr.summary.open .caret { transform: rotate(90deg); }
+    tr.detail-row > td { padding: 0; border-bottom: 1px solid var(--border-subtle); background: color-mix(in srgb, var(--accent) 3%, transparent); }
+    .detail { padding: 14px 18px 18px 30px; display: flex; flex-direction: column; gap: 16px; }
+    .detail h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); font-weight: 600; margin: 0 0 8px; }
+    .detail .d-block { min-width: 0; }
+
+    /* Phase timeline */
+    .tl { display: flex; align-items: stretch; flex-wrap: wrap; gap: 0; }
+    .tl-none { color: var(--text-disabled); font-style: italic; font-size: 12px; }
+    .tl-note { color: var(--text-dim); font-size: 11px; margin-bottom: 6px; }
+    .ph { display: flex; flex-direction: column; gap: 3px; padding: 6px 10px; border: 1px solid var(--border-primary);
+      border-radius: 6px; background: var(--bg-surface); min-width: 74px; }
+    .ph.fail { border-color: var(--status-error); background: color-mix(in srgb, var(--status-error) 8%, transparent); }
+    .ph .ph-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .ph .ph-meta { font-size: 10px; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }
+    .ph .ph-fatal { color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .ph-arrow { display: flex; align-items: center; color: var(--text-disabled); padding: 0 6px; font-size: 13px; }
+
+    /* Sparkline */
+    .spark-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .spark svg { display: block; }
+    .spark-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-muted); }
+    .spark-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+    .spark-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    .spark-legend .lg .md { color: var(--text-dim); }
+    .detail-grid { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; }
+
     .err-note { color: var(--status-warning); font-size: 12px; margin: 8px 0; }
     .empty-msg { color: var(--text-faint); padding: 18px; text-align: center; }
     .scroll { overflow-x: auto; }
@@ -93,6 +123,9 @@ export async function renderIndexingPage(): Promise<string> {
 
   <script>
     ${helpers}
+
+    // Collections whose depth row is expanded — survives the 15s re-render.
+    var expanded = new Set();
 
     function loadDot(loaded) {
       return '<span class="load-dot ' + (loaded ? 'on' : 'off') + '" title="' +
@@ -131,9 +164,111 @@ export async function renderIndexingPage(): Promise<string> {
       return row.job ? '<code class="dim">' + esc(row.job) + '</code>' : '<span class="empty">—</span>';
     }
 
+    // ---- Per-collection depth (expansion row) -----------------------------
+
+    // Palette used to distinguish run variants (incremental vs rebuild vs …).
+    var VARIANT_COLORS = ['var(--accent)', 'var(--status-magenta)', 'var(--status-warning)', 'var(--status-info)'];
+    function variantColor(i) { return VARIANT_COLORS[i % VARIANT_COLORS.length]; }
+
+    function phaseHtml(p) {
+      var cls = 'ph' + (p.nonFatalFailure || (p.status && p.status.status === 'failed') ? ' fail' : '');
+      var badge = '<span class="badge badge-' + esc(p.status.cls) + '">' + esc(p.status.label) + '</span>';
+      var dur = p.duration ? '<code>' + esc(p.duration) + '</code>' : '<span class="empty">—</span>';
+      var fatal = p.fatal ? '<span class="ph-fatal" title="fatal to the run">fatal</span>' : '';
+      return '<div class="' + cls + '">' +
+        '<span class="ph-name">' + esc(p.name) + '</span>' +
+        '<span class="ph-meta">' + badge + dur + fatal + '</span>' +
+      '</div>';
+    }
+
+    function timelineHtml(tl) {
+      if (!tl || tl.kind === 'none') return '<div class="tl-none">no phases recorded</div>';
+      var note = tl.kind === 'ordered'
+        ? '<div class="tl-note">chronological — earliest first</div>'
+        : '<div class="tl-note">arrival order — phase start times unavailable</div>';
+      var connector = tl.kind === 'ordered' ? '<div class="ph-arrow">→</div>' : '';
+      var chips = tl.phases.map(phaseHtml).join(connector);
+      return note + '<div class="tl">' + chips + '</div>';
+    }
+
+    function sparkSvg(spark) {
+      if (!spark || !spark.points.length) return '<span class="empty">no history</span>';
+      var pts = spark.points;
+      var H = 46, padT = 7, padB = 11, step = 16, padL = 6, padR = 6;
+      var W = padL + padR + Math.max(1, pts.length - 1) * step;
+      var max = spark.maxDurationSeconds || 1;
+      function xOf(i) { return padL + i * step; }
+      function yOf(v) { return H - padB - (v / max) * (H - padT - padB); }
+      var baseY = H - padB;
+
+      // Per-variant trend polylines (only real, non-null durations).
+      var lines = spark.variants.map(function (v, vi) {
+        var seg = [];
+        pts.forEach(function (p, i) {
+          if (p.variant === v && p.durationSeconds != null) seg.push(xOf(i) + ',' + yOf(p.durationSeconds));
+        });
+        if (seg.length < 2) return '';
+        return '<polyline points="' + seg.join(' ') + '" fill="none" stroke="' + variantColor(vi) +
+          '" stroke-width="1.5" stroke-opacity="0.55" />';
+      }).join('');
+
+      var dots = pts.map(function (p, i) {
+        var x = xOf(i);
+        var title = (p.duration || 'no duration') + ' · ' + p.variant + ' · ' + p.status.label;
+        if (p.durationSeconds == null) {
+          // Null duration (failed/incomplete) — a hollow red marker at baseline. NEVER a 0 dot.
+          return '<path d="M' + (x - 3) + ',' + baseY + ' L' + x + ',' + (baseY - 4) + ' L' + (x + 3) + ',' + baseY +
+            ' L' + x + ',' + (baseY + 4) + ' Z" fill="none" stroke="var(--status-error)" stroke-width="1.3">' +
+            '<title>' + esc(title) + '</title></path>';
+        }
+        var y = yOf(p.durationSeconds);
+        var failed = p.status.status === 'failed' || p.status.status === 'degraded';
+        var stroke = failed ? 'var(--status-error)' : 'var(--bg-primary)';
+        return '<circle cx="' + x + '" cy="' + y + '" r="2.6" fill="' + variantColor(p.variantIndex) +
+          '" stroke="' + stroke + '" stroke-width="1"><title>' + esc(title) + '</title></circle>';
+      }).join('');
+
+      return '<div class="spark"><svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H +
+        '" role="img" aria-label="duration history">' + lines + dots + '</svg></div>';
+    }
+
+    function medianLookup(row, variant) {
+      var m = (row.medians || []).find(function (x) { return x.variant === variant; });
+      return m ? m.duration : null;
+    }
+
+    function sparkLegend(row, spark) {
+      return '<div class="spark-legend">' + spark.variants.map(function (v, vi) {
+        var med = medianLookup(row, v);
+        var medTxt = med ? ' <span class="md">median ' + esc(med) + '</span>' : '';
+        return '<span class="lg"><span class="sw" style="background:' + variantColor(vi) + '"></span>' +
+          esc(v) + medTxt + '</span>';
+      }).join('') + '</div>';
+    }
+
+    function detailHtml(row) {
+      var d = row.detail || { lastTimeline: { kind: 'none', phases: [] }, sparkline: { points: [], variants: [], maxDurationSeconds: null }, current: null };
+      var blocks = '';
+
+      if (row.running && d.current) {
+        var el = row.runningElapsed ? ' <span class="dim">(' + esc(row.runningElapsed) + ' elapsed)</span>' : '';
+        blocks += '<div class="d-block"><h4>In flight' + el + '</h4>' + timelineHtml(d.current) + '</div>';
+      }
+
+      blocks += '<div class="d-block"><h4>Last run phases</h4>' + timelineHtml(d.lastTimeline) + '</div>';
+
+      blocks += '<div class="detail-grid">' +
+        '<div class="d-block spark-wrap"><h4>Duration history</h4>' + sparkSvg(d.sparkline) +
+          sparkLegend(row, d.sparkline) + '</div>' +
+      '</div>';
+
+      return '<div class="detail">' + blocks + '</div>';
+    }
+
     function rowHtml(row) {
-      return '<tr>' +
-        '<td><strong>' + esc(row.collection) + '</strong></td>' +
+      var isOpen = expanded.has(row.collection);
+      var summary = '<tr class="summary' + (isOpen ? ' open' : '') + '" data-col="' + esc(row.collection) + '">' +
+        '<td><span class="caret">▸</span> <strong>' + esc(row.collection) + '</strong></td>' +
         '<td>' + loadDot(row.loaded) + '</td>' +
         '<td>' + lastRunCell(row) + '</td>' +
         '<td>' + durationCell(row) + '</td>' +
@@ -141,6 +276,9 @@ export async function renderIndexingPage(): Promise<string> {
         '<td>' + scheduleCell(row) + '</td>' +
         '<td>' + jobCell(row) + '</td>' +
       '</tr>';
+      var detail = '<tr class="detail-row" data-col="' + esc(row.collection) + '"' +
+        (isOpen ? '' : ' style="display:none"') + '><td colspan="7">' + detailHtml(row) + '</td></tr>';
+      return summary + detail;
     }
 
     function classHtml(cls) {
@@ -179,6 +317,25 @@ export async function renderIndexingPage(): Promise<string> {
           '<div class="err-note">Failed to load overview: ' + esc(String(e)) + '</div>';
       }
     }
+
+    // Toggle a collection's depth row. Delegated because the table is re-rendered
+    // on every poll — direct listeners would die each cycle.
+    document.getElementById('classes').addEventListener('click', function (ev) {
+      var tr = ev.target.closest ? ev.target.closest('tr.summary') : null;
+      if (!tr) return;
+      var col = tr.getAttribute('data-col');
+      if (!col) return;
+      var detail = tr.nextElementSibling;
+      if (expanded.has(col)) {
+        expanded.delete(col);
+        tr.classList.remove('open');
+        if (detail && detail.classList.contains('detail-row')) detail.style.display = 'none';
+      } else {
+        expanded.add(col);
+        tr.classList.add('open');
+        if (detail && detail.classList.contains('detail-row')) detail.style.display = '';
+      }
+    });
 
     load();
     setInterval(load, 15000);

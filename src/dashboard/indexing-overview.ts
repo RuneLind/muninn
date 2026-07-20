@@ -20,6 +20,7 @@
  */
 
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
+import { buildIndexingDetail, type IndexingDetail } from "./indexing-detail.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("dashboard", "indexing");
@@ -35,6 +36,10 @@ export interface RawPhase {
   status?: string;
   durationSeconds?: number | null;
   fatal?: boolean;
+  /** ISO start time (huginn #92+, chronological). Absent on pre-#92 phases —
+   *  see `buildPhaseTimeline`: any phase missing this ⇒ the run's list is
+   *  treated as unordered (arrival order, no time axis). */
+  startedAt?: string | null;
 }
 
 /** A run row — `lastRun`, `current`, or a `history[]` entry. */
@@ -132,6 +137,9 @@ export interface IndexingRow {
   running: boolean;
   /** Elapsed time of the in-flight run ("1m 12s"); null when startedAt unknown. */
   runningElapsed: string | null;
+  /** Per-collection depth for the expansion row (phase timeline + sparkline +
+   *  in-flight phases) — derived by the pure `buildIndexingDetail`. */
+  detail: IndexingDetail;
 }
 
 export type IndexingClassKey = "scheduled" | "tracked" | "never";
@@ -309,6 +317,7 @@ export function toRow(job: RawJob, now: number): IndexingRow {
     nextScheduled: describeSchedule(job.schedule),
     running,
     runningElapsed,
+    detail: buildIndexingDetail(job),
   };
 }
 
