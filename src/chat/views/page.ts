@@ -7,6 +7,7 @@ import { docPanelStyles, docPanelHtml, docPanelScript, MARKED_CDN_SCRIPT } from 
 import { chatStyles } from "./components/chat-styles.ts";
 import { webFormatClientScript } from "./components/web-format-client.ts";
 import { inspectorPanelScript } from "./components/inspector-panel.ts";
+import { inspectorPanelClientScript } from "./components/inspector-panel-client.ts";
 import { streamingUiScript } from "./components/streaming-ui.ts";
 import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
@@ -14,9 +15,10 @@ import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 
 export async function renderChatPage(): Promise<string> {
-  const [webFormatScript, helpersScript] = await Promise.all([
+  const [webFormatScript, helpersScript, inspectorScript] = await Promise.all([
     webFormatClientScript(),
     helpersClientScript(),
+    inspectorPanelClientScript(),
   ]);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -134,6 +136,7 @@ export async function renderChatPage(): Promise<string> {
     ${agentStatusScript()}
     ${requestProgressScript()}
     ${webFormatScript}
+    ${inspectorScript}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
   </script>

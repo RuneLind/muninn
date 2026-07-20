@@ -1,5 +1,8 @@
-// Inspector panel helper functions — exported as TypeScript (for testing)
-// AND as a JS string (for browser injection via inspectorPanelScript()).
+// Inspector panel helpers. The pure functions are exported as TypeScript
+// (tested here, bundled to the browser via inspector-panel-browser.ts →
+// inspectorPanelClientScript). The DOM-touching functions live in the JS
+// string returned by inspectorPanelScript() and call the pure helpers by bare
+// name off globalThis.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -156,8 +159,8 @@ export function computeLastResponseRows(meta: ResponseMetaInput | null): LastRes
 
 // ── Dev-run Agents tab (Phase C) ────────────────────────────────────────
 // Pure helpers backing the inspector's Agents tab — the live discoveries
-// timeline + per-agent latest note. Exported for tests and mirrored verbatim in
-// the browser JS string below.
+// timeline + per-agent latest note. Exported for tests and shipped to the
+// browser via inspector-panel-browser.ts (bundled by inspectorPanelClientScript).
 
 /**
  * Merge two dev_run_event lists, deduping by `id`, sorted oldest→newest
@@ -220,124 +223,20 @@ export function devRunEventIcon(kind: string): string {
 
 // ── Browser-injectable JS string ───────────────────────────────────────
 
-/** Returns all inspector panel functions as a browser-compatible JS string.
+/** Returns the inspector panel's DOM-touching functions as a browser-compatible
+ *  JS string (the pure helpers ship separately via inspectorPanelClientScript).
  *  Injected INSIDE the CHAT_SCRIPT IIFE — has access to IIFE-scoped variables
  *  (selectedUserId, selectedBot, activeConvId, conversations, threads, connectors,
  *   bots, lastResponseMeta, inspectorContent, inspectorContext, inspectorToolUsage, etc.). */
 export function inspectorPanelScript(): string {
   return `
   // ── Pure helpers ──────────────────────────────────────────────────────
-
-  function aggregateToolCalls(toolCalls) {
-    var map = {};
-    for (var i = 0; i < toolCalls.length; i++) {
-      var tc = toolCalls[i];
-      var key = tc.displayName || tc.name;
-      if (!map[key]) map[key] = { displayName: key, callCount: 0, totalMs: 0, totalTokens: 0 };
-      map[key].callCount++;
-      map[key].totalMs += tc.durationMs || 0;
-      map[key].totalTokens += tc.tokensEstimate || 0;
-    }
-    var result = [];
-    var keys = Object.keys(map);
-    for (var j = 0; j < keys.length; j++) result.push(map[keys[j]]);
-    result.sort(function(a, b) {
-      return b.callCount - a.callCount || b.totalTokens - a.totalTokens || b.totalMs - a.totalMs;
-    });
-    return result;
-  }
-
-  function fmtToolTime(ms) {
-    var secs = ms / 1000;
-    if (secs >= 60) return Math.round(secs / 60) + 'm';
-    if (secs >= 1) return secs.toFixed(1) + 's';
-    return ms + 'ms';
-  }
-
-  function fmtNum(n) {
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
-    return String(n);
-  }
-
-  function computeContextUsage(meta) {
-    if (!meta) return null;
-    var ctxTokens = meta.contextTokens != null ? meta.contextTokens : meta.inputTokens;
-    if (!ctxTokens) return null;
-    var label, pct;
-    if (meta.contextWindow) {
-      pct = Math.min(100, Math.round((ctxTokens / meta.contextWindow) * 100));
-      label = fmtNum(ctxTokens) + ' / ' + fmtNum(meta.contextWindow);
-    } else {
-      pct = 0;
-      label = fmtNum(ctxTokens) + ' in, ' + fmtNum(meta.outputTokens || 0) + ' out';
-    }
-    var barColor = pct > 80 ? 'error' : pct > 60 ? 'warning' : 'accent';
-    return { label: label, percentage: pct, barColor: barColor, hasBar: !!meta.contextWindow };
-  }
-
-  function fmtDuration(ms) {
-    if (ms < 1000) return ms + 'ms';
-    var secs = ms / 1000;
-    return secs >= 10 ? Math.round(secs) + 's' : secs.toFixed(1) + 's';
-  }
-
-  function computeLastResponseRows(meta) {
-    if (!meta) return [];
-    var rows = [];
-    var cacheRead = meta.cacheReadTokens || 0;
-    var cacheCreate = meta.cacheCreationTokens || 0;
-    var totalIn = meta.inputTokens || 0;
-    var freshIn = Math.max(0, totalIn - cacheRead - cacheCreate);
-
-    if (totalIn > 0) rows.push({ label: 'Input', value: fmtNum(freshIn) });
-    if (meta.outputTokens && meta.outputTokens > 0) rows.push({ label: 'Output', value: fmtNum(meta.outputTokens) });
-    if (cacheRead > 0) {
-      var pct = Math.round((cacheRead / Math.max(1, totalIn)) * 100);
-      rows.push({ label: 'Cache hit', value: fmtNum(cacheRead), detail: pct + '%', emphasis: 'cache', barPct: pct });
-    }
-    if (cacheCreate > 0) rows.push({ label: 'Cache write', value: fmtNum(cacheCreate) });
-    if (meta.durationMs && meta.durationMs > 0) rows.push({ label: 'Duration', value: fmtDuration(meta.durationMs) });
-    if (meta.costUsd && meta.costUsd > 0) rows.push({ label: 'Cost', value: '$' + meta.costUsd.toFixed(4), emphasis: 'cost' });
-    if (meta.numTurns && meta.numTurns > 1) rows.push({ label: 'Turns', value: String(meta.numTurns) });
-    return rows;
-  }
-
-  // ── Dev-run Agents tab helpers (mirror of the TS exports above) ────────
-
-  function mergeDevRunEventsById(existing, incoming) {
-    var byId = {};
-    var order = [];
-    function add(e) { if (!Object.prototype.hasOwnProperty.call(byId, e.id)) { byId[e.id] = e; order.push(e.id); } }
-    (existing || []).forEach(add);
-    (incoming || []).forEach(add);
-    return order.map(function(id) { return byId[id]; }).sort(function(a, b) {
-      return a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    });
-  }
-
-  function latestNoteForHandoff(events, handoff) {
-    if (!events || !handoff || !handoff.peerName) return null;
-    var best = null;
-    for (var i = 0; i < events.length; i++) {
-      var e = events[i];
-      if (e.peerName && e.peerName === handoff.peerName && (!best || e.createdAt > best.createdAt)) best = e;
-    }
-    return best;
-  }
-
-  function devRunEventKindClass(kind) {
-    return (kind === 'discovery' || kind === 'decision' || kind === 'blocker' || kind === 'milestone') ? kind : 'discovery';
-  }
-
-  function devRunEventIcon(kind) {
-    switch (devRunEventKindClass(kind)) {
-      case 'decision': return '🧭';
-      case 'blocker': return '⛔';
-      case 'milestone': return '✓';
-      default: return '🔍';
-    }
-  }
+  // aggregateToolCalls / fmtToolTime / fmtNum / computeContextUsage /
+  // fmtDuration / computeLastResponseRows / mergeDevRunEventsById /
+  // latestNoteForHandoff / devRunEventKindClass / devRunEventIcon are the
+  // single-source TS exports above, shipped to the browser as an IIFE on
+  // globalThis (inspector-panel-browser.ts, bundled via inspectorPanelClientScript
+  // in page.ts). The DOM helpers below call them by bare name.
 
   // Per-run display cap on the live timeline — mirrors DEV_RUN_EVENTS_DISPLAY_CAP
   // in src/db/dev-runs.ts (the server read cap) so a chatty peer can't grow the
