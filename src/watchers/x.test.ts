@@ -90,6 +90,8 @@ const {
   captureFloorForTier,
   isLinkTweet,
   captureFloorForXLink,
+  DEFAULT_X_PROMPT,
+  DEFAULT_X_HIGHLIGHTS_PROMPT,
 } = await import("./x.ts");
 
 // ── Score extraction from markdown (tests the real exported function) ─
@@ -838,5 +840,175 @@ describe("link-tweet (x-link) capture", () => {
     gateResult = JSON.stringify([{ n: 1, score: 0.65, why: "borderline" }]);
     await checkX(baseWatcher({ config: { ...captureOnly } }));
     expect(upsertCalls).toHaveLength(0);
+  });
+});
+
+// ── Rank read prefers whitelisted metadata combined_score over text regex ──
+
+describe("fetchFromCollection rank read (metadata-preferred)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  let docs: Record<string, { text: string; url: string; metadata?: Record<string, unknown> }> = {};
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: d.text, metadata: d.metadata ?? { url: d.url } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    docs = {};
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("metadata combined_score (a STRING) beats the in-text regex fallback", async () => {
+    docs = {
+      [`${today}_a_1.md`]: {
+        url: "https://x.com/a/status/1",
+        // Served text carries a LOW score; the whitelisted metadata carries the real one.
+        text: `# @a — A\n\ncombined_score: 0.10 mentioned in the body\n\n---\n\n- **Engagement:** 5 likes`,
+        metadata: { url: "https://x.com/a/status/1", combined_score: "0.8028" },
+      },
+    };
+    const r = await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    // The string "0.8028" is Number-coerced (load-bearing) — metadata wins over 0.10.
+    expect(r!.topScore).toBe(0.8028);
+  });
+
+  test("absent metadata combined_score falls back to the in-text regex", async () => {
+    docs = {
+      [`${today}_b_2.md`]: {
+        url: "https://x.com/b/status/2",
+        text: `# @b — B\n\ncombined_score: 0.55 in the body\n\n---\n\n- **Engagement:** 5 likes`,
+        metadata: { url: "https://x.com/b/status/2" }, // no combined_score
+      },
+    };
+    const r = await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    expect(r!.topScore).toBe(0.55);
+  });
+
+  test("non-numeric metadata combined_score is ignored ⇒ text-regex fallback", async () => {
+    docs = {
+      [`${today}_c_3.md`]: {
+        url: "https://x.com/c/status/3",
+        text: `# @c — C\n\nengagement_score: 0.42 in the body\n\n---\n\n- **Engagement:** 5 likes`,
+        metadata: { url: "https://x.com/c/status/3", combined_score: "n/a" },
+      },
+    };
+    const r = await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    // Number("n/a") is NaN ⇒ not finite ⇒ fall back to extractRankScore (engagement 0.42).
+    expect(r!.topScore).toBe(0.42);
+  });
+});
+
+// ── Prompt topic-constraint content (pure string assertions) ────────
+
+const TOPIC_BASELINE =
+  "AI, LLMs and agents, developer tools, software engineering, open source, cloud/infrastructure, and tech industry news";
+
+describe("default prompt topic constraints", () => {
+  test("DEFAULT_X_PROMPT declares the topic baseline, off-topic skip clause, and drops view-to-like", () => {
+    expect(DEFAULT_X_PROMPT).toContain(TOPIC_BASELINE);
+    expect(DEFAULT_X_PROMPT).toContain("regardless of how high its engagement is");
+    expect(DEFAULT_X_PROMPT.toLowerCase()).not.toContain("view-to-like");
+  });
+
+  test("DEFAULT_X_HIGHLIGHTS_PROMPT scopes 'exceptional' to the baseline topics + off-topic exclusion", () => {
+    expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain(TOPIC_BASELINE);
+    expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain("regardless of how high its engagement is");
+  });
+});
+
+// ── Assembled digest wrapper is ranking-neutral (item 3b) ───────────
+
+describe("runAlertPath framing wrapper (fronts Daily/Highlights/Weekly)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const docs: Record<string, { text: string; url: string; metadata: Record<string, unknown> }> = {
+    [`${today}_c_3.md`]: {
+      url: "https://x.com/c/status/3",
+      text: `# @c — C\n\na tweet about LLM agents and eval design\n\n---\n\n- **Engagement:** 50 likes`,
+      metadata: { url: "https://x.com/c/status/3", combined_score: "0.7" },
+    },
+  };
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ text: d.text, metadata: d.metadata }) } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    lastGatePrompt = "";
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const baseWatcher = (over: Partial<Watcher>): Watcher => ({
+    id: "xw3",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Daily Digest",
+    type: "x",
+    config: { collection: "x-feed", windowDays: 1 },
+    intervalMs: 86_400_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+    ...over,
+  });
+
+  test("assembled digest prompt is relevance-framed, not engagement-ranked", async () => {
+    // No minScore/quietMode and captureCandidates off ⇒ the ONLY spawnHaiku call is the
+    // digest, so lastGatePrompt is exactly the assembled digest prompt (wrapper + prompt).
+    await checkX(baseWatcher({ config: { collection: "x-feed", windowDays: 1 } }));
+    expect(lastGatePrompt).toContain("pre-ranked by relevance to the user's interests");
+    // The stale engagement-ranking framing is gone. Assert the EXACT phrases only — the
+    // bare token "engagement" legitimately survives in DEFAULT_X_PROMPT ("engagement bait",
+    // "how high its engagement is").
+    expect(lastGatePrompt.toLowerCase()).not.toContain("engagement score");
+    expect(lastGatePrompt.toLowerCase()).not.toContain("highest engagement first");
   });
 });

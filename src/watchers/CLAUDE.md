@@ -28,7 +28,12 @@ Scheduler tick (every 60s)
 
 The `x`, `anthropic`, and `email` gate/capture/digest prompts carry a hardcoded
 BASELINE of criteria (topics for x/anthropic; the notify/don't-notify rules for
-email). On top of that,
+email). For **x** specifically, `DEFAULT_X_PROMPT` (Daily) and
+`DEFAULT_X_HIGHLIGHTS_PROMPT` name the topic baseline explicitly — AI, LLMs and
+agents, developer tools, software engineering, open source, cloud/infrastructure,
+and tech industry news, plus an off-topic skip clause (sport, celebrity, politics,
+memes, engagement-bait — *regardless of engagement*) — which the injected profile
+then augments (never narrows). On top of that,
 each run loads a per-user **interest profile** — a periodically-refreshed
 distillation of the bot user's active goals + recent memories (`interest_profiles`
 table; built by `src/profile/generator.ts` on a scheduler step gated by a
@@ -72,11 +77,30 @@ The X watcher reads from huginn's pre-indexed `x-feed` collection via the knowle
 
 > **Legacy note:** The codebase still contains a `fetchFromPython()` path that shells out to `x_fetcher.py` directly. This path is no longer used in production — the collection path (`config.collection: "x-feed"`) is the only active path.
 
-### Engagement ranking
+### Rank read (`combined_score`, metadata-preferred)
 
-Tweets are ranked by `engagement_score` before being sent to the LLM. The score is computed by huginn's fetcher using X's open-sourced signal weights (retweets 20x, replies 13.5x, bookmarks 10x, likes 1x), normalized by sqrt(views), with boosts for long-form notes, quotes, and media. The score is stored in each tweet's markdown footer as `**Engagement Score:**`.
+Tweets are ranked by a per-doc `rankScore` before being sent to the LLM: descending
+sort in `fetchFromCollection`, then top-N (default 30, configurable via `config.topN`),
+so the LLM receives a pre-ranked, filtered set rather than all recent tweets. The score
+originates in huginn — a `combined_score` (engagement × relevance; engagement uses X's
+open-sourced signal weights: retweets 20x, replies 13.5x, bookmarks 10x, likes 1x,
+normalized by sqrt(views), with boosts for long-form notes, quotes, media).
 
-The watcher extracts this score via `compactTweetText()`, sorts descending, and takes the top-N (default 30, configurable via `config.topN`). This means the LLM receives a pre-ranked, filtered set rather than all recent tweets.
+**How `fetchFromCollection` reads it:** it prefers `Number(data.metadata?.combined_score)`
+(guarded by `Number.isFinite`) from the document's whitelisted **metadata**, falling back
+to the text-regex `extractRankScore(data.text)` only when metadata is absent/non-numeric.
+The `Number(...)` coercion is load-bearing — huginn's `read_frontmatter` serves frontmatter
+values as **strings** (e.g. `"0.5991"`), which would sort lexicographically if used raw.
+
+> **Stale-claim correction:** the older doc said the score was extracted from the tweet's
+> markdown footer `**Engagement Score:** N`. That never actually worked — `extractRankScore`
+> only matches snake_case `combined_score:` / `engagement_score:`, never the footer's
+> Title-Case label, and huginn strips YAML frontmatter from the served `text` (so the
+> frontmatter scores weren't in `text` either). Net: before the metadata read, every
+> collection-path tweet had `rankScore = 0` and the sort was a no-op. The metadata read
+> (paired with huginn whitelisting `combined_score` into `metadata`) is what makes ranking
+> real. Absent metadata ⇒ byte-identical to the old (0-valued) behavior, so the change is
+> safe to land before the huginn whitelist PR.
 
 ### Prompt size is critical
 
@@ -109,7 +133,7 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Knowledge API URL |
 | `windowDays` | 2 | Rolling day window (Europe/Oslo). 1 = today only, 7 = last week. |
 | `dedupByTweetId` | `true` | Filter out tweets already in `lastNotifiedIds`. Set `false` on daily/weekly digests that re-rank the full window. |
-| `minScore` | — | Pre-LLM gate on `rankScore` (combined_score fallback engagement_score). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. |
+| `minScore` | — | Pre-LLM gate on `rankScore` (metadata `combined_score` preferred; text-regex `combined_score`/`engagement_score` fallback). If set and top tweet is below, the watcher silently tracks the fetched IDs and skips the LLM call entirely — no message sent. **NB — needs re-tuning:** the seeded X Highlights floor of `0.85` is structurally unreachable (live max `combined_score` ≈ 0.8028), so Highlights silences every run. Re-tune below the post-rescore ceiling once distribution is measured — expect **0.6–0.75**. |
 | `quietMode` | `false` | Allows the LLM to reply with literal `SKIP` (any case, optional surrounding markdown/punctuation) to suppress the alert. The fetched IDs are still tracked so the same tweets aren't re-evaluated next run. |
 | `captureCandidates` | `false` | Persist high-value **long-form** tweets into the `summary_candidates` inbox (Candidates → Summaries). Collection path only. Runs on the FULL fetched batch, BEFORE and independent of the `minScore`/`quietMode` silencing — a run that alerts nothing can still capture. See "Candidate capture" below. |
 | `candidateMinScore` | 0.6 | Inbox capture floor for **top-5%-author** long-form (`x-post`) tweets — long-form tweets scored ≥ this by the capture gate are queued. Independent of the alert `minScore`. |
