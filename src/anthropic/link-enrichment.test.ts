@@ -67,14 +67,28 @@ test("extractDocLinks does not match the singular **Link:** even if it held an e
   expect(extractDocLinks(text)).toEqual([]);
 });
 
-test("youTubeVideoId handles watch, youtu.be, and shorts; null otherwise", () => {
+test("youTubeVideoId handles watch, youtu.be, shorts, embed, and live; null otherwise", () => {
   expect(youTubeVideoId("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
   expect(youTubeVideoId("https://youtu.be/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
   expect(youTubeVideoId("https://www.youtube.com/shorts/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+  expect(youTubeVideoId("https://www.youtube.com/embed/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
+  expect(youTubeVideoId("https://www.youtube.com/live/dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
   expect(youTubeVideoId("https://youtube.com/watch?v=abc12345678&t=30s")).toBe("abc12345678");
+  expect(youTubeVideoId("https://m.youtube.com/watch?v=dQw4w9WgXcQ")).toBe("dQw4w9WgXcQ");
   expect(youTubeVideoId("https://example.com/article")).toBeNull();
   // Not a youtube video shape (channel page) → null.
   expect(youTubeVideoId("https://www.youtube.com/@karpathy")).toBeNull();
+});
+
+test("youTubeVideoId anchors the id patterns to a YouTube host", () => {
+  // A non-YouTube article URL carrying `?v=<11 chars>` must NOT be treated as a
+  // youtube video — otherwise the transcript fetch 404s and enrichment silently
+  // degrades instead of fetching the article.
+  expect(youTubeVideoId("https://example.com/post?v=abcdefghijk")).toBeNull();
+  // A non-YouTube `/shorts/<id>` path segment must not match either.
+  expect(youTubeVideoId("https://example.com/shorts/dQw4w9WgXcQ")).toBeNull();
+  // An unparseable string → null (not a throw).
+  expect(youTubeVideoId("not a url")).toBeNull();
 });
 
 test("pickEnrichmentLink: youtube link → youtube kind", () => {
@@ -87,6 +101,13 @@ test("pickEnrichmentLink: youtube link → youtube kind", () => {
 test("pickEnrichmentLink: non-youtube link → article kind", () => {
   expect(pickEnrichmentLink(["https://example.com/post"])).toEqual({
     url: "https://example.com/post",
+    kind: "article",
+  });
+});
+
+test("pickEnrichmentLink: non-youtube link carrying ?v= → article kind (not misclassified)", () => {
+  expect(pickEnrichmentLink(["https://example.com/post?v=abcdefghijk"])).toEqual({
+    url: "https://example.com/post?v=abcdefghijk",
     kind: "article",
   });
 });

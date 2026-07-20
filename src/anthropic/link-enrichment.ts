@@ -57,20 +57,47 @@ export function extractDocLinks(docText: string): string[] {
   return out;
 }
 
+/** YouTube hosts whose URLs may carry a fetchable video id. */
+const YOUTUBE_HOSTS = [
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+  "youtu.be",
+];
+
 /**
  * YouTube-only video-id extractor: `watch?v=<id>`, `youtu.be/<id>`,
- * `youtube.com/shorts/<id>` → the 11-char id; anything else → null.
+ * `youtube.com/shorts/<id>`, `youtube.com/embed/<id>`, `youtube.com/live/<id>`
+ * → the 11-char id; anything else → null.
+ *
+ * The id patterns are applied ONLY when the URL's hostname is a YouTube host —
+ * otherwise an article URL that happens to carry `?v=<11 chars>` or a `/shorts/`
+ * path segment would be misclassified as `youtube`, and the transcript fetch
+ * would then 404 instead of the article being fetched.
  *
  * Deliberately narrower than `docIdFromUrl` (`../wiki/ingest-backlog.ts`, which
  * ALSO matches X `/status/` + TikTok `/video/` ids) and wider than youtube-routes'
- * `extractYouTubeVideoId` (which lacks `/shorts/`) — this is the one place both
+ * `extractYouTubeVideoId` (which lacks `/shorts/`) — this is the one place these
  * quirks are handled for enrichment.
  */
 export function youTubeVideoId(url: string): string | null {
+  let host: string;
+  let pathname: string;
+  let search: string;
+  try {
+    const u = new URL(url);
+    host = u.hostname.toLowerCase();
+    pathname = u.pathname;
+    search = u.search;
+  } catch {
+    return null;
+  }
+  if (!YOUTUBE_HOSTS.includes(host)) return null;
   const m =
-    url.match(/[?&]v=([A-Za-z0-9_-]{11})/) ??
-    url.match(/youtu\.be\/([A-Za-z0-9_-]{11})/) ??
-    url.match(/shorts\/([A-Za-z0-9_-]{11})/);
+    search.match(/[?&]v=([A-Za-z0-9_-]{11})/) ??
+    pathname.match(/\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})/) ??
+    pathname.match(/^\/([A-Za-z0-9_-]{11})$/); // youtu.be/<id>
   return m ? m[1]! : null;
 }
 
