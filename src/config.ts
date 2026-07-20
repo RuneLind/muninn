@@ -35,8 +35,6 @@ export function loadConfig() {
     // model so English-only bots keep working; set TIKTOK_WHISPER_MODEL_PATH to
     // a multilingual model (e.g. ggml-base.bin) without touching Telegram voice.
     tiktokWhisperModelPath: optionalEnv("TIKTOK_WHISPER_MODEL_PATH", whisperModelPath),
-    goalCheckIntervalMs: optionalEnvInt("GOAL_CHECK_INTERVAL_MS", 1800000),
-    goalCheckEnabled: optionalEnv("GOAL_CHECK_ENABLED", "true") === "true",
     schedulerIntervalMs: optionalEnvInt(
       "SCHEDULER_INTERVAL_MS",
       optionalEnvInt("GOAL_CHECK_INTERVAL_MS", 60000),

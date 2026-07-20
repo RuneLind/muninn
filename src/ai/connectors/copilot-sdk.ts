@@ -3,10 +3,9 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import type { StreamProgressCallback } from "../stream-parser.ts";
-import { formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
-import { truncateOutput } from "../truncate-output.ts";
-import { processMcpToolResult } from "../huginn-trace-pointer.ts";
+import { abbreviateInput, formatToolDisplayName, isReportIntentTool, extractIntentText } from "../stream-parser.ts";
 import type { ToolCall } from "../../types.ts";
+import { recordToolSpan } from "./tool-span.ts";
 import { parseMcpConfig } from "./copilot-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
@@ -211,8 +210,6 @@ export async function executePrompt(
       case "tool.execution_complete": {
         const pending = pendingTools.get(event.data.toolCallId);
         if (pending) {
-          const endMs = performance.now();
-          const displayName = formatToolDisplayName(pending.name);
           // Capture the tool result for trace reproducibility. The SDK exposes
           // `result.content` (short string) and `result.detailedContent` / `contents[]`
           // (structured); we store the richest available form, capped to 16 KB.
@@ -220,28 +217,19 @@ export async function executePrompt(
             ? (event.data.result ?? undefined)
             : { error: event.data.error ?? { message: "tool execution failed" } };
 
-          const processed = processMcpToolResult(resultPayload);
-          const truncated = truncateOutput(processed.cleanedText);
-
-          toolCalls.push({
+          const { toolCall, toolEndEvent } = recordToolSpan({
             id: event.data.toolCallId,
             name: pending.name,
-            displayName,
-            durationMs: Math.round(endMs - pending.startMs),
-            startOffsetMs: Math.round(pending.startMs - wallStart),
             input: pending.input,
-            output: truncated,
-            searchTrace: processed.searchTrace,
-            searchTracePointer: processed.searchTracePointer,
-            searchTraceFetch: processed.searchTraceFetch,
+            rawResult: resultPayload,
+            startMs: pending.startMs,
+            endMs: performance.now(),
+            wallStart,
           });
+
+          toolCalls.push(toolCall);
           pendingTools.delete(event.data.toolCallId);
-          onProgress?.({
-            type: "tool_end",
-            name: pending.name,
-            displayName,
-            outputSize: truncated ? truncated.length : undefined,
-          });
+          onProgress?.(toolEndEvent);
         }
         break;
       }
@@ -407,10 +395,4 @@ ${projectPaths}
 - Read files to verify specific details`,
     mcpServers: {}, // No MCP tools — use built-in tools only (Bash, Grep, Read, Glob)
   }];
-}
-
-function abbreviateInput(args: unknown): string | undefined {
-  if (args == null) return undefined;
-  const json = JSON.stringify(args);
-  return json.length > 500 ? json.slice(0, 500) + "…" : json;
 }
