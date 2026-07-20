@@ -299,6 +299,14 @@ export const SHARED_STYLES = `
     .kind-task    { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-light); }
     .kind-capture { background: color-mix(in srgb, var(--status-magenta) 16%, transparent); color: var(--status-magenta); }
     .kind-digest  { background: color-mix(in srgb, var(--status-cyan) 13%, transparent); color: var(--status-cyan); }
+    /* Remaining AgentKind chips (Agents page). GARDENER→success, EXTRACTOR→warning;
+       chat/research/profile share a quiet neutral (the 4 hue slots above are the
+       design-canonical kinds, error stays reserved for run-status failures). */
+    .kind-gardener  { background: color-mix(in srgb, var(--status-success) 16%, transparent); color: var(--status-success); }
+    .kind-extractor { background: color-mix(in srgb, var(--status-warning) 16%, transparent); color: var(--status-warning); }
+    .kind-chat,
+    .kind-research,
+    .kind-profile   { background: var(--tint-neutral); color: var(--text-muted); }
 
     /* Run status — 7px colored dot + lowercase text (NOT an uppercase pill).
        Failure/staleness also tints the text. */
