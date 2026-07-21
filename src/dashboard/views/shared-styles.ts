@@ -238,6 +238,36 @@ export const SHARED_STYLES = `
       background: var(--border-secondary); margin: 0 6px; align-self: center;
     }
 
+    /* --- Tools ▾ dropdown (native <details>, no per-page JS) -----------------
+       The trigger reuses .nav-link so it matches its sibling links; the panel
+       floats over the page body on --bg-panel + a border so it stays legible in
+       BOTH themes (never a hardcoded dark hex). */
+    .nav-dropdown { position: relative; display: inline-block; }
+    .nav-dropdown > summary {
+      list-style: none; cursor: pointer; user-select: none;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .nav-dropdown > summary::-webkit-details-marker { display: none; }
+    .nav-dropdown > summary::marker { content: ""; }
+    .nav-caret { font-size: 9px; color: var(--text-dim); transition: transform 0.15s ease; }
+    .nav-dropdown[open] .nav-caret { transform: rotate(180deg); }
+    .nav-dropdown[open] > summary { color: var(--accent-light); }
+    .nav-dropdown-panel {
+      position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+      min-width: 168px; padding: 6px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .nav-dropdown-item {
+      color: var(--text-muted); text-decoration: none; font-size: 13px;
+      padding: 6px 10px; border-radius: 6px; white-space: nowrap; transition: all 0.15s;
+    }
+    .nav-dropdown-item:hover { color: var(--accent-light); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .nav-dropdown-item.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+
     /* ========================================================================
        Shared dashboard-redesign primitives (PR 1). Consumed by /agents,
        /models and /indexing in PRs 2–4. Every tint is expressed through
@@ -351,6 +381,11 @@ export function renderNav(
   activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "benchmark" | "models" | "indexing" | "agents",
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
+  // Pages collapsed under the "Tools ▾" dropdown. The trigger reads as active
+  // whenever the current page is one of these (and the matching entry inside is
+  // highlighted too).
+  const toolsPages = ["logs", "mcp-debug", "serena", "benchmark", "models", "indexing"] as const;
+  const toolsActive = (toolsPages as readonly string[]).includes(activePage);
   return `
   <script>${themeInitScript()}</script>
   <script>
@@ -381,6 +416,21 @@ export function renderNav(
       if (sessionStorage.getItem('fs')) {
         document.documentElement.requestFullscreen().catch(function() {});
       }
+
+      // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
+      // stays open otherwise). One global listener, no per-page wiring.
+      document.addEventListener('click', function(e) {
+        document.querySelectorAll('details.nav-dropdown[open]').forEach(function(d) {
+          if (!d.contains(e.target)) d.removeAttribute('open');
+        });
+      });
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+          document.querySelectorAll('details.nav-dropdown[open]').forEach(function(d) {
+            d.removeAttribute('open');
+          });
+        }
+      });
     }
   </script>
   <header>
@@ -390,7 +440,6 @@ export function renderNav(
         <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
         <a href="/agents" class="nav-link${activePage === "agents" ? " active" : ""}">Agents</a>
         <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
-        <a href="/logs" class="nav-link${activePage === "logs" ? " active" : ""}">Logs</a>
         <span class="nav-sep" aria-hidden="true"></span>
         <a href="/chat" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
         <a href="/research" class="nav-link${activePage === "research" ? " active" : ""}">Research</a>
@@ -399,11 +448,17 @@ export function renderNav(
         <a href="/wiki" class="nav-link${activePage === "wiki" ? " active" : ""}">Wiki</a>
         <a href="/graph" class="nav-link${activePage === "graph" ? " active" : ""}">Graph</a>
         <span class="nav-sep" aria-hidden="true"></span>
-        <a href="/mcp-debug" class="nav-link${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
-        <a href="/serena" class="nav-link${activePage === "serena" ? " active" : ""}">Serena</a>
-        <a href="/benchmark" class="nav-link${activePage === "benchmark" ? " active" : ""}">Benchmark</a>
-        <a href="/models" class="nav-link${activePage === "models" ? " active" : ""}">Models</a>
-        <a href="/indexing" class="nav-link${activePage === "indexing" ? " active" : ""}">Indexing</a>
+        <details class="nav-dropdown">
+          <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
+          <div class="nav-dropdown-panel">
+            <a href="/logs" class="nav-dropdown-item${activePage === "logs" ? " active" : ""}">Logs</a>
+            <a href="/mcp-debug" class="nav-dropdown-item${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
+            <a href="/serena" class="nav-dropdown-item${activePage === "serena" ? " active" : ""}">Serena</a>
+            <a href="/benchmark" class="nav-dropdown-item${activePage === "benchmark" ? " active" : ""}">Benchmark</a>
+            <a href="/models" class="nav-dropdown-item${activePage === "models" ? " active" : ""}">Models</a>
+            <a href="/indexing" class="nav-dropdown-item${activePage === "indexing" ? " active" : ""}">Indexing</a>
+          </div>
+        </details>
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>
