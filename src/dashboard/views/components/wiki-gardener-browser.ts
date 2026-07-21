@@ -330,12 +330,46 @@ let backlogConfirmOpen = false;
 // Last source-draft batch result (client-only) — survives the strip's wholesale
 // re-renders so the "N drafted…" note stays visible after a refresh.
 let lastSourceDraftResult: SourceBacklogResult | { error: string } | null = null;
+// Human label of the collection the last batch drafted — names it in the result note.
+let lastSourceDraftCollectionLabel: string | null = null;
+// The collection chosen in the source-draft <select>. Persisted here (not only in
+// the DOM) because the strip's innerHTML is replaced wholesale on every render —
+// re-applied after each render so the user's pick + the button's gate survive a poll.
+let sourceDraftCollection: string | null = null;
 // True while a source-draft batch POST is in flight — keeps the button disabled
 // (the batch awaits minutes of model calls) across any interleaved re-render.
 let sourceDraftInFlight = false;
 
 function pendingDraftCount(): number {
   return allProposals.filter((p) => p.status === "draft").length;
+}
+
+// Re-apply the persisted source-draft collection to the freshly-rendered <select>
+// and gate the button on the selected collection's queued count. If the remembered
+// collection is no longer an option (e.g. drained to 0 and dropped), adopt whatever
+// the server pre-selected (the largest queue). No-op while a batch is in flight
+// (the caller re-forces the "Drafting…" disabled state after this).
+function syncSourceDraftControl(el: HTMLElement): void {
+  const sel = el.querySelector<HTMLSelectElement>(".bk-source-draft-select");
+  if (!sel) return;
+  if (
+    sourceDraftCollection &&
+    Array.from(sel.options).some((o) => o.value === sourceDraftCollection)
+  ) {
+    sel.value = sourceDraftCollection;
+  } else {
+    sourceDraftCollection = sel.value;
+  }
+  if (!sourceDraftInFlight) gateSourceDraftButton(el, sel);
+}
+
+// Disable the source-draft button when the selected collection has 0 queued docs.
+function gateSourceDraftButton(el: HTMLElement, sel: HTMLSelectElement): void {
+  const btn = el.querySelector<HTMLButtonElement>(".bk-source-draft-btn");
+  if (!btn) return;
+  const opt = sel.selectedOptions[0];
+  const queued = opt ? Number(opt.getAttribute("data-queued")) : 0;
+  btn.disabled = !(Number.isFinite(queued) && queued > 0);
 }
 
 function renderBacklog(data: IngestBacklogResponse): void {
@@ -358,12 +392,15 @@ function renderBacklog(data: IngestBacklogResponse): void {
   el.innerHTML =
     backlogStripHtml(model, data.errors) +
     backlogOutcomeHtml(data.lastBacklogRun) +
-    sourceDraftResultHtml(lastSourceDraftResult) +
+    sourceDraftResultHtml(lastSourceDraftResult, lastSourceDraftCollectionLabel ?? undefined) +
     backlogTailHtml(model);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
   }
+  // Restore the user's chosen collection + gate the source-draft button on its
+  // queued count (the strip's innerHTML is replaced wholesale on every render).
+  syncSourceDraftControl(el);
   // Re-apply the in-flight disabled state after a re-render (a concurrent drain
   // poll could otherwise re-enable the button mid-batch).
   if (sourceDraftInFlight) {
@@ -537,11 +574,21 @@ async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<vo
 // the totals surface, never a failed request.
 async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
   if (sourceDraftInFlight) return;
+  // Always send an explicit collection (falls back to the remembered pick, then
+  // youtube — the route's own default — so a missing select can't send nothing).
+  const el = document.getElementById("gardBacklog");
+  const sel = el?.querySelector<HTMLSelectElement>(".bk-source-draft-select");
+  const collection = sel?.value || sourceDraftCollection || "youtube-summaries";
+  lastSourceDraftCollectionLabel =
+    lastBacklogData?.byCollection.find((c) => c.collection === collection)?.label || collection;
   sourceDraftInFlight = true;
   btn.disabled = true;
   btn.textContent = "Drafting…";
   try {
-    const res = await fetch(withBot("/api/wiki/gardener/source-draft-backlog"), { method: "POST" });
+    const res = await fetch(
+      withBot("/api/wiki/gardener/source-draft-backlog?collection=" + encodeURIComponent(collection)),
+      { method: "POST" },
+    );
     const data = await res.json();
     lastSourceDraftResult =
       res.ok && !data.error ? (data as SourceBacklogResult) : { error: data.error || "failed (" + res.status + ")" };
@@ -653,6 +700,17 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     // Draft per-article source pages for a small batch of uncovered docs.
     void startSourceDraftBacklog(btn as HTMLButtonElement);
   }
+});
+
+// Delegated collection picker for the source-draft control — remember the choice
+// (it must survive the strip's wholesale re-renders) and re-gate the button on the
+// selected collection's queued count.
+document.getElementById("gardBacklog")?.addEventListener("change", (e) => {
+  const sel = (e.target as HTMLElement).closest(".bk-source-draft-select") as HTMLSelectElement | null;
+  if (!sel) return;
+  sourceDraftCollection = sel.value;
+  const el = document.getElementById("gardBacklog");
+  if (el && !sourceDraftInFlight) gateSourceDraftButton(el, sel);
 });
 
 const wikiBotSel = document.getElementById("wikiBot") as HTMLSelectElement | null;

@@ -563,7 +563,10 @@ describe("source-page drafter control", () => {
   test("available when uncovered docs exist and nothing is running", () => {
     const m = backlogStripModel(base(), 0);
     expect(m.sourceDraftAvailable).toBe(true);
-    expect(backlogSourceDraftHtml(m)).toContain('data-backlog-action="source-draft"');
+    const html = backlogSourceDraftHtml(m);
+    expect(html).toContain('data-backlog-action="source-draft"');
+    // A collection <select> is rendered alongside the button.
+    expect(html).toContain('data-backlog-select="source-draft"');
     // The button is appended to the full strip.
     expect(backlogStripHtml(m)).toContain("Draft source pages");
   });
@@ -586,12 +589,14 @@ describe("source-page drafter control", () => {
       0,
     );
     expect(m.sourceDraftAvailable).toBe(false);
+    expect(m.sourceDraftOptions).toEqual([]);
+    expect(m.sourceDraftDefaultCollection).toBe("");
     expect(backlogSourceDraftHtml(m)).toBe("");
   });
 
-  test("gated on the youtube-summaries queue specifically, not the all-source total", () => {
-    // A wiki whose only backlog is X/TikTok — the source-draft action drafts only
-    // youtube-summaries, so the button must stay hidden even though `queued` > 0.
+  test("available when ANY collection has uncovered docs (not just youtube)", () => {
+    // A wiki whose only backlog is X — the multi-collection control offers it (the
+    // <select> lets the user draft that collection).
     const m = backlogStripModel(
       base({
         byCollection: [
@@ -602,22 +607,56 @@ describe("source-page drafter control", () => {
       }),
       0,
     );
-    expect(m.sourceDraftAvailable).toBe(false);
-    expect(backlogSourceDraftHtml(m)).toBe("");
+    expect(m.sourceDraftAvailable).toBe(true);
+    // Default selection = the largest queue (X here, since youtube is drained to 0).
+    expect(m.sourceDraftDefaultCollection).toBe("x-articles");
   });
 
-  test("available when the youtube queue has uncovered docs even if others are empty", () => {
+  test("default collection is the one with the largest queue", () => {
     const m = backlogStripModel(
       base({
         byCollection: [
           { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 4 },
-          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 0 },
+          { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 40 },
+          { collection: "tiktok-summaries", source: "tiktok", label: "TikTok", total: 0, ingested: 0, queued: 9 },
         ],
-        queued: 4,
+        queued: 53,
       }),
       0,
     );
-    expect(m.sourceDraftAvailable).toBe(true);
+    expect(m.sourceDraftDefaultCollection).toBe("x-articles");
+  });
+
+  test("select options carry each collection's queued count as the label + data-queued", () => {
+    const html = backlogSourceDraftHtml(backlogStripModel(base(), 0));
+    // base() → YouTube 310 (largest, pre-selected), X 7, Anthropic 7, TikTok 5.
+    expect(html).toContain('value="youtube-summaries" data-queued="310" selected');
+    expect(html).toContain("YouTube — 310 queued");
+    expect(html).toContain('value="x-articles" data-queued="7"');
+    expect(html).toContain("X — 7 queued");
+    expect(html).toContain("TikTok — 5 queued");
+    // The pre-selected default is enabled (largest queue > 0).
+    expect(html).not.toContain('data-backlog-action="source-draft" disabled');
+  });
+
+  test("a 0-queued collection still appears as an option (the button re-gates client-side)", () => {
+    const html = backlogSourceDraftHtml(
+      backlogStripModel(
+        base({
+          byCollection: [
+            { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 5 },
+            { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 0 },
+          ],
+          queued: 5,
+        }),
+        0,
+      ),
+    );
+    expect(html).toContain("X — 0 queued");
+    expect(html).toContain('value="x-articles" data-queued="0"');
+    // YouTube (5) is the default and > 0 → button enabled.
+    expect(html).toContain('value="youtube-summaries" data-queued="5" selected');
+    expect(html).not.toContain('data-backlog-action="source-draft" disabled');
   });
 
   test("hidden when the gardener is disabled (the source-draft route 400s then)", () => {
@@ -660,5 +699,13 @@ describe("sourceDraftResultHtml", () => {
   test("nothing selected → explicit note", () => {
     const html = sourceDraftResultHtml(result({ selected: 0, drafted: 0, skipped: 0 }));
     expect(html).toContain("no uncovered docs to draft");
+  });
+
+  test("names the collection when a label is passed", () => {
+    expect(sourceDraftResultHtml(result(), "TikTok")).toContain("TikTok source pages:");
+    expect(sourceDraftResultHtml({ error: "boom" }, "X")).toContain("X source draft failed: boom");
+    expect(sourceDraftResultHtml(result({ selected: 0, drafted: 0, skipped: 0 }), "YouTube")).toContain(
+      "YouTube source draft: no uncovered docs to draft",
+    );
   });
 });
