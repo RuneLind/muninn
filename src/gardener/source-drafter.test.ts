@@ -5,6 +5,7 @@ import {
   sourceWikilinkTargets,
   buildSourceDraftPrompt,
   MIN_SOURCE_BODY_CHARS,
+  COLLISION_SKIP_SENTINEL,
   type DraftSourcePageDeps,
   type SourceDraftInput,
 } from "./source-drafter.ts";
@@ -182,7 +183,8 @@ describe("draftSourcePage", () => {
     expect(out.outcome).toBe("covered");
   });
 
-  test("stem collides with an existing .md page → skipped (reader precedence would shadow the .mdx)", async () => {
+  test("stem still colliding after the one retry → skipped, exactly 2 drafter calls", async () => {
+    const prompts: string[] = [];
     const out = await draftSourcePage(
       baseDeps({
         index: fakeIndex([
@@ -192,10 +194,74 @@ describe("draftSourcePage", () => {
             relPath: "sources/Retrieval-Augmented Generation.md",
           }),
         ]),
+        callDrafter: async (prompt) => {
+          prompts.push(prompt);
+          return mdxDraft();
+        },
       }),
     );
     expect(out.outcome).toBe("skipped");
     if (out.outcome === "skipped") expect(out.reason).toContain("collides");
+    expect(prompts.length).toBe(2);
+    // The retry prompt carries the collision nudge with the taken title + SKIP option.
+    expect(prompts[1]).toContain("TITLE COLLISION");
+    expect(prompts[1]).toContain('"Retrieval-Augmented Generation"');
+    expect(prompts[1]).toContain(COLLISION_SKIP_SENTINEL);
+    expect(prompts[0]).not.toContain("TITLE COLLISION");
+  });
+
+  test("collision retry with a distinct title → drafted at the new stem", async () => {
+    let calls = 0;
+    const out = await draftSourcePage(
+      baseDeps({
+        index: fakeIndex([
+          page({
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            relPath: "sources/Retrieval-Augmented Generation.md",
+          }),
+        ]),
+        callDrafter: async () => {
+          calls++;
+          return calls === 1
+            ? mdxDraft()
+            : mdxDraft({ title: "Corrective Retrieval for RAG Pipelines" });
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    if (out.outcome !== "drafted") throw new Error("expected drafted");
+    expect(out.targetPath).toBe("sources/Corrective Retrieval for RAG Pipelines.mdx");
+    expect(out.title).toBe("Corrective Retrieval for RAG Pipelines");
+    expect(calls).toBe(2);
+  });
+
+  test("collision retry answers SKIP → skipped as already-covered, no insert", async () => {
+    let calls = 0;
+    let inserted = false;
+    const out = await draftSourcePage(
+      baseDeps({
+        index: fakeIndex([
+          page({
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            relPath: "sources/Retrieval-Augmented Generation.md",
+          }),
+        ]),
+        callDrafter: async () => {
+          calls++;
+          return calls === 1 ? mdxDraft() : "SKIP";
+        },
+        insertProposal: async (p) => {
+          inserted = true;
+          return { id: "x", ...p } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("skipped");
+    if (out.outcome === "skipped") expect(out.reason).toContain("already covers");
+    expect(calls).toBe(2);
+    expect(inserted).toBe(false);
   });
 
   test("draft whose frontmatter type isn't source → shape gate skip", async () => {

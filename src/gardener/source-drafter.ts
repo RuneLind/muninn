@@ -171,10 +171,11 @@ function urlCovered(refs: WikiRefs, url: string): boolean {
 }
 
 /**
- * A stem collides when an existing `.md` page shares the bare stem: reader
- * precedence (`.md` > `.mdx`) would SHADOW the new `.mdx` page, dropping it from
- * the index. Also treats an exact same-path source page as a collision (create
- * mode can't overwrite). Either ⇒ skip the draft rather than ship a shadowed page.
+ * A stem collides when an existing page shares the bare stem: an `.md` twin would
+ * SHADOW the new `.mdx` page via reader precedence (`.md` > `.mdx`), and an exact
+ * same-path source page can't be overwritten in create mode. Either ⇒ the draft
+ * can't ship under this title. The drafter gets ONE retry with a distinct-title
+ * nudge (see `buildCollisionRetryPrompt`) before the doc is skipped for good.
  */
 function stemCollision(index: WikiIndex | null, stem: string, targetPath: string): boolean {
   if (!index) return false;
@@ -183,6 +184,25 @@ function stemCollision(index: WikiIndex | null, stem: string, targetPath: string
   return index.pages.some(
     (p) => p.name.toLowerCase() === s && p.relPath.toLowerCase().endsWith(".md"),
   );
+}
+
+/** The exact sentinel the collision retry may answer with instead of a draft. */
+export const COLLISION_SKIP_SENTINEL = "SKIP";
+
+/**
+ * The one-retry nudge after a stem collision: the drafter's chosen title is
+ * already taken (typically by an earlier capture from the same topic wave), so
+ * either differentiate — a meaningfully distinct title for what THIS item adds —
+ * or admit the existing page already covers it by answering the SKIP sentinel.
+ * Without this retry, two same-topic captures silently converge on one title and
+ * the second draft is discarded with only a log line to show for the model spend.
+ */
+export function buildCollisionRetryPrompt(basePrompt: string, takenTitle: string): string {
+  return `${basePrompt}
+
+IMPORTANT — TITLE COLLISION: a wiki page titled "${takenTitle}" already exists, so that exact title cannot be used. Decide:
+- If the existing page already covers this source's content (same subject, nothing meaningfully new), output exactly ${COLLISION_SKIP_SENTINEL} — that single word, nothing else.
+- Otherwise output the complete .mdx file again with a meaningfully DISTINCT encyclopedic title (and matching # heading) that captures what is unique about THIS source — not a trivial variation like appending "Overview" or a number.`;
 }
 
 export interface DraftSourcePageDeps {
@@ -248,40 +268,67 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       return { outcome: "skipped", reason: "summary too thin" };
     }
 
-    const prompt = buildSourceDraftPrompt({
+    const basePrompt = buildSourceDraftPrompt({
       input,
       today,
       existingPages: sourceWikilinkTargets(index),
     });
-
-    const raw = await deps.callDrafter(prompt, input.sourceTitle ?? input.url);
-    const draftText = normalizeDraftOutput(raw);
-
-    const fm = parseFrontmatter(draftText);
-    const title = Array.isArray(fm.title) ? fm.title[0] : fm.title;
-    if (!title || !title.trim()) {
-      return { outcome: "skipped", reason: "draft has no frontmatter title" };
-    }
-    const stem = sanitizeFilename(title.trim());
-    if (!stem) return { outcome: "skipped", reason: "title sanitized to an empty stem" };
 
     // Domain-aware filing: `ai` vs `life` from the capture's category (absent /
     // unknown ⇒ `ai`). BOTH the target dir and the shape gate's confinement check
     // MUST use the same domain — a mismatch makes `isPathConfined` reject every
     // `life/sources/` page as a silent skip.
     const domain = categoryToDomain(input.category ?? "");
-    const targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
 
-    const gate = shapeGate(draftText, {
-      kind: "source",
-      targetPath,
-      wikiDir,
-      domain,
-    });
-    if (!gate.ok) return { outcome: "skipped", reason: `shape gate: ${gate.reason}` };
+    // Up to two attempts: a stem collision on the first draft triggers ONE retry
+    // with the distinct-title-or-SKIP nudge; any other skip reason is final.
+    let prompt = basePrompt;
+    let draftText = "";
+    let title = "";
+    let targetPath = "";
+    for (let attempt = 0; ; attempt++) {
+      const raw = await deps.callDrafter(prompt, input.sourceTitle ?? input.url);
+      draftText = normalizeDraftOutput(raw);
 
-    if (stemCollision(index, stem, targetPath)) {
-      return { outcome: "skipped", reason: `stem "${stem}" collides with an existing page` };
+      if (attempt > 0 && draftText.trim().toUpperCase() === COLLISION_SKIP_SENTINEL) {
+        return {
+          outcome: "skipped",
+          reason: `drafter judged the existing page "${title}" already covers this doc`,
+        };
+      }
+
+      const fm = parseFrontmatter(draftText);
+      const rawTitle = Array.isArray(fm.title) ? fm.title[0] : fm.title;
+      if (!rawTitle || !rawTitle.trim()) {
+        return { outcome: "skipped", reason: "draft has no frontmatter title" };
+      }
+      title = rawTitle.trim();
+      const stem = sanitizeFilename(title);
+      if (!stem) return { outcome: "skipped", reason: "title sanitized to an empty stem" };
+
+      targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
+
+      const gate = shapeGate(draftText, {
+        kind: "source",
+        targetPath,
+        wikiDir,
+        domain,
+      });
+      if (!gate.ok) return { outcome: "skipped", reason: `shape gate: ${gate.reason}` };
+
+      if (stemCollision(index, stem, targetPath)) {
+        if (attempt === 0) {
+          log.info("Source drafter title collision on {stem} for {topic} — retrying with distinct-title nudge", {
+            botName,
+            stem,
+            topic: topicKey,
+          });
+          prompt = buildCollisionRetryPrompt(basePrompt, title);
+          continue;
+        }
+        return { outcome: "skipped", reason: `stem "${stem}" collides with an existing page` };
+      }
+      break;
     }
 
     // Persist-time containment (same seams the gardener runs): drop aliases another
