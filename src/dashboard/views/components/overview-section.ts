@@ -78,7 +78,7 @@ export function overviewSectionStyles(): string {
       font-size: 12px;
       align-items: flex-start;
     }
-    .mini-event:hover { background: #ffffff04; }
+    .mini-event:hover { background: var(--bg-hover); }
     .mini-event-time {
       color: var(--text-faint);
       font-family: monospace;
@@ -115,7 +115,7 @@ export function overviewSectionStyles(): string {
       font-size: 12px;
       align-items: flex-start;
     }
-    .upcoming-item:hover { background: #ffffff04; }
+    .upcoming-item:hover { background: var(--bg-hover); }
     .upcoming-type {
       font-size: 10px;
       padding: 1px 5px;

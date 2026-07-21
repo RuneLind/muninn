@@ -53,7 +53,7 @@ export function slackPanelStyles(): string {
       transition: background 0.15s;
       cursor: pointer;
     }
-    .slack-user-item:hover { background: #ffffff0a; }
+    .slack-user-item:hover { background: var(--bg-hover); }
     .slack-user-item:active { background: #ffffff12; }
     .slack-user-item.active { background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); margin: -1px; }
     .slack-user-name { font-size: 13px; color: var(--text-tertiary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
