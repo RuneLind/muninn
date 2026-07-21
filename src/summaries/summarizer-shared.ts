@@ -162,19 +162,29 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
  * x-article / anthropic / article via {@link buildSummarySystemPrompt}, and tiktok inline).
  *
  * The contract is deliberately uniform so stored summaries read consistently on
- * /summaries AND make clean drafter input downstream: a `## Key takeaways`
- * section leads every summary, `##`-level headings structure the body, tables
- * appear only for genuinely comparative content, and the output is PLAIN
- * markdown — no block components (Callout/Verdict/Pill/etc.), a stated non-goal
- * for stored summaries.
+ * /summaries AND make clean drafter input downstream: one italic ingress line
+ * orients the reader, a `## Key takeaways` section leads the body, `##`-level
+ * headings structure the rest, tables appear only for genuinely comparative
+ * content, a closing blockquote distills the headline revelations, and the
+ * output is PLAIN markdown — no block components (Callout/Verdict/Pill/etc.),
+ * a stated non-goal for stored summaries.
+ *
+ * The ingress + closer restore what the pre-#309 loose prompt produced
+ * emergently on the best summaries (and inconsistently on the rest): an
+ * orientation line up top and a memorable distillation at the bottom. The
+ * `## Key takeaways` section stays the FIRST *section* — nothing parses the
+ * body positionally, but /summaries scanability and drafter-input uniformity
+ * were the point of the restructure and are preserved.
  */
 export const SUMMARY_STRUCTURE_BULLETS = [
-  "- Open with a `## Key takeaways` section FIRST — 3–6 tight bullet points, one line each, capturing the most important points.",
+  "- Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*",
+  "- Then a `## Key takeaways` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.",
   "- Then `##`-level section headers for each major topic; use `###` only for sub-sections. Keep the heading hierarchy consistent.",
   "- Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.",
   "- **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in `- 🧪 Evals catch…`).",
   "- Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).",
   "- Keep it concise but comprehensive.",
+  "- End with a closing blockquote takeaway: `> 💬 **Takeaway:** …` — the 1–3 most surprising or headline revelations, distilled into one or two punchy sentences.",
 ];
 
 /**

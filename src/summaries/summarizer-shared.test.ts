@@ -27,12 +27,14 @@ Instructions:
    Choose from: ${cats.join(", ")}
 2. Then add a blank line, then SUMMARY: on its own line
 3. Then write a structured summary with:
-   - Open with a \`## Key takeaways\` section FIRST — 3–6 tight bullet points, one line each, capturing the most important points.
+   - Open the summary with ONE *italic* ingress line (max ~30 words): what/who this is and why it matters — e.g. *Interview with Tom Griffiths, Princeton professor of psychology & CS, about his book tracing the mathematical history of cognition.*
+   - Then a \`## Key takeaways\` section FIRST (before any other section) — 3–6 tight bullet points, one line each, capturing the most important points.
    - Then \`##\`-level section headers for each major topic; use \`###\` only for sub-sections. Keep the heading hierarchy consistent.
    - Use a markdown table when the content is genuinely comparative (options side by side, before/after, feature or tradeoff matrices) — don't force a table onto non-comparative content.
    - **Bold** for key terms; bullet lists for enumerations, prefixed with a fitting emoji (as in \`- 🧪 Evals catch…\`).
    - Plain markdown only — no HTML and no custom block components (no callouts, cards, verdicts, or pills).
-   - Keep it concise but comprehensive.`;
+   - Keep it concise but comprehensive.
+   - End with a closing blockquote takeaway: \`> 💬 **Takeaway:** …\` — the 1–3 most surprising or headline revelations, distilled into one or two punchy sentences.`;
   // Hardcoded literals on purpose: this test is the change-detector that forces
   // any edit to SUMMARY_STRUCTURE_BULLETS through an intentional review.
   expect(built).toBe(expected);
@@ -42,6 +44,9 @@ test("the default structure leads with a `## Key takeaways` section and forbids 
   const built = buildSummarySystemPrompt("intro", ["ai/general"]);
   // Key-takeaways-first is the campaign's headline structural guarantee.
   expect(built).toContain("## Key takeaways` section FIRST");
+  // The ingress + closer framing devices (restored from the pre-#309 style).
+  expect(built).toContain("*italic* ingress line");
+  expect(built).toContain("> 💬 **Takeaway:**");
   // Plain-markdown-only: stored summaries must never carry block components.
   expect(built).toContain("no custom block components");
   // Tables only where content is genuinely comparative.
