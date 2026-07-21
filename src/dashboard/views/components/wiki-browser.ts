@@ -29,6 +29,7 @@ import {
   hasTypedHubs,
   hubTypeList,
   pageDateLabel,
+  pageFolder,
   ROOT_FOLDER,
   sanitizeColorToken,
   sortPages,
@@ -701,6 +702,31 @@ function renderTagChips(): void {
   document.getElementById("tagChips")!.innerHTML = html;
 }
 
+/** Count of active secondary filters (folder + type + tag) — drives the Filters
+ *  disclosure's badge and its auto-open. Domain lives in the compact head, so it
+ *  is deliberately excluded here. */
+function activeFilterCount(): number {
+  let n = 0;
+  if (filters.folder) n++;
+  if (filters.type) n++;
+  if (filters.tag) n++;
+  return n;
+}
+
+/** Keep the Filters disclosure honest: badge the active-filter count and auto-open
+ *  it whenever a filter is set (a hidden active filter is worse than a tall stack).
+ *  Never force-closes — a user who opened it manually keeps it open. */
+function syncFilters(): void {
+  const count = activeFilterCount();
+  const badge = document.getElementById("wikiFilterCount");
+  if (badge) {
+    badge.textContent = count ? String(count) : "";
+    badge.style.display = count ? "" : "none";
+  }
+  const details = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
+  if (details && count && !details.open) details.open = true;
+}
+
 function renderList(): void {
   const mode = sortMode();
   const pages = sortPages(filterPages(allPages, filters), mode);
@@ -720,6 +746,64 @@ function renderList(): void {
   document.getElementById("wikiList")!.innerHTML =
     html || '<div class="wiki-conn-empty">No pages match.</div>';
   document.getElementById("wikiCount")!.textContent = pages.length + " / " + allPages.length;
+}
+
+// ── Coverage footer (under the page list) ─────────────────────────────
+// A one-line index-coverage summary linking the full Index card on the start
+// view. Reuses the same /api/wiki/index-coverage endpoint as that card; a
+// no-collections/degraded/failed response simply hides the footer.
+function loadCoverageFooter(): void {
+  const el = document.getElementById("wikiCoverageFoot");
+  if (!el) return;
+  fetch(withWiki("/api/wiki/index-coverage"))
+    .then((r) => r.json())
+    .then((cov: IndexCoverage) => {
+      const cur = document.getElementById("wikiCoverageFoot");
+      if (!cur) return;
+      if (cov.error || cov.totalMd === null || cov.indexed === null) {
+        cur.style.display = "none";
+        return;
+      }
+      const missing = cov.missing ? cov.missing.length : 0;
+      cur.innerHTML =
+        '<span class="wiki-cov-link" id="wikiCoverageLink" title="Open the full Index card">' +
+        cov.totalMd + " pages · indexed " + cov.indexed +
+        (missing ? " · " + missing + " missing" : "") +
+        "</span>";
+      cur.style.display = "";
+    })
+    .catch(() => {
+      const cur = document.getElementById("wikiCoverageFoot");
+      if (cur) cur.style.display = "none";
+    });
+}
+
+// ── Breadcrumb bar (above the article) ────────────────────────────────
+// Shows "wiki / folder / page · updated" for the open page and hosts the
+// Explain affordance (a button shown only while a selection exists — see the
+// Select-to-Explain section). Hidden on the start view and on Ask answers.
+function renderBreadcrumb(m: WikiListing): void {
+  const el = document.getElementById("wikiBreadcrumb");
+  if (!el) return;
+  const crumbs: string[] = [];
+  if (WIKI) crumbs.push('<span class="wiki-bc-wiki">' + esc(WIKI) + "</span>");
+  const folder = pageFolder(m);
+  if (folder && folder !== ROOT_FOLDER) {
+    crumbs.push('<span class="wiki-bc-folder">' + esc(folder) + "</span>");
+  }
+  crumbs.push('<span class="wiki-bc-cur">' + esc(m.title) + "</span>");
+  const updated = pageDateLabel(m);
+  el.innerHTML =
+    '<div class="wiki-bc-trail">' +
+    crumbs.join('<span class="wiki-bc-sep">/</span>') +
+    "</div>" +
+    (updated ? '<span class="wiki-bc-date">updated ' + esc(updated) + "</span>" : "") +
+    '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>';
+  el.style.display = "flex";
+}
+function hideBreadcrumb(): void {
+  const el = document.getElementById("wikiBreadcrumb");
+  if (el) el.style.display = "none";
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -828,6 +912,7 @@ function refreshStartBody(): void {
 
 function renderStart(): void {
   currentName = null;
+  hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
   const counts = typeCounts(allPages, "");
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
@@ -1071,6 +1156,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   if (push) {
     history.pushState({ page: currentName }, "", pageUrl(currentName));
   }
+  renderBreadcrumb(m);
   const src = withWiki("/api/wiki/html?name=" + encodeURIComponent(m.name));
   document.getElementById("articleWrap")!.innerHTML =
     articleHeadHtml(m) +
@@ -1139,6 +1225,7 @@ function loadPage(name: string, push: boolean): void {
         return;
       }
       currentName = data.meta.name;
+      renderBreadcrumb(data.meta);
       if (push) {
         history.pushState({ page: currentName }, "", pageUrl(currentName));
       }
@@ -1185,6 +1272,16 @@ document.body.addEventListener("click", (e) => {
     loadIndexCoverage(true);
     return;
   }
+  // Coverage footer under the page list → open the full Index card on the start
+  // view (it lazy-loads there); scroll it into view once the render settles.
+  if (target.closest && target.closest("#wikiCoverageLink")) {
+    renderStart();
+    setTimeout(() => {
+      const card = document.getElementById("wikiIndexCard");
+      if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+    return;
+  }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
     startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline") || "hubs";
@@ -1217,12 +1314,14 @@ document.getElementById("domainChips")!.addEventListener("click", function (this
   renderTagChips();
   renderList();
   refreshStartBody();
+  syncFilters();
 });
 
 document.getElementById("wikiFolder")!.addEventListener("change", function (this: HTMLSelectElement) {
   filters.folder = this.value;
   renderList();
   refreshStartBody();
+  syncFilters();
 });
 
 document.getElementById("typeChips")!.addEventListener("click", (e) => {
@@ -1234,6 +1333,7 @@ document.getElementById("typeChips")!.addEventListener("click", (e) => {
   renderTagChips();
   renderList();
   refreshStartBody();
+  syncFilters();
 });
 
 document.getElementById("tagChips")!.addEventListener("click", (e) => {
@@ -1250,6 +1350,7 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
   renderTagChips();
   renderList();
   refreshStartBody();
+  syncFilters();
 });
 
 document.getElementById("wikiSort")!.addEventListener("change", renderList);
@@ -1338,18 +1439,6 @@ function askHistoryParam(): string {
     a: (t.answer || "").slice(0, ASK_ANSWER_CHARS),
   }));
   return JSON.stringify(recent);
-}
-
-function switchConnTab(tab: string): void {
-  document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
-    b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
-  });
-  const connBody = document.getElementById("connBody")!;
-  const askBody = document.getElementById("askBody")!;
-  const ask = tab === "ask";
-  connBody.style.display = ask ? "none" : "";
-  askBody.style.display = ask ? "flex" : "none";
-  if (ask) (document.getElementById("wikiAskInput") as HTMLTextAreaElement).focus();
 }
 
 /** Update the single status line in the Ask controls. Empty text hides it. */
@@ -1471,6 +1560,7 @@ function setFollowupDisabled(disabled: boolean): void {
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
+  hideBreadcrumb(); // an Ask answer replaces the page — no breadcrumb
   askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
   // Rehydrated turns (history re-show) inject stored answer HTML that may carry
@@ -1771,10 +1861,6 @@ function clearAskSession(): void {
   }
 }
 
-document.querySelector(".wiki-conn-tabs")?.addEventListener("click", (e) => {
-  const tab = (e.target as HTMLElement).closest(".wiki-conn-tab");
-  if (tab) switchConnTab(tab.getAttribute("data-conntab") || "conn");
-});
 document.getElementById("wikiAskBtn")?.addEventListener("click", askQuestion);
 document.getElementById("wikiAskInput")?.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;
@@ -1808,15 +1894,15 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-// ── Select-to-Explain pill ────────────────────────────────────────────
-// Selecting text inside a rendered (markdown) article floats an "✨ Explain"
-// pill above the selection; activating it runs the SAME research stream as Ask
-// (via `runAskStream`) against `/api/wiki/explain`, so the explanation lands in
-// the article pane + session history like any other Ask turn.
+// ── Select-to-Explain ─────────────────────────────────────────────────
+// Selecting text inside a rendered (markdown) article — or an HTML explainer,
+// via the iframe bridge — reveals the "✨ Explain" button in the breadcrumb bar
+// (a stable spot, no floating pill to position). Activating it runs the SAME
+// research stream as Ask (via `runAskStream`) against `/api/wiki/explain`, so the
+// explanation lands in the article pane + session history like any other Ask turn.
 const EXPLAIN_MIN_CHARS = 3;
 const EXPLAIN_MAX_CHARS = 1500;
-let explainPill: HTMLDivElement | null = null;
-// Captured at show time — BEFORE any click can collapse the selection.
+// Captured at selection time — BEFORE any click can collapse the selection.
 let pillSel = "";
 let pillHeading = "";
 
@@ -1845,54 +1931,22 @@ function nearestHeading(range: Range): string {
   return "";
 }
 
-function ensureExplainPill(): void {
-  if (explainPill) return;
-  const pill = document.createElement("div");
-  pill.id = "wikiExplainPill";
-  pill.className = "wiki-explain-pill";
-  pill.textContent = "✨ Explain";
-  // mousedown + preventDefault so activating the pill never clears the selection
-  // before the handler reads the captured values; stopPropagation keeps the
-  // document-level dismiss listener from also firing.
-  pill.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    activateExplain();
-  });
-  document.body.appendChild(pill);
-  explainPill = pill;
-}
-
+/** Reveal / hide the breadcrumb's Explain button. The button is (re)rendered
+ *  hidden by `renderBreadcrumb` on every page load, so a lookup-by-id is enough;
+ *  on the start view / Ask answers there is no breadcrumb and both are no-ops.
+ *  (Named `*ExplainPill` still — the call sites below read as before.) */
 function hideExplainPill(): void {
-  if (explainPill) explainPill.style.display = "none";
+  const btn = document.getElementById("wikiExplainBtn");
+  if (btn) (btn as HTMLElement).style.display = "none";
+}
+function showExplainPill(): void {
+  const btn = document.getElementById("wikiExplainBtn");
+  if (btn) (btn as HTMLElement).style.display = "";
 }
 
-/** Position the pill above the selection (below when clipped by the viewport
- *  top), horizontally centered and kept on-screen. Input is a VIEWPORT-relative
- *  rect (`{top,left,width,height}`): the md caller derives it from its Range, the
- *  iframe caller translates the forwarded rect by the frame's own position — both
- *  still viewport-relative. This is the ONLY place page scroll is added, so
- *  callers must NOT pre-add scroll or the pill lands a scroll-height away. */
-function positionExplainPill(rect: {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}): void {
-  const pill = explainPill!;
-  pill.style.display = "block";
-  const pw = pill.offsetWidth;
-  const ph = pill.offsetHeight;
-  let top = rect.top - ph - 8;
-  if (top < 4) top = rect.top + rect.height + 8; // clipped by viewport top → below
-  let left = rect.left + rect.width / 2 - pw / 2;
-  left = Math.max(4, Math.min(left, window.innerWidth - pw - 4));
-  pill.style.top = top + window.scrollY + "px";
-  pill.style.left = left + window.scrollX + "px";
-}
-
-/** Decide whether to show the pill for the current selection, and capture the
- *  passage + heading if so. Called on `mouseup` inside the article pane. */
+/** Decide whether to reveal the Explain button for the current selection, and
+ *  capture the passage + heading if so. Called on `mouseup` inside the article
+ *  pane. */
 function maybeShowExplainPill(): void {
   // Real markdown page only — not the start view, not an Ask answer (both leave
   // currentName null), not an HTML explainer (iframe selections are unreachable,
@@ -1910,15 +1964,12 @@ function maybeShowExplainPill(): void {
   const range = sel.getRangeAt(0);
   pillSel = text;
   pillHeading = nearestHeading(range);
-  ensureExplainPill();
-  positionExplainPill(range.getBoundingClientRect());
+  showExplainPill();
 }
 
 function activateExplain(): void {
   hideExplainPill();
   if (!pillSel || !currentName) return;
-  // Switch to the Ask tab so the status line is where the user expects progress.
-  switchConnTab("ask");
   const turn: AskTurn = {
     question: explainLabel(pillSel),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
@@ -1945,11 +1996,21 @@ document.addEventListener("selectionchange", () => {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed) hideExplainPill();
 });
-document.getElementById("articleWrap")?.addEventListener("scroll", hideExplainPill);
 document.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
 });
-document.addEventListener("mousedown", hideExplainPill);
+// A mousedown on the Explain button activates it (preventDefault keeps the
+// selection alive so `activateExplain` reads its captured passage); a mousedown
+// anywhere else dismisses the button. One handler so the two never race.
+document.addEventListener("mousedown", (e) => {
+  const t = e.target as HTMLElement;
+  if (t.closest && t.closest("#wikiExplainBtn")) {
+    e.preventDefault();
+    activateExplain();
+    return;
+  }
+  hideExplainPill();
+});
 
 // ── Explainer-iframe bridge ───────────────────────────────────────────
 // Standalone HTML explainers render in a sandboxed (opaque-origin) iframe, so the
@@ -1964,27 +2025,19 @@ window.addEventListener("message", (e: MessageEvent) => {
   if (!meta || meta.type !== "explainer") return;
   const frame = document.querySelector(".wiki-explainer-frame") as HTMLIFrameElement | null;
   if (!frame || e.source !== frame.contentWindow) return;
-  const data = e.data as { type?: string; sel?: unknown; heading?: unknown; rect?: unknown };
+  const data = e.data as { type?: string; sel?: unknown; heading?: unknown };
   if (!data || typeof data !== "object") return;
   if (data.type === "wiki-explain-clear") return hideExplainPill();
   if (data.type !== "wiki-explain-sel") return;
   const raw = typeof data.sel === "string" ? data.sel.trim() : "";
   if (raw.length < EXPLAIN_MIN_CHARS) return hideExplainPill();
-  const fwd = data.rect as { top?: number; left?: number; width?: number; height?: number } | null;
-  if (!fwd || typeof fwd !== "object") return hideExplainPill();
   // Cap at the same ceiling as the md path (server re-caps too).
   pillSel = raw.length > EXPLAIN_MAX_CHARS ? raw.slice(0, EXPLAIN_MAX_CHARS) : raw;
   pillHeading = typeof data.heading === "string" ? data.heading : "";
-  // Translate the frame-relative rect into the parent viewport by the iframe
-  // element's own position; positionExplainPill adds page scroll (only there).
-  const iframeRect = frame.getBoundingClientRect();
-  ensureExplainPill();
-  positionExplainPill({
-    top: iframeRect.top + (fwd.top || 0),
-    left: iframeRect.left + (fwd.left || 0),
-    width: fwd.width || 0,
-    height: fwd.height || 0,
-  });
+  // The Explain button lives in the breadcrumb (stable spot) — no rect to
+  // translate anymore; just reveal it. `renderBreadcrumb` already ran for this
+  // explainer, so the button exists.
+  showExplainPill();
 });
 
 // ── Boot ──────────────────────────────────────────────────────────────
@@ -2020,6 +2073,8 @@ fetch(withWiki("/api/wiki/pages"))
     renderFolderSelect();
     renderTypeChips();
     renderTagChips();
+    syncFilters();
+    loadCoverageFooter();
     const params = new URLSearchParams(location.search);
     const page = params.get("page");
     if (page) loadPage(page, false);
