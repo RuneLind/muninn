@@ -156,7 +156,7 @@ export async function renderWikiPage(opts?: {
 
     /* Compact head: wiki picker + gardener icon share the top row. */
     .wiki-head-top { display: flex; align-items: center; gap: 8px; }
-    .wiki-head-top .wiki-sort { flex: 1; }
+    .wiki-head-top .wiki-sort { flex: 1; min-width: 0; }
     .wiki-head-label { flex-shrink: 0; }
     .wiki-gardener-icon {
       position: relative; margin-left: auto; flex-shrink: 0;
