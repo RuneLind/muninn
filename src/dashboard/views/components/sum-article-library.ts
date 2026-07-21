@@ -279,6 +279,7 @@ export function sumArticleLibraryScript(): string {
           // exist in the new domain, which would strand the list on an empty
           // result with no source chips to recover from.
           if (typeof activeSource !== 'undefined') activeSource = null;
+          if (typeof activeShelfCategory !== 'undefined') activeShelfCategory = null;
           renderDomainFilter();
           loadLibrary();  // rebuild docsByCategory (doc-panel sidebar) for the new domain
           if (typeof loadShelf === 'function') loadShelf();
