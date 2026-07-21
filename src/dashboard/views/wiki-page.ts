@@ -59,7 +59,7 @@ export async function renderWikiPage(opts?: {
     : "";
   const gardenerHref = `/wiki/gardener${selected ? "?wiki=" + encodeURIComponent(selected) : ""}`;
   const gardenerLink = gardener
-    ? `<a href="${gardenerHref}" class="wiki-gardener-link" title="Wiki gardener — review drafted pages">🌱 Gardener${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
+    ? `<a href="${gardenerHref}" class="wiki-gardener-icon" title="Wiki gardener — review drafted pages" aria-label="Wiki gardener${gardenerPending > 0 ? ` (${gardenerPending} pending)` : ""}">🌱${gardenerPending > 0 ? `<span class="wiki-gardener-badge">${gardenerPending}</span>` : ""}</a>`
     : "";
   // An unknown `?wiki=` matches no real option — render its raw name as a
   // disabled, selected placeholder so the picker and the "No wiki named X" pane
@@ -148,17 +148,65 @@ export async function renderWikiPage(opts?: {
     .wiki-folder { flex: 1; }
     .wiki-count { font-size: 11.5px; color: var(--text-dim); }
 
-    .wiki-gardener-link {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 12px; color: var(--text-muted); text-decoration: none;
-      padding: 4px 10px; border: 1px solid var(--border-secondary); border-radius: 6px;
-    }
-    .wiki-gardener-link:hover { color: var(--accent-light); border-color: var(--accent); }
     .wiki-gardener-badge {
       background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 600;
       min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
       display: inline-flex; align-items: center; justify-content: center;
     }
+
+    /* Compact head: wiki picker + gardener icon share the top row. */
+    .wiki-head-top { display: flex; align-items: center; gap: 8px; }
+    .wiki-head-top .wiki-sort { flex: 1; }
+    .wiki-head-label { flex-shrink: 0; }
+    .wiki-gardener-icon {
+      position: relative; margin-left: auto; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; border-radius: 7px;
+      border: 1px solid var(--border-secondary); text-decoration: none; font-size: 15px;
+    }
+    .wiki-gardener-icon:hover { border-color: var(--accent); }
+    .wiki-gardener-icon .wiki-gardener-badge { position: absolute; top: -5px; right: -5px; }
+
+    /* Domain segmented control (All / AI / Life). */
+    .wiki-segmented {
+      display: inline-flex; width: fit-content; overflow: hidden;
+      border: 1px solid var(--border-secondary); border-radius: 7px;
+    }
+    .wiki-segmented .wiki-chip {
+      border: none; border-radius: 0; border-right: 1px solid var(--border-secondary);
+      padding: 5px 14px;
+    }
+    .wiki-segmented .wiki-chip:last-child { border-right: none; }
+    .wiki-segmented .wiki-chip.active {
+      background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-light);
+    }
+
+    /* Filters disclosure — holds the secondary facets (folder + type + tag chips)
+       so the head stays compact. Auto-opened by JS whenever a filter is active. */
+    .wiki-filters { border: 1px solid var(--border-secondary); border-radius: 7px; background: var(--bg-inset); }
+    .wiki-filters-summary {
+      list-style: none; cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 7px;
+      padding: 7px 10px; font-size: 12px; color: var(--text-muted);
+    }
+    .wiki-filters-summary::-webkit-details-marker { display: none; }
+    .wiki-filters-summary::before { content: '▸'; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
+    .wiki-filters[open] .wiki-filters-summary::before { transform: rotate(90deg); }
+    .wiki-filters-summary:hover { color: var(--text-primary); }
+    .wiki-filter-count {
+      background: var(--accent); color: #fff; font-size: 10px; font-weight: 600;
+      min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .wiki-filters-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 10px 10px; }
+
+    /* Coverage footer under the page list — links the full Index card. */
+    .wiki-coverage-foot {
+      flex-shrink: 0; border-top: 1px solid var(--border-primary);
+      padding: 8px 12px; font-size: 11.5px; color: var(--text-dim);
+    }
+    .wiki-cov-link { cursor: pointer; }
+    .wiki-cov-link:hover { color: var(--accent-light); }
 
     .wiki-list { flex: 1; overflow-y: auto; padding: 6px; }
     .wiki-list-item {
@@ -231,6 +279,24 @@ export async function renderWikiPage(opts?: {
     .wiki-mini-more { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 2px 0 4px; }
 
     /* ── Middle: article pane ──────────────────────────── */
+    /* Breadcrumb bar above the article (wiki / folder / page · updated), also the
+       stable home for the Explain affordance — shown only while a selection exists. */
+    .wiki-breadcrumb {
+      flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+      padding: 9px 24px; border-bottom: 1px solid var(--border-primary);
+      font-size: 12px; color: var(--text-muted);
+    }
+    .wiki-bc-trail { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
+    .wiki-bc-cur { color: var(--text-secondary); }
+    .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
+    .wiki-bc-explain {
+      flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
+      background: var(--accent); color: #fff;
+      border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+      font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
+    }
+    .wiki-bc-explain:hover { background: var(--accent-light); }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }
@@ -425,29 +491,22 @@ export async function renderWikiPage(opts?: {
     .wiki-ix-link:hover { color: var(--accent); }
     .wiki-ix-unavailable { font-size: 12px; color: var(--text-dim); }
 
-    /* ── Right: connections + ask pane ─────────────────── */
+    /* ── Right: ask (pinned) + connections pane ────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
-    .wiki-conn-tabs { display: flex; border-bottom: 1px solid var(--border-primary); }
-    .wiki-conn-tab {
-      flex: 1;
-      padding: 10px 8px;
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 0.4px;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      background: none;
-      border: none;
-      border-bottom: 2px solid transparent;
-      cursor: pointer;
-      font-family: inherit;
-    }
-    .wiki-conn-tab:hover { color: var(--text-primary); }
-    .wiki-conn-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .wiki-conn-body { flex: 1; overflow-y: auto; padding: 10px; }
 
-    /* Ask tab — the controls live here; the answer renders in the article pane. */
-    .wiki-ask-body { display: flex; flex-direction: column; }
+    /* Ask compose — pinned at the top of the right rail (no tabs). The controls
+       live here; the answer renders in the article pane. Connections/Similar
+       render in .wiki-conn-body below. */
+    .wiki-ask-body {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      max-height: 48%;
+      overflow-y: auto;
+      padding: 12px 12px 10px;
+      border-bottom: 1px solid var(--border-primary);
+    }
     .wiki-ask-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
     .wiki-ask-bot { font-size: 11px; color: var(--text-dim); padding: 0 4px 6px; line-height: 1.5; }
     .wiki-ask-bot code { font-size: 10px; background: var(--bg-hover); padding: 1px 4px; border-radius: 4px; }
@@ -468,17 +527,9 @@ export async function renderWikiPage(opts?: {
     @keyframes wikiAskSpin { to { transform: rotate(360deg); } }
     .wiki-ask-status.done .spinner { display: none; }
     .wiki-ask-status.error { color: var(--status-error); }
-    /* Select-to-Explain floating pill (appended to <body>, positioned in JS). */
-    .wiki-explain-pill {
-      position: absolute; z-index: 9999; display: none;
-      padding: 5px 11px; border-radius: 999px;
-      background: var(--accent); color: #fff;
-      font-size: 12px; font-weight: 600; line-height: 1;
-      cursor: pointer; white-space: nowrap; user-select: none;
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-      border: 1px solid color-mix(in srgb, var(--accent) 60%, #000);
-    }
-    .wiki-explain-pill:hover { background: var(--accent-light); }
+    /* Select-to-Explain affordance now lives in the breadcrumb bar (see
+       .wiki-bc-explain below) — shown only while a selection exists, so there is
+       no permanently-dead button and no floating pill to position. */
     /* Answer rendered in the article pane — reuses .wiki-article typography. */
     .wiki-ask-article { margin-top: 4px; }
     .wiki-ask-cite {
@@ -567,20 +618,18 @@ export async function renderWikiPage(opts?: {
   <div class="wiki-layout">
     <div class="wiki-pane">
       <div class="wiki-browse-head">
-        ${wikiSelector ? `<div class="wiki-sort-row"><span class="wiki-count">Wiki</span>${wikiSelector}</div>` : ""}
-        ${gardenerLink ? `<div class="wiki-sort-row">${gardenerLink}</div>` : ""}
+        ${
+          wikiSelector || gardenerLink
+            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${gardenerLink}</div>`
+            : ""
+        }
         <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
-        <div class="wiki-chip-row" id="domainChips">
+        <div class="wiki-chip-row wiki-segmented" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
           <button class="wiki-chip" data-domain="ai">AI</button>
           <button class="wiki-chip" data-domain="life">Life</button>
         </div>
-        <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
-          <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
-        </div>
-        <div class="wiki-chip-row" id="typeChips"></div>
-        <div class="wiki-chip-row" id="tagChips"></div>
         <div class="wiki-sort-row">
           <select id="wikiSort" class="wiki-sort">
             <option value="updated" selected>Recently updated</option>
@@ -589,25 +638,30 @@ export async function renderWikiPage(opts?: {
           </select>
           <span class="wiki-count" id="wikiCount"></span>
         </div>
+        <details class="wiki-filters" id="wikiFilters">
+          <summary class="wiki-filters-summary">Filters<span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></summary>
+          <div class="wiki-filters-body">
+            <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
+              <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
+            </div>
+            <div class="wiki-chip-row" id="typeChips"></div>
+            <div class="wiki-chip-row" id="tagChips"></div>
+          </div>
+        </details>
       </div>
       <div class="wiki-list" id="wikiList"></div>
+      <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
     </div>
 
     <div class="wiki-pane">
+      <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
       <div class="wiki-article-wrap" id="articleWrap">
         <div class="wiki-empty-state">Loading wiki…</div>
       </div>
     </div>
 
     <div class="wiki-pane wiki-conn-pane">
-      <div class="wiki-conn-tabs">
-        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
-        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
-      </div>
-      <div class="wiki-conn-body" id="connBody">
-        <div class="wiki-conn-empty">Select a page to see its connections.</div>
-      </div>
-      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
+      <div class="wiki-ask-body" id="askBody">
         <div class="wiki-ask-compose">
           <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
           <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
@@ -616,6 +670,9 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>
         ${askBotLine}
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
+      </div>
+      <div class="wiki-conn-body" id="connBody">
+        <div class="wiki-conn-empty">Select a page to see its connections.</div>
       </div>
     </div>
   </div>
