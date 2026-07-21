@@ -68,16 +68,27 @@ export function connectionScript(): string {
         // Client-side bot filter for SSE events
         if (selectedBot && ev.botName && ev.botName !== selectedBot) return;
         addEvent(ev);
-        // Update overview recent activity
-        recentEvents.push(ev);
-        if (recentEvents.length > 50) recentEvents = recentEvents.slice(-50);
-        updateRecentActivity(recentEvents.slice(-5).reverse());
       });
 
       es.addEventListener('stats', (e) => {
         const data = JSON.parse(e.data);
-        const el = document.getElementById('metricMsgsToday');
-        if (el) el.textContent = data.messagesToday;
+        // Live "messages today" — patch it onto the cached stats + re-tile.
+        if (lastStats && data && data.messagesToday != null) {
+          lastStats.messagesToday = data.messagesToday;
+          renderOverviewTiles();
+        }
+      });
+
+      // Live agent runs (running zone) for the home Now card. Refetch the overview
+      // only when the RUNNING set changes (a start/finish can shift up-next), not
+      // on every ~1/s progress snapshot.
+      es.addEventListener('agent_runs', (e) => {
+        try {
+          nowRuns = JSON.parse(e.data) || [];
+          renderNow();
+          const key = runningKey(nowRuns);
+          if (key !== lastRunningKey) { lastRunningKey = key; loadNowOverview(); }
+        } catch (err) {}
       });
 
       es.addEventListener('agent_status', (e) => {
@@ -100,6 +111,37 @@ export function connectionScript(): string {
     // --- Data Loading ---
     let usersData = [];
 
+    // Signature of the currently-running runs so we only refetch the overview
+    // (up-next) when a run actually starts/finishes — mirrors the /agents page.
+    let lastRunningKey = '';
+    function runningKey(runs) {
+      return (runs || []).filter(r => !r.completed).map(r => r.requestId).sort().join(',');
+    }
+
+    // Home "Now" card: up-next comes from the shared agents overview (running
+    // arrives live over the agent_runs SSE event). Monotonic seq guard so a slow
+    // earlier response can't overwrite a newer one.
+    let nowOverviewSeq = 0;
+    async function loadNowOverview() {
+      const mySeq = ++nowOverviewSeq;
+      try {
+        const data = await fetch('/api/agents/overview').then(r => r.json());
+        if (mySeq !== nowOverviewSeq) return;
+        nowUpNext = data.upNext || [];
+        renderNow();
+      } catch (err) { /* Now card degrades to running-only */ }
+    }
+
+    // Home "Attention" card.
+    async function loadAttention() {
+      try {
+        const data = await fetch('/api/attention').then(r => r.json());
+        renderAttention(data);
+      } catch (err) {
+        renderAttention({ items: [], errors: ['request failed'] });
+      }
+    }
+
     async function loadDashboard() {
       try {
         clearFeed();
@@ -116,7 +158,9 @@ export function connectionScript(): string {
           fetch('/api/activity').then(r => r.json()).catch(() => ({ events: [] })),
         ]);
 
-        updateMetricsStrip(statsRes);
+        lastStats = statsRes;
+        renderOverviewTiles();
+        renderSlimChart(statsRes);
 
         // Store data in globals (order doesn't matter — just setters)
         renderGoals(goalsRes.goals || []);
@@ -130,21 +174,19 @@ export function connectionScript(): string {
           () => renderUsers(usersRes.users || []),
           () => renderMemoryPanel(),
           () => renderAutomationPanel(),
-          () => initChart(statsRes.messagesByDay || [], statsRes.tokensByDay || []),
         ].forEach(fn => { try { fn(); } catch (e) { console.error('Render error:', e); } });
 
-        // Activity feed + overview: recent activity
+        // Activity feed
         let events = activityRes.events || [];
         if (selectedBot) {
           events = events.filter(ev => !ev.botName || ev.botName === selectedBot);
         }
         // Repopulate feed (events are oldest-first, addEvent prepends, so reverse to get chronological)
         events.slice().reverse().forEach(ev => addEvent(ev));
-        recentEvents = events;
-        updateRecentActivity(recentEvents.slice(-5).reverse());
 
-        // Overview: upcoming
-        updateUpcoming(goalsRes.goals || [], tasksRes.tasks || []);
+        // Home cards: Now (up-next) + Attention
+        loadNowOverview();
+        loadAttention();
       } catch (err) {
         console.error('Failed to load dashboard data:', err);
       }
@@ -211,8 +253,13 @@ export function connectionScript(): string {
     async function refreshStats() {
       try {
         const stats = await fetch('/api/stats' + botParam()).then(r => r.json());
-        updateMetricsStrip(stats);
-        initChart(stats.messagesByDay || [], stats.tokensByDay || []);
+        lastStats = stats;
+        renderOverviewTiles();
+        renderSlimChart(stats);
+        if (uchartFullShown && typeof initChart === 'function') {
+          initChart(stats.messagesByDay || [], stats.tokensByDay || []);
+        }
+        loadAttention();
       } catch (err) {
         console.error('Failed to refresh stats:', err);
       }
