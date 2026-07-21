@@ -99,11 +99,24 @@ export async function renderTracesPage(): Promise<string> {
       if (pill) selectBot(pill.dataset.bot);
     });
 
+    // Deep-link: /traces#<traceId> opens that trace's waterfall. loadWaterfall
+    // fetches the trace by id directly, so it works even when the row isn't on
+    // the loaded first page (placeWaterfallAfterRow then parks the panel at the
+    // top); when the row IS present we also scroll it into view.
+    function openTraceFromHash() {
+      var id = (location.hash || '').replace(/^#/, '').trim();
+      if (!id) return;
+      loadWaterfall(id);
+      var row = document.querySelector('tr[data-trace="' + id + '"]');
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center' });
+    }
+
     // Init
     loadFilters();
     loadStats();
-    loadTraces();
+    loadTraces().then(openTraceFromHash);
     startAutoRefresh();
+    window.addEventListener('hashchange', openTraceFromHash);
   </script>
 </body>
 </html>`;

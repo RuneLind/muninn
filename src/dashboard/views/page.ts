@@ -19,7 +19,8 @@ import { slackPanelStyles, slackPanelHtml, slackPanelScript } from "./components
 import { connectorPanelStyles, connectorPanelHtml, connectorPanelScript } from "./components/connector-panel.ts";
 import { memsearchPanelStyles, memsearchPanelHtml, memsearchPanelScript } from "./components/memsearch-panel.ts";
 import { usageChartStyles, usageChartScript } from "./components/usage-chart.ts";
-import { activityFeedStyles, activityFeedHtml, activityFeedScript } from "./components/activity-feed.ts";
+import { summaryTilesStyles, summaryTilesScript } from "./components/summary-tiles.ts";
+import { statusChipsStyles, statusChipsScript } from "./components/status-chips.ts";
 import { requestProgressStyles, requestProgressHtml, requestProgressScript } from "./components/request-progress-ui.ts";
 
 export async function renderDashboardPage(): Promise<string> {
@@ -54,7 +55,8 @@ export async function renderDashboardPage(): Promise<string> {
     ${memsearchPanelStyles()}
     ${requestProgressStyles()}
     ${usageChartStyles()}
-    ${activityFeedStyles()}
+    ${summaryTilesStyles()}
+    ${statusChipsStyles()}
   </style>
 </head>
 <body>
@@ -99,7 +101,6 @@ export async function renderDashboardPage(): Promise<string> {
     </div>
   </div>
   ${detailPanelHtml()}
-  ${activityFeedHtml()}
   ${tooltipHtml()}
   <script>
     ${helpers}
@@ -118,7 +119,8 @@ export async function renderDashboardPage(): Promise<string> {
     ${connectorPanelScript()}
     ${memsearchPanelScript()}
     ${usageChartScript()}
-    ${activityFeedScript()}
+    ${summaryTilesScript()}
+    ${statusChipsScript()}
     ${requestProgressScript()}
     ${agentStatusScript()}
     ${connectionScript()}

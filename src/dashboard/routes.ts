@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { getDashboardBuildHash } from "./dashboard-build-hash.ts";
+import { assembleAttention } from "./home-attention.ts";
 import { registerDataRoutes } from "./routes/data-routes.ts";
 import { registerTracesRoutes } from "./routes/traces-routes.ts";
 import { registerMemsearchRoutes } from "./routes/memsearch-routes.ts";
@@ -37,6 +38,13 @@ export function createDashboardRoutes(config: Config): Hono {
   // rendered with and shows a "Muninn was restarted" banner on mismatch.
   app.get("/api/dashboard-build-hash", async (c) => {
     return c.json({ hash: await getDashboardBuildHash() });
+  });
+
+  // Home "Attention" surface — stale watchers, pending gardener drafts, failed
+  // recent runs. Assembly is the pure, injectable `home-attention.ts`; never 5xx
+  // (degraded sources land in `errors[]`).
+  app.get("/api/attention", async (c) => {
+    return c.json(await assembleAttention());
   });
 
   registerDataRoutes(app);
