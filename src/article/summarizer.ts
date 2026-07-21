@@ -4,6 +4,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   attachRun,
   updateStatus,
@@ -79,6 +80,7 @@ ${contextLines.join("\n")}`;
     // URL-less doc forks rather than being keyed on an empty url.
     updateStatus(jobId, "ingesting");
 
+    let ingestedDocId: string | undefined;
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/articles/ingest",
@@ -91,10 +93,29 @@ ${contextLines.join("\n")}`;
         date: new Date().toISOString().split("T")[0],
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
+      onIngested: (info) => {
+        ingestedDocId = info.filePath;
+      },
     });
 
     // 4. Complete
     completeJob(jobId, summary, category);
+
+    // 5. Fire-and-forget: draft a per-article source page from this summary. NO
+    //    fallback id — a pasted article often has no url, so without huginn's stored
+    //    file_path there's no keyable id (skip rather than coerce). This is the first
+    //    real user of the URL-less pending-ingestion callout path (`url: ""`). Skips
+    //    silently when the bot has no wikiDir; never fails the job.
+    if (ingestedDocId) {
+      triggerSourceDraftFromCapture(botConfig, {
+        collection: "article-summaries",
+        docId: ingestedDocId,
+        url,
+        body: summary,
+        sourceTitle: title,
+        category,
+      });
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("Article summarization failed for job {jobId}: {error}", { jobId, error: msg });

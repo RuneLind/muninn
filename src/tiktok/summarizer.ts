@@ -7,6 +7,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { ingestSummary, runCaptureOneShot, SUMMARY_STRUCTURE_BULLETS } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   downloadVideo,
   transcribeVideo,
@@ -197,6 +198,7 @@ Author: ${dl.uploader}`;
     //    defeats dedup.
     updateStatus(jobId, "ingesting");
 
+    let ingestedDocId: string | undefined;
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/tiktok/ingest",
@@ -209,10 +211,25 @@ Author: ${dl.uploader}`;
         author: dl.uploader,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
+      onIngested: (info) => {
+        ingestedDocId = info.filePath;
+      },
     });
 
     // 7. Complete.
     completeJob(jobId, summary, category);
+
+    // 8. Fire-and-forget: draft a per-article source page from this summary. Prefer
+    //    huginn's stored doc id; fall back to the videoId when ingest returned no
+    //    file_path. Skips silently when the bot has no wikiDir; never fails the job.
+    triggerSourceDraftFromCapture(botConfig, {
+      collection: "tiktok-summaries",
+      docId: ingestedDocId ?? dl.id,
+      url: dl.canonicalUrl,
+      body: summary,
+      sourceTitle: ingestTitle,
+      category,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("TikTok summarization failed for job {jobId}: {error}", { jobId, error: msg });

@@ -23,6 +23,7 @@ import {
 } from "../wiki/ingest-backlog.ts";
 import {
   getLiveTopicKeys,
+  getLiveSourceDocUrls,
   insertWikiProposal,
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
@@ -43,6 +44,19 @@ const log = getLog("gardener", "source-drafter");
 
 const DEFAULT_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 const DOC_FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * Derive a huginn category from a collection-relative doc id (`<category>/<title>.md`,
+ * e.g. `ai/rag/Foo.md` → `ai/rag`) — the SAME derivation the Summaries page uses
+ * client-side (`docCategory`). Feeds `categoryToDomain` (via `SourceDraftInput.category`)
+ * so run-now / backlog drafts file under the right domain. An unprefixed id (older
+ * huginn / a fallback capture id) ⇒ "" ⇒ `categoryToDomain` defaults to `ai` (never
+ * worse than the status quo).
+ */
+export function categoryFromDocId(docId: string): string {
+  const parts = docId.split("/");
+  return parts.length >= 2 ? parts.slice(0, -1).join("/") : "";
+}
 
 /** The first public http(s) URL among the candidates, or "" when none is public. */
 function firstHttpUrl(...candidates: (string | undefined)[]): string {
@@ -73,6 +87,7 @@ export async function runSourceDraftForInput(
     today: todayOslo(Date.now()),
     collectWikiRefs,
     liveTopicKeys: () => getLiveTopicKeys(botConfig.name),
+    liveSourceDocUrls: () => getLiveSourceDocUrls(botConfig.name),
     insertProposal: (params) => insertWikiProposal(params),
     callDrafter: async (prompt, title) => {
       const res = await runDrafterOneShot({
@@ -139,7 +154,13 @@ export async function runSourceDraftForNewest(
   if (!url) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no public URL` };
 
   log.info("Source drafter run-now: newest doc {collection}/{id}", { collection, id: newest.id });
-  return runSourceDraftForInput(botConfig, wikiDir, { collection, docId: newest.id, url, body });
+  return runSourceDraftForInput(botConfig, wikiDir, {
+    collection,
+    docId: newest.id,
+    url,
+    body,
+    category: categoryFromDocId(newest.id),
+  });
 }
 
 // ── Backlog drafter (batched, on-demand over the UNCOVERED tail) ─────────────
@@ -362,7 +383,13 @@ async function draftOneBacklogDoc(
 
   let outcome: SourceDraftOutcome;
   try {
-    outcome = await deps.draftInput({ collection: doc.collection, docId: doc.id, url, body });
+    outcome = await deps.draftInput({
+      collection: doc.collection,
+      docId: doc.id,
+      url,
+      body,
+      category: categoryFromDocId(doc.id),
+    });
   } catch (err) {
     // draftSourcePage never throws, but runSourceDraftForInput's setup (config /
     // index load) could — contain it so one bad doc can't abort the batch.

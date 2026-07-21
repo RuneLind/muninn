@@ -142,6 +142,7 @@ Video URL: ${url}`;
       url,
       body: summary,
       sourceTitle: title,
+      category,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

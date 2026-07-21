@@ -5,6 +5,7 @@ import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import { getLog } from "../logging.ts";
 import { AI_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
 import {
@@ -509,6 +510,22 @@ URL: ${url}${enriched ? `\n\n${enrichmentFraming(kind)}` : ""}`;
     //    bookkeeping must NOT bubble to the outer catch and flip this completed
     //    job to `error`; log it and leave the job `complete`.
     completeJob(jobId, summary, category);
+
+    // Fire-and-forget: draft a per-article source page from this summary. `docId` is
+    // huginn's collection-relative id (`string | null`) — skip the trigger when null
+    // (no real keyed id ⇒ never coerce a null into a topic_key). Skips silently when
+    // the bot has no wikiDir; never fails the job.
+    if (docId) {
+      triggerSourceDraftFromCapture(botConfig, {
+        collection: SUMMARIES_COLLECTION,
+        docId,
+        url,
+        body: summary,
+        sourceTitle: title,
+        category,
+      });
+    }
+
     try {
       await setCandidateStatus(candidateId, "summarized", docId);
       log.info("Candidate {candidateId} summarized → {collection} doc {docId}", {

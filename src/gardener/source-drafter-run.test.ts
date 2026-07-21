@@ -1,12 +1,14 @@
 import { test, expect, describe } from "bun:test";
 import {
   clampSourceBacklogLimit,
+  categoryFromDocId,
   selectSourceBacklogDocs,
   runSourceDraftBacklog,
   SOURCE_BACKLOG_DEFAULT_LIMIT,
   SOURCE_BACKLOG_MAX_LIMIT,
   type SourceBacklogDeps,
 } from "./source-drafter-run.ts";
+import { categoryToDomain } from "../summaries/domain.ts";
 import type { ListedDoc as BacklogListedDoc, WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { RawFetchedDoc } from "./types.ts";
 import type { SourceDraftInput, SourceDraftOutcome } from "./source-drafter.ts";
@@ -21,6 +23,23 @@ function ytDoc(n: number): BacklogListedDoc {
 }
 
 const fakeBot = { name: "jarvis" } as unknown as BotConfig;
+
+describe("categoryFromDocId", () => {
+  test("derives the category prefix (drops the filename) — mirrors the Summaries page", () => {
+    expect(categoryFromDocId("ai/rag/Retrieval-Augmented Generation.md")).toBe("ai/rag");
+    expect(categoryFromDocId("health/Some Health Note.md")).toBe("health");
+  });
+
+  test("an unprefixed id ⇒ '' ⇒ categoryToDomain defaults to ai (never worse than status quo)", () => {
+    expect(categoryFromDocId("abc12345678")).toBe("");
+    expect(categoryToDomain(categoryFromDocId("abc12345678"))).toBe("ai");
+  });
+
+  test("feeds the right domain for a life-category doc id", () => {
+    expect(categoryToDomain(categoryFromDocId("health/x.md"))).toBe("life");
+    expect(categoryToDomain(categoryFromDocId("ai/rag/y.md"))).toBe("ai");
+  });
+});
 
 describe("clampSourceBacklogLimit", () => {
   test("missing / non-finite / sub-1 → default", () => {

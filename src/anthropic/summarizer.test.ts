@@ -76,6 +76,16 @@ mock.module("../db/summary-candidates.ts", () => ({
   },
 }));
 
+// Source-page drafter trigger — spied, never run (the real one is fire-and-forget
+// and hits huginn/DB). Records the args so the tests assert the docId/category/url
+// the summarizer hands it.
+let sourceDraftCalls: Array<{ input: Record<string, unknown> }> = [];
+mock.module("../gardener/source-drafter-run.ts", () => ({
+  triggerSourceDraftFromCapture: (_bot: unknown, input: Record<string, unknown>) => {
+    sourceDraftCalls.push({ input });
+  },
+}));
+
 // Link-enrichment (X path) fetch behaviour: the youtube transcript endpoint and
 // the article direct fetch. Reset to a happy default in beforeEach.
 let transcriptOk = true;
@@ -147,6 +157,7 @@ beforeEach(() => {
   transcriptText = "TRANSCRIPT: the linked 28-minute video walks through agent loops.";
   articleOk = true;
   articleText = "ARTICLE BODY: the linked long-form write-up.";
+  sourceDraftCalls = [];
   installFetchMock();
 });
 
@@ -167,6 +178,31 @@ test("happy path: resolves via documents listing, summarizes, ingests, flips can
 
   expect(statusCalls).toHaveLength(1);
   expect(statusCalls[0]).toEqual({ id: "cand-1", status: "summarized", docId: SUMMARY_DOC_ID });
+});
+
+test("fires the source-draft trigger with the collection-relative docId, category, and url", async () => {
+  claudeResult = "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point";
+  const jobId = createJob("cand-sd", "Update claude-api skill", CAND_URL);
+  await summarizeCandidate(jobId, "cand-sd", "Update claude-api skill", CAND_URL, config, bot);
+
+  expect(sourceDraftCalls).toHaveLength(1);
+  expect(sourceDraftCalls[0]!.input).toMatchObject({
+    collection: "anthropic-summaries",
+    docId: SUMMARY_DOC_ID,
+    url: CAND_URL,
+    category: "ai/claude-code",
+    sourceTitle: "Update claude-api skill",
+  });
+});
+
+test("skips the source-draft trigger when ingest returns no file_path (null docId — never coerce)", async () => {
+  ingestBody = { status: "ok" }; // no file_path ⇒ docId stays null
+  const jobId = createJob("cand-nofp", "Title", CAND_URL);
+  await summarizeCandidate(jobId, "cand-nofp", "Title", CAND_URL, config, bot);
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete"); // job still completes
+  expect(sourceDraftCalls).toHaveLength(0); // but no source draft keyed on a null id
 });
 
 test("derives a collection-relative doc_id from Huginn's already-relative file_path", async () => {

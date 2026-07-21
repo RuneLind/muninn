@@ -4,6 +4,7 @@ import {
   sourceTopicKey,
   sourceWikilinkTargets,
   buildSourceDraftPrompt,
+  MIN_SOURCE_BODY_CHARS,
   type DraftSourcePageDeps,
   type SourceDraftInput,
 } from "./source-drafter.ts";
@@ -50,12 +51,19 @@ function mdxDraft(over: { type?: string; title?: string; body?: string } = {}): 
 
 const emptyRefs: WikiRefs = { urls: new Set(), idTokens: new Set() };
 
+/** A summary body comfortably over MIN_SOURCE_BODY_CHARS (400) so the thin-body
+ *  guard is a no-op for the shared happy-path fixtures. */
+const BODY_OVER_THRESHOLD =
+  "Retrieval-Augmented Generation (RAG) pairs a retriever with a generator so a language model can ground its answers in an external corpus instead of relying solely on parametric memory. This explainer walks through embedding the query, searching a vector index, re-ranking the candidate passages, and conditioning the generation on the retrieved context, then discusses failure modes such as weak matches and hallucinated citations and how corrective retrieval mitigates them.";
+
 function baseDeps(over: Partial<DraftSourcePageDeps> = {}): DraftSourcePageDeps {
   const input: SourceDraftInput = {
     collection: "youtube-summaries",
     docId: "abc12345678",
     url: SOURCE_URL,
-    body: "A summary of a RAG explainer video.",
+    // Above MIN_SOURCE_BODY_CHARS (400) so the thin-body guard doesn't skip the
+    // shared happy-path fixtures — the guard boundary is tested explicitly below.
+    body: BODY_OVER_THRESHOLD,
   };
   const inserted: WikiProposal[] = [];
   return {
@@ -69,6 +77,7 @@ function baseDeps(over: Partial<DraftSourcePageDeps> = {}): DraftSourcePageDeps 
     callDrafter: async () => mdxDraft(),
     collectWikiRefs: async () => emptyRefs,
     liveTopicKeys: async () => [],
+    liveSourceDocUrls: async () => [],
     insertProposal: async (params: InsertWikiProposalParams) => {
       const row = { id: `row-${inserted.length}`, ...params } as unknown as WikiProposal;
       inserted.push(row);
@@ -244,5 +253,92 @@ describe("draftSourcePage", () => {
     );
     expect(out.outcome).toBe("error");
     if (out.outcome === "error") expect(out.reason).toContain("model timeout");
+  });
+
+  test("a life-domain category files the page under life/sources/", async () => {
+    let captured: InsertWikiProposalParams | null = null;
+    const deps = baseDeps({
+      input: { ...baseDeps().input, category: "health" },
+      insertProposal: async (p) => {
+        captured = p;
+        return { id: "r", ...p } as unknown as WikiProposal;
+      },
+    });
+    const out = await draftSourcePage(deps);
+    expect(out.outcome).toBe("drafted");
+    if (out.outcome !== "drafted") throw new Error("expected drafted");
+    expect(out.targetPath).toBe("life/sources/Retrieval-Augmented Generation.mdx");
+    expect(captured!.targetPath).toBe("life/sources/Retrieval-Augmented Generation.mdx");
+  });
+
+  test("an absent / ai category defaults to the ai domain (sources/, no life prefix)", async () => {
+    const out = await draftSourcePage(
+      baseDeps({ input: { ...baseDeps().input, category: undefined } }),
+    );
+    expect(out.outcome).toBe("drafted");
+    if (out.outcome === "drafted") expect(out.targetPath).toBe("sources/Retrieval-Augmented Generation.mdx");
+  });
+
+  test("a body just under MIN_SOURCE_BODY_CHARS → skipped 'summary too thin' (no draft call)", async () => {
+    let drafted = false;
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, body: "x".repeat(MIN_SOURCE_BODY_CHARS - 1) },
+        callDrafter: async () => {
+          drafted = true;
+          return mdxDraft();
+        },
+      }),
+    );
+    expect(out.outcome).toBe("skipped");
+    if (out.outcome === "skipped") expect(out.reason).toContain("too thin");
+    expect(drafted).toBe(false);
+  });
+
+  test("a body exactly at MIN_SOURCE_BODY_CHARS passes the guard → drafted", async () => {
+    const out = await draftSourcePage(
+      baseDeps({ input: { ...baseDeps().input, body: "x".repeat(MIN_SOURCE_BODY_CHARS) } }),
+    );
+    expect(out.outcome).toBe("drafted");
+  });
+
+  test("a thin body that is ALSO covered still reports covered (guard runs after the covered checks)", async () => {
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, body: "too thin" },
+        collectWikiRefs: async () => ({ urls: new Set([SOURCE_URL]), idTokens: new Set() }),
+      }),
+    );
+    expect(out.outcome).toBe("covered");
+  });
+
+  test("cross-vertical URL dedup: a live source proposal for the same URL → covered (no draft)", async () => {
+    let drafted = false;
+    const out = await draftSourcePage(
+      baseDeps({
+        // Same URL captured by another vertical, with a share param (`si=`) that
+        // normalizeUrl strips — the dedup normalizes both sides before comparing.
+        liveSourceDocUrls: async () => [`${SOURCE_URL}?si=abc123`],
+        callDrafter: async () => {
+          drafted = true;
+          return mdxDraft();
+        },
+      }),
+    );
+    expect(out.outcome).toBe("covered");
+    if (out.outcome === "covered") expect(out.reason).toContain("url");
+    expect(drafted).toBe(false);
+  });
+
+  test("URL dedup is gated on an http url: two URL-less docs don't suppress each other", async () => {
+    // A URL-less doc (pending-ingestion path). Even though the live set normalizes to
+    // "", the empty input.url isn't http so the dedup is skipped and the draft proceeds.
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, url: "" },
+        liveSourceDocUrls: async () => [""],
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
   });
 });
