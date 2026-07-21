@@ -120,6 +120,34 @@ describe("renderWikiHtml", () => {
     expect(html).not.toContain("&lt;Meter");
   });
 
+  test("an Obsidian [!warning] callout blockquote upgrades to a styled callout", () => {
+    const md = "> [!warning] Stale timeline\n> The video's dates are wrong.\n>\n> Trust this page instead.";
+    const html = renderWikiHtml(md, resolve);
+    expect(html).toContain('class="callout callout-warn"');
+    expect(html).toContain('<strong class="callout-title">Stale timeline</strong>');
+    expect(html).toContain("The video's dates are wrong.");
+    expect(html).toContain("Trust this page instead.");
+    expect(html).not.toContain("[!warning]");
+    expect(html).not.toContain("<blockquote>");
+  });
+
+  test("a bare [!note] with no title falls back to the type name; ordinary blockquotes untouched", () => {
+    const html = renderWikiHtml("> [!note]\n> Just a note body.", resolve);
+    expect(html).toContain('class="callout callout-info"');
+    expect(html).toContain('<strong class="callout-title">Note</strong>');
+
+    const plain = renderWikiHtml("> Just a regular quote.", resolve);
+    expect(plain).toContain("<blockquote>Just a regular quote.</blockquote>");
+  });
+
+  test("callout bodies keep rendered inline markup — wikilinks and bold survive", () => {
+    const md = "> [!danger] Broken\n> See [[Claude Code]] and **this**.";
+    const html = renderWikiHtml(md, resolve);
+    expect(html).toContain('class="callout callout-bad"');
+    expect(html).toContain('href="/wiki?page=Claude%20Code"');
+    expect(html).toContain("<strong>this</strong>");
+  });
+
   test("a ```mermaid fence renders as a plain code block (muninn has no mermaid renderer)", () => {
     const html = renderWikiHtml("```mermaid\ngraph TD; A-->B;\n```", resolve);
     // v1: no diagram rendering — the fence degrades to a labeled code block.
