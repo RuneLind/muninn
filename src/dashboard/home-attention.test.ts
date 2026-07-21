@@ -143,6 +143,10 @@ test("single draft is singular; multi-bot drafts name the bot", async () => {
   );
   expect(multi.items.map((i) => i.text).join("|")).toContain("jarvis gardener");
   expect(multi.items.map((i) => i.text).join("|")).toContain("capra gardener");
+  // Multi-bot hrefs carry the bot (the gate is per-bot via `?bot=`).
+  const multiDrafts = multi.items.filter((i) => i.kind === "gardener_drafts");
+  expect(multiDrafts.find((i) => i.text.includes("jarvis"))!.actionHref).toBe("/wiki/gardener?bot=jarvis");
+  expect(multiDrafts.find((i) => i.text.includes("capra"))!.actionHref).toBe("/wiki/gardener?bot=capra");
 });
 
 test("old failed runs outside the 24h window are excluded", async () => {

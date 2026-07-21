@@ -165,7 +165,8 @@ export async function assembleAttention(
       tone: "info",
       text: `${who} has ${d.count} draft${d.count === 1 ? "" : "s"} waiting for review`,
       actionLabel: "Review →",
-      actionHref: "/wiki/gardener",
+      // The gate is per-bot via `?bot=`; qualify the href only where the text is.
+      actionHref: multiBot ? `/wiki/gardener?bot=${d.bot}` : "/wiki/gardener",
     });
   }
 
