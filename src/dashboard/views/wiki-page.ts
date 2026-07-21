@@ -491,21 +491,36 @@ export async function renderWikiPage(opts?: {
     .wiki-ix-link:hover { color: var(--accent); }
     .wiki-ix-unavailable { font-size: 12px; color: var(--text-dim); }
 
-    /* ── Right: ask (pinned) + connections pane ────────── */
+    /* ── Right: Connections | Ask tabbed pane ──────────── */
     .wiki-conn-head { padding: 12px 14px; border-bottom: 1px solid var(--border-primary); font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-muted); }
+    .wiki-conn-tabs { display: flex; border-bottom: 1px solid var(--border-primary); flex-shrink: 0; }
+    .wiki-conn-tab {
+      flex: 1;
+      padding: 10px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .wiki-conn-tab:hover { color: var(--text-primary); }
+    .wiki-conn-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
     .wiki-conn-body { flex: 1; overflow-y: auto; padding: 10px; }
 
-    /* Ask compose — pinned at the top of the right rail (no tabs). The controls
-       live here; the answer renders in the article pane. Connections/Similar
-       render in .wiki-conn-body below. */
+    /* Ask tab — owns the full rail when active (no 48% clamp; the tab owns the
+       height). The controls live here; the answer renders in the article pane.
+       Connections/Similar render in .wiki-conn-body on the other tab. */
     .wiki-ask-body {
       display: flex;
       flex-direction: column;
-      flex-shrink: 0;
-      max-height: 48%;
+      flex: 1;
       overflow-y: auto;
       padding: 12px 12px 10px;
-      border-bottom: 1px solid var(--border-primary);
     }
     .wiki-ask-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
     .wiki-ask-bot { font-size: 11px; color: var(--text-dim); padding: 0 4px 6px; line-height: 1.5; }
@@ -661,7 +676,14 @@ export async function renderWikiPage(opts?: {
     </div>
 
     <div class="wiki-pane wiki-conn-pane">
-      <div class="wiki-ask-body" id="askBody">
+      <div class="wiki-conn-tabs">
+        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
+        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
+      </div>
+      <div class="wiki-conn-body" id="connBody">
+        <div class="wiki-conn-empty">Select a page to see its connections.</div>
+      </div>
+      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
         <div class="wiki-ask-compose">
           <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
           <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
@@ -670,9 +692,6 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>
         ${askBotLine}
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
-      </div>
-      <div class="wiki-conn-body" id="connBody">
-        <div class="wiki-conn-empty">Select a page to see its connections.</div>
       </div>
     </div>
   </div>

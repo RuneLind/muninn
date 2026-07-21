@@ -1056,6 +1056,28 @@ function renderConnections(data: WikiPageDetail): void {
     '<div id="wikiSimilar"></div>';
 }
 
+// ── Right rail tabs (Connections | Ask) ───────────────────────────────
+/** Toggle the right rail between the Connections body and the Ask compose body.
+ *  Default tab is Connections (so Linked from / Links to / Similar are visible on
+ *  page select). Auto-switched to Ask when an Ask/Explain stream starts (via
+ *  `runAskStream`); switching back to Connections is manual. `focus` (manual tab
+ *  clicks only) drops the caret into the Ask box; the auto-switch path passes it
+ *  false so a follow-up ask can't steal focus from the in-pane follow-up input. */
+function switchConnTab(tab: string, focus?: boolean): void {
+  document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
+  });
+  const connBody = document.getElementById("connBody");
+  const askBody = document.getElementById("askBody");
+  const ask = tab === "ask";
+  if (connBody) connBody.style.display = ask ? "none" : "";
+  if (askBody) askBody.style.display = ask ? "flex" : "none";
+  if (ask && focus) {
+    const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
+    if (input) input.focus();
+  }
+}
+
 // ── Similar articles (semantic cousins, lazily fetched) ───────────────
 /** One resolved similar page (mirrors SimilarPage in src/wiki/similar.ts). */
 interface SimilarPage {
@@ -1286,6 +1308,12 @@ document.body.addEventListener("click", (e) => {
   if (tab) {
     startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline") || "hubs";
     renderStart();
+    return;
+  }
+  // Right rail Connections | Ask tab switch (manual — focus the Ask box).
+  const connTab = target.closest ? target.closest(".wiki-conn-tab") : null;
+  if (connTab) {
+    switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
     return;
   }
   const link = target.closest ? target.closest("[data-wiki-page], [data-page]") : null;
@@ -1614,6 +1642,11 @@ function runAskStream(url: string, turn: AskTurn): void {
   // drop any pending progressive-render frame so it can't repaint the new pane.
   if (askConn) { askConn.close(); askConn = null; }
   cancelAskStreamRender();
+  // Reveal the Ask tab in the rail so the compose + session history are visible
+  // while the answer streams into the main pane. Covers the Ask box, the in-pane
+  // follow-up bar, and Explain (all converge here). No focus steal — the follow-up
+  // input in the article pane keeps the caret.
+  switchConnTab("ask");
   askActive = turn;
   askBuffer = "";
   showAskAnswer(turn, "");
