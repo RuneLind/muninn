@@ -9,6 +9,8 @@ const DARK_TOKENS = `
       --bg-deep: #0f0f17;
       --bg-inset: #0d0d14;
       --bg-gradient-end: #16162a;
+      --bg-card: #1a1a2e;
+      --bg-hover: rgba(255, 255, 255, 0.04);
 
       /* Borders */
       --border-primary: #1e1e2e;
@@ -74,6 +76,8 @@ const LIGHT_TOKENS = `
       --bg-deep: #eceef3;
       --bg-inset: #eceef3;
       --bg-gradient-end: #e8eaf2;
+      --bg-card: #f1f2f6;
+      --bg-hover: rgba(0, 0, 0, 0.04);
 
       /* Borders */
       --border-primary: #e2e4ea;
