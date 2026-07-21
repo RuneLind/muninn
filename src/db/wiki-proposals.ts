@@ -247,6 +247,30 @@ export async function getLiveTopicKeys(botName: string): Promise<string[]> {
 }
 
 /**
+ * Public source URLs referenced by this bot's LIVE (draft/approved) `source`
+ * proposals — the cross-vertical URL-dedup set for the source drafter. Since #325
+ * one X URL can be captured by two verticals (extension → `x-articles`; anthropic
+ * shelf's x-link species → `anthropic-summaries`) under collection-namespaced
+ * `topic_key`s, so the topic-key guard alone can't catch it. Returns raw URLs (the
+ * caller normalizes); empty/absent urls are dropped.
+ */
+export async function getLiveSourceDocUrls(botName: string): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT source_docs FROM wiki_proposals
+    WHERE bot_name = ${botName} AND kind = 'source' AND status IN ('draft', 'approved')
+  `;
+  const urls: string[] = [];
+  for (const row of rows) {
+    const docs = (row.source_docs ?? []) as WikiProposalSourceDoc[];
+    for (const d of docs) {
+      if (d?.url) urls.push(d.url);
+    }
+  }
+  return urls;
+}
+
+/**
  * TopicKeys EVER rejected for this bot — the full negative-memory set. Feeds the
  * cluster-prompt HINT only (so the model can reuse a rejected topicKey instead of
  * coining a near-synonym), NOT the skip set: the skip set is TTL'd via

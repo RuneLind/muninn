@@ -4,6 +4,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { getLog } from "../logging.ts";
 import { VALID_CATEGORIES, parseSummaryResponse } from "../utils/summary-parser.ts";
 import { buildSummarySystemPrompt, ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
+import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import {
   attachRun,
   updateStatus,
@@ -73,6 +74,9 @@ Article URL: ${url}`;
     // 3. Ingest into knowledge base (best-effort)
     updateStatus(jobId, "ingesting");
 
+    // Capture huginn's stored doc id (`file_path`) so the source-draft trigger keys
+    // off the SAME id the run-now drafter uses — see the youtube vertical for why.
+    let ingestedDocId: string | undefined;
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
       ingestPath: "/api/x-articles/ingest",
@@ -85,10 +89,25 @@ Article URL: ${url}`;
         date: new Date().toISOString().split("T")[0],
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
+      onIngested: (info) => {
+        ingestedDocId = info.filePath;
+      },
     });
 
     // 4. Complete
     completeJob(jobId, summary, category);
+
+    // 5. Fire-and-forget: draft a per-article source page from this summary. Prefer
+    //    huginn's stored doc id; fall back to the articleId when ingest returned no
+    //    file_path. Skips silently when the bot has no wikiDir; never fails the job.
+    triggerSourceDraftFromCapture(botConfig, {
+      collection: "x-articles",
+      docId: ingestedDocId ?? articleId,
+      url,
+      body: summary,
+      sourceTitle: title,
+      category,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("X article summarization failed for job {jobId}: {error}", { jobId, error: msg });

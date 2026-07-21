@@ -37,12 +37,18 @@ import {
   shapeGate,
   stripOwnedAliases,
 } from "./draft.ts";
+import { categoryToDomain } from "../summaries/domain.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "source-drafter");
 
-/** Source pages are filed under the AI domain's `sources/` folder in v1 (YouTube). */
-const SOURCE_DOMAIN = "ai" as const;
+/**
+ * A body shorter than this (trimmed chars) is too thin to synthesize a durable
+ * encyclopedic source page from (e.g. a single-tweet capture). Uncovered thin docs
+ * skip the model entirely; a thin-but-already-covered doc still reports `covered`.
+ * Named export so the guard boundary is testable against the exact threshold.
+ */
+export const MIN_SOURCE_BODY_CHARS = 400;
 
 /** The one input a source draft is built from — a single captured summary doc. */
 export interface SourceDraftInput {
@@ -56,6 +62,11 @@ export interface SourceDraftInput {
   body: string;
   /** Optional known title (listing/job title), stored on `source_docs` as raw material. */
   sourceTitle?: string;
+  /**
+   * Optional summary category (e.g. `ai/rag`, `health`) — decides which knowledge
+   * domain (`ai`/`life`) the page files under. Absent / unknown ⇒ `ai` (base rate).
+   */
+  category?: string;
 }
 
 export type SourceDraftOutcome =
@@ -187,6 +198,13 @@ export interface DraftSourcePageDeps {
   collectWikiRefs: (root: string) => Promise<WikiRefs>;
   /** Live (draft/approved) topicKeys for this bot — the duplicate-live guard. */
   liveTopicKeys: () => Promise<string[]>;
+  /**
+   * URLs of this bot's live (draft/approved) `source` proposals — the cross-vertical
+   * URL-dedup set. Since #325 one URL can be captured by two verticals under
+   * collection-namespaced topic_keys, so `liveTopicKeys` alone can't catch it. Raw
+   * URLs (this module normalizes both sides via `normalizeUrl` before comparing).
+   */
+  liveSourceDocUrls: () => Promise<string[]>;
   insertProposal: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
 }
 
@@ -202,12 +220,32 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
 
   try {
     // Covered? A URL/id already in the wiki, or a live proposal for this doc ⇒ skip.
-    const [refs, liveKeys] = await Promise.all([deps.collectWikiRefs(wikiDir), deps.liveTopicKeys()]);
+    const [refs, liveKeys, liveSourceUrls] = await Promise.all([
+      deps.collectWikiRefs(wikiDir),
+      deps.liveTopicKeys(),
+      deps.liveSourceDocUrls(),
+    ]);
     if (urlCovered(refs, input.url)) {
       return { outcome: "covered", reason: "url already referenced in the wiki" };
     }
     if (liveKeys.includes(topicKey)) {
       return { outcome: "covered", reason: "a live source proposal already exists for this doc" };
+    }
+    // Cross-vertical URL dedup: a live source proposal (of ANY collection) already
+    // carrying this URL ⇒ credit + skip. Gated on a real http url (mirroring
+    // `urlCovered`) — else two URL-less docs both normalize to "" and the second is
+    // falsely suppressed.
+    if (isHttpUrl(input.url)) {
+      const norm = normalizeUrl(input.url);
+      if (liveSourceUrls.some((u) => normalizeUrl(u) === norm)) {
+        return { outcome: "covered", reason: "a live source proposal already covers this url" };
+      }
+    }
+
+    // Thin-body guard — AFTER the covered checks (so a thin-but-covered doc still
+    // reports `covered`), BEFORE the model call (so thin uncovered docs never reach it).
+    if (input.body.trim().length < MIN_SOURCE_BODY_CHARS) {
+      return { outcome: "skipped", reason: "summary too thin" };
     }
 
     const prompt = buildSourceDraftPrompt({
@@ -227,13 +265,18 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     const stem = sanitizeFilename(title.trim());
     if (!stem) return { outcome: "skipped", reason: "title sanitized to an empty stem" };
 
-    const targetPath = path.posix.join(expectedDir(SOURCE_DOMAIN, "source"), `${stem}.mdx`);
+    // Domain-aware filing: `ai` vs `life` from the capture's category (absent /
+    // unknown ⇒ `ai`). BOTH the target dir and the shape gate's confinement check
+    // MUST use the same domain — a mismatch makes `isPathConfined` reject every
+    // `life/sources/` page as a silent skip.
+    const domain = categoryToDomain(input.category ?? "");
+    const targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
 
     const gate = shapeGate(draftText, {
       kind: "source",
       targetPath,
       wikiDir,
-      domain: SOURCE_DOMAIN,
+      domain,
     });
     if (!gate.ok) return { outcome: "skipped", reason: `shape gate: ${gate.reason}` };
 

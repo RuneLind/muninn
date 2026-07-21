@@ -75,6 +75,16 @@ mock.module("../ai/one-shot.ts", () => ({
   },
 }));
 
+// Source-page drafter trigger — spied, never run. Records the args so the tests
+// assert the docId (fallback vs huginn file_path), category, and canonical url.
+let sourceDraftCalls: Array<{ input: Record<string, unknown> }> = [];
+let ingestFilePath: string | undefined;
+mock.module("../gardener/source-drafter-run.ts", () => ({
+  triggerSourceDraftFromCapture: (_bot: unknown, input: Record<string, unknown>) => {
+    sourceDraftCalls.push({ input });
+  },
+}));
+
 const originalFetch = globalThis.fetch;
 function installFetchMock() {
   // @ts-expect-error — minimal Response stand-in is enough for the summarizer.
@@ -85,7 +95,7 @@ function installFetchMock() {
       return {
         ok: ingestOk,
         status: ingestOk ? 200 : 500,
-        json: async () => ({ similar: [] }),
+        json: async () => ({ similar: [], ...(ingestFilePath ? { file_path: ingestFilePath } : {}) }),
         text: async () => "{}",
       };
     }
@@ -125,6 +135,8 @@ beforeEach(() => {
   lastOpts = undefined;
   ingestOk = true;
   ingestPayload = undefined;
+  ingestFilePath = undefined;
+  sourceDraftCalls = [];
   installFetchMock();
 });
 
@@ -155,6 +167,29 @@ test("happy path: transcript + frames complete the job with the parsed summary a
   expect(ingestPayload!.author).toBe("coolcoder");
   expect(ingestPayload!.title).toBe("My TikTok");
   expect(ingestPayload!.category).toBe("ai/claude-code");
+});
+
+test("fires the source-draft trigger with the huginn file_path docId, category, and canonical url", async () => {
+  ingestFilePath = "ai/claude-code/My TikTok.md";
+  const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
+  await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
+
+  expect(sourceDraftCalls).toHaveLength(1);
+  expect(sourceDraftCalls[0]!.input).toMatchObject({
+    collection: "tiktok-summaries",
+    docId: "ai/claude-code/My TikTok.md",
+    url: CANONICAL_URL,
+    category: "ai/claude-code",
+  });
+});
+
+test("source-draft trigger falls back to the videoId when ingest returns no file_path", async () => {
+  // ingestFilePath undefined ⇒ ingest returns no file_path ⇒ fallback to dl.id.
+  const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
+  await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
+
+  expect(sourceDraftCalls).toHaveLength(1);
+  expect(sourceDraftCalls[0]!.input.docId).toBe("7523456789");
 });
 
 test("keyframe-extraction failure degrades to a transcript-only summary, not a failed job", async () => {
