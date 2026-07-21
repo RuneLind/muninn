@@ -224,10 +224,10 @@ export function sumJobCardHtml(): string {
         </span>
         <span class="job-title" id="jobTitle"></span>
         <span class="category-badge" id="categoryBadge" style="display:none"></span>
-        <button class="job-expand" id="jobExpandBtn" type="button" aria-expanded="false">Expand &#9662;</button>
+        <button class="job-expand" id="jobExpandBtn" type="button" aria-expanded="true">Collapse &#9652;</button>
       </div>
       <div class="job-progress" id="jobProgress"><div class="job-progress-fill"></div></div>
-      <div class="job-detail" id="jobDetail" hidden>
+      <div class="job-detail" id="jobDetail">
         <div class="summary-area empty" id="summaryArea">
           Waiting for summary...
         </div>
@@ -470,7 +470,7 @@ export function sumJobCardScript(): string {
       document.getElementById('categoryBadge').style.display = 'none';
       document.getElementById('similarPanel').classList.remove('visible');
       document.getElementById('errorBanner').classList.remove('visible');
-      setJobDetailExpanded(false);  // fresh job starts as a collapsed strip
+      setJobDetailExpanded(true);  // streaming text is the point — start expanded
       updateStatusBadge('pending');
     }
   `;
