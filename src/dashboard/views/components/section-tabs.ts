@@ -26,6 +26,12 @@ export interface SectionTabsConfig {
    *  main dashboard). Set false for pages that already pad their own content
    *  column (e.g. summaries lives inside a padded `.page-content`). */
   padded?: boolean;
+  /** Retired tab ids → surviving tab id, for continuity when tabs are merged.
+   *  A stored/hash id matching an alias resolves to its target at init time (and
+   *  on hashchange), so a returning browser lands where its content moved rather
+   *  than falling through to the default tab. Only affects INITIAL resolution —
+   *  `switchSection` is always called with a live id. */
+  aliases?: Record<string, string>;
 }
 
 /** The main dashboard's tab set — kept as the default so page.ts call sites stay
@@ -126,7 +132,15 @@ export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): s
     const SECTION_STORAGE_KEY = ${JSON.stringify(config.storageKey)};
     const SECTION_DEFAULT_TAB = ${JSON.stringify(config.defaultTab)};
     const SECTION_CONTENT_SELECTOR = ${JSON.stringify(contentSelector)};
+    const SECTION_ALIASES = ${JSON.stringify(config.aliases ?? {})};
     let activeSection = SECTION_DEFAULT_TAB;
+
+    // Resolve a stored/hash id through the merge aliases (retired-id → surviving-id),
+    // so a returning browser lands on the tab its content moved to. A live id (no
+    // alias entry) passes through unchanged.
+    function resolveSectionAlias(id) {
+      return (id && SECTION_ALIASES[id]) ? SECTION_ALIASES[id] : id;
+    }
 
     var sectionActivateCallbacks = {};
 
@@ -169,9 +183,10 @@ export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): s
     }
 
     function initSectionTabs() {
-      // Determine initial tab: hash > localStorage > default
-      const hash = location.hash.replace('#', '');
-      const saved = (() => { try { return localStorage.getItem(SECTION_STORAGE_KEY); } catch { return null; } })();
+      // Determine initial tab: hash > localStorage > default (each resolved through
+      // the merge aliases so a retired-tab id lands on its surviving tab).
+      const hash = resolveSectionAlias(location.hash.replace('#', ''));
+      const saved = resolveSectionAlias((() => { try { return localStorage.getItem(SECTION_STORAGE_KEY); } catch { return null; } })());
       const matchedHash = SECTION_TABS.find(t => t.id === hash);
       const matchedSaved = SECTION_TABS.find(t => t.id === saved);
       const initial = matchedHash ? hash : (matchedSaved ? saved : SECTION_DEFAULT_TAB);
@@ -183,9 +198,9 @@ export function sectionTabsScript(config: SectionTabsConfig = DASHBOARD_TABS): s
         if (btn && btn.dataset.tab) switchSection(btn.dataset.tab);
       });
 
-      // Hash change (browser back/forward)
+      // Hash change (browser back/forward) — alias-resolved like the initial pick.
       window.addEventListener('hashchange', () => {
-        const h = location.hash.replace('#', '');
+        const h = resolveSectionAlias(location.hash.replace('#', ''));
         if (h && SECTION_TABS.find(t => t.id === h)) switchSection(h);
       });
 

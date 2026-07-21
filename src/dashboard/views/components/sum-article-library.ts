@@ -1,10 +1,17 @@
-/** Summaries page — Article library with category chips, articles grid, and the
- * 3-column doc panel. Source-agnostic: categories are computed from the merged
- * /api/summaries/documents listing, and each row/doc carries its `source` so
- * opens, similar lookups, and "open original" links route to the right
- * collection (SOURCES[source].apiBase). Home of the shared doc helpers
- * (getSummaryDocuments, docTitle, docCategory, sourceBadge, sourceLink,
- * openSummaryDoc) that the other component scripts call. */
+/** Summaries page — the 3-column doc panel + the shared doc helpers.
+ *
+ * Since the inbox-first redesign this component no longer renders a visible
+ * "Article Library" section (category browsing moved onto the Shelf tab as a
+ * filter — see sum-shelf.ts). It remains the home of the shared doc helpers
+ * (getSummaryDocuments, docTitle, docCategory, matchesDomain, renderDomainFilter,
+ * sourceBadge, sourceLink, openSummaryDoc) and the 3-column doc panel (article
+ * text · category sidebar · similar), which the Shelf + candidate rows open into.
+ * `loadLibrary` survives only to build `docsByCategory`, which the doc panel's
+ * category sidebar (renderArticleCategories) reads; its old chip/grid DOM writes
+ * are guarded no-ops now that the visible section is gone. Source-agnostic:
+ * categories are computed from the merged /api/summaries/documents listing, and
+ * each doc carries its `source` so opens/similar/original-link route to the right
+ * collection (SOURCES[source].apiBase). */
 
 import { docPanelStyles } from "./doc-panel.ts";
 
@@ -200,17 +207,10 @@ export function sumArticleLibraryStyles(): string {
 }
 
 export function sumArticleLibraryHtml(): string {
-  return `
-    <div class="library-section" id="librarySection">
-      <div class="library-header">
-        <h2>Article Library</h2>
-        <span class="count" id="libraryCount"></span>
-      </div>
-      <div class="category-chips" id="categoryChips">
-        <div style="color:var(--text-dim);font-size:13px;">Loading categories...</div>
-      </div>
-      <div class="articles-grid" id="articlesGrid"></div>
-    </div>`;
+  // No visible section any more — category browsing lives on the Shelf tab now.
+  // The doc panel scaffold comes from the page's docPanelHtml(); this component
+  // only contributes styles + shared script.
+  return "";
 }
 
 export function sumArticleLibraryScript(): string {
@@ -280,8 +280,8 @@ export function sumArticleLibraryScript(): string {
           // result with no source chips to recover from.
           if (typeof activeSource !== 'undefined') activeSource = null;
           renderDomainFilter();
-          loadLibrary();
-          if (typeof loadRecentlyAdded === 'function') loadRecentlyAdded();
+          loadLibrary();  // rebuild docsByCategory (doc-panel sidebar) for the new domain
+          if (typeof loadShelf === 'function') loadShelf();
         });
       });
     }
@@ -380,8 +380,12 @@ export function sumArticleLibraryScript(): string {
         });
 
         // Count reflects the active domain (docsByCategory is already narrowed).
+        // The visible library section is gone — these writes no-op unless a legacy
+        // element is present (guarded), but docsByCategory is now built for the
+        // doc-panel category sidebar.
         var visibleCount = Object.values(docsByCategory).reduce(function(n, ds) { return n + ds.length; }, 0);
-        document.getElementById('libraryCount').textContent = visibleCount + ' articles';
+        var libCountEl = document.getElementById('libraryCount');
+        if (libCountEl) libCountEl.textContent = visibleCount + ' articles';
 
         // If the domain change dropped the open category, collapse its grid.
         if (activeCategory && !docsByCategory[activeCategory]) {
@@ -390,26 +394,32 @@ export function sumArticleLibraryScript(): string {
           if (grid) grid.innerHTML = '';
         }
 
-        // Render category chips with counts (highest first).
-        var chips = Object.keys(docsByCategory)
-          .map(function(name) { return { name: name, count: docsByCategory[name].length }; })
-          .sort(function(a, b) { return b.count - a.count; })
-          .map(function(cat) {
-            return '<span class="cat-chip" data-category="' + esc(cat.name) + '" onclick="toggleCategory(this)">' +
-              esc(cat.name) +
-              ' <span class="chip-count">' + cat.count + '</span>' +
-            '</span>';
-          }).join('');
-        document.getElementById('categoryChips').innerHTML = chips || '<div style="color:var(--text-dim);font-size:13px;">No categories found</div>';
+        // Render category chips with counts (highest first) — guarded no-op now
+        // that the visible library section is retired.
+        var chipsEl = document.getElementById('categoryChips');
+        if (chipsEl) {
+          var chips = Object.keys(docsByCategory)
+            .map(function(name) { return { name: name, count: docsByCategory[name].length }; })
+            .sort(function(a, b) { return b.count - a.count; })
+            .map(function(cat) {
+              return '<span class="cat-chip" data-category="' + esc(cat.name) + '" onclick="toggleCategory(this)">' +
+                esc(cat.name) +
+                ' <span class="chip-count">' + cat.count + '</span>' +
+              '</span>';
+            }).join('');
+          chipsEl.innerHTML = chips || '<div style="color:var(--text-dim);font-size:13px;">No categories found</div>';
+        }
       } catch (err) {
         console.error('loadLibrary failed:', err);
-        document.getElementById('categoryChips').innerHTML = '<div style="color:var(--text-dim);font-size:13px;">Failed to load library: ' + (err.message || err) + '</div>';
+        var failEl = document.getElementById('categoryChips');
+        if (failEl) failEl.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">Failed to load library: ' + (err.message || err) + '</div>';
       }
     }
 
     function toggleCategory(chip) {
       var cat = chip.getAttribute('data-category');
       var grid = document.getElementById('articlesGrid');
+      if (!grid) return;  // visible library section retired — nothing to expand into
 
       if (activeCategory === cat) {
         // Collapse
