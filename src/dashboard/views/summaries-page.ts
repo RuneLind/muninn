@@ -9,7 +9,7 @@ import { sumJobCardStyles, sumJobCardHtml, sumJobCardScript } from "./components
 import { sumCandidatesStyles, sumCandidatesHtml, sumCandidatesScript } from "./components/sum-candidates.ts";
 import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./components/sum-outcomes.ts";
 import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
-import { sumRecentlyAddedStyles, sumRecentlyAddedHtml, sumRecentlyAddedScript } from "./components/sum-recently-added.ts";
+import { sumShelfStyles, sumShelfHtml, sumShelfScript } from "./components/sum-shelf.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 import {
@@ -25,9 +25,8 @@ import {
 // live inside the already-padded `.page-content` column.
 const SUMMARIES_TABS: SectionTabsConfig = {
   tabs: [
-    { id: "candidates", label: "Candidates" },
-    { id: "recently", label: "Recently Added" },
-    { id: "library", label: "Library" },
+    { id: "candidates", label: "Inbox" },
+    { id: "shelf", label: "Shelf" },
     { id: "calibration", label: "Calibration" },
     { id: "stats", label: "Stats" },
   ],
@@ -35,6 +34,9 @@ const SUMMARIES_TABS: SectionTabsConfig = {
   defaultTab: "candidates",
   contentSelector: ".sum-tab-content",
   padded: false,
+  // The old Recently Added + Library tabs merged into Shelf — a returning browser
+  // whose saved/hash tab was one of those lands on Shelf, not the default.
+  aliases: { recently: "shelf", library: "shelf" },
 };
 
 export async function renderSummariesPage(): Promise<string> {
@@ -63,11 +65,44 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumJobCardStyles()}
     ${sectionTabsStyles(SUMMARIES_TABS)}
     ${sumCandidatesStyles()}
-    ${sumRecentlyAddedStyles()}
+    ${sumShelfStyles()}
     ${sumArticleLibraryStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
+
+    /* Page head: title + live presence + the collapsed paste-article affordance. */
+    .sum-page-head {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .sum-page-head h2 {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin: 0;
+    }
+    .sum-page-head .sum-presence-slot { display: inline-flex; }
+    .paste-toggle {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 14px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+      color: var(--accent-light);
+      font-size: 13px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .paste-toggle:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+    #pasteFormWrap[hidden] { display: none; }
 
     .duplicate-banner {
       display: none;
@@ -96,11 +131,17 @@ export async function renderSummariesPage(): Promise<string> {
   </div>
 
   <div class="page-content">
-    <!-- Live presence: a capture job or gardener drain running/about to run. -->
-    <div style="margin-bottom:14px;">${agentPresenceHtml("sumPresence")}</div>
+    <!-- Page head: title, live presence (capture job / gardener drain), and the
+         "+ Paste article" toggle that reveals the collapsed submit form. -->
+    <div class="sum-page-head">
+      <h2>Summaries</h2>
+      <span class="sum-presence-slot">${agentPresenceHtml("sumPresence")}</span>
+      <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
+    </div>
 
-    <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome extension) -->
-    ${sumSubmitFormHtml()}
+    <!-- Manual submit form (pasted article text; YouTube/X come from the Chrome
+         extension) — collapsed behind the toggle above so the inbox leads. -->
+    <div id="pasteFormWrap" hidden>${sumSubmitFormHtml()}</div>
 
     <!-- Active job card (hidden until a job is active) — stays above the tabs so a
          job kicked from any panel (incl. a candidate row) streams in one shared card. -->
@@ -108,14 +149,12 @@ export async function renderSummariesPage(): Promise<string> {
 
     ${sectionTabsHtml(SUMMARIES_TABS)}
     <div class="sum-tab-content">
-      <!-- Candidate inbox (anthropic tracker discoveries) -->
+      <!-- Candidate inbox (anthropic tracker discoveries) — the page lead -->
       <div data-section="candidates">${sumCandidatesHtml()}</div>
 
-      <!-- Recently added (persistent, date-grouped, source-filterable) -->
-      <div data-section="recently">${sumRecentlyAddedHtml()}</div>
-
-      <!-- Article Library -->
-      <div data-section="library">${sumArticleLibraryHtml()}</div>
+      <!-- Shelf: recency-first archive (date buckets) + category/source/domain filters
+           (merged Recently Added + Library) -->
+      <div data-section="shelf">${sumShelfHtml()}</div>
 
       <!-- Gate-outcome calibration (display-only) -->
       <div data-section="calibration">${sumOutcomesHtml()}</div>
@@ -142,7 +181,7 @@ export async function renderSummariesPage(): Promise<string> {
     ${sectionTabsScript(SUMMARIES_TABS)}
     ${sumJobCardScript()}
     ${sumCandidatesScript()}
-    ${sumRecentlyAddedScript()}
+    ${sumShelfScript()}
     ${sumArticleLibraryScript()}
     ${sumOutcomesScript()}
     ${sumStatsScript()}
@@ -152,6 +191,25 @@ export async function renderSummariesPage(): Promise<string> {
       var el = document.getElementById('duplicateBanner');
       if (el) el.classList.add('visible');
     }
+
+    // "+ Paste article" toggle: reveal/collapse the submit form + focus the textarea.
+    (function() {
+      var btn = document.getElementById('pasteToggleBtn');
+      var wrap = document.getElementById('pasteFormWrap');
+      if (!btn || !wrap) return;
+      btn.addEventListener('click', function() {
+        var open = wrap.hasAttribute('hidden');
+        if (open) {
+          wrap.removeAttribute('hidden');
+          btn.setAttribute('aria-expanded', 'true');
+          var ta = document.getElementById('articleText');
+          if (ta) ta.focus();
+        } else {
+          wrap.setAttribute('hidden', '');
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    })();
 
     // --- Init ---
     async function init() {
@@ -164,8 +222,7 @@ export async function renderSummariesPage(): Promise<string> {
       }
 
       loadCandidates();
-      loadRecentlyAdded();
-      loadLibrary();
+      loadShelf();
       loadOutcomes();
       renderDomainFilter();
 
@@ -186,10 +243,10 @@ export async function renderSummariesPage(): Promise<string> {
 
       var deepLinkDoc = params.get('doc');
       if (deepLinkDoc) {
-        // A doc deep link lands on Recently Added (the doc panel overlays on top).
+        // A doc deep link lands on the Shelf (the doc panel overlays on top).
         // Deep link wins over the localStorage default for THIS view, but doesn't
         // persist — a bookmarked URL must not rewrite the user's saved default tab.
-        switchSection('recently', { persist: false });
+        switchSection('shelf', { persist: false });
         if (params.get('duplicate') === '1') showDuplicateBanner();
         openSummaryDoc(deepLinkDoc, '', source);
       }

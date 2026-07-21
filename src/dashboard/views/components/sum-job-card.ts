@@ -6,32 +6,78 @@ import { markdownContentStyles } from "./doc-panel.ts";
 
 export function sumJobCardStyles(): string {
   return `
-    /* --- Job card --- */
+    /* --- Job card: one-line progress strip + collapsible detail --- */
     .job-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border-primary);
+      background: var(--bg-panel);
+      border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-primary));
       border-radius: 12px;
       overflow: hidden;
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
-    .job-header {
+    .job-strip {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 16px 20px;
-      border-bottom: 1px solid var(--border-primary);
+      padding: 12px 16px;
     }
     .job-title {
       flex: 1;
-      font-size: 16px;
+      font-size: 14px;
       font-weight: 600;
       color: var(--text-primary);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
     }
     .job-title a { color: var(--text-primary); text-decoration: none; }
     .job-title a:hover { color: var(--accent-light); }
+    .job-strip .status-badge { flex-shrink: 0; }
+    .job-strip .category-badge { flex-shrink: 0; }
+
+    /* Expand ▾ — reveals the streaming text / similar detail below the strip. */
+    .job-expand {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid var(--border-secondary);
+      color: var(--text-dim);
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .job-expand:hover { color: var(--text-secondary); border-color: var(--accent); }
+
+    /* Thin progress rail — an indeterminate sweep while the job is active. */
+    .job-progress {
+      height: 3px;
+      background: var(--bg-surface);
+      position: relative;
+      overflow: hidden;
+      display: none;
+    }
+    .job-card.running .job-progress { display: block; }
+    .job-progress-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      width: 40%;
+      background: var(--accent);
+      border-radius: 0 2px 2px 0;
+      animation: job-progress-sweep 1.4s ease-in-out infinite;
+    }
+    @keyframes job-progress-sweep {
+      0%   { left: -40%; }
+      100% { left: 100%; }
+    }
+
+    .job-detail {
+      border-top: 1px solid var(--border-primary);
+    }
+    .job-detail[hidden] { display: none; }
 
     /* --- Status badge --- */
     .status-badge {
@@ -171,21 +217,25 @@ export function sumJobCardStyles(): string {
 export function sumJobCardHtml(): string {
   return `
     <div class="job-card" id="jobCard" style="display:none">
-      <div class="job-header">
-        <span class="job-title" id="jobTitle"></span>
-        <span class="category-badge" id="categoryBadge" style="display:none"></span>
+      <div class="job-strip">
         <span class="status-badge status-pending" id="statusBadge">
           <span class="spinner"></span>
           <span class="status-text">Pending</span>
         </span>
+        <span class="job-title" id="jobTitle"></span>
+        <span class="category-badge" id="categoryBadge" style="display:none"></span>
+        <button class="job-expand" id="jobExpandBtn" type="button" aria-expanded="false">Expand &#9662;</button>
       </div>
-      <div class="summary-area empty" id="summaryArea">
-        Waiting for summary...
-      </div>
-      <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
-      <div class="similar-panel" id="similarPanel">
-        <h3>Similar</h3>
-        <div class="similar-list" id="similarList"></div>
+      <div class="job-progress" id="jobProgress"><div class="job-progress-fill"></div></div>
+      <div class="job-detail" id="jobDetail" hidden>
+        <div class="summary-area empty" id="summaryArea">
+          Waiting for summary...
+        </div>
+        <div class="error-banner" id="errorBanner" style="margin:0;border-radius:0;border-top:1px solid color-mix(in srgb, var(--status-error) 30%, transparent);"></div>
+        <div class="similar-panel" id="similarPanel">
+          <h3>Similar</h3>
+          <div class="similar-list" id="similarList"></div>
+        </div>
       </div>
     </div>`;
 }
@@ -233,7 +283,30 @@ export function sumJobCardScript(): string {
       var isActive = !TERMINAL_STATES.includes(status);
       badge.innerHTML = (isActive ? '<span class="spinner"></span>' : '') +
         '<span class="status-text">' + esc(STATUS_LABELS[status] || status) + '</span>';
+      // Drive the indeterminate progress rail — visible only while non-terminal.
+      var card = document.getElementById('jobCard');
+      if (card) card.classList.toggle('running', isActive);
     }
+
+    // Reveal/collapse the streaming-text detail below the one-line strip.
+    function setJobDetailExpanded(expanded) {
+      var detail = document.getElementById('jobDetail');
+      var btn = document.getElementById('jobExpandBtn');
+      if (!detail || !btn) return;
+      if (expanded) detail.removeAttribute('hidden');
+      else detail.setAttribute('hidden', '');
+      btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      btn.innerHTML = (expanded ? 'Collapse \\u25B4' : 'Expand \\u25BE');
+    }
+
+    (function() {
+      var btn = document.getElementById('jobExpandBtn');
+      if (!btn) return;
+      btn.addEventListener('click', function() {
+        var detail = document.getElementById('jobDetail');
+        setJobDetailExpanded(detail ? detail.hasAttribute('hidden') : true);
+      });
+    })();
 
     function showCategory(category) {
       var badge = document.getElementById('categoryBadge');
@@ -299,6 +372,8 @@ export function sumJobCardScript(): string {
       var banner = document.getElementById('errorBanner');
       banner.textContent = message;
       banner.classList.add('visible');
+      // An error is worth surfacing without a click — auto-expand the detail.
+      setJobDetailExpanded(true);
     }
 
     function updateSummaryArea() {
@@ -361,7 +436,7 @@ export function sumJobCardScript(): string {
           updateStatusBadge('complete');
           if (eventSource) eventSource.close();
           eventSource = null;
-          loadRecentlyAdded(true);  // force-refresh so the just-ingested doc appears
+          if (typeof loadShelf === 'function') loadShelf(true);  // force-refresh so the just-ingested doc appears
         },
         // Server-sent named 'error' event (carries a message payload), distinct
         // from a native connection drop.
@@ -395,6 +470,7 @@ export function sumJobCardScript(): string {
       document.getElementById('categoryBadge').style.display = 'none';
       document.getElementById('similarPanel').classList.remove('visible');
       document.getElementById('errorBanner').classList.remove('visible');
+      setJobDetailExpanded(false);  // fresh job starts as a collapsed strip
       updateStatusBadge('pending');
     }
   `;

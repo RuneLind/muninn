@@ -73,10 +73,18 @@ export function sumCandidatesStyles(): string {
       transition: opacity 0.2s, transform 0.2s;
     }
 
+    /* Score cell — the pill plus a mini-bar underneath, both colored by band. */
+    .candidate-score-cell {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      width: 52px;
+    }
     /* Score pill — colored by band: headliner / mid / low. */
     .candidate-score {
-      flex-shrink: 0;
-      min-width: 46px;
+      width: 46px;
       text-align: center;
       padding: 4px 0;
       border-radius: 6px;
@@ -97,6 +105,25 @@ export function sumCandidatesStyles(): string {
       border-color: color-mix(in srgb, var(--status-warning) 40%, transparent);
       background: color-mix(in srgb, var(--status-warning) 12%, transparent);
     }
+    /* Score mini-bar — fill width = score, tinted by band. */
+    .candidate-scorebar {
+      width: 40px;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--bg-surface);
+      position: relative;
+      overflow: hidden;
+    }
+    .candidate-scorebar-fill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      background: var(--text-dim);
+      opacity: 0.7;
+    }
+    .candidate-scorebar-fill[data-band="high"] { background: var(--status-success); }
+    .candidate-scorebar-fill[data-band="mid"] { background: var(--status-warning); }
 
     .candidate-body {
       flex: 1;
@@ -112,6 +139,15 @@ export function sumCandidatesStyles(): string {
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+    /* Age ("5h ago") — right-aligned in the meta row. */
+    .candidate-age {
+      margin-left: auto;
+      flex-shrink: 0;
+      font-weight: 500;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text-faint);
     }
     /* Origin badge (anthropic / x) — one inbox, two verticals. */
     .candidate-source-badge {
@@ -156,25 +192,17 @@ export function sumCandidatesStyles(): string {
       color: var(--text-soft);
       line-height: 1.45;
     }
-    .candidate-ask {
-      display: inline-block;
-      margin-top: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--accent-light);
-      text-decoration: none;
-    }
-    .candidate-ask:hover { text-decoration: underline; }
 
     .candidate-actions {
       flex-shrink: 0;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
+      align-items: center;
       gap: 6px;
-      align-items: stretch;
     }
+    /* Primary action (Summarize / Retry) stays a full button. */
     .candidate-btn {
-      padding: 5px 12px;
+      padding: 6px 14px;
       border-radius: 6px;
       font-size: 12px;
       font-weight: 600;
@@ -190,12 +218,39 @@ export function sumCandidatesStyles(): string {
     }
     .candidate-btn-summarize:not(:disabled) {
       border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
       color: var(--accent-light);
     }
     .candidate-btn:disabled {
       cursor: not-allowed;
       opacity: 0.45;
     }
+    /* Secondary actions (Dismiss ✕, Ask ?) demote to quiet icon buttons. */
+    .candidate-icon-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 6px 9px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      border: 1px solid transparent;
+      background: none;
+      color: var(--text-faint);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .candidate-icon-btn:hover { color: var(--text-primary); border-color: var(--border-secondary); }
+    .candidate-icon-dismiss:hover {
+      color: var(--status-error);
+      border-color: color-mix(in srgb, var(--status-error) 30%, transparent);
+    }
+    .candidate-icon-ask:hover {
+      color: var(--accent-light);
+      border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    .candidate-icon-btn:disabled { cursor: not-allowed; opacity: 0.45; }
 
     /* In-progress chip (summarizing — e.g. an auto-promoted headliner mid-run). */
     .candidate-status-chip {
@@ -315,8 +370,8 @@ export function sumCandidatesHtml(): string {
       <h2>Candidates <span class="count" id="candidatesCount"></span></h2>
       <p class="candidates-subtitle">Gated discoveries from the Anthropic tracker — pick what's worth a summary. Headliners summarize themselves.</p>
       <!-- Kind filter chips (All / X posts / News / Docs / Commits / Releases), rendered
-           by renderKindFilter() over the inbox. Reuses the .source-chip / .source-filter
-           styles declared in sum-recently-added. -->
+           by renderKindFilter() over the inbox. Reuses the shared .source-chip /
+           .source-filter chip styles (canonical home: sum-shelf.ts). -->
       <div class="source-filter" id="candidateKindFilter"></div>
       <div class="candidate-list" id="candidateList"></div>
       <div class="candidate-done" id="candidateDone" hidden>
@@ -375,18 +430,33 @@ export function sumCandidatesScript(): string {
       return 0; // new + error — needs a decision
     }
 
-    // Right-hand action area, keyed off the candidate status. The buttons carry a
-    // data-act marker (bound in bindCandidateRow); their handlers read id/title/url
-    // off the row's dataset, so the actions can be re-rendered on a status flip.
+    // "N ago" for a candidate's discovery time (createdAt epoch ms). Empty when
+    // missing. timeAgo is a shared page global (bundled helpers).
+    function candidateAgeHtml(c) {
+      if (!c.createdAt || typeof timeAgo !== 'function') return '';
+      return '<span class="candidate-age">' + esc(timeAgo(c.createdAt)) + '</span>';
+    }
+
+    // Cross-link into the Research layer: a discovery becomes a question. Lands
+    // on /research?q=<title>, which auto-asks the cited-Q&A box over the corpus.
+    function candidateAskHref(c) {
+      return '/research?q=' + encodeURIComponent(c.title || '');
+    }
+
+    // Right-hand action area, keyed off the candidate status. Summarize/Retry stays
+    // a primary button; Dismiss (✕) and Ask (?) demote to icon buttons. The buttons
+    // carry a data-act marker (bound in bindCandidateRow); their handlers read
+    // id/title/url off the row's dataset, so the actions can be re-rendered on a flip.
     function candidateActionsHtml(c) {
       if (c.status === 'summarizing') {
         return '<span class="candidate-status-chip"><span class="candidate-spinner"></span>Summarizing…</span>';
       }
-      // new or error — both get an active Summarize/Retry + Dismiss.
+      // new or error — both get an active Summarize/Retry + icon Dismiss + icon Ask.
       var label = c.status === 'error' ? 'Retry' : 'Summarize';
-      return (c.status === 'error' ? '<div class="candidate-failed">Failed</div>' : '') +
+      return (c.status === 'error' ? '<span class="candidate-failed">Failed</span>' : '') +
         '<button class="candidate-btn candidate-btn-summarize" data-act="summarize">' + label + '</button>' +
-        '<button class="candidate-btn candidate-btn-dismiss" data-act="dismiss">Dismiss</button>';
+        '<a class="candidate-icon-btn candidate-icon-ask" href="' + candidateAskHref(c) + '" title="Ask in Research">?</a>' +
+        '<button class="candidate-icon-btn candidate-icon-dismiss" data-act="dismiss" title="Dismiss">\\u2715</button>';
     }
 
     function renderCandidateRow(c) {
@@ -394,26 +464,27 @@ export function sumCandidatesScript(): string {
       // color never disagree on a boundary score (e.g. 0.895 → "0.90").
       var shown = c.score.toFixed(2);
       var band = candidateScoreBand(parseFloat(shown));
+      var scorePct = Math.round(Math.max(0, Math.min(1, c.score)) * 100);
       var titleInner = c.url
         ? '<a href="' + esc(c.url) + '" target="_blank" rel="noopener">' + esc(c.title) + '</a>'
         : esc(c.title);
-      // Cross-link into the Research layer: a discovery becomes a question. Lands
-      // on /research?q=<title>, which auto-asks the cited-Q&A box over the corpus.
-      var askHref = '/research?q=' + encodeURIComponent(c.title || '');
       return '<div class="candidate-item" data-id="' + esc(c.id) + '"' +
           ' data-url="' + esc(c.url || '') + '" data-title="' + esc(c.title || '') + '"' +
           ' data-status="' + esc(c.status) + '" data-doc-id="' + esc(c.docId || '') + '">' +
-        '<div class="candidate-score" data-band="' + band + '">' + shown + '</div>' +
+        '<div class="candidate-score-cell">' +
+          '<div class="candidate-score" data-band="' + band + '">' + shown + '</div>' +
+          '<div class="candidate-scorebar"><div class="candidate-scorebar-fill" data-band="' + band + '" style="width:' + scorePct + '%"></div></div>' +
+        '</div>' +
         '<div class="candidate-body">' +
           '<div class="candidate-meta">' +
             '<span class="candidate-source-badge" data-source="' + esc(c.source || '') + '">' +
               esc(candidateSourceLabel(c.source)) + '</span>' +
             candidateAuthorBadgeHtml(c) +
             (c.candidateSrc ? '<span>' + esc(c.candidateSrc) + '</span>' : '') +
+            candidateAgeHtml(c) +
           '</div>' +
           '<div class="candidate-title">' + titleInner + '</div>' +
           (c.why ? '<div class="candidate-why">' + esc(c.why) + '</div>' : '') +
-          '<a class="candidate-ask" href="' + askHref + '">Ask in Research &rarr;</a>' +
         '</div>' +
         '<div class="candidate-actions">' + candidateActionsHtml(c) + '</div>' +
       '</div>';
@@ -457,7 +528,7 @@ export function sumCandidatesScript(): string {
     ];
 
     // Render the kind-filter chips over the (unfiltered) inbox with live counts.
-    // Mirrors sum-recently-added's renderSourceFilter: "All" + one chip per present
+    // Mirrors the shelf's renderSourceFilter: "All" + one chip per present
     // kind. A sticky active filter keeps its chip rendered even at count 0 (so the
     // filtered-empty state below is reachable and the user explicitly clicks All to
     // widen). The row only hides when NO filter is active and there's nothing to
