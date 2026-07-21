@@ -163,11 +163,21 @@ export interface BacklogStripModel {
   /** How many docs a click drains now: min(batchSize, eligibleNow). */
   drainNow: number;
   /**
-   * The per-article source-page drafter is offered: there are uncovered docs and
-   * no run is in flight. Distinct from the gardener drain — it drafts one `.mdx`
-   * source page per doc (batched, on an explicit click) into the SAME review gate.
+   * The per-article source-page drafter is offered: at least one collection has
+   * uncovered docs and no run is in flight. Distinct from the gardener drain — it
+   * drafts one `.mdx` source page per doc (batched, on an explicit click) into the
+   * SAME review gate. Which collection it drafts is chosen in the strip's `<select>`
+   * ({@link sourceDraftOptions}); the button gates on that collection's queue.
    */
   sourceDraftAvailable: boolean;
+  /**
+   * Per-collection options for the source-draft `<select>` — every collection the
+   * ingest counter reports, with its queued count (the option label). Empty when
+   * the strip has no backlog rows.
+   */
+  sourceDraftOptions: { collection: string; label: string; queued: number }[];
+  /** The pre-selected collection — the one with the largest queue ("" when none). */
+  sourceDraftDefaultCollection: string;
 }
 
 function numOr(v: unknown, fallback: number): number {
@@ -249,12 +259,18 @@ export function backlogStripModel(
       ? { id: watcher!.id }
       : null;
   const nextRunText = watcherUsable ? computeNextRunText(watcher!, now) : null;
-  // The source-draft action only drafts youtube-summaries, so its availability
-  // gates on THAT collection's uncovered count — not the all-source `queued`.
-  const youtubeQueued = numOr(
-    (data.byCollection || []).find((c) => c.collection === "youtube-summaries")?.queued,
-    0,
-  );
+  // Source-draft select options: one per reported collection, its queued count as
+  // the label. The button is offered when ANY collection has uncovered docs; the
+  // pre-selected collection is the one with the largest queue (the client can pick
+  // another and the button re-gates on that collection's count).
+  const sourceDraftOptions = (data.byCollection || []).map((c) => ({
+    collection: c.collection,
+    label: c.label,
+    queued: Math.max(0, numOr(c.queued, 0)),
+  }));
+  const sourceDraftDefaultCollection = sourceDraftOptions.length
+    ? sourceDraftOptions.reduce((best, o) => (o.queued > best.queued ? o : best)).collection
+    : "";
   return {
     totalNeverIngested: queued,
     perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
@@ -281,13 +297,15 @@ export function backlogStripModel(
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
     // Independent of the watcher/drain (source pages need no offered-memory): offer
-    // it whenever there's an uncovered YOUTUBE tail and nothing is running. Gated on
-    // the youtube-summaries queued count specifically — the action only drafts that
-    // collection (the tooltip says YouTube), so gating on the all-source `queued`
-    // would light the button up for a wiki whose only backlog is X/TikTok. Also
-    // hidden when the gardener is disabled (the route 400s then, mirroring the
+    // it whenever ANY collection has an uncovered tail and nothing is running. The
+    // strip's <select> picks which collection to draft (default = largest queue);
+    // the button re-gates on the selected collection's count client-side. Hidden
+    // when the gardener is disabled (the route 400s then, mirroring the
     // control-hidden pattern); an absent `gardenerEnabled` (degraded server) ⇒ shown.
-    sourceDraftAvailable: !running && data.gardenerEnabled !== false && youtubeQueued > 0,
+    sourceDraftAvailable:
+      !running && data.gardenerEnabled !== false && sourceDraftOptions.some((o) => o.queued > 0),
+    sourceDraftOptions,
+    sourceDraftDefaultCollection,
   };
 }
 
@@ -479,17 +497,35 @@ export function backlogConfirmHtml(model: BacklogStripModel): string {
 }
 
 /**
- * The per-article "Draft source pages" control (pure HTML). Offered whenever the
- * source-drafter is available (uncovered docs, nothing running). A single explicit
- * click POSTs a small batch — the drafts land in the same review gate below. Empty
+ * The per-article "Draft source pages" control (pure HTML) — a collection
+ * `<select>` + a button. Offered whenever the source-drafter is available (some
+ * collection has uncovered docs, nothing running). The select is populated from
+ * the ingest counter's per-collection queued counts (default = largest queue); a
+ * single explicit click POSTs a small batch for the SELECTED collection — the
+ * drafts land in the same review gate below. The button renders disabled when the
+ * default collection has 0 queued (the client re-gates it on select change). Empty
  * when unavailable.
  */
 export function backlogSourceDraftHtml(model: BacklogStripModel): string {
   if (!model.sourceDraftAvailable) return "";
+  const options = model.sourceDraftOptions
+    .map((o) => {
+      const selected = o.collection === model.sourceDraftDefaultCollection ? " selected" : "";
+      return (
+        `<option value="${esc(o.collection)}" data-queued="${o.queued}"${selected}>` +
+        `${esc(o.label)} — ${o.queued} queued</option>`
+      );
+    })
+    .join("");
+  const defaultQueued =
+    model.sourceDraftOptions.find((o) => o.collection === model.sourceDraftDefaultCollection)?.queued ?? 0;
+  const disabled = defaultQueued > 0 ? "" : " disabled";
   return (
     '<span class="bk-control bk-source-draft">' +
-    '<button class="gard-btn bk-source-draft-btn" data-backlog-action="source-draft" ' +
-    'title="Draft one .mdx source page each for a small batch of uncovered YouTube docs — into the review gate below">' +
+    `<select class="bk-source-draft-select" data-backlog-select="source-draft" ` +
+    `aria-label="Collection to draft source pages for">${options}</select>` +
+    `<button class="gard-btn bk-source-draft-btn" data-backlog-action="source-draft"${disabled} ` +
+    'title="Draft one .mdx source page each for a small batch of uncovered docs in the selected collection — into the review gate below">' +
     "Draft source pages</button></span>"
   );
 }
@@ -512,22 +548,27 @@ export interface SourceBacklogResult {
 /**
  * Result note for the last source-draft batch (pure HTML). `{error}` renders a
  * failure note; a real result rolls up "N drafted, …" with only the non-zero
- * buckets. Empty for a null (no run yet).
+ * buckets. `collectionLabel` (the human vertical name, when known) prefixes the
+ * note so it names the collection the batch drafted. Empty for a null (no run yet).
  */
-export function sourceDraftResultHtml(r: SourceBacklogResult | { error: string } | null): string {
+export function sourceDraftResultHtml(
+  r: SourceBacklogResult | { error: string } | null,
+  collectionLabel?: string,
+): string {
   if (!r) return "";
+  const tag = collectionLabel ? `${esc(collectionLabel)} ` : "";
   if ("error" in r) {
-    return ` <span class="bk-err">source draft failed: ${esc(r.error)}</span>`;
+    return ` <span class="bk-err">${tag}source draft failed: ${esc(r.error)}</span>`;
   }
   const t = r.totals;
   if (t.selected === 0) {
-    return ` <span class="bk-run-note">source draft: no uncovered docs to draft</span>`;
+    return ` <span class="bk-run-note">${tag}source draft: no uncovered docs to draft</span>`;
   }
   const parts = [`${t.drafted} drafted`];
   if (t.covered) parts.push(`${t.covered} covered`);
   if (t.skipped) parts.push(`${t.skipped} skipped`);
   if (t.error) parts.push(`${t.error} error`);
-  return ` <span class="bk-run-note">source pages: ${esc(parts.join(", "))} of ${t.selected} — see proposals below</span>`;
+  return ` <span class="bk-run-note">${tag}source pages: ${esc(parts.join(", "))} of ${t.selected} — see proposals below</span>`;
 }
 
 /** Last-run outcome note (pure HTML string). */

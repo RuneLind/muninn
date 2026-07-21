@@ -164,6 +164,13 @@ export async function renderWikiGardenerPage(opts?: {
       font-size: 12px; padding: 4px 13px; border-radius: 7px; font-family: inherit; cursor: pointer;
     }
     .gard-backlog .gard-btn.bk-dismiss:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Source-draft collection picker (which vertical the "Draft source pages" button drains). */
+    .gard-backlog .bk-source-draft { gap: 6px; }
+    .gard-backlog .bk-source-draft-select {
+      background: var(--bg-inset); border: 1px solid var(--border-secondary); color: var(--text-secondary);
+      font-size: 12px; padding: 4px 8px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .bk-source-draft-select:hover { border-color: var(--accent); }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {
