@@ -58,6 +58,24 @@ const searchDetail = (input: string | undefined) => {
   return query ? truncate(query, 140) : undefined;
 };
 
+/**
+ * Extract a readable hostname from a `url` field — strips a leading `www.`.
+ * MUST tolerate a clipped/truncated URL value: tool inputs are abbreviated
+ * upstream, so a long URL can arrive cut off. When hostname parsing fails
+ * (`new URL` throws, or the field is missing), returns `undefined` so the
+ * generic label shows rather than a mangled fragment.
+ */
+export const urlDetail = (input: string | undefined): string | undefined => {
+  const url = extractField(input, "url");
+  if (!url) return undefined;
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return host || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 /** Generic detail extractor — tries common field names across any tool, then first string value */
 const genericDetail = (input: string | undefined) => {
   const value = extractField(
@@ -254,6 +272,17 @@ const TOOL_STATUS: Record<string, ToolStatusEntry> = {
   "google-calendar/get-current-time": { label: "Checking current time" },
 };
 
+/**
+ * Built-in web tools surfaced by claude-cli / claude-sdk (WebSearch, WebFetch).
+ * These are NOT MCP tools — they carry no `server` prefix, so `parseToolName`
+ * returns undefined for them. Keyed by the exact tool name and matched BEFORE
+ * `parseToolName` in {@link getToolStatus} / {@link getToolProgress}.
+ */
+const WEB_TOOL_STATUS: Record<string, ToolStatusEntry> = {
+  WebSearch: { label: "Searching the web", detail: searchDetail },
+  WebFetch: { label: "Reading", detail: urlDetail },
+};
+
 /** Server name → generic status (fallback when tool not in TOOL_STATUS) */
 const SERVER_STATUS: Record<string, string> = {
   "gmail": "Checking email",
@@ -323,6 +352,10 @@ export function getToolStatus(toolName: string, input?: string): string | undefi
   // Skip report_intent — it generates its own intent events.
   if (isReportIntentTool(toolName)) return undefined;
 
+  // Built-in web tools (no server prefix) get their own friendly labels.
+  const webEntry = WEB_TOOL_STATUS[toolName];
+  if (webEntry) return formatStatus(webEntry.label, webEntry.detail?.(input));
+
   const parsed = parseToolName(toolName);
   if (!parsed) {
     // Non-MCP / unparseable tool — still try to extract detail
@@ -356,4 +389,33 @@ export function getToolStatus(toolName: string, input?: string): string | undefi
   const label = `${tool} (${server})`;
   const detail = genericDetail(input);
   return formatStatus(label, detail);
+}
+
+/**
+ * Structured variant of {@link getToolStatus}: returns the label and detail
+ * SEPARATELY (not composed into one "label: detail" string), so a caller that
+ * forwards tool progress over the wire (e.g. the fact-check SSE) can send a clean
+ * `{ label, detail }` and let the client compose. Returns `undefined` for tools
+ * that show no status (report_intent), mirroring {@link getToolStatus}.
+ *
+ * Only the built-in web tools (WebSearch → query, WebFetch → hostname) carry a
+ * separate `detail`; every other tool folds its detail into the label (the
+ * composed status string with a trailing `...` stripped), which is all the
+ * fact-check status line needs for the non-web tools it may occasionally fire.
+ */
+export function getToolProgress(
+  toolName: string,
+  input?: string,
+): { label: string; detail?: string } | undefined {
+  if (isReportIntentTool(toolName)) return undefined;
+
+  const webEntry = WEB_TOOL_STATUS[toolName];
+  if (webEntry) {
+    const detail = webEntry.detail?.(input);
+    return detail !== undefined ? { label: webEntry.label, detail } : { label: webEntry.label };
+  }
+
+  const status = getToolStatus(toolName, input);
+  if (!status) return undefined;
+  return { label: status.replace(/\.\.\.$/, "") };
 }
