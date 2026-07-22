@@ -14,7 +14,15 @@
 import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
-import { buildExplainUrl, explainLabel, buildFactcheckUrl, factcheckLabel } from "./wiki-explain.ts";
+import {
+  buildExplainUrl,
+  explainLabel,
+  buildFactcheckUrl,
+  factcheckLabel,
+  applyToolLogEvent,
+  toolLogRowLabel,
+  type ToolLogRow,
+} from "./wiki-explain.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import {
@@ -1437,6 +1445,7 @@ interface AskTurn {
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
+  toolLog?: ToolLogRow[]; // compact per-claim tool log during a fact check (transient; not persisted)
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 interface ClaimRow { index: number; title: string; status: string; block: string; }
@@ -1630,6 +1639,47 @@ function askToolSourcesHtml(turn: AskTurn): string {
   );
 }
 
+/** Inner rows of the compact per-claim tool log — one line per verify step,
+ *  `Claim n · <label>[: <detail>]`, dimmed once done. Empty string when there
+ *  are no rows (the container then hides). */
+function toolLogRows(turn: AskTurn): string {
+  const rows = turn.toolLog || [];
+  if (!rows.length) return "";
+  return rows
+    .map((r) =>
+      '<div class="wiki-fc-tool' + (r.done ? " done" : "") + '">' +
+      '<span class="wiki-fc-tool-claim">Claim ' + r.claimIndex + "</span>" +
+      '<span class="wiki-fc-tool-label">' + esc(toolLogRowLabel(r)) + "</span>" +
+      '<span class="wiki-fc-tool-state">' + (r.done ? "✓" : "…") + "</span>" +
+      "</div>",
+    )
+    .join("");
+}
+
+/** The compact per-claim tool log for a fact-check turn — a scrolling list of
+ *  live verify steps under the Consulting chips. Always emitted (hidden while
+ *  empty) so `refreshAskToolLog` can populate it live. Ephemeral: `turn.toolLog`
+ *  is cleared at `done`, so a committed/rehydrated turn never re-renders it. */
+function askToolLogHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck") return "";
+  const has = (turn.toolLog || []).length > 0;
+  return (
+    '<div class="wiki-fc-toollog" id="askToolLog" data-log' +
+    (has ? "" : ' style="display:none"') + ">" + toolLogRows(turn) + "</div>"
+  );
+}
+
+/** Re-render the on-screen tool log in place as verify steps arrive, then
+ *  auto-scroll to the newest row (same as /agents' mini-log). The article body
+ *  still streams separately, so only this container is repainted. */
+function refreshAskToolLog(turn: AskTurn): void {
+  const el = document.getElementById("askToolLog");
+  if (!el) return;
+  el.innerHTML = toolLogRows(turn);
+  el.style.display = (turn.toolLog || []).length ? "flex" : "none";
+  el.scrollTop = el.scrollHeight;
+}
+
 /** Update the on-screen "Consulting" chip row in place as WebFetch hosts arrive
  *  (the article body still streams, so re-render just this container). */
 function refreshAskToolSources(turn: AskTurn): void {
@@ -1650,6 +1700,7 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     '<div class="wiki-article-head"><h1>' + esc(turn.question) + "</h1>" +
     '<div class="wiki-meta-row"><span class="wiki-dates" id="askAnswerMeta">' +
     esc(askMetaText(turn)) + "</span></div></div>" +
+    askToolLogHtml(turn) +
     askToolSourcesHtml(turn) +
     '<div class="wiki-article wiki-ask-article" id="askAnswerBody">' + body + "</div>" +
     '<div class="wiki-ask-sources" id="askAnswerSources">' +
@@ -1812,6 +1863,21 @@ function runAskStream(url: string, turn: AskTurn): void {
       if (askConn !== conn) return;
       if (turn.kind !== "factcheck") return;
       const d = JSON.parse((e as MessageEvent).data);
+      // Compact per-claim tool log — folds every start/end (paired by name +
+      // claimIndex, so concurrent claims resolve to their own rows) into a
+      // scrolling list under the Consulting chips. Rendered on ALL fact-check
+      // turns (it lives in the article pane, not the rail, so it doesn't compete
+      // with the status line the way the per-tool narration below would). Cleared
+      // at `done` — never persisted.
+      if (!turn.toolLog) turn.toolLog = [];
+      applyToolLogEvent(turn.toolLog, {
+        state: d.state === "end" ? "end" : "start",
+        name: typeof d.name === "string" ? d.name : "",
+        claimIndex: typeof d.claimIndex === "number" ? d.claimIndex : 0,
+        label: typeof d.label === "string" ? d.label : undefined,
+        detail: typeof d.detail === "string" ? d.detail : undefined,
+      });
+      refreshAskToolLog(turn);
       // With a multi-claim checklist the claim counter owns the status line — don't
       // let per-tool flips thrash it. A single-claim (sel) run keeps tool narration.
       const multiClaim = !!(turn.claims && turn.claims.length > 1);
@@ -1867,6 +1933,14 @@ function runAskStream(url: string, turn: AskTurn): void {
       // round-trip the whole verdict-block markdown into localStorage, duplicating
       // `turn.answer`.
       turn.claims = undefined;
+      // The tool log is ephemeral streaming chrome (the trace is the durable
+      // record) — drop it so it neither survives into the committed turn nor gets
+      // persisted to localStorage. The final render above uses `turn.answer`, and
+      // no post-done path reads it.
+      turn.toolLog = undefined;
+      // Clearing the data alone leaves the already-rendered #askToolLog node
+      // on screen (with any unpaired "…" row) — hide it too.
+      refreshAskToolLog(turn);
       askTurns.push(turn);
       renderAskHistory();
       persistAskSession();

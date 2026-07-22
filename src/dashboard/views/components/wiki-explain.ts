@@ -53,6 +53,55 @@ export function factcheckLabel(sel: string, pageTitle?: string): string {
   return 'Fact check: "' + short + '"';
 }
 
+/** One `tool` SSE event from the fact-check verify fan-out (`factcheck-sse.ts`).
+ *  `start` carries the server-computed `label`/`detail`; `end` just the identity
+ *  (`name` + `claimIndex`). `claimIndex` is 1-based. */
+export interface ToolLogEvent {
+  state: "start" | "end";
+  name: string;
+  claimIndex: number;
+  label?: string;
+  detail?: string;
+}
+
+/** One row of the compact per-claim fact-check tool log. Rendered as
+ *  `Claim <claimIndex> · <label>[: <detail>]`, dimmed once `done`. */
+export interface ToolLogRow {
+  claimIndex: number;
+  name: string;
+  label: string;
+  detail?: string;
+  done: boolean;
+}
+
+/** Fold one tool SSE event into the running per-claim tool-log rows (mutates +
+ *  returns `rows`). A `start` appends a row; an `end` marks the FIRST still-open
+ *  row matching `(name, claimIndex)` done — pairing per claim, so concurrent
+ *  claims interleaving their tool events resolve to their own rows. An `end` with
+ *  no open match (a dropped/duplicate event) is a no-op. */
+export function applyToolLogEvent(rows: ToolLogRow[], ev: ToolLogEvent): ToolLogRow[] {
+  if (ev.state === "start") {
+    rows.push({
+      claimIndex: ev.claimIndex,
+      name: ev.name,
+      label: ev.label || ev.name,
+      detail: ev.detail,
+      done: false,
+    });
+  } else {
+    const row = rows.find((r) => !r.done && r.name === ev.name && r.claimIndex === ev.claimIndex);
+    if (row) row.done = true;
+  }
+  return rows;
+}
+
+/** Text of a tool-log row's action, e.g. `Reading: example.com` or a bare
+ *  `Searching the web` when no detail is present. The `Claim n ·` prefix is added
+ *  by the renderer (kept separate so it can be styled as a grouping chip). */
+export function toolLogRowLabel(row: ToolLogRow): string {
+  return row.detail ? row.label + ": " + row.detail : row.label;
+}
+
 /** Build the `/api/wiki/factcheck` GET URL. `mode` is `sel` (selection-scoped —
  *  requires `sel`) or `article` (whole page — `sel` omitted). Caps `sel` at
  *  `EXPLAIN_SEL_MAX` to match the server, and omits empty params. */

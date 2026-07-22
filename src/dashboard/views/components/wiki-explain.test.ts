@@ -4,6 +4,9 @@ import {
   explainLabel,
   factcheckLabel,
   buildFactcheckUrl,
+  applyToolLogEvent,
+  toolLogRowLabel,
+  type ToolLogRow,
   EXPLAIN_LABEL_CHARS,
   EXPLAIN_SEL_MAX,
 } from "./wiki-explain.ts";
@@ -93,4 +96,59 @@ test("buildFactcheckUrl caps sel at EXPLAIN_SEL_MAX (sel mode)", () => {
   const url = buildFactcheckUrl({ mode: "sel", page: "p", sel });
   const enc = url.slice(url.indexOf("&sel=") + "&sel=".length);
   expect(decodeURIComponent(enc).length).toBe(EXPLAIN_SEL_MAX);
+});
+
+test("applyToolLogEvent appends a row on start with label/detail", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, {
+    state: "start", name: "WebFetch", claimIndex: 2, label: "Reading", detail: "example.com",
+  });
+  expect(rows).toEqual([
+    { claimIndex: 2, name: "WebFetch", label: "Reading", detail: "example.com", done: false },
+  ]);
+});
+
+test("applyToolLogEvent falls back to name when label is absent", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, { state: "start", name: "WebSearch", claimIndex: 1 });
+  expect(rows[0]!.label).toBe("WebSearch");
+  expect(rows[0]!.detail).toBeUndefined();
+});
+
+test("applyToolLogEvent marks the matching open row done on end", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, { state: "start", name: "WebFetch", claimIndex: 1, label: "Reading", detail: "a.com" });
+  applyToolLogEvent(rows, { state: "end", name: "WebFetch", claimIndex: 1 });
+  expect(rows[0]!.done).toBe(true);
+});
+
+test("applyToolLogEvent pairs end to the row of the same claim (concurrent interleave)", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, { state: "start", name: "WebFetch", claimIndex: 1, label: "Reading", detail: "a.com" });
+  applyToolLogEvent(rows, { state: "start", name: "WebFetch", claimIndex: 2, label: "Reading", detail: "b.com" });
+  applyToolLogEvent(rows, { state: "end", name: "WebFetch", claimIndex: 2 });
+  expect(rows[0]!.done).toBe(false); // claim 1 still open
+  expect(rows[1]!.done).toBe(true); // claim 2 closed
+});
+
+test("applyToolLogEvent marks only the FIRST open row of a claim when a tool repeats", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, { state: "start", name: "WebFetch", claimIndex: 1, label: "Reading", detail: "a.com" });
+  applyToolLogEvent(rows, { state: "start", name: "WebFetch", claimIndex: 1, label: "Reading", detail: "b.com" });
+  applyToolLogEvent(rows, { state: "end", name: "WebFetch", claimIndex: 1 });
+  expect(rows[0]!.done).toBe(true);
+  expect(rows[1]!.done).toBe(false);
+});
+
+test("applyToolLogEvent end with no open match is a no-op", () => {
+  const rows: ToolLogRow[] = [];
+  applyToolLogEvent(rows, { state: "end", name: "WebFetch", claimIndex: 9 });
+  expect(rows).toEqual([]);
+});
+
+test("toolLogRowLabel joins label + detail, or bare label when no detail", () => {
+  expect(toolLogRowLabel({ claimIndex: 1, name: "WebFetch", label: "Reading", detail: "example.com", done: false }))
+    .toBe("Reading: example.com");
+  expect(toolLogRowLabel({ claimIndex: 1, name: "WebSearch", label: "Searching the web", done: false }))
+    .toBe("Searching the web");
 });
