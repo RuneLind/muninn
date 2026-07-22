@@ -124,9 +124,14 @@ async function runFactcheck(
   try {
     // Live tool status ("Searching the web…") is out of scope for v1 — forward
     // only text deltas to the client. Tool spans still land on the trace below.
+    // The one-shot keeps producing deltas after a client abort (no AbortSignal
+    // plumbing into executeOneShot), so stop writing on the first failed write
+    // instead of leaking one unhandled rejection per token.
+    let clientGone = false;
     const onProgress = (event: StreamProgressEvent) => {
-      if (event.type === "text_delta") {
-        void stream.writeSSE({ event: "delta", data: JSON.stringify({ type: "delta", text: event.text }) });
+      if (event.type === "text_delta" && !clientGone) {
+        stream.writeSSE({ event: "delta", data: JSON.stringify({ type: "delta", text: event.text }) })
+          .catch(() => { clientGone = true; });
       }
     };
 
