@@ -23,6 +23,14 @@ import {
   EXPLAIN_HEADING_MAX,
   EXPLAIN_SELECTION_MAX,
 } from "../../wiki/explain-context.ts";
+import {
+  buildFactcheckPrompts,
+  FACTCHECK_SELECTION_MAX,
+  FACTCHECK_HEADING_MAX,
+} from "../../wiki/factcheck-context.ts";
+import { connectorCapabilities } from "../../ai/one-shot.ts";
+import { streamFactcheckSSE } from "./factcheck-sse.ts";
+import { createHash } from "node:crypto";
 import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
 import {
@@ -960,6 +968,102 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Same per-wiki citation enrichment as Ask (pinned to the resolved wiki).
       enrich: entry ? (citations) => enrichCitationsWithPages(citations, [entry]) : undefined,
       renderAnswerHtml: renderAskAnswerHtml,
+    });
+  });
+
+  // Wiki Fact check: web-verified per-claim verdicts for a selected passage (`sel`
+  // mode) or a whole page (`article` mode). A sibling of `/api/wiki/explain`, but
+  // it runs NO retrieval and NO coverage gate — a tool-enabled one-shot verifies
+  // claims against the LIVE web (WebFetch) and streams verdicts via the dedicated
+  // `streamFactcheckSSE`. Unlike Ask/Explain it needs NO search collections (it's
+  // corpus-independent) but DOES need a connector with web tools (claude-cli /
+  // claude-sdk) — a non-web connector preflights out with a clean app_error.
+  // Never 5xx: param problems are 400 JSON; wiki/page/connector problems are
+  // `app_error` events on the already-committed 200 SSE response.
+  app.get("/api/wiki/factcheck", async (c) => {
+    const mode = c.req.query("mode") === "article" ? "article" : "sel";
+    const page = c.req.query("page");
+    if (!page) return c.json({ error: "Missing query parameter: page" }, 400);
+    const sel = (c.req.query("sel") ?? "").trim().slice(0, FACTCHECK_SELECTION_MAX);
+    if (mode === "sel" && !sel) return c.json({ error: "Missing query parameter: sel" }, 400);
+    const ctx = (c.req.query("ctx") ?? "").trim().slice(0, FACTCHECK_HEADING_MAX) || undefined;
+
+    const registry = getWikiRegistry();
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    // Owner-routing, identical to Ask/Explain.
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+
+    // Preflight (never-5xx: app_error on the committed 200 stream). Fact-check
+    // needs NO collections, so this chain omits Explain's collection check but
+    // ADDS the web-tools connector check. Resolve index/meta only on the happy
+    // path (unknown wiki short-circuits before any filesystem touch).
+    let index: WikiIndex | null = null;
+    let meta: WikiPageMeta | undefined;
+    if (entry && !unknownWiki) {
+      index = await getWikiIndex({ root: entry.root });
+      if (index) meta = index.resolve(page);
+    }
+    let preflightError: string | null = null;
+    if (unknownWiki || !entry) {
+      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
+    } else if (!index) {
+      preflightError = "wiki directory not found";
+    } else if (!meta) {
+      preflightError = `No wiki page named "${page}".`;
+    } else if (botConfig && !connectorCapabilities(botConfig).supportsWebTools) {
+      preflightError =
+        `This wiki's bot (${botConfig.name}) can't run web fact-checks — its connector has no web tools. ` +
+        `Point the wiki at a claude-cli or claude-sdk bot.`;
+    }
+
+    // Context assembly — ONLY when preflight passed (entry/index/meta set).
+    let question = "";
+    let systemPrompt = "";
+    let userPrompt = "";
+    let baseHash = "";
+    if (!preflightError && entry && index && meta) {
+      // Explainers are HTML on disk; reduce to prose so claim extraction / the
+      // locator see plain text. Markdown pages pass through verbatim. A missing/
+      // unreadable file degrades to an empty body (no 500), like the explain branch.
+      const raw = (await readWikiPage(index, meta)) ?? "";
+      baseHash = createHash("sha256").update(raw).digest("hex");
+      const body = meta.type === "explainer" ? htmlToText(raw) : raw;
+      const prompts = buildFactcheckPrompts({
+        mode,
+        meta: { title: meta.title, tags: meta.tags, type: meta.type },
+        body,
+        sel: mode === "sel" ? sel : undefined,
+        ctx: mode === "sel" ? ctx : undefined,
+        wikiName: entry.name,
+      });
+      question = prompts.question;
+      systemPrompt = prompts.systemPrompt;
+      userPrompt = prompts.userPrompt;
+      log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
+        wiki: entry.name,
+        bot: botConfig?.name,
+        page,
+        mode,
+      });
+    }
+
+    return streamFactcheckSSE(c, {
+      config,
+      botConfig: botConfig ?? null,
+      preflightError,
+      question,
+      systemPrompt,
+      userPrompt,
+      baseHash,
+      mode,
+      // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
+      // raw URLs inline in the answer markdown, not numbered sources).
+      renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),
     });
   });
 

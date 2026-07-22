@@ -43,3 +43,34 @@ export function buildExplainUrl(opts: {
   if (opts.history) url += "&history=" + encodeURIComponent(opts.history);
   return url;
 }
+
+/** Display-only turn label for a fact check. `sel` mode echoes the passage; the
+ *  whole-article variant passes an empty `sel` and labels by page title. */
+export function factcheckLabel(sel: string, pageTitle?: string): string {
+  const s = sel.trim().replace(/\s+/g, " ");
+  if (!s) return "Fact check: " + (pageTitle ? pageTitle : "this article");
+  const short = s.length > EXPLAIN_LABEL_CHARS ? s.slice(0, EXPLAIN_LABEL_CHARS) + "…" : s;
+  return 'Fact check: "' + short + '"';
+}
+
+/** Build the `/api/wiki/factcheck` GET URL. `mode` is `sel` (selection-scoped —
+ *  requires `sel`) or `article` (whole page — `sel` omitted). Caps `sel` at
+ *  `EXPLAIN_SEL_MAX` to match the server, and omits empty params. */
+export function buildFactcheckUrl(opts: {
+  mode: "sel" | "article";
+  page: string;
+  wiki?: string;
+  sel?: string;
+  ctx?: string;
+}): string {
+  let url = "/api/wiki/factcheck?page=" + encodeURIComponent(opts.page);
+  url += "&mode=" + opts.mode;
+  if (opts.mode === "sel" && opts.sel) {
+    const sel =
+      opts.sel.length > EXPLAIN_SEL_MAX ? [...opts.sel].slice(0, EXPLAIN_SEL_MAX).join("") : opts.sel;
+    url += "&sel=" + encodeURIComponent(sel);
+    if (opts.ctx) url += "&ctx=" + encodeURIComponent(opts.ctx);
+  }
+  if (opts.wiki) url += "&wiki=" + encodeURIComponent(opts.wiki);
+  return url;
+}

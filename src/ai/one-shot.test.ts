@@ -48,6 +48,15 @@ test("connectorCapabilities: claude-cli and claude-sdk (and the unset default) s
   }
 });
 
+test("connectorCapabilities: only claude-cli / claude-sdk expose web tools", () => {
+  expect(connectorCapabilities(stubBot()).supportsWebTools).toBe(true); // unset ⇒ claude-cli
+  expect(connectorCapabilities(stubBot({ connector: "claude-cli" })).supportsWebTools).toBe(true);
+  expect(connectorCapabilities(stubBot({ connector: "claude-sdk" })).supportsWebTools).toBe(true);
+  for (const c of ["copilot-sdk", "openai-compat"] as ConnectorType[]) {
+    expect(connectorCapabilities(stubBot({ connector: c })).supportsWebTools).toBe(false);
+  }
+});
+
 test("dispatches through resolveConnector, forwarding prompt/config/systemPrompt/onProgress", async () => {
   const bot = stubBot({ connector: "copilot-sdk" });
   const onProgress = () => {};

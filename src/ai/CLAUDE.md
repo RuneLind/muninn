@@ -5,7 +5,7 @@
 | File | Role |
 |---|---|
 | `connector.ts` | `AiConnector` type + `resolveConnector()` — selects the right AI backend for a bot |
-| `one-shot.ts` | `executeOneShot()` — one-shot (batch/background) prompt→text seam that routes through `resolveConnector`, so summarizers + research synthesis honor the bot's connector (not a raw CLI spawn). Plus `connectorCapabilities()` — `supportsExtraDirs` (`claude-cli` via `--add-dir` **and** `claude-sdk` via `additionalDirectories`, used by the TikTok frame-reading pre-flight; delivered per-connector — CLI folds `extraDirs` into `--add-dir` spawnArgs, SDK reads them off `botConfig.extraDirs`). |
+| `one-shot.ts` | `executeOneShot()` — one-shot (batch/background) prompt→text seam that routes through `resolveConnector`, so summarizers + research synthesis honor the bot's connector (not a raw CLI spawn). Plus `connectorCapabilities()` — `supportsExtraDirs` (`claude-cli` via `--add-dir` **and** `claude-sdk` via `additionalDirectories`, used by the TikTok frame-reading pre-flight; delivered per-connector — CLI folds `extraDirs` into `--add-dir` spawnArgs, SDK reads them off `botConfig.extraDirs`), `supportsThinkingBudget`, and `supportsWebTools` (`claude-cli`/`claude-sdk` only — both surface WebFetch; used by the wiki Fact check route's pre-flight to `app_error` cleanly on a Copilot/OpenAI-compat bot). |
 | `executor.ts` | Claude CLI executor — spawns `claude` process, reads NDJSON stdout, handles timeout |
 | `prompt-builder.ts` | Assembles system + user prompts from persona, memories, goals, tasks, history |
 | `stream-parser.ts` | `StreamParser` class — parses NDJSON stream events, extracts tool calls with timing |

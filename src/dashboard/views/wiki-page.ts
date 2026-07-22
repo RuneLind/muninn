@@ -297,6 +297,19 @@ export async function renderWikiPage(opts?: {
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
     .wiki-bc-explain:hover { background: var(--accent-light); }
+    /* Fact check buttons — a quieter outline treatment so they read as a
+       secondary action next to the filled ✨ Explain. The whole-article variant
+       is always visible; the selection-gated one rides the same show/hide. */
+    .wiki-bc-factcheck {
+      flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
+      background: transparent; color: var(--text-secondary);
+      border: 1px solid var(--border-primary);
+      font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
+    }
+    .wiki-bc-factcheck:hover {
+      background: var(--tint-neutral); color: var(--text-primary);
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+    }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }
