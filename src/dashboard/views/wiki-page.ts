@@ -627,6 +627,23 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-secondary); white-space: nowrap;
     }
+    /* Compact per-claim fact-check tool log — a scrolling list of live verify
+       steps, pattern-copied from /agents' .run-tools mini-log (auto-scrolled to
+       the newest). Ephemeral: only present while a fact check streams. */
+    .wiki-fc-toollog {
+      display: flex; flex-direction: column; gap: 2px;
+      max-height: 96px; overflow-y: auto; scrollbar-width: thin;
+      margin: 2px 4px 8px;
+    }
+    .wiki-fc-tool { font-size: 11px; color: var(--text-secondary); display: flex; gap: 6px; align-items: baseline; }
+    .wiki-fc-tool.done { color: var(--text-dim); }
+    .wiki-fc-tool-claim {
+      flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.03em; font-size: 10px;
+    }
+    .wiki-fc-tool-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .wiki-fc-tool-state { margin-left: auto; flex-shrink: 0; color: var(--text-dim); }
+    .wiki-fc-tool.done .wiki-fc-tool-state { color: var(--accent-light); }
     .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {
       flex: 1; padding: 8px 10px; border-radius: 7px;
