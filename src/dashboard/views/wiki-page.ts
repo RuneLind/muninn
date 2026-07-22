@@ -630,7 +630,7 @@ export async function renderWikiPage(opts?: {
     }
     /* Per-claim confidence line (evidence strength, NOT the verdict) — a band-
        colored chip carrying the 0-100 score, rendered in place of the model's
-       Confidence NN/100 text line by enhanceFactcheckConfidence. */
+       Confidence NN/100 text line by enhanceConfidenceHtml. */
     .wiki-fc-conf-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
     .wiki-fc-conf-key {
       font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim);

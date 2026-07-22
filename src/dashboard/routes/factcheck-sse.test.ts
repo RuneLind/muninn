@@ -177,6 +177,11 @@ describe("parseConfidence", () => {
   test("matches the line anywhere in the block (not just first line)", () => {
     expect(parseConfidence(block("Confidence: 40/100"))).toBe(40);
   });
+
+  test("is case-insensitive (models emit lowercase 'confidence:')", () => {
+    expect(parseConfidence(block("confidence: 62/100"))).toBe(62);
+    expect(parseConfidence(block("CONFIDENCE: 91/100"))).toBe(91);
+  });
 });
 
 describe("realOutcome", () => {

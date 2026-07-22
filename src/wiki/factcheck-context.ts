@@ -193,7 +193,8 @@ function factcheckVerifySystemPrompt(): string {
     "- A heading line: `### <verdict emoji> Claim <n>/<total> — <short claim title>` (e.g. `### ✅ Claim 3/8 — Sleep deprivation raises amyloid beta`). Use the EXACT <n>/<total> you are given.",
     "- A blank line.",
     "- A short reasoning paragraph (one to three sentences).",
-    "- A `Confidence: NN/100` line (NN is your evidence-strength score from the rubric above). Put it on its own line after the reasoning paragraph.",
+    "- A blank line.",
+    "- A `Confidence: NN/100` line (NN is your evidence-strength score from the rubric above) as its OWN standalone paragraph — it MUST be preceded by a blank line so it renders on its own line, never merged into the reasoning paragraph.",
     "- A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
   ].join("\n");
 }

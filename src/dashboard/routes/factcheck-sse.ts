@@ -136,7 +136,7 @@ export type ClaimOutcome = "verified" | "unverifiable" | "timeout" | "error" | "
 
 /** Confidence line — evidence-strength score the model emits after the reasoning
  *  paragraph (`Confidence: NN/100`), independent of the verdict emoji. */
-const CONFIDENCE_RE = /^Confidence:\s*(\d{1,3})\/100/m;
+const CONFIDENCE_RE = /^Confidence:\s*(\d{1,3})\/100/im;
 
 /** Parse a block's `Confidence: NN/100` line → a 0–100 int (clamped), or
  *  undefined when the line is absent/malformed. Never derives the verdict; the

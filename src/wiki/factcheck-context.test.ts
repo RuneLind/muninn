@@ -129,6 +129,10 @@ describe("buildClaimVerifyPrompt", () => {
     const srcIdx = systemPrompt.indexOf("A `Sources:` line");
     expect(confIdx).toBeGreaterThan(-1);
     expect(srcIdx).toBeGreaterThan(confIdx); // Confidence precedes Sources
+    // FIX 3d — the Confidence line must be mandated as a standalone paragraph
+    // (blank line before it), so every downstream renderer keeps it on its own line.
+    expect(systemPrompt).toContain("OWN standalone paragraph");
+    expect(systemPrompt).toContain("preceded by a blank line");
     // The block-heading contract is UNTOUCHED — still the exact ### emoji form.
     expect(systemPrompt).toContain("### <verdict emoji> Claim <n>/<total> — <short claim title>");
   });
