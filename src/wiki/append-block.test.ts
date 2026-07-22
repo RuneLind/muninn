@@ -113,3 +113,13 @@ test("buildFactcheckBlock blockquotes every line and wraps in sentinels", () => 
   // Blank line kept as a bare `>` so it stays one blockquote.
   expect(block).toContain("\n>\n");
 });
+
+test("buildFactcheckBlock neutralizes embedded sentinel strings in the answer", () => {
+  const hostile = `Quoting the docs: ${FACTCHECK_SENTINEL_END} and ${FACTCHECK_SENTINEL_START} appear literally.`;
+  const block = buildFactcheckBlock(hostile, "2026-07-22");
+  // Exactly one sentinel pair — the wrapper's own — so strip/replace can never
+  // stop early at an embedded end-sentinel and strand prose outside the block.
+  expect(block.split(FACTCHECK_SENTINEL_START).length - 1).toBe(1);
+  expect(block.split(FACTCHECK_SENTINEL_END).length - 1).toBe(1);
+  expect(block).toContain("factcheck:end");
+});

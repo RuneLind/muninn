@@ -91,7 +91,14 @@ export function countFactcheckClaims(answer: string): number {
  * upgrader keys off a single `<blockquote>[!factcheck] …</blockquote>`.
  */
 export function buildFactcheckBlock(answer: string, dateOslo: string): string {
-  const lines = answer.trim().split("\n");
+  // Neutralize embedded sentinel strings (e.g. the model quoting a page that
+  // documents this feature): a literal end-sentinel inside the answer would make
+  // the non-greedy strip/replace regexes stop early, stranding prose and
+  // accumulating unbalanced sentinels on every re-append.
+  const safeAnswer = answer
+    .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
+    .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end");
+  const lines = safeAnswer.trim().split("\n");
   const quoted = [`> [!factcheck] Fact check (${dateOslo})`];
   for (const line of lines) {
     quoted.push(line.trim() === "" ? ">" : `> ${line}`);
