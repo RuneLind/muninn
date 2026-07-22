@@ -38,6 +38,7 @@ export async function renderModelsPage(): Promise<string> {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>Muninn - Models</title>
   <style>
     ${SHARED_STYLES}

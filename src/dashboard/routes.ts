@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
 import { renderDashboardPage } from "./views/page.ts";
+import { FAVICON_SVG, FAVICON_HEADERS } from "./views/favicon.ts";
 import { getDashboardBuildHash } from "./dashboard-build-hash.ts";
 import { assembleAttention } from "./home-attention.ts";
 import { registerDataRoutes } from "./routes/data-routes.ts";
@@ -32,6 +33,14 @@ export function createDashboardRoutes(config: Config): Hono {
   app.get("/", async (c) => {
     return c.html(await renderDashboardPage());
   });
+
+  // Brand favicon. Both paths serve the same SVG — browsers auto-fetch
+  // /favicon.ico on every page (so all pages get the icon with no markup),
+  // while the app shells also <link> /favicon.svg explicitly.
+  const serveFavicon = (c: import("hono").Context) =>
+    c.body(FAVICON_SVG, 200, FAVICON_HEADERS);
+  app.get("/favicon.svg", serveFavicon);
+  app.get("/favicon.ico", serveFavicon);
 
   // Build hash of the inlined browser bundles — the visibility-change watcher
   // in helpers-browser.ts compares this against the meta tag the page was
