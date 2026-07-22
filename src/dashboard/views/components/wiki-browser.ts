@@ -1448,7 +1448,7 @@ interface AskTurn {
   page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
-  toolSourceUrls?: Record<string, string>; // host → first full URL seen (transient; feeds the Consulting chip hrefs). Rehydrated turns lack it ⇒ chips fall back to https://<host>/.
+  toolSourceUrls?: Record<string, string>; // host → first full URL seen (feeds the Consulting chip hrefs). Persisted intentionally; a pre-PR / malformed-dropped turn lacks it ⇒ chips fall back to https://<host>/.
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
   claimOutcomes?: ClaimOutcomeCounts; // per-outcome tally for the honest fact-check meta line (persisted)
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)

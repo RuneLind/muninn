@@ -201,18 +201,52 @@ export async function runClaimPool(opts: {
   return outcomes;
 }
 
-/** A markdown link `[text](http(s)://…)` OR a bare http(s) URL, on a `Sources:`
- *  line. The first alternative (an existing markdown link) is left untouched;
- *  group 1 (a bare URL) is the only thing {@link linkifySourcesLines} wraps —
- *  matching a link first is what stops a double-wrap. */
-const SOURCES_URL_RE = /\[[^\]]*\]\(https?:\/\/[^)\s]+\)|(https?:\/\/[^\s<>()]+)/gi;
+/** An existing markdown link `[text](http(s)://…)` (group 1 = text, group 2 = the
+ *  href — the href group allows one level of balanced parens so a Wikipedia-style
+ *  `…/Foo_(bar)` disambiguator survives) OR a bare http(s) URL (group 3). Bare
+ *  URLs now allow `(`/`)` in the body (only whitespace/angle-brackets stop them);
+ *  an UNMATCHED trailing `)` is peeled back off by {@link splitTrailingUrl} (the
+ *  standard balanced-paren autolinker heuristic). Matching a markdown link first
+ *  is what stops a bare-URL double-wrap. */
+const SOURCES_URL_RE =
+  /\[([^\]]*)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))*)\)|(https?:\/\/[^\s<>]+)/gi;
 
-/** Split trailing punctuation a model routinely writes right after a URL (comma,
- *  period, etc.) off the URL, so it stays OUTSIDE the generated link's href
- *  rather than being swallowed into it. */
-function splitTrailingPunct(url: string): [string, string] {
-  const m = url.match(/[.,;:!?'"\]]+$/);
-  return m ? [url.slice(0, url.length - m[0].length), m[0]] : [url, ""];
+/** Percent-encode literal parens in a URL so the SHARED `web-format.ts`
+ *  markdown-link parser (`\[..\]\(([^)]+)\)`, which we must NOT touch — global
+ *  blast radius) doesn't stop the href at the first `)`. `%28`/`%29` carry no
+ *  literal parens, so re-running this is a no-op (idempotent — never `%2528`). */
+function encodeParens(url: string): string {
+  return url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+}
+
+/** Peel trailing text a model routinely writes right after a bare URL off the
+ *  URL so it stays OUTSIDE the generated link's href: plain punctuation
+ *  (comma/period/…) AND an UNBALANCED trailing `)` (a wrapper paren like
+ *  `(see https://x.com/a)` — more `)` than `(` in the URL). A BALANCED paren
+ *  (Wikipedia's `…/Foo_(bar)`) is kept. Peels alternately from the right so
+ *  `…/a).` splits both. */
+function splitTrailingUrl(input: string): [string, string] {
+  let url = input;
+  let trailing = "";
+  while (url.length > 0) {
+    const p = url.match(/[.,;:!?'"\]]+$/);
+    if (p) {
+      trailing = p[0] + trailing;
+      url = url.slice(0, url.length - p[0].length);
+      continue;
+    }
+    if (url.endsWith(")")) {
+      const opens = (url.match(/\(/g) ?? []).length;
+      const closes = (url.match(/\)/g) ?? []).length;
+      if (closes > opens) {
+        trailing = ")" + trailing;
+        url = url.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  return [url, trailing];
 }
 
 /**
@@ -220,27 +254,42 @@ function splitTrailingPunct(url: string): [string, string] {
  * `Sources:` prompt contract): on every line starting with `Sources:`, wrap any
  * BARE http(s) URL into a `[hostname](url)` markdown link so the reader/web
  * pipeline renders it clickable (`formatWebHtml` linkifies markdown links but has
- * no bare-URL autolinker). Pure + deterministic + factcheck-only — deliberately
- * NOT a global autolinker on the shared web-format. Leaves URLs already inside a
- * markdown link untouched (no double-wrap), keeps trailing punctuation outside the
- * href, ignores non-`Sources:` lines, and only touches http(s).
+ * no bare-URL autolinker). Pure + deterministic + idempotent + factcheck-only —
+ * deliberately NOT a global autolinker on the shared web-format.
+ *
+ * Parens handling (FIX 1): both a newly-wrapped bare URL AND an already-present
+ * markdown link have literal `(`/`)` percent-encoded in the emitted HREF
+ * (`encodeParens`, link text untouched) so the shared `web-format.ts` parser —
+ * which stops an href at the first `)` and which we must NOT modify — resolves
+ * the full URL. Bare URLs keep BALANCED parens (Wikipedia disambig) but shed a
+ * wrapper `)` (`splitTrailingUrl`). Existing markdown links are normalized in
+ * place (an intentional scope extension); the encoding is idempotent so a second
+ * pass is a no-op. Leaves non-`Sources:` lines and non-http(s) URLs untouched.
  */
 export function linkifySourcesLines(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
       if (!/^Sources:/.test(line)) return line;
-      return line.replace(SOURCES_URL_RE, (match: string, bareUrl?: string) => {
-        if (!bareUrl) return match; // an existing markdown link — leave as-is
-        const [url, trailing] = splitTrailingPunct(bareUrl);
-        let host: string;
-        try {
-          host = new URL(url).hostname.replace(/^www\./, "") || url;
-        } catch {
-          return match; // unparseable — leave the bare URL untouched
-        }
-        return `[${host}](${url})${trailing}`;
-      });
+      return line.replace(
+        SOURCES_URL_RE,
+        (match: string, mdText?: string, mdHref?: string, bareUrl?: string) => {
+          if (typeof mdHref === "string") {
+            // An existing markdown link — normalize parens in the href in place
+            // (idempotent), leave the link text as-is.
+            return `[${mdText ?? ""}](${encodeParens(mdHref)})`;
+          }
+          if (typeof bareUrl !== "string") return match;
+          const [url, trailing] = splitTrailingUrl(bareUrl);
+          let host: string;
+          try {
+            host = new URL(url).hostname.replace(/^www\./, "") || url;
+          } catch {
+            return match; // unparseable — leave the bare URL untouched
+          }
+          return `[${host}](${encodeParens(url)})${trailing}`;
+        },
+      );
     })
     .join("\n");
 }

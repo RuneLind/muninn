@@ -8,6 +8,7 @@ import {
   realOutcome,
   type ClaimVerifyOutcome,
 } from "./factcheck-sse.ts";
+import { formatWebHtml } from "../../web/web-format.ts";
 
 const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true, outcome: "verified" });
 const skip = (i: number): ClaimVerifyOutcome => ({ block: `skip${i}`, real: false, outcome: "skipped" });
@@ -179,6 +180,76 @@ describe("linkifySourcesLines", () => {
 
   test("no URLs on the Sources line → unchanged", () => {
     expect(linkifySourcesLines("Sources: none opened")).toBe("Sources: none opened");
+  });
+
+  // ── FIX 1: parenthesized URLs (Wikipedia disambig et al.) ──────────────────
+  test("bare Wikipedia disambig URL keeps its (balanced) parens, encoded in the href", () => {
+    expect(
+      linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Mercury_(planet)"),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29)");
+  });
+
+  test("an existing markdown link with parens in the href is normalized (parens encoded)", () => {
+    expect(
+      linkifySourcesLines("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_(planet))"),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29)");
+  });
+
+  test("a WRAPPER paren (see …) is shed, not swallowed into the href", () => {
+    expect(linkifySourcesLines("Sources: (see https://x.com/a)")).toBe(
+      "Sources: (see [x.com](https://x.com/a))",
+    );
+  });
+
+  test("balanced paren followed by trailing punctuation splits both", () => {
+    expect(
+      linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Mercury_(planet)."),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29).");
+  });
+
+  test("idempotent — a second pass does not re-encode %28/%29", () => {
+    const once = linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Foo_(bar)");
+    expect(linkifySourcesLines(once)).toBe(once);
+    expect(once).not.toContain("%2528");
+  });
+
+  test("mixed line: bare parens URL + markdown parens link both encoded", () => {
+    const line =
+      "Sources: https://en.wikipedia.org/wiki/A_(b), [c.org](https://c.org/d_(e))";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/A_%28b%29), [c.org](https://c.org/d_%28e%29)",
+    );
+  });
+});
+
+// FIX 1 end-to-end: a Sources line with a parenthesized URL, piped through the
+// real render path (assembleFactcheckAnswer → the shared formatWebHtml markdown
+// parser), yields an <a href> equal to the FULL encoded URL with no truncated
+// href and no dangling `(bar)` text after the anchor.
+describe("factcheck Sources render path (assemble → formatWebHtml)", () => {
+  const anchorHref = (html: string): string | null => {
+    const m = html.match(/<a href="([^"]*)"[^>]*>([^<]*)<\/a>/);
+    return m ? m[1]! : null;
+  };
+
+  test("bare Wikipedia disambig URL renders one <a> with the full encoded href", () => {
+    const block =
+      "### ✅ Claim 1/1 — Mercury\n\nSupported.\n\nSources: https://en.wikipedia.org/wiki/Mercury_(planet)";
+    const html = formatWebHtml(assembleFactcheckAnswer("", [block]));
+    expect(anchorHref(html)).toBe("https://en.wikipedia.org/wiki/Mercury_%28planet%29");
+    // No truncated href and no dangling text after the anchor.
+    expect(html).not.toContain('href="https://en.wikipedia.org/wiki/Mercury_"');
+    expect(html).not.toContain("(planet)");
+  });
+
+  test("model-emitted markdown link with parens in the href renders the full href", () => {
+    const block =
+      "### ✅ Claim 1/1 — Mercury\n\nSupported.\n\nSources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_(planet))";
+    const html = formatWebHtml(assembleFactcheckAnswer("", [block]));
+    expect(anchorHref(html)).toBe("https://en.wikipedia.org/wiki/Mercury_%28planet%29");
+    expect(html).not.toContain("(planet)");
+    // Exactly one anchor — the parens didn't spawn a stray truncated link.
+    expect(html.match(/<a /g)?.length ?? 0).toBe(1);
   });
 });
 

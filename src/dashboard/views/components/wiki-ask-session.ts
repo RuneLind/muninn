@@ -37,6 +37,11 @@ export interface StoredAskTurn {
    *  as a "Consulting" chip row. Persisted so a rehydrated turn still shows them.
    *  Absent on Ask/Explain turns. */
   toolSources?: string[];
+  /** host → first full URL seen for that host during a fact check, feeding the
+   *  Consulting chip hrefs. Persisted intentionally (better UX — a rehydrated
+   *  chip keeps its real deep-link); a pre-PR turn / malformed field is dropped
+   *  and the chip falls back to `https://<host>/`. Absent on Ask/Explain turns. */
+  toolSourceUrls?: Record<string, string>;
   /** Claims verified in a fact check (drives the meta line). Absent on Ask/Explain. */
   claimCount?: number;
   /** Per-outcome tally (verified / unverifiable / timeout / skipped / error) for
@@ -73,6 +78,12 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   ) {
     return false;
   }
+  // A malformed toolSourceUrls (not a plain object of string values) is DROPPED
+  // — the turn is kept, the field removed, so a rehydrated chip falls back to
+  // `https://<host>/`. A well-formed map is left intact.
+  if (typeof t.toolSourceUrls !== "undefined") {
+    if (!isValidUrlMap(t.toolSourceUrls)) delete t.toolSourceUrls;
+  }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;
   return true;
@@ -87,6 +98,14 @@ function isValidOutcomeCounts(v: unknown): boolean {
     if (typeof o[k] !== "undefined" && typeof o[k] !== "number") return false;
   }
   return true;
+}
+
+/** A well-formed host→url map: a plain object whose every value is a string.
+ *  Anything else (array, null, non-string value) is malformed ⇒ the field is
+ *  dropped by {@link isValidTurn} (never trusted, but the turn survives). */
+function isValidUrlMap(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return Object.values(v as Record<string, unknown>).every((s) => typeof s === "string");
 }
 
 /** Serialize the last `cap` turns to a JSON string. Never throws on the input

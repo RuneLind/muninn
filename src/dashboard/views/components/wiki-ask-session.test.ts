@@ -68,6 +68,36 @@ test("round-trips a fact-check turn's toolSources", () => {
   expect(restored[0]!.toolSources).toEqual(["blog.google", "reuters.com"]);
 });
 
+test("round-trips a fact-check turn's toolSourceUrls map (intentional persistence)", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    toolSources: ["reuters.com", "who.int"],
+    toolSourceUrls: {
+      "reuters.com": "https://www.reuters.com/world/a",
+      "who.int": "https://www.who.int/news/b",
+    },
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  expect(restored[0]!.toolSourceUrls).toEqual({
+    "reuters.com": "https://www.reuters.com/world/a",
+    "who.int": "https://www.who.int/news/b",
+  });
+});
+
+test("a malformed toolSourceUrls is DROPPED but the turn is kept", () => {
+  const raw = JSON.stringify([
+    { ...turn(), question: "arr", toolSourceUrls: ["not", "a", "map"] }, // array → drop field
+    { ...turn(), question: "nonstr", toolSourceUrls: { "a.com": 42 } }, // non-string value → drop field
+    { ...turn(), question: "nullish", toolSourceUrls: null }, // null → drop field
+  ]);
+  const restored = deserializeAskSession(raw);
+  // Every turn survives; the bad field is stripped.
+  expect(restored.map((t) => t.question)).toEqual(["arr", "nonstr", "nullish"]);
+  for (const t of restored) expect(t.toolSourceUrls).toBeUndefined();
+});
+
 test("a present-but-wrong-typed toolSources drops the turn", () => {
   const raw = JSON.stringify([
     { ...turn(), toolSources: "reuters.com" }, // string, not array → drop
