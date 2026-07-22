@@ -76,6 +76,16 @@ export const urlDetail = (input: string | undefined): string | undefined => {
   }
 };
 
+/**
+ * Raw `url` field from an (abbreviated) tool input JSON — the FULL URL, not the
+ * `www.`-stripped hostname {@link urlDetail} returns. Used by the fact-check SSE
+ * to forward a clickable href for a WebFetch source (the chips still dedupe on the
+ * hostname). May be clipped upstream like any abbreviated input; the consumer
+ * scheme-guards it. Returns undefined when absent.
+ */
+export const rawUrlField = (input: string | undefined): string | undefined =>
+  extractField(input, "url");
+
 /** Generic detail extractor — tries common field names across any tool, then first string value */
 const genericDetail = (input: string | undefined) => {
   const value = extractField(

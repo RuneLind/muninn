@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { getToolStatus, getToolProgress, parseToolName, urlDetail } from "./tool-status.ts";
+import { getToolStatus, getToolProgress, parseToolName, urlDetail, rawUrlField } from "./tool-status.ts";
 
 describe("parseToolName", () => {
   test("Claude CLI format: mcp__server__tool", () => {
@@ -228,6 +228,19 @@ describe("urlDetail", () => {
   test("missing url field → undefined", () => {
     expect(urlDetail('{"query": "no url here"}')).toBeUndefined();
     expect(urlDetail(undefined)).toBeUndefined();
+  });
+});
+
+describe("rawUrlField", () => {
+  test("returns the FULL url, not the www-stripped hostname", () => {
+    expect(rawUrlField('{"url": "https://www.nature.com/articles/x"}')).toBe(
+      "https://www.nature.com/articles/x",
+    );
+  });
+
+  test("missing url field / no input → undefined", () => {
+    expect(rawUrlField('{"query": "no url here"}')).toBeUndefined();
+    expect(rawUrlField(undefined)).toBeUndefined();
   });
 });
 

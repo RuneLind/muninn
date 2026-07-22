@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   runClaimPool,
   assembleFactcheckAnswer,
+  linkifySourcesLines,
   verdictOf,
   parseConfidence,
   realOutcome,
@@ -121,6 +122,63 @@ describe("assembleFactcheckAnswer", () => {
 
   test("empty blocks → empty string", () => {
     expect(assembleFactcheckAnswer("x", [])).toBe("");
+  });
+
+  test("linkifies bare URLs on the Sources line of the assembled answer", () => {
+    const block = "### ✅ Claim 1/1 — A\n\nSupported.\n\nSources: https://www.nature.com/articles/x";
+    const out = assembleFactcheckAnswer("", [block]);
+    expect(out).toContain("Sources: [nature.com](https://www.nature.com/articles/x)");
+  });
+});
+
+describe("linkifySourcesLines", () => {
+  test("wraps a bare URL into a [hostname](url) markdown link (www stripped)", () => {
+    expect(linkifySourcesLines("Sources: https://www.example.com/a")).toBe(
+      "Sources: [example.com](https://www.example.com/a)",
+    );
+  });
+
+  test("leaves an already-markdown link untouched (no double-wrap)", () => {
+    const line = "Sources: [example.com](https://example.com/a)";
+    expect(linkifySourcesLines(line)).toBe(line);
+  });
+
+  test("mixed bare + markdown link on one line — only the bare one is wrapped", () => {
+    const line = "Sources: [example.com](https://example.com/a), https://who.int/b";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [example.com](https://example.com/a), [who.int](https://who.int/b)",
+    );
+  });
+
+  test("multiple bare URLs on one line are all wrapped", () => {
+    const line = "Sources: https://a.com/x, https://b.org/y";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [a.com](https://a.com/x), [b.org](https://b.org/y)",
+    );
+  });
+
+  test("trailing punctuation stays OUTSIDE the href", () => {
+    expect(linkifySourcesLines("Sources: https://a.com/x, https://b.org/y.")).toBe(
+      "Sources: [a.com](https://a.com/x), [b.org](https://b.org/y).",
+    );
+  });
+
+  test("non-Sources lines are left untouched", () => {
+    const md = "Reasoning mentions https://a.com/x inline.\n\nSources: https://b.org/y";
+    expect(linkifySourcesLines(md)).toBe(
+      "Reasoning mentions https://a.com/x inline.\n\nSources: [b.org](https://b.org/y)",
+    );
+  });
+
+  test("only http(s) schemes are linkified", () => {
+    const line = "Sources: ftp://a.com/x https://b.org/y";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: ftp://a.com/x [b.org](https://b.org/y)",
+    );
+  });
+
+  test("no URLs on the Sources line → unchanged", () => {
+    expect(linkifySourcesLines("Sources: none opened")).toBe("Sources: none opened");
   });
 });
 

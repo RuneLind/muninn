@@ -30,7 +30,7 @@ import type { BotConfig } from "../../bots/config.ts";
 import type { StreamProgressEvent } from "../../ai/stream-parser.ts";
 import { executeOneShot } from "../../ai/one-shot.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
-import { getToolProgress } from "../../ai/tool-status.ts";
+import { getToolProgress, rawUrlField } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
 import { attachToolSpans } from "../../core/tool-spans.ts";
@@ -201,13 +201,60 @@ export async function runClaimPool(opts: {
   return outcomes;
 }
 
+/** A markdown link `[text](http(s)://…)` OR a bare http(s) URL, on a `Sources:`
+ *  line. The first alternative (an existing markdown link) is left untouched;
+ *  group 1 (a bare URL) is the only thing {@link linkifySourcesLines} wraps —
+ *  matching a link first is what stops a double-wrap. */
+const SOURCES_URL_RE = /\[[^\]]*\]\(https?:\/\/[^)\s]+\)|(https?:\/\/[^\s<>()]+)/gi;
+
+/** Split trailing punctuation a model routinely writes right after a URL (comma,
+ *  period, etc.) off the URL, so it stays OUTSIDE the generated link's href
+ *  rather than being swallowed into it. */
+function splitTrailingPunct(url: string): [string, string] {
+  const m = url.match(/[.,;:!?'"\]]+$/);
+  return m ? [url.slice(0, url.length - m[0].length), m[0]] : [url, ""];
+}
+
+/**
+ * Fact-check-scoped fallback linkifier (belt-and-suspenders to the markdown-link
+ * `Sources:` prompt contract): on every line starting with `Sources:`, wrap any
+ * BARE http(s) URL into a `[hostname](url)` markdown link so the reader/web
+ * pipeline renders it clickable (`formatWebHtml` linkifies markdown links but has
+ * no bare-URL autolinker). Pure + deterministic + factcheck-only — deliberately
+ * NOT a global autolinker on the shared web-format. Leaves URLs already inside a
+ * markdown link untouched (no double-wrap), keeps trailing punctuation outside the
+ * href, ignores non-`Sources:` lines, and only touches http(s).
+ */
+export function linkifySourcesLines(markdown: string): string {
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (!/^Sources:/.test(line)) return line;
+      return line.replace(SOURCES_URL_RE, (match: string, bareUrl?: string) => {
+        if (!bareUrl) return match; // an existing markdown link — leave as-is
+        const [url, trailing] = splitTrailingPunct(bareUrl);
+        let host: string;
+        try {
+          host = new URL(url).hostname.replace(/^www\./, "") || url;
+        } catch {
+          return match; // unparseable — leave the bare URL untouched
+        }
+        return `[${host}](${url})${trailing}`;
+      });
+    })
+    .join("\n");
+}
+
 /** Assemble the final fact-check markdown: for a multi-claim check, the compose
  *  `lede` on top of the verdict blocks; for a single claim, the lone block IS the
- *  answer (no lede). Blocks are always in claim order. */
+ *  answer (no lede). Blocks are always in claim order. `Sources:` lines are
+ *  linkified (bare URL → `[hostname](url)`) so they render clickable everywhere the
+ *  markdown lands (streamed answer, `answer_html`, the appended `> [!factcheck]`). */
 export function assembleFactcheckAnswer(lede: string, blocks: string[]): string {
-  return blocks.length > 1
+  const answer = blocks.length > 1
     ? `${lede}\n\n${blocks.join("\n\n")}`.trim()
     : (blocks[0] ?? "").trim();
+  return linkifySourcesLines(answer);
 }
 
 /**
@@ -414,12 +461,17 @@ async function runFactcheck(
         if (clientState.gone) return;
         if (event.type === "tool_start") {
           const prog = getToolProgress(event.name, event.input);
+          // Full URL alongside the hostname `detail` — the client keeps the first
+          // one seen per host to build the Consulting chip's href (hostname stays
+          // the dedup key + label). Only forwarded when present.
+          const url = rawUrlField(event.input);
           safeWrite("tool", {
             type: "tool",
             state: "start",
             name: event.displayName,
             label: prog?.label ?? event.displayName,
             detail: prog?.detail,
+            ...(url ? { url } : {}),
             claimIndex: index,
           });
         } else if (event.type === "tool_end") {

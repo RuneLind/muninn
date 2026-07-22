@@ -113,6 +113,13 @@ describe("buildClaimVerifyPrompt", () => {
     expect(systemPrompt).toContain("output ONLY this ONE block");
   });
 
+  test("the Sources contract asks for markdown links, not bare URLs", () => {
+    const { systemPrompt } = buildClaimVerifyPrompt(claim, {
+      index: 1, total: 3, pageTitle: "P", wikiName: "w", mode: "article",
+    });
+    expect(systemPrompt).toContain("markdown link `[hostname](url)`");
+  });
+
   test("carries the confidence rubric + a `Confidence: NN/100` output line", () => {
     const { systemPrompt } = buildClaimVerifyPrompt(claim, {
       index: 1, total: 3, pageTitle: "P", wikiName: "w", mode: "article",
