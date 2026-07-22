@@ -620,6 +620,13 @@ export async function renderWikiPage(opts?: {
     .wiki-fc-append-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-fc-append-msg.error { color: var(--status-error); }
     .wiki-fc-append-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
+    .wiki-fc-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 4px 10px; }
+    .wiki-fc-src-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+    .wiki-fc-src-chip {
+      font-size: 12px; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); white-space: nowrap;
+    }
     .wiki-ask-compose { display: flex; gap: 6px; margin: 0 0 4px; }
     .wiki-ask-input {
       flex: 1; padding: 8px 10px; border-radius: 7px;

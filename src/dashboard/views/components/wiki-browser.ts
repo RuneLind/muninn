@@ -1434,6 +1434,7 @@ interface AskTurn {
   baseHash?: string; // sha256 of the checked page at fact-check time (factcheck turns only; PR B round-trips it)
   page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
+  toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
 }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
@@ -1581,16 +1582,50 @@ function askFactcheckAppendHtml(turn: AskTurn): string {
   );
 }
 
-/** Full article-pane HTML for one Ask turn: question headline, meta row, answer
- *  body (rendered final article once available, else the progressively-formatted
- *  streaming buffer), then Sources, then the follow-up bar, then Remember, then —
- *  for fact-check turns on markdown pages — the ➕ Add-to-article button. */
+/** Inner markup of the "Consulting" chip row — a label + one chip per consulted
+ *  hostname. Empty string when there are none (the container then hides). */
+function toolSourceChips(turn: AskTurn): string {
+  const hosts = turn.toolSources || [];
+  if (!hosts.length) return "";
+  return (
+    '<span class="wiki-fc-src-label">Consulting</span>' +
+    hosts.map((h) => '<span class="wiki-fc-src-chip">' + esc(h) + "</span>").join("")
+  );
+}
+
+/** The "Consulting: host · host" chip row for a fact-check turn. Always emitted
+ *  (hidden while empty) so `refreshAskToolSources` can populate it live during the
+ *  stream. Renders nothing on non-fact-check turns. */
+function askToolSourcesHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck") return "";
+  const has = (turn.toolSources || []).length > 0;
+  return (
+    '<div class="wiki-fc-sources" id="askToolSources"' +
+    (has ? "" : ' style="display:none"') + ">" + toolSourceChips(turn) + "</div>"
+  );
+}
+
+/** Update the on-screen "Consulting" chip row in place as WebFetch hosts arrive
+ *  (the article body still streams, so re-render just this container). */
+function refreshAskToolSources(turn: AskTurn): void {
+  const el = document.getElementById("askToolSources");
+  if (!el) return;
+  el.innerHTML = toolSourceChips(turn);
+  el.style.display = (turn.toolSources || []).length ? "flex" : "none";
+}
+
+/** Full article-pane HTML for one Ask turn: question headline, meta row, the
+ *  fact-check "Consulting" chip row (fact-check turns only), answer body (rendered
+ *  final article once available, else the progressively-formatted streaming
+ *  buffer), then Sources, then the follow-up bar, then Remember, then — for
+ *  fact-check turns on markdown pages — the ➕ Add-to-article button. */
 function askArticleHtml(turn: AskTurn, buffer: string): string {
   const body = askAnswerBodyHtml(turn.html, buffer, turn.answer);
   return (
     '<div class="wiki-article-head"><h1>' + esc(turn.question) + "</h1>" +
     '<div class="wiki-meta-row"><span class="wiki-dates" id="askAnswerMeta">' +
     esc(askMetaText(turn)) + "</span></div></div>" +
+    askToolSourcesHtml(turn) +
     '<div class="wiki-article wiki-ask-article" id="askAnswerBody">' + body + "</div>" +
     '<div class="wiki-ask-sources" id="askAnswerSources">' +
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
@@ -1703,6 +1738,30 @@ function runAskStream(url: string, turn: AskTurn): void {
       const d = JSON.parse((e as MessageEvent).data);
       askBuffer += d.text || "";
       if (!turn.html) scheduleAskStreamRender(turn, conn);
+    },
+    // Live tool progress — fact-check only (Ask/Explain never emit `tool`). Drives
+    // the "Searching the web / Reading <host>" status line and accumulates the
+    // "Consulting" hostname chips (WebFetch targets, deduped) on the turn.
+    tool: (e: MessageEvent) => {
+      if (askConn !== conn) return;
+      if (turn.kind !== "factcheck") return;
+      const d = JSON.parse((e as MessageEvent).data);
+      if (d.state === "start") {
+        const label = typeof d.label === "string" && d.label ? d.label : "Working";
+        const detail = typeof d.detail === "string" ? d.detail : "";
+        setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
+        // WebFetch carries a hostname detail — record deduped consulted sources.
+        if (detail && d.name === "WebFetch") {
+          if (!turn.toolSources) turn.toolSources = [];
+          if (turn.toolSources.indexOf(detail) === -1) {
+            turn.toolSources.push(detail);
+            refreshAskToolSources(turn);
+          }
+        }
+      } else if (d.state === "end") {
+        // Revert to the neutral status between tool calls.
+        setAskStatus("Checking the web…", "");
+      }
     },
     done: (e: MessageEvent) => {
       if (askConn !== conn) return;

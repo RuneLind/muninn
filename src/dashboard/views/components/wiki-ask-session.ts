@@ -33,6 +33,10 @@ export interface StoredAskTurn {
   /** The checked page's type — the ➕ button gates markdown-only (hidden for
    *  `"explainer"`). Absent on Ask/Explain turns. */
   pageType?: string;
+  /** Hostnames consulted during a fact check (WebFetch targets, deduped), shown
+   *  as a "Consulting" chip row. Persisted so a rehydrated turn still shows them.
+   *  Absent on Ask/Explain turns. */
+  toolSources?: string[];
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -51,6 +55,12 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (typeof t.baseHash !== "undefined" && typeof t.baseHash !== "string") return false;
   if (typeof t.page !== "undefined" && typeof t.page !== "string") return false;
   if (typeof t.pageType !== "undefined" && typeof t.pageType !== "string") return false;
+  if (
+    typeof t.toolSources !== "undefined" &&
+    !(Array.isArray(t.toolSources) && t.toolSources.every((s) => typeof s === "string"))
+  ) {
+    return false;
+  }
   return true;
 }
 

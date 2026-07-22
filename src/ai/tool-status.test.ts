@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { getToolStatus, parseToolName } from "./tool-status.ts";
+import { getToolStatus, getToolProgress, parseToolName, urlDetail } from "./tool-status.ts";
 
 describe("parseToolName", () => {
   test("Claude CLI format: mcp__server__tool", () => {
@@ -187,8 +187,15 @@ describe("getToolStatus", () => {
   });
 
   test("non-MCP tool fallback", () => {
-    expect(getToolStatus("WebSearch")).toBe("Using WebSearch...");
+    expect(getToolStatus("Glob")).toBe("Using Glob...");
     expect(getToolStatus("some_custom_tool")).toBe("Using some custom tool...");
+  });
+
+  test("built-in web tools get friendly labels", () => {
+    expect(getToolStatus("WebSearch")).toBe("Searching the web...");
+    expect(getToolStatus("WebSearch", '{"query": "SB 1047 signed"}')).toBe("Searching the web: SB 1047 signed");
+    expect(getToolStatus("WebFetch")).toBe("Reading...");
+    expect(getToolStatus("WebFetch", '{"url": "https://blog.google/technology/ai/"}')).toBe("Reading: blog.google");
   });
 
   test("non-MCP tool includes detail when input has known fields", () => {
@@ -198,5 +205,58 @@ describe("getToolStatus", () => {
 
   test("skips report_intent", () => {
     expect(getToolStatus("report_intent")).toBeUndefined();
+  });
+});
+
+describe("urlDetail", () => {
+  test("normal URL → hostname", () => {
+    expect(urlDetail('{"url": "https://www.reuters.com/world/some-article"}')).toBe("reuters.com");
+    expect(urlDetail('{"url": "https://blog.google/technology/ai/"}')).toBe("blog.google");
+  });
+
+  test("strips www. prefix", () => {
+    expect(urlDetail('{"url": "https://www.nytimes.com/2026/07/01/tech.html"}')).toBe("nytimes.com");
+  });
+
+  test("clipped / truncated URL value → undefined", () => {
+    // Abbreviated JSON cut mid-value (no closing quote) — extractField finds nothing.
+    expect(urlDetail('{"url": "https://a-very-long-url.example.com/path/that/keeps')).toBeUndefined();
+    // A closed but non-URL garbage value — new URL throws.
+    expect(urlDetail('{"url": "not a url at all"}')).toBeUndefined();
+  });
+
+  test("missing url field → undefined", () => {
+    expect(urlDetail('{"query": "no url here"}')).toBeUndefined();
+    expect(urlDetail(undefined)).toBeUndefined();
+  });
+});
+
+describe("getToolProgress", () => {
+  test("WebSearch → label + query detail (split)", () => {
+    expect(getToolProgress("WebSearch", '{"query": "SB 1047 signed"}')).toEqual({
+      label: "Searching the web",
+      detail: "SB 1047 signed",
+    });
+    expect(getToolProgress("WebSearch")).toEqual({ label: "Searching the web" });
+  });
+
+  test("WebFetch → label + hostname detail (split)", () => {
+    expect(getToolProgress("WebFetch", '{"url": "https://www.reuters.com/x"}')).toEqual({
+      label: "Reading",
+      detail: "reuters.com",
+    });
+    // Clipped URL — no detail, generic label stands.
+    expect(getToolProgress("WebFetch", '{"url": "https://clipped')).toEqual({ label: "Reading" });
+  });
+
+  test("non-web tool → composed label, no separate detail", () => {
+    expect(getToolProgress("mcp__knowledge__search_knowledge", '{"query": "auth"}')).toEqual({
+      label: "Searching knowledge base: query=auth",
+    });
+    expect(getToolProgress("mcp__knowledge__list_collections")).toEqual({ label: "Listing collections" });
+  });
+
+  test("skips report_intent", () => {
+    expect(getToolProgress("report_intent")).toBeUndefined();
   });
 });

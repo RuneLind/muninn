@@ -18,6 +18,7 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { StreamProgressEvent } from "../../ai/stream-parser.ts";
 import { executeOneShot } from "../../ai/one-shot.ts";
+import { getToolProgress } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
 import { attachToolSpans } from "../../core/tool-spans.ts";
@@ -122,16 +123,37 @@ async function runFactcheck(
   let status: "ok" | "error" = "ok";
 
   try {
-    // Live tool status ("Searching the web…") is out of scope for v1 — forward
-    // only text deltas to the client. Tool spans still land on the trace below.
-    // The one-shot keeps producing deltas after a client abort (no AbortSignal
-    // plumbing into executeOneShot), so stop writing on the first failed write
-    // instead of leaking one unhandled rejection per token.
+    // Forward text deltas AND tool progress to the client (the live "Searching
+    // the web / Reading <host>" status line + the "Consulting" sources row). Tool
+    // spans still land on the trace below. The one-shot keeps producing events
+    // after a client abort (no AbortSignal plumbing into executeOneShot), so stop
+    // writing on the first failed write instead of leaking one unhandled
+    // rejection per event.
     let clientGone = false;
     const onProgress = (event: StreamProgressEvent) => {
-      if (event.type === "text_delta" && !clientGone) {
+      if (clientGone) return;
+      if (event.type === "text_delta") {
         stream.writeSSE({ event: "delta", data: JSON.stringify({ type: "delta", text: event.text }) })
           .catch(() => { clientGone = true; });
+      } else if (event.type === "tool_start") {
+        // Compute label/detail server-side so the client stays dumb. `detail` is
+        // the hostname for WebFetch / query for WebSearch, else undefined.
+        const prog = getToolProgress(event.name, event.input);
+        stream.writeSSE({
+          event: "tool",
+          data: JSON.stringify({
+            type: "tool",
+            state: "start",
+            name: event.displayName,
+            label: prog?.label ?? event.displayName,
+            detail: prog?.detail,
+          }),
+        }).catch(() => { clientGone = true; });
+      } else if (event.type === "tool_end") {
+        stream.writeSSE({
+          event: "tool",
+          data: JSON.stringify({ type: "tool", state: "end", name: event.displayName }),
+        }).catch(() => { clientGone = true; });
       }
     };
 

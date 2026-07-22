@@ -54,6 +54,31 @@ test("a non-array JSON root deserializes to an empty array", () => {
   expect(deserializeAskSession("42")).toEqual([]);
 });
 
+test("round-trips a fact-check turn's toolSources", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    baseHash: "abc123",
+    page: "some-page",
+    pageType: "note",
+    toolSources: ["blog.google", "reuters.com"],
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  expect(restored[0]!.toolSources).toEqual(["blog.google", "reuters.com"]);
+});
+
+test("a present-but-wrong-typed toolSources drops the turn", () => {
+  const raw = JSON.stringify([
+    { ...turn(), toolSources: "reuters.com" }, // string, not array → drop
+    { ...turn(), toolSources: ["ok", 42] }, // non-string element → drop
+    turn({ question: "clean", toolSources: ["reuters.com"] }), // valid
+    turn({ question: "absent" }), // absent is valid
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual(["clean", "absent"]);
+});
+
 test("per-turn shape validation drops only the malformed entries", () => {
   const good = turn({ question: "good" });
   const raw = JSON.stringify([
