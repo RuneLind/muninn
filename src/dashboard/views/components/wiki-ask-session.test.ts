@@ -79,6 +79,30 @@ test("a present-but-wrong-typed toolSources drops the turn", () => {
   expect(restored.map((t) => t.question)).toEqual(["clean", "absent"]);
 });
 
+test("round-trips a fact-check turn's per-outcome claimOutcomes tally", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    claimCount: 6,
+    claimOutcomes: { verified: 5, unverifiable: 1, skipped: 2 },
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  expect(restored[0]!.claimOutcomes).toEqual({ verified: 5, unverifiable: 1, skipped: 2 });
+});
+
+test("a present-but-wrong-typed claimOutcomes drops the turn", () => {
+  const raw = JSON.stringify([
+    { ...turn(), claimOutcomes: 5 }, // not an object → drop
+    { ...turn(), claimOutcomes: { verified: "5" } }, // count not a number → drop
+    turn({ question: "clean", claimOutcomes: { verified: 3 } }), // valid
+    { ...turn({ question: "unknown-key-ok" }), claimOutcomes: { verified: 1, future: 9 } }, // unknown key tolerated
+    turn({ question: "absent" }), // absent is valid
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual(["clean", "unknown-key-ok", "absent"]);
+});
+
 test("per-turn shape validation drops only the malformed entries", () => {
   const good = turn({ question: "good" });
   const raw = JSON.stringify([

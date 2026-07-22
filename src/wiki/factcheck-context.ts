@@ -183,10 +183,18 @@ function factcheckVerifySystemPrompt(): string {
     "- Verdict markers: ✅ supported · ⚠️ partly supported (or supported by snippets only) · ❌ contradicted · ❓ unverifiable / out of scope.",
     "- Write NO first-person or meta commentary anywhere — no \"I was unable to…\", \"I also…\", \"I could not open…\". If you cannot verify, the block's verdict is ❓ and the reasoning states the fact objectively, never your process.",
     "",
+    "Confidence rubric — a 0–100 score for the STRENGTH OF THE EVIDENCE you found, NOT a restatement of the verdict (the emoji is the ruling; the score is how solid the evidence is):",
+    "- 90–100: multiple independent authoritative sources directly confirm.",
+    "- 70–89: one solid authoritative source, or several weaker/agreeing ones.",
+    "- 40–69: mixed or partial evidence — sources conflict, are indirect, or cover only part of the claim.",
+    "- below 40: mostly inference — little or no source directly addresses the claim.",
+    "",
     "Output format — follow EXACTLY, output ONLY this ONE block and nothing else:",
     "- A heading line: `### <verdict emoji> Claim <n>/<total> — <short claim title>` (e.g. `### ✅ Claim 3/8 — Sleep deprivation raises amyloid beta`). Use the EXACT <n>/<total> you are given.",
     "- A blank line.",
     "- A short reasoning paragraph (one to three sentences).",
+    "- A blank line.",
+    "- A `Confidence: NN/100` line (NN is your evidence-strength score from the rubric above) as its OWN standalone paragraph — it MUST be preceded by a blank line so it renders on its own line, never merged into the reasoning paragraph.",
     "- A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
   ].join("\n");
 }
