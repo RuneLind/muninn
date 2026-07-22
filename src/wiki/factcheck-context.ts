@@ -43,9 +43,6 @@ export const FACTCHECK_MAX_CLAIMS = 8;
 export const FACTCHECK_SENTINEL_START = "<!-- factcheck:start -->";
 export const FACTCHECK_SENTINEL_END = "<!-- factcheck:end -->";
 
-/** The four verdict markers the output contract uses (one per claim block). */
-export const FACTCHECK_VERDICT_MARKERS = ["✅", "⚠️", "❌", "❓"] as const;
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -260,10 +257,12 @@ export interface ComposePromptInput {
 }
 
 /**
- * Phase 3 — the compose prompt (multi-claim only). A small tool-less call that
- * reads the finished verdict blocks and writes ONLY the one/two-sentence overall
- * assessment lede; the server prepends it to the blocks. It must NOT re-list the
- * individual claims (the server owns block ordering).
+ * Phase 3 — the compose prompt (multi-claim only). A small call (thinking off,
+ * tools NOT disabled) that reads the finished verdict blocks and writes ONLY the
+ * one/two-sentence overall assessment lede; the server prepends it to the blocks.
+ * It must NOT re-list the individual claims (the server owns block ordering). The
+ * prompt steers away from tool use, but a stray tool excursion just burns the
+ * compose budget and degrades to the neutral header (the caller handles it).
  */
 export function buildComposePrompt(input: ComposePromptInput): FactcheckCallPrompts {
   const systemPrompt = [

@@ -9,9 +9,12 @@
  *   2. **Verification** — a bounded-parallel fan-out (`FACTCHECK_CLAIM_CONCURRENCY`)
  *      of tool-enabled `executeOneShot` calls, one per claim, each verifying its
  *      claim against the LIVE web (WebFetch) and emitting one verdict block.
- *   3. **Compose** (multi-claim only) — a small tool-less call that writes the
- *      overall-assessment lede; the server assembles `lede + blocks`. For a single
- *      claim the lone verify block IS the answer (no compose, no latency regress).
+ *   3. **Compose** (multi-claim only) — a small call (`thinkingMaxTokens: 0`) that
+ *      writes the overall-assessment lede; the server assembles `lede + blocks`.
+ *      Tools remain available (they are NOT disabled) — a tool excursion here just
+ *      burns the 30s compose budget and degrades to the neutral header (the catch
+ *      handles it). For a single claim the lone verify block IS the answer (no
+ *      compose, no latency regress).
  *
  * It reuses the outer SSE scaffold shape (heartbeat, `app_error` masking, terminal
  * `end`, `finally` teardown) so the wire contract matches Ask/Explain — the
@@ -104,13 +107,17 @@ interface ClientState {
   gone: boolean;
 }
 
-/** The four verdict markers, for parsing a block's leading verdict emoji. */
-const VERDICT_RE = /^###\s*(✅|⚠️|❌|❓)/mu;
+/** The four verdict markers, for parsing a block's leading verdict emoji. The
+ *  VS16 (U+FE0F) on ⚠️ is optional — models routinely emit the bare ⚠ (U+26A0)
+ *  without it; the captured verdict is normalized to the VS16 form below. */
+const VERDICT_RE = /^###\s*(✅|⚠️?|❌|❓)/mu;
 
-/** Extract a block's leading verdict emoji, defaulting to ❓ when absent. */
-function verdictOf(block: string): string {
+/** Extract a block's leading verdict emoji, defaulting to ❓ when absent. A bare
+ *  ⚠ (no VS16) is normalized to ⚠️ so the client always receives the VS16 form. */
+export function verdictOf(block: string): string {
   const m = block.match(VERDICT_RE);
-  return m ? m[1]! : "❓";
+  if (!m) return "❓";
+  return m[1] === "⚠" ? "⚠️" : m[1]!;
 }
 
 /** A synthetic ❓ block for a claim we could not verify (skipped / timed out).
@@ -247,19 +254,34 @@ async function runFactcheck(
   const usage: Usage = { inputTokens: 0, outputTokens: 0, numTurns: 0, costUsd: 0 };
   let status: "ok" | "error" = "ok";
   let seenModel: string | undefined;
+  // Tracks whether the current `/agents` model label came from the Phase-1
+  // extraction Haiku. A later verify/compose model (sonnet) is allowed to
+  // overwrite an extraction-only label so the card ends up showing the
+  // verification model, not the fast extraction Haiku.
+  let modelFromExtraction = false;
   // Preserve the costUsd unknown-vs-zero distinction: CLI/direct-SDK Haiku leave
   // it undefined (⇒ the /agents Recent cost column should dash, not show $0.00),
   // whereas a subscription connector returns an explicit 0.
   let sawCost = false;
 
-  const addUsage = (r: { inputTokens?: number; outputTokens?: number; numTurns?: number; costUsd?: number; model?: string }) => {
+  const addUsage = (
+    r: { inputTokens?: number; outputTokens?: number; numTurns?: number; costUsd?: number; model?: string },
+    phase: "extract" | "verify" | "compose" = "verify",
+  ) => {
     usage.inputTokens += r.inputTokens ?? 0;
     usage.outputTokens += r.outputTokens ?? 0;
     usage.numTurns += r.numTurns ?? 0;
     if (typeof r.costUsd === "number") { usage.costUsd += r.costUsd; sawCost = true; }
-    if (r.model && !seenModel) {
-      seenModel = r.model;
-      agentStatus.setModel(reqId, r.model);
+    if (r.model) {
+      const fromExtraction = phase === "extract";
+      // Set on first sight; otherwise let a later, different, non-extraction
+      // model replace a label that only reflects the extraction Haiku.
+      const overwrite = seenModel !== r.model && modelFromExtraction && !fromExtraction;
+      if (!seenModel || overwrite) {
+        seenModel = r.model;
+        modelFromExtraction = fromExtraction;
+        agentStatus.setModel(reqId, r.model);
+      }
     }
   };
 
@@ -285,19 +307,27 @@ async function runFactcheck(
       : strippedBody.slice(0, FACTCHECK_ARTICLE_BODY_MAX);
 
     tracer.start("extract", { mode: opts.mode });
-    const extraction = await callHaikuWithFallback(
-      buildClaimExtractionPrompt(extractionText, opts.meta.title, maxClaims),
-      {
-        source: "factcheck-extract",
-        entrypoint: "factcheck",
-        cwd: opts.botDir,
-        botName: botConfig.name,
-        connector: botConfig.connector,
-        haikuBackend: botConfig.haikuBackend,
-        tracer,
-      },
-    );
-    addUsage(extraction);
+    let extraction: Awaited<ReturnType<typeof callHaikuWithFallback>>;
+    try {
+      extraction = await callHaikuWithFallback(
+        buildClaimExtractionPrompt(extractionText, opts.meta.title, maxClaims),
+        {
+          source: "factcheck-extract",
+          entrypoint: "factcheck",
+          cwd: opts.botDir,
+          botName: botConfig.name,
+          connector: botConfig.connector,
+          haikuBackend: botConfig.haikuBackend,
+          tracer,
+        },
+      );
+    } catch (err) {
+      // End the extract span on the throw path (the outer catch only finishes
+      // the trace root) so it pairs on all paths like verify/compose.
+      tracer.end("extract", { error: err instanceof Error ? err.message : String(err) });
+      throw err;
+    }
+    addUsage(extraction, "extract");
     tracer.end("extract", {
       inputTokens: extraction.inputTokens,
       outputTokens: extraction.outputTokens,
@@ -445,13 +475,17 @@ async function runFactcheck(
         const composeProgress = (event: StreamProgressEvent) => {
           if (event.type === "text_delta") safeWrite("delta", { type: "delta", text: event.text });
         };
+        // Only thinking is disabled (`thinkingMaxTokens: 0`); tools stay available.
+        // The compose prompt steers away from tool use, but a stray tool excursion
+        // just burns the COMPOSE_BUDGET_MS window and degrades to the neutral header
+        // below — we deliberately don't try to hard-disable tools here.
         const compose = await executeOneShot(composePrompts.userPrompt, config, botConfig, {
           systemPrompt: composePrompts.systemPrompt,
           thinkingMaxTokens: 0,
           timeoutMs: COMPOSE_BUDGET_MS,
           onProgress: composeProgress,
         });
-        addUsage(compose);
+        addUsage(compose, "compose");
         tracer.end("compose", {
           inputTokens: compose.inputTokens,
           outputTokens: compose.outputTokens,

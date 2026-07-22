@@ -1816,13 +1816,12 @@ function runAskStream(url: string, turn: AskTurn): void {
       // let per-tool flips thrash it. A single-claim (sel) run keeps tool narration.
       const multiClaim = !!(turn.claims && turn.claims.length > 1);
       if (d.state === "start") {
+        const detail = typeof d.detail === "string" ? d.detail : "";
         if (!multiClaim) {
           const label = typeof d.label === "string" && d.label ? d.label : "Working";
-          const detail0 = typeof d.detail === "string" ? d.detail : "";
-          setAskStatus(label + (detail0 ? ": " + detail0 : "") + "…", "");
+          setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
         }
         // WebFetch carries a hostname detail — record deduped consulted sources.
-        const detail = typeof d.detail === "string" ? d.detail : "";
         if (detail && d.name === "WebFetch") {
           if (!turn.toolSources) turn.toolSources = [];
           if (turn.toolSources.indexOf(detail) === -1) {
@@ -1862,6 +1861,12 @@ function runAskStream(url: string, turn: AskTurn): void {
       else if (d.noHits) statusText = "No matching sources";
       else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
       setAskStatus(statusText, "done");
+      // Drop the transient claim checklist before persisting — it's fully folded
+      // into `turn.answer` by now (the final render above uses `turn.answer`, not
+      // the checklist), and no post-done path reads it. Leaving it on the turn would
+      // round-trip the whole verdict-block markdown into localStorage, duplicating
+      // `turn.answer`.
+      turn.claims = undefined;
       askTurns.push(turn);
       renderAskHistory();
       persistAskSession();

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { runClaimPool, assembleFactcheckAnswer, type ClaimVerifyOutcome } from "./factcheck-sse.ts";
+import { runClaimPool, assembleFactcheckAnswer, verdictOf, type ClaimVerifyOutcome } from "./factcheck-sse.ts";
 
 const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true });
 const skip = (i: number): ClaimVerifyOutcome => ({ block: `skip${i}`, real: false });
@@ -114,5 +114,26 @@ describe("assembleFactcheckAnswer", () => {
 
   test("empty blocks → empty string", () => {
     expect(assembleFactcheckAnswer("x", [])).toBe("");
+  });
+});
+
+describe("verdictOf", () => {
+  test("✅ / ❌ / ❓ verdicts pass through", () => {
+    expect(verdictOf("### ✅ Claim 1/2 — a\n\nSupported.")).toBe("✅");
+    expect(verdictOf("### ❌ Claim 1/2 — a\n\nRefuted.")).toBe("❌");
+    expect(verdictOf("### ❓ Claim 1/2 — a\n\nUnclear.")).toBe("❓");
+  });
+
+  test("VS16 ⚠️ verdict passes through unchanged", () => {
+    expect(verdictOf("### ⚠️ Claim 1/2 — a\n\nPartly true.")).toBe("⚠️");
+  });
+
+  test("bare ⚠ (no VS16) is normalized to ⚠️", () => {
+    // Models routinely emit U+26A0 without the U+FE0F variation selector.
+    expect(verdictOf("### ⚠ Claim 1/2 — x")).toBe("⚠️");
+  });
+
+  test("no leading verdict marker → ❓", () => {
+    expect(verdictOf("Claim 1/2 — a\n\nno heading marker")).toBe("❓");
   });
 });
