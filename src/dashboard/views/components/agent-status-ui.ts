@@ -67,6 +67,8 @@ export function agentStatusScript(): string {
       clustering: 'Clustering topics',
       resolving: 'Resolving targets',
       drafting: 'Drafting pages',
+      extracting_claims: 'Extracting claims',
+      verifying_claims: 'Verifying claims',
     };
 
     // Last known connector info — kept across status/progress events

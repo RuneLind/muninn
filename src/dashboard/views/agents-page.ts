@@ -225,7 +225,8 @@ export async function renderAgentsPage(): Promise<string> {
       // Research phases + gardener drain stages (mirror the server AgentPhase union).
       searching: 'Searching', synthesizing: 'Synthesizing',
       assembling: 'Assembling', harvesting: 'Harvesting', clustering: 'Clustering',
-      resolving: 'Resolving', drafting: 'Drafting'
+      resolving: 'Resolving', drafting: 'Drafting',
+      extracting_claims: 'Extracting claims', verifying_claims: 'Verifying claims'
     };
     // Mirror of the server kindLabel() in dashboard/agents-overview.ts — a new
     // AgentKind must be added to BOTH. Used for tile subs + running-card titles.

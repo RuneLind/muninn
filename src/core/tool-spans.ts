@@ -56,6 +56,11 @@ export async function attachToolSpans(
   tracer: Tracer,
   toolCalls: ToolCall[] | undefined,
   captureOutputs: boolean,
+  /** Label of the parent span the tool child spans hang under. Defaults to the
+   *  hard-wired `"claude"` span (the single model call). The fact-check claim
+   *  fan-out passes an indexed label (`claude:claim-<i>`) because it runs N
+   *  concurrent verify calls, each its own label-keyed span. */
+  parentLabel = "claude",
 ): Promise<void> {
   if (!toolCalls || toolCalls.length === 0) return;
 
@@ -107,13 +112,13 @@ export async function attachToolSpans(
     if (captureOutputs && toolOutput !== undefined) {
       attrs.output = toolOutput;
     }
-    const toolSpanId = tracer.addChildSpan("claude", tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
+    const toolSpanId = tracer.addChildSpan(parentLabel, tool.displayName, tool.durationMs, attrs, tool.startOffsetMs);
 
     // If the tool call carries a v1 Huginn search trace, synthesize per-stage
     // child spans so the waterfall shows where the time went without the
     // operator having to expand the trace JSON.
     if (attrs.searchTrace !== undefined) {
-      const claudeStart = tracer.spanStartedAt("claude");
+      const claudeStart = tracer.spanStartedAt(parentLabel);
       if (claudeStart) {
         const toolStart = new Date(claudeStart.getTime() + (tool.startOffsetMs ?? 0));
         emitSearchTraceSpans({

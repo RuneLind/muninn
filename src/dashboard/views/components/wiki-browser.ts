@@ -1436,12 +1436,16 @@ interface AskTurn {
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
+  claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
 }
+// One row of the fact-check claim checklist — pending until its verdict block lands.
+interface ClaimRow { index: number; title: string; status: string; block: string; }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askActive: AskTurn | null = null; // the turn currently streaming, or null
 let askShownTurn: AskTurn | null = null; // the turn currently painted in the pane
 let askBuffer = ""; // streamed plain-text accumulator for askActive
+let composeText = ""; // fact-check compose lede accumulator (Phase 3 deltas)
 let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
 const ASK_ANSWER_CHARS = 700;
@@ -1460,6 +1464,19 @@ function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
     const b = document.getElementById("askAnswerBody");
     if (b) b.innerHTML = renderStreamingBody(askBuffer);
   });
+}
+
+/** Rebuild `askBuffer` for a multi-phase fact-check turn: the compose lede (empty
+ *  until Phase 3) on top, then each claim's verdict block (once verified) or its
+ *  pending checklist row (`n. ☐ <title>`), in claim order. Called on every
+ *  `claims`/`claim_result`/compose-`delta` so the pane grows coherently with no
+ *  transient bottom-then-top reorder at `done`. */
+function rebuildFactcheckBuffer(turn: AskTurn): void {
+  const claims = turn.claims || [];
+  const rows = claims.map((c) =>
+    c.status === "done" && c.block ? c.block : c.index + ". ☐ " + c.title,
+  );
+  askBuffer = (composeText ? composeText + "\n\n" : "") + rows.join("\n\n");
 }
 
 /** Cancel any pending progressive-render frame (on supersede / done / final swap). */
@@ -1721,9 +1738,10 @@ function runAskStream(url: string, turn: AskTurn): void {
   switchConnTab("ask");
   askActive = turn;
   askBuffer = "";
+  composeText = "";
   showAskAnswer(turn, "");
-  // Fact-check has no retrieval/synthesis phases — it verifies against the web.
-  setAskStatus(turn.kind === "factcheck" ? "Checking the web…" : "Searching…", "");
+  // Fact-check starts with claim extraction (Haiku), then per-claim web verification.
+  setAskStatus(turn.kind === "factcheck" ? "Extracting claims…" : "Searching…", "");
   const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
   btn.disabled = true;
   setFollowupDisabled(true);
@@ -1744,8 +1762,48 @@ function runAskStream(url: string, turn: AskTurn): void {
     delta: (e: MessageEvent) => {
       if (askConn !== conn) return;
       const d = JSON.parse((e as MessageEvent).data);
-      askBuffer += d.text || "";
+      // On a fact-check turn WITH a claim checklist, deltas are the Phase-3 compose
+      // lede — accumulate them separately and rebuild the buffer so they render
+      // ABOVE the blocks (append-only `askBuffer +=` would put them at the bottom).
+      if (turn.kind === "factcheck" && turn.claims && turn.claims.length) {
+        composeText += d.text || "";
+        rebuildFactcheckBuffer(turn);
+      } else {
+        askBuffer += d.text || "";
+      }
       if (!turn.html) scheduleAskStreamRender(turn, conn);
+    },
+    // Phase 1 — the extracted claim list. Seed the checklist + rebuild the buffer.
+    // Once total > 1 the claim counter OWNS the status line (per-tool events stop
+    // overwriting it; with concurrency 2 the host flips would thrash).
+    claims: (e: MessageEvent) => {
+      if (askConn !== conn) return;
+      const d = JSON.parse((e as MessageEvent).data);
+      const list = Array.isArray(d.claims) ? d.claims : [];
+      turn.claims = list.map((c: { index: number; title: string }) => ({
+        index: c.index, title: c.title, status: "pending", block: "",
+      }));
+      composeText = "";
+      rebuildFactcheckBuffer(turn);
+      if (!turn.html) scheduleAskStreamRender(turn, conn);
+      if (turn.claims && turn.claims.length > 1) {
+        setAskStatus("Verifying claim 0/" + turn.claims.length + "…", "");
+      }
+    },
+    // Phase 2 — a claim's verdict block landed. Mark it done, store the block,
+    // rebuild the buffer (blocks-or-checklist-rows in claim order), re-render.
+    claim_result: (e: MessageEvent) => {
+      if (askConn !== conn) return;
+      const d = JSON.parse((e as MessageEvent).data);
+      if (!turn.claims) return;
+      const row = turn.claims.find((c) => c.index === d.index);
+      if (row) { row.status = "done"; row.block = typeof d.markdown === "string" ? d.markdown : ""; }
+      rebuildFactcheckBuffer(turn);
+      if (!turn.html) scheduleAskStreamRender(turn, conn);
+      if (turn.claims.length > 1) {
+        const done = turn.claims.filter((c) => c.status === "done").length;
+        setAskStatus("Verifying claim " + done + "/" + turn.claims.length + "…", "");
+      }
     },
     // Live tool progress — fact-check only (Ask/Explain never emit `tool`). Drives
     // the "Searching the web / Reading <host>" status line and accumulates the
@@ -1754,10 +1812,15 @@ function runAskStream(url: string, turn: AskTurn): void {
       if (askConn !== conn) return;
       if (turn.kind !== "factcheck") return;
       const d = JSON.parse((e as MessageEvent).data);
+      // With a multi-claim checklist the claim counter owns the status line — don't
+      // let per-tool flips thrash it. A single-claim (sel) run keeps tool narration.
+      const multiClaim = !!(turn.claims && turn.claims.length > 1);
       if (d.state === "start") {
-        const label = typeof d.label === "string" && d.label ? d.label : "Working";
         const detail = typeof d.detail === "string" ? d.detail : "";
-        setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
+        if (!multiClaim) {
+          const label = typeof d.label === "string" && d.label ? d.label : "Working";
+          setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
+        }
         // WebFetch carries a hostname detail — record deduped consulted sources.
         if (detail && d.name === "WebFetch") {
           if (!turn.toolSources) turn.toolSources = [];
@@ -1767,8 +1830,7 @@ function runAskStream(url: string, turn: AskTurn): void {
           }
         }
       } else if (d.state === "end") {
-        // Revert to the neutral status between tool calls.
-        setAskStatus("Checking the web…", "");
+        if (!multiClaim) setAskStatus("Checking the web…", "");
       }
     },
     done: (e: MessageEvent) => {
@@ -1799,6 +1861,12 @@ function runAskStream(url: string, turn: AskTurn): void {
       else if (d.noHits) statusText = "No matching sources";
       else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
       setAskStatus(statusText, "done");
+      // Drop the transient claim checklist before persisting — it's fully folded
+      // into `turn.answer` by now (the final render above uses `turn.answer`, not
+      // the checklist), and no post-done path reads it. Leaving it on the turn would
+      // round-trip the whole verdict-block markdown into localStorage, duplicating
+      // `turn.answer`.
+      turn.claims = undefined;
       askTurns.push(turn);
       renderAskHistory();
       persistAskSession();

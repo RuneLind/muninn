@@ -14,7 +14,7 @@
  * sentinel-strip + prompt shapes unit-test in isolation — this is the test seam.
  */
 
-import { locateExcerpt } from "./explain-context.ts";
+import { extractJson } from "../ai/json-extract.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */
 export const FACTCHECK_SELECTION_MAX = 1500;
@@ -43,9 +43,6 @@ export const FACTCHECK_MAX_CLAIMS = 8;
 export const FACTCHECK_SENTINEL_START = "<!-- factcheck:start -->";
 export const FACTCHECK_SENTINEL_END = "<!-- factcheck:end -->";
 
-/** The four verdict markers the output contract uses (one per claim block). */
-export const FACTCHECK_VERDICT_MARKERS = ["✅", "⚠️", "❌", "❓"] as const;
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -61,27 +58,6 @@ export function stripFactcheckBlock(body: string): string {
     "g",
   );
   return body.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-/**
- * Count the fact-check verdicts in a finished answer — one per claim block per the
- * output contract. Anchors on the `### <verdict> Claim …` heading lines so a
- * verdict emoji mentioned in the assessment lede or reasoning prose (e.g. "capped
- * at ⚠️") never inflates the count — this value feeds the persistent turn meta
- * line, not just the transient status. Falls back to a loose marker scan for
- * answers predating the heading format. Returns 0 when nothing matches.
- */
-export function countFactcheckClaims(answer: string): number {
-  const markers = FACTCHECK_VERDICT_MARKERS.map(escapeRegExp).join("|");
-  const headings = answer.match(new RegExp(`^###\\s*(?:${markers})`, "gmu"));
-  if (headings) return headings.length;
-  let n = 0;
-  for (const marker of FACTCHECK_VERDICT_MARKERS) {
-    // Escape needed for the regex metacharacter-free emoji (defensive) + global count.
-    const re = new RegExp(escapeRegExp(marker), "gu");
-    n += (answer.match(re) ?? []).length;
-  }
-  return n;
 }
 
 /**
@@ -115,104 +91,192 @@ export function buildFactcheckBlock(answer: string, dateOslo: string): string {
   return [FACTCHECK_SENTINEL_START, quoted.join("\n"), FACTCHECK_SENTINEL_END].join("\n");
 }
 
-/** Shared fact-checker persona + output contract (both modes). */
-function factcheckSystemPrompt(): string {
+/**
+ * One checkable claim extracted from a page (Phase 1). `title` is a short label
+ * used as the verdict-block heading; `quote` is the verbatim supporting text (if
+ * the model provided one) threaded into the per-claim verify prompt as context.
+ */
+export interface Claim {
+  title: string;
+  quote?: string;
+}
+
+/**
+ * Phase 1 — the claim-extraction prompt run on Haiku (folded into one string,
+ * no system prompt). Extracts up to `cap` checkable factual claims from `body`
+ * (the capped article body in article mode, or the selected passage in sel mode)
+ * as JSON `{claims:[{title, quote?}]}`, parsed by {@link parseClaimList}. `title`
+ * is the page title, supplied only as framing context.
+ */
+export function buildClaimExtractionPrompt(body: string, title: string, cap: number): string {
   return [
-    "You are a rigorous fact-checker. You verify factual claims against the LIVE web.",
+    `Extract the checkable factual claims from the text below (from the article "${title}").`,
     "",
-    "Rules:",
-    "- Use the WebFetch tool (and web search if you have one) to open real sources BEFORE ruling on any claim. Never rule on a claim from memory alone.",
-    "- Cite ONLY URLs you actually opened with WebFetch. Never cite a URL you did not fetch. If you could open no source for a claim, mark it ❓ unverifiable — do not guess a verdict.",
-    "- Skip opinions, predictions, recommendations, and the author's first-person notes — mark those ❓ out of scope rather than inventing a verdict.",
-    "- Be concise. This is a verification pass, not an essay. Plain markdown only — no HTML, no custom block components (no callouts, cards, verdicts, or pills).",
+    "TEXT:",
+    '"""',
+    body,
+    '"""',
     "",
-    "Verdict discipline:",
-    "- A ✅ verdict REQUIRES at least one URL you actually OPENED with WebFetch for THAT claim. If the claim was only confirmed from search snippets (no page opened), cap the verdict at ⚠️ and say so in the reasoning.",
-    "- Verdict markers: ✅ supported · ⚠️ partly supported (or supported by snippets only) · ❌ contradicted · ❓ unverifiable / out of scope.",
-    "- Write NO first-person or meta commentary anywhere — no \"I was unable to…\", \"I also…\", \"I could not open…\". Anything you cannot verify is its OWN ❓ block, never a sentence about your process. The output is verdict blocks + the overall assessment, nothing else.",
+    `Return up to ${cap} claims — prefer SPECIFIC, verifiable statements (dates, numbers, named events, attributions, factual assertions). Skip opinions, predictions, recommendations, and first-person notes.`,
     "",
-    "Output format — follow EXACTLY:",
-    "- Start with a one- or two-sentence OVERALL ASSESSMENT (plain paragraph, no heading).",
-    "- Then ONE markdown block per claim, each its OWN block separated from the next by a BLANK LINE. A block is:",
-    "  - A heading line: `### <verdict emoji> Claim <n>/<total> — <short claim title>` (e.g. `### ✅ Claim 3/8 — Sleep deprivation raises amyloid beta`).",
-    "  - A blank line.",
-    "  - A short reasoning paragraph (one to three sentences).",
-    "  - A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
+    "Produce ONLY valid JSON (no markdown fences), shaped:",
+    '{"claims": [{"title": "short claim label (≤80 chars)", "quote": "the verbatim sentence(s) from the text stating this claim"}]}',
+    "",
+    "- title: a short label for the claim, not a full sentence.",
+    "- quote: the exact supporting text (≤300 chars). Omit it if the claim is implicit.",
+    "- Return an empty array if the text contains no checkable factual claims.",
   ].join("\n");
 }
 
-export interface FactcheckPromptInput {
-  mode: "sel" | "article";
-  meta: { title: string; tags: string[]; type: string };
-  /** Page body — raw markdown, or `htmlToText(explainer)` for explainer pages.
-   *  Sentinel-wrapped prior fact-check blocks are stripped here. */
-  body: string;
-  /** The reader-selected passage (`sel` mode only). */
-  sel?: string;
-  /** Nearest-heading hint for the selection (`sel` mode only). */
-  ctx?: string;
-  wikiName: string;
-  maxClaims?: number;
+/**
+ * Tolerant parse of the extractor's raw output (mirrors `parseDistillResult`'s
+ * validate-to-null discipline). Accepts `{claims:[…]}` or a bare `[…]` array
+ * (defensive against a model that drops the wrapper). Each claim needs a
+ * non-empty string `title`; `quote` is an optional non-empty string. Returns null
+ * on any parse/shape failure OR when zero valid claims survive — the SSE turns a
+ * null into a clean `app_error`, never a crash. Order is preserved; the caller
+ * caps the count.
+ */
+export function parseClaimList(raw: string): Claim[] | null {
+  if (!raw || typeof raw !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = extractJson<unknown>(raw);
+  } catch {
+    return null;
+  }
+  let rawClaims: unknown;
+  if (Array.isArray(parsed)) rawClaims = parsed;
+  else if (parsed && typeof parsed === "object") rawClaims = (parsed as Record<string, unknown>).claims;
+  if (!Array.isArray(rawClaims)) return null;
+
+  const claims: Claim[] = [];
+  for (const item of rawClaims) {
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const title = typeof obj.title === "string" ? obj.title.trim() : "";
+    if (!title) continue;
+    const quote = typeof obj.quote === "string" && obj.quote.trim() ? obj.quote.trim() : undefined;
+    claims.push(quote ? { title, quote } : { title });
+  }
+  return claims.length > 0 ? claims : null;
 }
 
-export interface FactcheckPrompts {
-  /** Display label + `/agents` run name. */
-  question: string;
+/**
+ * Shared fact-checker persona + verdict discipline for every per-claim verify
+ * call (Phase 2). Each verify call rules on EXACTLY ONE claim and emits exactly
+ * one `### <verdict> Claim <n>/<total> — <title>` block (R1's format) — the
+ * overall assessment lede is written separately by the compose pass (Phase 3).
+ */
+function factcheckVerifySystemPrompt(): string {
+  return [
+    "You are a rigorous fact-checker. You verify a SINGLE factual claim against the LIVE web.",
+    "",
+    "Rules:",
+    "- Use the WebFetch tool (and web search if you have one) to open real sources BEFORE ruling on the claim. Never rule on a claim from memory alone.",
+    "- Cite ONLY URLs you actually opened with WebFetch. Never cite a URL you did not fetch. If you could open no source, mark it ❓ unverifiable — do not guess a verdict.",
+    "- If the claim is an opinion, prediction, recommendation, or the author's first-person note, mark it ❓ out of scope rather than inventing a verdict.",
+    "- Be concise. This is a verification pass, not an essay. Plain markdown only — no HTML, no custom block components (no callouts, cards, verdicts, or pills).",
+    "",
+    "Verdict discipline:",
+    "- A ✅ verdict REQUIRES at least one URL you actually OPENED with WebFetch for this claim. If the claim was only confirmed from search snippets (no page opened), cap the verdict at ⚠️ and say so in the reasoning.",
+    "- Verdict markers: ✅ supported · ⚠️ partly supported (or supported by snippets only) · ❌ contradicted · ❓ unverifiable / out of scope.",
+    "- Write NO first-person or meta commentary anywhere — no \"I was unable to…\", \"I also…\", \"I could not open…\". If you cannot verify, the block's verdict is ❓ and the reasoning states the fact objectively, never your process.",
+    "",
+    "Output format — follow EXACTLY, output ONLY this ONE block and nothing else:",
+    "- A heading line: `### <verdict emoji> Claim <n>/<total> — <short claim title>` (e.g. `### ✅ Claim 3/8 — Sleep deprivation raises amyloid beta`). Use the EXACT <n>/<total> you are given.",
+    "- A blank line.",
+    "- A short reasoning paragraph (one to three sentences).",
+    "- A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
+  ].join("\n");
+}
+
+/** Context threaded into a per-claim verify prompt. `index`/`total` fix the
+ *  claim's `Claim <n>/<total>` heading; sel mode additionally passes the located
+ *  surrounding `excerpt` + nearest `heading` as reference context. */
+export interface ClaimVerifyContext {
+  index: number;
+  total: number;
+  pageTitle: string;
+  wikiName: string;
+  mode: "sel" | "article";
+  excerpt?: string;
+  heading?: string;
+}
+
+/** A system + user prompt pair for a per-claim verify / the compose call. */
+export interface FactcheckCallPrompts {
   systemPrompt: string;
   userPrompt: string;
 }
 
 /**
- * End-to-end prompt composition for the fact-check route. Strips any prior
- * fact-check block from the body, then builds the mode-specific user prompt:
- *  - `sel`: verify the selected passage, with a located excerpt as surrounding
- *    context (reusing `locateExcerpt`).
- *  - `article`: extract up to `maxClaims` checkable claims from the (capped) body
- *    and verify each.
+ * Phase 2 — the per-claim verify prompt. Carries the claim + its source quote
+ * (and, in sel mode, the located excerpt / heading) and instructs the model to
+ * output exactly ONE verdict block headed with the given `Claim <n>/<total>`.
  */
-export function buildFactcheckPrompts(input: FactcheckPromptInput): FactcheckPrompts {
-  const { mode, meta, wikiName } = input;
-  const maxClaims = input.maxClaims ?? FACTCHECK_MAX_CLAIMS;
-  const body = stripFactcheckBlock(input.body);
-  const systemPrompt = factcheckSystemPrompt();
-  const tagsLine = meta.tags.length ? `   Tags: ${meta.tags.join(", ")}` : "";
-
-  if (mode === "sel") {
-    const sel = (input.sel ?? "").trim();
-    const excerpt = locateExcerpt(body, sel, input.ctx);
-    const question = `Fact-check: "${sel}"`;
-    const userPrompt = [
-      `Verify the following passage from "${meta.title}" in the "${wikiName}" knowledge wiki.`,
+export function buildClaimVerifyPrompt(claim: Claim, ctx: ClaimVerifyContext): FactcheckCallPrompts {
+  const systemPrompt = factcheckVerifySystemPrompt();
+  const lines: string[] = [
+    `Verify ONE factual claim drawn from "${ctx.pageTitle}" in the "${ctx.wikiName}" knowledge wiki.`,
+    "",
+    `CLAIM (${ctx.index}/${ctx.total}): ${claim.title}`,
+  ];
+  if (claim.quote && claim.quote.trim()) {
+    lines.push(
       "",
-      "PASSAGE TO VERIFY:",
+      "SOURCE PASSAGE (the wiki text the claim was drawn from — verify the claim, not this text):",
       '"""',
-      sel,
+      claim.quote.trim(),
       '"""',
-      "",
-      "SURROUNDING CONTEXT (reference only — verify the passage above, not this):",
-      '"""',
-      excerpt,
-      '"""',
-      "",
-      `Extract the checkable factual claims in the passage (up to ${maxClaims}) and verify each against the live web, following the output format.`,
-    ].join("\n");
-    return { question, systemPrompt, userPrompt };
+    );
   }
+  if (ctx.mode === "sel" && ctx.excerpt && ctx.excerpt.trim()) {
+    lines.push(
+      "",
+      "SURROUNDING CONTEXT (reference only — verify the claim above, not this):",
+      '"""',
+      ctx.excerpt.trim(),
+      '"""',
+    );
+    if (ctx.heading && ctx.heading.trim()) lines.push("", `Section: ${ctx.heading.trim()}`);
+  }
+  lines.push(
+    "",
+    `Verify this claim against the live web and output EXACTLY ONE block headed \`### <verdict emoji> Claim ${ctx.index}/${ctx.total} — <short claim title>\`, following the output format.`,
+  );
+  return { systemPrompt, userPrompt: lines.join("\n") };
+}
 
-  // article mode
-  const capped = body.slice(0, FACTCHECK_ARTICLE_BODY_MAX);
-  const question = `Fact-check article: ${meta.title}`;
-  const userPrompt = [
-    `Fact-check the article below from the "${wikiName}" knowledge wiki.`,
-    "",
-    `ARTICLE: "${meta.title}"${tagsLine}   Type: ${meta.type}`,
-    "",
-    "BODY:",
-    '"""',
-    capped,
-    '"""',
-    "",
-    `Extract up to ${maxClaims} checkable factual claims from the article — prefer specific, dated, verifiable statements (dates, numbers, named events, attributions). Skip opinions, predictions, and first-person notes (mark those ❓ out of scope). Verify each claim against the live web, following the output format.`,
+/** Input to {@link buildComposePrompt} — the finished per-claim verdict blocks
+ *  (in claim order) plus the page framing. */
+export interface ComposePromptInput {
+  title: string;
+  wikiName: string;
+  blocks: string[];
+}
+
+/**
+ * Phase 3 — the compose prompt (multi-claim only). A small call (thinking off,
+ * tools NOT disabled) that reads the finished verdict blocks and writes ONLY the
+ * one/two-sentence overall assessment lede; the server prepends it to the blocks.
+ * It must NOT re-list the individual claims (the server owns block ordering). The
+ * prompt steers away from tool use, but a stray tool excursion just burns the
+ * compose budget and degrades to the neutral header (the caller handles it).
+ */
+export function buildComposePrompt(input: ComposePromptInput): FactcheckCallPrompts {
+  const systemPrompt = [
+    "You are summarizing the results of a web fact-check.",
+    "You are given the per-claim verdict blocks that were already written.",
+    "Write a ONE- or TWO-sentence OVERALL ASSESSMENT of how well the article's claims held up.",
+    "Output ONLY that plain-paragraph assessment — no heading, no bullet list, and do NOT restate or re-list the individual claims or their verdicts. Plain markdown, no first-person, no meta commentary.",
   ].join("\n");
-  return { question, systemPrompt, userPrompt };
+  const userPrompt = [
+    `These are the fact-check verdicts for claims from "${input.title}" (${input.wikiName} wiki):`,
+    "",
+    input.blocks.join("\n\n"),
+    "",
+    "Write the overall assessment paragraph now.",
+  ].join("\n");
+  return { systemPrompt, userPrompt };
 }
