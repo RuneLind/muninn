@@ -694,6 +694,10 @@ export async function renderResearchPage(): Promise<string> {
           var d;
           try { d = JSON.parse(e.data); } catch { return; }
           if (!d.html) return;
+          // Self-guard like the wiki reference: don't rely solely on 'done'
+          // having finalized — a pending stream frame must never repaint this.
+          a.finalized = true;
+          cancelStreamRender(a);
           a.bodyEl.className = 'answer-body';
           a.bodyEl.innerHTML = d.html;
           linkifyCitations(a.bodyEl, a.citations);
