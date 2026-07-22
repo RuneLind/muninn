@@ -24,7 +24,6 @@ import {
   EXPLAIN_SELECTION_MAX,
 } from "../../wiki/explain-context.ts";
 import {
-  buildFactcheckPrompts,
   buildFactcheckBlock,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
@@ -1024,10 +1023,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         `Point the wiki at a claude-cli or claude-sdk bot.`;
     }
 
-    // Context assembly — ONLY when preflight passed (entry/index/meta set).
-    let question = "";
-    let systemPrompt = "";
-    let userPrompt = "";
+    // Context assembly — ONLY when preflight passed (entry/index/meta set). The
+    // SSE now builds the extraction/verify/compose prompts at runtime; the route
+    // only reduces the body + computes the base hash.
+    let body = "";
     let baseHash = "";
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
@@ -1035,18 +1034,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // unreadable file degrades to an empty body (no 500), like the explain branch.
       const raw = (await readWikiPage(index, meta)) ?? "";
       baseHash = createHash("sha256").update(raw).digest("hex");
-      const body = meta.type === "explainer" ? htmlToText(raw) : raw;
-      const prompts = buildFactcheckPrompts({
-        mode,
-        meta: { title: meta.title, tags: meta.tags, type: meta.type },
-        body,
-        sel: mode === "sel" ? sel : undefined,
-        ctx: mode === "sel" ? ctx : undefined,
-        wikiName: entry.name,
-      });
-      question = prompts.question;
-      systemPrompt = prompts.systemPrompt;
-      userPrompt = prompts.userPrompt;
+      body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
         wiki: entry.name,
         bot: botConfig?.name,
@@ -1059,11 +1047,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       config,
       botConfig: botConfig ?? null,
       preflightError,
-      question,
-      systemPrompt,
-      userPrompt,
-      baseHash,
+      body,
+      meta: meta
+        ? { title: meta.title, tags: meta.tags, type: meta.type }
+        : { title: page, tags: [], type: "note" },
+      wikiName: entry?.name ?? "",
       mode,
+      sel: mode === "sel" ? sel : undefined,
+      ctx: mode === "sel" ? ctx : undefined,
+      botDir: botConfig?.dir,
+      baseHash,
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),

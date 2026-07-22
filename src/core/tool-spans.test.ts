@@ -103,6 +103,45 @@ describe("attachToolSpans", () => {
     });
   });
 
+  test("defaults the parent label to 'claude'", async () => {
+    const { tracer, childSpans } = recordingTracer();
+    await attachToolSpans(tracer, [makeToolCall({ name: "Read", displayName: "Read" })], false);
+    expect(childSpans[0]!.parentLabel).toBe("claude");
+  });
+
+  test("honors an explicit parentLabel (fact-check indexed claim span)", async () => {
+    const { tracer, childSpans } = recordingTracer();
+    await attachToolSpans(
+      tracer,
+      [makeToolCall({ name: "WebFetch", displayName: "WebFetch" })],
+      false,
+      "claude:claim-2",
+    );
+    expect(childSpans[0]!.parentLabel).toBe("claude:claim-2");
+  });
+
+  test("v1 stage sub-spans anchor to the given parentLabel's start", async () => {
+    const claudeStart = new Date(2026, 4, 9, 12, 0, 0);
+    // recordingTracer.spanStartedAt only returns a start for label "claude"; a
+    // different parentLabel has no recorded start ⇒ no stage synthesis.
+    const v1Trace = {
+      schemaVersion: 1,
+      collections: [{
+        name: "c", indexer: "hybrid", fetchK: 10, candidates: [{ kept: true }],
+        confidence: { lowConfidence: false, bestScore: -2 },
+        timingsMs: { indexFetch: 80, chunkLoad: 20, rerank: 1400, titleBoost: 0, assembly: 1 },
+      }],
+    };
+    const { tracer, subSpans } = recordingTracer({ claudeStartedAt: claudeStart });
+    await attachToolSpans(
+      tracer,
+      [makeToolCall({ name: KNOWLEDGE_TOOL, searchTrace: v1Trace })],
+      false,
+      "claude:claim-0",
+    );
+    expect(subSpans).toHaveLength(0);
+  });
+
   test("captureOutputs=false omits output attribute", async () => {
     const { tracer, childSpans } = recordingTracer();
     await attachToolSpans(tracer, [makeToolCall({ output: "the result" })], false);

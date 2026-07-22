@@ -23,7 +23,11 @@ export type AgentPhase =
   | "harvesting"
   | "clustering"
   | "resolving"
-  | "drafting";
+  | "drafting"
+  // Fact-check phases — Phase 1 claim extraction, then Phase 2 bounded-parallel
+  // per-claim web verification. Additive: no consumer switches exhaustively.
+  | "extracting_claims"
+  | "verifying_claims";
 
 export interface AgentStatus {
   phase: AgentPhase;

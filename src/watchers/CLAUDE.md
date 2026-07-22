@@ -705,9 +705,11 @@ bug) drops to a legacy single-JSON parse (`parseLegacyHaikuOutput`), mirroring
 `onProgress = createProgressCallback(requestId, "running_watcher")` fills the
 `/agents` Running card's tool mini-log live (and now routes `usage_progress` events
 into the run's live token counts), and `tracer = wt` receives tool child
-spans (`attachToolSpans`; its absent `"claude"` parent label falls back to the
-`watcher:<type>` root span) so the traces waterfall + `getToolUsageStats` pick them
-up. Threaded through `runChecker` → `checkEmail` / `checkX` (both spawnHaiku sites)
+spans (`attachToolSpans`; its `parentLabel` defaults to `"claude"`, which is absent
+here so the child spans fall back to the `watcher:<type>` root span) so the traces
+waterfall + `getToolUsageStats` pick them up. (The optional 4th `parentLabel` arg
+lets the wiki fact-check fan-out attach tool spans under indexed `claude:claim-<i>`
+parents instead — the 5 non-factcheck callers keep the default and stay byte-identical.) Threaded through `runChecker` → `checkEmail` / `checkX` (both spawnHaiku sites)
 / `checkAnthropic` (→ `runGate`/`runDigest` → `callAnthropicModel`). The email
 watcher's Gmail MCP calls are the primary payoff; X/anthropic gate/digest calls run
 no MCP tools, so their mini-log stays empty but `numTurns`/`costUsd` populate.
