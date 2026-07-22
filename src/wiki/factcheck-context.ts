@@ -65,11 +65,16 @@ export function stripFactcheckBlock(body: string): string {
 
 /**
  * Count the fact-check verdicts in a finished answer — one per claim block per the
- * output contract. Counts occurrences of the four verdict markers; used only to
- * drive the client status line ("Checked N claims against the web"), so a loose
- * count is fine. Returns 0 when the model emitted no markers.
+ * output contract. Anchors on the `### <verdict> Claim …` heading lines so a
+ * verdict emoji mentioned in the assessment lede or reasoning prose (e.g. "capped
+ * at ⚠️") never inflates the count — this value feeds the persistent turn meta
+ * line, not just the transient status. Falls back to a loose marker scan for
+ * answers predating the heading format. Returns 0 when nothing matches.
  */
 export function countFactcheckClaims(answer: string): number {
+  const markers = FACTCHECK_VERDICT_MARKERS.map(escapeRegExp).join("|");
+  const headings = answer.match(new RegExp(`^###\\s*(?:${markers})`, "gmu"));
+  if (headings) return headings.length;
   let n = 0;
   for (const marker of FACTCHECK_VERDICT_MARKERS) {
     // Escape needed for the regex metacharacter-free emoji (defensive) + global count.
@@ -101,7 +106,11 @@ export function buildFactcheckBlock(answer: string, dateOslo: string): string {
   const lines = safeAnswer.trim().split("\n");
   const quoted = [`> [!factcheck] Fact check (${dateOslo})`];
   for (const line of lines) {
-    quoted.push(line.trim() === "" ? ">" : `> ${line}`);
+    // Blockquote lines never render headings (the pipeline joins them with <br>
+    // and skips block parsing), so a `### ✅ Claim n/m` heading would show as
+    // literal "###" text inside the callout — demote claim headings to bold.
+    const demoted = /^###\s+/.test(line) ? `**${line.replace(/^###\s+/, "").trim()}**` : line;
+    quoted.push(demoted.trim() === "" ? ">" : `> ${demoted}`);
   }
   return [FACTCHECK_SENTINEL_START, quoted.join("\n"), FACTCHECK_SENTINEL_END].join("\n");
 }
@@ -117,12 +126,18 @@ function factcheckSystemPrompt(): string {
     "- Skip opinions, predictions, recommendations, and the author's first-person notes — mark those ❓ out of scope rather than inventing a verdict.",
     "- Be concise. This is a verification pass, not an essay. Plain markdown only — no HTML, no custom block components (no callouts, cards, verdicts, or pills).",
     "",
-    "Output format:",
-    "- Start with a one- or two-sentence OVERALL ASSESSMENT.",
-    "- Then ONE block per claim. Each block is:",
-    "  - A line starting with the verdict marker, then the claim in **bold**: ✅ supported · ⚠️ partly supported · ❌ contradicted · ❓ unverifiable / out of scope",
-    "  - One line of reasoning.",
-    "  - A `Source(s):` line listing ONLY the URL(s) you actually opened (omit the line when you opened none).",
+    "Verdict discipline:",
+    "- A ✅ verdict REQUIRES at least one URL you actually OPENED with WebFetch for THAT claim. If the claim was only confirmed from search snippets (no page opened), cap the verdict at ⚠️ and say so in the reasoning.",
+    "- Verdict markers: ✅ supported · ⚠️ partly supported (or supported by snippets only) · ❌ contradicted · ❓ unverifiable / out of scope.",
+    "- Write NO first-person or meta commentary anywhere — no \"I was unable to…\", \"I also…\", \"I could not open…\". Anything you cannot verify is its OWN ❓ block, never a sentence about your process. The output is verdict blocks + the overall assessment, nothing else.",
+    "",
+    "Output format — follow EXACTLY:",
+    "- Start with a one- or two-sentence OVERALL ASSESSMENT (plain paragraph, no heading).",
+    "- Then ONE markdown block per claim, each its OWN block separated from the next by a BLANK LINE. A block is:",
+    "  - A heading line: `### <verdict emoji> Claim <n>/<total> — <short claim title>` (e.g. `### ✅ Claim 3/8 — Sleep deprivation raises amyloid beta`).",
+    "  - A blank line.",
+    "  - A short reasoning paragraph (one to three sentences).",
+    "  - A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
   ].join("\n");
 }
 
