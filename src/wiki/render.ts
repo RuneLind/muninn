@@ -71,6 +71,10 @@ function calloutTone(type: string): "info" | "warn" | "good" | "bad" {
     case "missing":
     case "bug":
       return "bad";
+    case "factcheck":
+      // Fact-check blocks (PR B "➕ Add to article") are neutral verification —
+      // no fifth style; map to the existing `info` tone explicitly.
+      return "info";
     default:
       return "info";
   }

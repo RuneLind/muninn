@@ -25,9 +25,12 @@ import {
 } from "../../wiki/explain-context.ts";
 import {
   buildFactcheckPrompts,
+  buildFactcheckBlock,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
 } from "../../wiki/factcheck-context.ts";
+import { appendBlockToPage } from "../../wiki/append-block.ts";
+import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
 import { createHash } from "node:crypto";
@@ -1171,6 +1174,101 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       return c.json({ saved: true, summary: distilled.summary });
     } catch (err) {
       log.error("Wiki remember: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
+  });
+
+  // Fact check "➕ Add to article" (PR B): persist a fact-check answer as a
+  // `> [!factcheck]` callout block on the checked page. Plain JSON route (normal
+  // REST semantics — 400/403/404/409/500 — NOT the SSE never-5xx contract), but
+  // the whole body is wrapped so an unexpected failure returns 500 JSON, never an
+  // unhandled throw. Allowed on ANY registered wiki's MARKDOWN pages; explainer
+  // (.html) pages are rejected — appending markdown would corrupt the file.
+  // Writes via the dedicated `appendBlockToPage` helper (splice + raw-bytes
+  // staleness + log + reindex over the wiki's registry collections), never the
+  // gardener apply path.
+  app.post("/api/wiki/factcheck/append", async (c) => {
+    try {
+      type AppendBody = { wiki?: string; bot?: string; page?: string; answer?: string; baseHash?: string };
+      const body = await c.req.json<AppendBody>().catch(() => ({} as AppendBody));
+      const page = typeof body.page === "string" ? body.page.trim() : "";
+      const answer = typeof body.answer === "string" ? body.answer.trim() : "";
+      const baseHash = typeof body.baseHash === "string" ? body.baseHash.trim() : "";
+      if (!page) return c.json({ error: "page is required" }, 400);
+      if (!answer) return c.json({ error: "answer is required" }, 400);
+      if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
+
+      const { entry, unknownWiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? body.wiki,
+        c.req.query("bot") ?? body.bot,
+        process.env.WIKI_DIR,
+      );
+      if (unknownWiki || !entry) {
+        return c.json({ error: "no wiki configured for that name" }, 404);
+      }
+
+      const index = await getWikiIndex({ root: entry.root });
+      if (!index) return c.json({ error: "wiki directory not found" }, 404);
+      const meta = index.resolve(page);
+      if (!meta) return c.json({ error: `no wiki page named "${page}"` }, 404);
+      // Markdown-only: appending a callout to a standalone .html explainer would
+      // corrupt it. Reject before any write.
+      if (meta.type === "explainer") {
+        return c.json({ error: "fact-check blocks can only be added to markdown pages" }, 400);
+      }
+
+      const block = buildFactcheckBlock(answer, todayOslo(Date.now()));
+      const result = await appendBlockToPage({
+        wikiDir: entry.root,
+        relPath: meta.relPath,
+        block,
+        baseHash,
+        collections: entry.collections ?? [],
+        logTitle: meta.title,
+        now: () => Date.now(),
+        readFile: async (absPath) => {
+          try {
+            return await Bun.file(absPath).text();
+          } catch {
+            return null;
+          }
+        },
+        writeFile: async (absPath, content) => {
+          await Bun.write(absPath, content);
+        },
+        refreshIndex: async () => {
+          await getWikiIndex({ root: entry.root, refresh: true });
+        },
+        reindex: async (collection) => {
+          await postCollectionUpdate(config.knowledgeApiUrl, collection);
+        },
+      });
+
+      if (result.outcome === "stale") {
+        return c.json({ error: result.reason, stale: true }, 409);
+      }
+      if (result.outcome === "error") {
+        log.warn("Fact-check append failed for wiki={wiki} page={page}: {reason}", {
+          wiki: entry.name,
+          page,
+          reason: result.reason,
+        });
+        return c.json({ error: result.reason }, 500);
+      }
+
+      activityLog.push("system", `Wiki fact-check appended: ${entry.name} — ${meta.title}`, {
+        metadata: { source: "wiki-factcheck-append", wiki: entry.name, page: meta.relPath },
+      });
+      log.info("Wiki fact-check appended: wiki={wiki} page={page}", {
+        wiki: entry.name,
+        page: meta.relPath,
+      });
+      return c.json({ written: true, page: meta.relPath });
+    } catch (err) {
+      log.error("Wiki fact-check append: unexpected failure: {error}", {
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "internal error" }, 500);

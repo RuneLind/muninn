@@ -79,6 +79,26 @@ export function countFactcheckClaims(answer: string): number {
   return n;
 }
 
+/**
+ * Build the persisted fact-check block for PR B's "➕ Add to article": a
+ * `> [!factcheck]` Obsidian callout (rendered as a styled box by the reader's
+ * `upgradeObsidianCallouts`, shipped in #340) wrapping the fact-check answer
+ * markdown, fenced by the `<!-- factcheck:start/end -->` sentinels so a re-check
+ * strips it (`stripFactcheckBlock`) and a re-append replaces it in place.
+ *
+ * The answer is blockquoted line-by-line (every line prefixed with `>`, blank
+ * lines kept as a bare `>`) so it renders as ONE blockquote — the callout
+ * upgrader keys off a single `<blockquote>[!factcheck] …</blockquote>`.
+ */
+export function buildFactcheckBlock(answer: string, dateOslo: string): string {
+  const lines = answer.trim().split("\n");
+  const quoted = [`> [!factcheck] Fact check (${dateOslo})`];
+  for (const line of lines) {
+    quoted.push(line.trim() === "" ? ">" : `> ${line}`);
+  }
+  return [FACTCHECK_SENTINEL_START, quoted.join("\n"), FACTCHECK_SENTINEL_END].join("\n");
+}
+
 /** Shared fact-checker persona + output contract (both modes). */
 function factcheckSystemPrompt(): string {
   return [
