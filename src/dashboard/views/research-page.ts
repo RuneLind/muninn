@@ -142,7 +142,8 @@ export async function renderResearchPage(): Promise<string> {
       line-height: 1.7;
       font-size: 15px;
     }
-    .answer-body.streaming { white-space: pre-wrap; }
+    /* Streaming body renders progressively-formatted markdown (same pipeline as
+       the final render), so no pre-wrap plain-text mode is needed. */
     ${markdownContentStyles(".answer-body")}
     ${componentBlockCss(".answer-body")}
 
@@ -558,6 +559,8 @@ export async function renderResearchPage(): Promise<string> {
         question: question,
         citations: [],
         buffer: '',
+        renderRaf: 0,
+        finalized: false,
         card: card,
         statusWrap: card.querySelector('.answer-status'),
         statusEl: card.querySelector('.answer-status .st'),
@@ -571,6 +574,26 @@ export async function renderResearchPage(): Promise<string> {
       a.statusEl.textContent = text;
     }
 
+    // Throttle progressive markdown renders of the streaming buffer to one per
+    // animation frame (same pattern as the wiki Ask tab), coalescing bursts of
+    // deltas. The frame re-checks at fire time: a frame scheduled just before
+    // 'done'/'answer_html' lands (or before a new ask supersedes the stream)
+    // must not repaint over the final rendered article.
+    function scheduleStreamRender(a, conn) {
+      if (a.renderRaf) return;
+      a.renderRaf = requestAnimationFrame(function() {
+        a.renderRaf = 0;
+        if (currentSource !== conn) return; // superseded by a newer ask
+        if (a.finalized) return; // final render already swapped in
+        a.bodyEl.innerHTML = formatWebHtml(a.buffer);
+        a.bodyEl.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
+    function cancelStreamRender(a) {
+      if (a.renderRaf) { cancelAnimationFrame(a.renderRaf); a.renderRaf = 0; }
+    }
+
     function askQuestion() {
       var input = document.getElementById('askInput');
       var q = input.value.trim();
@@ -581,7 +604,7 @@ export async function renderResearchPage(): Promise<string> {
       // then fires no 'done', so its turn never commits. Drop its orphaned card
       // so it doesn't spin forever; it was never committed, so history is intact.
       if (currentSource) { currentSource.close(); currentSource = null; }
-      if (active && active.card) { active.card.remove(); }
+      if (active) { cancelStreamRender(active); if (active.card) active.card.remove(); }
       active = null;
 
       document.getElementById('emptyHint').style.display = 'none';
@@ -612,15 +635,20 @@ export async function renderResearchPage(): Promise<string> {
           bindSources(a.sourcesEl, a.citations);
         },
 
+        // Render the accumulating buffer progressively through the SAME
+        // component-aware formatter as the final render (formatWebHtml), so
+        // headings/lists/code grow formatted during the stream instead of as a
+        // wall of plain text — same behavior as the wiki Ask tab.
         delta: function(e) {
           var d = JSON.parse(e.data);
           a.buffer += d.text || '';
-          a.bodyEl.textContent = a.buffer;
-          a.bodyEl.scrollIntoView({ block: 'nearest' });
+          scheduleStreamRender(a, conn);
         },
 
         done: function(e) {
           var d = JSON.parse(e.data);
+          a.finalized = true;
+          cancelStreamRender(a);
           a.buffer = d.answer || a.buffer || '';
           a.bodyEl.className = 'answer-body';
           // Render through the SAME component-aware formatter the server's
@@ -666,6 +694,10 @@ export async function renderResearchPage(): Promise<string> {
           var d;
           try { d = JSON.parse(e.data); } catch { return; }
           if (!d.html) return;
+          // Self-guard like the wiki reference: don't rely solely on 'done'
+          // having finalized — a pending stream frame must never repaint this.
+          a.finalized = true;
+          cancelStreamRender(a);
           a.bodyEl.className = 'answer-body';
           a.bodyEl.innerHTML = d.html;
           linkifyCitations(a.bodyEl, a.citations);
@@ -681,6 +713,8 @@ export async function renderResearchPage(): Promise<string> {
         app_error: function(e) {
           var msg = 'Something went wrong.';
           try { msg = JSON.parse(e.data).message || msg; } catch {}
+          a.finalized = true;
+          cancelStreamRender(a);
           setCardStatus(a, msg, 'error');
           if (!a.buffer) { a.bodyEl.className = 'answer-body'; a.bodyEl.innerHTML = ''; }
           active = null;
