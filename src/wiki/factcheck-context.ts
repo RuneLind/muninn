@@ -195,7 +195,7 @@ function factcheckVerifySystemPrompt(): string {
     "- A short reasoning paragraph (one to three sentences).",
     "- A blank line.",
     "- A `Confidence: NN/100` line (NN is your evidence-strength score from the rubric above) as its OWN standalone paragraph — it MUST be preceded by a blank line so it renders on its own line, never merged into the reasoning paragraph.",
-    "- A `Sources:` line listing ONLY the URL(s) you actually opened with WebFetch for this claim (omit the line entirely when you opened none — and then the verdict cannot be ✅).",
+    "- A `Sources:` line listing ONLY the source(s) you actually opened with WebFetch for this claim, each as a markdown link `[hostname](url)` (e.g. `Sources: [nature.com](https://www.nature.com/articles/x), [who.int](https://www.who.int/news/y)`), comma-separated. Percent-encode any literal parentheses in the URL as `%28`/`%29` (e.g. `…/Foo_%28bar%29`) so the link renders correctly. Omit the line entirely when you opened none (and then the verdict cannot be ✅).",
   ].join("\n");
 }
 

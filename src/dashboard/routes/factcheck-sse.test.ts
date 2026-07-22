@@ -2,11 +2,13 @@ import { test, expect, describe } from "bun:test";
 import {
   runClaimPool,
   assembleFactcheckAnswer,
+  linkifySourcesLines,
   verdictOf,
   parseConfidence,
   realOutcome,
   type ClaimVerifyOutcome,
 } from "./factcheck-sse.ts";
+import { formatWebHtml } from "../../web/web-format.ts";
 
 const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true, outcome: "verified" });
 const skip = (i: number): ClaimVerifyOutcome => ({ block: `skip${i}`, real: false, outcome: "skipped" });
@@ -121,6 +123,133 @@ describe("assembleFactcheckAnswer", () => {
 
   test("empty blocks → empty string", () => {
     expect(assembleFactcheckAnswer("x", [])).toBe("");
+  });
+
+  test("linkifies bare URLs on the Sources line of the assembled answer", () => {
+    const block = "### ✅ Claim 1/1 — A\n\nSupported.\n\nSources: https://www.nature.com/articles/x";
+    const out = assembleFactcheckAnswer("", [block]);
+    expect(out).toContain("Sources: [nature.com](https://www.nature.com/articles/x)");
+  });
+});
+
+describe("linkifySourcesLines", () => {
+  test("wraps a bare URL into a [hostname](url) markdown link (www stripped)", () => {
+    expect(linkifySourcesLines("Sources: https://www.example.com/a")).toBe(
+      "Sources: [example.com](https://www.example.com/a)",
+    );
+  });
+
+  test("leaves an already-markdown link untouched (no double-wrap)", () => {
+    const line = "Sources: [example.com](https://example.com/a)";
+    expect(linkifySourcesLines(line)).toBe(line);
+  });
+
+  test("mixed bare + markdown link on one line — only the bare one is wrapped", () => {
+    const line = "Sources: [example.com](https://example.com/a), https://who.int/b";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [example.com](https://example.com/a), [who.int](https://who.int/b)",
+    );
+  });
+
+  test("multiple bare URLs on one line are all wrapped", () => {
+    const line = "Sources: https://a.com/x, https://b.org/y";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [a.com](https://a.com/x), [b.org](https://b.org/y)",
+    );
+  });
+
+  test("trailing punctuation stays OUTSIDE the href", () => {
+    expect(linkifySourcesLines("Sources: https://a.com/x, https://b.org/y.")).toBe(
+      "Sources: [a.com](https://a.com/x), [b.org](https://b.org/y).",
+    );
+  });
+
+  test("non-Sources lines are left untouched", () => {
+    const md = "Reasoning mentions https://a.com/x inline.\n\nSources: https://b.org/y";
+    expect(linkifySourcesLines(md)).toBe(
+      "Reasoning mentions https://a.com/x inline.\n\nSources: [b.org](https://b.org/y)",
+    );
+  });
+
+  test("only http(s) schemes are linkified", () => {
+    const line = "Sources: ftp://a.com/x https://b.org/y";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: ftp://a.com/x [b.org](https://b.org/y)",
+    );
+  });
+
+  test("no URLs on the Sources line → unchanged", () => {
+    expect(linkifySourcesLines("Sources: none opened")).toBe("Sources: none opened");
+  });
+
+  // ── FIX 1: parenthesized URLs (Wikipedia disambig et al.) ──────────────────
+  test("bare Wikipedia disambig URL keeps its (balanced) parens, encoded in the href", () => {
+    expect(
+      linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Mercury_(planet)"),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29)");
+  });
+
+  test("an existing markdown link with parens in the href is normalized (parens encoded)", () => {
+    expect(
+      linkifySourcesLines("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_(planet))"),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29)");
+  });
+
+  test("a WRAPPER paren (see …) is shed, not swallowed into the href", () => {
+    expect(linkifySourcesLines("Sources: (see https://x.com/a)")).toBe(
+      "Sources: (see [x.com](https://x.com/a))",
+    );
+  });
+
+  test("balanced paren followed by trailing punctuation splits both", () => {
+    expect(
+      linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Mercury_(planet)."),
+    ).toBe("Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_%28planet%29).");
+  });
+
+  test("idempotent — a second pass does not re-encode %28/%29", () => {
+    const once = linkifySourcesLines("Sources: https://en.wikipedia.org/wiki/Foo_(bar)");
+    expect(linkifySourcesLines(once)).toBe(once);
+    expect(once).not.toContain("%2528");
+  });
+
+  test("mixed line: bare parens URL + markdown parens link both encoded", () => {
+    const line =
+      "Sources: https://en.wikipedia.org/wiki/A_(b), [c.org](https://c.org/d_(e))";
+    expect(linkifySourcesLines(line)).toBe(
+      "Sources: [en.wikipedia.org](https://en.wikipedia.org/wiki/A_%28b%29), [c.org](https://c.org/d_%28e%29)",
+    );
+  });
+});
+
+// FIX 1 end-to-end: a Sources line with a parenthesized URL, piped through the
+// real render path (assembleFactcheckAnswer → the shared formatWebHtml markdown
+// parser), yields an <a href> equal to the FULL encoded URL with no truncated
+// href and no dangling `(bar)` text after the anchor.
+describe("factcheck Sources render path (assemble → formatWebHtml)", () => {
+  const anchorHref = (html: string): string | null => {
+    const m = html.match(/<a href="([^"]*)"[^>]*>([^<]*)<\/a>/);
+    return m ? m[1]! : null;
+  };
+
+  test("bare Wikipedia disambig URL renders one <a> with the full encoded href", () => {
+    const block =
+      "### ✅ Claim 1/1 — Mercury\n\nSupported.\n\nSources: https://en.wikipedia.org/wiki/Mercury_(planet)";
+    const html = formatWebHtml(assembleFactcheckAnswer("", [block]));
+    expect(anchorHref(html)).toBe("https://en.wikipedia.org/wiki/Mercury_%28planet%29");
+    // No truncated href and no dangling text after the anchor.
+    expect(html).not.toContain('href="https://en.wikipedia.org/wiki/Mercury_"');
+    expect(html).not.toContain("(planet)");
+  });
+
+  test("model-emitted markdown link with parens in the href renders the full href", () => {
+    const block =
+      "### ✅ Claim 1/1 — Mercury\n\nSupported.\n\nSources: [en.wikipedia.org](https://en.wikipedia.org/wiki/Mercury_(planet))";
+    const html = formatWebHtml(assembleFactcheckAnswer("", [block]));
+    expect(anchorHref(html)).toBe("https://en.wikipedia.org/wiki/Mercury_%28planet%29");
+    expect(html).not.toContain("(planet)");
+    // Exactly one anchor — the parens didn't spawn a stray truncated link.
+    expect(html.match(/<a /g)?.length ?? 0).toBe(1);
   });
 });
 

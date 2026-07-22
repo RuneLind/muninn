@@ -30,7 +30,7 @@ import type { BotConfig } from "../../bots/config.ts";
 import type { StreamProgressEvent } from "../../ai/stream-parser.ts";
 import { executeOneShot } from "../../ai/one-shot.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
-import { getToolProgress } from "../../ai/tool-status.ts";
+import { getToolProgress, rawUrlField } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
 import { attachToolSpans } from "../../core/tool-spans.ts";
@@ -201,13 +201,109 @@ export async function runClaimPool(opts: {
   return outcomes;
 }
 
+/** An existing markdown link `[text](http(s)://…)` (group 1 = text, group 2 = the
+ *  href — the href group allows one level of balanced parens so a Wikipedia-style
+ *  `…/Foo_(bar)` disambiguator survives) OR a bare http(s) URL (group 3). Bare
+ *  URLs now allow `(`/`)` in the body (only whitespace/angle-brackets stop them);
+ *  an UNMATCHED trailing `)` is peeled back off by {@link splitTrailingUrl} (the
+ *  standard balanced-paren autolinker heuristic). Matching a markdown link first
+ *  is what stops a bare-URL double-wrap. */
+const SOURCES_URL_RE =
+  /\[([^\]]*)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))*)\)|(https?:\/\/[^\s<>]+)/gi;
+
+/** Percent-encode literal parens in a URL so the SHARED `web-format.ts`
+ *  markdown-link parser (`\[..\]\(([^)]+)\)`, which we must NOT touch — global
+ *  blast radius) doesn't stop the href at the first `)`. `%28`/`%29` carry no
+ *  literal parens, so re-running this is a no-op (idempotent — never `%2528`). */
+function encodeParens(url: string): string {
+  return url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+}
+
+/** Peel trailing text a model routinely writes right after a bare URL off the
+ *  URL so it stays OUTSIDE the generated link's href: plain punctuation
+ *  (comma/period/…) AND an UNBALANCED trailing `)` (a wrapper paren like
+ *  `(see https://x.com/a)` — more `)` than `(` in the URL). A BALANCED paren
+ *  (Wikipedia's `…/Foo_(bar)`) is kept. Peels alternately from the right so
+ *  `…/a).` splits both. */
+function splitTrailingUrl(input: string): [string, string] {
+  let url = input;
+  let trailing = "";
+  while (url.length > 0) {
+    const p = url.match(/[.,;:!?'"\]]+$/);
+    if (p) {
+      trailing = p[0] + trailing;
+      url = url.slice(0, url.length - p[0].length);
+      continue;
+    }
+    if (url.endsWith(")")) {
+      const opens = (url.match(/\(/g) ?? []).length;
+      const closes = (url.match(/\)/g) ?? []).length;
+      if (closes > opens) {
+        trailing = ")" + trailing;
+        url = url.slice(0, -1);
+        continue;
+      }
+    }
+    break;
+  }
+  return [url, trailing];
+}
+
+/**
+ * Fact-check-scoped fallback linkifier (belt-and-suspenders to the markdown-link
+ * `Sources:` prompt contract): on every line starting with `Sources:`, wrap any
+ * BARE http(s) URL into a `[hostname](url)` markdown link so the reader/web
+ * pipeline renders it clickable (`formatWebHtml` linkifies markdown links but has
+ * no bare-URL autolinker). Pure + deterministic + idempotent + factcheck-only —
+ * deliberately NOT a global autolinker on the shared web-format.
+ *
+ * Parens handling (FIX 1): both a newly-wrapped bare URL AND an already-present
+ * markdown link have literal `(`/`)` percent-encoded in the emitted HREF
+ * (`encodeParens`, link text untouched) so the shared `web-format.ts` parser —
+ * which stops an href at the first `)` and which we must NOT modify — resolves
+ * the full URL. Bare URLs keep BALANCED parens (Wikipedia disambig) but shed a
+ * wrapper `)` (`splitTrailingUrl`). Existing markdown links are normalized in
+ * place (an intentional scope extension); the encoding is idempotent so a second
+ * pass is a no-op. Leaves non-`Sources:` lines and non-http(s) URLs untouched.
+ */
+export function linkifySourcesLines(markdown: string): string {
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (!/^Sources:/.test(line)) return line;
+      return line.replace(
+        SOURCES_URL_RE,
+        (match: string, mdText?: string, mdHref?: string, bareUrl?: string) => {
+          if (typeof mdHref === "string") {
+            // An existing markdown link — normalize parens in the href in place
+            // (idempotent), leave the link text as-is.
+            return `[${mdText ?? ""}](${encodeParens(mdHref)})`;
+          }
+          if (typeof bareUrl !== "string") return match;
+          const [url, trailing] = splitTrailingUrl(bareUrl);
+          let host: string;
+          try {
+            host = new URL(url).hostname.replace(/^www\./, "") || url;
+          } catch {
+            return match; // unparseable — leave the bare URL untouched
+          }
+          return `[${host}](${encodeParens(url)})${trailing}`;
+        },
+      );
+    })
+    .join("\n");
+}
+
 /** Assemble the final fact-check markdown: for a multi-claim check, the compose
  *  `lede` on top of the verdict blocks; for a single claim, the lone block IS the
- *  answer (no lede). Blocks are always in claim order. */
+ *  answer (no lede). Blocks are always in claim order. `Sources:` lines are
+ *  linkified (bare URL → `[hostname](url)`) so they render clickable everywhere the
+ *  markdown lands (streamed answer, `answer_html`, the appended `> [!factcheck]`). */
 export function assembleFactcheckAnswer(lede: string, blocks: string[]): string {
-  return blocks.length > 1
+  const answer = blocks.length > 1
     ? `${lede}\n\n${blocks.join("\n\n")}`.trim()
     : (blocks[0] ?? "").trim();
+  return linkifySourcesLines(answer);
 }
 
 /**
@@ -414,12 +510,17 @@ async function runFactcheck(
         if (clientState.gone) return;
         if (event.type === "tool_start") {
           const prog = getToolProgress(event.name, event.input);
+          // Full URL alongside the hostname `detail` — the client keeps the first
+          // one seen per host to build the Consulting chip's href (hostname stays
+          // the dedup key + label). Only forwarded when present.
+          const url = rawUrlField(event.input);
           safeWrite("tool", {
             type: "tool",
             state: "start",
             name: event.displayName,
             label: prog?.label ?? event.displayName,
             detail: prog?.detail,
+            ...(url ? { url } : {}),
             claimIndex: index,
           });
         } else if (event.type === "tool_end") {

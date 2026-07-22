@@ -1448,6 +1448,7 @@ interface AskTurn {
   page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
+  toolSourceUrls?: Record<string, string>; // host → first full URL seen (feeds the Consulting chip hrefs). Persisted intentionally; a pre-PR / malformed-dropped turn lacks it ⇒ chips fall back to https://<host>/.
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
   claimOutcomes?: ClaimOutcomeCounts; // per-outcome tally for the honest fact-check meta line (persisted)
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
@@ -1640,14 +1641,31 @@ function askFactcheckAppendHtml(turn: AskTurn): string {
   );
 }
 
-/** Inner markup of the "Consulting" chip row — a label + one chip per consulted
- *  hostname. Empty string when there are none (the container then hides). */
+/** Only http(s) URLs are safe to put in a chip href (the URL is model output). A
+ *  non-http(s) or missing value degrades to `https://<host>/` — the host itself
+ *  comes from `new URL(...).hostname` server-side, so it's a real hostname. */
+function factcheckSrcHref(host: string, url: string | undefined): string {
+  return url && /^https?:\/\//i.test(url) ? url : "https://" + host + "/";
+}
+
+/** Inner markup of the "Consulting" chip row — a label + one linked chip per
+ *  consulted hostname (opens the source in a new tab). Empty string when there are
+ *  none (the container then hides). The href is the first full URL seen for that
+ *  host (`toolSourceUrls`), falling back to `https://<host>/` for a rehydrated turn
+ *  that only persisted the hostnames. */
 function toolSourceChips(turn: AskTurn): string {
   const hosts = turn.toolSources || [];
   if (!hosts.length) return "";
+  const urls = turn.toolSourceUrls || {};
   return (
     '<span class="wiki-fc-src-label">Consulting</span>' +
-    hosts.map((h) => '<span class="wiki-fc-src-chip">' + esc(h) + "</span>").join("")
+    hosts
+      .map(
+        (h) =>
+          '<a class="wiki-fc-src-chip" href="' + esc(factcheckSrcHref(h, urls[h])) +
+          '" target="_blank" rel="noopener">' + esc(h) + "</a>",
+      )
+      .join("")
   );
 }
 
@@ -1916,11 +1934,16 @@ function runAskStream(url: string, turn: AskTurn): void {
           const label = typeof d.label === "string" && d.label ? d.label : "Working";
           setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
         }
-        // WebFetch carries a hostname detail — record deduped consulted sources.
+        // WebFetch carries a hostname detail — record deduped consulted sources,
+        // keeping the FIRST full URL seen per host for the chip href.
         if (detail && d.name === "WebFetch") {
           if (!turn.toolSources) turn.toolSources = [];
           if (turn.toolSources.indexOf(detail) === -1) {
             turn.toolSources.push(detail);
+            if (typeof d.url === "string" && d.url) {
+              if (!turn.toolSourceUrls) turn.toolSourceUrls = {};
+              if (!turn.toolSourceUrls[detail]) turn.toolSourceUrls[detail] = d.url;
+            }
             refreshAskToolSources(turn);
           }
         }

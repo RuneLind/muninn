@@ -627,7 +627,9 @@ export async function renderWikiPage(opts?: {
       font-size: 12px; padding: 2px 8px; border-radius: 999px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-secondary); white-space: nowrap;
+      text-decoration: none; cursor: pointer;
     }
+    a.wiki-fc-src-chip:hover { border-color: var(--accent); color: var(--text-primary); }
     /* Per-claim confidence line (evidence strength, NOT the verdict) — a band-
        colored chip carrying the 0-100 score, rendered in place of the model's
        Confidence NN/100 text line by enhanceConfidenceHtml. */
