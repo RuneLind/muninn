@@ -49,6 +49,41 @@ describe("countFactcheckClaims", () => {
   });
 });
 
+describe("factcheckSystemPrompt — output contract (R2 depends on this)", () => {
+  // Any mode surfaces the shared system prompt.
+  const out = buildFactcheckPrompts({ mode: "article", meta, body: "x", wikiName: "w" });
+
+  test("mandates per-claim heading blocks with the exact Claim <n>/<total> shape", () => {
+    expect(out.systemPrompt).toContain("### <verdict emoji> Claim <n>/<total> — <short claim title>");
+    expect(out.systemPrompt).toContain("ONE markdown block per claim");
+    expect(out.systemPrompt).toContain("separated from the next by a BLANK LINE");
+  });
+
+  test("keeps the web-verification + cite-only-fetched rules", () => {
+    expect(out.systemPrompt).toContain("WebFetch");
+    expect(out.systemPrompt).toContain("Cite ONLY URLs you actually opened");
+  });
+
+  test("requires a fetched URL for a ✅ verdict (caps at ⚠️ otherwise)", () => {
+    expect(out.systemPrompt).toContain("A ✅ verdict REQUIRES at least one URL you actually OPENED with WebFetch");
+    expect(out.systemPrompt).toContain("cap the verdict at ⚠️");
+  });
+
+  test("bans first-person / meta commentary", () => {
+    expect(out.systemPrompt).toContain("NO first-person or meta commentary");
+    expect(out.systemPrompt).toContain("its OWN ❓ block");
+  });
+
+  test("keeps the Sources: line rule (only fetched URLs)", () => {
+    expect(out.systemPrompt).toContain("`Sources:` line");
+    expect(out.systemPrompt).toContain("ONLY the URL(s) you actually opened");
+  });
+
+  test("keeps the overall assessment lede", () => {
+    expect(out.systemPrompt).toContain("OVERALL ASSESSMENT");
+  });
+});
+
 describe("buildFactcheckPrompts — sel mode", () => {
   test("frames the selected passage with located excerpt", () => {
     const body = "Intro paragraph.\n\nThe Eiffel Tower was completed in 1889 in Paris.\n\nOutro.";

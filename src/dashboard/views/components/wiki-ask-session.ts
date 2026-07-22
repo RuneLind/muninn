@@ -37,6 +37,8 @@ export interface StoredAskTurn {
    *  as a "Consulting" chip row. Persisted so a rehydrated turn still shows them.
    *  Absent on Ask/Explain turns. */
   toolSources?: string[];
+  /** Claims verified in a fact check (drives the meta line). Absent on Ask/Explain. */
+  claimCount?: number;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -61,6 +63,7 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   ) {
     return false;
   }
+  if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   return true;
 }
 

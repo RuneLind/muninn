@@ -1435,6 +1435,7 @@ interface AskTurn {
   page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
+  claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
 }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
@@ -1526,14 +1527,21 @@ function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
   return '<div class="wiki-ask-src-head">Sources</div>' + rows;
 }
 
-/** Meta line under the answer's headline: "Asked … · wiki: X · N sources". */
+/** Meta line under the answer's headline. Ask/Explain: "Asked … · wiki: X · N sources".
+ *  Fact-check has no retrieval sources (`citations` is always empty), so counting
+ *  them shows a misleading "0 sources" next to the "Consulting: <hosts>" chip row —
+ *  instead report the claim count + the number of sites actually opened. */
 function askMetaText(turn: AskTurn): string {
+  const prefix = "Asked " + relTime(turn.askedAt) + (WIKI ? " · wiki: " + WIKI : "");
+  if (turn.kind === "factcheck") {
+    const claims = typeof turn.claimCount === "number" ? turn.claimCount : 0;
+    const sites = (turn.toolSources || []).length;
+    const claimsLabel = claims + " claim" + (claims === 1 ? "" : "s");
+    const sitesLabel = sites ? " · " + sites + " site" + (sites === 1 ? "" : "s") + " consulted" : "";
+    return prefix + " · " + claimsLabel + sitesLabel;
+  }
   const n = turn.citations.length;
-  return (
-    "Asked " + relTime(turn.askedAt) +
-    (WIKI ? " · wiki: " + WIKI : "") +
-    " · " + n + " source" + (n === 1 ? "" : "s")
-  );
+  return prefix + " · " + n + " source" + (n === 1 ? "" : "s");
 }
 
 /** Follow-up bar rendered under every Ask/Explain answer (input + Ask button).
@@ -1782,6 +1790,8 @@ function runAskStream(url: string, turn: AskTurn): void {
         // Fact-check has no retrieval sources — report the claim count instead.
         turn.baseHash = typeof d.baseHash === "string" ? d.baseHash : undefined;
         const n = typeof d.claimCount === "number" ? d.claimCount : 0;
+        turn.claimCount = n; // drives the meta line's "N claims · M sites consulted"
+        refreshAskSources(turn); // repaint the meta line now that claimCount is set
         statusText = n > 0
           ? "Checked " + n + " claim" + (n === 1 ? "" : "s") + " against the web"
           : "Fact check complete";
