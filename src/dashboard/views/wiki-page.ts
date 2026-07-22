@@ -635,7 +635,7 @@ export async function renderWikiPage(opts?: {
       max-height: 96px; overflow-y: auto; scrollbar-width: thin;
       margin: 2px 4px 8px;
     }
-    .wiki-fc-tool { font-size: 11px; color: var(--text-secondary); display: flex; gap: 6px; align-items: baseline; }
+    .wiki-fc-tool { font-size: 11px; color: var(--text-soft); display: flex; gap: 6px; align-items: baseline; }
     .wiki-fc-tool.done { color: var(--text-dim); }
     .wiki-fc-tool-claim {
       flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--text-dim);

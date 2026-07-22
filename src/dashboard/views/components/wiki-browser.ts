@@ -1938,6 +1938,9 @@ function runAskStream(url: string, turn: AskTurn): void {
       // persisted to localStorage. The final render above uses `turn.answer`, and
       // no post-done path reads it.
       turn.toolLog = undefined;
+      // Clearing the data alone leaves the already-rendered #askToolLog node
+      // on screen (with any unpaired "…" row) — hide it too.
+      refreshAskToolLog(turn);
       askTurns.push(turn);
       renderAskHistory();
       persistAskSession();
