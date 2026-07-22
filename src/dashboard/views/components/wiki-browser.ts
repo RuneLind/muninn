@@ -1432,6 +1432,8 @@ interface AskTurn {
   askedAt: number;
   kind?: string; // "factcheck" for a fact-check turn (status line; PR B ➕ gate). Absent ⇒ Ask/Explain.
   baseHash?: string; // sha256 of the checked page at fact-check time (factcheck turns only; PR B round-trips it)
+  page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
+  pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
 }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
@@ -1563,9 +1565,26 @@ function askRememberHtml(turn: AskTurn): string {
   );
 }
 
+/** "➕ Add to article" button — ONLY on committed fact-check turns whose page is
+ *  markdown (never an explainer, whose .html can't take a markdown callout).
+ *  Persists the fact-check answer as a `> [!factcheck]` callout on the page
+ *  (POST /api/wiki/factcheck/append). Bound via document-level delegation, gated
+ *  on the turn being committed (same `turn.answer` gate as the follow-up bar). */
+function askFactcheckAppendHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck" || turn.pageType === "explainer" || !turn.page) return "";
+  const disabled = turn.answer ? "" : " disabled";
+  return (
+    '<div class="wiki-fc-append" id="wikiFactcheckAppendBar">' +
+    '<button id="wikiFactcheckAppendBtn" class="wiki-fc-append-btn"' + disabled + ">➕ Add to article</button>" +
+    '<span class="wiki-fc-append-msg" id="wikiFactcheckAppendMsg"></span>' +
+    "</div>"
+  );
+}
+
 /** Full article-pane HTML for one Ask turn: question headline, meta row, answer
  *  body (rendered final article once available, else the progressively-formatted
- *  streaming buffer), then Sources, then the follow-up bar, then Remember. */
+ *  streaming buffer), then Sources, then the follow-up bar, then Remember, then —
+ *  for fact-check turns on markdown pages — the ➕ Add-to-article button. */
 function askArticleHtml(turn: AskTurn, buffer: string): string {
   const body = askAnswerBodyHtml(turn.html, buffer, turn.answer);
   return (
@@ -1576,7 +1595,8 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     '<div class="wiki-ask-sources" id="askAnswerSources">' +
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
     askFollowupHtml(turn) +
-    askRememberHtml(turn)
+    askRememberHtml(turn) +
+    askFactcheckAppendHtml(turn)
   );
 }
 
@@ -1590,6 +1610,8 @@ function setFollowupDisabled(disabled: boolean): void {
   if (btn) btn.disabled = disabled;
   const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
   if (remember) remember.disabled = disabled;
+  const fcAppend = document.getElementById("wikiFactcheckAppendBtn") as HTMLButtonElement | null;
+  if (fcAppend) fcAppend.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -1857,6 +1879,61 @@ async function submitRemember(): Promise<void> {
   }
 }
 
+/** Persist the shown fact-check answer onto the page as a `> [!factcheck]` callout
+ *  (POST /api/wiki/factcheck/append). Sends the turn's stored `page` + `baseHash`
+ *  + answer. Success ⇒ swap the button to a non-interactive "✓ Added to article"
+ *  and reload the page in the reader so the new callout is visible. A 409 (page
+ *  changed since the check) shows a clear re-run message. Acts on `askShownTurn`. */
+async function submitFactcheckAppend(): Promise<void> {
+  const btn = document.getElementById("wikiFactcheckAppendBtn") as HTMLButtonElement | null;
+  const msg = document.getElementById("wikiFactcheckAppendMsg");
+  const turn = askShownTurn;
+  if (!btn || btn.disabled || !turn || !turn.answer || !turn.page) return;
+  const showErr = (text: string): void => {
+    if (msg) { msg.textContent = text; msg.className = "wiki-fc-append-msg error"; }
+  };
+  if (!turn.baseHash) {
+    showErr("No page snapshot from this check — re-run the fact check, then add it.");
+    return;
+  }
+  btn.disabled = true;
+  const prevLabel = btn.textContent || "➕ Add to article";
+  btn.textContent = "Adding…";
+  if (msg) { msg.textContent = ""; msg.className = "wiki-fc-append-msg"; }
+  try {
+    const res = await fetch("/api/wiki/factcheck/append", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wiki: WIKI || undefined,
+        page: turn.page,
+        answer: turn.answer,
+        baseHash: turn.baseHash,
+      }),
+    });
+    const data = await res
+      .json()
+      .catch(() => ({} as { written?: boolean; error?: string; stale?: boolean }));
+    if (res.status === 409 || data.stale) {
+      btn.disabled = false;
+      btn.textContent = prevLabel;
+      showErr("The page changed since the check — re-run the fact check, then add it.");
+      return;
+    }
+    if (!res.ok || !data.written) {
+      throw new Error(data.error || "HTTP " + res.status);
+    }
+    const bar = document.getElementById("wikiFactcheckAppendBar");
+    if (bar) bar.innerHTML = '<span class="wiki-fc-append-done">✓ Added to article</span>';
+    // Reload the page content so the freshly-written callout is visible.
+    loadPage(turn.page, false);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    showErr("Couldn't add that — " + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
 // ── Ask session persistence (localStorage) ────────────────────────────
 // Persist the last N committed Ask/Explain turns so a page reload rehydrates the
 // "This session" list. Keyed per wiki (the bare /wiki reader may have no WIKI —
@@ -1932,6 +2009,7 @@ document.addEventListener("click", (e) => {
   const t = e.target as HTMLElement;
   if (t.closest("#wikiFollowupBtn")) submitFollowup();
   else if (t.closest("#wikiRememberBtn")) submitRemember();
+  else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
 });
 document.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;
@@ -2042,9 +2120,11 @@ function activateExplain(): void {
 function activateFactcheckSel(): void {
   hideExplainPill();
   if (!pillSel || !currentName) return;
+  const selMeta = allPages.find((p) => p.name === currentName);
   const turn: AskTurn = {
     question: factcheckLabel(pillSel),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
+    page: currentName, pageType: selMeta ? selMeta.type : undefined,
   };
   const url = buildFactcheckUrl({ mode: "sel", page: currentName, wiki: WIKI, sel: pillSel, ctx: pillHeading });
   runAskStream(url, turn);
@@ -2060,6 +2140,7 @@ function activateFactcheckArticle(): void {
   const turn: AskTurn = {
     question: factcheckLabel("", meta ? meta.title : currentName),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
+    page: currentName, pageType: meta ? meta.type : undefined,
   };
   const url = buildFactcheckUrl({ mode: "article", page: currentName, wiki: WIKI });
   runAskStream(url, turn);

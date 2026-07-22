@@ -27,6 +27,12 @@ export interface StoredAskTurn {
   /** sha256 of the checked page content at fact-check time (fact-check turns only;
    *  PR B round-trips it). Absent on Ask/Explain turns. */
   baseHash?: string;
+  /** The checked page's name — the ➕ "Add to article" append target (fact-check
+   *  turns only). Absent on Ask/Explain turns. */
+  page?: string;
+  /** The checked page's type — the ➕ button gates markdown-only (hidden for
+   *  `"explainer"`). Absent on Ask/Explain turns. */
+  pageType?: string;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -43,6 +49,8 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // Optional fields — reject only a present-but-wrong-typed value.
   if (typeof t.kind !== "undefined" && typeof t.kind !== "string") return false;
   if (typeof t.baseHash !== "undefined" && typeof t.baseHash !== "string") return false;
+  if (typeof t.page !== "undefined" && typeof t.page !== "string") return false;
+  if (typeof t.pageType !== "undefined" && typeof t.pageType !== "string") return false;
   return true;
 }
 
