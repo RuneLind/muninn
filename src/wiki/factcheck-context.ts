@@ -65,11 +65,16 @@ export function stripFactcheckBlock(body: string): string {
 
 /**
  * Count the fact-check verdicts in a finished answer — one per claim block per the
- * output contract. Counts occurrences of the four verdict markers; used only to
- * drive the client status line ("Checked N claims against the web"), so a loose
- * count is fine. Returns 0 when the model emitted no markers.
+ * output contract. Anchors on the `### <verdict> Claim …` heading lines so a
+ * verdict emoji mentioned in the assessment lede or reasoning prose (e.g. "capped
+ * at ⚠️") never inflates the count — this value feeds the persistent turn meta
+ * line, not just the transient status. Falls back to a loose marker scan for
+ * answers predating the heading format. Returns 0 when nothing matches.
  */
 export function countFactcheckClaims(answer: string): number {
+  const markers = FACTCHECK_VERDICT_MARKERS.map(escapeRegExp).join("|");
+  const headings = answer.match(new RegExp(`^###\\s*(?:${markers})`, "gmu"));
+  if (headings) return headings.length;
   let n = 0;
   for (const marker of FACTCHECK_VERDICT_MARKERS) {
     // Escape needed for the regex metacharacter-free emoji (defensive) + global count.
@@ -101,7 +106,11 @@ export function buildFactcheckBlock(answer: string, dateOslo: string): string {
   const lines = safeAnswer.trim().split("\n");
   const quoted = [`> [!factcheck] Fact check (${dateOslo})`];
   for (const line of lines) {
-    quoted.push(line.trim() === "" ? ">" : `> ${line}`);
+    // Blockquote lines never render headings (the pipeline joins them with <br>
+    // and skips block parsing), so a `### ✅ Claim n/m` heading would show as
+    // literal "###" text inside the callout — demote claim headings to bold.
+    const demoted = /^###\s+/.test(line) ? `**${line.replace(/^###\s+/, "").trim()}**` : line;
+    quoted.push(demoted.trim() === "" ? ">" : `> ${demoted}`);
   }
   return [FACTCHECK_SENTINEL_START, quoted.join("\n"), FACTCHECK_SENTINEL_END].join("\n");
 }

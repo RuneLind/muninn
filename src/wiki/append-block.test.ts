@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { appendBlockToPage, spliceSentinelBlock, type AppendBlockOptions } from "./append-block.ts";
-import { buildFactcheckBlock, FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
+import { buildFactcheckBlock, countFactcheckClaims, FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { sha256 } from "../gardener/util.ts";
 
 const BLOCK = buildFactcheckBlock("Overall: mostly accurate.\n\n✅ **Claim A**\nReasoning.", "2026-07-22");
@@ -122,4 +122,20 @@ test("buildFactcheckBlock neutralizes embedded sentinel strings in the answer", 
   expect(block.split(FACTCHECK_SENTINEL_START).length - 1).toBe(1);
   expect(block.split(FACTCHECK_SENTINEL_END).length - 1).toBe(1);
   expect(block).toContain("factcheck:end");
+});
+
+test("buildFactcheckBlock demotes ### claim headings to bold inside the callout", () => {
+  const structured = "Overall fine.\n\n### ✅ Claim 1/2 — First\n\nReasoning.\n\n### ❌ Claim 2/2 — Second\n\nMore.";
+  const block = buildFactcheckBlock(structured, "2026-07-22");
+  expect(block).not.toContain("###");
+  expect(block).toContain("> **✅ Claim 1/2 — First**");
+  expect(block).toContain("> **❌ Claim 2/2 — Second**");
+});
+
+test("countFactcheckClaims anchors on heading lines when present", () => {
+  const structured =
+    "Most claims ✅ supported, one ❌ contradicted.\n\n### ✅ Claim 1/2 — A\n\nCapped at ⚠️ in prose here would not count.\n\n### ❌ Claim 2/2 — B\n\nReason.";
+  expect(countFactcheckClaims(structured)).toBe(2);
+  // Legacy answers without headings fall back to the loose marker scan.
+  expect(countFactcheckClaims("✅ **Old style** fine\n⚠️ **Another**")).toBe(2);
 });
