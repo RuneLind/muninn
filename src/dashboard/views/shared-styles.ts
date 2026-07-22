@@ -340,6 +340,7 @@ export const SHARED_STYLES = `
     .kind-extractor { background: color-mix(in srgb, var(--status-warning) 16%, transparent); color: var(--status-warning); }
     .kind-chat,
     .kind-research,
+    .kind-factcheck,
     .kind-profile   { background: var(--tint-neutral); color: var(--text-muted); }
 
     /* Run status — 7px colored dot + lowercase text (NOT an uppercase pill).

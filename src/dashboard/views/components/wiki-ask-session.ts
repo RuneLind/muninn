@@ -21,6 +21,12 @@ export interface StoredAskTurn {
   cited: number[];
   html: string | null;
   askedAt: number;
+  /** Turn origin — `"factcheck"` for a fact-check turn (drives the status line;
+   *  PR B gates its ➕ button on it). Absent ⇒ a plain Ask/Explain turn. */
+  kind?: string;
+  /** sha256 of the checked page content at fact-check time (fact-check turns only;
+   *  PR B round-trips it). Absent on Ask/Explain turns. */
+  baseHash?: string;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -34,6 +40,9 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (!Array.isArray(t.cited) || !t.cited.every((n) => typeof n === "number")) return false;
   if (!(t.html === null || typeof t.html === "string")) return false;
   if (typeof t.askedAt !== "number") return false;
+  // Optional fields — reject only a present-but-wrong-typed value.
+  if (typeof t.kind !== "undefined" && typeof t.kind !== "string") return false;
+  if (typeof t.baseHash !== "undefined" && typeof t.baseHash !== "string") return false;
   return true;
 }
 

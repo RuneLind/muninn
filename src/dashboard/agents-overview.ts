@@ -46,6 +46,7 @@ const RING_RECENT_KINDS: ReadonlySet<AgentKind> = new Set<AgentKind>([
   "capture",
   "research",
   "digest",
+  "factcheck",
   "scheduled_task",
 ]);
 
@@ -288,6 +289,7 @@ function kindLabel(kind?: AgentKind): string {
     case "capture": return "Capture job";
     case "research": return "Research";
     case "digest": return "Wiki digest";
+    case "factcheck": return "Fact check";
     case "scheduled_task": return "Scheduled task";
     case "extractor": return "Extractor";
     case "watcher": return "Watcher";

@@ -2,6 +2,8 @@ import { test, expect } from "bun:test";
 import {
   buildExplainUrl,
   explainLabel,
+  factcheckLabel,
+  buildFactcheckUrl,
   EXPLAIN_LABEL_CHARS,
   EXPLAIN_SEL_MAX,
 } from "./wiki-explain.ts";
@@ -58,4 +60,37 @@ test("buildExplainUrl never bisects a surrogate pair at the cap boundary", () =>
   const decoded = decodeURIComponent(encoded);
   expect(decoded.startsWith("y".repeat(EXPLAIN_SEL_MAX - 1))).toBe(true);
   expect(decoded).not.toContain("�");
+});
+
+test("factcheckLabel quotes a selection; falls back to the page title with no sel", () => {
+  expect(factcheckLabel("Eiffel Tower completed 1889")).toBe('Fact check: "Eiffel Tower completed 1889"');
+  expect(factcheckLabel("", "My Page")).toBe("Fact check: My Page");
+  expect(factcheckLabel("")).toBe("Fact check: this article");
+});
+
+test("factcheckLabel truncates past the label cap", () => {
+  const long = "x".repeat(EXPLAIN_LABEL_CHARS + 40);
+  expect(factcheckLabel(long)).toBe('Fact check: "' + "x".repeat(EXPLAIN_LABEL_CHARS) + '…"');
+});
+
+test("buildFactcheckUrl sel mode includes page/mode/sel/ctx, article mode omits sel", () => {
+  const sel = buildFactcheckUrl({ mode: "sel", page: "concepts/foo", sel: "a b", wiki: "mimir", ctx: "H" });
+  expect(sel).toContain("page=concepts%2Ffoo");
+  expect(sel).toContain("&mode=sel");
+  expect(sel).toContain("&sel=a%20b");
+  expect(sel).toContain("&ctx=H");
+  expect(sel).toContain("&wiki=mimir");
+
+  const article = buildFactcheckUrl({ mode: "article", page: "p", wiki: "mimir" });
+  expect(article).toContain("&mode=article");
+  expect(article).not.toContain("sel=");
+  expect(article).not.toContain("ctx=");
+  expect(article).toContain("&wiki=mimir");
+});
+
+test("buildFactcheckUrl caps sel at EXPLAIN_SEL_MAX (sel mode)", () => {
+  const sel = "y".repeat(EXPLAIN_SEL_MAX + 300);
+  const url = buildFactcheckUrl({ mode: "sel", page: "p", sel });
+  const enc = url.slice(url.indexOf("&sel=") + "&sel=".length);
+  expect(decodeURIComponent(enc).length).toBe(EXPLAIN_SEL_MAX);
 });

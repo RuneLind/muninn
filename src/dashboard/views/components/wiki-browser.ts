@@ -14,7 +14,7 @@
 import { escHtml as esc } from "./escape.ts";
 import { sseClient, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody } from "./wiki-ask-render.ts";
-import { buildExplainUrl, explainLabel } from "./wiki-explain.ts";
+import { buildExplainUrl, explainLabel, buildFactcheckUrl, factcheckLabel } from "./wiki-explain.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import {
@@ -798,7 +798,12 @@ function renderBreadcrumb(m: WikiListing): void {
     crumbs.join('<span class="wiki-bc-sep">/</span>') +
     "</div>" +
     (updated ? '<span class="wiki-bc-date">updated ' + esc(updated) + "</span>" : "") +
-    '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>';
+    // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
+    '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
+    '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
+    // Always-visible whole-article fact check (markdown pages + explainers).
+    '<button class="wiki-bc-factcheck wiki-bc-factcheck-article" id="wikiFactcheckArticleBtn" ' +
+    'title="Fact-check this whole page against the web">🔎 Fact check</button>';
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
@@ -1425,6 +1430,8 @@ interface AskTurn {
   cited: number[];
   html: string | null; // server-rendered answer body HTML (null until answer_html)
   askedAt: number;
+  kind?: string; // "factcheck" for a fact-check turn (status line; PR B ➕ gate). Absent ⇒ Ask/Explain.
+  baseHash?: string; // sha256 of the checked page at fact-check time (factcheck turns only; PR B round-trips it)
 }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
@@ -1650,7 +1657,8 @@ function runAskStream(url: string, turn: AskTurn): void {
   askActive = turn;
   askBuffer = "";
   showAskAnswer(turn, "");
-  setAskStatus("Searching…", "");
+  // Fact-check has no retrieval/synthesis phases — it verifies against the web.
+  setAskStatus(turn.kind === "factcheck" ? "Checking the web…" : "Searching…", "");
   const btn = document.getElementById("wikiAskBtn") as HTMLButtonElement;
   btn.disabled = true;
   setFollowupDisabled(true);
@@ -1689,7 +1697,14 @@ function runAskStream(url: string, turn: AskTurn): void {
       if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); }
       refreshAskSources(turn);
       let statusText: string;
-      if (d.lowConfidence) statusText = "No strong match — closest sources below";
+      if (turn.kind === "factcheck") {
+        // Fact-check has no retrieval sources — report the claim count instead.
+        turn.baseHash = typeof d.baseHash === "string" ? d.baseHash : undefined;
+        const n = typeof d.claimCount === "number" ? d.claimCount : 0;
+        statusText = n > 0
+          ? "Checked " + n + " claim" + (n === 1 ? "" : "s") + " against the web"
+          : "Fact check complete";
+      } else if (d.lowConfidence) statusText = "No strong match — closest sources below";
       else if (d.noHits) statusText = "No matching sources";
       else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
       setAskStatus(statusText, "done");
@@ -1971,10 +1986,15 @@ function nearestHeading(range: Range): string {
 function hideExplainPill(): void {
   const btn = document.getElementById("wikiExplainBtn");
   if (btn) (btn as HTMLElement).style.display = "none";
+  // The selection-gated Fact check button rides the same selection state.
+  const fc = document.getElementById("wikiFactcheckBtn");
+  if (fc) (fc as HTMLElement).style.display = "none";
 }
 function showExplainPill(): void {
   const btn = document.getElementById("wikiExplainBtn");
   if (btn) (btn as HTMLElement).style.display = "";
+  const fc = document.getElementById("wikiFactcheckBtn");
+  if (fc) (fc as HTMLElement).style.display = "";
 }
 
 /** Decide whether to reveal the Explain button for the current selection, and
@@ -2017,6 +2037,34 @@ function activateExplain(): void {
   runAskStream(url, turn);
 }
 
+/** Fact-check the current selection (`sel` mode). Same captured passage/heading
+ *  as Explain; the answer streams into the article pane as a `factcheck` Ask turn. */
+function activateFactcheckSel(): void {
+  hideExplainPill();
+  if (!pillSel || !currentName) return;
+  const turn: AskTurn = {
+    question: factcheckLabel(pillSel),
+    answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
+  };
+  const url = buildFactcheckUrl({ mode: "sel", page: currentName, wiki: WIKI, sel: pillSel, ctx: pillHeading });
+  runAskStream(url, turn);
+}
+
+/** Fact-check the whole current page (`article` mode) — the always-visible
+ *  breadcrumb button. Works on markdown pages AND explainers (server reduces the
+ *  explainer HTML to prose). No selection needed. */
+function activateFactcheckArticle(): void {
+  hideExplainPill();
+  if (!currentName) return;
+  const meta = allPages.find((p) => p.name === currentName);
+  const turn: AskTurn = {
+    question: factcheckLabel("", meta ? meta.title : currentName),
+    answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
+  };
+  const url = buildFactcheckUrl({ mode: "article", page: currentName, wiki: WIKI });
+  runAskStream(url, turn);
+}
+
 // Show on selection release inside the article pane; the timeout lets the browser
 // finalize the selection first. (articleWrap's element persists across page
 // navigations — only its innerHTML is swapped — so a one-time listener suffices.)
@@ -2040,6 +2088,18 @@ document.addEventListener("mousedown", (e) => {
   if (t.closest && t.closest("#wikiExplainBtn")) {
     e.preventDefault();
     activateExplain();
+    return;
+  }
+  // Selection-gated Fact check — preventDefault keeps the selection alive so the
+  // captured passage is read (same pattern as Explain).
+  if (t.closest && t.closest("#wikiFactcheckBtn")) {
+    e.preventDefault();
+    activateFactcheckSel();
+    return;
+  }
+  // Whole-article Fact check — always visible, needs no selection.
+  if (t.closest && t.closest("#wikiFactcheckArticleBtn")) {
+    activateFactcheckArticle();
     return;
   }
   hideExplainPill();

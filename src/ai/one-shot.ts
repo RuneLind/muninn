@@ -92,6 +92,15 @@ export interface ConnectorCapabilities {
    * clamp how long its answer is allowed to be.
    */
   supportsThinkingBudget: boolean;
+  /**
+   * Whether the connector exposes built-in web tools (WebFetch / web search) so a
+   * one-shot can verify claims against the live web. `claude-cli` and `claude-sdk`
+   * both surface WebFetch; the Copilot / OpenAI-compat connectors run only the
+   * bot's `.mcp.json` tools and have no built-in web fetch. The wiki fact-check
+   * route pre-flights on this and emits a clean `app_error` when it's false
+   * (mirrors the `supportsExtraDirs` TikTok pre-flight precedent).
+   */
+  supportsWebTools: boolean;
 }
 
 /** Query a bot's connector capabilities without spawning anything. */
@@ -101,6 +110,7 @@ export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabiliti
   return {
     supportsExtraDirs: isClaude,
     supportsThinkingBudget: isClaude,
+    supportsWebTools: isClaude,
   };
 }
 

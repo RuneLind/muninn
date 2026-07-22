@@ -54,6 +54,7 @@ export type AgentKind =
   | "capture"
   | "research"
   | "digest"
+  | "factcheck"
   | "extractor"
   | "profile";
 
