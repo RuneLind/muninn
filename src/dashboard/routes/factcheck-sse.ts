@@ -126,11 +126,45 @@ function synthBlock(index: number, total: number, title: string, reason: string)
   return `### ❓ Claim ${index}/${total} — ${title}\n\n${reason}`;
 }
 
+/** Per-claim live-UI outcome. Distinct from the block's ❓ markdown vocabulary
+ *  (which stays unchanged in the persisted answer) — the disambiguation between
+ *  "the web genuinely doesn't know" (`unverifiable`) and "we ran out of time /
+ *  crashed" (`timeout`/`skipped`/`error`) lives here, in the SSE `claim_result`
+ *  event, so the client can label + tally honestly. `verified` = any real
+ *  model ruling (✅/⚠️/❌, or a model-chosen ❓ counts as `unverifiable`). */
+export type ClaimOutcome = "verified" | "unverifiable" | "timeout" | "error" | "skipped";
+
+/** Confidence line — evidence-strength score the model emits after the reasoning
+ *  paragraph (`Confidence: NN/100`), independent of the verdict emoji. */
+const CONFIDENCE_RE = /^Confidence:\s*(\d{1,3})\/100/m;
+
+/** Parse a block's `Confidence: NN/100` line → a 0–100 int (clamped), or
+ *  undefined when the line is absent/malformed. Never derives the verdict; the
+ *  emoji is semantic, the score is evidence strength. */
+export function parseConfidence(block: string): number | undefined {
+  const m = block.match(CONFIDENCE_RE);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(0, Math.min(100, Math.trunc(n)));
+}
+
+/** Classify a REAL (non-synthetic) model verify block into its live outcome: a
+ *  model-chosen ❓ verdict means the web genuinely couldn't confirm it
+ *  (`unverifiable`); any other verdict is a real ruling (`verified`). */
+export function realOutcome(block: string): ClaimOutcome {
+  return verdictOf(block) === "❓" ? "unverifiable" : "verified";
+}
+
 /** One claim's verdict outcome. `real` distinguishes a genuine model verdict
- *  (counted) from a synthetic ❓ skip/timeout block (excluded from the count). */
+ *  (counted) from a synthetic ❓ skip/timeout block (excluded from the count);
+ *  `outcome` carries the finer live-UI classification and `confidence` the
+ *  parsed evidence-strength score (synthetic blocks carry none). */
 export interface ClaimVerifyOutcome {
   block: string;
   real: boolean;
+  outcome: ClaimOutcome;
+  confidence?: number;
 }
 
 /**
@@ -420,8 +454,10 @@ async function runFactcheck(
         await attachToolSpans(tracer, claude.toolCalls, !!config.tracingCaptureToolOutputs, label);
         const result = (claude.result ?? "").trim();
         return result
-          ? { block: result, real: true } // a genuine model verdict (even a model-chosen ❓)
-          : { block: synthBlock(index, total, claim.title, "The verifier returned no verdict for this claim."), real: false };
+          // A genuine model verdict (even a model-chosen ❓ ⇒ `unverifiable`).
+          ? { block: result, real: true, outcome: realOutcome(result), confidence: parseConfidence(result) }
+          // Empty result — no parseable verdict came back (an `error` outcome).
+          : { block: synthBlock(index, total, claim.title, "The verifier returned no verdict for this claim."), real: false, outcome: "error" };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         tracer.end(label, { error: message });
@@ -430,7 +466,10 @@ async function runFactcheck(
           index,
           error: message,
         });
-        return { block: synthBlock(index, total, claim.title, "Verification timed out or failed for this claim."), real: false };
+        // Single undistinguished catch (timeout OR failure) — the block text and
+        // the outcome both lead with the timeout reading (the common cause under
+        // the 90s per-claim budget); no signal here separates a true timeout.
+        return { block: synthBlock(index, total, claim.title, "Verification timed out or failed for this claim."), real: false, outcome: "timeout" };
       }
     };
 
@@ -445,12 +484,15 @@ async function runFactcheck(
       onSkip: (i) => ({
         block: synthBlock(i + 1, total, claims[i]!.title, "Skipped — the fact check ran out of time before this claim could be verified."),
         real: false,
+        outcome: "skipped",
       }),
       onDone: (i, outcome) => {
         safeWrite("claim_result", {
           type: "claim_result",
           index: i + 1,
           verdict: verdictOf(outcome.block),
+          outcome: outcome.outcome,
+          ...(typeof outcome.confidence === "number" ? { confidence: outcome.confidence } : {}),
           markdown: outcome.block,
         });
         doneCount++;

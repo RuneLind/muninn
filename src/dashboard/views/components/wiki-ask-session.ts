@@ -39,6 +39,16 @@ export interface StoredAskTurn {
   toolSources?: string[];
   /** Claims verified in a fact check (drives the meta line). Absent on Ask/Explain. */
   claimCount?: number;
+  /** Per-outcome tally (verified / unverifiable / timeout / skipped / error) for
+   *  the honest fact-check meta line. Persisted so a rehydrated turn's breakdown
+   *  survives. Absent on Ask/Explain turns (and pre-outcome fact-check turns). */
+  claimOutcomes?: {
+    verified?: number;
+    unverifiable?: number;
+    timeout?: number;
+    skipped?: number;
+    error?: number;
+  };
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -64,6 +74,18 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
     return false;
   }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
+  if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;
+  return true;
+}
+
+/** A well-formed per-outcome tally: an object whose known count fields, when
+ *  present, are numbers. Unknown keys are ignored (forward-tolerant). */
+function isValidOutcomeCounts(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  for (const k of ["verified", "unverifiable", "timeout", "skipped", "error"]) {
+    if (typeof o[k] !== "undefined" && typeof o[k] !== "number") return false;
+  }
   return true;
 }
 

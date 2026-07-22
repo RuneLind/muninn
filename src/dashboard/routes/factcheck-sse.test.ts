@@ -1,8 +1,15 @@
 import { test, expect, describe } from "bun:test";
-import { runClaimPool, assembleFactcheckAnswer, verdictOf, type ClaimVerifyOutcome } from "./factcheck-sse.ts";
+import {
+  runClaimPool,
+  assembleFactcheckAnswer,
+  verdictOf,
+  parseConfidence,
+  realOutcome,
+  type ClaimVerifyOutcome,
+} from "./factcheck-sse.ts";
 
-const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true });
-const skip = (i: number): ClaimVerifyOutcome => ({ block: `skip${i}`, real: false });
+const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true, outcome: "verified" });
+const skip = (i: number): ClaimVerifyOutcome => ({ block: `skip${i}`, real: false, outcome: "skipped" });
 
 describe("runClaimPool", () => {
   test("returns outcomes in claim order regardless of completion order", async () => {
@@ -135,5 +142,55 @@ describe("verdictOf", () => {
 
   test("no leading verdict marker → ❓", () => {
     expect(verdictOf("Claim 1/2 — a\n\nno heading marker")).toBe("❓");
+  });
+});
+
+describe("parseConfidence", () => {
+  const block = (line: string) =>
+    `### ✅ Claim 1/2 — a\n\nReasoning here.\n\n${line}\n\nSources: https://x`;
+
+  test("parses a normal score", () => {
+    expect(parseConfidence(block("Confidence: 85/100"))).toBe(85);
+  });
+
+  test("tolerates extra spaces after the colon", () => {
+    expect(parseConfidence(block("Confidence:   72/100"))).toBe(72);
+  });
+
+  test("0 is kept (not treated as falsy/absent)", () => {
+    expect(parseConfidence(block("Confidence: 0/100"))).toBe(0);
+  });
+
+  test("clamps a >100 score to 100", () => {
+    expect(parseConfidence(block("Confidence: 150/100"))).toBe(100);
+  });
+
+  test("missing Confidence line → undefined", () => {
+    expect(parseConfidence("### ✅ Claim 1/2 — a\n\nReasoning.\n\nSources: https://x")).toBeUndefined();
+  });
+
+  test("malformed Confidence line (no /100) → undefined", () => {
+    expect(parseConfidence(block("Confidence: high"))).toBeUndefined();
+    expect(parseConfidence(block("Confidence: 85 out of 100"))).toBeUndefined();
+  });
+
+  test("matches the line anywhere in the block (not just first line)", () => {
+    expect(parseConfidence(block("Confidence: 40/100"))).toBe(40);
+  });
+});
+
+describe("realOutcome", () => {
+  test("✅ / ⚠️ / ❌ real verdicts map to 'verified' (a real ruling, not a truth claim)", () => {
+    expect(realOutcome("### ✅ Claim 1/2 — a\n\nSupported.")).toBe("verified");
+    expect(realOutcome("### ⚠️ Claim 1/2 — a\n\nPartly.")).toBe("verified");
+    expect(realOutcome("### ❌ Claim 1/2 — a\n\nContradicted.")).toBe("verified");
+  });
+
+  test("a model-chosen ❓ verdict maps to 'unverifiable'", () => {
+    expect(realOutcome("### ❓ Claim 1/2 — a\n\nThe web genuinely doesn't cover this.")).toBe("unverifiable");
+  });
+
+  test("a bare ⚠ (no VS16) still maps to 'verified'", () => {
+    expect(realOutcome("### ⚠ Claim 1/2 — a\n\nPartly.")).toBe("verified");
   });
 });

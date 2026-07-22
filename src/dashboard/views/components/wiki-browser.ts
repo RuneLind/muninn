@@ -1444,11 +1444,16 @@ interface AskTurn {
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
+  claimOutcomes?: ClaimOutcomeCounts; // per-outcome tally for the honest fact-check meta line (persisted)
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
   toolLog?: ToolLogRow[]; // compact per-claim tool log during a fact check (transient; not persisted)
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
-interface ClaimRow { index: number; title: string; status: string; block: string; }
+// `outcome`/`confidence` land with the verdict (server `claim_result`): `outcome`
+// drives the distinct checklist label, `confidence` the band-colored chip.
+interface ClaimRow { index: number; title: string; status: string; block: string; outcome?: string; confidence?: number; }
+// Per-outcome tally for a committed fact-check turn (drives the honest meta line).
+interface ClaimOutcomeCounts { verified?: number; unverifiable?: number; timeout?: number; skipped?: number; error?: number; }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askActive: AskTurn | null = null; // the turn currently streaming, or null
@@ -1471,7 +1476,7 @@ function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
     if (askConn !== conn) return; // superseded by a newer ask
     if (turn.html) return; // final article already swapped in
     const b = document.getElementById("askAnswerBody");
-    if (b) b.innerHTML = renderStreamingBody(askBuffer);
+    if (b) { b.innerHTML = renderStreamingBody(askBuffer); enhanceFactcheckConfidence(b); }
   });
 }
 
@@ -1482,10 +1487,42 @@ function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
  *  transient bottom-then-top reorder at `done`. */
 function rebuildFactcheckBuffer(turn: AskTurn): void {
   const claims = turn.claims || [];
-  const rows = claims.map((c) =>
-    c.status === "done" && c.block ? c.block : c.index + ". ☐ " + c.title,
-  );
+  const rows = claims.map((c) => factcheckRowMarkdown(c));
   askBuffer = (composeText ? composeText + "\n\n" : "") + rows.join("\n\n");
+}
+
+/** One checklist row's live markdown. Pending ⇒ `n. ☐ title`. A real verdict
+ *  (verified / model-chosen unverifiable) renders the model block verbatim (its
+ *  emoji + reasoning + `Confidence:` line, chip-enhanced post-render). The
+ *  synthetic non-verdict outcomes get a DISTINCT compact label instead of a
+ *  generic ❓ block, so "ran out of time" reads differently from "the web
+ *  genuinely doesn't know" (the persisted answer keeps ❓ — this is live-only). */
+function factcheckRowMarkdown(c: ClaimRow): string {
+  if (c.status !== "done") return c.index + ". ☐ " + c.title;
+  if (c.outcome === "timeout") return c.index + ". ⏱ " + c.title + " — timed out";
+  if (c.outcome === "skipped") return c.index + ". ⏭ " + c.title + " — skipped (out of time)";
+  if (c.outcome === "error") return c.index + ". ⚠️ " + c.title + " — verification failed";
+  return c.block || c.index + ". ☐ " + c.title;
+}
+
+/** Post-render: turn each `Confidence: NN/100` line in a fact-check verdict block
+ *  into a band-colored chip (green ≥80 · amber 50–79 · red <50) with the number
+ *  inside. The emoji is the ruling; this chip is EVIDENCE STRENGTH only — never
+ *  derived from the verdict. Idempotent (skips an already-enhanced line) and a
+ *  no-op when no such line exists (Ask/Explain answers carry none), so it's safe
+ *  to call after every answer render. */
+function enhanceFactcheckConfidence(root: HTMLElement): void {
+  root.querySelectorAll("p, li").forEach((el) => {
+    if (el.querySelector(".wiki-fc-conf-chip")) return; // already enhanced
+    const m = /^Confidence:\s*(\d{1,3})\/100$/.exec((el.textContent || "").trim());
+    if (!m) return;
+    const n = Math.max(0, Math.min(100, parseInt(m[1]!, 10)));
+    const band = n >= 80 ? "hi" : n >= 50 ? "mid" : "lo";
+    el.classList.add("wiki-fc-conf-line");
+    el.innerHTML =
+      '<span class="wiki-fc-conf-key">Confidence</span>' +
+      '<span class="wiki-fc-conf-chip ' + band + '">' + n + "/100</span>";
+  });
 }
 
 /** Cancel any pending progressive-render frame (on supersede / done / final swap). */
@@ -1553,6 +1590,33 @@ function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
   return '<div class="wiki-ask-src-head">Sources</div>' + rows;
 }
 
+/** Tally a done checklist's per-outcome counts (verified / unverifiable / timeout
+ *  / skipped / error) for the committed turn's honest meta line. An absent outcome
+ *  (pre-outcome server) counts as `verified` — it was a real verdict block. */
+function tallyClaimOutcomes(claims: ClaimRow[] | undefined): ClaimOutcomeCounts {
+  const counts: ClaimOutcomeCounts = {};
+  (claims || []).forEach((c) => {
+    const k = c.outcome || "verified";
+    if (k === "verified" || k === "unverifiable" || k === "timeout" || k === "skipped" || k === "error") {
+      counts[k] = (counts[k] || 0) + 1;
+    }
+  });
+  return counts;
+}
+
+/** Render an outcome tally as "5 verified · 1 unverifiable · 2 skipped", omitting
+ *  zero-count categories (empty ⇒ empty string). */
+function factcheckOutcomeSummary(counts: ClaimOutcomeCounts): string {
+  const parts: string[] = [];
+  const push = (n: number | undefined, label: string) => { if (n) parts.push(n + " " + label); };
+  push(counts.verified, "verified");
+  push(counts.unverifiable, "unverifiable");
+  push(counts.timeout, "timed out");
+  push(counts.skipped, "skipped");
+  push(counts.error, "failed");
+  return parts.join(" · ");
+}
+
 /** Meta line under the answer's headline. Ask/Explain: "Asked … · wiki: X · N sources".
  *  Fact-check has no retrieval sources (`citations` is always empty), so counting
  *  them shows a misleading "0 sources" next to the "Consulting: <hosts>" chip row —
@@ -1560,11 +1624,14 @@ function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
 function askMetaText(turn: AskTurn): string {
   const prefix = "Asked " + relTime(turn.askedAt) + (WIKI ? " · wiki: " + WIKI : "");
   if (turn.kind === "factcheck") {
-    const claims = typeof turn.claimCount === "number" ? turn.claimCount : 0;
     const sites = (turn.toolSources || []).length;
-    const claimsLabel = claims + " claim" + (claims === 1 ? "" : "s");
     const sitesLabel = sites ? " · " + sites + " site" + (sites === 1 ? "" : "s") + " consulted" : "";
-    return prefix + " · " + claimsLabel + sitesLabel;
+    // Prefer the honest per-outcome breakdown ("5 verified · 1 unverifiable · 2
+    // skipped"); fall back to the plain claim count for a pre-outcome turn.
+    const summary = turn.claimOutcomes ? factcheckOutcomeSummary(turn.claimOutcomes) : "";
+    if (summary) return prefix + " · " + summary + sitesLabel;
+    const claims = typeof turn.claimCount === "number" ? turn.claimCount : 0;
+    return prefix + " · " + claims + " claim" + (claims === 1 ? "" : "s") + sitesLabel;
   }
   const n = turn.citations.length;
   return prefix + " · " + n + " source" + (n === 1 ? "" : "s");
@@ -1737,6 +1804,7 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   if (askBody) {
     enhanceMermaid(askBody);
     enhanceCodeTabs(askBody);
+    enhanceFactcheckConfidence(askBody);
   }
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML =
@@ -1848,7 +1916,12 @@ function runAskStream(url: string, turn: AskTurn): void {
       const d = JSON.parse((e as MessageEvent).data);
       if (!turn.claims) return;
       const row = turn.claims.find((c) => c.index === d.index);
-      if (row) { row.status = "done"; row.block = typeof d.markdown === "string" ? d.markdown : ""; }
+      if (row) {
+        row.status = "done";
+        row.block = typeof d.markdown === "string" ? d.markdown : "";
+        row.outcome = typeof d.outcome === "string" ? d.outcome : undefined;
+        row.confidence = typeof d.confidence === "number" ? d.confidence : undefined;
+      }
       rebuildFactcheckBuffer(turn);
       if (!turn.html) scheduleAskStreamRender(turn, conn);
       if (turn.claims.length > 1) {
@@ -1911,12 +1984,15 @@ function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); }
+      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceFactcheckConfidence(b); }
       refreshAskSources(turn);
       let statusText: string;
       if (turn.kind === "factcheck") {
         // Fact-check has no retrieval sources — report the claim count instead.
         turn.baseHash = typeof d.baseHash === "string" ? d.baseHash : undefined;
+        // Tally the per-outcome breakdown from the checklist BEFORE it's cleared
+        // below — it's persisted (drives the honest meta line on rehydrated turns).
+        turn.claimOutcomes = tallyClaimOutcomes(turn.claims);
         const n = typeof d.claimCount === "number" ? d.claimCount : 0;
         turn.claimCount = n; // drives the meta line's "N claims · M sites consulted"
         refreshAskSources(turn); // repaint the meta line now that claimCount is set
@@ -1960,7 +2036,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = turn.html; enhanceMermaid(b); enhanceCodeTabs(b); }
+      if (b && turn.html) { b.innerHTML = turn.html; enhanceMermaid(b); enhanceCodeTabs(b); enhanceFactcheckConfidence(b); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since

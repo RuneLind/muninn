@@ -113,6 +113,26 @@ describe("buildClaimVerifyPrompt", () => {
     expect(systemPrompt).toContain("output ONLY this ONE block");
   });
 
+  test("carries the confidence rubric + a `Confidence: NN/100` output line", () => {
+    const { systemPrompt } = buildClaimVerifyPrompt(claim, {
+      index: 1, total: 3, pageTitle: "P", wikiName: "w", mode: "article",
+    });
+    // The rubric is anchored in the prompt (evidence strength, not the verdict).
+    expect(systemPrompt).toContain("Confidence rubric");
+    expect(systemPrompt).toContain("90–100");
+    expect(systemPrompt).toContain("70–89");
+    expect(systemPrompt).toContain("40–69");
+    expect(systemPrompt).toContain("below 40");
+    // The output contract gains the line, after the reasoning + before Sources.
+    expect(systemPrompt).toContain("`Confidence: NN/100`");
+    const confIdx = systemPrompt.indexOf("`Confidence: NN/100`");
+    const srcIdx = systemPrompt.indexOf("A `Sources:` line");
+    expect(confIdx).toBeGreaterThan(-1);
+    expect(srcIdx).toBeGreaterThan(confIdx); // Confidence precedes Sources
+    // The block-heading contract is UNTOUCHED — still the exact ### emoji form.
+    expect(systemPrompt).toContain("### <verdict emoji> Claim <n>/<total> — <short claim title>");
+  });
+
   test("fixes the exact Claim n/total heading + includes the claim + quote", () => {
     const { userPrompt } = buildClaimVerifyPrompt(claim, {
       index: 3, total: 8, pageTitle: "Landmarks", wikiName: "jarvis", mode: "article",
