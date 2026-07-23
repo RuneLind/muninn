@@ -393,8 +393,9 @@ function freshMeterHtml(model: BacklogStripModel): string {
   const pct = Math.max(0, Math.min(100, Math.round((model.freshTotal / threshold) * 100)));
   const fillClass = crossed ? "bk-meter-fill bk-meter-full" : "bk-meter-fill";
   const bar =
-    `<span class="bk-meter" role="progressbar" aria-valuemin="0" aria-valuemax="${threshold}" ` +
-    `aria-valuenow="${model.freshTotal}"><span class="${fillClass}" style="width:${pct}%"></span></span>`;
+    `<span class="bk-meter" role="progressbar" aria-label="progress toward a suggested gardener run" ` +
+    `aria-valuemin="0" aria-valuemax="${threshold}" ` +
+    `aria-valuenow="${Math.min(model.freshTotal, threshold)}"><span class="${fillClass}" style="width:${pct}%"></span></span>`;
   const label = crossed
     ? `<span class="bk-note bk-meter-hit">worth a gardener run</span>`
     : `<span class="bk-note">${threshold - model.freshTotal} more to suggest a run</span>`;
