@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { projectAtlas } from "../../wiki/atlas.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
   listWikis,
@@ -475,6 +476,36 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         index.pages.map((p) => p.type),
       ),
     });
+  });
+
+  // Atlas tab data: the hybrid Types/Months graph view + curated trails. A PURE
+  // projection (`projectAtlas`) over the TTL-cached index — no per-request reads of
+  // wiki page files, so a repeat request within the TTL touches no disk. Same
+  // registry resolution + `?bot=` alias as the other wiki routes; works for ANY
+  // registered wiki. Unknown/absent wiki or a missing dir returns an empty payload
+  // (all seven keys present) rather than 5xx.
+  app.get("/api/wiki/atlas", async (c) => {
+    const emptyAtlas = (error?: string) =>
+      c.json({
+        types: [],
+        nodes: {},
+        monthKeys: [],
+        months: {},
+        topics: [],
+        trails: [],
+        omitted: { byType: {}, byMonth: {} },
+        ...(error ? { error } : {}),
+      });
+    const { entry, unknownWiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki) return emptyAtlas("no wiki configured for that name");
+    const index = await getWikiIndex({ root: entry?.root, refresh: c.req.query("refresh") === "1" });
+    if (!index) return emptyAtlas("wiki directory not found");
+    return c.json(projectAtlas(index));
   });
 
   // "What's new" digest — an AI summary of the wiki's recent `log.md` entries

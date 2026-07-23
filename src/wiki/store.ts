@@ -80,6 +80,44 @@ export interface WikiPageMeta {
    * sorts as undated. Undefined when the file couldn't be stat'd.
    */
   mtimeMs?: number;
+  /**
+   * Publication date (`YYYY-MM-DD`) parsed from the body's `Source: …, YYYY-MM-DD`
+   * line — the day the referenced source was published (distinct from the
+   * frontmatter `created`/`updated`, which are when the wiki page was written).
+   * Only source-style pages carry a `Source:` line (168/501 jarvis sources);
+   * undefined otherwise. Extracted in `buildWikiIndex`'s existing read pass (the
+   * body is already in hand) and consumed by the Atlas month-bucketing chain
+   * (`pubDate → created → mtime`). See `extractPubDate`.
+   */
+  pubDate?: string;
+  /**
+   * First prose line of the body — the Atlas node blurb. The first non-empty line
+   * after the frontmatter that is NOT a heading, list item, blockquote, horizontal
+   * rule, HTML comment, or the `Source:` line, with `[[wikilinks]]`/`[md](links)`
+   * flattened to their display text so no raw markup/YAML leaks into the UI.
+   * Extracted in `buildWikiIndex`'s read pass; undefined when the page has no prose
+   * line. Explainers carry no `desc` (they take the early return) — the Atlas
+   * projection coalesces `desc ?? description` for them. See `extractDesc`.
+   */
+  desc?: string;
+}
+
+/** One authored step of a curated Atlas trail: a page reference (a wikilink
+ *  target — name/alias/path, resolved against the index at projection time) plus
+ *  an optional per-step note. The `resolved` flag is added by the Atlas projection,
+ *  not stored here. */
+export interface WikiTrailStep {
+  page: string;
+  note?: string;
+}
+
+/** A curated Atlas trail — an ordered walk through the wiki. Read from the wiki
+ *  root's optional `trails.json` (an array of these) by the TTL-cached index build.
+ *  A wiki with no `trails.json` simply has no trails. */
+export interface WikiTrail {
+  title: string;
+  blurb?: string;
+  steps: WikiTrailStep[];
 }
 
 export interface WikiIndex {
@@ -105,6 +143,13 @@ export interface WikiIndex {
    * older callers stay valid; `buildWikiIndex` always sets it.
    */
   readerConfig?: WikiReaderConfig | null;
+  /**
+   * Curated Atlas trails parsed from the wiki root's optional `trails.json`, read
+   * once per index build (inherits the 5-min TTL). Empty array when the wiki has
+   * no trails file or it's malformed. Optional so hand-built test indexes stay
+   * valid; `buildWikiIndex` always sets it.
+   */
+  trails?: WikiTrail[];
 }
 
 /** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
@@ -286,6 +331,68 @@ function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[
   return out;
 }
 
+/**
+ * The body content after the frontmatter fence. Mirrors `parseFrontmatter`'s
+ * fence detection: a leading `---` with a closing `\n---`; the body starts on the
+ * line after the closing fence. Returns the whole content when there is no fence.
+ */
+function stripFrontmatter(content: string): string {
+  if (!content.startsWith("---")) return content;
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return content;
+  // `end` points at the `\n` before the closing `---`; skip to the newline that
+  // ends the closing fence line, and the body is everything after it.
+  const afterFence = content.indexOf("\n", end + 1);
+  return afterFence === -1 ? "" : content.slice(afterFence + 1);
+}
+
+/** Flatten `[[Target|Display]]`→`Display`, `[[Target]]`→`Target`, and
+ *  `[text](url)`→`text` so a page's prose blurb carries no raw link markup. */
+function flattenLinks(s: string): string {
+  return s
+    .replace(/\[\[([^\]]+?)\]\]/g, (_m, inner: string) => inner.split("|").pop()!.trim())
+    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (_m, text: string) => text.trim());
+}
+
+const SOURCE_PUBDATE_RE = /^Source:.*?(\d{4}-\d{2}-\d{2})/m;
+
+/**
+ * Publication date (`YYYY-MM-DD`) from a source page's body `Source: …,
+ * YYYY-MM-DD` line (e.g. `Source: YouTube, 2026-03-25 — https://…`). Undefined
+ * when the page has no such line. Scans the raw content — the `Source:` line lives
+ * in the body, never the frontmatter, and `^…/m` anchors it to a line start.
+ */
+export function extractPubDate(content: string): string | undefined {
+  const m = content.match(SOURCE_PUBDATE_RE);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * First prose line of a page — the Atlas node blurb. Skips the frontmatter, then
+ * the first non-empty line that is not a heading (`#`), list item (`-`/`*`/`+`/
+ * `1.`), blockquote/callout (`>`), horizontal rule (`---`/`***`/`___`), HTML
+ * comment, or the `Source:` line. `[[wikilinks]]`/`[md](links)` are flattened to
+ * display text so no raw markup or leaked YAML reaches the UI. Undefined when the
+ * page has no qualifying prose line.
+ */
+export function extractDesc(content: string): string | undefined {
+  const body = stripFrontmatter(content);
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("#")) continue; // heading
+    if (line.startsWith(">")) continue; // blockquote / callout
+    if (line.startsWith("<!--")) continue; // html comment
+    if (/^Source:/.test(line)) continue; // the source-attribution line
+    if (/^[-*+]\s/.test(line)) continue; // bullet list
+    if (/^\d+[.)]\s/.test(line)) continue; // ordered list
+    if (/^([-*_])\1{2,}$/.test(line)) continue; // horizontal rule
+    const flat = flattenLinks(line).trim();
+    if (flat) return flat;
+  }
+  return undefined;
+}
+
 const VALID_TYPES: string[] = ["source", "concept", "entity", "analysis", "note"];
 
 const WIKI_READER_CONFIG_FILE = ".wiki-reader.json";
@@ -342,6 +449,66 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
   };
+}
+
+const WIKI_TRAILS_FILE = "trails.json";
+
+/**
+ * Read the optional `<root>/trails.json` — an array of curated Atlas trails
+ * (`{title, blurb?, steps: [{page, note?}]}`). A sibling read next to
+ * `.wiki-reader.json`, so it inherits the index's 5-min TTL. Absent ⇒ `[]` (the
+ * common case). Malformed JSON, a non-array root, or individual entries/steps that
+ * don't match the shape degrade gracefully (warned once per build) — a bad trails
+ * file never takes the wiki offline, the same philosophy as bot-config validation.
+ * Entries missing a `title` or steps missing a `page` are dropped; unresolvable
+ * page references are NOT dropped here (the projection flags them `resolved: false`).
+ */
+async function readWikiTrails(root: string): Promise<WikiTrail[]> {
+  const abs = path.join(root, WIKI_TRAILS_FILE);
+  let text: string;
+  try {
+    text = await Bun.file(abs).text();
+  } catch {
+    return []; // no trails file — not an error, the standard case
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    log.warn("{file} at {root} is not valid JSON — ignoring: {error}", {
+      file: WIKI_TRAILS_FILE,
+      root,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    log.warn("{file} at {root}: expected a JSON array of trails — ignoring", {
+      file: WIKI_TRAILS_FILE,
+      root,
+    });
+    return [];
+  }
+  const trails: WikiTrail[] = [];
+  for (const raw of parsed) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const obj = raw as Record<string, unknown>;
+    const title = typeof obj.title === "string" ? obj.title.trim() : "";
+    if (!title) continue; // a trail with no title is unusable
+    const blurb = typeof obj.blurb === "string" ? obj.blurb : undefined;
+    const rawSteps = Array.isArray(obj.steps) ? obj.steps : [];
+    const steps: WikiTrailStep[] = [];
+    for (const s of rawSteps) {
+      if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+      const so = s as Record<string, unknown>;
+      const page = typeof so.page === "string" ? so.page.trim() : "";
+      if (!page) continue; // a step with no page reference is unusable
+      const note = typeof so.note === "string" ? so.note : undefined;
+      steps.push({ page, note });
+    }
+    trails.push({ title, blurb, steps });
+  }
+  return trails;
 }
 
 /**
@@ -577,6 +744,8 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // or malformed ⇒ null (built-in five-type behavior). `.wiki-reader.json` is not
   // an .md/.html page, so it's already outside the page glob above.
   const readerConfig = await readWikiReaderConfig(root);
+  // Curated Atlas trails — a sibling read next to `.wiki-reader.json`, same TTL.
+  const trails = await readWikiTrails(root);
 
   const pages: WikiPageMeta[] = [];
   const byKey = new Map<string, WikiPageMeta>();
@@ -633,6 +802,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         accentDark: sanitizeColorToken(fm.accentDark),
         relPath,
         mtimeMs,
+        // Atlas fields — computed here where the body is already in hand (paid once
+        // per index build, inheriting the 5-min TTL) rather than re-reading ~800
+        // files per uncached Atlas request. Both undefined for pages that lack them.
+        pubDate: extractPubDate(content),
+        desc: extractDesc(content),
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
@@ -739,7 +913,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   }
   for (const arr of backlinks.values()) arr.sort();
 
-  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root, readerConfig };
+  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root, readerConfig, trails };
 }
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */

@@ -155,6 +155,61 @@ describe("GET /api/wiki/html", () => {
     // The .md → .mdx relative link resolves onto the .mdx page as a backlink.
     expect(data.backlinks.map((b) => b.name)).toContain("Cites Native");
   });
+
+  // /api/wiki/atlas returns the projected payload (all seven keys) over the same
+  // TTL-cached index, and re-reads no wiki page files on a repeat request within
+  // the TTL (projection purity — the second call is served from the cached index).
+  test("/api/wiki/atlas returns a seven-key payload and re-reads nothing on repeat", async () => {
+    await Bun.write(
+      path.join(root, "concepts/Skills.md"),
+      "---\ntype: concept\n---\n\nThe skills system.",
+    );
+    await Bun.write(
+      path.join(root, "sources/Talk.md"),
+      "---\ntype: source\n---\n\n# Talk\n\nSource: YouTube, 2026-03-25 — https://x\n\nLinks [[Skills]].",
+    );
+    __resetWikiCacheForTest();
+    const res = await app.request("/api/wiki/atlas");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      types: Array<{ key: string }>;
+      nodes: Record<string, { name: string; t: string }>;
+      monthKeys: string[];
+      months: Record<string, string[]>;
+      topics: Array<{ name: string; count: number }>;
+      trails: unknown[];
+      omitted: { byType: Record<string, number>; byMonth: Record<string, number> };
+    };
+    for (const k of ["types", "nodes", "monthKeys", "months", "topics", "trails", "omitted"]) {
+      expect(data).toHaveProperty(k);
+    }
+    expect(data.types.map((t) => t.key)).toContain("source");
+    expect(data.months["2026-03"]).toContain("sources/talk.md");
+    expect(data.topics.find((t) => t.name === "Skills")?.count).toBe(1);
+
+    // Delete the wiki dir, then repeat WITHOUT busting the cache: a purely
+    // index-projected route serves the same payload with no disk reads.
+    await rm(path.join(root, "sources/Talk.md"), { force: true });
+    const res2 = await app.request("/api/wiki/atlas");
+    expect(res2.status).toBe(200);
+    const data2 = (await res2.json()) as typeof data;
+    expect(data2.months["2026-03"]).toContain("sources/talk.md");
+  });
+
+  // A refresh=1 request busts the TTL and re-reads the tree.
+  test("/api/wiki/atlas?refresh=1 rebuilds from disk", async () => {
+    await Bun.write(path.join(root, "sources/One.md"), "---\ntype: source\n---\n\nOne.");
+    __resetWikiCacheForTest();
+    const first = (await (await app.request("/api/wiki/atlas")).json()) as {
+      nodes: Record<string, unknown>;
+    };
+    const firstCount = Object.keys(first.nodes).length;
+    await Bun.write(path.join(root, "sources/Two.md"), "---\ntype: source\n---\n\nTwo.");
+    const refreshed = (await (await app.request("/api/wiki/atlas?refresh=1")).json()) as {
+      nodes: Record<string, unknown>;
+    };
+    expect(Object.keys(refreshed.nodes).length).toBe(firstCount + 1);
+  });
 });
 
 /**
