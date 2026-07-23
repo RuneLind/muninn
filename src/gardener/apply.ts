@@ -58,7 +58,7 @@ export interface ApplyDeps {
    * wired index/backlinks). Optional — absent in tests that don't exercise the
    * commit seam. Wired to `commitWikiChange` at the route; never throws.
    */
-  commit?: (paths: string[], message: string) => Promise<void>;
+  commit?: (paths: string[], message: string) => Promise<unknown>;
   /**
    * Per-wiki cataloging policy — which page kinds get an index.md catalog line
    * (`buildIndexEntry`). Absent ⇒ the default `["concept"]` (today's behavior).

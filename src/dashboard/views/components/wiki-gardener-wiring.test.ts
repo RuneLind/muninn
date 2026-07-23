@@ -3,7 +3,7 @@ import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 const model = (over: Partial<WiringPreview> = {}): WiringPreview => ({
   indexLine: "- [[Code Mode]] — MCP code exec pattern",
-  indexSkipEntity: false,
+  indexSkip: null,
   seeAlso: ["RAG", "Model Context Protocol"],
   legacyNoRelated: false,
   ...over,
@@ -23,8 +23,15 @@ describe("wiringHtml", () => {
   });
 
   test("entity → index entry shows the manual-file skip note", () => {
-    const html = wiringHtml(model({ indexSkipEntity: true, indexLine: null }));
+    const html = wiringHtml(model({ indexSkip: "entity", indexLine: null }));
     expect(html).toContain("skipped (entity — file manually)");
+    expect(html).not.toContain("<code>");
+  });
+
+  test("not-in-policy (e.g. source on a concept-only wiki) → policy skip note, NOT 'entity'", () => {
+    const html = wiringHtml(model({ indexSkip: "not-in-policy", indexLine: null }));
+    expect(html).toContain("skipped (not in this wiki's cataloging policy)");
+    expect(html).not.toContain("entity");
     expect(html).not.toContain("<code>");
   });
 

@@ -540,10 +540,19 @@ function validateGardenerConfig(settings: Record<string, unknown>, botName: stri
   validateScalarField(g, "maxProposalsPerRun", "number", botName);
 }
 
+/** The page kinds a wiki may list in `wikiAutoCommit.catalogKinds`. `entity` is
+ *  accepted for symmetry but has no effect — entities are hard-skipped from the
+ *  index regardless (see `catalogPage` in gardener/wire.ts). */
+const VALID_CATALOG_KINDS = new Set(["concept", "source", "entity"]);
+
 /**
  * Validate the nested `wikiAutoCommit` config block (per-bot config.json). A
  * non-object value is dropped whole; a mistyped `push` sub-field warns + drops
- * (falling back to the code default of push-on).
+ * (falling back to the code default of push-on); a mistyped `catalogKinds`
+ * (non-array / non-string element) drops the whole field, and any UNKNOWN element
+ * value (e.g. a "concpt" typo) is warned about and removed while the valid ones
+ * are kept. An empty `catalogKinds` array is preserved as an explicit
+ * "catalog nothing".
  */
 function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName: string): void {
   const value = settings.wikiAutoCommit;
@@ -556,8 +565,22 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
     delete settings.wikiAutoCommit;
     return;
   }
-  validateScalarField(value as Record<string, unknown>, "push", "boolean", botName);
-  validateStringArrayField(value as Record<string, unknown>, "catalogKinds", botName);
+  const block = value as Record<string, unknown>;
+  validateScalarField(block, "push", "boolean", botName);
+  validateStringArrayField(block, "catalogKinds", botName);
+  // Shape is now a string array (or absent). Drop unknown element values, keeping
+  // the rest — an empty result stays as-is (explicit "catalog nothing").
+  if (Array.isArray(block.catalogKinds)) {
+    const kinds = block.catalogKinds as string[];
+    const unknown = kinds.filter((k) => !VALID_CATALOG_KINDS.has(k));
+    if (unknown.length > 0) {
+      log.warn(
+        `Bot "{name}" config.json field "wikiAutoCommit.catalogKinds" has unknown value(s) {unknown} — dropping them (valid: concept, source, entity)`,
+        { name: botName, unknown: unknown.join(", ") },
+      );
+      block.catalogKinds = kinds.filter((k) => VALID_CATALOG_KINDS.has(k));
+    }
+  }
 }
 
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {

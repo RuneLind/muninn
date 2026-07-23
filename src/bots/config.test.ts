@@ -512,6 +512,29 @@ describe("bot discovery", () => {
       expect(found!.wikiAutoCommit).toEqual({ push: false });
     });
 
+    test("drops unknown catalogKinds element values but keeps the valid ones", () => {
+      setupTestBot("_test_autocommit_unknowncatalog", {
+        config: { wikiAutoCommit: { catalogKinds: ["concept", "concpt", "source", "bogus"] } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_unknowncatalog");
+      expect(found).toBeDefined();
+      // Unknown "concpt"/"bogus" removed; the valid kinds survive in order.
+      expect(found!.wikiAutoCommit).toEqual({ catalogKinds: ["concept", "source"] });
+    });
+
+    test("keeps an empty catalogKinds array as an explicit 'catalog nothing'", () => {
+      setupTestBot("_test_autocommit_emptycatalog", {
+        config: { wikiAutoCommit: { catalogKinds: [] } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_emptycatalog");
+      expect(found).toBeDefined();
+      expect(found!.wikiAutoCommit).toEqual({ catalogKinds: [] });
+    });
+
     test("keeps a valid wikiSynthesisBot string and flows it through discovery", () => {
       setupTestBot("_test_wikisynth", {
         config: { wikiSynthesisBot: "melosys" },

@@ -62,7 +62,8 @@ import {
   stripFrontmatter,
   extractPubDate,
 } from "../src/wiki/store.ts";
-import { commitWikiChange } from "../src/wiki/commit.ts";
+import { commitWikiChange, type CommitWikiResult } from "../src/wiki/commit.ts";
+import { reindexCollectionFor } from "../src/gardener/apply.ts";
 import { fetchKnowledgeApi } from "../src/ai/knowledge-api-client.ts";
 
 // ── args / config ────────────────────────────────────────────────────────────
@@ -107,12 +108,6 @@ async function repoCleanAtStart(dir: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/** The huginn collection a wiki-relative path reindexes into (mirrors
- *  `reindexCollectionFor` in src/gardener/apply.ts): life/** → wiki-life, else wiki. */
-function collectionForPath(rel: string): "wiki" | "wiki-life" {
-  return rel.startsWith("life/") ? "wiki-life" : "wiki";
 }
 
 /** Extract a YouTube video id from a watch/short/embed url; undefined otherwise. */
@@ -367,15 +362,32 @@ if (apply) {
     const message = `[script:backfill-wiki-pubdates] update: ${writtenRelPaths.length} pages`;
     // Await the async push settle so this short-lived script doesn't exit before
     // the commit's push lands (the helper awaits only the local commit itself).
-    await new Promise<void>((resolve) => {
-      commitWikiChange(WIKI_ROOT, writtenRelPaths, message, { onPushSettled: resolve }).catch(() =>
-        resolve(),
+    // Capture the truthful outcome so we don't claim a commit that didn't land.
+    const commitResult = await new Promise<CommitWikiResult>((resolve) => {
+      let settled: CommitWikiResult = { committed: false, reason: "error" };
+      commitWikiChange(WIKI_ROOT, writtenRelPaths, message, {
+        onPushSettled: () => resolve(settled),
+      }).then(
+        (r) => {
+          settled = r;
+        },
+        () => {
+          settled = { committed: false, reason: "error" };
+        },
       );
     });
-    console.log(`✓ committed ${writtenRelPaths.length} pages (${message}).`);
+    if (commitResult.committed) {
+      console.log(`✓ committed ${writtenRelPaths.length} pages (${message}).`);
+    } else {
+      // Files were written regardless — only the commit was skipped; the reindex
+      // below still runs so search picks the on-disk edits up.
+      console.log(
+        `(commit skipped: ${commitResult.reason ?? "unknown"} — ${writtenRelPaths.length} pages written, uncommitted)`,
+      );
+    }
 
     // Fire the huginn reindex for every touched collection.
-    const collections = new Set(writtenRelPaths.map(collectionForPath));
+    const collections = new Set(writtenRelPaths.map(reindexCollectionFor));
     for (const collection of collections) {
       try {
         await fetchKnowledgeApi(
@@ -388,7 +400,7 @@ if (apply) {
         console.warn(`! reindex for "${collection}" failed: ${err instanceof Error ? err.message : err}`);
       }
     }
-  } else if (apply && !noCommitFlag && !repoWasClean && !commitFlag) {
+  } else if (!noCommitFlag && !repoWasClean && !commitFlag) {
     console.log(`(repo not clean at start — skipping commit; pass --commit to force)`);
   }
 } else {

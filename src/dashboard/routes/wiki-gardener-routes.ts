@@ -4,7 +4,7 @@ import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
-import { buildIndexEntry, selectWirablePages } from "../../gardener/wire.ts";
+import { buildIndexEntry, catalogPage, selectWirablePages } from "../../gardener/wire.ts";
 import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
 import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
@@ -716,21 +716,34 @@ export function registerWikiGardenerRoutes(
         let wiring: WiringPreview | null = null;
         if (reviewable) {
           const domain: "ai" | "life" = p.targetPath.startsWith("life/") ? "life" : "ai";
-          const entry = buildIndexEntry({
-            title,
-            kind: p.kind,
-            domain,
-            rationale: p.rationale,
-            body: stripFrontmatter(p.draft),
-          });
+          // Thread the wiki's REAL cataloging policy so the preview matches what
+          // apply's wire stage will actually do (jarvis catalogs sources; a
+          // concept-only wiki doesn't) — never the old kind!=="concept" hardcode.
+          const catalogKinds = bot.wikiAutoCommit?.catalogKinds;
+          const entry = buildIndexEntry(
+            {
+              title,
+              kind: p.kind,
+              domain,
+              rationale: p.rationale,
+              body: stripFrontmatter(p.draft),
+            },
+            catalogKinds,
+          );
           const seeAlso = selectWirablePages(p.relatedPages, index, p.targetPath).map(
             (wp) => wp.title,
           );
+          // Derive the skip cause from the real policy: entities are hard-skipped
+          // (split index, file manually); any other uncataloged kind is out of this
+          // wiki's `catalogKinds` policy (e.g. a source page on a concept-only wiki).
+          const indexSkip = catalogPage(p.kind, catalogKinds)
+            ? null
+            : p.kind === "entity"
+              ? "entity"
+              : "not-in-policy";
           wiring = {
             indexLine: entry ? entry.line : null,
-            // Any non-concept kind is left out of the Concepts index (entity → manual
-            // filing; source → flat per-article archive, no index line at all).
-            indexSkipEntity: p.kind !== "concept",
+            indexSkip,
             seeAlso,
             legacyNoRelated: p.relatedPages === null,
           };

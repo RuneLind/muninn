@@ -12,10 +12,16 @@ import { escHtml as esc } from "./escape.ts";
 
 /** The read-time wiring projection the route attaches to a reviewable proposal. */
 export interface WiringPreview {
-  /** The planned `- [[Title]] — …` index line, or null (entity skip / no section). */
+  /** The planned `- [[Title]] — …` index line, or null (skipped / no section). */
   indexLine: string | null;
-  /** True when the page is an entity — the index insertion is skipped, file manually. */
-  indexSkipEntity: boolean;
+  /**
+   * Why the index insertion is skipped, or null when a line IS planned:
+   *  - `"entity"` — an entity page (the Entities index is split People /
+   *    Organizations / Products, which one isn't derivable — file manually);
+   *  - `"not-in-policy"` — the kind isn't in this wiki's cataloging policy
+   *    (`catalogKinds`), e.g. a `source` page on a concept-only wiki.
+   */
+  indexSkip: "entity" | "not-in-policy" | null;
   /** Titles of related pages that will gain an inbound See-also link (resolved, ≤3). */
   seeAlso: string[];
   /** True on a pre-migration row (`related_pages` NULL) — no inbound-link data. */
@@ -27,8 +33,10 @@ export function wiringHtml(w: WiringPreview | null | undefined): string {
   if (!w) return "";
 
   let indexItem: string;
-  if (w.indexSkipEntity) {
+  if (w.indexSkip === "entity") {
     indexItem = "skipped (entity — file manually)";
+  } else if (w.indexSkip === "not-in-policy") {
+    indexItem = "skipped (not in this wiki's cataloging policy)";
   } else if (w.indexLine) {
     indexItem = `<code>${esc(w.indexLine)}</code>`;
   } else {

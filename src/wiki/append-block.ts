@@ -64,7 +64,7 @@ export interface AppendBlockOptions {
    * the route; never throws and (per the helper) awaits only the local commit —
    * the push is dispatched async, so the HTTP response isn't blocked on the network.
    */
-  commit?: (paths: string[], message: string) => Promise<void>;
+  commit?: (paths: string[], message: string) => Promise<unknown>;
 }
 
 function escapeRegExp(s: string): string {
