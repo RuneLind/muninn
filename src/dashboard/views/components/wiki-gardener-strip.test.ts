@@ -49,6 +49,7 @@ function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse 
     fresh: 0,
     freshBySource: [],
     freshWindowDays: 14,
+    minClusterSize: 3,
     watcherSeeded: true,
     batchSize: 40,
     maxProposals: 8,
@@ -340,6 +341,90 @@ describe("backlogSentenceHtml — Run-gardener-now fresh segment", () => {
   });
 });
 
+describe("run-suggestion meter (fresh segment)", () => {
+  const NOW = 1_700_000_000_000;
+  const DAY = 86_400_000;
+  function watcher(over: Partial<BacklogWatcherInfo> = {}): BacklogWatcherInfo {
+    return { id: "w-1", enabled: true, lastRunAt: NOW - 3 * DAY, nextRunAt: NOW + 4 * DAY, forceQueued: false, ...over };
+  }
+  // minClusterSize 3 ⇒ threshold 2× = 6.
+  function meterBase(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse {
+    return base({ minClusterSize: 3, freshBySource: [], watcher: watcher(), ...over });
+  }
+
+  test("the model carries the per-bot minClusterSize verbatim (no client hardcode)", () => {
+    expect(backlogStripModel(meterBase({ fresh: 4, minClusterSize: 5 }), 0, NOW).minClusterSize).toBe(5);
+  });
+
+  test("below threshold: informational — a partial bar + 'N more to suggest a run', NO 'worth a run'", () => {
+    // fresh 4 < threshold 6 ⇒ 2 more.
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 4 }), 0, NOW));
+    expect(html).toContain("bk-run-meter");
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain('aria-valuenow="4"');
+    expect(html).toContain('aria-valuemax="6"');
+    expect(html).toContain("2 more to suggest a run");
+    expect(html).not.toContain("worth a gardener run");
+    expect(html).not.toContain("bk-meter-full");
+    // Informational, never its own button.
+    expect(html).not.toContain('data-backlog-action="run-meter"');
+  });
+
+  test("at threshold: flips to 'worth a gardener run' with a full bar", () => {
+    // fresh 6 === threshold 6 ⇒ crossed.
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 6 }), 0, NOW));
+    expect(html).toContain("worth a gardener run");
+    expect(html).toContain("bk-meter-full");
+    expect(html).not.toContain("more to suggest a run");
+    expect(html).toContain('style="width:100%"');
+  });
+
+  test("above threshold: stays crossed and the fill clamps at 100%", () => {
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 20 }), 0, NOW));
+    expect(html).toContain("worth a gardener run");
+    expect(html).toContain('style="width:100%"');
+  });
+
+  test("no competing CTA: the meter is informational — the existing Run-gardener-now button stays the sole CTA", () => {
+    // Crossed AND an enabled watcher ⇒ the meter's note + the ONE run button coexist,
+    // but the meter renders no button of its own.
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 8 }), 0, NOW));
+    expect(html).toContain("worth a gardener run"); // meter note (informational)
+    // Exactly one call-to-action button in the segment (the watcher affordance).
+    const runBtns = html.match(/data-backlog-action="run-watcher"/g) ?? [];
+    expect(runBtns.length).toBe(1);
+    expect(html).toContain("Run gardener now");
+  });
+
+  test("below threshold still hands the CTA to the existing button (meter never suppresses it)", () => {
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 2 }), 0, NOW));
+    expect(html).toContain("more to suggest a run"); // meter informational
+    expect(html).toContain("Run gardener now"); // button unaffected below threshold
+  });
+
+  test("degraded response (no minClusterSize field) ⇒ meter hides, no NaN/undefined", () => {
+    const noThreshold = meterBase({ fresh: 5 });
+    delete noThreshold.minClusterSize;
+    const m = backlogStripModel(noThreshold, 0, NOW);
+    expect(m.minClusterSize).toBe(0);
+    const html = backlogSentenceHtml(m);
+    expect(html).not.toContain("bk-run-meter");
+    expect(html).not.toContain("suggest a run");
+    expect(html).not.toContain("worth a gardener run");
+    expect(html).not.toContain("NaN");
+    expect(html).not.toContain("undefined");
+    // The rest of the fresh segment (and the existing button) still render.
+    expect(html).toContain("new (last 14d)");
+    expect(html).toContain("Run gardener now");
+  });
+
+  test("no fresh docs ⇒ meter hides even with a valid threshold", () => {
+    const html = backlogSentenceHtml(backlogStripModel(meterBase({ fresh: 0 }), 0, NOW));
+    expect(html).not.toContain("bk-run-meter");
+    expect(html).toContain("0</span> new (last 14d)");
+  });
+});
+
 describe("backlogStripModel — control gating", () => {
   test("zero queued → no run, no reset, not all-offered", () => {
     const m = backlogStripModel(
@@ -612,9 +697,12 @@ describe("backlogStripModel — degraded response (live fields absent)", () => {
       m.batchSize,
       m.maxProposals,
       m.drainNow,
+      m.minClusterSize,
     ]) {
       expect(Number.isFinite(n)).toBe(true);
     }
+    // No minClusterSize on a degraded response ⇒ 0 ⇒ the meter hides (no NaN width).
+    expect(m.minClusterSize).toBe(0);
     // remaining falls back to queued(0) ⇒ nothing to drain, control hidden.
     expect(m.showRun).toBe(false);
   });

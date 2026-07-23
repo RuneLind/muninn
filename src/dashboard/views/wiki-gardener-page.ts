@@ -116,6 +116,16 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .gard-btn.bk-run-watcher:hover:not(:disabled) { background: var(--accent); color: #fff; }
     .gard-backlog .gard-btn.bk-run-watcher:disabled { opacity: 0.55; cursor: default; }
     .gard-backlog .bk-queued { color: var(--accent-light); font-size: 12px; font-weight: 600; }
+    /* Informational run-suggestion meter — a tiny progress bar toward a suggested run.
+       Not a button: it sets expectations, the "Run gardener now" affordance is the CTA. */
+    .gard-backlog .bk-run-meter { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
+    .gard-backlog .bk-meter {
+      display: inline-block; width: 54px; height: 6px; border-radius: 3px;
+      background: var(--bg-inset, var(--border-secondary)); overflow: hidden; vertical-align: middle;
+    }
+    .gard-backlog .bk-meter-fill { display: block; height: 100%; background: var(--text-dim); border-radius: 3px; }
+    .gard-backlog .bk-meter-fill.bk-meter-full { background: var(--accent); }
+    .gard-backlog .bk-meter-hit { color: var(--accent-light); font-weight: 600; }
     /* Inline informed-consent panel — full-width row below the strip, hidden until confirm. */
     .gard-backlog .bk-confirm {
       display: none; flex-basis: 100%; flex-direction: column; gap: 10px;

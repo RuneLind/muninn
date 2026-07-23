@@ -121,6 +121,12 @@ export interface IngestBacklogResponse {
   freshBySource?: { label: string; count: number }[];
   /** The resolved age-floor window in days — labels "new (last Nd)"; 0/absent ⇒ degraded. */
   freshWindowDays?: number;
+  /**
+   * The bot's resolved minimum cluster size (per-bot, from `resolveGardenerConfig` —
+   * NOT the merge-time `batchSize`/`maxProposals`). The run-suggestion meter derives
+   * its threshold from this; absent/≤0 (degraded/older server) ⇒ the meter hides.
+   */
+  minClusterSize?: number;
   /** The bot's wiki-gardener watcher (next-run + Run-now affordance). Null/absent ⇒ no affordance. */
   watcher?: BacklogWatcherInfo | null;
   watcherSeeded?: boolean;
@@ -154,6 +160,11 @@ export interface BacklogStripModel {
   freshPerSource: { label: string; count: number }[];
   /** Age-floor window in days; 0 ⇒ degraded response, hide the fresh segment. */
   freshWindowDays: number;
+  /**
+   * The bot's resolved minimum cluster size (the run-suggestion meter's threshold
+   * basis; meter threshold = 2×). 0 ⇒ absent/degraded response ⇒ the meter hides.
+   */
+  minClusterSize: number;
   /**
    * The wiki-gardener watcher id when a manual "Run gardener now" is offered:
    * non-null iff there are fresh docs, no run is in flight, and the watcher is
@@ -267,6 +278,9 @@ export function backlogStripModel(
   // fresh segment rather than showing a false "0 new".
   const freshWindowDays = Math.max(0, numOr(data.freshWindowDays, 0));
   const freshTotal = Math.max(0, numOr(data.fresh, 0));
+  // Run-suggestion meter threshold basis (per-bot). 0 on a degraded/older server
+  // (no field) ⇒ the meter renderer hides rather than dividing by a bogus threshold.
+  const minClusterSize = Math.max(0, numOr(data.minClusterSize, 0));
   const freshPerSource = (Array.isArray(data.freshBySource) ? data.freshBySource : []).filter(
     (s): s is { label: string; count: number } =>
       !!s && typeof s.label === "string" && typeof s.count === "number" && s.count > 0,
@@ -312,6 +326,7 @@ export function backlogStripModel(
     freshTotal,
     freshPerSource,
     freshWindowDays,
+    minClusterSize,
     watcherRunNow,
     watcherQueued,
     nextRunText,
@@ -351,6 +366,40 @@ function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
   return items
     .map((s) => `${esc(s.label)} <span class="bk-n">${s.n}</span>`)
     .join('<span class="bk-sep"> · </span>');
+}
+
+/**
+ * The run-suggestion meter (pure HTML) — a tiny progress bar in the fresh segment
+ * showing how the un-offered new-in-window count ({@link BacklogStripModel.freshTotal})
+ * tracks toward a threshold where a gardener run is likely to draft something. The
+ * threshold is **2× the bot's minClusterSize** (clustering needs `minClusterSize`
+ * docs on ONE topic, so 2× scattered arrivals is the "likely at least one cluster"
+ * heuristic) — sourced from the response, never hardcoded.
+ *
+ * It is purely **informational**: it renders NO button, so it never competes with the
+ * existing "Run gardener now" affordance ({@link freshWatcherSuffixHtml}) that IS the
+ * call-to-action. Below threshold it reports how many more arrivals would suggest a run;
+ * once crossed it flips to "worth a gardener run" and hands the user off to that button.
+ * It deliberately promises NO page count — a scattered fresh count can legitimately draft
+ * zero, the exact false expectation this kills.
+ *
+ * Hidden when there are no fresh docs OR the response carries no usable `minClusterSize`
+ * (degraded/older server ⇒ 0 ⇒ no threshold ⇒ no meter, never a NaN width).
+ */
+function freshMeterHtml(model: BacklogStripModel): string {
+  if (model.freshTotal <= 0 || model.minClusterSize <= 0) return "";
+  const threshold = 2 * model.minClusterSize;
+  const crossed = model.freshTotal >= threshold;
+  const pct = Math.max(0, Math.min(100, Math.round((model.freshTotal / threshold) * 100)));
+  const fillClass = crossed ? "bk-meter-fill bk-meter-full" : "bk-meter-fill";
+  const bar =
+    `<span class="bk-meter" role="progressbar" aria-label="progress toward a suggested gardener run" ` +
+    `aria-valuemin="0" aria-valuemax="${threshold}" ` +
+    `aria-valuenow="${Math.min(model.freshTotal, threshold)}"><span class="${fillClass}" style="width:${pct}%"></span></span>`;
+  const label = crossed
+    ? `<span class="bk-note bk-meter-hit">worth a gardener run</span>`
+    : `<span class="bk-note">${threshold - model.freshTotal} more to suggest a run</span>`;
+  return `<span class="bk-sep"> · </span><span class="bk-run-meter">${bar}${label}</span>`;
 }
 
 /**
@@ -408,6 +457,9 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
       freshSeg +=
         ": " + perSourceBreakdownHtml(model.freshPerSource.map((s) => ({ label: s.label, n: s.count })));
     }
+    // The informational run-suggestion meter sits BEFORE the watcher affordance
+    // (next-run text + "Run gardener now" button), never competing with it.
+    freshSeg += freshMeterHtml(model);
     freshSeg += freshWatcherSuffixHtml(model);
     segs.push(freshSeg);
   }

@@ -249,6 +249,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: true,
       gardenerEnabled: true,
@@ -268,6 +269,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: { finishedAt: 222, offered: 2, drafted: 1 },
       watcherSeeded: true,
       gardenerEnabled: true,
@@ -306,6 +308,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: true,
       gardenerEnabled: true,
@@ -314,6 +317,27 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
     // Sourced from src/gardener/backlog.ts — the client never hardcodes them.
     expect(merged.batchSize).toBe(40);
     expect(merged.maxProposals).toBe(8);
+  });
+
+  test("carries the per-bot minClusterSize through to the wire (run-suggestion meter threshold)", () => {
+    // Unlike batchSize/maxProposals (merge-time constants), minClusterSize is per-bot
+    // (from resolveGardenerConfig) and rides on the live fields so the strip's meter
+    // never hardcodes 3.
+    const merged = mergeBacklogLiveFields(cached, {
+      running: false,
+      offered: 0,
+      remaining: 2,
+      offeredStillQueued: 0,
+      fresh: 0,
+      freshBySource: [],
+      freshWindowDays: 14,
+      minClusterSize: 5,
+      lastBacklogRun: null,
+      watcherSeeded: true,
+      gardenerEnabled: true,
+      progress: null,
+    });
+    expect(merged.minClusterSize).toBe(5);
   });
 
   test("carries the watcher block through to the wire (Run-gardener-now affordance)", () => {
@@ -325,6 +349,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 3,
       freshBySource: [{ label: "YouTube", count: 3 }],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: true,
       gardenerEnabled: true,
@@ -348,6 +373,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: false,
       gardenerEnabled: true,
@@ -366,6 +392,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: true,
       gardenerEnabled: true,
@@ -383,6 +410,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
+      minClusterSize: 3,
       lastBacklogRun: null,
       watcherSeeded: true,
       gardenerEnabled: true,
