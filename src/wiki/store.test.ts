@@ -11,6 +11,8 @@ import {
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
+  extractPubDate,
+  extractDesc,
   __resetWikiCacheForTest,
 } from "./store.ts";
 
@@ -890,5 +892,200 @@ describe("buildWikiIndex", () => {
       else process.env.WIKI_DIR = prev;
       __resetWikiCacheForTest();
     }
+  });
+});
+
+describe("extractPubDate", () => {
+  test("reads the date from a body Source: line", () => {
+    const md = [
+      "---",
+      "type: source",
+      "created: 2026-04-25",
+      "---",
+      "",
+      "# Title",
+      "",
+      "Source: YouTube, 2026-03-25 — https://www.youtube.com/watch?v=abc",
+      "",
+      "## Summary",
+    ].join("\n");
+    // The pub date is the Source: line's date, NOT the frontmatter created date.
+    expect(extractPubDate(md)).toBe("2026-03-25");
+  });
+
+  test("undefined when there is no Source: line", () => {
+    expect(extractPubDate("---\ntype: concept\n---\n\n# X\n\nProse.")).toBeUndefined();
+    expect(extractPubDate("Source: nowhere without a date")).toBeUndefined();
+  });
+});
+
+describe("extractDesc", () => {
+  test("returns the first prose line, skipping frontmatter/heading/Source/list", () => {
+    const md = [
+      "---",
+      "type: source",
+      'title: "X"',
+      "---",
+      "",
+      "# The Title",
+      "",
+      "Source: YouTube, 2026-03-25 — https://x",
+      "",
+      "## Summary",
+      "",
+      "- a bullet",
+      "This is the first real prose line.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("This is the first real prose line.");
+  });
+
+  test("flattens wikilinks and markdown links to display text", () => {
+    const md = "---\ntype: concept\n---\n\nSee [[Target Page|the display]] and [docs](x.md) here.";
+    expect(extractDesc(md)).toBe("See the display and docs here.");
+  });
+
+  test("never leaks raw YAML — a page whose body is only frontmatter has no desc", () => {
+    expect(extractDesc("---\ntype: note\ntitle: Only Frontmatter\n---\n")).toBeUndefined();
+  });
+
+  test("skips blockquotes, HTML comments and horizontal rules", () => {
+    const md = [
+      "---",
+      "type: note",
+      "---",
+      "",
+      "<!-- a comment -->",
+      "> a callout",
+      "---",
+      "Actual prose.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("Actual prose.");
+  });
+
+  test("skips a bare URL:/metadata line and returns the prose two lines below", () => {
+    const md = [
+      "---",
+      "type: source",
+      "---",
+      "",
+      "# Title",
+      "",
+      "URL: https://example.com/some/article",
+      "Date: 2026-03-25",
+      "",
+      "The real prose summary of the article.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("The real prose summary of the article.");
+  });
+
+  test("skips markdown table rows", () => {
+    const md = [
+      "---",
+      "type: note",
+      "---",
+      "",
+      "| Col A | Col B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "Prose after the table.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("Prose after the table.");
+  });
+
+  test("skips a leading JSX/HTML component opening tag (mimir .mdx pages)", () => {
+    const md = [
+      "---",
+      "type: plan",
+      "---",
+      "",
+      '<Callout tone="info">',
+      "",
+      "This is the first genuine prose line.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("This is the first genuine prose line.");
+  });
+
+  test("strips inline emphasis/code markers so the blurb is plain text", () => {
+    const md = "---\ntype: concept\n---\n\nThe **bold** and _italic_ and `code` and *starred* words.";
+    expect(extractDesc(md)).toBe("The bold and italic and code and starred words.");
+  });
+
+  test("leaves interior underscores in identifiers alone", () => {
+    const md = "---\ntype: note\n---\n\nThe some_var_name identifier stays intact.";
+    expect(extractDesc(md)).toBe("The some_var_name identifier stays intact.");
+  });
+
+  test("drops the leading ! from an image, keeping its alt text", () => {
+    const md = "---\ntype: note\n---\n\n![a diagram](img.png) shows the flow.";
+    expect(extractDesc(md)).toBe("a diagram shows the flow.");
+  });
+});
+
+describe("buildWikiIndex — Atlas fields + trails", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-atlas-store-"));
+    await mkdir(path.join(root, "sources"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("stamps pubDate + desc onto markdown pages", async () => {
+    await Bun.write(
+      path.join(root, "sources/Vid.md"),
+      [
+        "---",
+        "type: source",
+        'title: "Vid"',
+        "created: 2026-04-25",
+        "---",
+        "",
+        "# Vid",
+        "",
+        "Source: YouTube, 2026-03-25 — https://x",
+        "",
+        "The interview covers agentic engineering.",
+      ].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.resolve("Vid")!;
+    expect(meta.pubDate).toBe("2026-03-25");
+    expect(meta.desc).toBe("The interview covers agentic engineering.");
+  });
+
+  test("reads trails.json; malformed entries dropped, valid ones kept", async () => {
+    await Bun.write(
+      path.join(root, "trails.json"),
+      JSON.stringify([
+        { title: "Getting started", blurb: "A path.", steps: [{ page: "Vid", note: "watch first" }, { page: "Ghost" }] },
+        { blurb: "no title — dropped" },
+        { title: "Empty steps", steps: [{ note: "no page — dropped" }] },
+      ]),
+    );
+    await Bun.write(path.join(root, "sources/Vid.md"), "---\ntype: source\n---\n\nProse.");
+    const index = await buildWikiIndex(root);
+    expect(index.trails).toHaveLength(2);
+    expect(index.trails![0]!.title).toBe("Getting started");
+    expect(index.trails![0]!.steps).toEqual([
+      { page: "Vid", note: "watch first" },
+      { page: "Ghost", note: undefined },
+    ]);
+    expect(index.trails![1]!.steps).toEqual([]); // step with no page dropped
+  });
+
+  test("no trails.json ⇒ empty trails array", async () => {
+    await Bun.write(path.join(root, "sources/Vid.md"), "---\ntype: source\n---\n\nProse.");
+    const index = await buildWikiIndex(root);
+    expect(index.trails).toEqual([]);
+  });
+
+  test("malformed trails.json ⇒ empty trails, wiki stays browsable", async () => {
+    await Bun.write(path.join(root, "trails.json"), "{ not json");
+    await Bun.write(path.join(root, "sources/Vid.md"), "---\ntype: source\n---\n\nProse.");
+    const index = await buildWikiIndex(root);
+    expect(index.trails).toEqual([]);
+    expect(index.pages).toHaveLength(1);
   });
 });

@@ -11,7 +11,12 @@
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
-import type { WikiPageMeta } from "./store.ts";
+import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
+
+// stripFrontmatter's single home is store.ts (the read-side, which store.ts must
+// not import back from — that would invert layering). Re-exported here so the
+// gardener consumers that import it from render.ts keep working unchanged.
+export { stripFrontmatter } from "./store.ts";
 
 const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
 
@@ -105,13 +110,4 @@ function upgradeObsidianCallouts(html: string): string {
       return `<div class="callout callout-${tone}">${titleHtml}${bodyHtml}</div>`;
     },
   );
-}
-
-/** Drop the leading `---` frontmatter fence so it doesn't render as an hr + text. */
-export function stripFrontmatter(markdown: string): string {
-  if (!markdown.startsWith("---")) return markdown;
-  const end = markdown.indexOf("\n---", 3);
-  if (end === -1) return markdown;
-  const after = markdown.indexOf("\n", end + 1);
-  return after === -1 ? "" : markdown.slice(after + 1);
 }
