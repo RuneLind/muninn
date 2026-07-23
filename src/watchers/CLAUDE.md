@@ -654,7 +654,7 @@ backlog run reuses `minClusterSize` but overrides `lookbackDays`/`maxProposalsPe
 
 **Seed**: `bun scripts/setup-wiki-gardener.ts [--apply]` creates the jarvis
 `wiki-gardener` row — weekly interval, `config.hour: 10` (daytime, clear of quiet
-hours), `config.timeoutMs: 1200000` (net headroom for 3 drafts at 300s + cluster + harvest;
+hours), `config.timeoutMs: 2700000` (net headroom for cap 8 drafts at 300s + cluster + harvest;
 a timed-out run advances last_run_at and loses the week).
 
 Schema: `wiki_proposals` (migration `057`, mirrored in `db/init.sql`; the
