@@ -12,5 +12,8 @@
   "componentAnswers": true,
   "wikiAutoCommit": {
     "catalogKinds": ["concept", "source"]
+  },
+  "gardener": {
+    "maxProposalsPerRun": 8
   }
 }
