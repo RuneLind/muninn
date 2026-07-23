@@ -197,10 +197,19 @@ export interface BotConfig {
   /** Wiki-gardener config (per-bot config.json `gardener` block). Requires
    *  `wikiDir`. See src/gardener/. */
   gardener?: GardenerConfig;
+  /** Auto-commit config for programmatic wiki writes (per-bot config.json
+   *  `wikiAutoCommit` block). See `src/wiki/commit.ts`. */
+  wikiAutoCommit?: WikiAutoCommitConfig;
 }
 
 export interface CorrectiveRetrievalBotConfig {
   enabled?: boolean;
+}
+
+/** Per-bot auto-commit config for programmatic wiki writes (gardener apply,
+ *  source drafter). `push` defaults to true — opt out to commit locally only. */
+export interface WikiAutoCommitConfig {
+  push?: boolean;
 }
 
 export interface JiraAnalysisVariant {
@@ -527,6 +536,25 @@ function validateGardenerConfig(settings: Record<string, unknown>, botName: stri
   validateScalarField(g, "maxProposalsPerRun", "number", botName);
 }
 
+/**
+ * Validate the nested `wikiAutoCommit` config block (per-bot config.json). A
+ * non-object value is dropped whole; a mistyped `push` sub-field warns + drops
+ * (falling back to the code default of push-on).
+ */
+function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName: string): void {
+  const value = settings.wikiAutoCommit;
+  if (value === undefined) return;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    log.warn(
+      `Bot "{name}" config.json field "wikiAutoCommit" should be an object — ignoring it (using defaults)`,
+      { name: botName },
+    );
+    delete settings.wikiAutoCommit;
+    return;
+  }
+  validateScalarField(value as Record<string, unknown>, "push", "boolean", botName);
+}
+
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
   const botsDir = resolve(import.meta.dir, "../../bots");
 
@@ -587,7 +615,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener", "wikiAutoCommit"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -608,6 +636,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
         validateScalarField(botSettings, "showWaterfall", "boolean", name);
         validateScalarField(botSettings, "componentAnswers", "boolean", name);
         validateGardenerConfig(botSettings, name);
+        validateWikiAutoCommitConfig(botSettings, name);
       } catch (e) {
         log.warn("Failed to parse {path}: {error}", { path: configJsonPath, error: String(e) });
       }
@@ -683,6 +712,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       hasResearchKnowledge,
       defaultKnowledgeCollections,
       gardener: botSettings.gardener as GardenerConfig | undefined,
+      wikiAutoCommit: botSettings.wikiAutoCommit as WikiAutoCommitConfig | undefined,
     });
 
     const configParts: string[] = [];

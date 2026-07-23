@@ -455,6 +455,40 @@ describe("bot discovery", () => {
       expect(found!.wikiCollections).toBeUndefined();
     });
 
+    test("keeps a valid wikiAutoCommit block with push:false", () => {
+      setupTestBot("_test_autocommit", {
+        config: { wikiAutoCommit: { push: false } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit");
+      expect(found).toBeDefined();
+      expect(found!.wikiAutoCommit).toEqual({ push: false });
+    });
+
+    test("drops wikiAutoCommit when it is not an object", () => {
+      setupTestBot("_test_autocommit_notobj", {
+        config: { wikiAutoCommit: "yes" },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_notobj");
+      expect(found).toBeDefined();
+      expect(found!.wikiAutoCommit).toBeUndefined();
+    });
+
+    test("drops a mistyped wikiAutoCommit.push but keeps the block", () => {
+      setupTestBot("_test_autocommit_badpush", {
+        config: { wikiAutoCommit: { push: "true" } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_badpush");
+      expect(found).toBeDefined();
+      // The bad sub-field is dropped; the block survives (push falls back to default-on).
+      expect(found!.wikiAutoCommit).toEqual({});
+    });
+
     test("keeps a valid wikiSynthesisBot string and flows it through discovery", () => {
       setupTestBot("_test_wikisynth", {
         config: { wikiSynthesisBot: "melosys" },
