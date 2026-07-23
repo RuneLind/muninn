@@ -7,8 +7,10 @@ import {
   insertLogEntry,
   reindexCollectionFor,
   draftTitle,
+  commitMessageFor,
   type ApplyDeps,
 } from "./apply.ts";
+import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
 import { sha256 } from "./util.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
@@ -482,5 +484,124 @@ describe("applyWikiProposal", () => {
     // Page written, but index.md unchanged (entity → manual filing).
     expect(await readFile(path.join(wikiDir, "entities/Anthropic.md"), "utf8")).toContain("# Anthropic");
     expect(await readFile(path.join(wikiDir, "index.md"), "utf8")).toBe(INDEX_MD);
+  });
+});
+
+describe("commitMessageFor", () => {
+  test("gardener kinds → [gardener] apply, source → [source-drafter] draft", () => {
+    expect(commitMessageFor(makeProposal({ kind: "concept", targetPath: "concepts/A.md" }))).toBe(
+      "[gardener] apply: concepts/A.md",
+    );
+    expect(commitMessageFor(makeProposal({ kind: "entity", targetPath: "entities/B.md" }))).toBe(
+      "[gardener] apply: entities/B.md",
+    );
+    expect(commitMessageFor(makeProposal({ kind: "source", targetPath: "sources/C.md" }))).toBe(
+      "[source-drafter] draft: sources/C.md",
+    );
+  });
+});
+
+describe("applyWikiProposal → commit seam (acceptance)", () => {
+  let repo: string;
+  let wikiDir: string;
+
+  const git = async (args: string[]): Promise<{ code: number; out: string }> => {
+    const proc = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(proc.stdout).text()).trim();
+    const code = await proc.exited;
+    return { code, out };
+  };
+
+  // Deps wired to the REAL commit helper — the fixture test the PR-1 acceptance
+  // criteria call for (approve → exactly one prefixed commit, clean tree).
+  function realCommitDeps(): ApplyDeps {
+    return {
+      wikiDir,
+      now: () => Date.parse("2026-07-08T10:00:00Z"),
+      readFile: async (absPath) => {
+        try {
+          return await readFile(absPath, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (absPath, content) => {
+        await mkdir(path.dirname(absPath), { recursive: true });
+        await writeFile(absPath, content);
+      },
+      getWikiIndex: () => buildWikiIndex(wikiDir),
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      // push:false — the fixture repo has no remote anyway; keeps the test hermetic.
+      commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push: false }),
+    };
+  }
+
+  beforeEach(async () => {
+    resetCommitQueue();
+    repo = await mkdtemp(path.join(tmpdir(), "gardener-commit-"));
+    wikiDir = path.join(repo, "data", "wiki");
+    await mkdir(wikiDir, { recursive: true });
+    await git(["init", "-b", "main"]);
+    await git(["config", "user.email", "a@b.c"]);
+    await git(["config", "user.name", "Fixture"]);
+    await writeFile(path.join(repo, "README.md"), "root\n");
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "init"]);
+  });
+  afterEach(async () => {
+    resetCommitQueue();
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  test("concept approve yields exactly one [gardener] commit; tree clean", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), INDEX_MD);
+    // Stage index.md so only the apply's OWN writes drive the commit diff.
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "seed index"]);
+
+    const res = await applyWikiProposal(makeProposal(), realCommitDeps());
+    expect(res.outcome).toBe("applied");
+
+    const log = await git(["log", "--format=%s"]);
+    expect(log.out.split("\n")[0]).toBe("[gardener] apply: concepts/Context Compaction.md");
+    // The commit carries the page + log.md (+ index.md wire touch).
+    const names = await git(["show", "--name-only", "--format=", "HEAD"]);
+    expect(names.out).toContain("data/wiki/concepts/Context Compaction.md");
+    expect(names.out).toContain("data/wiki/log.md");
+    // Tree clean.
+    expect((await git(["status", "--porcelain"])).out).toBe("");
+  });
+
+  test("source approve yields a [source-drafter] commit", async () => {
+    const sourceDraft = `---\ntype: source\ntitle: Some Source\naliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: [https://example.com/s]\n---\n\n# Some Source\n\nA captured source.`;
+    const proposal = makeProposal({
+      kind: "source",
+      topicKey: "some-source",
+      targetPath: "sources/Some Source.md",
+      draft: sourceDraft,
+      relatedPages: [],
+    });
+    const res = await applyWikiProposal(proposal, realCommitDeps());
+    expect(res.outcome).toBe("applied");
+
+    const subject = (await git(["log", "-1", "--format=%s"])).out;
+    expect(subject).toBe("[source-drafter] draft: sources/Some Source.md");
+    expect((await git(["status", "--porcelain"])).out).toBe("");
+  });
+
+  test("on a non-default branch the write succeeds and the commit is skipped", async () => {
+    await git(["checkout", "-q", "-b", "feature/x"]);
+    const res = await applyWikiProposal(makeProposal(), realCommitDeps());
+    expect(res.outcome).toBe("applied");
+
+    // Page written…
+    expect(
+      await readFile(path.join(wikiDir, "concepts/Context Compaction.md"), "utf8"),
+    ).toContain("# Context Compaction");
+    // …but no commit landed (still just "init").
+    expect((await git(["log", "--format=%s"])).out).toBe("init");
+    // The writes are present as uncommitted files.
+    expect((await git(["status", "--porcelain"])).out).not.toBe("");
   });
 });

@@ -53,6 +53,46 @@ export interface ApplyDeps {
   refreshIndex: () => Promise<void>;
   /** Best-effort huginn reindex for a collection; must never throw. */
   reindex: (collection: string) => Promise<void>;
+  /**
+   * Commit the just-written wiki files into their git repo (the page + log.md +
+   * wired index/backlinks). Optional — absent in tests that don't exercise the
+   * commit seam. Wired to `commitWikiChange` at the route; never throws.
+   */
+  commit?: (paths: string[], message: string) => Promise<void>;
+}
+
+/**
+ * The commit message for a proposal apply: `[<writer>] <verb>: <page>`. Gardener
+ * concept/entity applies are `[gardener] apply: …`; auto-drafted source pages are
+ * `[source-drafter] draft: …`.
+ */
+export function commitMessageFor(proposal: WikiProposal): string {
+  const writer = proposal.kind === "source" ? "source-drafter" : "gardener";
+  const verb = proposal.kind === "source" ? "draft" : "apply";
+  return `[${writer}] ${verb}: ${proposal.targetPath}`;
+}
+
+/**
+ * Commit the page + log.md + every wire-stage-modified file as ONE commit. The
+ * page and log.md are NOT in the wire-stage set, so committing only the wire
+ * result would leave the tree dirty. Deduped. No-op when no commit seam is wired.
+ * The helper is non-throwing; the try/catch is belt-and-suspenders.
+ */
+async function commitApply(
+  proposal: WikiProposal,
+  deps: ApplyDeps,
+  modified: Set<string>,
+): Promise<void> {
+  if (!deps.commit) return;
+  const paths = [...new Set([proposal.targetPath, "log.md", ...modified])];
+  try {
+    await deps.commit(paths, commitMessageFor(proposal));
+  } catch (err) {
+    log.warn("Wiki-gardener apply: commit failed for {path}: {error}", {
+      path: proposal.targetPath,
+      error: errMsg(err),
+    });
+  }
 }
 
 /** The huginn collection a target path reindexes into: life/** → wiki-life, else wiki. */
@@ -233,6 +273,9 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
       log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
     }
     reindexUnion(deps, proposal.targetPath, modified);
+    // Commit is the last step — a re-run that changed nothing on disk stages an
+    // empty diff and the helper skips the commit quietly.
+    await commitApply(proposal, deps, modified);
     return { outcome: "applied", writtenPath: proposal.targetPath };
   }
 
@@ -285,6 +328,11 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
   //    every collection the wire stage touched — the approve response must not
   //    wait on a (potentially slow) best-effort POST.
   reindexUnion(deps, proposal.targetPath, modified);
+
+  // 7. Commit the write into the wiki repo (last step; must not delay or be
+  //    skipped by the fire-and-forget reindex). Non-fatal — a commit failure
+  //    never undoes the applied page.
+  await commitApply(proposal, deps, modified);
 
   return { outcome: "applied", writtenPath: proposal.targetPath };
 }

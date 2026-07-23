@@ -15,6 +15,7 @@ import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
 import { applyWikiProposal, draftTitle, type ApplyDeps } from "../../gardener/apply.ts";
+import { commitWikiChange } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -152,8 +153,10 @@ async function triggerReindex(collection: string): Promise<void> {
   }
 }
 
-/** Build the filesystem/index/reindex seams the apply step needs for a wiki root. */
-function applyDepsFor(wikiDir: string): ApplyDeps {
+/** Build the filesystem/index/reindex/commit seams the apply step needs for a
+ *  wiki root. `push` defaults to true (per-bot `wikiAutoCommit.push` opt-out); the
+ *  commit helper still skips the push when the repo has no remote/upstream. */
+function applyDepsFor(wikiDir: string, push: boolean): ApplyDeps {
   return {
     wikiDir,
     now: () => Date.now(),
@@ -167,6 +170,7 @@ function applyDepsFor(wikiDir: string): ApplyDeps {
       await getWikiIndex({ root: wikiDir, refresh: true });
     },
     reindex: triggerReindex,
+    commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push }),
   };
 }
 
@@ -1235,7 +1239,10 @@ export function registerWikiGardenerRoutes(
 
     let result;
     try {
-      result = await applyWikiProposal(claimed, applyDepsFor(bot.wikiDir));
+      result = await applyWikiProposal(
+        claimed,
+        applyDepsFor(bot.wikiDir, bot.wikiAutoCommit?.push ?? true),
+      );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await finishProposal(id, markWikiProposalError, "error");
