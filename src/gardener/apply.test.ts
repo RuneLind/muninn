@@ -485,6 +485,60 @@ describe("applyWikiProposal", () => {
     expect(await readFile(path.join(wikiDir, "entities/Anthropic.md"), "utf8")).toContain("# Anthropic");
     expect(await readFile(path.join(wikiDir, "index.md"), "utf8")).toBe(INDEX_MD);
   });
+
+  // ── Per-wiki cataloging policy (catalogKinds) ────────────────────────────────
+
+  const SOURCES_INDEX_MD = [
+    "# Index",
+    "",
+    "## Sources",
+    "",
+    "- [[Sources — AI General]] — aggregate index",
+    "",
+    "## Concepts",
+    "",
+    "### AI / Claude / Coding",
+    "",
+    "- [[Agent Loops]] — a",
+    "",
+  ].join("\n");
+
+  function sourceProposal() {
+    const draft = `---\ntype: source\ntitle: Some Capture\naliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: [https://example.com/s]\n---\n\n# Some Capture\n\nA captured article about retrieval.`;
+    return makeProposal({
+      kind: "source",
+      topicKey: "some-capture",
+      targetPath: "sources/Some Capture.md",
+      draft,
+      relatedPages: [],
+    });
+  }
+
+  test("source create under jarvis policy adds a ## Sources index line", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), SOURCES_INDEX_MD);
+    const res = await applyWikiProposal(sourceProposal(), deps({ catalogKinds: ["concept", "source"] }));
+    expect(res.outcome).toBe("applied");
+
+    const idx = await readFile(path.join(wikiDir, "index.md"), "utf8");
+    const line = "- [[Some Capture]] — A captured article about retrieval.";
+    expect(idx).toContain(line);
+    const lines = idx.split("\n");
+    // Landed inside the ## Sources block, above ## Concepts.
+    expect(lines.indexOf(line)).toBeGreaterThan(lines.indexOf("## Sources"));
+    expect(lines.indexOf(line)).toBeLessThan(lines.indexOf("## Concepts"));
+    // The wire touch also reindexed the target's collection.
+    expect(reindexed).toContain("wiki");
+  });
+
+  test("source create under DEFAULT policy leaves index.md untouched", async () => {
+    await writeFile(path.join(wikiDir, "index.md"), SOURCES_INDEX_MD);
+    const res = await applyWikiProposal(sourceProposal(), deps()); // no catalogKinds ⇒ concept-only
+    expect(res.outcome).toBe("applied");
+    // Page written…
+    expect(await readFile(path.join(wikiDir, "sources/Some Capture.md"), "utf8")).toContain("# Some Capture");
+    // …but the index is byte-identical (source not cataloged by default).
+    expect(await readFile(path.join(wikiDir, "index.md"), "utf8")).toBe(SOURCES_INDEX_MD);
+  });
 });
 
 describe("commitMessageFor", () => {
@@ -587,6 +641,43 @@ describe("applyWikiProposal → commit seam (acceptance)", () => {
 
     const subject = (await git(["log", "-1", "--format=%s"])).out;
     expect(subject).toBe("[source-drafter] draft: sources/Some Source.md");
+    expect((await git(["status", "--porcelain"])).out).toBe("");
+  });
+
+  test("source approve under jarvis policy catalogs index.md AND includes it in the commit", async () => {
+    const sourcesIndex = [
+      "# Index",
+      "",
+      "## Sources",
+      "",
+      "- [[Sources — AI General]] — aggregate index",
+      "",
+    ].join("\n");
+    await writeFile(path.join(wikiDir, "index.md"), sourcesIndex);
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "seed index"]);
+
+    const sourceDraft = `---\ntype: source\ntitle: Fresh Source\naliases: []\ncreated: 2026-07-08\nupdated: 2026-07-08\ntags: []\nsources: [https://example.com/s]\n---\n\n# Fresh Source\n\nA newly captured source.`;
+    const proposal = makeProposal({
+      kind: "source",
+      topicKey: "fresh-source",
+      targetPath: "sources/Fresh Source.md",
+      draft: sourceDraft,
+      relatedPages: [],
+    });
+    const res = await applyWikiProposal(proposal, { ...realCommitDeps(), catalogKinds: ["concept", "source"] });
+    expect(res.outcome).toBe("applied");
+
+    const subject = (await git(["log", "-1", "--format=%s"])).out;
+    expect(subject).toBe("[source-drafter] draft: sources/Fresh Source.md");
+    // The commit carries the page AND the wired index.md.
+    const names = (await git(["show", "--name-only", "--format=", "HEAD"])).out;
+    expect(names).toContain("data/wiki/sources/Fresh Source.md");
+    expect(names).toContain("data/wiki/index.md");
+    // The catalog line landed under ## Sources.
+    const idx = await readFile(path.join(wikiDir, "index.md"), "utf8");
+    expect(idx).toContain("- [[Fresh Source]] — A newly captured source.");
+    // Tree clean.
     expect((await git(["status", "--porcelain"])).out).toBe("");
   });
 

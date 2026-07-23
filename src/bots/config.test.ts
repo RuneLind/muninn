@@ -489,6 +489,29 @@ describe("bot discovery", () => {
       expect(found!.wikiAutoCommit).toEqual({});
     });
 
+    test("keeps a valid wikiAutoCommit.catalogKinds array", () => {
+      setupTestBot("_test_autocommit_catalog", {
+        config: { wikiAutoCommit: { catalogKinds: ["concept", "source"] } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_catalog");
+      expect(found).toBeDefined();
+      expect(found!.wikiAutoCommit).toEqual({ catalogKinds: ["concept", "source"] });
+    });
+
+    test("drops a mistyped wikiAutoCommit.catalogKinds (non-array) but keeps the block", () => {
+      setupTestBot("_test_autocommit_badcatalog", {
+        config: { wikiAutoCommit: { push: false, catalogKinds: "concept" } },
+      });
+
+      const bots = discoverAllBots();
+      const found = bots.find((b) => b.name === "_test_autocommit_badcatalog");
+      expect(found).toBeDefined();
+      // The bad array field is dropped; push survives.
+      expect(found!.wikiAutoCommit).toEqual({ push: false });
+    });
+
     test("keeps a valid wikiSynthesisBot string and flows it through discovery", () => {
       setupTestBot("_test_wikisynth", {
         config: { wikiSynthesisBot: "melosys" },

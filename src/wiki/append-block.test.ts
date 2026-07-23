@@ -1,6 +1,10 @@
 import { test, expect } from "bun:test";
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { appendBlockToPage, spliceSentinelBlock, type AppendBlockOptions } from "./append-block.ts";
 import { buildFactcheckBlock, FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
+import { commitWikiChange, __resetForTest } from "./commit.ts";
 import { sha256 } from "../gardener/util.ts";
 
 const BLOCK = buildFactcheckBlock("Overall: mostly accurate.\n\n✅ **Claim A**\nReasoning.", "2026-07-22");
@@ -101,6 +105,92 @@ test("appendBlockToPage skips reindex when collections is empty (still writes + 
   expect(files["/wiki/analyses/page.md"]).toContain("factcheck:start");
   expect(files["/wiki/log.md"]).toContain("factcheck | Page Title");
   expect(reindexed).toEqual([]);
+});
+
+test("appendBlockToPage invokes the commit seam with [page, log.md] and the fact-check message", async () => {
+  const files: Record<string, string> = { "/wiki/analyses/page.md": "# Page\n\nBody.\n" };
+  const commits: { paths: string[]; message: string }[] = [];
+  const { opts } = makeDeps(files, {
+    commit: async (paths, message) => {
+      commits.push({ paths, message });
+    },
+  });
+  const res = await appendBlockToPage(opts);
+  expect(res.outcome).toBe("written");
+  expect(commits).toHaveLength(1);
+  expect(commits[0]!.paths).toEqual(["analyses/page.md", "log.md"]);
+  expect(commits[0]!.message).toBe("[fact-check] annotate: analyses/page.md");
+});
+
+test("appendBlockToPage does NOT commit on a stale baseHash (no write, no commit)", async () => {
+  const files: Record<string, string> = { "/wiki/analyses/page.md": "# Page\n\nBody.\n" };
+  let commitCalls = 0;
+  const { opts } = makeDeps(files, { baseHash: "deadbeef", commit: async () => { commitCalls++; } });
+  const res = await appendBlockToPage(opts);
+  expect(res.outcome).toBe("stale");
+  expect(commitCalls).toBe(0);
+});
+
+test("appendBlockToPage produces exactly one [fact-check] commit (page + log.md), tree clean", async () => {
+  __resetForTest();
+  const base = await mkdtemp(path.join(tmpdir(), "factcheck-append-"));
+  try {
+    // Fixture repo with the wiki nested at data/wiki (huginn-jarvis layout).
+    const repo = await mkdtemp(path.join(base, "repo-"));
+    const wikiDir = path.join(repo, "data", "wiki");
+    await mkdir(path.join(wikiDir, "analyses"), { recursive: true });
+    const relPath = "analyses/page.md";
+    const abs = path.join(wikiDir, relPath);
+    const initial = "# Page\n\nBody prose.\n";
+    await writeFile(abs, initial);
+    const git = async (args: string[]) => {
+      const proc = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
+      const out = (await new Response(proc.stdout).text()).trim();
+      await proc.exited;
+      return out;
+    };
+    await git(["init", "-b", "main"]);
+    await git(["config", "user.email", "a@b.c"]);
+    await git(["config", "user.name", "Fixture"]);
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "init"]);
+
+    const res = await appendBlockToPage({
+      wikiDir,
+      relPath,
+      block: BLOCK,
+      baseHash: sha256(initial),
+      collections: [],
+      logTitle: "Page Title",
+      now: () => Date.UTC(2026, 6, 22, 12, 0, 0),
+      readFile: async (p) => {
+        try {
+          return await Bun.file(p).text();
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (p, content) => {
+        await Bun.write(p, content);
+      },
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push: false }),
+    });
+    expect(res.outcome).toBe("written");
+
+    // Exactly one new commit, on top of init, with the fact-check message.
+    const subjects = (await git(["log", "--format=%s"])).split("\n");
+    expect(subjects).toEqual(["[fact-check] annotate: analyses/page.md", "init"]);
+    // It carries the page AND log.md (repo-relative under data/wiki).
+    const names = (await git(["show", "--name-only", "--format=", "HEAD"])).split("\n").sort();
+    expect(names).toEqual(["data/wiki/analyses/page.md", "data/wiki/log.md"]);
+    // Tree clean afterward.
+    expect(await git(["status", "--porcelain"])).toBe("");
+  } finally {
+    __resetForTest();
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("buildFactcheckBlock blockquotes every line and wraps in sentinels", () => {

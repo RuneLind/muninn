@@ -60,8 +60,33 @@ const CONCEPT_SECTION: Record<"ai" | "life", string> = {
   life: "Health / Learning",
 };
 
+/** The `## Sources` section heading (level 2) individual source-page catalog
+ *  lines slot under — matches the real huginn-jarvis index.md, where source
+ *  pages live as `- [[Title]] — one-liner` bullets under `## Sources` (the human
+ *  lint pass later regroups them into dated `### Focused source pages` batches). */
+const SOURCES_SECTION = "Sources";
+
+/** Default cataloging policy: only `concept` pages get an index.md line — the
+ *  historical behavior, byte-identical for any wiki that doesn't opt in. A wiki
+ *  opts additional kinds in via `wikiAutoCommit.catalogKinds` (e.g. jarvis adds
+ *  `source`). Entities are NEVER cataloged regardless (see {@link catalogPage}). */
+export const DEFAULT_CATALOG_KINDS: string[] = ["concept"];
+
 /** Hard cap on the index one-liner (rationale / first body paragraph). */
 const ONE_LINER_MAX = 120;
+
+/**
+ * Per-wiki cataloging policy decision: does a page of `kind` get an index.md
+ * catalog line under this wiki's `catalogKinds` policy? Entities are ALWAYS
+ * skipped — the Entities index is split People / Organizations / Products and
+ * which one an entity is isn't derivable from the proposal — so even a wiki that
+ * lists "entity" in its policy never catalogs one here. Every other kind is
+ * cataloged iff it appears in `catalogKinds` (default `["concept"]`).
+ */
+export function catalogPage(kind: WikiProposalKind, catalogKinds: string[] = DEFAULT_CATALOG_KINDS): boolean {
+  if (kind === "entity") return false;
+  return catalogKinds.includes(kind);
+}
 
 export interface IndexEntryInput {
   title: string;
@@ -73,27 +98,39 @@ export interface IndexEntryInput {
   body?: string | null;
 }
 
-/** The planned index insertion: the bullet line + the `### ` section it belongs under. */
+/** The planned index insertion: the bullet line + the section it belongs under. */
 export interface IndexEntry {
   line: string;
-  /** The `### ` heading text WITHOUT the leading `### ` (e.g. "AI / Claude / Coding"). */
+  /** The heading text WITHOUT its leading `#`s (e.g. "AI / Claude / Coding"). */
   section: string;
+  /** Heading depth of `section` — `3` for the `### ` concept sections, `2` for
+   *  the `## Sources` section. Defaults to `3` when absent (concept path). */
+  headingLevel?: 2 | 3;
 }
 
 /**
  * Build the `- [[Title]] — <one-liner>` index bullet for a new page, plus the
- * `### ` section it belongs under. Returns null for any non-`concept` kind: the
- * Entities index is split People / Organizations / Products & projects (which one
- * an entity is isn't derivable from the proposal), and `source` pages are a flat
- * per-article archive with no `## Concepts` index line at all — both are left out
- * of the index (surfaced in the gate's wiring preview as an "entity/source skip").
+ * section it belongs under — subject to the wiki's per-kind cataloging policy
+ * (`catalogKinds`, default `["concept"]`). Returns null when the page's kind
+ * isn't cataloged for this wiki (see {@link catalogPage}):
+ *   - `entity` — ALWAYS null (the Entities index is split People / Organizations
+ *     / Products & projects; which one isn't derivable from the proposal).
+ *   - `source` — null under the default policy; a wiki that opts sources in
+ *     (jarvis: `catalogKinds: ["concept", "source"]`) gets a `## Sources` line.
+ *   - `concept` — the default; a `### <domain section>` line.
+ * A skipped kind is surfaced in the gate's wiring preview as a "not cataloged".
  */
-export function buildIndexEntry(input: IndexEntryInput): IndexEntry | null {
-  if (input.kind !== "concept") return null;
-  const section = CONCEPT_SECTION[input.domain];
+export function buildIndexEntry(
+  input: IndexEntryInput,
+  catalogKinds: string[] = DEFAULT_CATALOG_KINDS,
+): IndexEntry | null {
+  if (!catalogPage(input.kind, catalogKinds)) return null;
   const oneLiner = indexOneLiner(input.rationale, input.body);
   const line = oneLiner ? `- [[${input.title}]] — ${oneLiner}` : `- [[${input.title}]]`;
-  return { line, section };
+  if (input.kind === "source") {
+    return { line, section: SOURCES_SECTION, headingLevel: 2 };
+  }
+  return { line, section: CONCEPT_SECTION[input.domain], headingLevel: 3 };
 }
 
 /** Rationale (first non-empty line) → first body paragraph, whitespace-collapsed, ≤120 chars. */
@@ -149,7 +186,8 @@ export function insertIndexLine(indexContent: string, entry: IndexEntry): Insert
   }
 
   const lines = indexContent.split("\n");
-  const headingIdx = lines.findIndex((l) => l.trimEnd() === `### ${entry.section}`);
+  const heading = `${"#".repeat(entry.headingLevel ?? 3)} ${entry.section}`;
+  const headingIdx = lines.findIndex((l) => l.trimEnd() === heading);
   if (headingIdx === -1) {
     return { content: indexContent, changed: false, reason: "section-not-found" };
   }

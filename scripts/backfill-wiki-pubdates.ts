@@ -36,8 +36,21 @@
  *   bun scripts/backfill-wiki-pubdates.ts --limit 20      # cap planned edits (dry-run inspection)
  *   bun scripts/backfill-wiki-pubdates.ts --wiki-dir <abs>
  *   bun scripts/backfill-wiki-pubdates.ts --transcripts-dir <abs>
+ *   bun scripts/backfill-wiki-pubdates.ts --apply --commit    # write + git-commit + reindex
+ *   bun scripts/backfill-wiki-pubdates.ts --apply --no-commit # write, never commit
  *
- * Env: WIKI_DIR (wiki root override), YT_TRANSCRIPTS_DIR (transcripts override).
+ * Wiki-writing convention (ALL future wiki-writing scripts must follow this):
+ * a script that mutates wiki pages MUST route its commit through
+ * `commitWikiChange` (`src/wiki/commit.ts`) — never a bare `git add`/`commit` —
+ * so it stages ONLY the paths it wrote, commits on the default branch, and pushes
+ * asynchronously, matching the gardener/fact-check writers. It then fires the
+ * huginn reindex for the touched collections so search picks the edits up. With
+ * `--apply`, this commit+reindex is ON by default WHEN THE REPO WAS CLEAN at
+ * script start (so a script run in a dirty working tree stays hands-off); pass
+ * `--commit` to force it on a dirty repo, `--no-commit` to suppress it entirely.
+ *
+ * Env: WIKI_DIR (wiki root override), YT_TRANSCRIPTS_DIR (transcripts override),
+ * KNOWLEDGE_API_URL (huginn base for the reindex, default http://localhost:8321).
  * Defaults: jarvis wiki (`../huginn/huginn-jarvis/data/wiki`) and
  * `~/source/private/youtube-transcripts`.
  */
@@ -49,6 +62,8 @@ import {
   stripFrontmatter,
   extractPubDate,
 } from "../src/wiki/store.ts";
+import { commitWikiChange } from "../src/wiki/commit.ts";
+import { fetchKnowledgeApi } from "../src/ai/knowledge-api-client.ts";
 
 // ── args / config ────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -58,6 +73,9 @@ const flagVal = (name: string): string | undefined => {
   return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
 };
 const limit = Number(flagVal("--limit") ?? "0") || 0;
+const commitFlag = args.includes("--commit");
+const noCommitFlag = args.includes("--no-commit");
+const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..");
 const WIKI_ROOT = path.resolve(
@@ -73,6 +91,29 @@ const TRANSCRIPTS_ROOT = path.resolve(
 const ISO = /(\d{4}-\d{2}-\d{2})/;
 const DATE_LINE_RE = /^Date:\s*(\d{4}-\d{2}-\d{2})\s*$/m;
 const SOURCE_LINE_COUNT_RE = /^Source:/gm;
+
+/** True when the git repo containing `dir` has NO uncommitted changes at all
+ *  (`git status --porcelain` empty). Used to decide whether `--commit` is on by
+ *  default. A non-repo / git failure reads as "not clean" (conservative). */
+async function repoCleanAtStart(dir: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["git", "-C", dir, "status", "--porcelain"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = (await new Response(proc.stdout).text()).trim();
+    const code = await proc.exited;
+    return code === 0 && out.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** The huginn collection a wiki-relative path reindexes into (mirrors
+ *  `reindexCollectionFor` in src/gardener/apply.ts): life/** → wiki-life, else wiki. */
+function collectionForPath(rel: string): "wiki" | "wiki-life" {
+  return rel.startsWith("life/") ? "wiki-life" : "wiki";
+}
 
 /** Extract a YouTube video id from a watch/short/embed url; undefined otherwise. */
 function youtubeId(url: string | undefined): string | undefined {
@@ -307,13 +348,49 @@ for (const p of toApply) {
   console.log(`  [${p.reason === "in-page-date" ? "date-line" : "yt-upload "}] ${p.date}  ${p.relPath}`);
 }
 
+// Decide commit+reindex BEFORE writing so a clean-repo check reflects the
+// pre-write state, not the tree we're about to dirty.
+const repoWasClean = apply ? await repoCleanAtStart(WIKI_ROOT) : false;
+const shouldCommit = apply && !noCommitFlag && (commitFlag || repoWasClean);
+
 if (apply) {
   let written = 0;
+  const writtenRelPaths: string[] = [];
   for (const p of toApply) {
     await Bun.write(path.join(WIKI_ROOT, p.relPath), p.next);
+    writtenRelPaths.push(p.relPath);
     written++;
   }
   console.log(`\n✓ wrote ${written} files.`);
+
+  if (shouldCommit && writtenRelPaths.length > 0) {
+    const message = `[script:backfill-wiki-pubdates] update: ${writtenRelPaths.length} pages`;
+    // Await the async push settle so this short-lived script doesn't exit before
+    // the commit's push lands (the helper awaits only the local commit itself).
+    await new Promise<void>((resolve) => {
+      commitWikiChange(WIKI_ROOT, writtenRelPaths, message, { onPushSettled: resolve }).catch(() =>
+        resolve(),
+      );
+    });
+    console.log(`✓ committed ${writtenRelPaths.length} pages (${message}).`);
+
+    // Fire the huginn reindex for every touched collection.
+    const collections = new Set(writtenRelPaths.map(collectionForPath));
+    for (const collection of collections) {
+      try {
+        await fetchKnowledgeApi(
+          KNOWLEDGE_API_URL,
+          `/api/collections/${encodeURIComponent(collection)}/update`,
+          { method: "POST", timeoutMs: 10_000 },
+        );
+        console.log(`✓ reindex triggered for "${collection}".`);
+      } catch (err) {
+        console.warn(`! reindex for "${collection}" failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  } else if (apply && !noCommitFlag && !repoWasClean && !commitFlag) {
+    console.log(`(repo not clean at start — skipping commit; pass --commit to force)`);
+  }
 } else {
   console.log(`\n(dry-run — no files written; pass --apply to write)`);
 }

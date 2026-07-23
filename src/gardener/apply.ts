@@ -59,6 +59,13 @@ export interface ApplyDeps {
    * commit seam. Wired to `commitWikiChange` at the route; never throws.
    */
   commit?: (paths: string[], message: string) => Promise<void>;
+  /**
+   * Per-wiki cataloging policy — which page kinds get an index.md catalog line
+   * (`buildIndexEntry`). Absent ⇒ the default `["concept"]` (today's behavior).
+   * jarvis opts sources in via `wikiAutoCommit.catalogKinds` (`["concept",
+   * "source"]`); entities are never cataloged regardless.
+   */
+  catalogKinds?: string[];
 }
 
 /**
@@ -363,16 +370,20 @@ async function runWireStage(
   // (a) index.md entry — create mode only.
   if (proposal.mode === "create") {
     try {
-      const entry = buildIndexEntry({
-        title,
-        kind: proposal.kind,
-        domain,
-        rationale: proposal.rationale,
-        body: stripFrontmatter(proposal.draft),
-      });
-      if (!entry) {
-        log.info("Wiki-gardener wire: index entry skipped for {title} (entity — file manually)", {
+      const entry = buildIndexEntry(
+        {
           title,
+          kind: proposal.kind,
+          domain,
+          rationale: proposal.rationale,
+          body: stripFrontmatter(proposal.draft),
+        },
+        deps.catalogKinds,
+      );
+      if (!entry) {
+        log.info("Wiki-gardener wire: index entry skipped for {title} ({kind} — not cataloged for this wiki)", {
+          title,
+          kind: proposal.kind,
         });
       } else {
         const indexPath = path.join(deps.wikiDir, "index.md");

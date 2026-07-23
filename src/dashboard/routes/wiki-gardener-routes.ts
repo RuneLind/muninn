@@ -155,10 +155,13 @@ async function triggerReindex(collection: string): Promise<void> {
 
 /** Build the filesystem/index/reindex/commit seams the apply step needs for a
  *  wiki root. `push` defaults to true (per-bot `wikiAutoCommit.push` opt-out); the
- *  commit helper still skips the push when the repo has no remote/upstream. */
-function applyDepsFor(wikiDir: string, push: boolean): ApplyDeps {
+ *  commit helper still skips the push when the repo has no remote/upstream.
+ *  `catalogKinds` is the wiki's per-kind index-cataloging policy (default
+ *  `["concept"]` when the bot doesn't set `wikiAutoCommit.catalogKinds`). */
+function applyDepsFor(wikiDir: string, push: boolean, catalogKinds?: string[]): ApplyDeps {
   return {
     wikiDir,
+    catalogKinds,
     now: () => Date.now(),
     readFile: readFileOrNull,
     // Bun.write creates parent directories itself.
@@ -1241,7 +1244,7 @@ export function registerWikiGardenerRoutes(
     try {
       result = await applyWikiProposal(
         claimed,
-        applyDepsFor(bot.wikiDir, bot.wikiAutoCommit?.push ?? true),
+        applyDepsFor(bot.wikiDir, bot.wikiAutoCommit?.push ?? true, bot.wikiAutoCommit?.catalogKinds),
       );
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);

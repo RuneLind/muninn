@@ -58,6 +58,13 @@ export interface AppendBlockOptions {
   refreshIndex: () => Promise<void>;
   /** Best-effort huginn reindex for a collection; must never throw. */
   reindex: (collection: string) => Promise<void>;
+  /**
+   * Commit the just-written page + log.md into their git repo. Optional — absent
+   * in tests that don't exercise the commit seam. Wired to `commitWikiChange` at
+   * the route; never throws and (per the helper) awaits only the local commit —
+   * the push is dispatched async, so the HTTP response isn't blocked on the network.
+   */
+  commit?: (paths: string[], message: string) => Promise<void>;
 }
 
 function escapeRegExp(s: string): string {
@@ -166,6 +173,21 @@ export async function appendBlockToPage(opts: AppendBlockOptions): Promise<Appen
         error: errMsg(err),
       });
     });
+  }
+
+  // 7. Commit the page + log.md into the wiki repo (last step; the helper awaits
+  //    only the local commit, dispatching the push async, so the HTTP response is
+  //    never blocked on the network). Non-fatal — a commit failure never undoes
+  //    the applied write. No-op when no commit seam is wired (unit tests).
+  if (opts.commit) {
+    try {
+      await opts.commit([relPath, "log.md"], `[fact-check] annotate: ${relPath}`);
+    } catch (err) {
+      log.warn("Fact-check append: commit failed for {path}: {error}", {
+        path: relPath,
+        error: errMsg(err),
+      });
+    }
   }
 
   return { outcome: "written", writtenPath: relPath };

@@ -207,9 +207,13 @@ export interface CorrectiveRetrievalBotConfig {
 }
 
 /** Per-bot auto-commit config for programmatic wiki writes (gardener apply,
- *  source drafter). `push` defaults to true — opt out to commit locally only. */
+ *  source drafter). `push` defaults to true — opt out to commit locally only.
+ *  `catalogKinds` is the wiki's index-cataloging policy — which page kinds get an
+ *  index.md catalog line (default `["concept"]`; jarvis adds `"source"`). Entities
+ *  are never cataloged regardless of this list (see `catalogPage` in wire.ts). */
 export interface WikiAutoCommitConfig {
   push?: boolean;
+  catalogKinds?: string[];
 }
 
 export interface JiraAnalysisVariant {
@@ -553,6 +557,7 @@ function validateWikiAutoCommitConfig(settings: Record<string, unknown>, botName
     return;
   }
   validateScalarField(value as Record<string, unknown>, "push", "boolean", botName);
+  validateStringArrayField(value as Record<string, unknown>, "catalogKinds", botName);
 }
 
 function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
