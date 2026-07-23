@@ -8,11 +8,14 @@
  *
  * Config choices:
  *  - `interval_ms` daily (24h) — a 1-day staleness floor. Combined with
- *    `config.hour: 7`, `getDueWatchers`/`isScheduledTimeDue` fire it once per day
- *    at/after 07:00 Oslo; a missed window (muninn down) still fires the next day
+ *    `config.hour: 9`, `getDueWatchers`/`isScheduledTimeDue` fire it once per day
+ *    at/after 09:00 Oslo; a missed window (muninn down) still fires the next day
  *    (interval + hour gate both re-open). Same shape as the anthropic Daily row.
- *  - `config.hour: 7` — an early daytime fire, well clear of the gardener (hour
- *    10) and linter (hour 11) so the wiki watchers don't fire in the same tick.
+ *  - `config.hour: 9` — a daytime fire, clear of the common overnight quiet-hours
+ *    window (22–08) so the runner's quiet-hours gate doesn't skip it, and clear of
+ *    the gardener (hour 10) and linter (hour 11) so the wiki watchers don't fire in
+ *    the same tick. (The sweeper is quiet-hours run-exempt too, so a shifted
+ *    window can't silence it — the hour just keeps it off the busy slots.)
  *  - `config.timeoutMs: 300000` (5 min) — a sweep is fast (git status + commit +
  *    a non-blocking push); the runner's net is max(120s, timeoutMs + 30s).
  *
@@ -35,7 +38,8 @@ const apply = process.argv.includes("--apply");
 const NAME = "Wiki Committer";
 const DAILY_INTERVAL_MS = 86_400_000; // 24h — a 1-day staleness floor
 const committerConfig = {
-  hour: 7, // early daytime; clear of the gardener (10) and linter (11) slots
+  hour: 9, // daytime; clear of the common overnight quiet-hours window (22–08) and
+  // of the gardener (10) and linter (11) slots
   timeoutMs: 300_000, // 5 min — a sweep is fast (git status + commit + push)
 };
 

@@ -324,7 +324,7 @@ function indexCovList(cssClass: string, label: string, items: string[], linkable
 /** "uncommitted changes: N" badge for the Index card summary — rendered ONLY when
  *  the wiki's git subtree is dirty (N > 0). Red when the oldest dirty file has
  *  been sitting > 24h (a stale-uncommitted signal the daily sweeper should have
- *  caught); neutral/amber otherwise. Absent when clean, so a clean card stays
+ *  caught); amber otherwise. Absent when clean, so a clean card stays
  *  uncluttered. */
 function dirtyBadge(cov: IndexCoverage): string {
   const n = cov.dirtyCount || 0;

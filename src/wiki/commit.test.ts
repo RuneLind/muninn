@@ -2,7 +2,7 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { commitWikiChange, __resetForTest } from "./commit.ts";
+import { commitWikiChange, listWikiSubtreeDirty, gitToplevel, __resetForTest } from "./commit.ts";
 
 /**
  * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test
@@ -292,5 +292,80 @@ describe("commitWikiChange", () => {
     const names = await git(repo, ["show", "--name-only", "--format=", "HEAD"]);
     expect(names.out).toBe("data/wiki/concepts/G.md"); // only the page — log.md dropped
     expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
+  });
+
+  test("a staged rename + staged rm + modified + untracked all sweep into ONE commit", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    // Seed and commit tracked wiki pages to rename / delete / modify.
+    await writeFile(path.join(wikiDir, "concepts", "Old.md"), "# Old\n");
+    await writeFile(path.join(wikiDir, "concepts", "Mod.md"), "# Mod\n");
+    await writeFile(path.join(wikiDir, "concepts", "Gone.md"), "# Gone\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-q", "-m", "seed wiki"]);
+
+    // A human's UNCOMMITTED `git mv` (staged rename — the old path is staged as a
+    // deletion, which used to make the batched `git add` exit 128 and abort the
+    // whole sweep so nothing ever committed).
+    await git(repo, ["mv", "data/wiki/concepts/Old.md", "data/wiki/concepts/New.md"]);
+    // A staged `git rm` deletion.
+    await git(repo, ["rm", "-q", "data/wiki/concepts/Gone.md"]);
+    // An unstaged modification of a tracked file.
+    await writeFile(path.join(wikiDir, "concepts", "Mod.md"), "# Mod changed\n");
+    // A brand-new untracked file.
+    await writeFile(path.join(wikiDir, "concepts", "Fresh.md"), "# Fresh\n");
+
+    const top = await gitToplevel(wikiDir);
+    expect(top).not.toBeNull();
+    const { dirty, deletions } = await listWikiSubtreeDirty(top!, wikiDir);
+    // The rename origin + the `git rm` target are both absent-on-disk deletions.
+    expect(deletions).toContain("concepts/Old.md");
+    expect(deletions).toContain("concepts/Gone.md");
+
+    const result = await commitWikiChange(wikiDir, dirty, "[sweep] daily wiki sweep", {
+      push: false,
+      deletions,
+    });
+    expect(result).toEqual({ committed: true });
+
+    // Tree clean afterward — every dirty path was committed.
+    expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
+
+    // The commit records the rename (as R with -M, or D+A), the modification, the
+    // addition, and the deletion.
+    const status = await git(repo, ["show", "--name-status", "-M", "--format=", "HEAD"]);
+    // New page present, old page gone (rename either way).
+    expect(status.out).toContain("data/wiki/concepts/New.md");
+    expect(status.out).not.toMatch(/[AM]\s+data\/wiki\/concepts\/Old\.md/);
+    // Gone.md recorded as a deletion.
+    expect(status.out).toMatch(/D\s+data\/wiki\/concepts\/Gone\.md/);
+    // Mod modified, Fresh added.
+    expect(status.out).toMatch(/M\s+data\/wiki\/concepts\/Mod\.md/);
+    expect(status.out).toMatch(/A\s+data\/wiki\/concepts\/Fresh\.md/);
+    // New.md exists in the tree, Old.md does not.
+    expect(await Bun.file(path.join(wikiDir, "concepts", "New.md")).exists()).toBe(true);
+    expect(await Bun.file(path.join(wikiDir, "concepts", "Old.md")).exists()).toBe(false);
+  });
+
+  test("an unstaged deletion still commits as a D (byte-identical to before)", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "Doomed.md"), "# Doomed\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-q", "-m", "seed"]);
+
+    // Delete from the worktree WITHOUT `git rm` — an unstaged deletion.
+    await rm(path.join(wikiDir, "concepts", "Doomed.md"));
+
+    const top = await gitToplevel(wikiDir);
+    const { dirty, deletions } = await listWikiSubtreeDirty(top!, wikiDir);
+    expect(deletions).toContain("concepts/Doomed.md");
+
+    const result = await commitWikiChange(wikiDir, dirty, "[sweep] daily wiki sweep", {
+      push: false,
+      deletions,
+    });
+    expect(result).toEqual({ committed: true });
+    expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
+    const status = await git(repo, ["show", "--name-status", "--format=", "HEAD"]);
+    expect(status.out).toMatch(/D\s+data\/wiki\/concepts\/Doomed\.md/);
   });
 });

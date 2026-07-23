@@ -210,17 +210,23 @@ test("watcher gate model: per-watcher config.model, else Haiku default", async (
     watcher("X Highlights", "x", { model: "claude-sonnet-4-6" }),
     watcher("Email", "email", {}),
     watcher("Wiki Linter", "wiki-linter", {}),
+    watcher("Wiki Committer", "wiki-committer", {}),
   ];
   const o = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis")], watchers }));
   const x = o.pipeline.find((p) => p.job.startsWith("Watcher: X Highlights"))!;
   const email = o.pipeline.find((p) => p.job.startsWith("Watcher: Email"))!;
   const linter = o.pipeline.find((p) => p.job.startsWith("Watcher: Wiki Linter"))!;
+  const committer = o.pipeline.find((p) => p.job.startsWith("Watcher: Wiki Committer"))!;
 
   expect(x.model).toEqual({ value: "claude-sonnet-4-6", origin: "config" });
   expect(email.model.origin).toBe("default"); // Haiku default
   expect(email.model.value).toContain("haiku");
   expect(linter.model.value).toBe("—"); // report-only, no AI
   expect(linter.model.origin).toBe("none");
+  // The sweeper is a no-AI watcher, not a Haiku CLI job — no model, dedicated note.
+  expect(committer.model).toEqual({ value: "—", origin: "none" });
+  expect(committer.backend).toBe("none");
+  expect(committer.note).toBe("commit sweeper (no AI)");
 });
 
 test("actually-used column maps haiku_usage by source+bot and traces by bot", async () => {

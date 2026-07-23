@@ -296,11 +296,21 @@ async function commitInner(
   // disk — it's absent by design, and `git add -- <path>` stages the deletion, so
   // it must NOT be dropped. This is how the sweeper commits removed pages.
   const repoRel: string[] = [];
+  const repoRelDeletions: string[] = [];
   const dropped: string[] = [];
   for (const p of paths) {
     const abs = path.join(canonicalWiki, p);
-    if ((await pathExists(abs)) || opts.deletions.has(p)) {
-      repoRel.push(path.relative(top, abs));
+    const rel = path.relative(top, abs);
+    if (await pathExists(abs)) {
+      repoRel.push(rel);
+    } else if (opts.deletions.has(p)) {
+      // Absent-on-disk deletion — either an unstaged `rm` (present in HEAD, gone
+      // from the worktree) OR a human's ALREADY-staged `git rm` / `git mv` origin.
+      // Keep it in the commit pathspec, but stage it SEPARATELY below: a path
+      // already staged as a deletion makes a batched `git add` exit 128
+      // ("pathspec did not match any files"), which would abort the whole sweep.
+      repoRel.push(rel);
+      repoRelDeletions.push(rel);
     } else {
       dropped.push(p);
     }
@@ -316,10 +326,30 @@ async function commitInner(
     return { committed: false, reason: "nothing-to-commit" };
   }
 
-  const added = await git(top, ["add", "--", ...repoRel]);
-  if (added.code !== 0) {
-    log.warn("Wiki commit: git add failed in {top}: {error}", { top, error: added.stderr });
-    return { committed: false, reason: "error" };
+  // Stage the present paths in ONE batch. A deletion is never in this set (see
+  // above), so a staged rename/deletion in the wiki can't fail the pathspec and
+  // abort the batch — the recurring-every-sweep bug this guards.
+  const toAdd = repoRel.filter((r) => !repoRelDeletions.includes(r));
+  if (toAdd.length > 0) {
+    const added = await git(top, ["add", "--", ...toAdd]);
+    if (added.code !== 0) {
+      log.warn("Wiki commit: git add failed in {top}: {error}", { top, error: added.stderr });
+      return { committed: false, reason: "error" };
+    }
+  }
+  // Stage each deletion on its own, TOLERATING the exit-128 pathspec mismatch a
+  // path already staged as a deletion (human `git rm`/`git mv`) produces — it's
+  // already in the index, so it still lands in the commit. An UNSTAGED deletion
+  // (in HEAD, gone from the worktree, never `git rm`'d) stages here exactly as
+  // before, keeping that path byte-identical.
+  for (const del of repoRelDeletions) {
+    const addDel = await git(top, ["add", "--", del]);
+    if (addDel.code !== 0) {
+      log.debug("Wiki commit: '{path}' already staged as a deletion in {top} (tolerated)", {
+        top,
+        path: del,
+      });
+    }
   }
 
   // Nothing staged for OUR paths (unchanged since the last commit) → skip quietly.

@@ -63,6 +63,20 @@ export function accumulateWatcherUsage(acc: WatcherUsageAcc, u: HaikuUsage): voi
 // were evicted and could re-surface as duplicates.
 const MAX_NOTIFIED_IDS = 600;
 
+// Watcher types whose checker's side effect is NOT a user notification — the
+// `wiki-committer` sweeps a git commit, not a Telegram ping. Quiet hours must not
+// suppress the RUN itself (an hour-9 sweeper would never fire under the common
+// overnight 22–08 window); only the user-facing ALERT send is suppressed during
+// quiet hours (see `runWatchers`). Mirrors the `skipContentHash` per-type pattern.
+const QUIET_HOURS_RUN_EXEMPT: ReadonlySet<Watcher["type"]> = new Set(["wiki-committer"]);
+
+/** True when a watcher type still RUNS during the owner's quiet hours (its side
+ *  effect isn't a notification) — its user-facing alert send is suppressed
+ *  instead of the whole run being skipped. */
+export function isQuietHoursRunExempt(type: Watcher["type"]): boolean {
+  return QUIET_HOURS_RUN_EXEMPT.has(type);
+}
+
 /**
  * Per-watcher safety-net timeout. Each checker already applies its own model
  * timeout (X: `config.timeoutMs`, default 5 min; email: `spawnHaiku`, default
@@ -344,14 +358,23 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     }
 
     let requestId: string | undefined;
+    // True when the owner is in quiet hours AND this watcher type is exempt from
+    // the whole-run skip (wiki-committer): the checker runs, but its user-facing
+    // Telegram/Slack send is suppressed below.
+    let quietHours = false;
     try {
       // Check quiet hours — skip notifications but still mark as run (forced runs bypass)
       if (!forced) {
         const quiet = await isQuietHours(watcher.userId);
         if (quiet) {
-          await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
-          wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
-          return;
+          if (!isQuietHoursRunExempt(watcher.type)) {
+            await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+            wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
+            return;
+          }
+          // Exempt type: run the checker (perform its side effect) but suppress
+          // the user-facing alert send until quiet hours end.
+          quietHours = true;
         }
       }
 
@@ -469,24 +492,31 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         // Format as markdown (stored in DB), convert to platform format for send
         const markdown = formatAlerts(watcher, visibleAlerts);
 
-        // Send to Telegram (fall back to plain text if HTML is rejected)
-        agentStatus.set("sending_telegram", watcher.name);
-        const html = formatTelegramHtml(markdown);
-        try {
-          await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
-        } catch (sendErr) {
-          if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
-            log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
-            await api.sendMessage(watcher.userId, stripHtml(html));
-          } else {
-            throw sendErr;
+        if (quietHours) {
+          // Quiet-hours exempt watcher (wiki-committer): the sweep already ran;
+          // suppress the Telegram/Slack ping but still log + persist so the sweep
+          // stays auditable. The user sees it in-thread, not as an overnight ping.
+          log.info("Watcher \"{name}\" ran during quiet hours — user-facing alert send suppressed, sweep logged", { botName: tag, name: watcher.name });
+        } else {
+          // Send to Telegram (fall back to plain text if HTML is rejected)
+          agentStatus.set("sending_telegram", watcher.name);
+          const html = formatTelegramHtml(markdown);
+          try {
+            await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
+          } catch (sendErr) {
+            if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
+              log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
+              await api.sendMessage(watcher.userId, stripHtml(html));
+            } else {
+              throw sendErr;
+            }
           }
-        }
 
-        // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
-        const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };
-        if (slackConfig.slackChannels?.length) {
-          await sendToSlackChannels(slackConfig.slackBot || tag, markdown, slackConfig.slackChannels);
+          // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
+          const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };
+          if (slackConfig.slackChannels?.length) {
+            await sendToSlackChannels(slackConfig.slackBot || tag, markdown, slackConfig.slackChannels);
+          }
         }
 
         // Persist markdown in messages so Claude can reference it in conversation.

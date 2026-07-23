@@ -744,10 +744,20 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   clean/off-branch/not-a-repo, matching the linter. Per-day-stable alert id
   (`wiki-sweep-<YYYY-MM-DD>`); the runner's `skipContentHash` covers it so a
   recurring daily sweep with the same summary still notifies.
+- **Quiet-hours run-exempt**: the sweeper's side effect is a **git commit, not a
+  user notification**, so the runner does NOT skip its run during the owner's
+  quiet hours (the common overnight 22–08 window would otherwise silence an
+  hour-9 sweeper forever). `wiki-committer` is in the runner's
+  `QUIET_HOURS_RUN_EXEMPT` set (`isQuietHoursRunExempt`) — during quiet hours the
+  checker RUNS (commits + logs activity) but its Telegram/Slack **alert send is
+  suppressed** (the alert still persists in-thread + activity-logs, so the sweep
+  stays auditable without an overnight ping). Every other watcher type keeps the
+  original whole-run quiet-hours skip.
 - **Seed**: `bun scripts/setup-wiki-committer.ts [--apply]` — daily interval
   (24h, a **1-day staleness floor** so a missed window still fires the next day)
-  + `config.hour: 7` (early, clear of the gardener's 10 and linter's 11 slots),
-  `config.timeoutMs: 300000`. Idempotent: skips if a `wiki-committer` row exists.
+  + `config.hour: 9` (daytime, clear of the common overnight quiet-hours window
+  AND of the gardener's 10 and linter's 11 slots), `config.timeoutMs: 300000`.
+  Idempotent: skips if a `wiki-committer` row exists.
 - Schema: the `watchers.type` CHECK gains `'wiki-committer'` (migration `064`,
   mirrored in `db/init.sql`).
 
