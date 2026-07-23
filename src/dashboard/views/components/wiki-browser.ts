@@ -968,6 +968,15 @@ function refreshStartBody(): void {
   if (el && currentName === null) el.innerHTML = startBodyHtml();
 }
 
+/** Atlas gets the full viewport while its tab is active on the start view —
+ *  the left browse pane + right rail collapse (`.atlas-full` on the layout,
+ *  styled in wiki-page.ts). Restored on tab switch / page open. Toggled BEFORE
+ *  initAtlas builds so the canvas lays out (and draws edges) at final width. */
+function setAtlasFull(on: boolean): void {
+  const layout = document.querySelector(".wiki-layout");
+  if (layout) layout.classList.toggle("atlas-full", on);
+}
+
 function renderStart(): void {
   currentName = null;
   hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
@@ -991,6 +1000,7 @@ function renderStart(): void {
     "</div>" +
     `<div id="startBody">${startBodyHtml()}</div></div>`;
   document.getElementById("articleWrap")!.innerHTML = html;
+  setAtlasFull(startTab === "atlas");
   // The Atlas tab lazy-loads its projection into the placeholder just inserted.
   if (startTab === "atlas") {
     // Atlas passes (relPath, name); drop the display name — the relPath is
@@ -1239,6 +1249,7 @@ function articleHeadHtml(m: WikiListing): string {
  *  the link graph, plus the lazy Similar section; outgoing links stay empty. */
 function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  setAtlasFull(false);
   currentName = m.name;
   if (push) {
     history.pushState({ page: currentName }, "", pageUrl(currentName));
@@ -1325,6 +1336,9 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
+      // Restore the 3-pane layout on every outcome — an error rendered into
+      // #articleWrap has replaced the atlas, so the panes must come back too.
+      setAtlasFull(false);
       if (data.error) {
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
@@ -1362,6 +1376,7 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
       renderList();
     })
     .catch((err: Error) => {
+      setAtlasFull(false);
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
     });

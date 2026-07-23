@@ -100,6 +100,13 @@ export async function renderWikiPage(opts?: {
       padding: 16px 24px;
       height: calc(100vh - 63px);
     }
+    /* Atlas needs the full viewport for a useful overview: while the Atlas tab
+       is active on the start view the layout collapses to the article column
+       alone (class toggled by setAtlasFull in wiki-browser.ts); switching tabs
+       or opening a page restores the 3-pane reader. */
+    .wiki-layout.atlas-full { grid-template-columns: minmax(0, 1fr); }
+    .wiki-layout.atlas-full > .wiki-pane:first-child,
+    .wiki-layout.atlas-full > .wiki-conn-pane { display: none; }
     .wiki-pane {
       background: var(--bg-panel);
       border: 1px solid var(--border-primary);
