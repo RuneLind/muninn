@@ -27,6 +27,7 @@ import {
   parseClusters,
   summarizeClusterDrops,
   type ClusterDropEntry,
+  type ClusterDropTally,
 } from "./cluster.ts";
 import { resolveTarget } from "./target-resolve.ts";
 import {
@@ -115,6 +116,17 @@ export interface GardenerDeps {
   onProgress?: (p: GardenerProgress) => void;
   shouldAbort?: () => boolean;
   onAborted?: (skippedClusterDocKeys: string[]) => void;
+  /**
+   * Fires once per run with the AGGREGATE cluster-drop tally over ALL drop sites
+   * (pre-resolve filter + pass-1 map skips + post-resolve size/cap gate) — the same
+   * `dropTally` the per-run log line prints, not the span-scoped partials. Emitted
+   * right after that log line, so it covers the completed-but-all-dropped case (a run
+   * that clustered nothing draftable). The backlog drain persists it so the review
+   * gate can render WHY a drain drafted nothing without consulting the logs. Not
+   * emitted on the harvest-floor early return (docs < minClusterSize) — the renderer
+   * falls back to the attempted-doc count there, which is honestly a size failure.
+   */
+  onTally?: (tally: ClusterDropTally) => void;
 }
 
 /** One progress report emitted by a run (drafts fields present only while drafting). */
@@ -316,6 +328,11 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       topicsSuffix: dropTally.clusters_dropped_topics ? ` — ${dropTally.clusters_dropped_topics}` : "",
     },
   );
+  // Surface the aggregate tally to the backlog drain's journal (byte-identical for
+  // the weekly path, which passes no hook). Emitted here — after the log line and
+  // BEFORE the zero-cluster early return — so a completed-but-all-dropped run still
+  // reports its drop reasons.
+  deps.onTally?.(dropTally);
 
   if (resolved.length === 0) {
     return [];

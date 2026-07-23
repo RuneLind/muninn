@@ -22,6 +22,7 @@
 
 import type { WatcherAlert } from "../types.ts";
 import type { GardenerProgress } from "./runner.ts";
+import type { ClusterDropTally } from "./cluster.ts";
 import type { QueuedDoc, ListedDoc as WikiListedDoc, WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { SummaryCollectionListings } from "../summaries/list-collections.ts";
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
@@ -136,6 +137,8 @@ export interface GardenerRunHooks {
   onProgress?: (p: GardenerProgress) => void;
   shouldAbort?: () => boolean;
   onAborted?: (skippedClusterDocKeys: string[]) => void;
+  /** Aggregate cluster-drop tally (mirrors {@link GardenerDeps.onTally}). */
+  onTally?: (tally: ClusterDropTally) => void;
 }
 
 // ── Batch selection ──────────────────────────────────────────────────────────
@@ -327,6 +330,20 @@ export interface LastBacklogRun {
   eligible?: number;
   /** The resolved threshold the guard fired against — for honest UI copy (per-bot configurable). */
   minClusterSize?: number;
+  /**
+   * How many docs the run ATTEMPTED to draft (the assembled batch size). Persisted
+   * alongside {@link dropTally} so a zero-draft run can render "drained N docs, none
+   * clustered" — the tally counts CLUSTERS, this counts DOCS (kept distinct in copy).
+   */
+  attemptedDocs?: number;
+  /**
+   * The aggregate cluster-drop tally from the run (size/skip/hallucinated/duplicate/
+   * cap). Present on a completed run that reached clustering; absent on the
+   * harvest-floor early return (renderer falls back to {@link attemptedDocs}) and the
+   * `insufficient` short-circuit (which never ran the pipeline). Lets the review gate
+   * show WHY a drain drafted nothing without opening the logs.
+   */
+  dropTally?: ClusterDropTally;
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
@@ -432,6 +449,10 @@ interface BacklogRunResult {
   outcome?: "insufficient";
   eligible?: number;
   minClusterSize?: number;
+  /** Assembled batch size (docs attempted) — persisted for the zero-draft reason line. */
+  attemptedDocs?: number;
+  /** Aggregate cluster-drop tally (absent when the pipeline never clustered). */
+  dropTally?: ClusterDropTally;
 }
 
 /**
@@ -540,6 +561,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         outcome: "insufficient",
         eligible: assembled.batchKeys.length,
         minClusterSize: deps.minClusterSize,
+        attemptedDocs: assembled.batchKeys.length,
       };
     }
 
@@ -556,6 +578,10 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     let aborted = false;
     let skippedKeys: string[] = [];
     let lastTotal = 0;
+    // Captured from the runner's onTally hook (fires once, after clustering) — the
+    // aggregate drop tally the zero-draft reason line renders from. Undefined when
+    // the run early-returns at the harvest floor before any tally is computed.
+    let dropTally: ClusterDropTally | undefined;
     const hooks: GardenerRunHooks = {
       onProgress: (p) => {
         const prog = backlogProgress.get(deps.botName);
@@ -585,6 +611,9 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       onAborted: (keys) => {
         aborted = true;
         skippedKeys = keys;
+      },
+      onTally: (t) => {
+        dropTally = t;
       },
     };
 
@@ -622,6 +651,12 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       offered: zeroDraftBurn ? 0 : assembled.batchKeys.length,
       drafted,
       ...(aborted ? { cancelled: { drafted, of: lastTotal } } : {}),
+      // Persist the drop reason so the review gate can explain a zero-draft run.
+      // minClusterSize rides along on every completed run (the zero-draft copy needs
+      // it too, not just the `insufficient` short-circuit).
+      attemptedDocs: assembled.batchKeys.length,
+      minClusterSize: deps.minClusterSize,
+      ...(dropTally ? { dropTally } : {}),
     };
     } finally {
       // Complete the registry run on EVERY exit path — success, soft-cancel
@@ -654,7 +689,13 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         offered: r.offered,
         drafted: r.drafted,
         ...(r.cancelled ? { cancelled: r.cancelled } : {}),
-        ...(r.outcome ? { outcome: r.outcome, eligible: r.eligible, minClusterSize: r.minClusterSize } : {}),
+        ...(r.outcome ? { outcome: r.outcome, eligible: r.eligible } : {}),
+        // minClusterSize rides on both the `insufficient` short-circuit AND a completed
+        // zero-draft run (its reason copy says "need N on one topic"), so forward it
+        // whenever present rather than only inside the outcome block.
+        ...(r.minClusterSize !== undefined ? { minClusterSize: r.minClusterSize } : {}),
+        ...(r.attemptedDocs !== undefined ? { attemptedDocs: r.attemptedDocs } : {}),
+        ...(r.dropTally ? { dropTally: r.dropTally } : {}),
       });
     },
     (err) => {

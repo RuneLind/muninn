@@ -28,6 +28,22 @@ export interface BacklogCollection {
   queued: number;
 }
 
+/**
+ * Hand-mirror of `src/gardener/cluster.ts`'s `ClusterDropTally` — the per-reason
+ * cluster-drop counts. Kept as a standalone interface (not imported) so the client
+ * bundle never pulls in gardener logic, the same reason {@link LastBacklogRun} is
+ * declared twice.
+ */
+export interface BacklogDropTally {
+  clusters_dropped: number;
+  clusters_dropped_size: number;
+  clusters_dropped_skip: number;
+  clusters_dropped_hallucinated: number;
+  clusters_dropped_duplicate: number;
+  clusters_dropped_cap: number;
+  clusters_dropped_topics: string;
+}
+
 export interface LastBacklogRun {
   finishedAt: number;
   offered: number;
@@ -44,6 +60,10 @@ export interface LastBacklogRun {
   eligible?: number;
   /** The resolved threshold the guard fired against — per-bot configurable, default 3. */
   minClusterSize?: number;
+  /** Docs the run attempted (assembled batch size) — the zero-draft reason line's count. */
+  attemptedDocs?: number;
+  /** Aggregate cluster-drop tally — absent when the pipeline never clustered. */
+  dropTally?: BacklogDropTally;
 }
 
 /**
@@ -118,7 +138,9 @@ export interface IngestBacklogResponse {
 /** The pure, testable model behind the strip — numbers + control gating. */
 export interface BacklogStripModel {
   totalNeverIngested: number;
-  perSource: { label: string; queued: number }[];
+  /** All-time doc total across every collection — the coverage sentence's denominator. */
+  allTimeTotal: number;
+  perSource: { label: string; queued: number; total: number }[];
   eligibleNow: number;
   offeredStillQueued: number;
   /** New arrivals inside the watcher window (the sentence's lead segment). */
@@ -273,7 +295,12 @@ export function backlogStripModel(
     : "";
   return {
     totalNeverIngested: queued,
-    perSource: (data.byCollection || []).map((c) => ({ label: c.label, queued: c.queued })),
+    allTimeTotal: Math.max(0, numOr(data.total, 0)),
+    perSource: (data.byCollection || []).map((c) => ({
+      label: c.label,
+      queued: c.queued,
+      total: Math.max(0, numOr(c.total, 0)),
+    })),
     eligibleNow: remaining,
     offeredStillQueued,
     freshTotal,
@@ -386,23 +413,32 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
 }
 
 /**
- * The de-emphasized, collapsed all-time accounting (pure HTML): the exhausted
- * tail ("offered in past runs, never drafted") + the all-time never-ingested
- * total in the always-visible summary, with the per-source breakdown behind the
- * toggle. Empty when nothing is queued. This is where "280 never ingested ·
- * YouTube 269" went — true numbers, but dead weight as a headline.
+ * The de-emphasized, collapsed all-time accounting (pure HTML) — reframed as an
+ * honest COVERAGE sentence (R2): "N of M all-time docs have no wiki footprint",
+ * collapsing the redundant "offered in past runs, never drafted / never ingested"
+ * pair into one line, with a per-source "queued of total" breakdown behind the
+ * toggle. The parenthetical names the tail for what it is: the pre-auto-drafter
+ * backlog (new captures now auto-draft their own source page). Empty when nothing
+ * is queued. This is where "280 never ingested · YouTube 269" went — true numbers,
+ * but dead weight as a headline.
  */
 export function backlogTailHtml(model: BacklogStripModel): string {
   if (model.totalNeverIngested <= 0) return "";
-  const summaryParts: string[] = [];
-  if (model.offeredStillQueued > 0) {
-    summaryParts.push(`${strong(model.offeredStillQueued)} offered in past runs, never drafted`);
-  }
-  summaryParts.push(`${strong(model.totalNeverIngested)} never ingested all-time`);
-  const breakdown = perSourceBreakdownHtml(model.perSource.map((s) => ({ label: s.label, n: s.queued })));
+  // Denominator falls back to the queued count on a degraded response with no all-
+  // time total (never < numerator, so "N of N" reads as full-tail rather than lying).
+  const total = Math.max(model.allTimeTotal, model.totalNeverIngested);
+  const summary =
+    `${strong(model.totalNeverIngested)} of ${strong(total)} all-time docs have no wiki footprint` +
+    ` <span class="bk-note">(pre-auto-drafter tail; new captures auto-draft their own source page)</span>`;
+  const breakdown = model.perSource
+    .map(
+      (s) =>
+        `${esc(s.label)} <span class="bk-n">${s.queued}</span> of <span class="bk-n">${s.total}</span>`,
+    )
+    .join('<span class="bk-sep"> · </span>');
   return (
     '<details class="bk-tail">' +
-    `<summary>${summaryParts.join('<span class="bk-sep"> · </span>')}</summary>` +
+    `<summary>${summary}</summary>` +
     `<span class="bk-tail-body">${breakdown}</span>` +
     "</details>"
   );
@@ -525,8 +561,8 @@ export function backlogSourceDraftHtml(model: BacklogStripModel): string {
     `<select class="bk-source-draft-select" data-backlog-select="source-draft" ` +
     `aria-label="Collection to draft source pages for">${options}</select>` +
     `<button class="gard-btn bk-source-draft-btn" data-backlog-action="source-draft"${disabled} ` +
-    'title="Draft one .mdx source page each for a small batch of uncovered docs in the selected collection — into the review gate below">' +
-    "Draft source pages</button></span>"
+    'title="Backfill the oldest uncovered docs in the selected collection — one .mdx source page each, into the review gate below">' +
+    "Backfill oldest</button></span>"
   );
 }
 
@@ -598,13 +634,54 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   if (run.drafted > 0) {
     return ` <span class="bk-run-note">last run: ${run.drafted} draft(s) from ${run.offered} docs — see proposals below</span>`;
   }
-  // Offered docs but drafted nothing: the batch was burned into the offered set
-  // (at-most-once) with zero result — the silent tail-burn this campaign guards.
-  // Warn (not a bland "done") so a reviewer notices and can Reset to retry.
-  if (run.offered > 0) {
-    return ` <span class="bk-warn">⚠ last run offered ${run.offered} docs but drafted nothing — those docs are now marked offered; Reset to retry</span>`;
+  // Completed, un-cancelled, zero-draft run. Post-#311 such a run rolls its offered
+  // set back to 0 (batch stays eligible), so the old `offered > 0 && drafted === 0`
+  // ⚠ burn branch is now unreachable here — a *cancelled* zero-draft hits
+  // run.cancelled above, an errored one hits run.error, and the #311 rollback means
+  // a completed one always reports offered:0. So the burn warning is folded into the
+  // reason line below: surface WHY nothing drafted (from the drop tally + attempted-
+  // doc count) so a reviewer needn't open the logs.
+  if (run.attemptedDocs !== undefined || run.dropTally) {
+    return backlogZeroDraftReasonHtml(run);
   }
   return ` <span class="bk-run-note">last run finished — nothing to draft</span>`;
+}
+
+/**
+ * Why a completed run drafted nothing (pure HTML), from the aggregate drop tally +
+ * attempted-doc count. The tally counts CLUSTERS, `attemptedDocs` counts DOCS — kept
+ * distinct in the copy. The dominant, most-legible case (nothing reached cluster
+ * size, incl. the harvest-floor fallback with no tally) reads "drained N docs, none
+ * clustered — all below cluster size (need M on one topic)"; other drop reasons
+ * (skip/duplicate/cap/hallucinated) are surfaced explicitly when present.
+ */
+function backlogZeroDraftReasonHtml(run: LastBacklogRun): string {
+  const min = run.minClusterSize ?? 3;
+  const t = run.dropTally;
+  const docPhrase =
+    run.attemptedDocs !== undefined
+      ? `drained ${run.attemptedDocs} doc${run.attemptedDocs === 1 ? "" : "s"}`
+      : "drafted nothing";
+  const extras: string[] = [];
+  if (t) {
+    if (t.clusters_dropped_skip > 0)
+      extras.push(`${t.clusters_dropped_skip} already covered/recently rejected`);
+    if (t.clusters_dropped_duplicate > 0) extras.push(`${t.clusters_dropped_duplicate} duplicate`);
+    if (t.clusters_dropped_cap > 0) extras.push(`${t.clusters_dropped_cap} over the per-run cap`);
+    if (t.clusters_dropped_hallucinated > 0)
+      extras.push(`${t.clusters_dropped_hallucinated} referenced unknown docs`);
+  }
+  let reason: string;
+  if (extras.length === 0) {
+    // No non-size drops (or no tally at all) — the whole story is "nothing clustered".
+    reason = `none clustered — all below cluster size (need ${min} on one topic)`;
+  } else {
+    const parts = [...extras];
+    const sizeDrops = t?.clusters_dropped_size ?? 0;
+    if (sizeDrops > 0) parts.push(`${sizeDrops} below cluster size`);
+    reason = `no draftable cluster — ${parts.join(", ")}`;
+  }
+  return ` <span class="bk-run-note">last run ${docPhrase}, ${esc(reason)}</span>`;
 }
 
 /**

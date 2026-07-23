@@ -60,7 +60,9 @@ describe("clampSourceBacklogLimit", () => {
 });
 
 describe("selectSourceBacklogDocs", () => {
-  test("returns the full uncovered queue in listing order (no cap — the loop applies the limit)", () => {
+  test("returns the full uncovered queue (no cap — the loop applies the limit); undated keep order", () => {
+    // These ytDocs are undated (no date + no date-prefix id), so oldest-first is a
+    // stable no-op — they come back in their original listing order.
     const docs = [ytDoc(1), ytDoc(2), ytDoc(3), ytDoc(4)];
     const { queued, totalQueued } = selectSourceBacklogDocs(
       { "youtube-summaries": docs },
@@ -70,6 +72,22 @@ describe("selectSourceBacklogDocs", () => {
     );
     expect(totalQueued).toBe(4);
     expect(queued.map((d) => d.id)).toEqual(docs.map((d) => d.id));
+  });
+
+  test("sorts OLDEST-first (R2 backfill), undated docs LAST", () => {
+    // A mix: two dated docs (out of chronological order) + one undated. Oldest dated
+    // first, newest dated next, undated (no date, no date-prefix) trailing.
+    const older: BacklogListedDoc = { collection: "youtube-summaries", id: "old11111111", url: "https://youtu.be/old", date: "2024-01-05" };
+    const newer: BacklogListedDoc = { collection: "youtube-summaries", id: "new11111111", url: "https://youtu.be/new", date: "2026-03-01" };
+    const undated: BacklogListedDoc = { collection: "youtube-summaries", id: "undated1111", url: "https://youtu.be/und" };
+    // Feed them newest, undated, oldest to prove the sort (not input order) decides.
+    const { queued } = selectSourceBacklogDocs(
+      { "youtube-summaries": [newer, undated, older] },
+      emptyRefs,
+      new Set(),
+      new Set(),
+    );
+    expect(queued.map((d) => d.id)).toEqual(["old11111111", "new11111111", "undated1111"]);
   });
 
   test("consumed / pending / url-referenced docs are excluded from the queue", () => {

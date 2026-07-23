@@ -32,10 +32,10 @@ import {
 function base(over: Partial<IngestBacklogResponse> = {}): IngestBacklogResponse {
   return {
     byCollection: [
-      { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 310 },
-      { collection: "x-articles", source: "x-article", label: "X", total: 0, ingested: 0, queued: 7 },
-      { collection: "anthropic-summaries", source: "anthropic", label: "Anthropic", total: 0, ingested: 0, queued: 7 },
-      { collection: "tiktok-summaries", source: "tiktok", label: "TikTok", total: 0, ingested: 0, queued: 5 },
+      { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 380, ingested: 70, queued: 310 },
+      { collection: "x-articles", source: "x-article", label: "X", total: 8, ingested: 1, queued: 7 },
+      { collection: "anthropic-summaries", source: "anthropic", label: "Anthropic", total: 7, ingested: 0, queued: 7 },
+      { collection: "tiktok-summaries", source: "tiktok", label: "TikTok", total: 5, ingested: 0, queued: 5 },
     ],
     total: 400,
     ingested: 71,
@@ -126,19 +126,26 @@ describe("recency-first sentence + collapsed tail", () => {
     expect(backlogSentenceHtml(m)).not.toContain("new (last");
   });
 
-  test("tail holds the all-time accounting: offered summary + per-source breakdown", () => {
+  test("tail reframes as a coverage sentence with a per-source 'queued of total' breakdown", () => {
     const html = backlogTailHtml(backlogStripModel(base({ remaining: 0, offeredStillQueued: 255 }), 0));
     expect(html).toContain("<details");
-    expect(html).toContain("255</span> offered in past runs, never drafted");
-    expect(html).toContain("329</span> never ingested all-time");
-    expect(html).toContain("YouTube"); // per-source breakdown behind the toggle
-    expect(html).toContain("310");
+    // Coverage sentence: N of M docs have no wiki footprint (queued of all-time total).
+    expect(html).toContain("329</span> of <span class=\"bk-strong\">400</span> all-time docs have no wiki footprint");
+    expect(html).toContain("pre-auto-drafter tail");
+    // The redundant "offered in past runs / never ingested" pair is collapsed away.
+    expect(html).not.toContain("offered in past runs");
+    expect(html).not.toContain("never ingested");
+    // Per-source "queued of total" behind the toggle.
+    expect(html).toContain("YouTube");
+    expect(html).toContain("310</span> of <span class=\"bk-n\">380");
   });
 
-  test("tail without an offered set still shows the all-time summary; empty backlog renders nothing", () => {
-    const noOffered = backlogTailHtml(backlogStripModel(base({ offeredStillQueued: 0 }), 0));
-    expect(noOffered).not.toContain("offered in past runs");
-    expect(noOffered).toContain("never ingested all-time");
+  test("degraded response (no all-time total) falls back to 'N of N'; empty backlog renders nothing", () => {
+    // total 0 → allTimeTotal 0, but the denominator floors at the queued count so it
+    // reads as a full-tail "N of N" rather than lying with a smaller total.
+    const degraded = base({ remaining: 0, offeredStillQueued: 0, total: 0 });
+    const html = backlogTailHtml(backlogStripModel(degraded, 0));
+    expect(html).toContain("329</span> of <span class=\"bk-strong\">329</span>");
     const empty = backlogTailHtml(
       backlogStripModel(base({ queued: 0, remaining: 0, offeredStillQueued: 0, byCollection: [] }), 0),
     );
@@ -472,24 +479,74 @@ describe("backlogOutcomeHtml — insufficient + zero-draft burn (PR 2)", () => {
     expect(withoutMin).toContain("below the minimum cluster size of 3");
   });
 
-  test("offered docs but drafted nothing → warn style + burn copy + Reset hint", () => {
-    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 9, drafted: 0 });
-    expect(html).toContain("bk-warn");
-    expect(html).toContain("⚠");
-    expect(html).toContain("offered 9 docs but drafted nothing");
-    expect(html).toContain("Reset to retry");
-  });
-
   test("a real done run (drafted > 0) is unchanged — no warn", () => {
     const html = backlogOutcomeHtml({ finishedAt: 1, offered: 9, drafted: 2 });
     expect(html).toContain("2 draft(s) from 9 docs");
     expect(html).not.toContain("bk-warn");
   });
 
-  test("nothing offered and nothing drafted → plain 'nothing to draft' note (not a warn)", () => {
+  test("bare zero-draft run (no attempted count / no tally) → plain 'nothing to draft' note", () => {
     const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0 });
     expect(html).toContain("nothing to draft");
     expect(html).not.toContain("bk-warn");
+  });
+});
+
+describe("backlogOutcomeHtml — zero-draft reason line (R1)", () => {
+  const tally = (over: Partial<import("./wiki-gardener-strip.ts").BacklogDropTally> = {}) => ({
+    clusters_dropped: 0,
+    clusters_dropped_size: 0,
+    clusters_dropped_skip: 0,
+    clusters_dropped_hallucinated: 0,
+    clusters_dropped_duplicate: 0,
+    clusters_dropped_cap: 0,
+    clusters_dropped_topics: "",
+    ...over,
+  });
+
+  test("completed run that clustered nothing → 'drained N docs, none clustered — all below cluster size'", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 4, minClusterSize: 3,
+      dropTally: tally({ clusters_dropped: 2, clusters_dropped_size: 2 }),
+    });
+    expect(html).toContain("drained 4 docs");
+    expect(html).toContain("none clustered — all below cluster size (need 3 on one topic)");
+    // The old ⚠ burn warning is folded away — never rendered for a completed run.
+    expect(html).not.toContain("bk-warn");
+  });
+
+  test("singular doc phrasing", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 1, minClusterSize: 3 });
+    expect(html).toContain("drained 1 doc,");
+  });
+
+  test("non-size drops (skip/duplicate/cap/hallucinated) are surfaced explicitly", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 6, minClusterSize: 3,
+      dropTally: tally({
+        clusters_dropped: 4,
+        clusters_dropped_skip: 1,
+        clusters_dropped_duplicate: 1,
+        clusters_dropped_cap: 1,
+        clusters_dropped_hallucinated: 1,
+      }),
+    });
+    expect(html).toContain("no draftable cluster");
+    expect(html).toContain("1 already covered/recently rejected");
+    expect(html).toContain("1 duplicate");
+    expect(html).toContain("1 over the per-run cap");
+    expect(html).toContain("1 referenced unknown docs");
+  });
+
+  test("harvest-floor fallback (attempted count, no tally) → still names the size failure", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 2, minClusterSize: 3 });
+    expect(html).toContain("drained 2 docs");
+    expect(html).toContain("all below cluster size (need 3 on one topic)");
+  });
+
+  test("minClusterSize defaults to 3 when absent", () => {
+    const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 5 });
+    expect(html).toContain("need 3 on one topic");
   });
 });
 
@@ -567,8 +624,8 @@ describe("source-page drafter control", () => {
     expect(html).toContain('data-backlog-action="source-draft"');
     // A collection <select> is rendered alongside the button.
     expect(html).toContain('data-backlog-select="source-draft"');
-    // The button is appended to the full strip.
-    expect(backlogStripHtml(m)).toContain("Draft source pages");
+    // The button is appended to the full strip (renamed to "Backfill oldest").
+    expect(backlogStripHtml(m)).toContain("Backfill oldest");
   });
 
   test("hidden while a run is in flight", () => {

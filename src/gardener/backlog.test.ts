@@ -481,6 +481,8 @@ describe("startBacklogRun", () => {
     expect(recorded!.eligible).toBe(2);
     expect(recorded!.offered).toBe(0);
     expect(recorded!.drafted).toBe(0);
+    // Attempted-doc count persisted for the strip's reason line (= the too-small batch).
+    expect(recorded!.attemptedDocs).toBe(2);
     expect(gardenerRunInFlight("jarvis")).toBe(false);
   });
 
@@ -596,6 +598,84 @@ describe("startBacklogRun", () => {
     expect(persists).toEqual([["c/a", "c/b", "c/c", "c/z"]]);
     expect(recorded!.offered).toBe(3);
     expect(recorded!.drafted).toBe(1);
+  });
+
+  test("captures the onTally drop tally + attempted-doc count on a zero-draft run (R1)", async () => {
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    const tally = {
+      clusters_dropped: 3,
+      clusters_dropped_size: 3,
+      clusters_dropped_skip: 0,
+      clusters_dropped_hallucinated: 0,
+      clusters_dropped_duplicate: 0,
+      clusters_dropped_cap: 0,
+      clusters_dropped_topics: "solo-0(size,n:1)",
+    };
+
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 3,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      // A completed run that clustered nothing draftable: fire onTally, draft nothing.
+      runGardener: async (_a, hooks) => {
+        hooks.onTally?.(tally);
+        return [];
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    expect(recorded).not.toBeNull();
+    // The tally + attempted-doc count + threshold ride onto the durable last-run record.
+    expect(recorded!.dropTally).toEqual(tally);
+    expect(recorded!.attemptedDocs).toBe(3);
+    expect(recorded!.minClusterSize).toBe(3);
+    // Zero-draft rollback still reports offered:0.
+    expect(recorded!.offered).toBe(0);
+    expect(recorded!.drafted).toBe(0);
+  });
+
+  test("harvest-floor zero-draft (onTally never fires) still persists the attempted-doc count", async () => {
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 3,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      runGardener: async () => [], // early-returned before clustering → no onTally
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    expect(recorded).not.toBeNull();
+    expect(recorded!.dropTally).toBeUndefined();
+    expect(recorded!.attemptedDocs).toBe(3);
+    expect(recorded!.minClusterSize).toBe(3);
   });
 
   test("auto-recovers a pending journal (returns undrafted docs) BEFORE offering the new batch", async () => {

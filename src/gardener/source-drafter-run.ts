@@ -272,15 +272,18 @@ export function defaultSourceBacklogDeps(
 }
 
 /**
- * The FULL uncovered queue (listing order) plus its size. Pure: reuses the SAME
+ * The FULL uncovered queue (OLDEST-FIRST) plus its size. Pure: reuses the SAME
  * partition the ingest-backlog counter uses ({@link computeIngestBacklog}) —
  * consumed-wins / pending-wins / URL-referenced-wins / id-referenced-wins — so the
  * batch drains exactly the "queued" tail. Deliberately NOT capped here: the batch
  * loop ({@link runSourceDraftBacklog}) scans the whole queue in order and applies
  * the `limit` to real model attempts only, so cheap deterministic skips at the head
- * (no body/url, covered, stem collision) never strand the reachable tail. Selection
- * is listing order (newest-first is the drain's job, not this producer's — the
- * backlog tail is genuinely un-paged either way).
+ * (no body/url, covered, stem collision) never strand the reachable tail.
+ *
+ * Sort is OLDEST-first (ascending date) — a "Backfill oldest" tool should eat the
+ * chronological tail. Undated docs sort LAST (treated as +∞): clearly-dated old docs
+ * drain first, so a naive inversion of the drain's undated-as-−∞ convention can't
+ * float them to the head. Undated docs are R5's archive-tail territory, deferred here.
  */
 export function selectSourceBacklogDocs(
   listedBySource: Record<string, BacklogListedDoc[]>,
@@ -290,7 +293,11 @@ export function selectSourceBacklogDocs(
 ): { queued: QueuedDoc[]; totalQueued: number } {
   const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
   const queued = backlog.byCollection.flatMap((c) => c.queuedDocs);
-  return { queued, totalQueued: queued.length };
+  const sorted = [...queued].sort(
+    (a, b) =>
+      (docDateMs(a) ?? Number.POSITIVE_INFINITY) - (docDateMs(b) ?? Number.POSITIVE_INFINITY),
+  );
+  return { queued: sorted, totalQueued: sorted.length };
 }
 
 /**
