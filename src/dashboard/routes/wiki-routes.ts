@@ -702,9 +702,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   });
 
   // One page: rendered HTML + connections (outgoing links and backlinks).
+  // Resolves by `relPath` when given (exact, collision-proof — the Atlas tab's
+  // node clicks send the node's normalized relPath so a same-stem page in another
+  // folder can't shadow the intended page), else by `name` (first-stem-match, the
+  // legacy wikilink/list-click path).
   app.get("/api/wiki/page", async (c) => {
+    const relPathQ = c.req.query("relPath");
     const name = c.req.query("name");
-    if (!name) return c.json({ error: "name query param required" }, 400);
+    if (!relPathQ && !name) {
+      return c.json({ error: "name or relPath query param required" }, 400);
+    }
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
@@ -714,8 +721,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     if (unknownWiki) return c.json({ error: "no wiki configured for that name" }, 404);
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
-    const meta = index.resolve(name);
-    if (!meta) return c.json({ error: `no wiki page named "${name}"` }, 404);
+    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
+    if (!meta) {
+      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${name}"`;
+      return c.json({ error: `no wiki page for ${which}` }, 404);
+    }
     const markdown = await readWikiPage(index, meta);
     if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
 

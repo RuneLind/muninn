@@ -29,6 +29,7 @@ import {
   type ToolLogRow,
 } from "./wiki-explain.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
+import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import {
   serializeAskSession,
@@ -108,7 +109,7 @@ function pageUrl(name: string): string {
 let allPages: WikiListing[] = [];
 let currentName: string | null = null;
 const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "" };
-let startTab: "hubs" | "timeline" = "hubs";
+let startTab: "hubs" | "timeline" | "atlas" = "hubs";
 let tagsExpanded = false;
 
 // ── "What's new" digest (start view) ──────────────────────────────────
@@ -919,11 +920,15 @@ function timelineHtml(): string {
 }
 
 function startBodyHtml(): string {
+  if (startTab === "atlas") return atlasBodyHtml();
   return startTab === "hubs" ? hubsHtml() : timelineHtml();
 }
 
-/** Re-render the hubs/timeline area in place when filters change on the start view. */
+/** Re-render the hubs/timeline area in place when filters change on the start view.
+ *  The Atlas tab isn't filter-driven (it reads its own `/api/wiki/atlas`
+ *  projection), so a filter change must NOT wipe its built canvas + selection. */
 function refreshStartBody(): void {
+  if (startTab === "atlas") return;
   const el = document.getElementById("startBody");
   if (el && currentName === null) el.innerHTML = startBodyHtml();
 }
@@ -947,9 +952,14 @@ function renderStart(): void {
     '<div class="wiki-tabs">' +
     `<button class="wiki-tab${startTab === "hubs" ? " active" : ""}" data-tab="hubs">Hubs</button>` +
     `<button class="wiki-tab${startTab === "timeline" ? " active" : ""}" data-tab="timeline">Timeline</button>` +
+    `<button class="wiki-tab${startTab === "atlas" ? " active" : ""}" data-tab="atlas">Atlas</button>` +
     "</div>" +
     `<div id="startBody">${startBodyHtml()}</div></div>`;
   document.getElementById("articleWrap")!.innerHTML = html;
+  // The Atlas tab lazy-loads its projection into the placeholder just inserted.
+  if (startTab === "atlas") {
+    initAtlas({ withWiki, openPage: loadPageByRelPath });
+  }
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
   // Re-attach the "what's new" card: reuse the cached render if we have it (tab
@@ -1256,7 +1266,21 @@ function loadPage(name: string, push: boolean): void {
     loadExplainer(listing, push);
     return;
   }
-  fetch(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)))
+  fetchAndRenderPage(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)), push);
+}
+
+/** Open a page by its exact normalized relPath — collision-proof navigation used
+ *  by the Atlas tab, where a same-stem page in another folder must not shadow the
+ *  intended one (the by-`name` route resolves first-stem-match). Atlas never maps
+ *  explainers, so this render path (no explainer branch) always applies. */
+function loadPageByRelPath(relPath: string, _name: string): void {
+  hideExplainPill();
+  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), true);
+}
+
+/** Shared fetch + article render for both by-name and by-relPath navigation. */
+function fetchAndRenderPage(url: string, push: boolean): void {
+  fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       if (data.error) {
@@ -1324,7 +1348,7 @@ document.body.addEventListener("click", (e) => {
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
-    startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline") || "hubs";
+    startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline" | "atlas") || "hubs";
     renderStart();
     return;
   }
