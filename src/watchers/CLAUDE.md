@@ -437,6 +437,21 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
   **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
   `lastNotifiedIds` dedup runs unconditionally, so a static id would drop every
   run after the first. `skipContentHash` is extended to cover `wiki-gardener`.
+- **Weekly-run drop-tally snapshot (drain parity).** `checkWikiGardener` wires the
+  runner's `onTally` hook (fires once after clustering, before the draft loop) and
+  persists a `WeeklyGardenerRun` (`{finishedAt, clustersFound, kept, dropped,
+  dropTally, evictedTopics}`) to `watcher_snapshots` key **`gardener:lastRun`** via
+  the existing `setWatcherSnapshot` — DISTINCT from the drain's `backlog:lastRun`
+  (`LastBacklogRun`), whose `attemptedDocs`/`fallbackDrafted` shape would collide.
+  Written in a `finally` around the run (success AND throw-after-clustering — the
+  tally's cluster counts are honest even if a later draft throws), best-effort so a
+  snapshot write never masks the run's error. The pure builder `buildWeeklyGardenerRun`
+  is exported + unit-tested. `onTally` gained a third arg (`allDropped:
+  ClusterDropEntry[]`) so `evictedTopics` is the LOSSLESS structured tail
+  (`{topicKey, reason, size}`), not the trace-capped 500-char topics string; the
+  drain ignores the arg. Surfaced on `/wiki/gardener` via the GET's `weeklyRun` live
+  field + the strip's `weeklyRunHtml` branch ("N clusters found, K kept (reason) — D
+  dropped") — the cap-eviction the page previously showed nothing about.
 
 **Review gate + apply (PR 2).** The `/wiki/gardener` dashboard page
 (`src/dashboard/routes/wiki-gardener-routes.ts` + `views/wiki-gardener-page.ts` +

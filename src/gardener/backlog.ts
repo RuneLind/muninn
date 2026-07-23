@@ -22,7 +22,7 @@
 
 import type { WatcherAlert } from "../types.ts";
 import type { GardenerProgress } from "./runner.ts";
-import type { ClusterDropTally } from "./cluster.ts";
+import type { ClusterDropTally, ClusterDropReason } from "./cluster.ts";
 import type { QueuedDoc, ListedDoc as WikiListedDoc, WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { SummaryCollectionListings } from "../summaries/list-collections.ts";
 import { computeIngestBacklog } from "../wiki/ingest-backlog.ts";
@@ -58,6 +58,17 @@ export const WIKI_GARDENER_RUN_KEY = "backlog:run";
  * in-memory `lastBacklogRuns` map.
  */
 export const WIKI_GARDENER_LAST_RUN_KEY = "backlog:lastRun";
+/**
+ * The `watcher_snapshots` key holding the most recent WEEKLY gardener run's
+ * {@link WeeklyGardenerRun} outcome — written by `checkWikiGardener` (the watcher
+ * path), NOT the drain. Deliberately DISTINCT from `backlog:lastRun` (the drain's
+ * {@link LastBacklogRun}, whose `attemptedDocs`/`fallbackDrafted`/… shape would
+ * collide): the weekly run knows a different, honest set of facts (clusters found /
+ * kept / dropped-by-reason / evicted topics). Backs the strip's weekly-run render
+ * branch so a cap-eviction ("26 found, 3 kept, 23 dropped") is visible on
+ * `/wiki/gardener` instead of dying as a log line.
+ */
+export const WIKI_GARDENER_WEEKLY_RUN_KEY = "gardener:lastRun";
 
 // ── Per-bot gardener mutex ───────────────────────────────────────────────────
 //
@@ -453,6 +464,45 @@ export interface LastBacklogRun {
    * no fallback fired (or it drafted nothing).
    */
   fallbackDrafted?: number;
+}
+
+/**
+ * One evicted (dropped) cluster in the WEEKLY run's snapshot — the structured,
+ * UNtruncated counterpart to {@link ClusterDropTally.clusters_dropped_topics}
+ * (which the trace caps ~500 chars). `topicKey` is the cluster's topic slug,
+ * `reason` why it was dropped, `size` its doc count.
+ */
+export interface WeeklyEvictedTopic {
+  topicKey: string;
+  reason: ClusterDropReason;
+  size: number;
+}
+
+/**
+ * The durable outcome of the most recent WEEKLY wiki-gardener run (the watcher
+ * path — NOT the drain). Persisted by `checkWikiGardener` to
+ * {@link WIKI_GARDENER_WEEKLY_RUN_KEY} so the review-gate strip can render WHY a
+ * weekly run drafted little/nothing (the cap-eviction case) without opening the
+ * logs. Declared here (write side) and hand-mirrored in the client strip
+ * (`wiki-gardener-strip.ts`) — same client-bundle-hygiene reason {@link LastBacklogRun}
+ * is declared twice.
+ *
+ * `clustersFound === kept + dropped` always holds; `dropTally` carries the per-reason
+ * counts (its own topics string stays trace-truncated), and {@link evictedTopics} is
+ * the lossless structured tail.
+ */
+export interface WeeklyGardenerRun {
+  finishedAt: number;
+  /** Total clusters the run produced (kept + dropped). */
+  clustersFound: number;
+  /** Clusters that survived the gate (== `resolved.length` == drafted candidates). */
+  kept: number;
+  /** Clusters dropped across all sites (== `dropTally.clusters_dropped`). */
+  dropped: number;
+  /** Per-reason drop counts (topics string is trace-truncated; use {@link evictedTopics} for the full tail). */
+  dropTally: ClusterDropTally;
+  /** The lossless, structured evicted-topic list — never truncated. */
+  evictedTopics: WeeklyEvictedTopic[];
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────

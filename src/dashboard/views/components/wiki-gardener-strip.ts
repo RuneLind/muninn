@@ -81,6 +81,22 @@ export interface LastBacklogRun {
 }
 
 /**
+ * Hand-mirror of `src/gardener/backlog.ts`'s `WeeklyGardenerRun` — the most recent
+ * WEEKLY gardener run's outcome (the watcher path, distinct from the manual drain's
+ * {@link LastBacklogRun}). Declared here so the client bundle never imports gardener
+ * logic (same rationale as {@link LastBacklogRun}/{@link BacklogDropTally}). Keep in
+ * sync with the write-side shape.
+ */
+export interface WeeklyGardenerRun {
+  finishedAt: number;
+  clustersFound: number;
+  kept: number;
+  dropped: number;
+  dropTally: BacklogDropTally;
+  evictedTopics: { topicKey: string; reason: string; size: number }[];
+}
+
+/**
  * The bot's `wiki-gardener` watcher, projected for the strip's fresh segment (the
  * "Run gardener now" affordance + next-run time). Merged into the LIVE fields on
  * every GET (never cached), mirroring the server's `BacklogWatcherInfo`. Absent on
@@ -145,6 +161,8 @@ export interface IngestBacklogResponse {
    */
   gardenerEnabled?: boolean;
   lastBacklogRun?: LastBacklogRun | null;
+  /** The most recent WEEKLY gardener run's outcome (watcher path). Null/absent ⇒ never completed a clustering pass. */
+  weeklyRun?: WeeklyGardenerRun | null;
   /** Live drain progress (null when idle / a weekly run holds the mutex). */
   progress?: BacklogProgress | null;
   /** Interrupted (crashed/errored) run awaiting Recover/Dismiss (PR 3). */
@@ -721,6 +739,61 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
     return backlogZeroDraftReasonHtml(run);
   }
   return ` <span class="bk-run-note">last run finished — nothing to draft</span>`;
+}
+
+/** Short drop-reason qualifiers for the weekly-run headline ("… 3 kept (cap) …"). */
+const WEEKLY_REASON_SHORT: Record<string, string> = {
+  cap: "cap",
+  size: "cluster size",
+  skip: "already covered",
+  duplicate: "duplicates",
+  hallucinated: "unknown docs",
+};
+
+/**
+ * Last WEEKLY gardener run note (pure HTML) — its OWN render branch, distinct from
+ * the drain's {@link backlogOutcomeHtml} (the two paths persist different snapshot
+ * shapes and can both show). Reads "last weekly run: 26 clusters found, 3 kept (cap)
+ * — 23 dropped", the `(cap)` naming the dominant drop reason so a cap-eviction is
+ * legible at a glance (the incident that showed nothing on the page). The FULL
+ * evicted-topic list rides in a `title` tooltip — lossless + inspectable — since the
+ * snapshot stores the structured (untruncated) tail. Empty when no weekly run has
+ * completed a clustering pass. Follows `backlogZeroDraftReasonHtml`'s copy
+ * conventions (`.bk-run-note`, "last … run …") but does NOT reuse it.
+ */
+export function weeklyRunHtml(run: WeeklyGardenerRun | null | undefined): string {
+  if (!run) return "";
+  const clustersFound = Math.max(0, numOr(run.clustersFound, 0));
+  const kept = Math.max(0, numOr(run.kept, 0));
+  const dropped = Math.max(0, numOr(run.dropped, 0));
+  if (clustersFound <= 0) {
+    return ` <span class="bk-run-note">last weekly run: no clusters found</span>`;
+  }
+  const foundPhrase = `${clustersFound} cluster${clustersFound === 1 ? "" : "s"} found`;
+  if (dropped <= 0) {
+    return ` <span class="bk-run-note">last weekly run: ${foundPhrase}, all ${kept} kept</span>`;
+  }
+  const t = run.dropTally;
+  const counts: [string, number][] = t
+    ? [
+        ["cap", t.clusters_dropped_cap],
+        ["size", t.clusters_dropped_size],
+        ["skip", t.clusters_dropped_skip],
+        ["duplicate", t.clusters_dropped_duplicate],
+        ["hallucinated", t.clusters_dropped_hallucinated],
+      ]
+    : [];
+  const dominant = counts.reduce<[string, number] | null>(
+    (best, c) => (c[1] > 0 && (!best || c[1] > best[1]) ? c : best),
+    null,
+  );
+  const qualifier = dominant ? ` (${WEEKLY_REASON_SHORT[dominant[0]] ?? dominant[0]})` : "";
+  const line = `last weekly run: ${foundPhrase}, ${kept} kept${qualifier} — ${dropped} dropped`;
+  const topics = Array.isArray(run.evictedTopics) ? run.evictedTopics : [];
+  const titleAttr = topics.length
+    ? ` title="${esc(topics.map((e) => `${e.topicKey} (${e.reason}, n:${e.size})`).join(", "))}"`
+    : "";
+  return ` <span class="bk-run-note"${titleAttr}>${esc(line)}</span>`;
 }
 
 /**

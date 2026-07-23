@@ -53,11 +53,13 @@ import {
   WIKI_GARDENER_OFFERED_KEY,
   WIKI_GARDENER_RUN_KEY,
   WIKI_GARDENER_LAST_RUN_KEY,
+  WIKI_GARDENER_WEEKLY_RUN_KEY,
   type AssembledBacklog,
   type BacklogProgress,
   type DraftedScanProposal,
   type GardenerRunHooks,
   type LastBacklogRun,
+  type WeeklyGardenerRun,
   type RunJournal,
 } from "../../gardener/backlog.ts";
 import { buildGardenerSeams } from "../../watchers/wiki-gardener.ts";
@@ -312,6 +314,13 @@ export interface BacklogLiveFields {
    */
   minClusterSize: number;
   lastBacklogRun: LastBacklogRun | null;
+  /**
+   * The most recent WEEKLY gardener run's outcome (the watcher path — distinct from
+   * `lastBacklogRun`, the manual drain). Read from the durable `gardener:lastRun`
+   * snapshot; null when the weekly run has never completed a clustering pass. Backs
+   * the strip's weekly-run render branch (clusters found / kept / dropped-by-reason).
+   */
+  weeklyRun: WeeklyGardenerRun | null;
   watcherSeeded: boolean;
   /**
    * Whether the wiki gardener is enabled for this bot (`bot.gardener?.enabled !==
@@ -876,6 +885,14 @@ export function registerWikiGardenerRoutes(
         if (snap && typeof snap === "object") lastBacklogRun = snap as LastBacklogRun;
       }
 
+      // Weekly-run outcome (watcher path) — durable-snapshot only (no in-memory
+      // record; the watcher fires out-of-band, unlike the dashboard-driven drain).
+      let weeklyRun: WeeklyGardenerRun | null = null;
+      if (watcher) {
+        const snap = await backlogDeps.getSnapshot(watcher.id, WIKI_GARDENER_WEEKLY_RUN_KEY);
+        if (snap && typeof snap === "object") weeklyRun = snap as WeeklyGardenerRun;
+      }
+
       // Interrupted-run detection: a journal that outlived its run (a crash or an
       // error settle KEEPS it) with no run currently in flight ⇒ surface a banner.
       let interrupted: BacklogLiveFields["interrupted"] = null;
@@ -923,6 +940,7 @@ export function registerWikiGardenerRoutes(
           freshWindowDays: minAgeDays,
           minClusterSize: gardenerCfg.minClusterSize,
           lastBacklogRun,
+          weeklyRun,
           watcherSeeded: !!watcher,
           gardenerEnabled: bot.gardener?.enabled !== false,
           watcher: watcherInfo,

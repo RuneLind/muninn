@@ -128,8 +128,13 @@ export interface GardenerDeps {
    * `keptClusters` is the post-gate survivor count (`resolved.length`) — it lets the
    * gate distinguish "nothing clustered" (0) from "clusters formed but every draft
    * failed" (>0 with `drafted === 0`), which the all-zeros tally alone can't.
+   * `dropped` is the raw aggregate drop list (`allDropped`) — the weekly checker's
+   * snapshot stores the UNtruncated evicted-topic tail from it (the tally's
+   * `clusters_dropped_topics` string is capped ~500 chars for the trace; a 26-cluster
+   * eviction would lose topics). The backlog drain's hook takes only the first two
+   * args and ignores this (fewer-params assignability keeps its signature unchanged).
    */
-  onTally?: (tally: ClusterDropTally, keptClusters: number) => void;
+  onTally?: (tally: ClusterDropTally, keptClusters: number, dropped: ClusterDropEntry[]) => void;
 }
 
 /** One progress report emitted by a run (drafts fields present only while drafting). */
@@ -335,7 +340,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // the weekly path, which passes no hook). Emitted here — after the log line and
   // BEFORE the zero-cluster early return — so a completed-but-all-dropped run still
   // reports its drop reasons.
-  deps.onTally?.(dropTally, resolved.length);
+  deps.onTally?.(dropTally, resolved.length, allDropped);
 
   if (resolved.length === 0) {
     return [];

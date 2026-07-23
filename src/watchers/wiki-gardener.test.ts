@@ -1,8 +1,9 @@
 import { test, expect, describe } from "bun:test";
-import { buildGardenerSeams, stampDraftClaudeSpan } from "./wiki-gardener.ts";
+import { buildGardenerSeams, stampDraftClaudeSpan, buildWeeklyGardenerRun } from "./wiki-gardener.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import type { Tracer } from "../tracing/index.ts";
+import type { ClusterDropEntry, ClusterDropTally } from "../gardener/cluster.ts";
 
 const CONFIG = {} as Config;
 
@@ -89,5 +90,49 @@ describe("stampDraftClaudeSpan — child-span-only draft telemetry", () => {
     expect(() =>
       stampDraftClaudeSpan(undefined, { model: "m", inputTokens: 1, outputTokens: 2 }, 5),
     ).not.toThrow();
+  });
+});
+
+describe("buildWeeklyGardenerRun — weekly-run snapshot shape (PR 2)", () => {
+  const tally = (over: Partial<ClusterDropTally> = {}): ClusterDropTally => ({
+    clusters_dropped: 0,
+    clusters_dropped_size: 0,
+    clusters_dropped_skip: 0,
+    clusters_dropped_hallucinated: 0,
+    clusters_dropped_duplicate: 0,
+    clusters_dropped_cap: 0,
+    clusters_dropped_topics: "",
+    ...over,
+  });
+
+  test("clustersFound === kept + dropped, and dropped mirrors the tally count", () => {
+    const dropped: ClusterDropEntry[] = [
+      { topicKey: "a", kind: "concept", size: 4, reason: "cap" },
+      { topicKey: "b", kind: "concept", size: 3, reason: "cap" },
+    ];
+    const snap = buildWeeklyGardenerRun(tally({ clusters_dropped: 23, clusters_dropped_cap: 23 }), 3, dropped, 999);
+    expect(snap.finishedAt).toBe(999);
+    expect(snap.kept).toBe(3);
+    expect(snap.dropped).toBe(23);
+    expect(snap.clustersFound).toBe(26); // 3 kept + 23 dropped
+  });
+
+  test("evictedTopics is the lossless structured tail (topicKey/reason/size), never the truncated string", () => {
+    const dropped: ClusterDropEntry[] = [
+      { topicKey: "rag-eval", kind: "concept", size: 4, reason: "cap", stripped: 1 },
+      { topicKey: "agents", kind: "entity", size: 2, reason: "size" },
+    ];
+    const snap = buildWeeklyGardenerRun(tally({ clusters_dropped: 2 }), 0, dropped);
+    expect(snap.evictedTopics).toEqual([
+      { topicKey: "rag-eval", reason: "cap", size: 4 },
+      { topicKey: "agents", reason: "size", size: 2 },
+    ]);
+  });
+
+  test("empty drop list → clustersFound === kept, no evicted topics", () => {
+    const snap = buildWeeklyGardenerRun(tally({ clusters_dropped: 0 }), 5, []);
+    expect(snap.clustersFound).toBe(5);
+    expect(snap.dropped).toBe(0);
+    expect(snap.evictedTopics).toEqual([]);
   });
 });

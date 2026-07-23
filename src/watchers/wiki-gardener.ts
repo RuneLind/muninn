@@ -31,7 +31,14 @@ import {
 } from "../db/wiki-proposals.ts";
 import { resolveGardenerConfig, GARDENER_DEFAULTS } from "../gardener/types.ts";
 import { runGardener, type GardenerDeps } from "../gardener/runner.ts";
-import { DRAFT_TIMEOUT_MS, runExclusive } from "../gardener/backlog.ts";
+import {
+  DRAFT_TIMEOUT_MS,
+  runExclusive,
+  WIKI_GARDENER_WEEKLY_RUN_KEY,
+  type WeeklyGardenerRun,
+} from "../gardener/backlog.ts";
+import type { ClusterDropEntry, ClusterDropTally } from "../gardener/cluster.ts";
+import { setWatcherSnapshot } from "../db/watchers.ts";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
 
@@ -265,6 +272,29 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
   return seams;
 }
 
+/**
+ * Build the durable weekly-run snapshot from the aggregate drop tally the runner's
+ * `onTally` hook emits. Pure + exported so the shape (and the `clustersFound === kept
+ * + dropped` invariant) is unit-testable without a DB. The evicted-topic list is the
+ * LOSSLESS structured tail — mapped straight off the raw `dropped` entries, never the
+ * tally's trace-truncated `clusters_dropped_topics` string.
+ */
+export function buildWeeklyGardenerRun(
+  dropTally: ClusterDropTally,
+  keptClusters: number,
+  dropped: ClusterDropEntry[],
+  now: number = Date.now(),
+): WeeklyGardenerRun {
+  return {
+    finishedAt: now,
+    clustersFound: keptClusters + dropTally.clusters_dropped,
+    kept: keptClusters,
+    dropped: dropTally.clusters_dropped,
+    dropTally,
+    evictedTopics: dropped.map((d) => ({ topicKey: d.topicKey, reason: d.reason, size: d.size })),
+  };
+}
+
 export async function checkWikiGardener(
   watcher: Watcher,
   botConfig: BotConfig,
@@ -297,6 +327,13 @@ export async function checkWikiGardener(
   // the runner — every tracer use is null-guarded.
   const tracer = telemetry?.tracer;
 
+  // Captured from the runner's `onTally` hook (fires once after clustering, before
+  // the draft loop) — persisted below as the durable weekly-run snapshot so the
+  // review-gate strip can render "N found, K kept, D dropped" (the cap-eviction the
+  // page showed nothing about). Undefined when the run early-returns at the harvest
+  // floor (never clustered) or is skipped for an in-flight drain.
+  let weeklyTally: { dropTally: ClusterDropTally; kept: number; dropped: ClusterDropEntry[] } | undefined;
+
   // Acquire the per-bot gardener mutex — if a manual backlog run is draining the
   // same wiki, skip this weekly fire (the in-flight batch covers the newest docs).
   // The runner still advances last_run_at, so that week's organic run is skipped.
@@ -311,6 +348,9 @@ export async function checkWikiGardener(
       draftTimeoutMs: DRAFT_TIMEOUT_MS,
       now: () => Date.now(),
       tracer,
+      onTally: (dropTally, kept, dropped) => {
+        weeklyTally = { dropTally, kept, dropped };
+      },
 
       listDocs: async (collection) => {
         const data = await fetchKnowledgeApi(
@@ -346,6 +386,28 @@ export async function checkWikiGardener(
   }
 
   // Errors propagate to the runner, whose catch calls `wt.error(...)` on this same
-  // span — no local finish/error, so the run stays a single connected trace.
-  return await run;
+  // span — no local finish/error, so the run stays a single connected trace. The
+  // `finally` persists the weekly-run snapshot on BOTH the success and the
+  // throw-after-clustering paths (the tally fires before the draft loop, so its
+  // cluster counts are honest even if a later draft throws); best-effort so a
+  // snapshot write never masks the run's own error or breaks the checker.
+  try {
+    return await run;
+  } finally {
+    if (weeklyTally) {
+      try {
+        await setWatcherSnapshot(
+          watcher.id,
+          WIKI_GARDENER_WEEKLY_RUN_KEY,
+          buildWeeklyGardenerRun(weeklyTally.dropTally, weeklyTally.kept, weeklyTally.dropped),
+        );
+      } catch (err) {
+        log.warn("Wiki-gardener: persisting weekly-run snapshot failed for \"{name}\": {error}", {
+          botName: name,
+          name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
 }
