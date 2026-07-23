@@ -285,6 +285,47 @@ describe("runGardener", () => {
     expect(alerts).toEqual([]);
   });
 
+  describe("onTally hook (R1)", () => {
+    test("fires once per run with the aggregate drop tally (0 drops on a clean run)", async () => {
+      const tallies: { clusters_dropped: number }[] = [];
+      const { deps } = makeDeps({ onTally: (t) => tallies.push(t) });
+      await runGardener(deps);
+      expect(tallies).toHaveLength(1);
+      expect(tallies[0]!.clusters_dropped).toBe(0);
+    });
+
+    test("a completed run that clusters nothing draftable reports its size drops", async () => {
+      // Three singleton clusters — each below minClusterSize(3), so all size-dropped
+      // at the post-resolve gate; nothing drafts, but the tally still fires.
+      const tallies: { clusters_dropped: number; clusters_dropped_size: number }[] = [];
+      const { deps, inserted } = makeDeps({
+        callCluster: async () =>
+          JSON.stringify(
+            KEYS.map((k, i) => ({
+              topicKey: `solo-${i}`,
+              kind: "concept",
+              domain: "ai",
+              label: `Solo ${i}`,
+              docIds: [k],
+            })),
+          ),
+        onTally: (t) => tallies.push(t),
+      });
+      const alerts = await runGardener(deps);
+      expect(inserted).toHaveLength(0);
+      expect(alerts).toEqual([]);
+      expect(tallies).toHaveLength(1);
+      expect(tallies[0]!.clusters_dropped_size).toBe(3);
+    });
+
+    test("NOT fired on the harvest-floor early return (docs < minClusterSize)", async () => {
+      const tallies: unknown[] = [];
+      const { deps } = makeDeps({ listDocs: async () => [{ id: IDS[0]! }], onTally: (t) => tallies.push(t) });
+      await runGardener(deps);
+      expect(tallies).toHaveLength(0);
+    });
+  });
+
   test("skips clusters whose topic was RECENTLY rejected (within the TTL window)", async () => {
     // A fresh rejection is in both the all-rejections set and the recent set, so
     // the cluster is skipped — nothing drafted.

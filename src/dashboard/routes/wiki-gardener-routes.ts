@@ -568,6 +568,7 @@ function buildBacklogGardenerDeps(
     onProgress: hooks.onProgress,
     shouldAbort: hooks.shouldAbort,
     onAborted: hooks.onAborted,
+    onTally: hooks.onTally,
     botName: bot.name,
     wikiDir: root,
     collections: SUMMARY_SOURCES.map((s) => s.collection),

@@ -349,7 +349,8 @@ const DROP_TOPICS_MAX_CHARS = 500;
  * (capped ~500 chars) so the weekly gardener's `cluster` span answers "why 0
  * clusters?" on `/traces` without an offline replay. Pure + reused by the log line.
  */
-export function summarizeClusterDrops(dropped: ClusterDropEntry[]): {
+/** The per-reason drop counts {@link summarizeClusterDrops} returns. */
+export interface ClusterDropTally {
   clusters_dropped: number;
   clusters_dropped_size: number;
   clusters_dropped_skip: number;
@@ -357,7 +358,9 @@ export function summarizeClusterDrops(dropped: ClusterDropEntry[]): {
   clusters_dropped_duplicate: number;
   clusters_dropped_cap: number;
   clusters_dropped_topics: string;
-} {
+}
+
+export function summarizeClusterDrops(dropped: ClusterDropEntry[]): ClusterDropTally {
   const count = (r: ClusterDropReason) => dropped.filter((d) => d.reason === r).length;
   const topics = dropped
     .map((d) => `${d.topicKey}(${d.reason},n:${d.size}${d.stripped ? `,strip:${d.stripped}` : ""})`)
