@@ -294,6 +294,14 @@ export interface BacklogLiveFields {
   freshBySource: { label: string; count: number }[];
   /** The resolved age-floor window in days — lets the client label "new (last Nd)". */
   freshWindowDays: number;
+  /**
+   * The bot's resolved minimum cluster size (per-bot, from `resolveGardenerConfig`
+   * — NOT the merge-time constants `batchSize`/`maxProposals`). The strip's
+   * run-suggestion meter derives its threshold from this (≥ 2× ⇒ "worth a gardener
+   * run"); hardcoding 3 client-side would break the strip's no-hardcode contract and
+   * any bot with a different config.
+   */
+  minClusterSize: number;
   lastBacklogRun: LastBacklogRun | null;
   watcherSeeded: boolean;
   /**
@@ -821,7 +829,8 @@ export function registerWikiGardenerRoutes(
       // enough to have left the weekly gardener's window (undated ⇒ old backlog,
       // kept). `offeredStillQueued` (queued ∩ offered) is emitted explicitly so the
       // strip no longer derives it as `queued − remaining` (which the floor inflates).
-      const minAgeDays = resolveGardenerConfig(bot.gardener).lookbackDays;
+      const gardenerCfg = resolveGardenerConfig(bot.gardener);
+      const minAgeDays = gardenerCfg.lookbackDays;
       const now = Date.now();
       const { remaining, offeredStillQueued, freshByCollection } = computeBacklogFloorCounts(
         queuedKeys,
@@ -890,6 +899,7 @@ export function registerWikiGardenerRoutes(
           fresh,
           freshBySource,
           freshWindowDays: minAgeDays,
+          minClusterSize: gardenerCfg.minClusterSize,
           lastBacklogRun,
           watcherSeeded: !!watcher,
           gardenerEnabled: bot.gardener?.enabled !== false,
