@@ -70,6 +70,14 @@ export interface LastBacklogRun {
    * reason line renders the honest draft-failure copy instead of a false size failure.
    */
   keptClusters?: number;
+  /**
+   * Source pages the low-volume fallback (R4) drafted when the gardener produced ZERO
+   * cluster proposals (insufficient batch / harvest floor / cluster-size gate). Distinct
+   * from {@link drafted} (gardener CLUSTER proposals) — when > 0 the outcome/reason copy
+   * reports "drafted N source pages (fallback — nothing clustered)" instead of empty.
+   * Mirrors the journal shape in `src/gardener/backlog.ts` — keep both in sync.
+   */
+  fallbackDrafted?: number;
 }
 
 /**
@@ -680,10 +688,17 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
   if (run.outcome === "insufficient") {
     const eligible = run.eligible ?? run.offered;
     const min = run.minClusterSize ?? 3;
+    const fb = run.fallbackDrafted ?? 0;
+    // The low-volume fallback (R4) drafted the too-small batch individually as source
+    // pages — report that instead of a bare "nothing offered".
+    const fbTail =
+      fb > 0
+        ? ` — drafted ${fb} source page${fb === 1 ? "" : "s"} individually (fallback)`
+        : "; nothing offered";
     if (eligible === 0) {
       return ` <span class="bk-run-note">last run: no eligible docs in the backlog — nothing offered</span>`;
     }
-    return ` <span class="bk-run-note">last run: ${eligible} eligible doc(s) — below the minimum cluster size of ${min}; nothing offered</span>`;
+    return ` <span class="bk-run-note">last run: ${eligible} eligible doc(s) — below the minimum cluster size of ${min}${fbTail}</span>`;
   }
   if (run.cancelled) {
     const { drafted, of } = run.cancelled;
@@ -719,6 +734,13 @@ export function backlogOutcomeHtml(run: LastBacklogRun | null | undefined): stri
 function backlogZeroDraftReasonHtml(run: LastBacklogRun): string {
   const min = run.minClusterSize ?? 3;
   const t = run.dropTally;
+  // Low-volume fallback (R4): the gardener clustered nothing draftable, so the run
+  // drafted the batch docs individually as source pages. Report that plainly rather
+  // than the "none clustered" reason — nothing was actually left empty.
+  const fb = run.fallbackDrafted ?? 0;
+  if (fb > 0) {
+    return ` <span class="bk-run-note">last run drafted ${fb} source page${fb === 1 ? "" : "s"} (fallback — nothing clustered)</span>`;
+  }
   const docPhrase =
     run.attemptedDocs !== undefined
       ? `drained ${run.attemptedDocs} doc${run.attemptedDocs === 1 ? "" : "s"}`

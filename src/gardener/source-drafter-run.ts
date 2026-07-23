@@ -372,8 +372,14 @@ export async function runSourceDraftBacklog(
   return { results, totals, totalQueued, limit: cap };
 }
 
-/** Fetch one queued doc's body + url and draft it — never throws (skip-not-fail). */
-async function draftOneBacklogDoc(
+/**
+ * Fetch one queued doc's body + url and draft it — never throws (skip-not-fail).
+ * Exported so the low-volume backlog-drain fallback (R4) can bind it as its
+ * `draftSourceFallback` seam (via {@link defaultSourceBacklogDeps}): a `BacklogCandidate`
+ * carries `collection`/`id`/`date` but NO url, so the caller passes `url: ""` and this
+ * relies on `fetchDoc`'s `metadata.url`/`url` — the drain's own bodies were discarded.
+ */
+export async function draftOneBacklogDoc(
   doc: QueuedDoc,
   deps: SourceBacklogDeps,
 ): Promise<SourceBacklogDocResult> {
