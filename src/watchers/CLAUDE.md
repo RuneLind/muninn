@@ -598,6 +598,14 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   `runGardener`), the harvest floor inside `runGardener` (docs < `minClusterSize` → `[]`),
   and the cluster-size gate zeroing a batch that ran. In every case the work fn falls
   back to drafting the batch docs individually as SOURCE pages (`runSourceFallback`),
+  **except** when clusters DID form and pass the gate but every draft failed transiently
+  (`keptClusters > 0`): the completed-path fallback is gated on `!(keptClusters > 0)` so
+  cluster-worthy docs aren't permanently converted to per-doc source pages (they'd become
+  pending and never re-cluster) and the strip shows the honest R1 draft-failure copy
+  instead of the "(fallback — nothing clustered)" lie. `keptClusters` is undefined on the
+  harvest-floor early return, so that path still falls back (the guard is `!(keptClusters
+  > 0)`, not `=== 0`). The fan-out also honors a soft cancel (`shouldStop`) and drives a
+  "drafting" progress stage.
   injected as the optional `draftSourceFallback` seam on `StartBacklogRunDeps` and bound
   at the route to the now-exported `draftOneBacklogDoc` (via `defaultSourceBacklogDeps`) —
   NOT bare `draftSourcePage` (needs a body+url the drain discarded) nor

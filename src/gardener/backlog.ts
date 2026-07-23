@@ -181,17 +181,27 @@ export interface SourceFallbackOutcome {
  * On path (c) the batch can be up to {@link BACKLOG_BATCH_SIZE} (40) docs from a
  * not-actually-low-volume vertical, so this fans out up to the cap (8) in real model
  * one-shots — bounded, and every draft is still gate-reviewable.
+ *
+ * `hooks.shouldStop` (bound to the run's `cancelRequested` flag) is polled at the top of
+ * each iteration so a soft cancel stops the fan-out promptly — already-drafted proposals
+ * stay, and the returned count is honest. `hooks.onProgress` reports the running drafted
+ * count (+ the current doc key) so the live progress projection isn't wedged while up to
+ * 8 real one-shots run.
  */
 export async function runSourceFallback(
   batch: BacklogCandidate[],
   draftSourceFallback: (cand: BacklogCandidate) => Promise<SourceFallbackOutcome>,
   botName: string,
   cap: number = BACKLOG_MAX_PROPOSALS,
+  hooks?: { shouldStop?: () => boolean; onProgress?: (draftsDone: number, currentKey?: string) => void },
 ): Promise<number> {
   let drafted = 0;
   let modelAttempts = 0;
   for (const cand of batch) {
     if (modelAttempts >= cap) break;
+    // Honor a soft cancel mid-fan-out — stop drafting further docs, keep what landed.
+    if (hooks?.shouldStop?.()) break;
+    hooks?.onProgress?.(drafted, cand.key);
     let outcome: SourceFallbackOutcome;
     try {
       outcome = await draftSourceFallback(cand);
@@ -210,6 +220,7 @@ export async function runSourceFallback(
     if (outcome.outcome === "drafted") {
       drafted++;
       modelAttempts++;
+      hooks?.onProgress?.(drafted, cand.key);
     } else if (outcome.outcome === "error") {
       modelAttempts++;
     }
@@ -432,7 +443,10 @@ export interface LastBacklogRun {
   /**
    * How many docs the low-volume source-draft fallback (R4) drafted into source-page
    * proposals when the gardener produced ZERO cluster drafts (insufficient batch,
-   * harvest floor, or cluster-size gate). A DISTINCT count from {@link drafted}
+   * harvest floor, or cluster-size gate) AND no clusters survived the gate. The
+   * fallback is deliberately SKIPPED when `keptClusters > 0` (clusters formed but every
+   * draft failed transiently) — those docs stay cluster-worthy for a re-run rather than
+   * being permanently converted to per-doc source pages. A DISTINCT count from {@link drafted}
    * (which counts gardener CLUSTER proposals) — kept separate so the #311 zero-draft
    * rollback (fires on `drafted === 0`) is unaffected and the strip can render the
    * honest "drafted N source pages (fallback — nothing clustered)" copy. Absent/0 ⇒
@@ -619,7 +633,27 @@ async function maybeRunFallback(
   if (!deps.draftSourceFallback) return 0;
   const batch = assembled.batch ?? [];
   if (batch.length === 0) return 0;
-  return runSourceFallback(batch, deps.draftSourceFallback, deps.botName);
+  // Move the live progress projection into a "drafting" stage so the UI reflects the
+  // fallback fan-out (up to BACKLOG_MAX_PROPOSALS one-shots) instead of looking wedged
+  // at the last gardener stage ("assembling" on the insufficient path). draftsTotal is
+  // the cap-bounded upper bound on drafts; draftsDone ticks as each source page lands.
+  const prog = backlogProgress.get(deps.botName);
+  if (prog) {
+    prog.stage = "drafting";
+    prog.draftsDone = 0;
+    prog.draftsTotal = Math.min(batch.length, BACKLOG_MAX_PROPOSALS);
+    prog.currentTopic = undefined;
+  }
+  return runSourceFallback(batch, deps.draftSourceFallback, deps.botName, BACKLOG_MAX_PROPOSALS, {
+    // Bind cancel to the run's live flag so a soft cancel halts the fan-out.
+    shouldStop: () => backlogProgress.get(deps.botName)?.cancelRequested === true,
+    onProgress: (draftsDone, currentKey) => {
+      const p = backlogProgress.get(deps.botName);
+      if (!p) return;
+      p.draftsDone = draftsDone;
+      p.currentTopic = currentKey;
+    },
+  });
 }
 
 export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResult {
@@ -772,8 +806,19 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // to the pool, while the fallback's drafted docs get credited as pending via their
     // own proposals (so keeping #311 rollback semantics is correct — verified: the
     // fallback and the offered set touch disjoint doc states).
+    //
+    // MUST NOT fire when clusters DID form and pass the gate (keptClusters > 0) but
+    // every draft attempt failed transiently (timeout / shape-gate). Those docs are
+    // cluster-worthy — converting them to per-doc source pages makes them pending and
+    // they're never re-clustered (permanent loss of concept synthesis on a transient
+    // failure), and the strip would then render the "(fallback — nothing clustered)"
+    // lie the R1 draft-failure branch exists to prevent. `keptClusters` is undefined
+    // on the harvest-floor early return (no tally fired) — the fallback SHOULD still
+    // fire there, so the guard is `!(keptClusters > 0)`, not `=== 0`. (The insufficient
+    // path is a separate short-circuit above and is unaffected.)
+    const clustersFormed = (keptClusters ?? 0) > 0;
     let fallbackDrafted = 0;
-    if (zeroDraftBurn) {
+    if (zeroDraftBurn && !clustersFormed) {
       fallbackDrafted = await maybeRunFallback(deps, assembled);
     }
     if (aborted && skippedKeys.length) {

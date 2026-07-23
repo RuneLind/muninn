@@ -841,6 +841,63 @@ describe("startBacklogRun", () => {
     expect(recorded!.offered).toBe(0);
   });
 
+  test("clusters formed but every draft failed (keptClusters > 0) → fallback NOT invoked", async () => {
+    // Finding 1 (MED): a completed run where clusters DID form and pass the gate but
+    // every draft attempt failed transiently must NOT convert cluster-worthy docs into
+    // per-doc source pages — that would permanently lose the concept synthesis and make
+    // the strip render the "(fallback — nothing clustered)" lie.
+    let fallbackCalls = 0;
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      batch: [cand("c", "a"), cand("c", "b"), cand("c", "c")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 1,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      // Clusters formed + passed the gate (keptClusters = 2) but drafts all failed → [].
+      runGardener: async (_assembled, hooks) => {
+        hooks.onTally?.(
+          {
+            clusters_dropped: 0,
+            clusters_dropped_size: 0,
+            clusters_dropped_skip: 0,
+            clusters_dropped_hallucinated: 0,
+            clusters_dropped_duplicate: 0,
+            clusters_dropped_cap: 0,
+            clusters_dropped_topics: "",
+          },
+          2,
+        );
+        return [];
+      },
+      draftSourceFallback: async () => {
+        fallbackCalls++;
+        return { outcome: "drafted" };
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The fallback must not have fired — the docs stay cluster-worthy for a future run.
+    expect(fallbackCalls).toBe(0);
+    expect(recorded!.fallbackDrafted).toBeUndefined();
+    // keptClusters rides through so the strip renders the honest R1 draft-failure copy.
+    expect(recorded!.keptClusters).toBe(2);
+    expect(recorded!.drafted).toBe(0);
+  });
+
   test("no fallback seam wired → zero-draft run records no fallbackDrafted (unchanged behavior)", async () => {
     let recorded: import("./backlog.ts").LastBacklogRun | null = null;
     const batch: AssembledBacklog = {
