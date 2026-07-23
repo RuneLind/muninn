@@ -227,6 +227,11 @@ export async function renderWikiPage(opts?: {
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
     .wiki-type-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; align-self: center; background: var(--text-dim); }
+    /* Neutral fallback for custom-ontology swatches with no dedicated type-* rule.
+       Declared BEFORE the .type-* block so those (equal specificity) win by source
+       order and each legend swatch shows its real type color; the sizing rule below
+       carries no background so it can't re-clobber the palette. */
+    .wiki-atlas-swatch { background: var(--text-dim); }
     .type-concept { background: var(--accent); }
     .type-entity { background: var(--status-cyan); }
     .type-source { background: var(--status-info); }
@@ -258,6 +263,97 @@ export async function renderWikiPage(opts?: {
     .wiki-tl-kind.new { color: var(--status-success); }
     .wiki-tl-kind.upd { color: var(--text-dim); }
     .wiki-tl-title { font-size: 12.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Atlas tab (hybrid Types/Months graph view) ───────────────────── */
+    .wiki-atlas { display: flex; flex-direction: column; gap: 12px; }
+    .wiki-atlas-empty { color: var(--text-faint); font-size: 13px; padding: 20px 4px; }
+    .wiki-atlas-head { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+    .wiki-atlas-toggle { display: inline-flex; border: 1px solid var(--border-primary); border-radius: 8px; overflow: hidden; }
+    .wiki-atlas-toggle button {
+      background: var(--bg-surface); color: var(--text-muted); border: none;
+      padding: 6px 16px; font: 600 12.5px inherit; font-family: inherit; cursor: pointer;
+    }
+    .wiki-atlas-toggle button + button { border-left: 1px solid var(--border-primary); }
+    .wiki-atlas-toggle button.on { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+    .wiki-atlas-toggle button:disabled { opacity: .4; cursor: default; }
+    .wiki-atlas-legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--text-dim); flex-wrap: wrap; }
+    .wiki-atlas-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .wiki-atlas-swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+    .wiki-atlas-swatch.type-hub { background: var(--status-warning); }
+
+    .wiki-atlas-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
+    @media (max-width: 1200px) { .wiki-atlas-body { grid-template-columns: 1fr; } }
+    .wiki-atlas-canvas-wrap { border: 1px solid var(--border-primary); border-radius: 10px; background: var(--bg-panel); overflow-x: auto; }
+    .wiki-atlas-canvas { position: relative; display: none; }
+    .wiki-atlas-canvas.active { display: block; }
+    .wiki-atlas-canvas[data-view="months"] .wiki-atlas-cols { grid-auto-flow: column; grid-auto-columns: minmax(140px, 1fr); }
+    .wiki-atlas-canvas[data-view="months"] { min-width: max-content; }
+    .wiki-atlas-canvas svg { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+    .wiki-atlas-canvas svg path.wiki-atlas-edge { fill: none; stroke: var(--accent); stroke-opacity: .55; stroke-width: 1.7; }
+    .wiki-atlas-canvas svg path.wiki-atlas-edge-star { stroke-opacity: .32; stroke-width: 1.3; }
+    .wiki-atlas-cols { display: grid; gap: 10px; padding: 12px; position: relative; grid-auto-flow: column; grid-auto-columns: minmax(150px, 1fr); }
+    .wiki-atlas-col h3 { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-faint); padding: 2px 4px 6px; font-weight: 600; }
+    .wiki-atlas-count { color: var(--text-faint); font-weight: 400; letter-spacing: 0; }
+    .wiki-atlas-bar { height: 3px; border-radius: 2px; background: var(--status-info); opacity: .35; margin: 0 4px 8px; }
+    .wiki-atlas-node {
+      border: 1px solid var(--border-primary); border-left-width: 3px; border-radius: 7px;
+      padding: 5px 8px; margin: 5px 0; cursor: pointer; background: var(--bg-surface); position: relative;
+      transition: opacity .16s, border-color .16s, box-shadow .16s;
+    }
+    .wiki-atlas-node b { display: block; font-size: 11.5px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; letter-spacing: -.02em; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .wiki-atlas-node small { display: block; color: var(--text-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Node left-border colors MUST mirror the canonical .type-* palette above
+       (type-hub→status-warning, source→status-info, concept→accent,
+       entity→status-cyan, analysis→status-magenta) — keep the two in sync. */
+    .wiki-atlas-node[data-t="hub"] { border-left-color: var(--status-warning); }
+    .wiki-atlas-node[data-t="source"] { border-left-color: var(--status-info); }
+    .wiki-atlas-node[data-t="concept"] { border-left-color: var(--accent); }
+    .wiki-atlas-node[data-t="entity"] { border-left-color: var(--status-cyan); }
+    .wiki-atlas-node[data-t="analysis"] { border-left-color: var(--status-magenta); }
+    .wiki-atlas-badge {
+      position: absolute; top: -8px; left: -8px; width: 18px; height: 18px; border-radius: 50%;
+      background: var(--accent); color: #fff; font-size: 10.5px; font-weight: 700; z-index: 7;
+      display: none; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+    .wiki-atlas-canvas.sel .wiki-atlas-node { opacity: .15; }
+    .wiki-atlas-canvas.sel .wiki-atlas-node.on { opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); z-index: 6; }
+    .wiki-atlas-canvas.sel .wiki-atlas-node.on .wiki-atlas-badge { display: flex; }
+    .wiki-atlas-canvas.sel .wiki-atlas-node.center { box-shadow: 0 0 0 2px var(--accent), 0 4px 20px color-mix(in srgb, var(--accent) 30%, transparent); }
+    .wiki-atlas-more { color: var(--text-faint); font-size: 10px; padding: 4px 6px; }
+
+    .wiki-atlas-side { display: flex; flex-direction: column; gap: 12px; }
+    .wiki-atlas-card { border: 1px solid var(--border-primary); border-radius: 10px; background: var(--bg-panel); padding: 12px; }
+    .wiki-atlas-card h2 { font-size: 10px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-faint); margin: 0 2px 8px; }
+    .wiki-atlas-story { min-height: 200px; }
+    .wiki-atlas-sect { font-size: 9.5px; letter-spacing: .11em; text-transform: uppercase; color: var(--text-faint); margin: 12px 2px 4px; }
+    .wiki-atlas-sect:first-of-type { margin-top: 2px; }
+    .wiki-atlas-trail, .wiki-atlas-topic { border: 1px solid var(--border-primary); border-radius: 8px; padding: 7px 10px; margin: 5px 0; cursor: pointer; background: var(--bg-surface); }
+    .wiki-atlas-trail:hover, .wiki-atlas-topic:hover { border-color: var(--text-faint); }
+    .wiki-atlas-trail.on, .wiki-atlas-topic.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .wiki-atlas-trail b { font-size: 12.5px; color: var(--text-secondary); }
+    .wiki-atlas-trail small { display: block; color: var(--text-dim); font-size: 11px; margin-top: 2px; line-height: 1.4; }
+    .wiki-atlas-len { float: right; color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; margin-top: 2px; }
+    .wiki-atlas-topic { display: flex; align-items: center; gap: 8px; }
+    .wiki-atlas-topic b { font-size: 12px; flex: 1; font-weight: 600; color: var(--text-secondary); }
+    .wiki-atlas-spark { display: flex; align-items: flex-end; gap: 1.5px; height: 16px; }
+    .wiki-atlas-spark i { width: 4px; background: var(--status-info); opacity: .55; border-radius: 1px; display: block; }
+    .wiki-atlas-topic.on .wiki-atlas-spark i { background: var(--accent); opacity: .9; }
+    .wiki-atlas-n { color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; }
+    .wiki-atlas-clear { font-size: 11px; color: var(--text-dim); border: 1px dashed var(--border-primary); border-radius: 8px; padding: 5px 10px; cursor: pointer; margin-top: 8px; background: none; font-family: inherit; }
+    .wiki-atlas-clear:hover { color: var(--text-primary); }
+    .wiki-atlas-hint { color: var(--text-faint); font-size: 12px; padding: 8px 2px; }
+    .wiki-atlas-intro { border-left: 3px solid var(--accent); padding: 3px 10px; margin: 2px 2px 10px; color: var(--text-dim); font-size: 12px; }
+    .wiki-atlas-step { display: grid; grid-template-columns: 22px 1fr; gap: 9px; margin: 10px 2px; }
+    .wiki-atlas-num { width: 19px; height: 19px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+    .wiki-atlas-step.ghost .wiki-atlas-num { background: var(--text-faint); }
+    .wiki-atlas-step b { font-size: 12px; font-family: ui-monospace, Menlo, monospace; color: var(--text-secondary); }
+    .wiki-atlas-step.ghost b { color: var(--text-dim); }
+    .wiki-atlas-meta { color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; margin-top: 1px; }
+    .wiki-atlas-note { font-size: 12px; margin-top: 3px; color: var(--text-tertiary); }
+    .wiki-atlas-desc { color: var(--text-dim); font-size: 11.5px; margin-top: 3px; line-height: 1.4; }
+    .wiki-atlas-gap { border-left: 3px solid var(--text-faint); margin: 6px 2px 6px 12px; padding: 2px 10px; color: var(--text-faint); font-size: 10.5px; font-style: italic; }
+    .wiki-atlas-open { margin-top: 8px; font-size: 11.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 7px; padding: 5px 11px; cursor: pointer; background: none; font-family: inherit; }
+    .wiki-atlas-open:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
     /* Connections mini-graph (1-hop neighborhood) */
     .wiki-mini-graph { border-bottom: 1px solid var(--border-primary); padding: 6px 6px 2px; margin-bottom: 8px; }

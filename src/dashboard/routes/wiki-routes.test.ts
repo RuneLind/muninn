@@ -196,6 +196,57 @@ describe("GET /api/wiki/html", () => {
     expect(data2.months["2026-03"]).toContain("sources/talk.md");
   });
 
+  // Colliding-stem navigation: the Atlas tab opens nodes by their exact relPath
+  // (a node's payload key), NOT by name — so on a mimir-shaped wiki with several
+  // same-stem pages in different folders, a click resolves the INTENDED page
+  // rather than the first-stem-match the by-`name` route would return.
+  test("/api/wiki/page?relPath resolves a colliding stem to the exact page", async () => {
+    await mkdir(path.join(root, "projects/a"), { recursive: true });
+    await mkdir(path.join(root, "projects/b"), { recursive: true });
+    await Bun.write(
+      path.join(root, "projects/a/architecture.md"),
+      "---\ntype: concept\ntitle: Architecture\n---\n\nProject A architecture.",
+    );
+    await Bun.write(
+      path.join(root, "projects/b/architecture.md"),
+      "---\ntype: concept\ntitle: Architecture\n---\n\nProject B architecture.",
+    );
+    __resetWikiCacheForTest();
+
+    // The Atlas payload keys both pages distinctly by normalized relPath.
+    const atlas = (await (await app.request("/api/wiki/atlas")).json()) as {
+      nodes: Record<string, { name: string }>;
+    };
+    expect(Object.keys(atlas.nodes)).toContain("projects/a/architecture.md");
+    expect(Object.keys(atlas.nodes)).toContain("projects/b/architecture.md");
+
+    // relPath navigation opens each page's OWN body — no first-stem shadowing.
+    const a = (await (
+      await app.request("/api/wiki/page?relPath=" + encodeURIComponent("projects/a/architecture.md"))
+    ).json()) as { meta: { relPath: string }; html: string };
+    const b = (await (
+      await app.request("/api/wiki/page?relPath=" + encodeURIComponent("projects/b/architecture.md"))
+    ).json()) as { meta: { relPath: string }; html: string };
+    expect(a.meta.relPath).toBe("projects/a/architecture.md");
+    expect(a.html).toContain("Project A architecture.");
+    expect(b.meta.relPath).toBe("projects/b/architecture.md");
+    expect(b.html).toContain("Project B architecture.");
+
+    // The by-name route can only ever return ONE of the two (first-stem-match) —
+    // which is exactly why the Atlas navigates by relPath instead.
+    const byName = (await (
+      await app.request("/api/wiki/page?name=" + encodeURIComponent("architecture"))
+    ).json()) as { html: string; error?: string };
+    expect(byName.error).toBeUndefined();
+
+    // Missing both params is a 400; an unknown relPath is a clean 404.
+    expect((await app.request("/api/wiki/page")).status).toBe(400);
+    expect(
+      (await app.request("/api/wiki/page?relPath=" + encodeURIComponent("projects/z/nope.md")))
+        .status,
+    ).toBe(404);
+  });
+
   // A refresh=1 request busts the TTL and re-reads the tree.
   test("/api/wiki/atlas?refresh=1 rebuilds from disk", async () => {
     await Bun.write(path.join(root, "sources/One.md"), "---\ntype: source\n---\n\nOne.");
