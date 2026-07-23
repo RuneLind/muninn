@@ -1024,6 +1024,21 @@ describe("weeklyRunHtml — weekly-run render branch (PR 2, watcher-path parity)
     expect(html).toContain('title="rag-eval (cap, n:4), agents-memory (cap, n:3)"');
   });
 
+  test("hostile topicKey is escaped in both the tooltip and the line", () => {
+    const html = weeklyRunHtml(
+      run({
+        clustersFound: 2,
+        kept: 1,
+        dropped: 1,
+        dropTally: tally({ clusters_dropped: 1, clusters_dropped_cap: 1 }),
+        evictedTopics: [{ topicKey: '<script>alert(1)</script>" onmouseover="x', reason: "cap", size: 2 }],
+      }),
+    );
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain('" onmouseover="');
+    expect(html).toContain("&lt;script&gt;");
+  });
+
   test("no dominant bucket (dropped>0 but tally all zero) → no qualifier, no crash", () => {
     const html = weeklyRunHtml(run({ clustersFound: 5, kept: 3, dropped: 2, dropTally: tally() }));
     expect(html).toContain("3 kept — 2 dropped");
