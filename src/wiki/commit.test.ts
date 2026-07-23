@@ -4,6 +4,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
 
+/**
+ * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test
+ * can await push completion (or the immediate no-push settle) deterministically
+ * instead of sleeping.
+ */
+function pushBarrier(): { done: Promise<void>; onPushSettled: () => void } {
+  let resolve!: () => void;
+  const done = new Promise<void>((r) => (resolve = r));
+  return { done, onPushSettled: () => resolve() };
+}
+
 /** Run `git -C <cwd> <args…>` in a fixture repo, returning trimmed stdout. */
 async function git(cwd: string, args: string[]): Promise<{ code: number; out: string }> {
   const proc = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -158,7 +169,11 @@ describe("commitWikiChange", () => {
     const { repo, wikiDir } = await makeRepo(base);
     await writeFile(path.join(wikiDir, "concepts", "P.md"), "# P\n");
     // Default push:true — but no remote, so the push is a no-op, and the commit lands.
-    await commitWikiChange(wikiDir, ["concepts/P.md"], "[gardener] apply: concepts/P.md");
+    const b = pushBarrier();
+    await commitWikiChange(wikiDir, ["concepts/P.md"], "[gardener] apply: concepts/P.md", {
+      onPushSettled: b.onPushSettled,
+    });
+    await b.done; // the dispatched push settled (no-remote no-op)
     const subject = await git(repo, ["log", "-1", "--format=%s"]);
     expect(subject.out).toBe("[gardener] apply: concepts/P.md");
   });
@@ -168,7 +183,11 @@ describe("commitWikiChange", () => {
     await git(repo, ["remote", "add", "origin", path.join(base, "does-not-exist.git")]);
     await writeFile(path.join(wikiDir, "concepts", "Q.md"), "# Q\n");
     // Remote present, no tracking branch → upstream lookup fails → push skipped, commit lands.
-    await commitWikiChange(wikiDir, ["concepts/Q.md"], "[gardener] apply: concepts/Q.md");
+    const b = pushBarrier();
+    await commitWikiChange(wikiDir, ["concepts/Q.md"], "[gardener] apply: concepts/Q.md", {
+      onPushSettled: b.onPushSettled,
+    });
+    await b.done;
     const subject = await git(repo, ["log", "-1", "--format=%s"]);
     expect(subject.out).toBe("[gardener] apply: concepts/Q.md");
   });
@@ -176,10 +195,76 @@ describe("commitWikiChange", () => {
   test("push:false commits locally without attempting a push", async () => {
     const { repo, wikiDir } = await makeRepo(base);
     await writeFile(path.join(wikiDir, "concepts", "R.md"), "# R\n");
+    const b = pushBarrier();
     await commitWikiChange(wikiDir, ["concepts/R.md"], "[gardener] apply: concepts/R.md", {
       push: false,
+      onPushSettled: b.onPushSettled,
     });
+    await b.done; // settles immediately — no push attempted
     const subject = await git(repo, ["log", "-1", "--format=%s"]);
     expect(subject.out).toBe("[gardener] apply: concepts/R.md");
+  });
+
+  test("commit is awaited but the push is dispatched async — the seam settles it", async () => {
+    // A real bare remote with an upstream. commitWikiChange resolves as soon as the
+    // COMMIT lands (local + fast); the push runs asynchronously and only after the
+    // seam fires has the remote received it.
+    const { repo, wikiDir } = await makeRepo(base);
+    const bare = path.join(base, "remote.git");
+    await git(base, ["init", "--bare", "-b", "main", bare]);
+    await git(repo, ["remote", "add", "origin", bare]);
+    await git(repo, ["push", "-u", "origin", "main"]);
+
+    await writeFile(path.join(wikiDir, "concepts", "Pushed.md"), "# Pushed\n");
+    const b = pushBarrier();
+    await commitWikiChange(wikiDir, ["concepts/Pushed.md"], "[gardener] apply: concepts/Pushed.md", {
+      onPushSettled: b.onPushSettled,
+    });
+
+    // The commit is present locally the moment commitWikiChange resolves.
+    const localSubject = await git(repo, ["log", "-1", "--format=%s"]);
+    expect(localSubject.out).toBe("[gardener] apply: concepts/Pushed.md");
+
+    // Await the dispatched push, then the bare remote carries the commit.
+    await b.done;
+    const remoteSubject = await git(bare, ["log", "-1", "--format=%s"]);
+    expect(remoteSubject.out).toBe("[gardener] apply: concepts/Pushed.md");
+  });
+
+  test("a foreign pre-staged file is NOT swept into the wiki commit", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "F.md"), "# F\n");
+    // Someone else pre-staged an unrelated change into the index before our commit.
+    await writeFile(path.join(repo, "README.md"), "root changed by a foreign actor\n");
+    await git(repo, ["add", "README.md"]);
+
+    await commitWikiChange(wikiDir, ["concepts/F.md"], "[gardener] apply: concepts/F.md", {
+      push: false,
+    });
+
+    // The commit carries ONLY our page — never the foreign pre-staged README.
+    const names = await git(repo, ["show", "--name-only", "--format=", "HEAD"]);
+    expect(names.out).toBe("data/wiki/concepts/F.md");
+    // The foreign change is still staged, uncommitted (partial commit left it alone).
+    const staged = await git(repo, ["diff", "--cached", "--name-only"]);
+    expect(staged.out).toContain("README.md");
+  });
+
+  test("a missing path (failed log.md write) is dropped — the page still commits", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "G.md"), "# G\n");
+    // log.md was never written (best-effort write failed) — it must not abort the batch.
+    await commitWikiChange(
+      wikiDir,
+      ["concepts/G.md", "log.md"],
+      "[gardener] apply: concepts/G.md",
+      { push: false },
+    );
+
+    const subject = await git(repo, ["log", "-1", "--format=%s"]);
+    expect(subject.out).toBe("[gardener] apply: concepts/G.md");
+    const names = await git(repo, ["show", "--name-only", "--format=", "HEAD"]);
+    expect(names.out).toBe("data/wiki/concepts/G.md"); // only the page — log.md dropped
+    expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
   });
 });
