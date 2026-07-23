@@ -961,6 +961,65 @@ describe("extractDesc", () => {
     ].join("\n");
     expect(extractDesc(md)).toBe("Actual prose.");
   });
+
+  test("skips a bare URL:/metadata line and returns the prose two lines below", () => {
+    const md = [
+      "---",
+      "type: source",
+      "---",
+      "",
+      "# Title",
+      "",
+      "URL: https://example.com/some/article",
+      "Date: 2026-03-25",
+      "",
+      "The real prose summary of the article.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("The real prose summary of the article.");
+  });
+
+  test("skips markdown table rows", () => {
+    const md = [
+      "---",
+      "type: note",
+      "---",
+      "",
+      "| Col A | Col B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "Prose after the table.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("Prose after the table.");
+  });
+
+  test("skips a leading JSX/HTML component opening tag (mimir .mdx pages)", () => {
+    const md = [
+      "---",
+      "type: plan",
+      "---",
+      "",
+      '<Callout tone="info">',
+      "",
+      "This is the first genuine prose line.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("This is the first genuine prose line.");
+  });
+
+  test("strips inline emphasis/code markers so the blurb is plain text", () => {
+    const md = "---\ntype: concept\n---\n\nThe **bold** and _italic_ and `code` and *starred* words.";
+    expect(extractDesc(md)).toBe("The bold and italic and code and starred words.");
+  });
+
+  test("leaves interior underscores in identifiers alone", () => {
+    const md = "---\ntype: note\n---\n\nThe some_var_name identifier stays intact.";
+    expect(extractDesc(md)).toBe("The some_var_name identifier stays intact.");
+  });
+
+  test("drops the leading ! from an image, keeping its alt text", () => {
+    const md = "---\ntype: note\n---\n\n![a diagram](img.png) shows the flow.";
+    expect(extractDesc(md)).toBe("a diagram shows the flow.");
+  });
 });
 
 describe("buildWikiIndex — Atlas fields + trails", () => {

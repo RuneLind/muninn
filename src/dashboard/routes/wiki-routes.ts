@@ -241,8 +241,14 @@ interface WikiPageListing extends WikiPageMeta {
 }
 
 function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
+  // `desc` + `pubDate` are Atlas-only fields (only `GET /api/wiki/atlas` reads
+  // them); excluded here so they don't bloat this hot pages-listing payload
+  // (~100 KB on jarvis). The listing type keeps them optional/undefined.
+  const { desc, pubDate, ...rest } = meta;
+  void desc;
+  void pubDate;
   return {
-    ...meta,
+    ...rest,
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };

@@ -336,7 +336,7 @@ function resolveMarkdownTargets(fromRelPath: string, targets: string[]): string[
  * fence detection: a leading `---` with a closing `\n---`; the body starts on the
  * line after the closing fence. Returns the whole content when there is no fence.
  */
-function stripFrontmatter(content: string): string {
+export function stripFrontmatter(content: string): string {
   if (!content.startsWith("---")) return content;
   const end = content.indexOf("\n---", 3);
   if (end === -1) return content;
@@ -346,12 +346,23 @@ function stripFrontmatter(content: string): string {
   return afterFence === -1 ? "" : content.slice(afterFence + 1);
 }
 
-/** Flatten `[[Target|Display]]`→`Display`, `[[Target]]`→`Target`, and
- *  `[text](url)`→`text` so a page's prose blurb carries no raw link markup. */
+/**
+ * Flatten a prose line into genuinely plain text for the Atlas blurb:
+ * `[[Target|Display]]`→`Display`, `[[Target]]`→`Target`, images `![alt](url)`→`alt`
+ * (dropping the leading `!`), links `[text](url)`→`text`, and inline emphasis/code
+ * markers (`**`, `__`, backticks, and boundary `*`/`_`) removed. A simple
+ * markers-removal pass — not a markdown parser — so interior underscores in
+ * `some_var_name` are left alone (they're never at a word boundary).
+ */
 function flattenLinks(s: string): string {
   return s
     .replace(/\[\[([^\]]+?)\]\]/g, (_m, inner: string) => inner.split("|").pop()!.trim())
-    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (_m, text: string) => text.trim());
+    // Images `![alt](url)` → alt (drop the leading `!`); links `[text](url)` → text.
+    .replace(/!?\[([^\]]*)\]\(([^)]+)\)/g, (_m, text: string) => text.trim())
+    // Strip bold/code markers, then leading/trailing (wrapping) `*`/`_` emphasis.
+    .replace(/\*\*|__|`/g, "")
+    .replace(/(^|\s)[*_]+/g, "$1")
+    .replace(/[*_]+(\s|$)/g, "$1");
 }
 
 const SOURCE_PUBDATE_RE = /^Source:.*?(\d{4}-\d{2}-\d{2})/m;
@@ -371,9 +382,12 @@ export function extractPubDate(content: string): string | undefined {
  * First prose line of a page — the Atlas node blurb. Skips the frontmatter, then
  * the first non-empty line that is not a heading (`#`), list item (`-`/`*`/`+`/
  * `1.`), blockquote/callout (`>`), horizontal rule (`---`/`***`/`___`), HTML
- * comment, or the `Source:` line. `[[wikilinks]]`/`[md](links)` are flattened to
- * display text so no raw markup or leaked YAML reaches the UI. Undefined when the
- * page has no qualifying prose line.
+ * comment or JSX/HTML component tag (`<…`), markdown table row (`|…`), a
+ * `Source:` line, or a `URL:`/`Date:`/`Updated:`/`Created:`/`Tags:` metadata line
+ * (real source pages lead with a bare `URL: https://…` above the prose).
+ * `[[wikilinks]]`/`[md](links)` are flattened to display text and inline emphasis
+ * markers stripped so no raw markup or leaked YAML reaches the UI. Undefined when
+ * the page has no qualifying prose line.
  */
 export function extractDesc(content: string): string | undefined {
   const body = stripFrontmatter(content);
@@ -382,8 +396,10 @@ export function extractDesc(content: string): string | undefined {
     if (!line) continue;
     if (line.startsWith("#")) continue; // heading
     if (line.startsWith(">")) continue; // blockquote / callout
-    if (line.startsWith("<!--")) continue; // html comment
+    if (line.startsWith("<")) continue; // html comment OR a JSX/HTML component tag
+    if (line.startsWith("|")) continue; // markdown table row
     if (/^Source:/.test(line)) continue; // the source-attribution line
+    if (/^(URL|Date|Updated|Created|Tags):/.test(line)) continue; // metadata line, not prose
     if (/^[-*+]\s/.test(line)) continue; // bullet list
     if (/^\d+[.)]\s/.test(line)) continue; // ordered list
     if (/^([-*_])\1{2,}$/.test(line)) continue; // horizontal rule

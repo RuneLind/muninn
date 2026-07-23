@@ -15,6 +15,7 @@
  */
 
 import {
+  localDay,
   mergeWikiTypes,
   TYPE_LABEL,
 } from "../dashboard/views/components/wiki-filter.ts";
@@ -115,14 +116,6 @@ export interface AtlasPayload {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-/** `YYYY-MM-DD` in the local timezone (no UTC shift) — matches the reader's
- *  mtime→day convention (`pageDateLabel`), so an 00:30 edit in UTC+2 isn't labeled
- *  the previous day. */
-function localDay(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 
 /** A `YYYY-MM-DD` prefix if the string starts with one, else undefined. */
 function isoDayPrefix(s: string | undefined): string | undefined {
