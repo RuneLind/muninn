@@ -41,6 +41,7 @@ export interface BacklogDropTally {
   clusters_dropped_hallucinated: number;
   clusters_dropped_duplicate: number;
   clusters_dropped_cap: number;
+  clusters_dropped_reserved: number;
   clusters_dropped_topics: string;
 }
 
@@ -748,6 +749,7 @@ const WEEKLY_REASON_SHORT: Record<string, string> = {
   skip: "already covered",
   duplicate: "duplicates",
   hallucinated: "unknown docs",
+  "reserved-path": "reserved path",
 };
 
 /**
@@ -781,6 +783,7 @@ export function weeklyRunHtml(run: WeeklyGardenerRun | null | undefined): string
         ["skip", t.clusters_dropped_skip],
         ["duplicate", t.clusters_dropped_duplicate],
         ["hallucinated", t.clusters_dropped_hallucinated],
+        ["reserved-path", t.clusters_dropped_reserved],
       ]
     : [];
   const dominant = counts.reduce<[string, number] | null>(
@@ -833,6 +836,8 @@ function backlogZeroDraftReasonHtml(run: LastBacklogRun): string {
     if (t.clusters_dropped_cap > 0) extras.push(`${t.clusters_dropped_cap} over the per-run cap`);
     if (t.clusters_dropped_hallucinated > 0)
       extras.push(`${t.clusters_dropped_hallucinated} referenced unknown docs`);
+    if (t.clusters_dropped_reserved > 0)
+      extras.push(`${t.clusters_dropped_reserved} targeted a reserved path`);
   }
   let reason: string;
   if (extras.length === 0) {

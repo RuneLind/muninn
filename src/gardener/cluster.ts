@@ -14,6 +14,7 @@ import type { WikiIndex } from "../wiki/store.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
+import { hasForbiddenBasename } from "./draft.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "cluster");
@@ -124,9 +125,10 @@ const VALID_DOMAINS: ClusterDomain[] = ["ai", "life"];
 
 /**
  * Why a cluster the model proposed never became a draft. Deterministic, one per
- * dropped cluster, computed WHERE the drop happens. The drops now originate at
- * TWO sites (PR 3 split): `filterClusters` (pre-resolve) emits hallucinated / skip
- * / duplicate; the post-resolve {@link gateResolvedClusters} emits size / cap.
+ * dropped cluster, computed WHERE the drop happens. The drops originate at several
+ * sites: `filterClusters` (pre-resolve) emits hallucinated / skip / duplicate;
+ * {@link partitionReservedTargets} (resolve-time, both resolve sites) emits
+ * reserved-path; the post-resolve {@link gateResolvedClusters} emits size / cap.
  * Taxonomy:
  *  - `hallucinated`: EVERY docId was invalid (post-strip count is 0); `stripped`
  *    records how many ids the strip removed. This is the ONLY reason that carries
@@ -138,9 +140,18 @@ const VALID_DOMAINS: ClusterDomain[] = ["ai", "life"];
  *  - `size`: a CREATE-mode cluster below `minClusterSize`, judged POST-resolve so
  *    an update-mode cluster survives at ≥1 doc (the human gate guards its quality),
  *  - `cap`: overflow past `maxProposalsPerRun` at the post-resolve gate — shared
- *    across modes, one slot reserved for the largest update.
+ *    across modes, one slot reserved for the largest update,
+ *  - `reserved-path`: the resolved target is a reserved wiki-infrastructure file
+ *    (`entities/Claude.md`, log/index/CLAUDE — either extension), dropped at resolve
+ *    time so the doomed cluster never consumes a cap slot or reaches the drafter.
  */
-export type ClusterDropReason = "size" | "skip" | "hallucinated" | "duplicate" | "cap";
+export type ClusterDropReason =
+  | "size"
+  | "skip"
+  | "hallucinated"
+  | "duplicate"
+  | "cap"
+  | "reserved-path";
 
 /** One dropped-cluster tally entry (see {@link ClusterDropReason}). */
 export interface ClusterDropEntry {
@@ -282,6 +293,34 @@ export interface GateResult {
 }
 
 /**
+ * Split resolved clusters by whether their target is a reserved wiki-infrastructure
+ * file ({@link hasForbiddenBasename} — log/index/CLAUDE, either extension). A
+ * reserved target (e.g. the permanently hand-maintained `entities/Claude.md`, which
+ * `resolveTarget` maps a "claude" cluster onto in UPDATE mode) is dropped HERE at
+ * resolve time — before the size/cap gate — so a doomed cluster never consumes a cap
+ * slot or reaches the drafter/shape-gate. One `reserved-path` drop entry per
+ * rejection. Pure; called at BOTH resolve sites (the runner's pass-0 resolve and the
+ * pass-1 doc→page map's synthesized-update resolve).
+ */
+export function partitionReservedTargets(resolved: ResolvedCluster[]): GateResult {
+  const kept: ResolvedCluster[] = [];
+  const dropped: ClusterDropEntry[] = [];
+  for (const r of resolved) {
+    if (hasForbiddenBasename(r.target.targetPath)) {
+      dropped.push({
+        topicKey: r.cluster.topicKey,
+        kind: r.cluster.kind,
+        size: r.cluster.docIds.length,
+        reason: "reserved-path",
+      });
+    } else {
+      kept.push(r);
+    }
+  }
+  return { kept, dropped };
+}
+
+/**
  * Post-resolve size + cap gate. Runs AFTER target-resolve, so a single-doc cluster
  * whose topic an existing page already covers (flipped to `update` by resolve)
  * survives the size floor that would otherwise kill it pre-resolve.
@@ -357,6 +396,7 @@ export interface ClusterDropTally {
   clusters_dropped_hallucinated: number;
   clusters_dropped_duplicate: number;
   clusters_dropped_cap: number;
+  clusters_dropped_reserved: number;
   clusters_dropped_topics: string;
 }
 
@@ -373,6 +413,7 @@ export function summarizeClusterDrops(dropped: ClusterDropEntry[]): ClusterDropT
     clusters_dropped_hallucinated: count("hallucinated"),
     clusters_dropped_duplicate: count("duplicate"),
     clusters_dropped_cap: count("cap"),
+    clusters_dropped_reserved: count("reserved-path"),
     clusters_dropped_topics: topics,
   };
 }

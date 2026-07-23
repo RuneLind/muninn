@@ -582,6 +582,22 @@ const FORBIDDEN_BASENAMES = new Set([
 ]);
 
 /**
+ * True when `relPath`'s basename is a reserved wiki-infrastructure file
+ * ({@link FORBIDDEN_BASENAMES}) — case-insensitive, both `.md` and `.mdx`. The
+ * gardener must never TARGET these. `entities/Claude.md` is a legitimate,
+ * permanently hand-maintained entity page, but on APFS's case-insensitive default
+ * it IS `entities/CLAUDE.md` — which an agent with cwd inside the wiki would
+ * auto-load as instructions — so it stays off-limits to programmatic writes (a
+ * prompt-injection surface). Resolve-time rejection (both resolve sites) uses this
+ * to drop such a cluster EARLY, before it consumes a cap slot or reaches the
+ * drafter; `isPathConfined` uses the same set as the final persist/apply backstop.
+ */
+export function hasForbiddenBasename(relPath: string): boolean {
+  const base = toPosixRel(relPath).split("/").pop();
+  return !!base && FORBIDDEN_BASENAMES.has(base.toLowerCase());
+}
+
+/**
  * Path confinement: `target_path` must be relative, `..`-free, resolve inside
  * `wikiDir`, end in `.md` or `.mdx`, not be a reserved infrastructure file (log,
  * index, CLAUDE — either extension), and either (create) sit under the domain+kind's
