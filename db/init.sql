@@ -312,7 +312,7 @@ CREATE TABLE watchers (
   user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   name TEXT NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic', 'wiki-gardener', 'wiki-linter')),
+  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic', 'wiki-gardener', 'wiki-linter', 'wiki-committer')),
   config JSONB NOT NULL DEFAULT '{}',
   interval_ms INTEGER NOT NULL DEFAULT 300000,  -- 5 min default
   enabled BOOLEAN NOT NULL DEFAULT true,

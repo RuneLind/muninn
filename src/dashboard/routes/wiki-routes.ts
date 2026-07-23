@@ -63,6 +63,7 @@ import {
   type IndexCoverageResponse,
 } from "../../wiki/index-coverage.ts";
 import { EXPLAINER_BRIDGE_SCRIPT } from "../../wiki/explainer-bridge.ts";
+import { wikiDirtyStat } from "../../wiki/commit.ts";
 import { buildDistillPrompt, parseDistillResult, buildSavedNotesBlock } from "../../wiki/remember.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { generateEmbedding } from "../../ai/embeddings.ts";
@@ -648,7 +649,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       return { ids, patterns: patternsByCollection.get(collection) };
     });
 
-    return c.json(buildIndexCoverageResponse(collections, pageRelPaths, listings));
+    // Dirty-state probe for the Index card's "uncommitted changes: N" badge.
+    // Independent of collections (a git fact about the wiki dir); cheap + never
+    // throws (non-repo ⇒ 0). Attached alongside the coverage fields.
+    const dirty = await wikiDirtyStat(entry.root);
+    return c.json({
+      ...buildIndexCoverageResponse(collections, pageRelPaths, listings),
+      ...dirty,
+    });
   });
 
   // Manual reindex trigger for the reader's Index card. Resolves the wiki exactly

@@ -9,6 +9,7 @@ import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
+import { checkWikiCommitter } from "./wiki-committer.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
 import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../scheduler/executor.ts";
@@ -297,7 +298,7 @@ export function watcherConnectorInfo(
         model: botConfig.model ?? botFallbackModel,
       };
     default:
-      // news, wiki-linter — no AI model runs.
+      // news, wiki-linter, wiki-committer — no AI model runs.
       return null;
   }
 }
@@ -401,8 +402,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
       // live progress callback fills this run's `/agents` tool mini-log, `wt`
       // receives tool child spans (Gmail MCP calls etc.) under the `watcher:<type>`
-      // span, and onUsage sums token usage. News/wiki-linter/wiki-gardener
-      // checkers ignore it (no spawnHaiku).
+      // span, and onUsage sums token usage. News/wiki-linter/wiki-committer/
+      // wiki-gardener checkers ignore it (no spawnHaiku).
       const telemetry: HaikuTelemetry = {
         onProgress: createProgressCallback(requestId, "running_watcher"),
         tracer: wt,
@@ -436,11 +437,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // would false-drop a legitimate weekly notification. The wiki-linter's
       // alert id is per-day-stable and its summary (identical counts) can repeat
       // across weekly runs, so content-hash would wrongly suppress a recurring
-      // report — skip it for all three.
+      // report — skip it for all three. The wiki-committer's alert id is likewise
+      // per-day-stable and its summary ("Swept N …") repeats across days, so
+      // content-hash would wrongly suppress a recurring daily sweep — skip it too.
       const skipContentHash =
         watcher.type === "anthropic" ||
         watcher.type === "wiki-gardener" ||
-        watcher.type === "wiki-linter";
+        watcher.type === "wiki-linter" ||
+        watcher.type === "wiki-committer";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
@@ -600,6 +604,10 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
       // Report-only lint over the bot's wikiDir — needs the full BotConfig for
       // its wikiDir; never writes to the wiki or DB.
       return await checkWikiLinter(watcher, botConfig);
+    case "wiki-committer":
+      // Daily sweeper: commits uncommitted wiki-subtree changes on the default
+      // branch. Needs the full BotConfig for its wikiDir + wikiAutoCommit.push.
+      return await checkWikiCommitter(watcher, botConfig);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -608,7 +616,7 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : watcher.type === "wiki-committer" ? "\u{1F4BE}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

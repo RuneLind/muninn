@@ -590,6 +590,10 @@ export async function renderWikiPage(opts?: {
     .wiki-ix-reindex-row.warn span { color: var(--status-warning); }
     .wiki-ix-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
     .wiki-ix-summary b { color: var(--text-primary); }
+    /* "uncommitted changes: N" badge — amber by default, red once the oldest
+       dirty file is > 24h old (the daily sweeper should have caught it). */
+    .wiki-ix-dirty { font-weight: 600; color: var(--status-warning); }
+    .wiki-ix-dirty.stale { color: var(--status-error); }
     .wiki-ix-details { margin-top: 6px; }
     .wiki-ix-details summary { font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 2px 0; }
     .wiki-ix-details summary:hover { color: var(--accent-light); }

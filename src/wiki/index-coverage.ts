@@ -235,6 +235,14 @@ export interface IndexCoverageResponse {
   /** Always populated (derived from the page index alone, independent of collections). */
   htmlPages: number;
   generatedAt: number;
+  /** Uncommitted-file count in the wiki's git subtree (independent of collections;
+   *  0 when the wiki is not a git repo or the tree is clean). Backs the Index
+   *  card's "uncommitted changes: N" badge. Attached by the route (a git probe),
+   *  not the pure builder — optional so builder-only callers/tests stay valid. */
+  dirtyCount?: number;
+  /** Oldest dirty file's mtime (epoch ms) — the staleness signal (red past 24h in
+   *  the UI). `null` when clean or every dirty path is a deletion. */
+  oldestDirtyMtimeMs?: number | null;
   /** Present only when ≥1 collection listing failed (partial data, non-fatal). */
   errors?: StatsError[];
 }
