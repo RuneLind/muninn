@@ -9,6 +9,7 @@ import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
+import { checkWikiCommitter } from "./wiki-committer.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
 import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../scheduler/executor.ts";
@@ -61,6 +62,20 @@ export function accumulateWatcherUsage(acc: WatcherUsageAcc, u: HaikuUsage): voi
 // lookbackDays (16) spans two 7-day runs — at 400, ~82 of the older run's ids
 // were evicted and could re-surface as duplicates.
 const MAX_NOTIFIED_IDS = 600;
+
+// Watcher types whose checker's side effect is NOT a user notification — the
+// `wiki-committer` sweeps a git commit, not a Telegram ping. Quiet hours must not
+// suppress the RUN itself (an hour-9 sweeper would never fire under the common
+// overnight 22–08 window); only the user-facing ALERT send is suppressed during
+// quiet hours (see `runWatchers`). Mirrors the `skipContentHash` per-type pattern.
+const QUIET_HOURS_RUN_EXEMPT: ReadonlySet<Watcher["type"]> = new Set(["wiki-committer"]);
+
+/** True when a watcher type still RUNS during the owner's quiet hours (its side
+ *  effect isn't a notification) — its user-facing alert send is suppressed
+ *  instead of the whole run being skipped. */
+export function isQuietHoursRunExempt(type: Watcher["type"]): boolean {
+  return QUIET_HOURS_RUN_EXEMPT.has(type);
+}
 
 /**
  * Per-watcher safety-net timeout. Each checker already applies its own model
@@ -297,7 +312,7 @@ export function watcherConnectorInfo(
         model: botConfig.model ?? botFallbackModel,
       };
     default:
-      // news, wiki-linter — no AI model runs.
+      // news, wiki-linter, wiki-committer — no AI model runs.
       return null;
   }
 }
@@ -343,14 +358,23 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     }
 
     let requestId: string | undefined;
+    // True when the owner is in quiet hours AND this watcher type is exempt from
+    // the whole-run skip (wiki-committer): the checker runs, but its user-facing
+    // Telegram/Slack send is suppressed below.
+    let quietHours = false;
     try {
       // Check quiet hours — skip notifications but still mark as run (forced runs bypass)
       if (!forced) {
         const quiet = await isQuietHours(watcher.userId);
         if (quiet) {
-          await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
-          wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
-          return;
+          if (!isQuietHoursRunExempt(watcher.type)) {
+            await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+            wt?.finish("ok", { type: watcher.type, quietHoursSkipped: true });
+            return;
+          }
+          // Exempt type: run the checker (perform its side effect) but suppress
+          // the user-facing alert send until quiet hours end.
+          quietHours = true;
         }
       }
 
@@ -401,8 +425,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
       // live progress callback fills this run's `/agents` tool mini-log, `wt`
       // receives tool child spans (Gmail MCP calls etc.) under the `watcher:<type>`
-      // span, and onUsage sums token usage. News/wiki-linter/wiki-gardener
-      // checkers ignore it (no spawnHaiku).
+      // span, and onUsage sums token usage. News/wiki-linter/wiki-committer/
+      // wiki-gardener checkers ignore it (no spawnHaiku).
       const telemetry: HaikuTelemetry = {
         onProgress: createProgressCallback(requestId, "running_watcher"),
         tracer: wt,
@@ -436,11 +460,14 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // would false-drop a legitimate weekly notification. The wiki-linter's
       // alert id is per-day-stable and its summary (identical counts) can repeat
       // across weekly runs, so content-hash would wrongly suppress a recurring
-      // report — skip it for all three.
+      // report — skip it for all three. The wiki-committer's alert id is likewise
+      // per-day-stable and its summary ("Swept N …") repeats across days, so
+      // content-hash would wrongly suppress a recurring daily sweep — skip it too.
       const skipContentHash =
         watcher.type === "anthropic" ||
         watcher.type === "wiki-gardener" ||
-        watcher.type === "wiki-linter";
+        watcher.type === "wiki-linter" ||
+        watcher.type === "wiki-committer";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
@@ -465,24 +492,31 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         // Format as markdown (stored in DB), convert to platform format for send
         const markdown = formatAlerts(watcher, visibleAlerts);
 
-        // Send to Telegram (fall back to plain text if HTML is rejected)
-        agentStatus.set("sending_telegram", watcher.name);
-        const html = formatTelegramHtml(markdown);
-        try {
-          await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
-        } catch (sendErr) {
-          if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
-            log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
-            await api.sendMessage(watcher.userId, stripHtml(html));
-          } else {
-            throw sendErr;
+        if (quietHours) {
+          // Quiet-hours exempt watcher (wiki-committer): the sweep already ran;
+          // suppress the Telegram/Slack ping but still log + persist so the sweep
+          // stays auditable. The user sees it in-thread, not as an overnight ping.
+          log.info("Watcher \"{name}\" ran during quiet hours — user-facing alert send suppressed, sweep logged", { botName: tag, name: watcher.name });
+        } else {
+          // Send to Telegram (fall back to plain text if HTML is rejected)
+          agentStatus.set("sending_telegram", watcher.name);
+          const html = formatTelegramHtml(markdown);
+          try {
+            await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
+          } catch (sendErr) {
+            if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
+              log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
+              await api.sendMessage(watcher.userId, stripHtml(html));
+            } else {
+              throw sendErr;
+            }
           }
-        }
 
-        // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
-        const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };
-        if (slackConfig.slackChannels?.length) {
-          await sendToSlackChannels(slackConfig.slackBot || tag, markdown, slackConfig.slackChannels);
+          // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
+          const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };
+          if (slackConfig.slackChannels?.length) {
+            await sendToSlackChannels(slackConfig.slackBot || tag, markdown, slackConfig.slackChannels);
+          }
         }
 
         // Persist markdown in messages so Claude can reference it in conversation.
@@ -600,6 +634,10 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
       // Report-only lint over the bot's wikiDir — needs the full BotConfig for
       // its wikiDir; never writes to the wiki or DB.
       return await checkWikiLinter(watcher, botConfig);
+    case "wiki-committer":
+      // Daily sweeper: commits uncommitted wiki-subtree changes on the default
+      // branch. Needs the full BotConfig for its wikiDir + wikiAutoCommit.push.
+      return await checkWikiCommitter(watcher, botConfig);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -608,7 +646,7 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : watcher.type === "wiki-committer" ? "\u{1F4BE}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";

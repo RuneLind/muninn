@@ -23,6 +23,7 @@ Scheduler tick (every 60s)
 | `anthropic` | `anthropic.ts` | GitHub Atom feeds + llms.txt/blog diff | Haiku gate (Highlights) / Sonnet digest (Daily/Weekly) |
 | `wiki-gardener` | `wiki-gardener.ts` | Recent summary collections (knowledge API) | Haiku cluster + bot-connector draft |
 | `wiki-linter` | `wiki-linter.ts` | The bot's on-disk wiki tree (no AI) | — |
+| `wiki-committer` | `wiki-committer.ts` | The bot's wiki git repo (no AI) | — |
 
 ## Interest-profile personalization (gate/capture prompts)
 
@@ -710,6 +711,62 @@ wiki or DB. v1 is purely a report.
   fast — fs + parsing). Idempotent: skips if a `wiki-linter` row already exists.
 - Schema: the `watchers.type` CHECK gains `'wiki-linter'` (migration `058`,
   mirrored in `db/init.sql`).
+
+## Wiki Committer (wiki-committer.ts)
+
+A **daily** commit sweeper that catches wiki writes the per-write commit seam
+(`src/wiki/commit.ts`) missed: manual edits outside muninn, a crashed
+gardener-apply run, and writes SKIPPED because the repo was off its default
+branch when they landed (the seam deliberately defers those). It exists because a
+wiki repo silently accumulating uncommitted pages is one `git clean` away from
+losing them (the 2026-07-23 huginn-jarvis incident).
+
+- Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
+  exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);
+  **not-a-repo / off-default-branch ⇒ no-op** (a feature checkout is left for a
+  later run). On the default branch, `listWikiSubtreeDirty(top, wikiDir)` runs
+  `git status --porcelain -z -- <wikiDir>` (scoped to the wiki subtree, so
+  unrelated repo dirt is never touched; `-z` + a `rawStdout` flag on the shared
+  `git()` helper because a leading status-column space would be trimmed away and
+  corrupt the first entry) and returns the dirty wiki-relative paths + the subset
+  that are **deletions** (absent from disk). It commits exactly those via
+  `commitWikiChange` under `[sweep] daily wiki sweep: N files` with the file list
+  in the commit body (new `opts.bodyLines`), pushing per `wikiAutoCommit.push ??
+  true`.
+- **Deletions** are committed too: `commitInner`'s exists-on-disk filter would
+  drop a removed page, so the sweeper passes them as `opts.deletions` — those
+  bypass the filter and `git add -- <path>` stages the deletion (recorded as a
+  `D` in the commit). No `.obsidian` exclusion — Obsidian churn is already
+  gitignored in the target repo, and a blanket skip would wrongly drop
+  legitimately-tracked `.obsidian` config.
+- **Report-only otherwise**: emits a `WatcherAlert` (💾) ONLY when it swept
+  (low urgency) or when a sweep it attempted FAILED (medium) — quiet when
+  clean/off-branch/not-a-repo, matching the linter. Per-day-stable alert id
+  (`wiki-sweep-<YYYY-MM-DD>`); the runner's `skipContentHash` covers it so a
+  recurring daily sweep with the same summary still notifies.
+- **Quiet-hours run-exempt**: the sweeper's side effect is a **git commit, not a
+  user notification**, so the runner does NOT skip its run during the owner's
+  quiet hours (the common overnight 22–08 window would otherwise silence an
+  hour-9 sweeper forever). `wiki-committer` is in the runner's
+  `QUIET_HOURS_RUN_EXEMPT` set (`isQuietHoursRunExempt`) — during quiet hours the
+  checker RUNS (commits + logs activity) but its Telegram/Slack **alert send is
+  suppressed** (the alert still persists in-thread + activity-logs, so the sweep
+  stays auditable without an overnight ping). Every other watcher type keeps the
+  original whole-run quiet-hours skip.
+- **Seed**: `bun scripts/setup-wiki-committer.ts [--apply]` — daily interval
+  (24h, a **1-day staleness floor** so a missed window still fires the next day)
+  + `config.hour: 9` (daytime, clear of the common overnight quiet-hours window
+  AND of the gardener's 10 and linter's 11 slots), `config.timeoutMs: 300000`.
+  Idempotent: skips if a `wiki-committer` row exists.
+- Schema: the `watchers.type` CHECK gains `'wiki-committer'` (migration `064`,
+  mirrored in `db/init.sql`).
+
+**Index-card badge.** The `/wiki` reader's Index card shows an "uncommitted
+changes: N" badge when the wiki's git subtree is dirty (`wikiDirtyStat` on
+`GET /api/wiki/index-coverage` — a cheap `git status` line count + the oldest
+dirty file's mtime; 0 when not a git repo). Amber normally, **red** once the
+oldest dirty file is > 24h old (the sweeper should have caught it); absent when
+clean.
 
 ## Configurable prompts
 

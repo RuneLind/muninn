@@ -596,13 +596,19 @@ export async function assembleModelsOverview(
     "wiki-gardener": "wiki_gardener_cluster",
   };
   for (const w of watchers) {
-    if (w.type === "wiki-linter" || w.type === "news") {
-      // Report-only / no-AI watchers.
+    if (w.type === "wiki-linter" || w.type === "wiki-committer" || w.type === "news") {
+      // Report-only / no-AI watchers (linter reports, committer sweeps git, news RSS).
+      const noAiNote =
+        w.type === "wiki-linter"
+          ? "report-only (no AI)"
+          : w.type === "wiki-committer"
+            ? "commit sweeper (no AI)"
+            : "no AI (RSS)";
       pipeline.push({
         job: `Watcher: ${w.name} · ${w.botName}`,
         backend: "none",
         model: { value: "—", origin: "none" },
-        note: w.type === "wiki-linter" ? "report-only (no AI)" : "no AI (RSS)",
+        note: noAiNote,
         used: [],
         matchKind: "watcher",
         matchBot: w.botName,

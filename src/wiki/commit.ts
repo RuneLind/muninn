@@ -37,7 +37,7 @@
  */
 
 import path from "node:path";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "commit");
@@ -53,6 +53,21 @@ export interface CommitWikiOpts {
    * module doc. It is serialized behind any subsequent commit on the same repo.
    */
   push?: boolean;
+  /**
+   * Extra commit-body lines, appended to `message` as a second `-m` block (a
+   * blank line then the joined lines). Additive: absent/empty ⇒ a subject-only
+   * commit, byte-identical to today. Used by the daily sweeper to list the swept
+   * files under the `[sweep] …` subject.
+   */
+  bodyLines?: string[];
+  /**
+   * Wiki-relative paths that are DELETIONS (tracked files removed from disk). The
+   * normal exists-on-disk filter in `commitInner` would drop these before staging;
+   * listing them here makes `commitInner` stage them anyway (`git add -- <path>`
+   * stages a deletion), so a removed page is committed as a deletion instead of
+   * being silently skipped. Additive: absent/empty ⇒ today's behavior.
+   */
+  deletions?: string[];
   /**
    * Test/observability seam — invoked once the dispatched push settles (success
    * OR failure), OR immediately when no push is attempted (nothing committed,
@@ -85,8 +100,13 @@ interface GitResult {
  *
  * `GIT_TERMINAL_PROMPT=0` (merged over the process env) makes any git op that
  * would otherwise prompt for credentials — e.g. a `push` to an https remote with
- * no credential helper — fail fast instead of hanging waiting on stdin. */
-async function git(cwd: string, args: string[]): Promise<GitResult> {
+ * no credential helper — fail fast instead of hanging waiting on stdin.
+ *
+ * `rawStdout` skips the trim — REQUIRED for `status --porcelain -z`, whose
+ * first status column is a leading space that `.trim()` would strip, corrupting
+ * the first entry's 2-char `XY` prefix. Every other caller wants the trimmed
+ * form (e.g. `rev-parse` toplevel), so trim stays the default. */
+async function git(cwd: string, args: string[], rawStdout = false): Promise<GitResult> {
   try {
     const proc = Bun.spawn(["git", "-C", cwd, ...args], {
       stdout: "pipe",
@@ -98,7 +118,7 @@ async function git(cwd: string, args: string[]): Promise<GitResult> {
       new Response(proc.stderr).text(),
     ]);
     const code = await proc.exited;
-    return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+    return { code, stdout: rawStdout ? stdout : stdout.trim(), stderr: stderr.trim() };
   } catch (err) {
     return { code: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
@@ -144,9 +164,10 @@ export function __resetForTest(): void {
 
 /**
  * Resolve the git toplevel that contains `wikiDir`, or null when `wikiDir` is
- * outside any git repo (a non-fatal skip condition).
+ * outside any git repo (a non-fatal skip condition). Exported so the daily
+ * wiki-committer sweeper reuses it instead of re-spawning `rev-parse`.
  */
-async function gitToplevel(wikiDir: string): Promise<string | null> {
+export async function gitToplevel(wikiDir: string): Promise<string | null> {
   const r = await git(wikiDir, ["rev-parse", "--show-toplevel"]);
   if (r.code !== 0 || !r.stdout) return null;
   return r.stdout;
@@ -166,8 +187,10 @@ async function defaultBranch(top: string): Promise<string | null> {
   return null;
 }
 
-/** True when the repo is currently checked out on its default branch. */
-async function onDefaultBranch(top: string): Promise<boolean> {
+/** True when the repo is currently checked out on its default branch. Exported
+ *  so the sweeper can skip a feature-branch checkout (same rule the commit path
+ *  applies — a non-default branch is left for a later sweep). */
+export async function onDefaultBranch(top: string): Promise<boolean> {
   const current = (await git(top, ["branch", "--show-current"])).stdout;
   if (!current) return false; // detached HEAD — never our default
   const def = await defaultBranch(top);
@@ -212,7 +235,10 @@ export async function commitWikiChange(
 
     // Commit is awaited — after this resolves the working tree is clean.
     const result = await runExclusiveQueued(top, () =>
-      commitInner(top, wikiDir, staged, message),
+      commitInner(top, wikiDir, staged, message, {
+        bodyLines: opts.bodyLines,
+        deletions: new Set(opts.deletions ?? []),
+      }),
     );
 
     // The push is a network op — it must NOT block the caller (an approve HTTP
@@ -247,6 +273,7 @@ async function commitInner(
   wikiDir: string,
   paths: string[],
   message: string,
+  opts: { bodyLines?: string[]; deletions: Set<string> } = { deletions: new Set() },
 ): Promise<CommitWikiResult> {
   if (!(await onDefaultBranch(top))) {
     log.warn(
@@ -265,12 +292,25 @@ async function commitInner(
   // Filter to paths that actually exist on disk. A best-effort write (e.g. the
   // log.md append) may have failed — a missing path must not abort the whole
   // batch (git add/commit would error on it), so drop it and commit the rest.
+  // EXCEPTION: a path listed in `opts.deletions` is a tracked file removed from
+  // disk — it's absent by design, and `git add -- <path>` stages the deletion, so
+  // it must NOT be dropped. This is how the sweeper commits removed pages.
   const repoRel: string[] = [];
+  const repoRelDeletions: string[] = [];
   const dropped: string[] = [];
   for (const p of paths) {
     const abs = path.join(canonicalWiki, p);
+    const rel = path.relative(top, abs);
     if (await pathExists(abs)) {
-      repoRel.push(path.relative(top, abs));
+      repoRel.push(rel);
+    } else if (opts.deletions.has(p)) {
+      // Absent-on-disk deletion — either an unstaged `rm` (present in HEAD, gone
+      // from the worktree) OR a human's ALREADY-staged `git rm` / `git mv` origin.
+      // Keep it in the commit pathspec, but stage it SEPARATELY below: a path
+      // already staged as a deletion makes a batched `git add` exit 128
+      // ("pathspec did not match any files"), which would abort the whole sweep.
+      repoRel.push(rel);
+      repoRelDeletions.push(rel);
     } else {
       dropped.push(p);
     }
@@ -286,10 +326,30 @@ async function commitInner(
     return { committed: false, reason: "nothing-to-commit" };
   }
 
-  const added = await git(top, ["add", "--", ...repoRel]);
-  if (added.code !== 0) {
-    log.warn("Wiki commit: git add failed in {top}: {error}", { top, error: added.stderr });
-    return { committed: false, reason: "error" };
+  // Stage the present paths in ONE batch. A deletion is never in this set (see
+  // above), so a staged rename/deletion in the wiki can't fail the pathspec and
+  // abort the batch — the recurring-every-sweep bug this guards.
+  const toAdd = repoRel.filter((r) => !repoRelDeletions.includes(r));
+  if (toAdd.length > 0) {
+    const added = await git(top, ["add", "--", ...toAdd]);
+    if (added.code !== 0) {
+      log.warn("Wiki commit: git add failed in {top}: {error}", { top, error: added.stderr });
+      return { committed: false, reason: "error" };
+    }
+  }
+  // Stage each deletion on its own, TOLERATING the exit-128 pathspec mismatch a
+  // path already staged as a deletion (human `git rm`/`git mv`) produces — it's
+  // already in the index, so it still lands in the commit. An UNSTAGED deletion
+  // (in HEAD, gone from the worktree, never `git rm`'d) stages here exactly as
+  // before, keeping that path byte-identical.
+  for (const del of repoRelDeletions) {
+    const addDel = await git(top, ["add", "--", del]);
+    if (addDel.code !== 0) {
+      log.debug("Wiki commit: '{path}' already staged as a deletion in {top} (tolerated)", {
+        top,
+        path: del,
+      });
+    }
   }
 
   // Nothing staged for OUR paths (unchanged since the last commit) → skip quietly.
@@ -303,7 +363,9 @@ async function commitInner(
   // file someone else pre-staged in the repo's index is never swept into this
   // wiki-attributed commit. `git commit -- <paths>` records the working-tree state
   // of those paths (they were just `git add`ed, so new files are known to git).
-  const committed = await git(top, ["commit", "-m", message, "--", ...repoRel]);
+  const bodyArgs =
+    opts.bodyLines && opts.bodyLines.length > 0 ? ["-m", opts.bodyLines.join("\n")] : [];
+  const committed = await git(top, ["commit", "-m", message, ...bodyArgs, "--", ...repoRel]);
   if (committed.code !== 0) {
     log.warn("Wiki commit: git commit failed in {top}: {error}", { top, error: committed.stderr });
     return { committed: false, reason: "error" };
@@ -330,4 +392,112 @@ async function pushInner(top: string): Promise<void> {
   if (pushed.code !== 0) {
     log.warn("Wiki commit: git push failed in {top}: {error}", { top, error: pushed.stderr });
   }
+}
+
+// ── Sweeper support: enumerate the dirty state of a wiki subtree ──────────────
+//
+// The daily wiki-committer catches manual edits, crashed runs, and writes that
+// were skipped while the repo was off its default branch. It needs to know
+// exactly which files in the wiki subtree are dirty (tracked-modified, untracked,
+// or deleted) so it can commit precisely those — never `git add -A`. This helper
+// centralizes the git-status spawn + porcelain parse so the watcher stays free of
+// raw git plumbing.
+
+/** One entry from `git status --porcelain -z` (repo-relative, posix). */
+interface PorcelainEntry {
+  /** repo-relative path (posix separators, as git emits). */
+  path: string;
+}
+
+/**
+ * Parse `git status --porcelain -z` output. NUL-separated (no path quoting), so
+ * paths with spaces/unicode are safe. A rename/copy record (`X`/`Y` = R/C) is
+ * followed by a second NUL field carrying the ORIGINAL path — we surface BOTH the
+ * new path and the original (the original is a deletion the caller will stage), so
+ * a pre-staged rename commits as delete + add rather than a half-recorded rename.
+ */
+function parsePorcelainZ(out: string): PorcelainEntry[] {
+  const tokens = out.split("\0");
+  const entries: PorcelainEntry[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok || tok.length < 4) continue; // "XY p" is the minimum
+    const xy = tok.slice(0, 2);
+    entries.push({ path: tok.slice(3) });
+    if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
+      const orig = tokens[++i];
+      if (orig) entries.push({ path: orig });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Enumerate the dirty paths inside a wiki subtree (tracked-modified, untracked,
+ * and deleted), as WIKI-relative paths ready to pass to `commitWikiChange`. The
+ * status is scoped to the wiki directory pathspec, so unrelated dirt elsewhere in
+ * the repo is never listed. Deletions (paths absent from disk) are returned
+ * separately so the caller can pass them as `opts.deletions`. Best-effort: a
+ * failed `git status` degrades to empty, never throws.
+ *
+ * @param top        the repo toplevel (from `gitToplevel`)
+ * @param wikiDirAbs the absolute wiki root
+ */
+export async function listWikiSubtreeDirty(
+  top: string,
+  wikiDirAbs: string,
+): Promise<{ dirty: string[]; deletions: string[] }> {
+  const canonicalWiki = await realpath(wikiDirAbs).catch(() => wikiDirAbs);
+  // Scope to the wiki subtree; `--porcelain -z` keeps parsing quote-free and
+  // includes untracked files by default. Absolute pathspec ⇒ repo-relative output.
+  const r = await git(top, ["status", "--porcelain", "-z", "--", canonicalWiki], true);
+  if (r.code !== 0) {
+    log.warn("Wiki sweep: git status failed in {top}: {error}", { top, error: r.stderr });
+    return { dirty: [], deletions: [] };
+  }
+  const dirty: string[] = [];
+  const deletions: string[] = [];
+  for (const entry of parsePorcelainZ(r.stdout)) {
+    const abs = path.join(top, entry.path);
+    const rel = path.relative(canonicalWiki, abs);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue; // outside the subtree
+    const wikiRel = rel.split(path.sep).join("/");
+    dirty.push(wikiRel);
+    if (!(await pathExists(abs))) deletions.push(wikiRel);
+  }
+  return { dirty, deletions };
+}
+
+/** The dirty-state snapshot of a wiki's repo for the `/wiki` Index-card badge. */
+export interface WikiDirtyStat {
+  /** Count of dirty files (tracked-modified + untracked + deleted) in the wiki
+   *  subtree. `0` when the wiki is not inside a git repo or the tree is clean. */
+  dirtyCount: number;
+  /** Oldest dirty file's mtime (epoch ms) — a proxy for "dirty for a while".
+   *  `null` when nothing is dirty or every dirty path is a deletion (no mtime). */
+  oldestDirtyMtimeMs: number | null;
+}
+
+/**
+ * Cheap, non-blocking dirty-state probe for the Index card's "uncommitted
+ * changes: N" badge. Counts the wiki subtree's dirty files and finds the oldest
+ * dirty file's mtime (the staleness signal — red past 24h in the UI). Never
+ * throws: a non-repo / status failure degrades to `{ dirtyCount: 0, ... }`.
+ */
+export async function wikiDirtyStat(wikiDir: string): Promise<WikiDirtyStat> {
+  const top = await gitToplevel(wikiDir);
+  if (!top) return { dirtyCount: 0, oldestDirtyMtimeMs: null };
+  const canonicalWiki = await realpath(wikiDir).catch(() => wikiDir);
+  const { dirty } = await listWikiSubtreeDirty(top, wikiDir);
+  let oldest: number | null = null;
+  for (const rel of dirty) {
+    try {
+      const st = await stat(path.join(canonicalWiki, rel));
+      const mtime = st.mtimeMs;
+      if (oldest === null || mtime < oldest) oldest = mtime;
+    } catch {
+      /* a deleted path has no mtime — skip it */
+    }
+  }
+  return { dirtyCount: dirty.length, oldestDirtyMtimeMs: oldest };
 }

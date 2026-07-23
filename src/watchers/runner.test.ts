@@ -11,6 +11,7 @@ import {
   watcherConnectorInfo,
   newWatcherUsage,
   accumulateWatcherUsage,
+  isQuietHoursRunExempt,
 } from "./runner.ts";
 import { DEFAULT_MODEL } from "../scheduler/executor.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -331,6 +332,20 @@ describe("watcherConnectorInfo", () => {
   test("non-AI watchers (news, wiki-linter) stamp nothing", () => {
     expect(watcherConnectorInfo({ type: "news", config: {} }, sdkBot)).toBeNull();
     expect(watcherConnectorInfo({ type: "wiki-linter", config: {} }, sdkBot)).toBeNull();
+  });
+});
+
+// ── isQuietHoursRunExempt (quiet-hours run vs alert-send suppression) ─
+
+describe("isQuietHoursRunExempt", () => {
+  test("wiki-committer runs during quiet hours (its side effect is a git commit, not a ping)", () => {
+    expect(isQuietHoursRunExempt("wiki-committer")).toBe(true);
+  });
+
+  test("notification watchers are NOT exempt — quiet hours skip the whole run", () => {
+    for (const t of ["email", "news", "x", "anthropic", "wiki-gardener", "wiki-linter"] as const) {
+      expect(isQuietHoursRunExempt(t)).toBe(false);
+    }
   });
 });
 

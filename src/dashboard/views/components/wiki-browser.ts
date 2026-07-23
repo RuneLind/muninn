@@ -247,6 +247,8 @@ interface IndexCoverage {
   ghosts: string[] | null;
   htmlPages: number;
   generatedAt: number;
+  dirtyCount?: number;
+  oldestDirtyMtimeMs?: number | null;
   error?: string;
   errors?: { source: string; collection: string; error: string }[];
 }
@@ -319,6 +321,24 @@ function indexCovList(cssClass: string, label: string, items: string[], linkable
   return html + "</ul></details>";
 }
 
+/** "uncommitted changes: N" badge for the Index card summary — rendered ONLY when
+ *  the wiki's git subtree is dirty (N > 0). Red when the oldest dirty file has
+ *  been sitting > 24h (a stale-uncommitted signal the daily sweeper should have
+ *  caught); amber otherwise. Absent when clean, so a clean card stays
+ *  uncluttered. */
+function dirtyBadge(cov: IndexCoverage): string {
+  const n = cov.dirtyCount || 0;
+  if (n <= 0) return "";
+  const STALE_MS = 24 * 60 * 60 * 1000;
+  const oldest = cov.oldestDirtyMtimeMs;
+  const stale = typeof oldest === "number" && Date.now() - oldest > STALE_MS;
+  return (
+    ' · <span class="wiki-ix-dirty' + (stale ? " stale" : "") + '"' +
+    (stale ? ' title="oldest uncommitted change is over a day old">' : ">") +
+    "uncommitted changes: " + n + "</span>"
+  );
+}
+
 /** Build the card's inner HTML from a fully-populated coverage response. */
 function buildIndexCovInner(cov: IndexCoverage): string {
   const missing = cov.missing || [];
@@ -331,7 +351,8 @@ function buildIndexCovInner(cov: IndexCoverage): string {
     (excludedByRule.length ? " · " + excludedByRule.length + " meta (not indexed)" : "") +
     (cov.htmlPages
       ? " · " + cov.htmlPages + " explainer" + (cov.htmlPages === 1 ? "" : "s") + " (not indexed)"
-      : "");
+      : "") +
+    dirtyBadge(cov);
   let html = indexCovHeadHtml() + '<div class="wiki-ix-summary">' + summary + "</div>";
   if (missing.length) {
     html += indexCovList("", "missing (not in search)", missing, true);
