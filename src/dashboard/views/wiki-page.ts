@@ -227,6 +227,11 @@ export async function renderWikiPage(opts?: {
     /* Neutral default so a custom type (no dedicated type-* rule) still shows a
        dot; the specific rules below override for the built-in types. */
     .wiki-type-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; align-self: center; background: var(--text-dim); }
+    /* Neutral fallback for custom-ontology swatches with no dedicated type-* rule.
+       Declared BEFORE the .type-* block so those (equal specificity) win by source
+       order and each legend swatch shows its real type color; the sizing rule below
+       carries no background so it can't re-clobber the palette. */
+    .wiki-atlas-swatch { background: var(--text-dim); }
     .type-concept { background: var(--accent); }
     .type-entity { background: var(--status-cyan); }
     .type-source { background: var(--status-info); }
@@ -273,7 +278,7 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-toggle button:disabled { opacity: .4; cursor: default; }
     .wiki-atlas-legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--text-dim); flex-wrap: wrap; }
     .wiki-atlas-legend span { display: inline-flex; align-items: center; gap: 5px; }
-    .wiki-atlas-swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; background: var(--text-dim); }
+    .wiki-atlas-swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
     .wiki-atlas-swatch.type-hub { background: var(--status-warning); }
 
     .wiki-atlas-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
@@ -297,6 +302,9 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-atlas-node b { display: block; font-size: 11.5px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; letter-spacing: -.02em; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .wiki-atlas-node small { display: block; color: var(--text-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Node left-border colors MUST mirror the canonical .type-* palette above
+       (type-hub→status-warning, source→status-info, concept→accent,
+       entity→status-cyan, analysis→status-magenta) — keep the two in sync. */
     .wiki-atlas-node[data-t="hub"] { border-left-color: var(--status-warning); }
     .wiki-atlas-node[data-t="source"] { border-left-color: var(--status-info); }
     .wiki-atlas-node[data-t="concept"] { border-left-color: var(--accent); }

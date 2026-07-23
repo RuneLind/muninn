@@ -204,14 +204,28 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     }
     const cv = activeCanvas();
     const els = activeEls();
-    if (cv) cv.classList.add("sel");
 
     if (selection.kind === "curated") {
       renderCurated(root, data, selection.idx, cv, els, keyByName, steps, title, nodes);
     } else if (selection.kind === "topic") {
       renderTopic(root, data, selection.idx, cv, els, elsTypes, inA, conceptKeyByName, steps, title, nodes);
     } else {
-      renderNode(root, data, selection.key, cv, elsTypes, inA, steps, title, nodes, deps);
+      renderNode(root, selection.key, cv, els, elsTypes, inA, steps, title, nodes);
+    }
+
+    // Only dim the canvas when the renderer actually lit ≥1 node there — a topic
+    // whose concept was capped out of `nodes`, or a Months selection whose hits
+    // are all in the omitted tail, light nothing, and a fully-greyed canvas with
+    // no anchor reads as broken. Leave it undimmed + note it in the story panel.
+    if (cv) {
+      const lit = cv.querySelectorAll(".wiki-atlas-node.on").length > 0;
+      cv.classList.toggle("sel", lit);
+      if (!lit) {
+        steps.insertAdjacentHTML(
+          "afterbegin",
+          '<div class="wiki-atlas-hint">Not in this view — try the other projection.</div>',
+        );
+      }
     }
   };
 
@@ -246,13 +260,18 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     }
     const trail = t.closest?.(".wiki-atlas-trail") as HTMLElement | null;
     if (trail) {
-      selection = { kind: "curated", idx: Number(trail.getAttribute("data-idx")) };
+      const idx = Number(trail.getAttribute("data-idx"));
+      // Clicking the already-selected trail toggles it off.
+      selection =
+        selection?.kind === "curated" && selection.idx === idx ? null : { kind: "curated", idx };
       render();
       return;
     }
     const topic = t.closest?.(".wiki-atlas-topic") as HTMLElement | null;
     if (topic) {
-      selection = { kind: "topic", idx: Number(topic.getAttribute("data-idx")) };
+      const idx = Number(topic.getAttribute("data-idx"));
+      selection =
+        selection?.kind === "topic" && selection.idx === idx ? null : { kind: "topic", idx };
       render();
       return;
     }
@@ -260,9 +279,16 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     if (node) {
       const key = node.getAttribute("data-key");
       if (key) {
-        selection = { kind: "node", key };
+        selection = selection?.kind === "node" && selection.key === key ? null : { kind: "node", key };
         render();
       }
+      return;
+    }
+    // Click on empty canvas background (not a node) clears the selection —
+    // same effect as the Clear button.
+    if (t.closest?.(".wiki-atlas-canvas") && selection) {
+      selection = null;
+      render();
     }
   });
 
@@ -562,15 +588,7 @@ function renderTopic(
     }
   } else if (conceptKey) {
     // Types projection: ego-network star around the concept node.
-    const hood = new Set<string>([
-      conceptKey,
-      ...(nodes[conceptKey]?.links ?? []),
-      ...(inA[conceptKey] ?? []),
-    ]);
-    for (const k of hood) elsTypes[k]?.classList.add("on");
-    elsTypes[conceptKey]?.classList.add("center");
-    if (cv) drawStar(cv, elsTypes, conceptKey, hood);
-    elsTypes[conceptKey]?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    drawEgoStar(cv, elsTypes, inA, nodes, conceptKey);
   }
 
   // Chronicle panel — always chronological (dates carry the story in both views).
@@ -587,10 +605,14 @@ function renderTopic(
     const date = nodes[k]?.date ?? "";
     const m = date.slice(0, 7);
     if (prevMonth && m && m > prevMonth) {
-      const gap =
-        (new Date(m + "-02").getTime() - new Date(prevMonth + "-02").getTime()) / (30 * 864e5);
-      if (gap >= 2) {
-        html += `<div class="wiki-atlas-gap">— quiet for ~${Math.round(gap)} months —</div>`;
+      // True month arithmetic (both keys are YYYY-MM) — count the EMPTY months
+      // between the two captures, immune to 28/30/31-day drift. `quiet ≥ 1` ⇒ at
+      // least one fully silent month.
+      const [py, pm] = prevMonth.split("-").map(Number);
+      const [cy, cm] = m.split("-").map(Number);
+      const quiet = (cy! - py!) * 12 + (cm! - pm!) - 1;
+      if (quiet >= 1) {
+        html += `<div class="wiki-atlas-gap">— quiet for ~${quiet} month${quiet === 1 ? "" : "s"} —</div>`;
       }
     }
     if (m) prevMonth = m;
@@ -612,31 +634,27 @@ function renderTopic(
 
 function renderNode(
   root: HTMLElement,
-  _data: AtlasPayload,
   key: string,
   cv: HTMLElement | null,
+  els: Record<string, HTMLElement>,
   elsTypes: Record<string, HTMLElement>,
   inA: Record<string, string[]>,
   steps: HTMLElement,
   title: HTMLElement,
   nodes: Record<string, AtlasNode>,
-  _deps: AtlasDeps,
 ): void {
   const n = nodes[key];
   if (!n) return;
   title.textContent = "Page";
 
   // Ego star only meaningful in the Types projection (all types present there);
-  // in Months just highlight the node if it lives in the active view.
+  // in Months just highlight the node in the active-view els (elsMonths) if it
+  // lives there — passing the ACTIVE els is what makes the Months click light up.
   if (proj === "types" && elsTypes[key]) {
-    const hood = new Set<string>([key, ...(n.links ?? []), ...(inA[key] ?? [])]);
-    for (const k of hood) elsTypes[k]?.classList.add("on");
-    elsTypes[key]?.classList.add("center");
-    if (cv) drawStar(cv, elsTypes, key, hood);
-    elsTypes[key]?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    drawEgoStar(cv, elsTypes, inA, nodes, key);
   } else {
-    const els = proj === "types" ? elsTypes : ({} as Record<string, HTMLElement>);
     els[key]?.classList.add("on", "center");
+    els[key]?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
   }
 
   steps.innerHTML =
@@ -679,6 +697,24 @@ function drawPath(cv: HTMLElement, els: Record<string, HTMLElement>, pathKeys: s
     html += `<path class="wiki-atlas-edge" d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`;
   }
   svg.innerHTML = html;
+}
+
+/** Light + anchor an ego-network star around `center` in the Types projection:
+ *  mark the center + its 1-hop hood `.on`, flag the center `.center`, draw the
+ *  star edges, and scroll it into view. Shared verbatim by the topic (concept ego)
+ *  and node selection renderers. */
+function drawEgoStar(
+  cv: HTMLElement | null,
+  elsTypes: Record<string, HTMLElement>,
+  inA: Record<string, string[]>,
+  nodes: Record<string, AtlasNode>,
+  center: string,
+): void {
+  const hood = new Set<string>([center, ...(nodes[center]?.links ?? []), ...(inA[center] ?? [])]);
+  for (const k of hood) elsTypes[k]?.classList.add("on");
+  elsTypes[center]?.classList.add("center");
+  if (cv) drawStar(cv, elsTypes, center, hood);
+  elsTypes[center]?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
 }
 
 function drawStar(

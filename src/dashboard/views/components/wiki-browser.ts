@@ -105,6 +105,14 @@ function pageUrl(name: string): string {
   const wiki = WIKI ? "wiki=" + encodeURIComponent(WIKI) + "&" : "";
   return "/wiki?" + wiki + "page=" + encodeURIComponent(name);
 }
+/** Collision-proof shareable URL keyed by the page's exact relPath — used for
+ *  pages opened via the Atlas tab so Back/reload/share re-resolve the SAME page
+ *  even on a wiki with same-stem pages in different folders (the `?page=` name
+ *  route resolves first-stem-match). */
+function pageUrlByRelPath(relPath: string): string {
+  const wiki = WIKI ? "wiki=" + encodeURIComponent(WIKI) + "&" : "";
+  return "/wiki?" + wiki + "relPath=" + encodeURIComponent(relPath);
+}
 
 let allPages: WikiListing[] = [];
 let currentName: string | null = null;
@@ -958,7 +966,9 @@ function renderStart(): void {
   document.getElementById("articleWrap")!.innerHTML = html;
   // The Atlas tab lazy-loads its projection into the placeholder just inserted.
   if (startTab === "atlas") {
-    initAtlas({ withWiki, openPage: loadPageByRelPath });
+    // Atlas passes (relPath, name); drop the display name — the relPath is
+    // authoritative and drives the collision-proof history round-trip.
+    initAtlas({ withWiki, openPage: (relPath) => loadPageByRelPath(relPath) });
   }
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';
@@ -1272,14 +1282,19 @@ function loadPage(name: string, push: boolean): void {
 /** Open a page by its exact normalized relPath — collision-proof navigation used
  *  by the Atlas tab, where a same-stem page in another folder must not shadow the
  *  intended one (the by-`name` route resolves first-stem-match). Atlas never maps
- *  explainers, so this render path (no explainer branch) always applies. */
-function loadPageByRelPath(relPath: string, _name: string): void {
+ *  explainers, so this render path (no explainer branch) always applies. The
+ *  relPath rides into the pushed history entry so Back/reload/share re-resolve the
+ *  SAME page; `push=false` on popstate/boot replays without re-pushing. */
+function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
-  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), true);
+  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, relPath);
 }
 
-/** Shared fetch + article render for both by-name and by-relPath navigation. */
-function fetchAndRenderPage(url: string, push: boolean): void {
+/** Shared fetch + article render for both by-name and by-relPath navigation.
+ *  When `relPath` is given (a collision-proof Atlas open), history is pushed as
+ *  `?relPath=<relPath>` so the round-trip survives Back/reload/share; otherwise
+ *  the name-based `?page=<name>` URL is used (existing links unchanged). */
+function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void {
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1291,7 +1306,11 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       currentName = data.meta.name;
       renderBreadcrumb(data.meta);
       if (push) {
-        history.pushState({ page: currentName }, "", pageUrl(currentName));
+        if (relPath) {
+          history.pushState({ relPath }, "", pageUrlByRelPath(relPath));
+        } else {
+          history.pushState({ page: currentName }, "", pageUrl(currentName));
+        }
       }
       // Blog pages get explainer-ish article chrome: an accent-tinted scope
       // (`.wiki-article-blog` + a per-page accent style block) plus the subtitle
@@ -1436,6 +1455,12 @@ if (wikiSel) {
 
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
+  // A relPath URL (Atlas-opened page) round-trips collision-proof; check it first.
+  const relPath = params.get("relPath");
+  if (relPath) {
+    loadPageByRelPath(relPath, false);
+    return;
+  }
   const page = params.get("page");
   if (page) loadPage(page, false);
   else renderStart();
@@ -2540,9 +2565,15 @@ fetch(withWiki("/api/wiki/pages"))
     syncFilters();
     loadCoverageFooter();
     const params = new URLSearchParams(location.search);
-    const page = params.get("page");
-    if (page) loadPage(page, false);
-    else renderStart();
+    // A shared/reloaded relPath URL re-resolves collision-proof; check it first.
+    const relPath = params.get("relPath");
+    if (relPath) {
+      loadPageByRelPath(relPath, false);
+    } else {
+      const page = params.get("page");
+      if (page) loadPage(page, false);
+      else renderStart();
+    }
   })
   .catch((err: Error) => {
     document.getElementById("articleWrap")!.innerHTML =
