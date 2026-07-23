@@ -8,6 +8,7 @@ import {
   backlogProgressText,
   backlogProgressHtml,
   backlogOutcomeHtml,
+  weeklyRunHtml,
   backlogBannerHtml,
   backlogStripHtml,
   backlogSourceDraftHtml,
@@ -16,6 +17,7 @@ import {
   type BacklogWatcherInfo,
   type IngestBacklogResponse,
   type SourceBacklogResult,
+  type WeeklyGardenerRun,
 } from "./wiki-gardener-strip.ts";
 
 /**
@@ -936,5 +938,109 @@ describe("sourceDraftResultHtml", () => {
     expect(sourceDraftResultHtml(result({ selected: 0, drafted: 0, skipped: 0 }), "YouTube")).toContain(
       "YouTube source draft: no uncovered docs to draft",
     );
+  });
+});
+
+describe("weeklyRunHtml — weekly-run render branch (PR 2, watcher-path parity)", () => {
+  const tally = (over: Partial<import("./wiki-gardener-strip.ts").BacklogDropTally> = {}) => ({
+    clusters_dropped: 0,
+    clusters_dropped_size: 0,
+    clusters_dropped_skip: 0,
+    clusters_dropped_hallucinated: 0,
+    clusters_dropped_duplicate: 0,
+    clusters_dropped_cap: 0,
+    clusters_dropped_topics: "",
+    ...over,
+  });
+  const run = (over: Partial<WeeklyGardenerRun> = {}): WeeklyGardenerRun => ({
+    finishedAt: 1,
+    clustersFound: 0,
+    kept: 0,
+    dropped: 0,
+    dropTally: tally(),
+    evictedTopics: [],
+    ...over,
+  });
+
+  test("null/undefined → empty string", () => {
+    expect(weeklyRunHtml(null)).toBe("");
+    expect(weeklyRunHtml(undefined)).toBe("");
+  });
+
+  test("the cap-eviction incident → '26 clusters found, 3 kept (cap) — 23 dropped'", () => {
+    const html = weeklyRunHtml(
+      run({
+        clustersFound: 26,
+        kept: 3,
+        dropped: 23,
+        dropTally: tally({ clusters_dropped: 23, clusters_dropped_cap: 23 }),
+      }),
+    );
+    expect(html).toContain("last weekly run: 26 clusters found, 3 kept (cap) — 23 dropped");
+    expect(html).toContain("bk-run-note");
+  });
+
+  test("dominant reason names the largest bucket (size beats cap here)", () => {
+    const html = weeklyRunHtml(
+      run({
+        clustersFound: 10,
+        kept: 2,
+        dropped: 8,
+        dropTally: tally({ clusters_dropped: 8, clusters_dropped_size: 6, clusters_dropped_cap: 2 }),
+      }),
+    );
+    expect(html).toContain("2 kept (cluster size) — 8 dropped");
+  });
+
+  test("no clusters found → honest 'no clusters found'", () => {
+    expect(weeklyRunHtml(run({ clustersFound: 0, kept: 0, dropped: 0 }))).toContain(
+      "last weekly run: no clusters found",
+    );
+  });
+
+  test("all kept → 'all N kept', no qualifier", () => {
+    const html = weeklyRunHtml(run({ clustersFound: 4, kept: 4, dropped: 0 }));
+    expect(html).toContain("last weekly run: 4 clusters found, all 4 kept");
+    expect(html).not.toContain("(");
+  });
+
+  test("singular cluster phrasing", () => {
+    expect(weeklyRunHtml(run({ clustersFound: 1, kept: 1, dropped: 0 }))).toContain("1 cluster found");
+  });
+
+  test("full evicted-topic list rides in a lossless title tooltip", () => {
+    const html = weeklyRunHtml(
+      run({
+        clustersFound: 3,
+        kept: 1,
+        dropped: 2,
+        dropTally: tally({ clusters_dropped: 2, clusters_dropped_cap: 2 }),
+        evictedTopics: [
+          { topicKey: "rag-eval", reason: "cap", size: 4 },
+          { topicKey: "agents-memory", reason: "cap", size: 3 },
+        ],
+      }),
+    );
+    expect(html).toContain('title="rag-eval (cap, n:4), agents-memory (cap, n:3)"');
+  });
+
+  test("hostile topicKey is escaped in both the tooltip and the line", () => {
+    const html = weeklyRunHtml(
+      run({
+        clustersFound: 2,
+        kept: 1,
+        dropped: 1,
+        dropTally: tally({ clusters_dropped: 1, clusters_dropped_cap: 1 }),
+        evictedTopics: [{ topicKey: '<script>alert(1)</script>" onmouseover="x', reason: "cap", size: 2 }],
+      }),
+    );
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain('" onmouseover="');
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  test("no dominant bucket (dropped>0 but tally all zero) → no qualifier, no crash", () => {
+    const html = weeklyRunHtml(run({ clustersFound: 5, kept: 3, dropped: 2, dropTally: tally() }));
+    expect(html).toContain("3 kept — 2 dropped");
   });
 });

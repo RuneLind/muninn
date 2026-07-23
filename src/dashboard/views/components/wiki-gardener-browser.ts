@@ -12,6 +12,7 @@ import {
   backlogStripModel,
   backlogStripHtml,
   backlogOutcomeHtml,
+  weeklyRunHtml,
   backlogTailHtml,
   sourceDraftResultHtml,
   type IngestBacklogResponse,
@@ -392,6 +393,7 @@ function renderBacklog(data: IngestBacklogResponse): void {
   el.innerHTML =
     backlogStripHtml(model, data.errors) +
     backlogOutcomeHtml(data.lastBacklogRun) +
+    weeklyRunHtml(data.weeklyRun) +
     sourceDraftResultHtml(lastSourceDraftResult, lastSourceDraftCollectionLabel ?? undefined) +
     backlogTailHtml(model);
   if (tailWasOpen) {
