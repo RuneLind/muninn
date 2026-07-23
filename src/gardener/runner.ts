@@ -125,8 +125,11 @@ export interface GardenerDeps {
    * gate can render WHY a drain drafted nothing without consulting the logs. Not
    * emitted on the harvest-floor early return (docs < minClusterSize) — the renderer
    * falls back to the attempted-doc count there, which is honestly a size failure.
+   * `keptClusters` is the post-gate survivor count (`resolved.length`) — it lets the
+   * gate distinguish "nothing clustered" (0) from "clusters formed but every draft
+   * failed" (>0 with `drafted === 0`), which the all-zeros tally alone can't.
    */
-  onTally?: (tally: ClusterDropTally) => void;
+  onTally?: (tally: ClusterDropTally, keptClusters: number) => void;
 }
 
 /** One progress report emitted by a run (drafts fields present only while drafting). */
@@ -332,7 +335,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // the weekly path, which passes no hook). Emitted here — after the log line and
   // BEFORE the zero-cluster early return — so a completed-but-all-dropped run still
   // reports its drop reasons.
-  deps.onTally?.(dropTally);
+  deps.onTally?.(dropTally, resolved.length);
 
   if (resolved.length === 0) {
     return [];

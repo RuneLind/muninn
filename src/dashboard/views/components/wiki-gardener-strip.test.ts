@@ -152,6 +152,22 @@ describe("recency-first sentence + collapsed tail", () => {
     expect(empty).toBe("");
   });
 
+  test("degraded per-source total (0) falls back to a queued-only label, never 'N of 0'", () => {
+    // An older/degraded response can carry per-collection total 0 while queued > 0.
+    const degraded = base({
+      byCollection: [
+        { collection: "youtube-summaries", source: "youtube", label: "YouTube", total: 0, ingested: 0, queued: 269 },
+      ],
+      queued: 269,
+      remaining: 0,
+      offeredStillQueued: 269,
+    });
+    const html = backlogTailHtml(backlogStripModel(degraded, 0));
+    expect(html).not.toContain("269</span> of <span class=\"bk-n\">0");
+    // The source still renders with its queued count, just no bogus denominator.
+    expect(html).toContain("YouTube <span class=\"bk-n\">269</span>");
+  });
+
   test("malformed freshBySource entries are dropped, zero-count entries hidden", () => {
     const m = backlogStripModel(
       base({
@@ -547,6 +563,28 @@ describe("backlogOutcomeHtml — zero-draft reason line (R1)", () => {
   test("minClusterSize defaults to 3 when absent", () => {
     const html = backlogOutcomeHtml({ finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 5 });
     expect(html).toContain("need 3 on one topic");
+  });
+
+  test("clusters passed the gate but every draft failed → honest draft-failure copy, not size", () => {
+    // keptClusters > 0 with drafted 0 and an all-zeros tally: clustering succeeded,
+    // so the size copy would lie. Branch to the draft-failure story.
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 5, minClusterSize: 3,
+      dropTally: tally(), keptClusters: 2,
+    });
+    expect(html).toContain("drained 5 docs");
+    expect(html).toContain("clusters formed but no drafts survived (draft errors or quality gate)");
+    expect(html).not.toContain("none clustered");
+    expect(html).not.toContain("below cluster size");
+  });
+
+  test("keptClusters 0 keeps the 'nothing clustered' size copy", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 4, minClusterSize: 3,
+      dropTally: tally({ clusters_dropped: 1, clusters_dropped_size: 1 }), keptClusters: 0,
+    });
+    expect(html).toContain("none clustered — all below cluster size (need 3 on one topic)");
+    expect(html).not.toContain("no drafts survived");
   });
 });
 

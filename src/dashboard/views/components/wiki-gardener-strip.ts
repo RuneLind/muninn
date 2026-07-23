@@ -64,6 +64,12 @@ export interface LastBacklogRun {
   attemptedDocs?: number;
   /** Aggregate cluster-drop tally — absent when the pipeline never clustered. */
   dropTally?: BacklogDropTally;
+  /**
+   * Post-gate cluster survivor count. `keptClusters > 0` with `drafted === 0` means
+   * clusters formed and passed the gate but every draft attempt failed — the zero-draft
+   * reason line renders the honest draft-failure copy instead of a false size failure.
+   */
+  keptClusters?: number;
 }
 
 /**
@@ -431,10 +437,13 @@ export function backlogTailHtml(model: BacklogStripModel): string {
     `${strong(model.totalNeverIngested)} of ${strong(total)} all-time docs have no wiki footprint` +
     ` <span class="bk-note">(pre-auto-drafter tail; new captures auto-draft their own source page)</span>`;
   const breakdown = model.perSource
-    .map(
-      (s) =>
-        `${esc(s.label)} <span class="bk-n">${s.queued}</span> of <span class="bk-n">${s.total}</span>`,
-    )
+    .map((s) => {
+      // Guard the denominator like the aggregate line: a degraded/older response can
+      // carry total 0 (or below queued), which "269 of 0" would render as a lie — fall
+      // back to a queued-only label when total isn't a usable denominator.
+      const label = `${esc(s.label)} <span class="bk-n">${s.queued}</span>`;
+      return s.total >= s.queued && s.total > 0 ? `${label} of <span class="bk-n">${s.total}</span>` : label;
+    })
     .join('<span class="bk-sep"> · </span>');
   return (
     '<details class="bk-tail">' +
@@ -662,6 +671,13 @@ function backlogZeroDraftReasonHtml(run: LastBacklogRun): string {
     run.attemptedDocs !== undefined
       ? `drained ${run.attemptedDocs} doc${run.attemptedDocs === 1 ? "" : "s"}`
       : "drafted nothing";
+  // Clusters formed and passed the gate, but every draft attempt failed (a draft-call
+  // error or a shape-gate reject). The size/skip copy below would lie ("none clustered")
+  // — clustering succeeded — so surface the honest draft-failure story. Takes precedence
+  // over the tally buckets: with kept clusters, why OTHER clusters dropped is secondary.
+  if (run.keptClusters !== undefined && run.keptClusters > 0) {
+    return ` <span class="bk-run-note">last run ${docPhrase}, clusters formed but no drafts survived (draft errors or quality gate)</span>`;
+  }
   const extras: string[] = [];
   if (t) {
     if (t.clusters_dropped_skip > 0)

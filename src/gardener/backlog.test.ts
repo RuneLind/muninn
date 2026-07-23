@@ -629,7 +629,7 @@ describe("startBacklogRun", () => {
       persistOffered: async () => {},
       // A completed run that clustered nothing draftable: fire onTally, draft nothing.
       runGardener: async (_a, hooks) => {
-        hooks.onTally?.(tally);
+        hooks.onTally?.(tally, 0);
         return [];
       },
       recordLastRun: (rec) => {
@@ -643,6 +643,8 @@ describe("startBacklogRun", () => {
     expect(recorded!.dropTally).toEqual(tally);
     expect(recorded!.attemptedDocs).toBe(3);
     expect(recorded!.minClusterSize).toBe(3);
+    // Post-gate survivor count rides along (0 here — nothing clustered).
+    expect(recorded!.keptClusters).toBe(0);
     // Zero-draft rollback still reports offered:0.
     expect(recorded!.offered).toBe(0);
     expect(recorded!.drafted).toBe(0);

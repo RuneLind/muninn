@@ -137,8 +137,8 @@ export interface GardenerRunHooks {
   onProgress?: (p: GardenerProgress) => void;
   shouldAbort?: () => boolean;
   onAborted?: (skippedClusterDocKeys: string[]) => void;
-  /** Aggregate cluster-drop tally (mirrors {@link GardenerDeps.onTally}). */
-  onTally?: (tally: ClusterDropTally) => void;
+  /** Aggregate cluster-drop tally + post-gate survivor count (mirrors {@link GardenerDeps.onTally}). */
+  onTally?: (tally: ClusterDropTally, keptClusters: number) => void;
 }
 
 // ── Batch selection ──────────────────────────────────────────────────────────
@@ -344,6 +344,13 @@ export interface LastBacklogRun {
    * show WHY a drain drafted nothing without opening the logs.
    */
   dropTally?: ClusterDropTally;
+  /**
+   * Post-gate cluster survivor count (`resolved.length` from the runner). Present on
+   * a completed run that reached clustering. `keptClusters > 0` with `drafted === 0`
+   * means every draft attempt failed (draft-call error or shape-gate reject) — the
+   * all-zeros {@link dropTally} alone can't distinguish that from "nothing clustered".
+   */
+  keptClusters?: number;
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
@@ -453,6 +460,8 @@ interface BacklogRunResult {
   attemptedDocs?: number;
   /** Aggregate cluster-drop tally (absent when the pipeline never clustered). */
   dropTally?: ClusterDropTally;
+  /** Post-gate cluster survivor count — >0 with drafted 0 ⇒ all drafts failed. */
+  keptClusters?: number;
 }
 
 /**
@@ -582,6 +591,9 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // aggregate drop tally the zero-draft reason line renders from. Undefined when
     // the run early-returns at the harvest floor before any tally is computed.
     let dropTally: ClusterDropTally | undefined;
+    // Post-gate survivor count — lets the zero-draft reason line tell "nothing
+    // clustered" (0) apart from "clusters formed but every draft failed" (>0).
+    let keptClusters: number | undefined;
     const hooks: GardenerRunHooks = {
       onProgress: (p) => {
         const prog = backlogProgress.get(deps.botName);
@@ -612,8 +624,9 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         aborted = true;
         skippedKeys = keys;
       },
-      onTally: (t) => {
+      onTally: (t, kept) => {
         dropTally = t;
+        keptClusters = kept;
       },
     };
 
@@ -657,6 +670,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       attemptedDocs: assembled.batchKeys.length,
       minClusterSize: deps.minClusterSize,
       ...(dropTally ? { dropTally } : {}),
+      ...(keptClusters !== undefined ? { keptClusters } : {}),
     };
     } finally {
       // Complete the registry run on EVERY exit path — success, soft-cancel
@@ -696,6 +710,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         ...(r.minClusterSize !== undefined ? { minClusterSize: r.minClusterSize } : {}),
         ...(r.attemptedDocs !== undefined ? { attemptedDocs: r.attemptedDocs } : {}),
         ...(r.dropTally ? { dropTally: r.dropTally } : {}),
+        ...(r.keptClusters !== undefined ? { keptClusters: r.keptClusters } : {}),
       });
     },
     (err) => {

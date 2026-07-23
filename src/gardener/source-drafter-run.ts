@@ -312,7 +312,8 @@ export function selectSourceBacklogDocs(
  * cheap pre-fetch guards (no body / no public URL), so a doc that was credited
  * between selection and drafting is honestly reported rather than double-drafted.
  *
- * **Head-of-line fairness:** the loop scans the FULL queue in listing order and
+ * **Head-of-line fairness:** the loop scans the FULL queue oldest-first (undated
+ * docs last; see {@link selectSourceBacklogDocs}) and
  * counts only real MODEL attempts (`drafted`/`error`) toward `limit`. Cheap
  * deterministic skips (`skipped`/`covered`) don't consume the limit — the loop
  * continues deeper — so a run of poisoned docs at the head can't wedge the batch on
