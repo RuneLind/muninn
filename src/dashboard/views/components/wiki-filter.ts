@@ -238,6 +238,14 @@ export function pageAddedMs(p: WikiListing): number {
   return bt;
 }
 
+/** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder). Rewritten
+ *  by every sweep, so their birthtime is churn, not content creation: they sink
+ *  to the bottom of "Recently added" instead of squatting on top. */
+function isMetaPage(p: WikiListing): boolean {
+  const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+  return stem === "index" || stem === "log" || stem === "CLAUDE";
+}
+
 /**
  * `YYYY-MM-DD` for `pageAddedMs` — shown next to a page when sorted by
  * "Recently added", so the visible date explains the ordering. Same verbatim-
@@ -290,7 +298,12 @@ export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing
   } else if (mode === "backlinks") {
     copy.sort((a, b) => b.backlinkCount - a.backlinkCount);
   } else if (mode === "created") {
-    copy.sort((a, b) => pageAddedMs(b) - pageAddedMs(a) || a.title.localeCompare(b.title));
+    copy.sort(
+      (a, b) =>
+        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
+        pageAddedMs(b) - pageAddedMs(a) ||
+        a.title.localeCompare(b.title),
+    );
   } else {
     copy.sort((a, b) => pageTimeMs(b) - pageTimeMs(a) || a.title.localeCompare(b.title));
   }

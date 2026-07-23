@@ -186,6 +186,14 @@ test("sortPages: created orders by added date and ignores updated/mtime churn", 
   expect(sortPages(withBirth, "created").map((p) => p.name)).toEqual(["gym", "anthropic", "rag"]);
 });
 
+test("sortPages: created sinks meta pages (index/log/CLAUDE) to the bottom", () => {
+  // Every sweep rewrites these, so a fresh birthtime there is churn, not new
+  // content — they must not squat on top of "Recently added".
+  const log = page({ name: "log", title: "Log", relPath: "log.md", birthtimeMs: Date.parse("2026-07-23T09:00:00Z") });
+  const idx = page({ name: "index", title: "Index", relPath: "plans/index.md", birthtimeMs: Date.parse("2026-07-23T09:00:00Z") });
+  expect(sortPages([log, idx, ...PAGES], "created").map((p) => p.name).slice(-2)).toEqual(["index", "log"]);
+});
+
 test("sortPages: created lifts a brand-new frontmatter-less page to the top", () => {
   const fresh = page({
     name: "fresh",
