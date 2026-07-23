@@ -116,14 +116,40 @@ describe("commitWikiChange", () => {
     const file = path.join(wikiDir, "concepts", "Y.md");
     await writeFile(file, "# Y\n");
 
-    await commitWikiChange(wikiDir, ["concepts/Y.md"], "[gardener] apply: concepts/Y.md");
+    const result = await commitWikiChange(wikiDir, ["concepts/Y.md"], "[gardener] apply: concepts/Y.md");
 
+    // The skip is reported honestly to the caller.
+    expect(result).toEqual({ committed: false, reason: "not-default-branch" });
     // No new commit — still just "init".
     const log = await git(repo, ["log", "--format=%s"]);
     expect(log.out).toBe("init");
     // The written file survives on disk, uncommitted.
     expect(await Bun.file(file).text()).toBe("# Y\n");
     expect((await git(repo, ["status", "--porcelain"])).out).toContain("data/");
+  });
+
+  test("returns a truthful result — committed on success, reasoned skips", async () => {
+    const { wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "H.md"), "# H\n");
+
+    // Happy path → committed: true.
+    const ok = await commitWikiChange(wikiDir, ["concepts/H.md"], "[gardener] apply: concepts/H.md");
+    expect(ok).toEqual({ committed: true });
+
+    // Re-commit the unchanged file → nothing staged.
+    const noop = await commitWikiChange(wikiDir, ["concepts/H.md"], "[gardener] apply: concepts/H.md");
+    expect(noop).toEqual({ committed: false, reason: "nothing-to-commit" });
+
+    // Empty pathspec → nothing-to-commit.
+    const empty = await commitWikiChange(wikiDir, [], "noop");
+    expect(empty).toEqual({ committed: false, reason: "nothing-to-commit" });
+  });
+
+  test("wikiDir outside any git repo → { committed:false, reason:'not-a-repo' }", async () => {
+    const nonRepo = await mkdtemp(path.join(base, "loose2-"));
+    await writeFile(path.join(nonRepo, "note.md"), "# note\n");
+    const result = await commitWikiChange(nonRepo, ["note.md"], "[gardener] apply: note.md");
+    expect(result).toEqual({ committed: false, reason: "not-a-repo" });
   });
 
   test("nothing changed → no commit", async () => {

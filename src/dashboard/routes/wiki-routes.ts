@@ -30,6 +30,7 @@ import {
   FACTCHECK_HEADING_MAX,
 } from "../../wiki/factcheck-context.ts";
 import { appendBlockToPage } from "../../wiki/append-block.ts";
+import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
@@ -1260,6 +1261,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         return c.json({ error: "fact-check blocks can only be added to markdown pages" }, 400);
       }
 
+      // Resolve the owning bot's push preference for the commit. A bot wiki's
+      // registry entry shares its name with the bot; a standalone wiki has no
+      // owning bot — default push:true either way.
+      const owningBot =
+        entry.source === "bot"
+          ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase())
+          : undefined;
+      const push = owningBot?.wikiAutoCommit?.push ?? true;
+
       const block = buildFactcheckBlock(answer, todayOslo(Date.now()));
       const result = await appendBlockToPage({
         wikiDir: entry.root,
@@ -1285,6 +1295,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         reindex: async (collection) => {
           await postCollectionUpdate(config.knowledgeApiUrl, collection);
         },
+        commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
       });
 
       if (result.outcome === "stale") {

@@ -9,5 +9,8 @@
     "wiki-life"
   ],
   "haikuBackend": "anthropic",
-  "componentAnswers": true
+  "componentAnswers": true,
+  "wikiAutoCommit": {
+    "catalogKinds": ["concept", "source"]
+  }
 }

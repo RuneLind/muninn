@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { buildIndexEntry, insertIndexLine, buildSeeAlsoEdit, selectWirablePages } from "./wire.ts";
+import { buildIndexEntry, catalogPage, insertIndexLine, buildSeeAlsoEdit, selectWirablePages } from "./wire.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 
 /**
@@ -71,6 +71,57 @@ describe("buildIndexEntry", () => {
       buildIndexEntry({ title: "RAG Explained", kind: "source", domain: "ai", rationale: "video" }),
     ).toBeNull();
   });
+
+  // ── Per-wiki cataloging policy (catalogKinds) ────────────────────────────────
+
+  test("jarvis policy [concept, source] → source page gets a ## Sources line", () => {
+    const e = buildIndexEntry(
+      { title: "RAG Explained", kind: "source", domain: "ai", rationale: "video on retrieval" },
+      ["concept", "source"],
+    );
+    expect(e).not.toBeNull();
+    expect(e!.section).toBe("Sources");
+    expect(e!.headingLevel).toBe(2);
+    expect(e!.line).toBe("- [[RAG Explained]] — video on retrieval");
+  });
+
+  test("jarvis policy still catalogs concepts under their ### domain section", () => {
+    const e = buildIndexEntry(
+      { title: "Code Mode", kind: "concept", domain: "ai", rationale: "MCP code exec" },
+      ["concept", "source"],
+    );
+    expect(e!.section).toBe("AI / Claude / Coding");
+    expect(e!.headingLevel).toBe(3);
+  });
+
+  test("entity is NEVER cataloged even when the policy lists it", () => {
+    expect(
+      buildIndexEntry({ title: "Anthropic", kind: "entity", domain: "ai" }, ["concept", "source", "entity"]),
+    ).toBeNull();
+  });
+
+  test("default policy (concept-only) still skips source pages", () => {
+    expect(buildIndexEntry({ title: "S", kind: "source", domain: "ai", rationale: "x" })).toBeNull();
+  });
+});
+
+describe("catalogPage", () => {
+  test("default policy catalogs concept only", () => {
+    expect(catalogPage("concept")).toBe(true);
+    expect(catalogPage("source")).toBe(false);
+    expect(catalogPage("entity")).toBe(false);
+  });
+
+  test("jarvis policy adds source, keeps entity skipped", () => {
+    const policy = ["concept", "source"];
+    expect(catalogPage("concept", policy)).toBe(true);
+    expect(catalogPage("source", policy)).toBe(true);
+    expect(catalogPage("entity", policy)).toBe(false);
+  });
+
+  test("entity is hard-skipped even if explicitly listed", () => {
+    expect(catalogPage("entity", ["entity"])).toBe(false);
+  });
 });
 
 describe("insertIndexLine", () => {
@@ -140,6 +191,48 @@ describe("insertIndexLine", () => {
 
   test("empty index (no headings) ⇒ section-not-found, no write", () => {
     const { changed, reason } = insertIndexLine("", { line: "- [[X]] — x", section: "AI / Claude / Coding" });
+    expect(changed).toBe(false);
+    expect(reason).toBe("section-not-found");
+  });
+
+  test("headingLevel 2 routes a source line under the ## Sources section", () => {
+    const idx = [
+      "# Index",
+      "",
+      "## Sources",
+      "",
+      "- [[Sources — AI General]] — aggregate",
+      "",
+      "### Focused source pages — old batch",
+      "",
+      "- [[Old Page]] — o",
+      "",
+      "## Concepts",
+      "",
+      "### AI / Claude / Coding",
+      "",
+      "- [[Banana]] — b",
+      "",
+    ].join("\n");
+    const e = { line: "- [[New Source]] — a fresh capture", section: "Sources", headingLevel: 2 as const };
+    const { content, changed, reason } = insertIndexLine(idx, e);
+    expect(changed).toBe(true);
+    expect(reason).toBe("inserted");
+    const lines = content.split("\n");
+    const iSources = lines.indexOf("## Sources");
+    const iNew = lines.indexOf("- [[New Source]] — a fresh capture");
+    const iSubsection = lines.indexOf("### Focused source pages — old batch");
+    // Lands inside the ## Sources direct-bullet block, above the first subsection.
+    expect(iNew).toBeGreaterThan(iSources);
+    expect(iNew).toBeLessThan(iSubsection);
+    // Did not leak into the Concepts section.
+    expect(iNew).toBeLessThan(lines.indexOf("## Concepts"));
+  });
+
+  test("a level-2 section name is NOT matched by the default (level-3) lookup", () => {
+    const idx = "# Index\n\n## Sources\n\n- [[A]] — a\n";
+    // Default headingLevel (3) looks for `### Sources` — absent → section-not-found.
+    const { changed, reason } = insertIndexLine(idx, { line: "- [[B]] — b", section: "Sources" });
     expect(changed).toBe(false);
     expect(reason).toBe("section-not-found");
   });

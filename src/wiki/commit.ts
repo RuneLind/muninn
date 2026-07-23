@@ -63,6 +63,17 @@ export interface CommitWikiOpts {
   onPushSettled?: () => void;
 }
 
+/**
+ * Truthful outcome of a `commitWikiChange` call. `committed` is `true` only when a
+ * commit actually landed on the default branch; every skip path reports `false`
+ * with a `reason` so callers can log an honest message instead of assuming success.
+ * Additive — callers that ignore the return keep working unchanged.
+ */
+export interface CommitWikiResult {
+  committed: boolean;
+  reason?: "not-a-repo" | "not-default-branch" | "nothing-to-commit" | "error";
+}
+
 /** Result of one git invocation. */
 interface GitResult {
   code: number;
@@ -178,7 +189,7 @@ export async function commitWikiChange(
   paths: string[],
   message: string,
   opts: CommitWikiOpts = {},
-): Promise<void> {
+): Promise<CommitWikiResult> {
   const settlePush = () => {
     try {
       opts.onPushSettled?.();
@@ -191,28 +202,29 @@ export async function commitWikiChange(
     if (!top) {
       log.warn("Wiki commit skipped — {dir} is not inside a git repo", { dir: wikiDir });
       settlePush();
-      return;
+      return { committed: false, reason: "not-a-repo" };
     }
     const staged = paths.filter((p) => p && p.length > 0);
     if (staged.length === 0) {
       settlePush();
-      return;
+      return { committed: false, reason: "nothing-to-commit" };
     }
 
     // Commit is awaited — after this resolves the working tree is clean.
-    const committed = await runExclusiveQueued(top, () =>
+    const result = await runExclusiveQueued(top, () =>
       commitInner(top, wikiDir, staged, message),
     );
 
     // The push is a network op — it must NOT block the caller (an approve HTTP
     // request). Dispatch it onto the SAME per-toplevel queue so it can't
     // interleave a subsequent commit, but do not await that queue entry here.
-    if (committed && opts.push !== false) {
+    if (result.committed && opts.push !== false) {
       const pushDone = runExclusiveQueued(top, () => pushInner(top));
       pushDone.then(settlePush, settlePush);
     } else {
       settlePush();
     }
+    return result;
   } catch (err) {
     // Belt-and-suspenders: commitInner already swallows its own errors.
     log.warn("Wiki commit failed for {dir}: {error}", {
@@ -220,26 +232,28 @@ export async function commitWikiChange(
       error: err instanceof Error ? err.message : String(err),
     });
     settlePush();
+    return { committed: false, reason: "error" };
   }
 }
 
 /**
  * Stage + commit the given wiki-relative paths on the default branch. Returns
- * `true` when a commit landed (so the caller can decide whether to dispatch a
- * push), `false` on any skip/failure. Never throws.
+ * `{ committed: true }` when a commit landed (so the caller can decide whether to
+ * dispatch a push), otherwise `{ committed: false, reason }` for the specific skip
+ * or failure. Never throws.
  */
 async function commitInner(
   top: string,
   wikiDir: string,
   paths: string[],
   message: string,
-): Promise<boolean> {
+): Promise<CommitWikiResult> {
   if (!(await onDefaultBranch(top))) {
     log.warn(
       "Wiki commit skipped — {top} is not on its default branch (a sweeper will pick up the write)",
       { top },
     );
-    return false;
+    return { committed: false, reason: "not-default-branch" };
   }
 
   // Translate wiki-relative → repo-relative for staging. `git rev-parse` returns
@@ -269,13 +283,13 @@ async function commitInner(
   }
   if (repoRel.length === 0) {
     log.warn("Wiki commit: no existing paths to commit in {top} — skipping", { top });
-    return false;
+    return { committed: false, reason: "nothing-to-commit" };
   }
 
   const added = await git(top, ["add", "--", ...repoRel]);
   if (added.code !== 0) {
     log.warn("Wiki commit: git add failed in {top}: {error}", { top, error: added.stderr });
-    return false;
+    return { committed: false, reason: "error" };
   }
 
   // Nothing staged for OUR paths (unchanged since the last commit) → skip quietly.
@@ -283,7 +297,7 @@ async function commitInner(
   // this read as "there's something to commit". `--quiet` exits 0 when there is NO
   // staged diff for these paths, 1 when there is.
   const diff = await git(top, ["diff", "--cached", "--quiet", "--", ...repoRel]);
-  if (diff.code === 0) return false;
+  if (diff.code === 0) return { committed: false, reason: "nothing-to-commit" };
 
   // Commit with the explicit pathspec so ONLY our paths are recorded — a foreign
   // file someone else pre-staged in the repo's index is never swept into this
@@ -292,10 +306,10 @@ async function commitInner(
   const committed = await git(top, ["commit", "-m", message, "--", ...repoRel]);
   if (committed.code !== 0) {
     log.warn("Wiki commit: git commit failed in {top}: {error}", { top, error: committed.stderr });
-    return false;
+    return { committed: false, reason: "error" };
   }
   log.info("Wiki commit: {message} in {top}", { message, top });
-  return true;
+  return { committed: true };
 }
 
 /**
