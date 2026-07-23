@@ -39,6 +39,9 @@ export interface WikiListing {
   relPath: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
+  /** File birthtime (epoch ms) — the "Recently added" signal for frontmatter-less
+   *  wikis. Absent when the filesystem doesn't track it. */
+  birthtimeMs?: number;
   linkCount: number;
   backlinkCount: number;
 }
@@ -78,7 +81,7 @@ export function sanitizeColorToken(value: unknown): string | undefined {
  *  collide with it, so it doubles as a selectable value in the folder picker. */
 export const ROOT_FOLDER = "/";
 
-export type WikiSortMode = "updated" | "backlinks" | "title";
+export type WikiSortMode = "updated" | "created" | "backlinks" | "title";
 
 /** The built-in type order + labels — the no-`.wiki-reader.json` defaults. A wiki's
  *  merged type list (see `mergeWikiTypes`) always starts with these, so a wiki with
@@ -215,6 +218,40 @@ export function pageDateLabel(p: WikiListing): string {
   return localDay(new Date(p.mtimeMs));
 }
 
+/**
+ * Creation time of a page in epoch ms — the sort key behind "Recently added".
+ *
+ * The SMALLER of the file's birthtime and its frontmatter `created` date (the
+ * mirror image of `pageTimeMs`'s max): a re-checked-out wiki recreates every
+ * file, so a fresh birthtime is a lie the older frontmatter date corrects, and
+ * a frontmatter `created` stamped after the fact never hides a genuinely older
+ * file. Unlike "Recently updated", a mass edit sweep bumping every mtime leaves
+ * this ordering untouched — which is the point. 0 when a page has neither
+ * signal.
+ */
+export function pageAddedMs(p: WikiListing): number {
+  const fmMs = p.created ? Date.parse(p.created) : NaN;
+  const fmValid = !Number.isNaN(fmMs);
+  const bt = p.birthtimeMs || 0;
+  if (fmValid && bt) return Math.min(fmMs, bt);
+  if (fmValid) return fmMs;
+  return bt;
+}
+
+/**
+ * `YYYY-MM-DD` for `pageAddedMs` — shown next to a page when sorted by
+ * "Recently added", so the visible date explains the ordering. Same verbatim-
+ * frontmatter / local-day-mtime rules as `pageDateLabel`.
+ */
+export function pageAddedLabel(p: WikiListing): string {
+  const fmMs = p.created ? Date.parse(p.created) : NaN;
+  const fmValid = !Number.isNaN(fmMs);
+  const bt = p.birthtimeMs || 0;
+  if (fmValid && (!bt || fmMs <= bt)) return p.created!;
+  if (bt) return localDay(new Date(bt));
+  return fmValid ? p.created! : "";
+}
+
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
 export function localDay(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -252,6 +289,8 @@ export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing
     copy.sort((a, b) => a.title.localeCompare(b.title));
   } else if (mode === "backlinks") {
     copy.sort((a, b) => b.backlinkCount - a.backlinkCount);
+  } else if (mode === "created") {
+    copy.sort((a, b) => pageAddedMs(b) - pageAddedMs(a) || a.title.localeCompare(b.title));
   } else {
     copy.sort((a, b) => pageTimeMs(b) - pageTimeMs(a) || a.title.localeCompare(b.title));
   }

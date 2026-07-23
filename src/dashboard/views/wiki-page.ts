@@ -814,6 +814,7 @@ export async function renderWikiPage(opts?: {
         <div class="wiki-sort-row">
           <select id="wikiSort" class="wiki-sort">
             <option value="updated" selected>Recently updated</option>
+            <option value="created">Recently added</option>
             <option value="backlinks">Most linked</option>
             <option value="title">Title A–Z</option>
           </select>

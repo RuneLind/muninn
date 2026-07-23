@@ -42,6 +42,7 @@ import {
   folderCounts,
   hasTypedHubs,
   hubTypeList,
+  pageAddedLabel,
   pageDateLabel,
   pageFolder,
   ROOT_FOLDER,
@@ -775,10 +776,15 @@ function renderList(): void {
   const pages = sortPages(filterPages(allPages, filters), mode);
   let html = "";
   pages.forEach((p) => {
-    // In recency mode show the date we actually sorted on (mtime or frontmatter,
-    // whichever is newer) — otherwise a frontmatter-less page would show nothing
-    // while sitting at the top, which is exactly what looked broken before.
-    const meta = mode === "backlinks" ? p.backlinkCount + " ←" : pageDateLabel(p);
+    // In recency modes show the date we actually sorted on (mtime/birthtime or
+    // frontmatter) — otherwise a frontmatter-less page would show nothing while
+    // sitting at the top, which is exactly what looked broken before.
+    const meta =
+      mode === "backlinks"
+        ? p.backlinkCount + " ←"
+        : mode === "created"
+          ? pageAddedLabel(p)
+          : pageDateLabel(p);
     html +=
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +

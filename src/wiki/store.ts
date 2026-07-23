@@ -81,6 +81,14 @@ export interface WikiPageMeta {
    */
   mtimeMs?: number;
   /**
+   * File birthtime (epoch ms) — when the file was CREATED, as opposed to last
+   * touched. The "Recently added" signal for frontmatter-less wikis: a sweep
+   * that edits many pages bumps every mtime but leaves birthtimes alone, so
+   * genuinely new pages stay distinguishable. Undefined when the file couldn't
+   * be stat'd or the filesystem doesn't track birthtime (reported as ≤ 0).
+   */
+  birthtimeMs?: number;
+  /**
    * Publication date (`YYYY-MM-DD`) parsed from the body's `Source: …, YYYY-MM-DD`
    * line — the day the referenced source was published (distinct from the
    * frontmatter `created`/`updated`, which are when the wiki page was written).
@@ -654,12 +662,17 @@ function explainerKeywordTags(content: string): string[] {
     .filter((t) => t.length > 0);
 }
 
-/** File mtime in epoch ms, or undefined when the file can't be stat'd. */
-async function fileMtimeMs(abs: string): Promise<number | undefined> {
+/** File mtime + birthtime in epoch ms; both undefined when the file can't be
+ *  stat'd. Birthtime alone is also undefined on filesystems that don't track it
+ *  (stat reports it as 0 or negative there). */
+async function fileStatTimes(
+  abs: string,
+): Promise<{ mtimeMs?: number; birthtimeMs?: number }> {
   try {
-    return (await stat(abs)).mtimeMs;
+    const s = await stat(abs);
+    return { mtimeMs: s.mtimeMs, birthtimeMs: s.birthtimeMs > 0 ? s.birthtimeMs : undefined };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -688,7 +701,7 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
   } catch {
     return null; // unreadable — skip, keep the rest of the wiki browsable
   }
-  const mtimeMs = await fileMtimeMs(abs);
+  const { mtimeMs, birthtimeMs } = await fileStatTimes(abs);
   const date = mtimeMs === undefined ? undefined : new Date(mtimeMs).toISOString().slice(0, 10);
   return {
     name: stem,
@@ -702,6 +715,7 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
     description,
     relPath,
     mtimeMs,
+    birthtimeMs,
   };
 }
 
@@ -786,11 +800,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       }
       const abs = path.join(root, relPath);
       let content: string;
-      let mtimeMs: number | undefined;
+      let times: { mtimeMs?: number; birthtimeMs?: number };
       try {
         // One round-trip per file: the stat never rejects (it degrades to
         // undefined), so a throw here is always the unreadable-file case.
-        [content, mtimeMs] = await Promise.all([Bun.file(abs).text(), fileMtimeMs(abs)]);
+        [content, times] = await Promise.all([Bun.file(abs).text(), fileStatTimes(abs)]);
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
@@ -817,7 +831,8 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         accent: sanitizeColorToken(fm.accent),
         accentDark: sanitizeColorToken(fm.accentDark),
         relPath,
-        mtimeMs,
+        mtimeMs: times.mtimeMs,
+        birthtimeMs: times.birthtimeMs,
         // Atlas fields — computed here where the body is already in hand (paid once
         // per index build, inheriting the 5-min TTL) rather than re-reading ~800
         // files per uncached Atlas request. Both undefined for pages that lack them.

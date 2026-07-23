@@ -6,6 +6,8 @@ import {
   hasTypedHubs,
   hubTypeList,
   mergeWikiTypes,
+  pageAddedLabel,
+  pageAddedMs,
   pageDateLabel,
   pageFolder,
   pageTimeMs,
@@ -145,6 +147,53 @@ test("sortPages: equal recency falls back to title for a stable order", () => {
   const a = page({ name: "a", title: "Bravo", updated: "2026-05-01" });
   const b = page({ name: "b", title: "Alpha", updated: "2026-05-01" });
   expect(sortPages([a, b], "updated").map((p) => p.name)).toEqual(["b", "a"]);
+});
+
+test("pageAddedMs: frontmatter-less pages rank by birthtime, not mtime", () => {
+  // The point of "Recently added": a sweep that edits many pages bumps every
+  // mtime but leaves birthtimes alone, so new pages stay distinguishable.
+  const p = page({
+    mtimeMs: Date.parse("2026-07-23T09:00:00Z"),
+    birthtimeMs: Date.parse("2026-07-11T09:00:00Z"),
+  });
+  expect(pageAddedMs(p)).toBe(Date.parse("2026-07-11T09:00:00Z"));
+  expect(pageAddedLabel(p)).toBe("2026-07-11");
+});
+
+test("pageAddedMs: takes the OLDER of birthtime and frontmatter created", () => {
+  // A re-checked-out wiki recreates every file — the fresh birthtime is a lie
+  // the older frontmatter `created` corrects.
+  const recloned = page({ created: "2026-01-01", birthtimeMs: Date.parse("2026-07-20T10:00:00Z") });
+  expect(pageAddedMs(recloned)).toBe(Date.parse("2026-01-01"));
+  expect(pageAddedLabel(recloned)).toBe("2026-01-01");
+});
+
+test("pageAddedMs: no signals is 0 and shows no date", () => {
+  expect(pageAddedMs(page({}))).toBe(0);
+  expect(pageAddedLabel(page({}))).toBe("");
+});
+
+test("pageAddedLabel: a winning frontmatter created is echoed verbatim", () => {
+  expect(pageAddedLabel(page({ created: "2026-06-01" }))).toBe("2026-06-01");
+});
+
+test("sortPages: created orders by added date and ignores updated/mtime churn", () => {
+  const withBirth = PAGES.map((p) =>
+    // Everything mass-touched today; anthropic (created 2026-01-15) still ranks
+    // between gym (02-01) and rag (01-01) by its creation date alone.
+    page({ ...p, mtimeMs: Date.parse("2026-07-23T09:00:00Z") }),
+  );
+  expect(sortPages(withBirth, "created").map((p) => p.name)).toEqual(["gym", "anthropic", "rag"]);
+});
+
+test("sortPages: created lifts a brand-new frontmatter-less page to the top", () => {
+  const fresh = page({
+    name: "fresh",
+    title: "Fresh page",
+    birthtimeMs: Date.parse("2026-07-22T09:00:00Z"),
+    mtimeMs: Date.parse("2026-07-22T09:00:00Z"),
+  });
+  expect(sortPages([...PAGES, fresh], "created").map((p) => p.name)[0]).toBe("fresh");
 });
 
 test("pageFolder: top-level segment, ROOT_FOLDER for wiki-root pages", () => {
