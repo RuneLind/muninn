@@ -152,6 +152,84 @@ export interface BacklogCandidate {
 }
 
 /**
+ * The per-doc result the low-volume source-draft fallback seam reports — a minimal
+ * projection of the source drafter's outcome (`src/gardener/source-drafter.ts`), kept
+ * local so `backlog.ts` stays free of a runtime dependency on the drafter module (the
+ * seam is bound to the real `draftOneBacklogDoc` at the route). `drafted`/`error` are
+ * real model attempts (count toward the cap); `covered`/`skipped` are cheap
+ * deterministic no-ops (don't).
+ */
+export interface SourceFallbackOutcome {
+  outcome: "drafted" | "covered" | "skipped" | "error";
+}
+
+/**
+ * The low-volume vertical fallback (R4): when a drain produces ZERO gardener cluster
+ * drafts — the batch was below `minClusterSize`, the harvest floor tripped, or the
+ * cluster-size gate zeroed a batch that ran — draft the batch docs individually as
+ * source pages instead, so X/Anthropic/article verticals always produce something
+ * reviewable rather than returning empty.
+ *
+ * Fans out over `batch` (candidates carry `collection`/`id` separately — no key
+ * parsing), stopping after {@link BACKLOG_MAX_PROPOSALS} REAL model attempts
+ * (`drafted`/`error`); cheap `covered`/`skipped` outcomes don't consume the cap, so
+ * a run of already-covered docs at the head can't starve the reachable tail. The seam
+ * fetches each doc's body internally (the drain discarded harvested bodies). One
+ * doc's draft error never aborts the rest (skip-not-fail, mirroring the source
+ * backlog batch). Returns how many docs were actually drafted into proposals.
+ *
+ * On path (c) the batch can be up to {@link BACKLOG_BATCH_SIZE} (40) docs from a
+ * not-actually-low-volume vertical, so this fans out up to the cap (8) in real model
+ * one-shots — bounded, and every draft is still gate-reviewable.
+ *
+ * `hooks.shouldStop` (bound to the run's `cancelRequested` flag) is polled at the top of
+ * each iteration so a soft cancel stops the fan-out promptly — already-drafted proposals
+ * stay, and the returned count is honest. `hooks.onProgress` reports the running drafted
+ * count (+ the current doc key) so the live progress projection isn't wedged while up to
+ * 8 real one-shots run.
+ */
+export async function runSourceFallback(
+  batch: BacklogCandidate[],
+  draftSourceFallback: (cand: BacklogCandidate) => Promise<SourceFallbackOutcome>,
+  botName: string,
+  cap: number = BACKLOG_MAX_PROPOSALS,
+  hooks?: { shouldStop?: () => boolean; onProgress?: (draftsDone: number, currentKey?: string) => void },
+): Promise<number> {
+  let drafted = 0;
+  let modelAttempts = 0;
+  for (const cand of batch) {
+    if (modelAttempts >= cap) break;
+    // Honor a soft cancel mid-fan-out — stop drafting further docs, keep what landed.
+    if (hooks?.shouldStop?.()) break;
+    hooks?.onProgress?.(drafted, cand.key);
+    let outcome: SourceFallbackOutcome;
+    try {
+      outcome = await draftSourceFallback(cand);
+    } catch (err) {
+      // The bound seam is skip-not-fail (returns an `error` outcome rather than
+      // throwing), but contain a throw here so one bad doc can't abort the fan-out.
+      // A throw is a failed real attempt — it consumes the cap.
+      modelAttempts++;
+      log.warn("Backlog fallback: drafting {key} for {bot} threw: {error}", {
+        botName,
+        key: cand.key,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    if (outcome.outcome === "drafted") {
+      drafted++;
+      modelAttempts++;
+      hooks?.onProgress?.(drafted, cand.key);
+    } else if (outcome.outcome === "error") {
+      modelAttempts++;
+    }
+    // covered/skipped are cheap deterministic no-ops — they don't consume the cap.
+  }
+  return drafted;
+}
+
+/**
  * The **age-floor** eligibility predicate — the single source of truth shared by
  * {@link selectBacklogBatch}'s filter and the GET route's `remaining` count (so
  * the drain and the strip can never advertise a different eligible set).
@@ -240,6 +318,16 @@ export interface AssembledBacklog {
   listedBySource: Record<string, WikiListedDoc[]>;
   /** Keys of the selected batch (excludes already-offered), newest-first. */
   batchKeys: string[];
+  /**
+   * The selected candidates (collection/id/date SEPARATE) behind {@link batchKeys},
+   * in the same newest-first order — so the low-volume source-draft fallback (R4) can
+   * draft each doc individually without parsing a composite `<collection>/<id>` key
+   * (doc ids routinely contain slashes, e.g. `ai/rag/Foo.md`, so a naive split
+   * corrupts both). `assembleBacklog` always sets this; optional only so the many
+   * hand-built `AssembledBacklog` test fixtures that don't exercise the fallback need
+   * not carry it (absent ⇒ the fallback finds nothing to draft, a safe no-op).
+   */
+  batch?: BacklogCandidate[];
   /** consumed-complement: every listed key EXCEPT the batch (harvest's cap). */
   consumedComplement: Set<string>;
   /** The already-offered set read this run (so the caller persists the union). */
@@ -305,6 +393,7 @@ export async function assembleBacklog(deps: AssembleBacklogDeps): Promise<Assemb
   return {
     listedBySource,
     batchKeys,
+    batch,
     consumedComplement,
     offeredBefore,
     queuedCount: backlog.queued,
@@ -351,6 +440,19 @@ export interface LastBacklogRun {
    * all-zeros {@link dropTally} alone can't distinguish that from "nothing clustered".
    */
   keptClusters?: number;
+  /**
+   * How many docs the low-volume source-draft fallback (R4) drafted into source-page
+   * proposals when the gardener produced ZERO cluster drafts (insufficient batch,
+   * harvest floor, or cluster-size gate) AND no clusters survived the gate. The
+   * fallback is deliberately SKIPPED when `keptClusters > 0` (clusters formed but every
+   * draft failed transiently) — those docs stay cluster-worthy for a re-run rather than
+   * being permanently converted to per-doc source pages. A DISTINCT count from {@link drafted}
+   * (which counts gardener CLUSTER proposals) — kept separate so the #311 zero-draft
+   * rollback (fires on `drafted === 0`) is unaffected and the strip can render the
+   * honest "drafted N source pages (fallback — nothing clustered)" copy. Absent/0 ⇒
+   * no fallback fired (or it drafted nothing).
+   */
+  fallbackDrafted?: number;
 }
 
 // ── Run journal + interrupted-run recovery (PR 3, crash safety) ───────────────
@@ -442,6 +544,15 @@ export interface StartBacklogRunDeps {
    * capture) lives here, under the mutex.
    */
   runGardener: (assembled: AssembledBacklog, hooks: GardenerRunHooks) => Promise<WatcherAlert[]>;
+  /**
+   * Low-volume vertical fallback (R4): draft ONE batch doc individually as a source
+   * page, fetching its body internally. Bound at the route to the real
+   * `draftOneBacklogDoc` (via `defaultSourceBacklogDeps`), NOT to bare `draftSourcePage`
+   * (which needs a fully-formed body+url the drain discarded) nor `runSourceDraftBacklog`
+   * (which re-takes THIS same mutex and would dead-return null). Absent ⇒ no fallback
+   * (older callers / tests) — a zero-draft run then just reports nothing, as before.
+   */
+  draftSourceFallback?: (cand: BacklogCandidate) => Promise<SourceFallbackOutcome>;
   recordLastRun: (r: LastBacklogRun) => void;
 }
 
@@ -462,6 +573,8 @@ interface BacklogRunResult {
   dropTally?: ClusterDropTally;
   /** Post-gate cluster survivor count — >0 with drafted 0 ⇒ all drafts failed. */
   keptClusters?: number;
+  /** Source pages the low-volume fallback (R4) drafted when the gardener drafted 0. */
+  fallbackDrafted?: number;
 }
 
 /**
@@ -507,6 +620,42 @@ export async function recoverRunJournal(
  * re-enter the queued COUNT but stay offered — never re-offered — recovered only
  * by an explicit reset. Accepted divergence.)
  */
+/**
+ * Run the low-volume source-draft fallback over the assembled batch when the seam is
+ * wired and there is a batch to draft — the single call site behind BOTH zero-draft
+ * paths (the insufficient short-circuit and the completed-but-nothing-clustered
+ * branch). Returns 0 when no seam is injected or the batch is empty/absent.
+ */
+async function maybeRunFallback(
+  deps: StartBacklogRunDeps,
+  assembled: AssembledBacklog,
+): Promise<number> {
+  if (!deps.draftSourceFallback) return 0;
+  const batch = assembled.batch ?? [];
+  if (batch.length === 0) return 0;
+  // Move the live progress projection into a "drafting" stage so the UI reflects the
+  // fallback fan-out (up to BACKLOG_MAX_PROPOSALS one-shots) instead of looking wedged
+  // at the last gardener stage ("assembling" on the insufficient path). draftsTotal is
+  // the cap-bounded upper bound on drafts; draftsDone ticks as each source page lands.
+  const prog = backlogProgress.get(deps.botName);
+  if (prog) {
+    prog.stage = "drafting";
+    prog.draftsDone = 0;
+    prog.draftsTotal = Math.min(batch.length, BACKLOG_MAX_PROPOSALS);
+    prog.currentTopic = undefined;
+  }
+  return runSourceFallback(batch, deps.draftSourceFallback, deps.botName, BACKLOG_MAX_PROPOSALS, {
+    // Bind cancel to the run's live flag so a soft cancel halts the fan-out.
+    shouldStop: () => backlogProgress.get(deps.botName)?.cancelRequested === true,
+    onProgress: (draftsDone, currentKey) => {
+      const p = backlogProgress.get(deps.botName);
+      if (!p) return;
+      p.draftsDone = draftsDone;
+      p.currentTopic = currentKey;
+    },
+  });
+}
+
 export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResult {
   if (!deps.hasWatcher) return { state: "no-watcher" };
   if (!deps.gardenerEnabled) return { state: "disabled" };
@@ -564,6 +713,11 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         "Backlog run: {n} eligible doc(s) below minClusterSize {min} for {bot} — nothing offered",
         { botName: deps.botName, n: assembled.batchKeys.length, min: deps.minClusterSize },
       );
+      // Low-volume fallback (R4, path a — the common genuinely-small vertical): the
+      // batch can't cluster, so draft its docs individually as source pages rather
+      // than returning empty. Nothing was journalled/offered/run; the drafted docs
+      // become pending via their own proposals, the rest stay queued.
+      const fallbackDrafted = await maybeRunFallback(deps, assembled);
       return {
         offered: 0,
         drafted: 0,
@@ -571,6 +725,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         eligible: assembled.batchKeys.length,
         minClusterSize: deps.minClusterSize,
         attemptedDocs: assembled.batchKeys.length,
+        ...(fallbackDrafted > 0 ? { fallbackDrafted } : {}),
       };
     }
 
@@ -644,6 +799,28 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     // path below, whose deliberate semantics keep declined/never-clustered docs
     // offered (soft cancel is a user choice, not "the run had nothing to show").
     const zeroDraftBurn = !aborted && drafted === 0;
+    // Low-volume fallback (R4, paths b + c): a COMPLETED run that clustered nothing
+    // draftable (harvest floor, or the cluster-size gate zeroed a batch that ran)
+    // falls back to per-doc source drafts. Runs BEFORE the #311 rollback below only
+    // for readability — the two are independent: the rollback returns UNDRAFTED docs
+    // to the pool, while the fallback's drafted docs get credited as pending via their
+    // own proposals (so keeping #311 rollback semantics is correct — verified: the
+    // fallback and the offered set touch disjoint doc states).
+    //
+    // MUST NOT fire when clusters DID form and pass the gate (keptClusters > 0) but
+    // every draft attempt failed transiently (timeout / shape-gate). Those docs are
+    // cluster-worthy — converting them to per-doc source pages makes them pending and
+    // they're never re-clustered (permanent loss of concept synthesis on a transient
+    // failure), and the strip would then render the "(fallback — nothing clustered)"
+    // lie the R1 draft-failure branch exists to prevent. `keptClusters` is undefined
+    // on the harvest-floor early return (no tally fired) — the fallback SHOULD still
+    // fire there, so the guard is `!(keptClusters > 0)`, not `=== 0`. (The insufficient
+    // path is a separate short-circuit above and is unaffected.)
+    const clustersFormed = (keptClusters ?? 0) > 0;
+    let fallbackDrafted = 0;
+    if (zeroDraftBurn && !clustersFormed) {
+      fallbackDrafted = await maybeRunFallback(deps, assembled);
+    }
     if (aborted && skippedKeys.length) {
       // On cancel, return exactly the not-yet-drafted clusters' docs to the offered
       // set — declined/never-clustered docs stay offered (at-most-once). Subtract the
@@ -654,8 +831,12 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
     } else if (zeroDraftBurn) {
       await deps.persistOffered([...assembled.offeredBefore]);
       log.info(
-        "Backlog run: drafted 0 of {n} offered doc(s) for {bot} — offered set rolled back, batch stays eligible",
-        { botName: deps.botName, n: assembled.batchKeys.length },
+        "Backlog run: drafted 0 of {n} offered doc(s) for {bot} — offered set rolled back, batch stays eligible{fb}",
+        {
+          botName: deps.botName,
+          n: assembled.batchKeys.length,
+          fb: fallbackDrafted > 0 ? ` (${fallbackDrafted} source page(s) drafted as fallback)` : "",
+        },
       );
     }
 
@@ -671,6 +852,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       minClusterSize: deps.minClusterSize,
       ...(dropTally ? { dropTally } : {}),
       ...(keptClusters !== undefined ? { keptClusters } : {}),
+      ...(fallbackDrafted > 0 ? { fallbackDrafted } : {}),
     };
     } finally {
       // Complete the registry run on EVERY exit path — success, soft-cancel
@@ -711,6 +893,7 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
         ...(r.attemptedDocs !== undefined ? { attemptedDocs: r.attemptedDocs } : {}),
         ...(r.dropTally ? { dropTally: r.dropTally } : {}),
         ...(r.keptClusters !== undefined ? { keptClusters: r.keptClusters } : {}),
+        ...(r.fallbackDrafted !== undefined ? { fallbackDrafted: r.fallbackDrafted } : {}),
       });
     },
     (err) => {

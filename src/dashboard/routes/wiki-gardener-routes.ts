@@ -64,6 +64,8 @@ import {
   runSourceDraftForNewest,
   runSourceDraftBacklog,
   clampSourceBacklogLimit,
+  draftOneBacklogDoc,
+  defaultSourceBacklogDeps,
 } from "../../gardener/source-drafter-run.ts";
 import {
   getWikiGardenerWatcher,
@@ -931,6 +933,9 @@ export function registerWikiGardenerRoutes(
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
     const config = loadConfig();
 
+    // Real-seam wiring for the R4 low-volume fallback — built once, reused per doc.
+    const sourceFallbackDeps = defaultSourceBacklogDeps(bot, root, KNOWLEDGE_API_URL);
+
     const result = startBacklogRun({
       botName: bot.name,
       gardenerEnabled: bot.gardener?.enabled !== false,
@@ -983,6 +988,22 @@ export function registerWikiGardenerRoutes(
           throw err;
         }
       },
+      // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
+      // proposals, draft the batch docs individually as source pages instead. Bound to
+      // the real `draftOneBacklogDoc` (which fetches each doc's body internally — the
+      // drain discarded harvested bodies) via `defaultSourceBacklogDeps`. A candidate
+      // carries collection/id/date but no url, so we pass url:"" and rely on the
+      // fetched doc's metadata.url. `sourceFallbackDeps` is built ONCE per run.
+      draftSourceFallback: (cand) =>
+        draftOneBacklogDoc(
+          {
+            collection: cand.collection,
+            id: cand.id,
+            url: "",
+            ...(cand.date ? { date: cand.date } : {}),
+          },
+          sourceFallbackDeps,
+        ),
       recordLastRun: (r) => {
         setLastBacklogRun(bot.name, r);
         // Durable fallback for the extended GET after a restart drops the in-memory

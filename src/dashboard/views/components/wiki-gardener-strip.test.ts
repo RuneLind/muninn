@@ -673,6 +673,52 @@ describe("backlogOutcomeHtml — zero-draft reason line (R1)", () => {
   });
 });
 
+describe("backlogOutcomeHtml — low-volume source fallback (R4)", () => {
+  test("completed zero-cluster run with fallbackDrafted → 'drafted N source pages (fallback — nothing clustered)'", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 4, minClusterSize: 3,
+      fallbackDrafted: 3,
+    });
+    expect(html).toContain("drafted 3 source pages (fallback — nothing clustered)");
+    // The fallback copy WINS over the "none clustered" size reason.
+    expect(html).not.toContain("none clustered — all below cluster size");
+  });
+
+  test("fallbackDrafted singular phrasing", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 4, minClusterSize: 3,
+      fallbackDrafted: 1,
+    });
+    expect(html).toContain("drafted 1 source page (fallback — nothing clustered)");
+  });
+
+  test("fallbackDrafted 0 keeps the standard 'nothing clustered' reason", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, attemptedDocs: 4, minClusterSize: 3,
+      fallbackDrafted: 0,
+    });
+    expect(html).toContain("none clustered — all below cluster size (need 3 on one topic)");
+    expect(html).not.toContain("fallback");
+  });
+
+  test("insufficient batch with a fallback draft → reports the individual source drafts", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 2, minClusterSize: 3,
+      fallbackDrafted: 2,
+    });
+    expect(html).toContain("below the minimum cluster size of 3");
+    expect(html).toContain("drafted 2 source pages individually (fallback)");
+    expect(html).not.toContain("nothing offered");
+  });
+
+  test("insufficient batch, no fallback draft → still 'nothing offered'", () => {
+    const html = backlogOutcomeHtml({
+      finishedAt: 1, offered: 0, drafted: 0, outcome: "insufficient", eligible: 2, minClusterSize: 3,
+    });
+    expect(html).toContain("below the minimum cluster size of 3; nothing offered");
+  });
+});
+
 describe("backlogStripModel — degraded response (live fields absent)", () => {
   // The GET's catch branch returns only { byCollection:[], total, ingested,
   // queued:0, wikiUrlCount, generatedAt, errors } — no remaining/running/

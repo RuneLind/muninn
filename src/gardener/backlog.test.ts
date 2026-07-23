@@ -13,9 +13,12 @@ import {
   getBacklogProgress,
   requestBacklogCancel,
   __resetGardenerMutexForTest,
+  runSourceFallback,
   BACKLOG_BATCH_SIZE,
+  BACKLOG_MAX_PROPOSALS,
   type AssembleBacklogDeps,
   type AssembledBacklog,
+  type BacklogCandidate,
   type RunJournal,
 } from "./backlog.ts";
 import type { QueuedDoc } from "../wiki/ingest-backlog.ts";
@@ -743,6 +746,348 @@ describe("startBacklogRun", () => {
     // The old journal is cleared exactly once by the recover (the success settle
     // clears again on its own; that's a separate no-op clear on the fresh journal).
     expect(cleared).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── R4 low-volume source-draft fallback ──────────────────────────────────────
+
+  /** Build a candidate + its composite key for a fallback fixture. */
+  function cand(collection: string, id: string): BacklogCandidate {
+    return { collection, id, key: `${collection}/${id}` };
+  }
+
+  test("path (a): insufficient batch drafts its docs individually via the fallback", async () => {
+    const drafted: string[] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    // 2 eligible docs < minClusterSize 3 — the insufficient short-circuit.
+    const tiny: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b"],
+      batch: [cand("c", "a"), cand("c", "b")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 2,
+    };
+    let ranGardener = false;
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 3,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => tiny,
+      persistOffered: async () => {},
+      runGardener: async () => {
+        ranGardener = true;
+        return [];
+      },
+      draftSourceFallback: async (c) => {
+        drafted.push(c.key);
+        return { outcome: "drafted" };
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The gardener never ran (insufficient short-circuit), but the fallback drafted both.
+    expect(ranGardener).toBe(false);
+    expect(drafted.sort()).toEqual(["c/a", "c/b"]);
+    expect(recorded!.outcome).toBe("insufficient");
+    expect(recorded!.fallbackDrafted).toBe(2);
+  });
+
+  test("path (b/c): a completed zero-cluster run falls back + still rolls the offered set back", async () => {
+    const drafted: string[] = [];
+    const persists: string[][] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    // 3 eligible docs clear minClusterSize 1, so the run offers + journals + runs —
+    // but runGardener drafts NOTHING (harvest floor / cluster-size gate → []).
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      batch: [cand("c", "a"), cand("c", "b"), cand("c", "c")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(["c/z"]),
+      queuedCount: 4,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async (keys) => {
+        persists.push([...keys].sort());
+      },
+      runGardener: async () => [], // drafted nothing
+      draftSourceFallback: async (c) => {
+        drafted.push(c.key);
+        return { outcome: "drafted" };
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The fallback drafted the batch docs individually…
+    expect(drafted.sort()).toEqual(["c/a", "c/b", "c/c"]);
+    expect(recorded!.fallbackDrafted).toBe(3);
+    // …and the #311 rollback still fired: the batch keys are OUT of the final offered set.
+    expect(persists[persists.length - 1]).toEqual(["c/z"]);
+    // drafted (gardener CLUSTER proposals) stays 0 — fallbackDrafted is a distinct count.
+    expect(recorded!.drafted).toBe(0);
+    expect(recorded!.offered).toBe(0);
+  });
+
+  test("clusters formed but every draft failed (keptClusters > 0) → fallback NOT invoked", async () => {
+    // Finding 1 (MED): a completed run where clusters DID form and pass the gate but
+    // every draft attempt failed transiently must NOT convert cluster-worthy docs into
+    // per-doc source pages — that would permanently lose the concept synthesis and make
+    // the strip render the "(fallback — nothing clustered)" lie.
+    let fallbackCalls = 0;
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      batch: [cand("c", "a"), cand("c", "b"), cand("c", "c")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 1,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      // Clusters formed + passed the gate (keptClusters = 2) but drafts all failed → [].
+      runGardener: async (_assembled, hooks) => {
+        hooks.onTally?.(
+          {
+            clusters_dropped: 0,
+            clusters_dropped_size: 0,
+            clusters_dropped_skip: 0,
+            clusters_dropped_hallucinated: 0,
+            clusters_dropped_duplicate: 0,
+            clusters_dropped_cap: 0,
+            clusters_dropped_topics: "",
+          },
+          2,
+        );
+        return [];
+      },
+      draftSourceFallback: async () => {
+        fallbackCalls++;
+        return { outcome: "drafted" };
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+
+    // The fallback must not have fired — the docs stay cluster-worthy for a future run.
+    expect(fallbackCalls).toBe(0);
+    expect(recorded!.fallbackDrafted).toBeUndefined();
+    // keptClusters rides through so the strip renders the honest R1 draft-failure copy.
+    expect(recorded!.keptClusters).toBe(2);
+    expect(recorded!.drafted).toBe(0);
+  });
+
+  test("no fallback seam wired → zero-draft run records no fallbackDrafted (unchanged behavior)", async () => {
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      batch: [cand("c", "a"), cand("c", "b"), cand("c", "c")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      runGardener: async () => [],
+      // draftSourceFallback intentionally omitted.
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(recorded!.fallbackDrafted).toBeUndefined();
+    expect(recorded!.drafted).toBe(0);
+  });
+
+  test("fallback failure tolerance: one doc's draft error doesn't abort the rest", async () => {
+    const seen: string[] = [];
+    let recorded: import("./backlog.ts").LastBacklogRun | null = null;
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["c/a", "c/b", "c/c"],
+      batch: [cand("c", "a"), cand("c", "b"), cand("c", "c")],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 3,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 1,
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      runGardener: async () => [],
+      draftSourceFallback: async (c) => {
+        seen.push(c.key);
+        if (c.id === "b") throw new Error("boom"); // one doc blows up
+        return { outcome: "drafted" };
+      },
+      recordLastRun: (rec) => {
+        recorded = rec;
+      },
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    // All three were visited despite the middle one throwing; 2 drafted.
+    expect(seen.sort()).toEqual(["c/a", "c/b", "c/c"]);
+    expect(recorded!.fallbackDrafted).toBe(2);
+  });
+
+  test("nested doc ids (slashes) flow through the fallback via separate collection/id (no key parsing)", async () => {
+    const seen: BacklogCandidate[] = [];
+    const batch: AssembledBacklog = {
+      listedBySource: {},
+      batchKeys: ["x-summaries/ai/rag/Foo.md", "x-summaries/ai/rag/Bar.md"],
+      batch: [
+        { collection: "x-summaries", id: "ai/rag/Foo.md", key: "x-summaries/ai/rag/Foo.md" },
+        { collection: "x-summaries", id: "ai/rag/Bar.md", key: "x-summaries/ai/rag/Bar.md" },
+      ],
+      consumedComplement: new Set(),
+      offeredBefore: new Set(),
+      queuedCount: 2,
+    };
+    startBacklogRun({
+      ...NOOP_JOURNAL,
+      minClusterSize: 5, // insufficient path
+      botName: "jarvis",
+      gardenerEnabled: true,
+      hasWatcher: true,
+      assemble: async () => batch,
+      persistOffered: async () => {},
+      runGardener: async () => [],
+      draftSourceFallback: async (c) => {
+        seen.push(c);
+        return { outcome: "drafted" };
+      },
+      recordLastRun: () => {},
+    });
+    await new Promise((res) => setTimeout(res, 10));
+    // The bare doc id keeps its slashes intact — collection and id never re-derived
+    // from a composite key.
+    expect(seen.map((c) => `${c.collection}::${c.id}`).sort()).toEqual([
+      "x-summaries::ai/rag/Bar.md",
+      "x-summaries::ai/rag/Foo.md",
+    ]);
+  });
+});
+
+// ── runSourceFallback (R4 fan-out helper) ────────────────────────────────────
+
+describe("runSourceFallback", () => {
+  function cand(id: string): BacklogCandidate {
+    return { collection: "c", id, key: `c/${id}` };
+  }
+
+  test("returns the count of docs actually drafted", async () => {
+    const batch = [cand("a"), cand("b"), cand("c")];
+    const n = await runSourceFallback(
+      batch,
+      async (c) => ({ outcome: c.id === "b" ? "skipped" : "drafted" }),
+      "jarvis",
+    );
+    expect(n).toBe(2);
+  });
+
+  test("caps real model attempts at BACKLOG_MAX_PROPOSALS (8) over a 40-doc batch", async () => {
+    // Path (c): a not-actually-low-volume vertical whose batch is BACKLOG_BATCH_SIZE.
+    const batch = Array.from({ length: BACKLOG_BATCH_SIZE }, (_, i) => cand(`d${i}`));
+    let attempts = 0;
+    const n = await runSourceFallback(
+      batch,
+      async () => {
+        attempts++;
+        return { outcome: "drafted" };
+      },
+      "jarvis",
+    );
+    expect(attempts).toBe(BACKLOG_MAX_PROPOSALS); // 8, not 40
+    expect(n).toBe(BACKLOG_MAX_PROPOSALS);
+  });
+
+  test("cheap covered/skipped outcomes do NOT consume the cap (head-of-line fairness)", async () => {
+    // 8 skips at the head, then real drafts — the skips must not exhaust the cap.
+    const batch = [
+      ...Array.from({ length: 8 }, (_, i) => cand(`skip${i}`)),
+      ...Array.from({ length: 8 }, (_, i) => cand(`draft${i}`)),
+    ];
+    const drafted: string[] = [];
+    const n = await runSourceFallback(
+      batch,
+      async (c) => {
+        if (c.id.startsWith("skip")) return { outcome: "covered" };
+        drafted.push(c.id);
+        return { outcome: "drafted" };
+      },
+      "jarvis",
+    );
+    expect(n).toBe(8);
+    expect(drafted).toHaveLength(8); // reached all 8 real drafts past the skips
+  });
+
+  test("errors count toward the cap and are tolerated (one bad doc doesn't abort)", async () => {
+    const batch = Array.from({ length: 4 }, (_, i) => cand(`d${i}`));
+    let visited = 0;
+    const n = await runSourceFallback(
+      batch,
+      async (c) => {
+        visited++;
+        if (c.id === "d1") return { outcome: "error" };
+        return { outcome: "drafted" };
+      },
+      "jarvis",
+      3, // cap of 3 real attempts
+    );
+    expect(visited).toBe(3); // stopped at the cap (d0 drafted, d1 error, d2 drafted)
+    expect(n).toBe(2); // d0 + d2 drafted; d1 errored
+  });
+
+  test("a thrown seam is contained, counts as a failed attempt, and the fan-out continues", async () => {
+    const batch = [cand("a"), cand("b"), cand("c")];
+    let visited = 0;
+    const n = await runSourceFallback(
+      batch,
+      async (c) => {
+        visited++;
+        if (c.id === "a") throw new Error("boom");
+        return { outcome: "drafted" };
+      },
+      "jarvis",
+    );
+    expect(visited).toBe(3);
+    expect(n).toBe(2);
+  });
+
+  test("empty batch drafts nothing", async () => {
+    const n = await runSourceFallback([], async () => ({ outcome: "drafted" }), "jarvis");
+    expect(n).toBe(0);
   });
 });
 

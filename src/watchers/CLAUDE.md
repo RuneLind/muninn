@@ -593,6 +593,34 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   started, so auto-recover (vs a 409) keeps the one-click UX and is strictly safe. The
   banner's Recover/Dismiss buttons (`data-backlog-action="recover"/"dismiss"`) render
   from the pure `backlogBannerHtml` in `wiki-gardener-strip.ts`.
+- **Low-volume source fallback** (R4): the drain can produce zero cluster drafts on
+  THREE paths — the insufficient short-circuit (batch < `minClusterSize`, before
+  `runGardener`), the harvest floor inside `runGardener` (docs < `minClusterSize` → `[]`),
+  and the cluster-size gate zeroing a batch that ran. In every case the work fn falls
+  back to drafting the batch docs individually as SOURCE pages (`runSourceFallback`),
+  **except** when clusters DID form and pass the gate but every draft failed transiently
+  (`keptClusters > 0`): the completed-path fallback is gated on `!(keptClusters > 0)` so
+  cluster-worthy docs aren't permanently converted to per-doc source pages (they'd become
+  pending and never re-cluster) and the strip shows the honest R1 draft-failure copy
+  instead of the "(fallback — nothing clustered)" lie. `keptClusters` is undefined on the
+  harvest-floor early return, so that path still falls back (the guard is `!(keptClusters
+  > 0)`, not `=== 0`). The fan-out also honors a soft cancel (`shouldStop`) and drives a
+  "drafting" progress stage.
+  injected as the optional `draftSourceFallback` seam on `StartBacklogRunDeps` and bound
+  at the route to the now-exported `draftOneBacklogDoc` (via `defaultSourceBacklogDeps`) —
+  NOT bare `draftSourcePage` (needs a body+url the drain discarded) nor
+  `runSourceDraftBacklog` (re-takes THIS mutex → null). `assembleBacklog` now also returns
+  the selected `BacklogCandidate[]` as `batch`, so the fallback drafts from separate
+  `collection`/`id` fields and never parses a `<collection>/<id>` key (slashed doc ids
+  like `ai/rag/Foo.md` would corrupt a naive split). The seam fetches each body
+  internally; the fan-out caps at `BACKLOG_MAX_PROPOSALS` (8) REAL model attempts (cheap
+  covered/skipped don't consume the cap; a per-doc throw is contained → one bad doc never
+  aborts the rest). The count is persisted as a DISTINCT `fallbackDrafted` on
+  `LastBacklogRun` — never folded into `drafted` (gardener CLUSTER proposals), so the #311
+  zero-draft rollback still fires (keyed on `drafted === 0`) and the fallback's drafted
+  docs get credited as pending via their own proposals. The strip renders "drafted N
+  source pages (fallback — nothing clustered)" (or the insufficient-path variant) when
+  `fallbackDrafted > 0`.
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances
