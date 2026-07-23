@@ -101,6 +101,7 @@ describe("buildWeeklyGardenerRun — weekly-run snapshot shape (PR 2)", () => {
     clusters_dropped_hallucinated: 0,
     clusters_dropped_duplicate: 0,
     clusters_dropped_cap: 0,
+    clusters_dropped_reserved: 0,
     clusters_dropped_topics: "",
     ...over,
   });

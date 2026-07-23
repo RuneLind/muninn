@@ -175,6 +175,15 @@ describe("mappablePages", () => {
   test("null index → []", () => {
     expect(mappablePages(null)).toEqual([]);
   });
+  test("excludes reserved-basename pages (entities/Claude.md) so no doc maps onto them", () => {
+    const index = indexOf([
+      page({ title: "Claude", name: "Claude", type: "entity", domain: "ai", relPath: "entities/Claude.md" }),
+      page({ title: "Concept A", type: "concept", domain: "ai", relPath: "concepts/Concept A.md" }),
+    ]);
+    expect(mappablePages(index)).toEqual([
+      { title: "Concept A", aliases: [], domain: "ai", type: "concept" },
+    ]);
+  });
 });
 
 // ── Merge logic ──────────────────────────────────────────────────────────────
@@ -207,6 +216,30 @@ describe("mergeDocPageMappings", () => {
     expect(rc.cluster.docIds).toEqual(["youtube-summaries/game.md"]);
     expect(rc.target.mode).toBe("update");
     expect(rc.target.existingRelPath).toBe("concepts/AI Industry Landscape.md");
+  });
+
+  test("reserved backstop: a mapping resolving onto entities/Claude.md is dropped as reserved-path", () => {
+    // mappablePages already excludes reserved pages, so pass the reserved page in
+    // `pages` explicitly to exercise the merge's resolve-time backstop directly.
+    const claude = page({
+      title: "Claude", name: "Claude", type: "entity", domain: "ai", relPath: "entities/Claude.md",
+    });
+    const idx = indexOf([claude]);
+    const reservedPages: MappablePage[] = [{ title: "Claude", aliases: [], domain: "ai", type: "entity" }];
+    const resolvedAll: ResolvedCluster[] = [];
+    const { outcome, skipDrops, reservedDrops } = mergeDocPageMappings(
+      resolvedAll,
+      [{ docId: "youtube-summaries/game.md", pageTitle: "Claude" }],
+      { pages: reservedPages, index: idx, validDocKeys: new Set(["youtube-summaries/game.md"]), skipTopicKeys: new Set() },
+    );
+    // The page was a valid candidate (mapped++), but its resolved target is reserved.
+    expect(outcome.mapped).toBe(1);
+    expect(outcome.synthesized).toBe(0);
+    expect(resolvedAll).toHaveLength(0); // nothing synthesized onto the reserved page
+    expect(skipDrops).toHaveLength(0);
+    expect(reservedDrops).toHaveLength(1);
+    expect(reservedDrops[0]!.reason).toBe("reserved-path");
+    expect(reservedDrops[0]!.topicKey).toBe("claude");
   });
 
   test("matches a page by alias, not just its title", () => {

@@ -25,6 +25,7 @@ import {
   filterClusters,
   gateResolvedClusters,
   parseClusters,
+  partitionReservedTargets,
   summarizeClusterDrops,
   type ClusterDropEntry,
   type ClusterDropTally,
@@ -235,7 +236,21 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // --- Target-resolve (reuses the index loaded before clustering) ---
   tracer?.start("resolve");
   deps.onProgress?.({ stage: "resolving" });
-  const resolvedAll = clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) }));
+  // Resolve every cluster, then reject any whose target is a reserved wiki-
+  // infrastructure file (`entities/Claude.md`, log/index/CLAUDE — either extension)
+  // BEFORE the map stage and the size/cap gate, so a doomed cluster never consumes a
+  // cap slot or reaches the drafter. `resolvedAll` is mutated in place by the pass-1
+  // map merge below, so it must be the mutable survivor array.
+  const { kept: resolvedAll, dropped: reservedDropped } = partitionReservedTargets(
+    clusters.map((c) => ({ cluster: c, target: resolveTarget(c, index) })),
+  );
+  if (reservedDropped.length > 0) {
+    log.info("Gardener: dropped {n} cluster(s) targeting reserved wiki paths: {topics}", {
+      botName,
+      n: reservedDropped.length,
+      topics: reservedDropped.map((d) => d.topicKey).join(", "),
+    });
+  }
 
   // --- Pass-1 doc→page map (deterministic rescue, before the size/cap gate) ---
   // Whether a doc gets clustered at all is pass-0's roll; a doc that squarely
@@ -248,6 +263,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // degrades to "no mappings" and never aborts the run.
   let mapOutcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0, collision: 0 };
   let mapSkipDrops: ClusterDropEntry[] = [];
+  let mapReservedDrops: ClusterDropEntry[] = [];
   const candidatePages = mappablePages(index);
   if (candidatePages.length > 0) {
     tracer?.start("map");
@@ -264,6 +280,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       });
       mapOutcome = merged.outcome;
       mapSkipDrops = merged.skipDrops;
+      mapReservedDrops = merged.reservedDrops;
     } catch (err) {
       log.warn("Gardener doc→page map failed — proceeding without mappings: {error}", {
         botName,
@@ -277,6 +294,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       deduped: mapOutcome.deduped,
       collision: mapOutcome.collision,
       skip_dropped: mapSkipDrops.length,
+      reserved_dropped: mapReservedDrops.length,
     });
   }
 
@@ -288,13 +306,14 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
     minClusterSize: deps.minClusterSize,
     maxProposalsPerRun: deps.maxProposalsPerRun,
   });
-  const gateTally = summarizeClusterDrops(gateDropped);
-  // size/cap drops attach to the `resolve` span (the `cluster` span already ended
-  // before resolve ran). creates/updates count the full resolved set, pre-gate.
+  // reserved-path (pass-0) + size/cap drops attach to the `resolve` span (the
+  // `cluster` span already ended before resolve ran; pass-1 map reserved drops ride
+  // the `map` span). creates/updates count the reserved-free resolved set, pre-gate.
+  const resolveTally = summarizeClusterDrops([...reservedDropped, ...gateDropped]);
   tracer?.end("resolve", {
     creates: resolvedAll.filter((r) => r.target.mode === "create").length,
     updates: resolvedAll.filter((r) => r.target.mode === "update").length,
-    ...gateTally,
+    ...resolveTally,
   });
 
   // Adjacent structured line for the pass-1 mapping outcome (independent of the
@@ -318,11 +337,11 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
   // the record even though its span attrs are now split across spans. The pass-1
   // map's own `skip` drops (a synthesized update whose topic is live/recently
   // rejected) join the aggregate so the run-level skip count stays complete.
-  const allDropped = [...clusterDropped, ...mapSkipDrops, ...gateDropped];
+  const allDropped = [...clusterDropped, ...reservedDropped, ...mapSkipDrops, ...mapReservedDrops, ...gateDropped];
   const dropTally = summarizeClusterDrops(allDropped);
   log.info(
     "Gardener cluster filter: {kept} kept, {dropped} dropped " +
-      "(size {size}, skip {skip}, hallucinated {hallucinated}, duplicate {duplicate}, cap {cap}){topicsSuffix}",
+      "(size {size}, skip {skip}, hallucinated {hallucinated}, duplicate {duplicate}, cap {cap}, reserved {reserved}){topicsSuffix}",
     {
       botName,
       kept: resolved.length,
@@ -332,6 +351,7 @@ export async function runGardener(deps: GardenerDeps): Promise<WatcherAlert[]> {
       hallucinated: dropTally.clusters_dropped_hallucinated,
       duplicate: dropTally.clusters_dropped_duplicate,
       cap: dropTally.clusters_dropped_cap,
+      reserved: dropTally.clusters_dropped_reserved,
       topics: dropTally.clusters_dropped_topics,
       topicsSuffix: dropTally.clusters_dropped_topics ? ` — ${dropTally.clusters_dropped_topics}` : "",
     },

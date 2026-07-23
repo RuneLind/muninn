@@ -19,6 +19,7 @@ import type { ClusterDropEntry, ResolvedCluster } from "./cluster.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { GARDENER_DEFAULTS } from "./types.ts";
 import { normalizeLabel, resolveTarget } from "./target-resolve.ts";
+import { hasForbiddenBasename } from "./draft.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import { getLog } from "../logging.ts";
 
@@ -66,12 +67,15 @@ export interface MapMergeOutcome {
  * The candidate pages the map call may target: concept/entity pages only — the
  * SAME candidate policy as {@link resolveTarget} (source/analysis/note pages are
  * never a gardener draft target, so a doc "mapping" to one is meaningless). Source
- * pages would also bloat the prompt. Empty (or null index) ⇒ the runner skips the
+ * pages would also bloat the prompt. Reserved-basename pages ({@link hasForbiddenBasename}
+ * — e.g. the hand-maintained `entities/Claude.md`) are ALSO excluded so a doc is
+ * never mapped onto one in the first place; the merge's resolve-time reserved check
+ * is the belt-and-suspenders backstop. Empty (or null index) ⇒ the runner skips the
  * whole map stage (no candidates ⇒ nothing to map, and no Haiku call is spent).
  */
 export function mappablePages(index: WikiIndex | null | undefined): MappablePage[] {
   return (index?.pages ?? [])
-    .filter((p) => p.type === "concept" || p.type === "entity")
+    .filter((p) => (p.type === "concept" || p.type === "entity") && !hasForbiddenBasename(p.relPath))
     .map((p) => ({
       title: p.title,
       aliases: p.aliases,
@@ -279,9 +283,15 @@ export function mergeDocPageMappings(
     skipTopicKeys: Set<string>;
     botName?: string;
   },
-): { outcome: MapMergeOutcome; skipDrops: ClusterDropEntry[] } {
+): { outcome: MapMergeOutcome; skipDrops: ClusterDropEntry[]; reservedDrops: ClusterDropEntry[] } {
   const outcome: MapMergeOutcome = { mapped: 0, synthesized: 0, appended: 0, deduped: 0, collision: 0 };
   const skipDrops: ClusterDropEntry[] = [];
+  // Resolve-time reserved-basename rejections (belt-and-suspenders — `mappablePages`
+  // already drops reserved pages, so `pageByLabel` won't hold one; this catches the
+  // rare case where a synthesized cluster's label resolves onto a reserved page in
+  // the FULL index that isn't itself a candidate). Kept separate from `skipDrops` so
+  // the caller can tally them as `reserved-path`, not `skip`.
+  const reservedDrops: ClusterDropEntry[] = [];
   const botName = opts.botName;
 
   // Candidate lookup by normalized title + alias.
@@ -334,6 +344,21 @@ export function mergeDocPageMappings(
       continue;
     }
 
+    // Reserved-path guard (resolve site): never synthesize a cluster targeting a
+    // reserved wiki-infrastructure file (`entities/Claude.md`, log/index/CLAUDE).
+    // `mappablePages` already excludes such pages from `opts.pages`, so this is the
+    // belt-and-suspenders backstop for a label that resolves onto a reserved page in
+    // the full index. Tallied as `reserved-path`, mirroring the pass-0 resolve site.
+    if (hasForbiddenBasename(target.targetPath)) {
+      reservedDrops.push({ topicKey, kind: synth.kind, size: 1, reason: "reserved-path" });
+      log.debug("doc→page map: {page} resolved to a reserved path {path} — dropping", {
+        botName,
+        page: page.title,
+        path: target.targetPath,
+      });
+      continue;
+    }
+
     // The mapped page already has an update cluster this run → the doc belongs on
     // it. This holds REGARDLESS of whether the doc is also in other clusters.
     const existing = updateByRelPath.get(target.existingRelPath);
@@ -381,5 +406,5 @@ export function mergeDocPageMappings(
     outcome.synthesized++;
   }
 
-  return { outcome, skipDrops };
+  return { outcome, skipDrops, reservedDrops };
 }

@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { runGardener, type GardenerDeps, type GardenerProgress } from "./runner.ts";
+import type { ClusterDropTally } from "./cluster.ts";
 import type { WikiProposal, InsertWikiProposalParams } from "../db/wiki-proposals.ts";
 import type { ListedDoc, RawFetchedDoc } from "./types.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
@@ -403,6 +404,44 @@ describe("runGardener", () => {
     expect(inserted[0]!.mode).toBe("update");
     expect(inserted[0]!.targetPath).toBe("concepts/Context Compaction.md");
     expect(inserted[0]!.baseHash).toBeTruthy();
+  });
+
+  test("a cluster resolving onto the reserved entities/Claude.md is dropped as reserved-path", async () => {
+    const index: WikiIndex = {
+      pages: [
+        {
+          name: "Claude", title: "Claude", type: "entity", domain: "ai",
+          tags: [], aliases: [], relPath: "entities/Claude.md",
+        },
+      ],
+      outgoing: new Map(),
+      backlinks: new Map(),
+      resolve: () => undefined,
+      resolveRelPath: () => undefined,
+      scannedAt: NOW,
+      root: WIKI,
+    };
+    const tallies: ClusterDropTally[] = [];
+    const { deps, inserted } = makeDeps({
+      getWikiIndex: async () => index,
+      // The model labels the cluster with the existing Claude entity page's title →
+      // resolveTarget maps it to an UPDATE of entities/Claude.md, a reserved path.
+      callCluster: async () =>
+        JSON.stringify([
+          { topicKey: "claude", kind: "entity", domain: "ai", label: "Claude", docIds: KEYS, rationale: "clusters" },
+        ]),
+      readWikiFile: async () => "# Claude\n\nExisting hand-maintained body.",
+      onTally: (t) => tallies.push(t),
+    });
+    const alerts = await runGardener(deps);
+
+    // The doomed cluster never reaches the drafter/persist — no proposal written.
+    expect(inserted).toHaveLength(0);
+    expect(alerts).toHaveLength(0);
+    // The drop flows into the aggregate tally the runner feeds onTally.
+    expect(tallies).toHaveLength(1);
+    expect(tallies[0]!.clusters_dropped_reserved).toBe(1);
+    expect(tallies[0]!.clusters_dropped).toBe(1);
   });
 
   test("cross-kind title match re-kinds the cluster and updates the canonical page", async () => {

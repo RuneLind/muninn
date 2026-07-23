@@ -3,6 +3,7 @@ import {
   parseClusters,
   filterClusters,
   gateResolvedClusters,
+  partitionReservedTargets,
   excerptOf,
   buildClusterPrompt,
   summarizeClusterDrops,
@@ -198,6 +199,45 @@ describe("gateResolvedClusters (post-resolve: CREATE-only size floor + shared ca
   });
 });
 
+describe("partitionReservedTargets (resolve-time reserved-basename rejection)", () => {
+  const cluster = (topicKey: string, kind: "concept" | "entity" = "entity"): Cluster => ({
+    topicKey,
+    kind,
+    domain: "ai",
+    label: topicKey,
+    docIds: ["c/1"],
+  });
+  const rc = (topicKey: string, targetPath: string): ResolvedCluster => ({
+    cluster: cluster(topicKey),
+    target: { mode: "update", targetPath, existingRelPath: targetPath },
+  });
+
+  test("an entities/Claude.md update target is dropped as reserved-path", () => {
+    const { kept, dropped } = partitionReservedTargets([rc("claude", "entities/Claude.md")]);
+    expect(kept).toHaveLength(0);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.reason).toBe("reserved-path");
+    expect(dropped[0]!.topicKey).toBe("claude");
+    expect(dropped[0]!.size).toBe(1);
+  });
+
+  test("case-insensitive: entities/claude.mdx and a nested index.md are both reserved", () => {
+    const { kept, dropped } = partitionReservedTargets([
+      rc("claude-lc", "entities/claude.mdx"),
+      rc("idx", "concepts/foo/index.md"),
+    ]);
+    expect(kept).toHaveLength(0);
+    expect(dropped.map((d) => d.reason)).toEqual(["reserved-path", "reserved-path"]);
+  });
+
+  test("ordinary concept/entity targets pass through untouched", () => {
+    const rcs = [rc("agent-loops", "concepts/Agent Loops.md"), rc("claude-code", "entities/Claude Code.md")];
+    const { kept, dropped } = partitionReservedTargets(rcs);
+    expect(kept.map((r) => r.cluster.topicKey)).toEqual(["agent-loops", "claude-code"]);
+    expect(dropped).toHaveLength(0);
+  });
+});
+
 describe("summarizeClusterDrops", () => {
   test("tallies per-reason counts and a compact, capped topics string", () => {
     const dropped: ClusterDropEntry[] = [
@@ -205,14 +245,17 @@ describe("summarizeClusterDrops", () => {
       { topicKey: "b", kind: "concept", size: 2, reason: "size", stripped: 1 },
       { topicKey: "c", kind: "entity", size: 2, reason: "size" },
       { topicKey: "d", kind: "concept", size: 4, reason: "skip" },
+      { topicKey: "e", kind: "entity", size: 1, reason: "reserved-path" },
     ];
     const s = summarizeClusterDrops(dropped);
-    expect(s.clusters_dropped).toBe(4);
+    expect(s.clusters_dropped).toBe(5);
     expect(s.clusters_dropped_size).toBe(2);
     expect(s.clusters_dropped_hallucinated).toBe(1);
     expect(s.clusters_dropped_skip).toBe(1);
     expect(s.clusters_dropped_duplicate).toBe(0);
     expect(s.clusters_dropped_cap).toBe(0);
+    expect(s.clusters_dropped_reserved).toBe(1);
+    expect(s.clusters_dropped_topics).toContain("e(reserved-path,n:1)");
     expect(s.clusters_dropped_topics).toContain("a(hallucinated,n:0,strip:3)");
     expect(s.clusters_dropped_topics).toContain("c(size,n:2)");
     expect(s.clusters_dropped_topics.length).toBeLessThanOrEqual(500);
