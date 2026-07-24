@@ -20,8 +20,8 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
+import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
-import { attachToolSpans } from "../core/tool-spans.ts";
 import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
@@ -58,20 +58,17 @@ export interface DrafterOneShotOptions {
  */
 export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<ClaudeExecResult> {
   const { title, url, config, botConfig } = opts;
-  const oneShot = opts.oneShot ?? executeOneShot;
 
   const tracer =
     opts.tracer ??
     new Tracer("draft:source", { botName: botConfig.name, platform: "capture" });
 
   // Setup runs INSIDE the try so a throw in `startRequest` / `connectorCapabilities` /
-  // `tracer.start` still finishes the root span and completes the /agents run, instead
-  // of leaking an unfinished trace + a run stuck in "drafting". Staged with two flags so
-  // the catch only touches what was actually created: `tracer.end("claude")` throws on an
-  // unstarted mark (Timing.end), so it is gated on `claudeStarted`; `completeRequest` is
-  // gated on `reqId`.
+  // the seam still finishes the root span and completes the /agents run, instead of
+  // leaking an unfinished trace + a run stuck in "drafting". The shared seam owns the
+  // `claude` span's whole lifecycle (start + ok-end + error-end), so the catch only
+  // needs the trace-root finish (gated on nothing) + `completeRequest` (gated on reqId).
   let reqId: string | undefined;
-  let claudeStarted = false;
   try {
     reqId = agentStatus.startRequest(botConfig.name, "drafting", undefined, {
       kind: "capture",
@@ -89,20 +86,17 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
         ? DRAFTER_THINKING_MAX_TOKENS
         : opts.thinkingMaxTokens;
 
-    tracer.start("claude", {
-      source: "source-draft",
-      title,
-      url,
-      connector: botConfig.connector ?? "claude-cli",
-      model: botConfig.model,
-      ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-    });
-    claudeStarted = true;
-
-    const result = await oneShot(opts.prompt, config, botConfig, {
+    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, botConfig, {
       ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
+      startAttrs: {
+        source: "source-draft",
+        title,
+        url,
+        ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      },
     });
 
     const usage = {
@@ -114,8 +108,6 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
       costUsd: result.costUsd,
     };
 
-    tracer.end("claude", { ...usage, durationMs: result.durationMs });
-    await attachToolSpans(tracer, result.toolCalls, !!config.tracingCaptureToolOutputs);
     tracer.finish("ok", { source: "source-draft", ...usage });
     agentStatus.completeRequest(reqId, {
       ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
@@ -128,7 +120,6 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (claudeStarted) tracer.end("claude", { error: message });
     tracer.finish("error", { source: "source-draft", error: message });
     if (reqId) agentStatus.completeRequest(reqId, {});
     log.warn("Source-page draft one-shot failed for {title}: {error}", { title, error: message });
