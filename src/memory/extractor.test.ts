@@ -12,6 +12,7 @@ const mockGenerateEmbedding = mock(() => Promise.resolve(Array.from({ length: 38
 
 mock.module("../ai/haiku-direct.ts", () => ({
   callHaikuWithFallback: mockCallHaiku,
+  backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
 }));
 
 mock.module("../db/memories.ts", () => ({

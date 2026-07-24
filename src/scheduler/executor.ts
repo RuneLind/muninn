@@ -101,6 +101,13 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   model?: string;
   /** Max output tokens for direct-SDK backends (anthropic). Ignored by the CLI spawn. */
   maxTokens?: number;
+  /** System prompt (bot persona) for direct-SDK backends (anthropic `system` /
+   *  copilot `systemMessage`). **Ignored by the CLI spawn** — spawnHaiku runs with
+   *  `cwd: bots/<name>/`, so the Claude CLI already auto-loads the bot's CLAUDE.md
+   *  persona; passing it here too would double-inject. Only the prose callers (goal
+   *  + task reminders) set this, to restore the persona voice the non-CLI backends
+   *  otherwise send NO system prompt for. */
+  system?: string;
 }
 
 export async function spawnHaiku(

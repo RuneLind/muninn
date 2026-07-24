@@ -519,10 +519,15 @@ describe("traces", () => {
     });
 
     test("goal-run root (Rec 5): connector + model stamped on the root's OWN attrs render non-blank (mapRow root precedence, no `claude` child, no walk)", async () => {
-      // A goal_reminder/goal_checkin trace is a bare root — `callHaiku` → spawnHaiku
-      // runs no tools and stamps no `claude` model span, so the honest backend +
-      // model ride on the root's own attrs (goalRunMeta). No child spans ⇒ c/w/walk
-      // all miss; the row must still show connector 'claude-cli' + the model.
+      // A goal_reminder/goal_checkin trace is a bare root — the tool-less prompt now
+      // routes through the Haiku router (`callHaikuMessageWithFallback`), which runs
+      // no tools and stamps no `claude` model span, so the honest backend + model
+      // ride on the root's own attrs (goalRunMeta). The `connector` value is the
+      // ACTUAL router backend that ran, mapped through `backendConnector` into the
+      // connector vocabulary — a cli backend stamps 'claude-cli' (SAME value as the
+      // bot's briefing/watcher spans, so a tick with both never renders 'Mixed');
+      // anthropic/copilot pass through. No child spans ⇒ c/w/walk all miss; the row
+      // must still show the backend ('claude-cli' → Claude Code) + the model.
       const root = makeRootSpan({ name: "goal_reminder", platform: "telegram" });
       await saveSpan(root);
       await updateSpan(root.id, {

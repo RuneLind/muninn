@@ -244,7 +244,10 @@ function isAiSpan(s: WaterfallSpan): boolean {
 // Friendly display for a Haiku-router backend value (cli/anthropic/copilot);
 // leaves real ConnectorType values (claude-sdk/copilot-sdk/…) untouched.
 function backendDisplay(v: string): string {
-  if (v === "cli") return "Claude Code";
+  // Both the legacy bare backend token (`cli`, still on historical `haikuBackend`
+  // rows) and the unified connector value (`claude-cli`, stamped via
+  // `backendConnector` on router-backed rows) render as "Claude Code".
+  if (v === "cli" || v === "claude-cli") return "Claude Code";
   if (v === "anthropic") return "Anthropic API";
   if (v === "copilot") return "Copilot SDK";
   return v;

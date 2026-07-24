@@ -39,7 +39,10 @@ const mockCallHaiku = mock(async () => ({
   outputTokens: 40,
   model: "claude-haiku-4-5-20251001",
 }));
-mock.module("../ai/haiku-direct.ts", () => ({ callHaikuWithFallback: mockCallHaiku }));
+mock.module("../ai/haiku-direct.ts", () => ({
+  callHaikuWithFallback: mockCallHaiku,
+  backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
+}));
 
 const { refreshInterestProfile, loadInterestProfileForBot, loadInterestProfile, isValidProfileShape } =
   await import("./generator.ts");

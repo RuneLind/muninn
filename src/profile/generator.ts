@@ -2,7 +2,7 @@ import { getActiveGoals } from "../db/goals.ts";
 import { getMemoriesForUser } from "../db/memories.ts";
 import { getBotDefaultUser } from "../db/chat-preferences.ts";
 import { getInterestProfile, upsertInterestProfile } from "../db/interest-profiles.ts";
-import { callHaikuWithFallback } from "../ai/haiku-direct.ts";
+import { backendConnector, callHaikuWithFallback } from "../ai/haiku-direct.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { Tracer } from "../tracing/tracer.ts";
@@ -152,8 +152,9 @@ export async function refreshInterestProfile(
     // is the SOLE ai-span in this trace (its own root), so getRecentTraces' walk
     // reads its connector straight onto the row with no mixed-collapse risk (no
     // co-resident bot-connector span to disagree with). Value is a HaikuBackend
-    // (cli/anthropic/copilot) — connectorLabel() maps it to a friendly label.
-    tracer.end("haiku", { ...usage, model, ...(haiku.backend ? { connector: haiku.backend } : {}) });
+    // (cli/anthropic/copilot), mapped through `backendConnector` into the connector
+    // vocabulary (cli→"claude-cli") — connectorLabel() maps it to a friendly label.
+    tracer.end("haiku", { ...usage, model, ...(haiku.backend ? { connector: backendConnector(haiku.backend) } : {}) });
     if (model) agentStatus.setModel(reqId, model);
 
     const profile = result.trim();
