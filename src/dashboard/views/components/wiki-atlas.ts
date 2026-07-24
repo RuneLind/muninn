@@ -25,13 +25,16 @@
 
 import { escHtml as esc } from "./escape.ts";
 import {
+  computeClusters,
   computeColoring,
   neighborsFor,
+  stemOf,
   SEM_OTHER_SLOT,
   SEM_THRESHOLD_DEFAULT,
   SEM_THRESHOLD_MAX,
   SEM_THRESHOLD_MIN,
   SEM_THRESHOLD_STEP,
+  type RailCluster,
   type SemanticOverlay,
   type SemColoring,
 } from "./wiki-atlas-semantic.ts";
@@ -114,6 +117,12 @@ let threshold = SEM_THRESHOLD_DEFAULT;
 let coloring: SemColoring | null = null;
 /** Active dim-others community filter (legend click), by colour slot. */
 let dimSlot: number | null = null;
+/** Cluster rail: union-find components at the current threshold (recomputed on
+ *  slider change). Distinct from the FIXED communities — see wiki-atlas-semantic.ts. */
+let clustersNow: RailCluster[] = [];
+/** Selected cluster id (rail click) — dims non-members in the active projection.
+ *  Mutually exclusive with `selection` and `dimSlot`. */
+let clusterSel: string | null = null;
 
 /** Container markup for #startBody when the Atlas tab is active. */
 export function atlasBodyHtml(): string {
@@ -167,6 +176,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   coloring = data.semantic ? computeColoring(data.semantic, keys) : null;
   if (!coloring) semanticOn = false; // no overlay data ⇒ toggle inert + hidden
   dimSlot = null; // els are rebuilt — any prior dim-others filter is stale
+  clusterSel = null; // els are rebuilt — any prior cluster highlight is stale
 
   if (data.error) {
     root.innerHTML = `<div class="wiki-atlas-empty">${esc(data.error)}</div>`;
@@ -271,11 +281,48 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       );
   };
 
-  /** Root `.semantic-on` (drives dot visibility) + Types-only legend visibility. */
+  /** Root `.semantic-on` (drives dot visibility) + Types-only legend visibility +
+   *  cluster-rail visibility (shown in BOTH projections — it operates on the full
+   *  graph, not the rendered columns). */
   const updateSemChrome = () => {
     root.classList.toggle("semantic-on", semanticOn && !!coloring);
     const leg = root.querySelector(".wiki-atlas-semlegend") as HTMLElement | null;
     if (leg) leg.style.display = semanticOn && coloring && proj === "types" ? "flex" : "none";
+    const rail = root.querySelector(".wiki-atlas-clusters") as HTMLElement | null;
+    if (rail) rail.style.display = semanticOn && coloring ? "block" : "none";
+  };
+
+  // ── Cluster rail (recomputed on threshold change; full-graph union-find) ────
+  /** Recompute the components at the current threshold + repaint the rail body.
+   *  Drops a stale cluster selection whose component no longer exists. */
+  const buildClusterRail = () => {
+    const body = root.querySelector(".wiki-atlas-clusters-body") as HTMLElement | null;
+    if (!body) return;
+    clustersNow = data.semantic ? computeClusters(data.semantic, threshold) : [];
+    if (clusterSel && !clustersNow.some((c) => c.id === clusterSel)) clusterSel = null;
+    const renderedSet = new Set(Object.keys(activeEls()));
+    body.innerHTML = clusterRailHtml(clustersNow, renderedSet);
+  };
+
+  /** Dim non-members of the selected cluster in the active projection (reuses the
+   *  legend's `.semdim` dim-others mechanism) + light the selected rail row. When
+   *  no cluster is selected this is a no-op — `applyDim` has already reset semdim. */
+  const applyClusterHighlight = () => {
+    root
+      .querySelectorAll(".wiki-atlas-cluster")
+      .forEach((c) => c.classList.toggle("on", clusterSel !== null && c.getAttribute("data-cid") === clusterSel));
+    if (clusterSel === null) return;
+    const cluster = clustersNow.find((c) => c.id === clusterSel);
+    const memberSet = new Set(cluster?.members ?? []);
+    const els = Object.entries(activeEls());
+    // Same guard as the node/topic path: a cluster whose members are ALL capped
+    // out of the rendered projection would dim every visible pill with nothing
+    // lit, and a fully-greyed canvas with no anchor reads as broken. The story
+    // panel's "0 shown · N off-canvas" line carries the message instead.
+    if (!els.some(([k]) => memberSet.has(k))) return;
+    for (const [k, el] of els) {
+      if (!memberSet.has(k)) el.classList.add("semdim");
+    }
   };
 
   /** Draw dashed semantic-neighbour edges for a selected node (Types only),
@@ -332,10 +379,34 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   const render = () => {
     clearHighlights();
     applyDim();
+    applyClusterHighlight();
     setSemCount("");
     const steps = stepsEl();
     const title = titleEl();
     if (!steps || !title) return;
+    // A cluster selection owns the story panel + canvas dim (supersedes node/legend).
+    if (clusterSel) {
+      const cluster = clustersNow.find((c) => c.id === clusterSel);
+      title.textContent = "Cluster";
+      if (!cluster) {
+        steps.innerHTML = '<div class="wiki-atlas-hint">Cluster gone at this threshold.</div>';
+        return;
+      }
+      const renderedSet = new Set(Object.keys(activeEls()));
+      const shown = cluster.members.filter((m) => renderedSet.has(m)).length;
+      const badge = cluster.candidate
+        ? '<div class="wiki-atlas-meta">✦ synthesis candidate — no synthesis page yet</div>'
+        : "";
+      steps.innerHTML =
+        '<div class="wiki-atlas-step"><div class="wiki-atlas-num">◆</div><div>' +
+        `<b>${esc(cluster.label || "cluster")}</b>` +
+        `<div class="wiki-atlas-meta">${cluster.size} pages · ${shown} shown in this view · ` +
+        `${cluster.members.length - shown} off-canvas</div>` +
+        badge +
+        '<div class="wiki-atlas-desc">Members are listed in the Clusters rail — every row opens its page.</div>' +
+        "</div></div>";
+      return;
+    }
     if (!selection) {
       title.textContent = "Story";
       steps.innerHTML = '<div class="wiki-atlas-hint">Pick a trail or topic, or click a node.</div>';
@@ -390,6 +461,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
           c.classList.toggle("active", c.getAttribute("data-view") === proj),
         );
         updateSemChrome(); // legend is Types-only
+        buildClusterRail(); // refresh member "rendered in this view" marks
         render(); // redraw edges against the new projection's DOM positions
       }
       return;
@@ -397,7 +469,10 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     // Semantic overlay toggle — flips the overlay on/off (data is already loaded).
     if (t.closest?.(".wiki-atlas-semtoggle")) {
       semanticOn = !semanticOn && !!coloring;
-      if (!semanticOn) dimSlot = null;
+      if (!semanticOn) {
+        dimSlot = null;
+        clusterSel = null;
+      }
       (t.closest(".wiki-atlas-semtoggle") as HTMLElement).classList.toggle("on", semanticOn);
       updateSemChrome();
       render();
@@ -413,8 +488,40 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       render();
       return;
     }
+    // Cluster rail collapse toggle.
+    if (t.closest?.(".wiki-atlas-clusters-toggle")) {
+      const card = root.querySelector(".wiki-atlas-clusters");
+      const collapsed = card?.classList.toggle("collapsed");
+      const btn = card?.querySelector(".wiki-atlas-clusters-toggle");
+      if (btn) btn.textContent = collapsed ? "▸" : "▾";
+      return;
+    }
+    // A cluster member row — deep-links to the reader page (rendered or not).
+    const cmember = t.closest?.(".wiki-atlas-cmember") as HTMLElement | null;
+    if (cmember) {
+      const key = cmember.getAttribute("data-key");
+      if (key) deps.openPage(key, stemOf(key));
+      return;
+    }
+    // A cluster row — toggle its highlight (dims non-members in the active view).
+    // Blob-guarded clusters aren't selectable (they'd dim ~everything).
+    const clusterEl = t.closest?.(".wiki-atlas-cluster") as HTMLElement | null;
+    if (clusterEl) {
+      const cid = clusterEl.getAttribute("data-cid");
+      const c = cid ? clustersNow.find((x) => x.id === cid) : null;
+      if (c && !c.tooBroad) {
+        clusterSel = clusterSel === cid ? null : cid;
+        if (clusterSel) {
+          selection = null; // a cluster supersedes a node/topic/trail selection
+          dimSlot = null; // …and the legend dim-others filter
+        }
+        render();
+      }
+      return;
+    }
     if (t.closest?.(".wiki-atlas-clear")) {
       selection = null;
+      clusterSel = null;
       render();
       return;
     }
@@ -430,6 +537,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       // Clicking the already-selected trail toggles it off.
       selection =
         selection?.kind === "curated" && selection.idx === idx ? null : { kind: "curated", idx };
+      clusterSel = null; // a trail selection supersedes a cluster highlight
       render();
       return;
     }
@@ -438,6 +546,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       const idx = Number(topic.getAttribute("data-idx"));
       selection =
         selection?.kind === "topic" && selection.idx === idx ? null : { kind: "topic", idx };
+      clusterSel = null; // a topic selection supersedes a cluster highlight
       render();
       return;
     }
@@ -446,6 +555,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       const key = node.getAttribute("data-key");
       if (key) {
         dimSlot = null; // a node selection supersedes any dim-others filter
+        clusterSel = null; // …and any cluster highlight
         selection = selection?.kind === "node" && selection.key === key ? null : { kind: "node", key };
         render();
       }
@@ -453,8 +563,9 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     }
     // Click on empty canvas background (not a node) clears the selection —
     // same effect as the Clear button.
-    if (t.closest?.(".wiki-atlas-canvas") && selection) {
+    if (t.closest?.(".wiki-atlas-canvas") && (selection || clusterSel)) {
       selection = null;
+      clusterSel = null;
       render();
     }
   });
@@ -484,10 +595,12 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     threshold = Number(inp.value);
     const val = root.querySelector(".wiki-atlas-semval") as HTMLElement | null;
     if (val) val.textContent = threshold.toFixed(3);
+    buildClusterRail(); // union-find components recompute at the new threshold
     render();
   });
 
   buildSemLegend();
+  buildClusterRail();
   updateSemChrome();
   render();
 }
@@ -516,6 +629,15 @@ export function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: bool
     : "";
   // Community legend (second head row, Types-only, hidden until the toggle is on).
   const semLegend = data.semantic ? '<div class="wiki-atlas-semlegend"></div>' : "";
+  // Cluster rail card (side column, both projections, hidden until the toggle is
+  // on). Header copy is deliberately "Clusters at threshold" — the two-partition
+  // split from the fixed "Communities" legend must stay legible.
+  const clusterRail = data.semantic
+    ? '<div class="wiki-atlas-card wiki-atlas-clusters" style="display:none">' +
+      '<h2 class="wiki-atlas-clusters-hdr">Clusters at threshold' +
+      '<button class="wiki-atlas-clusters-toggle" title="Collapse cluster rail">▾</button></h2>' +
+      '<div class="wiki-atlas-clusters-body"></div></div>'
+    : "";
   return (
     '<div class="wiki-atlas-head">' +
     `<div class="wiki-atlas-toggle">${typesBtn}${monthsBtn}</div>` +
@@ -535,9 +657,53 @@ export function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: bool
     '<button class="wiki-atlas-clear">Clear selection</button></div>' +
     '<div class="wiki-atlas-card wiki-atlas-story"><h2 class="wiki-atlas-story-title">Story</h2>' +
     '<div class="wiki-atlas-steps"><div class="wiki-atlas-hint">Pick a trail or topic, or click a node.</div></div></div>' +
+    clusterRail +
     "</div>" +
     "</div>"
   );
+}
+
+/**
+ * Render the cluster rail body from the union-find components at the current
+ * threshold. Each ≥3-member cluster shows a label + size + an optional synthesis-
+ * candidate badge, then its member rows (each deep-links regardless of whether it
+ * is rendered on the canvas — off-canvas members are muted). A blob-guarded
+ * cluster (> RAIL_BLOB_MAX) shows only a header + "raise the threshold" note.
+ *
+ * Follow-up seam (no code): a `candidate` cluster's `{ members, label }` is exactly
+ * the input shape a future consolidation-gardener "Draft synthesis" button would
+ * post into the `wiki_proposals` gate as one clustered proposal.
+ */
+function clusterRailHtml(clusters: RailCluster[], renderedSet: Set<string>): string {
+  if (!clusters.length) {
+    return '<div class="wiki-atlas-hint">No clusters at this threshold — lower the “similar ≥” slider.</div>';
+  }
+  return clusters
+    .map((c) => {
+      const badge = c.candidate
+        ? '<span class="wiki-atlas-cbadge" title="≥3 narrative-type pages and no synthesis page yet — a consolidation candidate">synthesis candidate</span>'
+        : "";
+      const head =
+        '<div class="wiki-atlas-cluster-head">' +
+        `<b>${esc(c.label || "cluster")}</b><em>${c.size}</em>${badge}</div>`;
+      if (c.tooBroad) {
+        return (
+          `<div class="wiki-atlas-cluster broad" data-cid="${esc(c.id)}">${head}` +
+          '<div class="wiki-atlas-cbroad">too broad — raise the threshold</div></div>'
+        );
+      }
+      const members = c.members
+        .map((m) => {
+          const muted = renderedSet.has(m) ? "" : " muted";
+          return `<button class="wiki-atlas-cmember${muted}" data-key="${esc(m)}" title="${esc(m)}">${esc(stemOf(m))}</button>`;
+        })
+        .join("");
+      return (
+        `<div class="wiki-atlas-cluster" data-cid="${esc(c.id)}">${head}` +
+        `<div class="wiki-atlas-cluster-members">${members}</div></div>`
+      );
+    })
+    .join("");
 }
 
 export function nodeHtml(key: string, n: AtlasNode, dataT: string): string {

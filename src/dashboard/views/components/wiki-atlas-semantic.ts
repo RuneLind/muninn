@@ -29,6 +29,14 @@ export interface SemanticOverlay {
   communities: SemanticCommunity[];
   /** emitKey → namespaced community id (isolate ids with no community row survive). */
   nodeCommunity: Record<string, string>;
+  /** emitKey → page type, for EVERY overlay node incl. pages capped out of the
+   *  rendered columns and excluded types (explainers). Populated by the server
+   *  join (`src/wiki/atlas-semantic.ts`); optional so old payloads / test fixtures
+   *  without it degrade (cluster rail then withholds the candidate badge). */
+  nodeType?: Record<string, string>;
+  /** emitKey → page tags, same population as `nodeType` — feeds the cluster rail's
+   *  top-2 informative-tag label over the FULL graph (not just rendered pills). */
+  nodeTags?: Record<string, string[]>;
 }
 
 /** Threshold slider bounds + default (semantic EDGE gate, not the node colouring). */
@@ -191,4 +199,166 @@ export function neighborsFor(
   }
   rendered.sort((x, y) => y.sim - x.sim);
   return { rendered, hidden };
+}
+
+// ── Cluster rail (PR 3) ──────────────────────────────────────────────────────
+/**
+ * The cluster rail is the consolidation-gardener instrument: a union-find over the
+ * FULL index-resolved semantic graph (`overlay.edges` — every page incl. those
+ * capped out of the rendered columns AND excluded types like explainers) AT the
+ * current similarity threshold. Distinct on purpose from the FIXED Louvain
+ * `communities` legend — components recompute every time the slider moves, so the
+ * rail header says "Clusters at threshold" while the legend says "Communities".
+ *
+ * Follow-up seam (no code): each `candidate` cluster is exactly the input shape a
+ * future consolidation-gardener "Draft synthesis" button would post into the
+ * `wiki_proposals` gate — `{ members, label }` → one clustered proposal.
+ */
+
+/** Tags too generic to make a useful cluster/community label. SINGLE source of
+ *  truth — the server (`src/wiki/atlas-semantic.ts`) imports this same set for its
+ *  community label rule, so the exclusion list lives in exactly one place. */
+export const GENERIC_TAGS = new Set(["plan", "wiki", "blog"]);
+
+/** A component must reach this many members to earn a rail row (drops singleton /
+ *  pair noise). Also the narrative-member floor for the synthesis-candidate badge. */
+export const RAIL_MIN_MEMBERS = 3;
+/** Above this size a component is a blob — render header + count + a "raise the
+ *  threshold" note, NO member list, NO badge. */
+export const RAIL_BLOB_MAX = 40;
+
+/**
+ * Page-type → consolidation role, keyed by TYPE (never a folder name). Covers BOTH
+ * per-wiki ontologies at once — mimir (`plan`/`report` narrative, `blog`/`subsystem`
+ * synthesis) and default wikis (`source`/`analysis` narrative, `concept` synthesis).
+ * The two ontologies' type names are disjoint, so one static map serves both without
+ * needing the wiki's typeMap client-side. A type absent from the map is neither.
+ */
+export const CLUSTER_ROLE_BY_TYPE: Record<string, "narrative" | "synthesis"> = {
+  plan: "narrative",
+  report: "narrative",
+  blog: "synthesis",
+  subsystem: "synthesis",
+  source: "narrative",
+  analysis: "narrative",
+  concept: "synthesis",
+};
+
+export interface RailCluster {
+  /** Stable id = the lexicographically smallest member key (== union-find root). */
+  id: string;
+  /** All member emitKeys, sorted asc — every row deep-links regardless of rendering. */
+  members: string[];
+  size: number;
+  /** Top-2 informative tags (`a + b`), else the smallest member's stem. Empty when tooBroad. */
+  label: string;
+  /** Synthesis candidate: ≥ RAIL_MIN_MEMBERS narrative-type members AND zero synthesis-type. */
+  candidate: boolean;
+  /** Blob guard tripped (size > RAIL_BLOB_MAX): no member list, no badge. */
+  tooBroad: boolean;
+}
+
+/** Basename without a wiki extension — the display label for a rail member row and
+ *  the label fallback when a cluster has no informative tags. */
+export function stemOf(relPath: string): string {
+  const base = relPath.split("/").pop() ?? relPath;
+  return base.replace(/\.(md|mdx|html)$/i, "");
+}
+
+/**
+ * A cluster's label: the top-2 most frequent NON-generic tags across its members
+ * (each tag counted once per member), `a + b`. Ties break alphabetically. Empty
+ * string when no informative tag survives — the caller falls back to a member stem.
+ */
+export function clusterLabel(memberTagLists: string[][]): string {
+  const freq = new Map<string, number>(); // lowercased tag → member count
+  const display = new Map<string, string>(); // lowercased tag → first-seen display form
+  for (const list of memberTagLists) {
+    const seen = new Set<string>();
+    for (const raw of list ?? []) {
+      const t = (raw ?? "").trim();
+      if (!t) continue;
+      const lc = t.toLowerCase();
+      if (GENERIC_TAGS.has(lc) || seen.has(lc)) continue;
+      seen.add(lc);
+      freq.set(lc, (freq.get(lc) ?? 0) + 1);
+      if (!display.has(lc)) display.set(lc, t);
+    }
+  }
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, 2)
+    .map(([lc]) => display.get(lc)!)
+    .join(" + ");
+}
+
+/**
+ * Union-find components of the overlay's semantic graph AT `threshold`, as rail
+ * clusters. Only edges with `sim >= threshold` union; a node with no qualifying
+ * edge is a singleton dropped by the `>= RAIL_MIN_MEMBERS` filter. Clusters are
+ * sorted by size desc (id asc tie-break). Pure — recompute freely on slider change.
+ */
+export function computeClusters(overlay: SemanticOverlay, threshold: number): RailCluster[] {
+  const parent = new Map<string, string>();
+  const add = (x: string) => {
+    if (!parent.has(x)) parent.set(x, x);
+  };
+  const find = (x: string): string => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r)!;
+    let c = x;
+    while (parent.get(c) !== r) {
+      const next = parent.get(c)!;
+      parent.set(c, r);
+      c = next;
+    }
+    return r;
+  };
+  const union = (a: string, b: string) => {
+    add(a);
+    add(b);
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return;
+    // Keep the lexicographically smaller root so `id` is stable + deterministic.
+    if (ra < rb) parent.set(rb, ra);
+    else parent.set(ra, rb);
+  };
+
+  for (const [a, b, sim] of overlay.edges) {
+    if (sim < threshold) continue;
+    union(a, b);
+  }
+
+  const groups = new Map<string, string[]>();
+  for (const node of parent.keys()) {
+    const root = find(node);
+    (groups.get(root) ?? groups.set(root, []).get(root)!).push(node);
+  }
+
+  const nodeType = overlay.nodeType ?? {};
+  const nodeTags = overlay.nodeTags ?? {};
+  const clusters: RailCluster[] = [];
+  for (const raw of groups.values()) {
+    if (raw.length < RAIL_MIN_MEMBERS) continue;
+    const members = raw.slice().sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const size = members.length;
+    const tooBroad = size > RAIL_BLOB_MAX;
+    let label = "";
+    let candidate = false;
+    if (!tooBroad) {
+      label = clusterLabel(members.map((m) => nodeTags[m] ?? [])) || stemOf(members[0]!);
+      let narrative = 0;
+      let synthesis = 0;
+      for (const m of members) {
+        const role = CLUSTER_ROLE_BY_TYPE[nodeType[m] ?? ""];
+        if (role === "narrative") narrative++;
+        else if (role === "synthesis") synthesis++;
+      }
+      candidate = narrative >= RAIL_MIN_MEMBERS && synthesis === 0;
+    }
+    clusters.push({ id: members[0]!, members, size, label, candidate, tooBroad });
+  }
+  clusters.sort((a, b) => b.size - a.size || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return clusters;
 }

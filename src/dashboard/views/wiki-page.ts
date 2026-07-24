@@ -438,6 +438,26 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-canvas svg path.wiki-atlas-sedge.s5 { stroke: var(--atlas-c5); }
     .wiki-atlas-canvas svg path.wiki-atlas-sedge.sx { stroke: var(--atlas-cx); }
     .wiki-atlas-seminfo { margin: 8px 2px 0; padding-top: 8px; border-top: 1px dashed var(--border-primary); color: var(--text-dim); font-size: 11px; }
+    /* Cluster rail (PR 3) — union-find components at the current threshold, distinct
+       from the fixed Communities legend. Collapsible; shown only when overlay on. */
+    .wiki-atlas-clusters-hdr { display: flex; align-items: center; justify-content: space-between; }
+    .wiki-atlas-clusters-toggle { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1; }
+    .wiki-atlas-clusters-toggle:hover { color: var(--text-primary); }
+    .wiki-atlas-clusters.collapsed .wiki-atlas-clusters-body { display: none; }
+    .wiki-atlas-clusters-body { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+    .wiki-atlas-cluster { border: 1px solid var(--border-primary); border-radius: 8px; padding: 6px 8px; background: var(--bg-surface); cursor: pointer; }
+    .wiki-atlas-cluster:not(.broad):hover { border-color: var(--text-faint); }
+    .wiki-atlas-cluster.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .wiki-atlas-cluster.broad { cursor: default; opacity: .8; }
+    .wiki-atlas-cluster-head { display: flex; align-items: center; gap: 6px; }
+    .wiki-atlas-cluster-head b { font-size: 12px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-atlas-cluster-head em { font-style: normal; color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; }
+    .wiki-atlas-cbadge { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--status-warning); border: 1px solid var(--status-warning); border-radius: 6px; padding: 1px 5px; white-space: nowrap; }
+    .wiki-atlas-cbroad { font-size: 10.5px; color: var(--text-faint); font-style: italic; margin-top: 3px; }
+    .wiki-atlas-cluster-members { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+    .wiki-atlas-cmember { font-size: 10px; font-family: ui-monospace, Menlo, monospace; color: var(--text-dim); border: 1px solid var(--border-primary); border-radius: 6px; padding: 2px 6px; background: var(--bg-panel); cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-atlas-cmember:hover { color: var(--accent); border-color: var(--accent); }
+    .wiki-atlas-cmember.muted { opacity: .5; }
 
     /* Connections mini-graph (1-hop neighborhood) */
     .wiki-mini-graph { border-bottom: 1px solid var(--border-primary); padding: 6px 6px 2px; margin-bottom: 8px; }
