@@ -72,6 +72,20 @@ describe("buildIndexEntry", () => {
     ).toBeNull();
   });
 
+  test("synthesis → null (consolidation blog page, no index catalog line in v1) — skips, doesn't throw", () => {
+    // Default policy.
+    expect(
+      buildIndexEntry({ title: "Corrective RAG, End to End", kind: "synthesis", domain: "ai", rationale: "saga" }),
+    ).toBeNull();
+    // Synthesis is NEVER cataloged, even if a wiki lists it in its policy.
+    expect(
+      buildIndexEntry({ title: "X", kind: "synthesis", domain: "ai" }, ["concept", "synthesis"]),
+    ).toBeNull();
+    // catalogPage agrees under both default and an explicit-synthesis policy.
+    expect(catalogPage("synthesis")).toBe(false);
+    expect(catalogPage("synthesis", ["concept", "synthesis"])).toBe(false);
+  });
+
   // ── Per-wiki cataloging policy (catalogKinds) ────────────────────────────────
 
   test("jarvis policy [concept, source] → source page gets a ## Sources line", () => {

@@ -8,6 +8,7 @@ import {
   reindexCollectionFor,
   draftTitle,
   commitMessageFor,
+  logWriterFor,
   type ApplyDeps,
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
@@ -51,6 +52,7 @@ function makeProposal(overrides: Partial<WikiProposal> = {}): WikiProposal {
   return {
     id: "11111111-1111-1111-1111-111111111111",
     botName: "jarvis",
+    wikiName: null,
     topicKey: "context-compaction",
     kind: "concept",
     mode: "create",
@@ -106,6 +108,23 @@ describe("reindexCollectionFor", () => {
     expect(reindexCollectionFor("entities/Bar.md")).toBe("wiki");
     expect(reindexCollectionFor("life/concepts/Baz.md")).toBe("wiki-life");
     expect(reindexCollectionFor("life/entities/Qux.md")).toBe("wiki-life");
+  });
+});
+
+describe("commitMessageFor / logWriterFor by kind", () => {
+  test("gardener concept/entity apply", () => {
+    expect(commitMessageFor(makeProposal({ kind: "concept" }))).toBe("[gardener] apply: concepts/Context Compaction.md");
+    expect(logWriterFor(makeProposal({ kind: "concept" }))).toBe("wiki-gardener");
+  });
+  test("source-drafter draft", () => {
+    const p = makeProposal({ kind: "source", targetPath: "sources/RAG.mdx" });
+    expect(commitMessageFor(p)).toBe("[source-drafter] draft: sources/RAG.mdx");
+    expect(logWriterFor(p)).toBe("wiki-gardener");
+  });
+  test("consolidation synthesis apply", () => {
+    const p = makeProposal({ kind: "synthesis", targetPath: "blogs/2026-07-24-saga.mdx" });
+    expect(commitMessageFor(p)).toBe("[consolidation] apply: blogs/2026-07-24-saga.mdx");
+    expect(logWriterFor(p)).toBe("consolidation-gardener");
   });
 });
 
@@ -171,6 +190,35 @@ describe("applyWikiProposal", () => {
 
     expect(refreshed).toBe(1);
     expect(reindexed).toEqual(["wiki"]);
+  });
+
+  test("wiki-keyed synthesis apply reindexes the injected collections, not wiki/wiki-life", async () => {
+    const proposal = makeProposal({
+      wikiName: "mimir",
+      kind: "synthesis",
+      topicKey: "corrective-rag-saga",
+      targetPath: "blogs/2026-07-24-corrective-rag.mdx",
+      draft: "---\ntype: synthesis\ntitle: Corrective RAG, End to End\n---\n\n# Corrective RAG, End to End\n\nA synthesis of the saga.\n",
+    });
+    const res = await applyWikiProposal(proposal, deps({ reindexCollections: ["mimir"] }));
+    expect(res.outcome).toBe("applied");
+
+    const written = await readFile(path.join(wikiDir, "blogs/2026-07-24-corrective-rag.mdx"), "utf8");
+    expect(written).toContain("# Corrective RAG, End to End");
+
+    const logMd = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(logMd).toContain("- via consolidation-gardener, 2 sources");
+
+    // Reindex hits the registry collection, NOT the hardcoded jarvis wiki mapping.
+    expect(reindexed).toEqual(["mimir"]);
+    // Synthesis is never cataloged → no index.md written.
+    let indexExists = true;
+    try {
+      await readFile(path.join(wikiDir, "index.md"), "utf8");
+    } catch {
+      indexExists = false;
+    }
+    expect(indexExists).toBe(false);
   });
 
   test("apply re-strips an alias a page created AFTER drafting now owns (TOCTOU guard)", async () => {

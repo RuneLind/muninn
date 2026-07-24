@@ -21,8 +21,15 @@ export function normalizeLabel(s: string): string {
  * life domain). Typed `WikiProposalKind` (not `ClusterKind`) so the source-page
  * drafter — which produces `source` proposals the weekly clusterer never emits —
  * shares this one mapping; `resolveTarget` below only ever passes concept/entity.
+ *
+ * `synthesis` (consolidation gardener) is the ONE domain-independent kind: its
+ * pages always land in `blogs/` — the wiki's narrative synthesis folder, which is
+ * NOT domain-split — so it returns `blogs` unconditionally, BEFORE the `life/`
+ * prefix. A naive `life/blogs` would fail `isPathConfined` (no such folder) and
+ * reject every life-domain synthesis target.
  */
 export function expectedDir(domain: "ai" | "life", kind: WikiProposalKind): string {
+  if (kind === "synthesis") return "blogs";
   const sub = kind === "concept" ? "concepts" : kind === "source" ? "sources" : "entities";
   return domain === "life" ? `life/${sub}` : sub;
 }

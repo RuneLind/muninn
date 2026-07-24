@@ -5,10 +5,19 @@ import {
   insertWikiProposal,
   getWikiProposalById,
   listWikiProposalsByStatus,
+  listAllWikiProposals,
+  countDraftWikiProposals,
   getLiveTopicKeys,
+  getLiveSourceDocUrls,
   getRejectedTopicKeys,
   getRecentlyRejectedTopicKeys,
   getConsumedDocIds,
+  getPendingDocIds,
+  listAllWikiProposalsByWiki,
+  countDraftWikiProposalsByWiki,
+  getLiveTopicKeysByWiki,
+  getLiveOrAppliedTopicKeysByWiki,
+  getRecentlyRejectedTopicKeysByWiki,
   type InsertWikiProposalParams,
 } from "./wiki-proposals.ts";
 
@@ -147,5 +156,128 @@ describe("wiki_proposals CRUD", () => {
     // Backlog-crediting path (unfiltered) → the source-paged doc DOES count as consumed.
     const all = await getConsumedDocIds("jarvis");
     expect(all.has("youtube-summaries/vidZ")).toBe(true);
+  });
+});
+
+describe("wiki-keyed (consolidation) proposals — isolation from bot-keyed reads", () => {
+  /** A wiki-keyed row: bot_name is the truthful synthesis bot, wiki_name keys it
+   *  to the standalone wiki. Every field distinct from the jarvis makeProposal
+   *  defaults so nothing leaks by accident. */
+  function mimirRow(overrides: Partial<InsertWikiProposalParams> = {}): InsertWikiProposalParams {
+    return {
+      botName: "jarvis",
+      wikiName: "mimir",
+      topicKey: "mimir-topic",
+      kind: "synthesis",
+      mode: "create",
+      targetPath: "blogs/2026-07-24-x.mdx",
+      draft: "---\ntype: synthesis\ntitle: X\n---\n\nbody",
+      sourceDocs: [{ collection: "mimir", docId: "projects/muninn/x.md", title: "X", url: "https://mimir/x" }],
+      rationale: "consolidation",
+      ...overrides,
+    };
+  }
+
+  test("a wiki-keyed row with bot_name='jarvis' is invisible under every bot-keyed read for jarvis", async () => {
+    const sql = getDb();
+
+    // Baseline: a legacy bot-keyed jarvis draft the bot's flows still expect.
+    const legacy = await insertWikiProposal(makeProposal({ topicKey: "legacy-live" }));
+    expect(legacy).not.toBeNull();
+
+    // Wiki-keyed rows across the statuses the reads exercise.
+    const draftRow = await insertWikiProposal(mimirRow({ topicKey: "mimir-draft" }));
+    const sourceRow = await insertWikiProposal(
+      mimirRow({
+        topicKey: "mimir-source",
+        kind: "source",
+        targetPath: "sources/S.mdx",
+        sourceDocs: [{ collection: "mimir", docId: "s.md", title: "S", url: "https://mimir/s" }],
+      }),
+    );
+    const appliedRow = await insertWikiProposal(
+      mimirRow({
+        topicKey: "mimir-applied",
+        sourceDocs: [{ collection: "mimir", docId: "applied.md", title: "A", url: "https://mimir/applied" }],
+      }),
+    );
+    const rejectedRow = await insertWikiProposal(mimirRow({ topicKey: "mimir-rejected" }));
+    expect([draftRow, sourceRow, appliedRow, rejectedRow].every((r) => r !== null)).toBe(true);
+    await sql`UPDATE wiki_proposals SET status = 'applied' WHERE id = ${appliedRow!.id}`;
+    await sql`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE id = ${rejectedRow!.id}`;
+
+    // ── The 9 bot-keyed reads: jarvis sees ONLY its legacy row, never mimir's. ──
+    const mimirKeys = ["mimir-draft", "mimir-source", "mimir-applied", "mimir-rejected"];
+
+    // 1. listWikiProposalsByStatus
+    expect((await listWikiProposalsByStatus("jarvis", "draft")).map((p) => p.topicKey)).toEqual(["legacy-live"]);
+    // 2. listAllWikiProposals
+    const all = (await listAllWikiProposals("jarvis")).map((p) => p.topicKey);
+    expect(all).toContain("legacy-live");
+    for (const k of mimirKeys) expect(all).not.toContain(k);
+    // 3. countDraftWikiProposals — only the legacy draft.
+    expect(await countDraftWikiProposals("jarvis")).toBe(1);
+    // 4. getLiveTopicKeys
+    expect(await getLiveTopicKeys("jarvis")).toEqual(["legacy-live"]);
+    // 5. getLiveSourceDocUrls — the mimir source url must not leak.
+    expect(await getLiveSourceDocUrls("jarvis")).not.toContain("https://mimir/s");
+    // 6. getRejectedTopicKeys
+    expect(await getRejectedTopicKeys("jarvis")).not.toContain("mimir-rejected");
+    // 7. getRecentlyRejectedTopicKeys
+    expect(await getRecentlyRejectedTopicKeys("jarvis", 7)).not.toContain("mimir-rejected");
+    // 8. getConsumedDocIds — the applied mimir doc is not consumed for jarvis.
+    expect((await getConsumedDocIds("jarvis")).has("mimir/applied.md")).toBe(false);
+    // 9. getPendingDocIds — the draft/source mimir docs are not pending for jarvis.
+    const pending = await getPendingDocIds("jarvis");
+    expect(pending.has("mimir/x.md")).toBe(false);
+    expect(pending.has("mimir/s.md")).toBe(false);
+
+    // ── Wiki-scoped reads DO see mimir's rows (and not jarvis's legacy row). ──
+    const byWiki = (await listAllWikiProposalsByWiki("mimir")).map((p) => p.topicKey).sort();
+    expect(byWiki).toEqual([...mimirKeys].sort());
+    expect(await countDraftWikiProposalsByWiki("mimir")).toBe(2); // draft + source
+    expect((await getLiveTopicKeysByWiki("mimir")).sort()).toEqual(["mimir-draft", "mimir-source"]);
+    expect((await getRecentlyRejectedTopicKeysByWiki("mimir", 7))).toEqual(["mimir-rejected"]);
+    // The wiki-keyed row carries wiki_name back through mapRow.
+    expect(draftRow!.wikiName).toBe("mimir");
+    expect(legacy!.wikiName).toBeNull();
+  });
+
+  test("getLiveOrAppliedTopicKeysByWiki includes applied topic keys (the new consolidation skip-list)", async () => {
+    const sql = getDb();
+    const live = await insertWikiProposal(mimirRow({ topicKey: "co-live" }));
+    const applied = await insertWikiProposal(mimirRow({ topicKey: "co-applied", targetPath: "blogs/a.mdx" }));
+    const rejected = await insertWikiProposal(mimirRow({ topicKey: "co-rejected", targetPath: "blogs/r.mdx" }));
+    await sql`UPDATE wiki_proposals SET status = 'applied' WHERE id = ${applied!.id}`;
+    await sql`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE id = ${rejected!.id}`;
+
+    const skip = (await getLiveOrAppliedTopicKeysByWiki("mimir")).sort();
+    expect(skip).toContain("co-live");
+    expect(skip).toContain("co-applied");
+    // A rejected topic is NOT in this skip-list (rejections are handled by the
+    // TTL'd recently-rejected list, so a topic can be re-proposed after rejection).
+    expect(skip).not.toContain("co-rejected");
+    // getLiveTopicKeysByWiki (draft/approved only) does NOT include the applied one.
+    expect(await getLiveTopicKeysByWiki("mimir")).toEqual(["co-live"]);
+    expect(live!.status).toBe("draft");
+  });
+
+  test("dedup index is keyed on COALESCE(wiki_name, bot_name): a bot-keyed and a wiki-keyed row share a topic_key without colliding", async () => {
+    // Same bot_name='jarvis' + same topic_key, but the mimir row's COALESCE key is
+    // 'mimir' (wiki_name) while the legacy row's is 'jarvis' — no conflict.
+    const legacy = await insertWikiProposal(makeProposal({ topicKey: "shared-key" }));
+    const wiki = await insertWikiProposal(mimirRow({ topicKey: "shared-key" }));
+    expect(legacy).not.toBeNull();
+    expect(wiki).not.toBeNull();
+
+    // Two live wiki-keyed rows for the SAME wiki + topic_key DO collide (no-op).
+    const dup = await insertWikiProposal(mimirRow({ topicKey: "shared-key" }));
+    expect(dup).toBeNull();
+
+    // Retiring the live mimir row frees the topic for a fresh draft.
+    await getDb()`UPDATE wiki_proposals SET status = 'applied' WHERE id = ${wiki!.id}`;
+    const again = await insertWikiProposal(mimirRow({ topicKey: "shared-key" }));
+    expect(again).not.toBeNull();
+    expect(again!.id).not.toBe(wiki!.id);
   });
 });
