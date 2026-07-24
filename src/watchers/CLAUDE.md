@@ -24,6 +24,7 @@ Scheduler tick (every 60s)
 | `wiki-gardener` | `wiki-gardener.ts` | Recent summary collections (knowledge API) | Haiku cluster + bot-connector draft |
 | `wiki-linter` | `wiki-linter.ts` | The bot's on-disk wiki tree (no AI) | — |
 | `wiki-committer` | `wiki-committer.ts` | The bot's wiki git repo (no AI) | — |
+| `consolidation-gardener` | `consolidation-gardener.ts` | The wiki's OWN pages via the Atlas semantic overlay (knowledge API) | Bot-connector synthesis draft (`draftAndPersistSynthesis`) |
 
 ## Interest-profile personalization (gate/capture prompts)
 
@@ -782,6 +783,65 @@ changes: N" badge when the wiki's git subtree is dirty (`wikiDirtyStat` on
 dirty file's mtime; 0 when not a git repo). Amber normally, **red** once the
 oldest dirty file is > 24h old (the sweeper should have caught it); absent when
 clean.
+
+## Consolidation Gardener (consolidation-gardener.ts)
+
+The **weekly automation leg** of the consolidation gardener. Where the Atlas
+rail's **Draft synthesis** button (PR 2) is a manual, one-cluster-at-a-time
+trigger, this watcher scans a wiki's semantic overlay on a weekly cadence, finds
+the synthesis-CANDIDATE clusters of the wiki's OWN pages, skips clusters already
+drafted/approved/applied, ranks the rest, and drafts the top `capPerRun` through
+the SAME PR 2 drafter seam (`draftAndPersistSynthesis`, `src/gardener/synthesis-drafter.ts`)
+into the `wiki_proposals` gate under kind `synthesis`. Unlike the concept/entity
+gardener (which clusters external summary docs into concept pages) this clusters
+the wiki's OWN pages into saga-style `type: blog` narrative pages under `blogs/`.
+
+- **Config** (JSONB on the row): `config.wiki` (required — the wiki name, e.g.
+  `"mimir"`), `config.threshold` (edge threshold for `computeClusters`, default
+  `0.98` = the Atlas slider default), `config.capPerRun` (max real model drafts
+  per run, default 2 — a small cap so a single run never floods the gate; the
+  tail drains over subsequent weeks).
+- **Run** (`checkConsolidationGardener`, injectable `ConsolidationGardenerDeps`
+  seams so it's unit-tested without huginn/DB/model): (1) resolve the wiki via
+  `findWiki`/`getWikiRegistry` — no entry / no collections ⇒ warn + skip, **no
+  alert**; (2) read the wiki index; (3) fetch the semantic overlay via the SHARED
+  `getSemanticOverlay` (`src/wiki/atlas-semantic.ts`, the same seam the atlas
+  route + the Draft-synthesis button use) — huginn down ⇒ null ⇒ **non-sticky
+  skip, no alert spam**; (4) `computeClusters` at threshold, keep only badged
+  `candidate` (non-`tooBroad`) clusters; (5) **PRIMARY dedup** — skip clusters
+  whose `synthesisTopicKey(label)` is in `getLiveOrAppliedTopicKeysByWiki` (the
+  same live-OR-applied skip-list the button's 409 checks, so a button-drafted OR
+  applied cluster is never double-proposed); (6) resolve the synthesis bot
+  (`resolveWikiSynthesisBot` — mimir → jarvis via pin) for draft attribution;
+  (7) `rankCandidates` (size DESC, then narrative-member SHARE, then id — pure +
+  unit-tested) and draft the top `capPerRun` **sequentially** through the drafter
+  seam. Never throws for a degraded external source — warns + returns `[]`.
+- **Alert** (🧩): only when ≥1 proposal actually persisted, with a **per-run-unique
+  id** (`consolidation-gardener:<proposal ids>`) naming `/wiki/gardener?wiki=<name>`.
+  A **zero-draft run sends NO alert** (nothing to review). The runner's
+  `skipContentHash` covers `consolidation-gardener` (belt-and-suspenders with the
+  unique id). **NOT quiet-hours run-exempt** — it alerts a human, so a run landing
+  in quiet hours is skipped whole (unlike the `wiki-committer` git-commit sweeper).
+- **Telemetry**: the runner threads its `watcher:consolidation-gardener` span into
+  `checkConsolidationGardener` via `telemetry.tracer`; each draft's traced one-shot
+  attaches a `claude` child span under it (mirrors how `wiki-gardener` reuses the
+  runner span), so runs land on `/traces` + `/agents` truthfully.
+  `watcherConnectorInfo` labels the row from the **bot's own connector/model**
+  (like wiki-gardener — the draft `executeOneShot` is the dominant work).
+- **Seed**: `bun scripts/setup-consolidation-gardener.ts [--apply]` (default
+  `WIKI=mimir`) — weekly interval, `config.hour: 10` (daytime, clear of quiet
+  hours, the wiki-gardener slot), `config.timeoutMs: 1200000` (20 min net headroom
+  for cap-2 drafts + overlay fetch). `bot_name` = the wiki's resolved synthesis
+  bot; `user_id` = that bot's `getBotDefaultUser` mapping — a missing mapping is a
+  **FAIL-LOUD** error (watchers.user_id is NOT NULL; the script refuses to insert a
+  placeholder owner). Seeded **disabled** for safety (the orchestrator enables it
+  at landing); idempotent (skips an existing row for the same wiki). The generic
+  `POST /api/watchers/:id/trigger` route is the Run-now path (no new UI).
+- **Home attention**: `src/dashboard/home-attention.ts` surfaces pending wiki-keyed
+  synthesis drafts per gardener-capable standalone wiki (`countDraftWikiProposalsByWiki`)
+  — bot-keyed `getDraftCounts` never sees them (they're keyed by `wiki_name`).
+- Schema: the `watchers.type` CHECK gains `'consolidation-gardener'` (migration
+  `066`, mirrored in `db/init.sql`).
 
 ## Configurable prompts
 

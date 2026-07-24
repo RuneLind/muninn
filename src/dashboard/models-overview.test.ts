@@ -229,6 +229,21 @@ test("watcher gate model: per-watcher config.model, else Haiku default", async (
   expect(committer.note).toBe("commit sweeper (no AI)");
 });
 
+test("consolidation-gardener watcher: bot-connector backend + bot model, not CLI/Haiku", async () => {
+  const watchers = [watcher("Consolidation Gardener", "consolidation-gardener", {})];
+  const o = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis", { connector: "claude-sdk", model: "claude-sonnet-4-6" })], watchers }),
+  );
+  const cg = o.pipeline.find((p) => p.job.startsWith("Watcher: Consolidation Gardener"))!;
+  // It drafts on the bot's OWN connector via executeOneShot — NOT the generic
+  // "Claude CLI (Gmail MCP)" / "backend fixed to CLI" / HAIKU_DEFAULT_MODEL trio.
+  expect(cg.backend).toBe("claude-sdk (bot connector)");
+  expect(cg.model).toEqual({ value: "claude-sonnet-4-6", origin: "config" });
+  expect(cg.note).toBe("synthesis draft: bot model");
+  expect(cg.matchRecentName).toBe("consolidation-gardener");
+});
+
 test("actually-used column maps haiku_usage by source+bot and traces by bot", async () => {
   const haiku: HaikuUsageRow[] = [
     { source: "knowledge-decompose", botName: "jarvis", model: "claude-haiku-4-5-20251001" },

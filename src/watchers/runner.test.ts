@@ -343,7 +343,7 @@ describe("isQuietHoursRunExempt", () => {
   });
 
   test("notification watchers are NOT exempt — quiet hours skip the whole run", () => {
-    for (const t of ["email", "news", "x", "anthropic", "wiki-gardener", "wiki-linter"] as const) {
+    for (const t of ["email", "news", "x", "anthropic", "wiki-gardener", "wiki-linter", "consolidation-gardener"] as const) {
       expect(isQuietHoursRunExempt(t)).toBe(false);
     }
   });

@@ -359,7 +359,9 @@ export async function assembleAgentsOverview(
       name: w.name || w.type,
       nextRunAt,
       ...(label ? { label } : {}),
-      ...(w.type === "wiki-gardener" ? { sourcePage: "/wiki/gardener" } : {}),
+      ...(w.type === "wiki-gardener" || w.type === "consolidation-gardener"
+        ? { sourcePage: "/wiki/gardener" }
+        : {}),
     });
   }
   upNext.sort((a, b) => a.nextRunAt - b.nextRunAt);

@@ -588,7 +588,12 @@ export async function assembleModelsOverview(
     used: [],
   });
 
-  // Watcher gates — backend fixed to CLI (they need Gmail MCP), MODEL per-watcher.
+  // Watcher gates. email/x/anthropic run the Gmail-MCP CLI path; the gardener
+  // watchers draft on the bot's OWN connector via executeOneShot (mirroring
+  // watcherConnectorInfo), so they are NOT "backend fixed to CLI".
+  // `gateSourceByType` only names the Haiku sources that write `haiku_usage` rows —
+  // the consolidation gardener clusters DETERMINISTICALLY (`computeClusters`, no
+  // Haiku cluster call), so it has no gate source and its `used` column stays empty.
   const gateSourceByType: Partial<Record<Watcher["type"], string>> = {
     email: "watcher-email",
     x: "watcher-x",
@@ -619,14 +624,53 @@ export async function assembleModelsOverview(
     }
     const configModel = typeof w.config?.model === "string" ? (w.config.model as string) : null;
     const source = gateSourceByType[w.type];
+    if (w.type === "wiki-gardener" || w.type === "consolidation-gardener") {
+      // Both draft on the bot's own connector (the dominant work). The wiki
+      // gardener ALSO runs a Haiku cluster call (hence "Haiku router / …" +
+      // HAIKU_DEFAULT_MODEL); the consolidation gardener clusters deterministically,
+      // so its row is purely the bot-connector synthesis draft on the bot's model.
+      const wBot = bots.find((b) => b.name === w.botName);
+      if (w.type === "consolidation-gardener") {
+        pipeline.push({
+          job: `Watcher: ${w.name} · ${w.botName}`,
+          backend: `${wBot?.connector ?? "claude-cli"} (bot connector)`,
+          model: {
+            value: configModel ?? wBot?.model ?? globalModelDefault,
+            origin: configModel || wBot?.model ? "config" : "default",
+          },
+          note: "synthesis draft: bot model",
+          used: source ? usedHaikuForSource(source, w.botName) : [],
+          matchKind: "watcher",
+          matchBot: w.botName,
+          matchName: w.name,
+          matchRecentName: w.type,
+        });
+      } else {
+        pipeline.push({
+          job: `Watcher: ${w.name} · ${w.botName}`,
+          backend: `Haiku router / ${w.botName} bot connector`,
+          model: {
+            value: configModel ?? HAIKU_DEFAULT_MODEL,
+            origin: configModel ? "config" : "default",
+          },
+          note: "cluster: Haiku · draft: bot model",
+          used: source ? usedHaikuForSource(source, w.botName) : [],
+          matchKind: "watcher",
+          matchBot: w.botName,
+          matchName: w.name,
+          matchRecentName: w.type,
+        });
+      }
+      continue;
+    }
     pipeline.push({
       job: `Watcher: ${w.name} · ${w.botName}`,
-      backend: w.type === "wiki-gardener" ? `Haiku router / ${w.botName} bot connector` : "Claude CLI (Gmail MCP)",
+      backend: "Claude CLI (Gmail MCP)",
       model: {
         value: configModel ?? HAIKU_DEFAULT_MODEL,
         origin: configModel ? "config" : "default",
       },
-      note: w.type === "wiki-gardener" ? "cluster: Haiku · draft: bot model" : "backend fixed to CLI",
+      note: "backend fixed to CLI",
       used: source ? usedHaikuForSource(source, w.botName) : [],
       matchKind: "watcher",
       matchBot: w.botName,

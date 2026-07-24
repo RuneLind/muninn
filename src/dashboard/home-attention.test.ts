@@ -50,6 +50,7 @@ function deps(over: Partial<AttentionDeps> = {}): AttentionDeps {
   return {
     getWatchers: async () => [],
     getDraftCounts: async () => [],
+    getWikiDraftCounts: async () => [],
     getRecentTraces: async () => [],
     ...over,
   };
@@ -147,6 +148,65 @@ test("single draft is singular; multi-bot drafts name the bot", async () => {
   const multiDrafts = multi.items.filter((i) => i.kind === "gardener_drafts");
   expect(multiDrafts.find((i) => i.text.includes("jarvis"))!.actionHref).toBe("/wiki/gardener?bot=jarvis");
   expect(multiDrafts.find((i) => i.text.includes("capra"))!.actionHref).toBe("/wiki/gardener?bot=capra");
+});
+
+test("wiki-keyed consolidation drafts surface with a ?wiki= review link", async () => {
+  const overview = await assembleAttention(
+    deps({
+      getWikiDraftCounts: async () => [
+        { wiki: "mimir", count: 3 },
+        { wiki: "notes", count: 0 }, // dropped (count 0)
+      ],
+    }),
+    NOW,
+  );
+  const wikiItem = overview.items.find(
+    (i) => i.kind === "gardener_drafts" && i.text.includes("mimir"),
+  )!;
+  expect(wikiItem).toBeDefined();
+  expect(wikiItem.text).toContain("3 drafts");
+  expect(wikiItem.text).toContain("consolidation gardener");
+  expect(wikiItem.actionHref).toBe("/wiki/gardener?wiki=mimir");
+  // The count-0 wiki produced no item.
+  expect(overview.items.some((i) => i.text.includes("notes"))).toBe(false);
+});
+
+test("bot-owned wiki: bot-keyed + wiki-keyed drafts for the same name coexist as distinct items", async () => {
+  // Fix 3(b): a bot wiki (e.g. jarvis) can have BOTH bot-keyed gardener drafts and
+  // wiki-keyed consolidation `synthesis` drafts. The two counters are disjoint, so
+  // both surface — the bot-keyed one at /wiki/gardener, the wiki-keyed one at
+  // ?wiki=jarvis. They must NOT collapse into one (no double-count).
+  const overview = await assembleAttention(
+    deps({
+      getDraftCounts: async () => [{ bot: "jarvis", count: 2 }],
+      getWikiDraftCounts: async () => [{ wiki: "jarvis", count: 3 }],
+    }),
+    NOW,
+  );
+  const drafts = overview.items.filter((i) => i.kind === "gardener_drafts");
+  expect(drafts).toHaveLength(2);
+  // Bot-keyed (single bot ⇒ unqualified /wiki/gardener).
+  const botItem = drafts.find((i) => i.actionHref === "/wiki/gardener")!;
+  expect(botItem.text).toContain("2 drafts");
+  // Wiki-keyed for the SAME name links with ?wiki=jarvis.
+  const wikiItem = drafts.find((i) => i.actionHref === "/wiki/gardener?wiki=jarvis")!;
+  expect(wikiItem.text).toContain("3 drafts");
+  expect(wikiItem.text).toContain("consolidation gardener");
+});
+
+test("wiki-keyed draft source degrades to errors[] without failing the page", async () => {
+  const overview = await assembleAttention(
+    deps({
+      getWikiDraftCounts: async () => {
+        throw new Error("registry down");
+      },
+      getDraftCounts: async () => [{ bot: "jarvis", count: 1 }],
+    }),
+    NOW,
+  );
+  expect(overview.errors!.join()).toContain("wiki-drafts");
+  // The bot-keyed drafts still assembled.
+  expect(overview.items.some((i) => i.kind === "gardener_drafts")).toBe(true);
 });
 
 test("old failed runs outside the 24h window are excluded", async () => {

@@ -711,7 +711,11 @@ export function registerWikiGardenerRoutes(
     // `synthesis` rows (see the wiki-scoped reads).
     const root = entry?.root;
     let rows: WikiProposal[];
-    let catalogKinds: string[] | undefined;
+    // The bot's per-kind index-cataloging policy — applies ONLY to bot-keyed rows.
+    // Wiki-keyed (consolidation `synthesis`) rows use default kinds regardless of
+    // which gate view lists them (computed per-row in the map below via
+    // `p.wikiName ? undefined : botCatalogKinds`).
+    let botCatalogKinds: string[] | undefined;
     if (entry && entry.source === "extra") {
       // Same gate as the page route: a collection-less standalone wiki can't be
       // semantically clustered, so it has no proposals surface at all.
@@ -722,14 +726,22 @@ export function registerWikiGardenerRoutes(
       // per-wiki catalog policy — default `["concept"]` (synthesis is never
       // cataloged regardless, so the wiring preview always shows a skip).
       rows = await listAllWikiProposalsByWiki(entry.name);
-      catalogKinds = undefined;
     } else {
       const bot = entry
         ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)
         : undefined;
-      if (!bot) return c.json({ proposals: [], error: "no wiki bot resolved" });
-      rows = await listAllWikiProposals(bot.name);
-      catalogKinds = bot.wikiAutoCommit?.catalogKinds;
+      if (!bot || !entry) return c.json({ proposals: [], error: "no wiki bot resolved" });
+      // A bot wiki's gate lists BOTH the bot-keyed rows (concept/entity/source — the
+      // gardener's own) AND any wiki-keyed consolidation `synthesis` rows for this
+      // wiki name. The rail's Draft-synthesis button drafts those on bot-owned wikis
+      // too (collections like jarvis `["wiki","wiki-life"]`), and they'd otherwise be
+      // invisible + un-approvable here.
+      const [botRows, wikiRows] = await Promise.all([
+        listAllWikiProposals(bot.name),
+        listAllWikiProposalsByWiki(entry.name),
+      ]);
+      rows = [...botRows, ...wikiRows].sort((a, b) => b.createdAt - a.createdAt);
+      botCatalogKinds = bot.wikiAutoCommit?.catalogKinds;
     }
     const index = await getWikiIndex({ root });
     const resolve = index ? index.resolve : () => undefined;
@@ -758,10 +770,12 @@ export function registerWikiGardenerRoutes(
         let wiring: WiringPreview | null = null;
         if (reviewable) {
           const domain: "ai" | "life" = p.targetPath.startsWith("life/") ? "life" : "ai";
-          // `catalogKinds` (hoisted above) is the wiki's REAL cataloging policy so
-          // the preview matches what apply's wire stage will actually do (jarvis
-          // catalogs sources; a concept-only / standalone wiki doesn't) — never the
-          // old kind!=="concept" hardcode.
+          // A wiki-keyed (consolidation `synthesis`) row uses default kinds even when
+          // listed in a bot wiki's gate — never the drafting bot's catalog policy —
+          // matching apply's wire stage (which resolves standalone/wiki-keyed rows
+          // with `undefined` catalogKinds). Bot-keyed rows use the bot's real policy
+          // (jarvis catalogs sources; a concept-only wiki doesn't).
+          const catalogKinds = p.wikiName ? undefined : botCatalogKinds;
           const entry = buildIndexEntry(
             {
               title,

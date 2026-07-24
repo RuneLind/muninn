@@ -10,6 +10,7 @@ import { checkAnthropic } from "./anthropic.ts";
 import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
+import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
 import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../scheduler/executor.ts";
@@ -307,6 +308,9 @@ export function watcherConnectorInfo(
       return { label: getConnectorLabel("claude-cli"), model };
     }
     case "wiki-gardener":
+    case "consolidation-gardener":
+      // Both draft via executeOneShot on the bot's own connector (the dominant
+      // work) — label from the bot's connector/model, like wiki-gardener.
       return {
         label: getConnectorLabel(botConfig.connector ?? "claude-cli"),
         model: botConfig.model ?? botFallbackModel,
@@ -463,11 +467,16 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // report — skip it for all three. The wiki-committer's alert id is likewise
       // per-day-stable and its summary ("Swept N …") repeats across days, so
       // content-hash would wrongly suppress a recurring daily sweep — skip it too.
+      // The consolidation-gardener alert id is already per-run-unique (embeds the
+      // persisted proposal ids) and its summary names the same cluster labels across
+      // runs, so content-hash would false-drop a legitimate weekly notification —
+      // skip it too (belt-and-suspenders with the per-run-unique id).
       const skipContentHash =
         watcher.type === "anthropic" ||
         watcher.type === "wiki-gardener" ||
         watcher.type === "wiki-linter" ||
-        watcher.type === "wiki-committer";
+        watcher.type === "wiki-committer" ||
+        watcher.type === "consolidation-gardener";
       const newAlerts = alerts.filter((a) => {
         if (known.has(a.id)) {
           log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
@@ -638,6 +647,13 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
       // Daily sweeper: commits uncommitted wiki-subtree changes on the default
       // branch. Needs the full BotConfig for its wikiDir + wikiAutoCommit.push.
       return await checkWikiCommitter(watcher, botConfig);
+    case "consolidation-gardener":
+      // Weekly consolidation: clusters a wiki's OWN pages and drafts synthesis-page
+      // proposals into the gate. Threads the runner's `watcher:consolidation-gardener`
+      // span through `telemetry.tracer` so each draft's `claude` child span attaches
+      // under it (like wiki-gardener). Resolves the wiki + synthesis bot itself from
+      // `watcher.config.wiki`.
+      return await checkConsolidationGardener(watcher, botConfig, telemetry);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
@@ -646,7 +662,7 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
 
 
 export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : watcher.type === "wiki-committer" ? "\u{1F4BE}" : "\u{1F514}";
+  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : watcher.type === "wiki-committer" ? "\u{1F4BE}" : watcher.type === "consolidation-gardener" ? "\u{1F9E9}" : "\u{1F514}";
   const header = `${icon} **${watcher.name}**\n`;
   const lines = alerts.map((a) => {
     const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";
