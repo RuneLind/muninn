@@ -538,7 +538,15 @@ async function runFactcheck(
         heading: opts.ctx,
       });
 
-      tracer.start(label, { claimIndex: index, model: botConfig.model });
+      tracer.start(label, {
+        claimIndex: index,
+        model: botConfig.model,
+        // Stopgap connector stamp — each claim verify is an executeOneShot on the
+        // bot's connector. These spans are named claude:claim-<i> (never "claude"),
+        // so they deliberately fall through the getRecentTraces fast path to the
+        // walk aggregate, which sums their tokens + collapses model/connector.
+        connector: botConfig.connector ?? "claude-cli",
+      });
       try {
         const claude = await executeOneShot(userPrompt, config, botConfig, {
           systemPrompt,
@@ -605,7 +613,9 @@ async function runFactcheck(
     // ── Phase 3: compose (multi-claim only) ────────────────────────────────
     let lede = "";
     if (total > 1) {
-      tracer.start("compose", {});
+      // Stopgap connector stamp — compose is an executeOneShot on the bot's
+      // connector, summed into the walk aggregate alongside the claim spans.
+      tracer.start("compose", { connector: botConfig.connector ?? "claude-cli" });
       try {
         const composePrompts = buildComposePrompt({
           title: opts.meta.title,

@@ -376,7 +376,17 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
   });
   agentStatus.setSourcePage(reqId, "/wiki");
   setConnectorInfo(reqId, botConfig, config.claudeModel);
-  tracer.start("claude", { wiki: wikiName, entries: entries.length, fromDate, toDate });
+  tracer.start("claude", {
+    wiki: wikiName,
+    entries: entries.length,
+    fromDate,
+    toDate,
+    // Stopgap connector stamp — the digest runs the bot's connector via
+    // executeOneShot, so the `claude` span (a direct child of the wiki_digest
+    // root) can honestly report it. Un-blanks the connector on /traces; the
+    // model lands on tracer.end below.
+    connector: botConfig.connector ?? "claude-cli",
+  });
 
   let result: ClaudeExecResult;
   try {

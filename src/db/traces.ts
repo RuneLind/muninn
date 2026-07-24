@@ -96,12 +96,12 @@ export async function getRecentTraces(
   const rows = await sql`
     SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
            t.started_at, t.duration_ms, t.attributes, t.created_at,
-           COALESCE(c.input_tokens, w.input_tokens)   AS input_tokens,
-           COALESCE(c.output_tokens, w.output_tokens) AS output_tokens,
-           COALESCE(c.tool_count, w.tool_count)       AS tool_count,
-           COALESCE(c.model, w.model)                 AS model,
+           COALESCE(c.input_tokens, w.input_tokens, walk.input_tokens)   AS input_tokens,
+           COALESCE(c.output_tokens, w.output_tokens, walk.output_tokens) AS output_tokens,
+           COALESCE(c.tool_count, w.tool_count, walk.tool_count)         AS tool_count,
+           COALESCE(c.model, w.model, walk.model)                        AS model,
            c.requested_model,
-           COALESCE(c.connector, w.connector)         AS connector
+           COALESCE(c.connector, w.connector, walk.connector)            AS connector
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -141,6 +141,48 @@ export async function getRecentTraces(
       WHERE ws.trace_id = t.trace_id AND ws.parent_id = t.id AND ws.name LIKE 'watcher:%'
         AND ws.attributes ? 'inputTokens'
     ) w ON true
+    -- Depth-agnostic AI-span aggregate — the general fallback for every trace
+    -- shape the fast paths above miss (factcheck's claude:claim-<i>/compose
+    -- spans, task:briefing → claude, gardener draft → claude, model-only
+    -- extractors). Runs LAST so the c fast path and the w watcher aggregate keep
+    -- precedence (a walk running before w would match one watcher span and shadow
+    -- w's multi-watcher sum + mixed collapse). An AI span is any non-root span
+    -- carrying a connector or model attribute. Deterministic, no recursion:
+    --   - connector-bearing spans present ⇒ tokens SUM / model + connector
+    --     single-value-or-'mixed' OVER THOSE SPANS ONLY (so factcheck's
+    --     connector-less Haiku extract span is excluded from the mixed collapse
+    --     and the token sum — it carries a model but no connector);
+    --   - else fall back to model-only spans (connector honestly NULL).
+    -- self-consistent: connector/model/tokens all come from the same span set.
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE WHEN agg.has_conn THEN agg.conn_input  ELSE agg.model_input  END AS input_tokens,
+        CASE WHEN agg.has_conn THEN agg.conn_output ELSE agg.model_output END AS output_tokens,
+        CASE WHEN agg.has_conn THEN agg.conn_model  ELSE agg.model_model  END AS model,
+        CASE WHEN agg.has_conn THEN agg.conn_connector ELSE NULL          END AS connector,
+        NULLIF((
+          SELECT COUNT(*)
+          FROM traces xs
+          WHERE xs.trace_id = t.trace_id AND xs.parent_id IS NOT NULL
+            AND xs.attributes ? 'toolName'
+        ), 0)::int AS tool_count
+      FROM (
+        SELECT
+          bool_or(ns.attributes ? 'connector') AS has_conn,
+          SUM((ns.attributes->>'inputTokens')::int)  FILTER (WHERE ns.attributes ? 'connector') AS conn_input,
+          SUM((ns.attributes->>'outputTokens')::int) FILTER (WHERE ns.attributes ? 'connector') AS conn_output,
+          CASE WHEN COUNT(DISTINCT ns.attributes->>'model') FILTER (WHERE ns.attributes ? 'connector') > 1 THEN 'mixed'
+               ELSE MIN(ns.attributes->>'model') FILTER (WHERE ns.attributes ? 'connector') END AS conn_model,
+          CASE WHEN COUNT(DISTINCT ns.attributes->>'connector') > 1 THEN 'mixed'
+               ELSE MIN(ns.attributes->>'connector') END AS conn_connector,
+          SUM((ns.attributes->>'inputTokens')::int)  FILTER (WHERE ns.attributes ? 'model') AS model_input,
+          SUM((ns.attributes->>'outputTokens')::int) FILTER (WHERE ns.attributes ? 'model') AS model_output,
+          CASE WHEN COUNT(DISTINCT ns.attributes->>'model') FILTER (WHERE ns.attributes ? 'model') > 1 THEN 'mixed'
+               ELSE MIN(ns.attributes->>'model') FILTER (WHERE ns.attributes ? 'model') END AS model_model
+        FROM traces ns
+        WHERE ns.trace_id = t.trace_id AND ns.parent_id IS NOT NULL
+      ) agg
+    ) walk ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
       AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})

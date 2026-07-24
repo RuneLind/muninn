@@ -219,18 +219,22 @@ function toggleCollapse(spanId: string): void {
   renderWaterfall();
 }
 
-// The AI span is recorded internally as "claude" regardless of which
-// connector handled the call. Render the label as "{connector}, {model}"
+// An AI span is any span carrying a connector or model attribute — mirrors the
+// server-side recognition in getRecentTraces' walk aggregate. It is no longer
+// keyed on the span name being exactly "claude": factcheck's claude:claim-<i>/
+// compose spans, task:briefing → claude, gardener draft → claude, and model-only
+// extractor spans all qualify. Render the label as "{connector}, {model}"
 // (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
-// actually ran.
+// actually ran; when the connector is truly absent (model-only spans) render
+// "unknown" rather than fabricating "claude-cli".
 function isAiSpan(s: WaterfallSpan): boolean {
-  if (!s || s.name !== "claude") return false;
+  if (!s) return false;
   const a = s.attributes ?? {};
   return !!(a.connector || a.model || a.requestedModel);
 }
 function aiSpanLabel(s: WaterfallSpan): string {
   const a = s.attributes ?? {};
-  const conn = a.connector || "claude-cli";
+  const conn = a.connector || "unknown";
   const model = a.model || a.requestedModel || "";
   return model ? conn + ", " + model : conn;
 }

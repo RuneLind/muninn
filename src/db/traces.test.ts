@@ -298,6 +298,176 @@ describe("traces", () => {
       expect(found.attributes.model).toBe("mixed");
       expect(found.attributes.connector).toBe("claude-cli");
     });
+
+    test("two watchers with different models ⇒ mixed + SUMMED tokens (regression: a single-watcher fixture can coincidentally match w)", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      const models = [
+        ["email", "claude-haiku-4-5-20251001", 95719, 608],
+        ["anthropic", "claude-sonnet-4-6", 1281, 92],
+      ] as const;
+      for (const [type, model, inputTokens, outputTokens] of models) {
+        await saveSpan({
+          id: crypto.randomUUID(),
+          traceId: root.traceId,
+          parentId: root.id,
+          name: `watcher:${type}`,
+          kind: "span" as const,
+          startedAt: new Date(),
+          attributes: { inputTokens, outputTokens, model, connector: "claude-cli" },
+        });
+      }
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      // Summed across both watchers — NOT a single watcher's value.
+      expect(found.attributes.inputTokens).toBe(95719 + 1281);
+      expect(found.attributes.outputTokens).toBe(608 + 92);
+      expect(found.attributes.model).toBe("mixed");
+      expect(found.attributes.connector).toBe("claude-cli");
+    });
+  });
+
+  // ── Rec 1: the walk aggregate (the deterministic connector/model-bearing
+  // fallback for trace shapes the `c` fast path and `w` watcher aggregate miss) ──
+  describe("walk aggregate (connector-bearing / model-only fallback)", () => {
+    test("factcheck-shaped trace: claim-0 + claim-1 + compose summed; connector-less extract span excluded from mixed-collapse AND the token sum", async () => {
+      const root = makeRootSpan({ name: "factcheck", userId: null, username: null, platform: null });
+      await saveSpan(root);
+
+      // Two indexed claim spans + a compose span, all on the SAME connector/model.
+      // Named claude:claim-<i>/compose (NOT "claude"), so they deliberately fall
+      // THROUGH the `c` fast path (name='claude' LIMIT 1) to the walk's summing.
+      const claim0 = {
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude:claim-0", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 1000, outputTokens: 50 },
+      };
+      await saveSpan(claim0);
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude:claim-1", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 2000, outputTokens: 80 },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "compose", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 500, outputTokens: 20 },
+      });
+      // The Haiku extract span carries a MODEL but no CONNECTOR (it runs through
+      // the Haiku router, not the bot connector) — it must be excluded from the
+      // connector-set's mixed-collapse and token sum.
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "extract", kind: "span" as const, startedAt: new Date(),
+        attributes: { model: "claude-haiku-4-5-20251001", inputTokens: 9999, outputTokens: 999 },
+      });
+      // A WebFetch tool child span under a claim → depth-agnostic tool_count.
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: claim0.id,
+        name: "WebFetch", kind: "span" as const, startedAt: new Date(),
+        attributes: { toolName: "WebFetch" },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      // Extract's 9999/999 EXCLUDED — only the three connector-bearing spans sum.
+      expect(found.attributes.inputTokens).toBe(1000 + 2000 + 500);
+      expect(found.attributes.outputTokens).toBe(50 + 80 + 20);
+      // Single connector-bearing model despite the extract span's different model.
+      expect(found.attributes.model).toBe("claude-sonnet-4-6");
+      expect(found.attributes.connector).toBe("claude-sdk");
+      expect(found.attributes.toolCount).toBe(1);
+    });
+
+    test("task:briefing-shaped nested trace: reads the nested `claude` child, NOT the token-duplicating parent task span (no double count)", async () => {
+      // scheduler_tick → task:briefing → claude (nested; `c` only reads a DIRECT
+      // root child named 'claude'). The task span carries the SAME tokens as its
+      // claude child but NO connector, so it is excluded from the connector-set
+      // — proving the walk sums connector-bearing spans only (no double count).
+      const root = makeRootSpan({ name: "scheduler_tick", userId: null, username: null, platform: null });
+      await saveSpan(root);
+      const taskSpan = {
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "task:briefing", kind: "span" as const, startedAt: new Date(),
+        attributes: { model: "claude-sonnet-4-6", inputTokens: 5000, outputTokens: 300 },
+      };
+      await saveSpan(taskSpan);
+      const claudeChild = {
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: taskSpan.id,
+        name: "claude", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 5000, outputTokens: 300 },
+      };
+      await saveSpan(claudeChild);
+      for (let i = 0; i < 2; i++) {
+        await saveSpan({
+          id: crypto.randomUUID(), traceId: root.traceId, parentId: claudeChild.id,
+          name: `tool-${i}`, kind: "span" as const, startedAt: new Date(),
+          attributes: { toolName: `mcp__x__t${i}` },
+        });
+      }
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(5000); // NOT 10000
+      expect(found.attributes.outputTokens).toBe(300);
+      expect(found.attributes.model).toBe("claude-sonnet-4-6");
+      expect(found.attributes.connector).toBe("claude-sdk");
+      expect(found.attributes.toolCount).toBe(2);
+    });
+
+    test("reminder-shaped trace: task span carries its own connector/model/tokens (spawnHaiku, no `claude` child)", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick", userId: null, username: null, platform: null });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "task:reminder", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-cli", model: "claude-haiku-4-5-20251001", inputTokens: 800, outputTokens: 40 },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(800);
+      expect(found.attributes.outputTokens).toBe(40);
+      expect(found.attributes.model).toBe("claude-haiku-4-5-20251001");
+      expect(found.attributes.connector).toBe("claude-cli");
+    });
+
+    test("model-only fallback: a span carrying a model but no connector reports the model with a NULL connector (honest, no fabrication)", async () => {
+      const root = makeRootSpan({ name: "interest_profile", userId: null, username: null, platform: null });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "generate", kind: "span" as const, startedAt: new Date(),
+        attributes: { model: "claude-haiku-4-5-20251001", inputTokens: 1200, outputTokens: 90 },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.model).toBe("claude-haiku-4-5-20251001");
+      expect(found.attributes.inputTokens).toBe(1200);
+      expect(found.attributes.outputTokens).toBe(90);
+      // Connector truly absent — never fabricated.
+      expect(found.attributes.connector).toBeUndefined();
+    });
+
+    test("chat-shaped trace (direct `claude` child) is unchanged by the walk: c fast path still wins", async () => {
+      const root = makeRootSpan({ name: "telegram_text" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", requestedModel: "sonnet", inputTokens: 42000, outputTokens: 700, toolCount: 0 },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.inputTokens).toBe(42000);
+      expect(found.attributes.outputTokens).toBe(700);
+      expect(found.attributes.model).toBe("claude-sonnet-4-6");
+      expect(found.attributes.requestedModel).toBe("sonnet");
+      expect(found.attributes.connector).toBe("claude-sdk");
+    });
   });
 
   describe("mapRow attribute guard", () => {
