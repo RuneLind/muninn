@@ -368,7 +368,7 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
   coincides — NOT the mapped page's own update, caught by the dedup/append above), the
   synthesis is dropped and tallied `collision` — drafting both would waste a draft call
   since the pass-1 rescue always loses to the pass-0 cluster's earlier
-  `insertWikiProposal` `ON CONFLICT (bot_name, topic_key) DO NOTHING`. A doc may end up
+  `insertWikiProposal` `ON CONFLICT (COALESCE(wiki_name, bot_name), topic_key) DO NOTHING`. A doc may end up
   in both a create AND a synthesized update (no cross-mode dedup). Skipped entirely when
   the wiki has no concept/entity pages (no candidates ⇒ no call); best-effort (a
   map-call error degrades to "no mappings", never aborts the run). A `map` stage span

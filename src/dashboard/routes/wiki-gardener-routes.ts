@@ -9,7 +9,7 @@ import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts"
 import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import { lintWiki } from "../../wiki/lint.ts";
-import { listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
+import { findWiki, listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -23,6 +23,7 @@ import {
   markWikiProposalStale,
   markWikiProposalError,
   listAllWikiProposals,
+  listAllWikiProposalsByWiki,
   getWikiProposalById,
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
@@ -90,15 +91,21 @@ function getBots(): BotConfig[] {
 }
 
 /**
- * The gardener is bot-scoped — proposals are keyed by bot, and applying writes
- * into a bot's wiki. It shares the reader's memoized registry (one bot discovery
- * + `WIKI_EXTRA` parse for the whole dashboard) and filters to bot-source wikis
- * so the picker only lists bot wikis. Resolution still runs against the full
- * registry so a `?wiki=<extra>` (e.g. mimir) is recognized as a non-bot wiki
- * rather than silently falling through to the default bot.
+ * Wikis the gardener gate can review. Two sources:
+ *   - **bot wikis** — the bot-keyed gardener (weekly clustering, source drafter);
+ *   - **standalone (extra) wikis WITH backing `collections`** — the consolidation
+ *     gardener, which turns semantic clusters of a wiki's own pages into wiki-keyed
+ *     `synthesis` proposals (mimir). A collection-less extra wiki can't be
+ *     semantically clustered, so it stays out of the picker (and reads as
+ *     "unavailable" if reached by URL).
+ * Shares the reader's memoized registry (one bot discovery + `WIKI_EXTRA` parse).
  */
-function getBotRegistry(): WikiRegistryEntry[] {
-  return getWikiRegistry().filter((e) => e.source === "bot");
+function isGardenerWiki(e: WikiRegistryEntry): boolean {
+  return e.source === "bot" || !!(e.collections && e.collections.length > 0);
+}
+
+function getGardenerRegistry(): WikiRegistryEntry[] {
+  return getWikiRegistry().filter(isGardenerWiki);
 }
 
 /** The rich per-proposal shape the review page renders (meta + server-computed preview/diff). */
@@ -159,11 +166,20 @@ async function triggerReindex(collection: string): Promise<void> {
  *  wiki root. `push` defaults to true (per-bot `wikiAutoCommit.push` opt-out); the
  *  commit helper still skips the push when the repo has no remote/upstream.
  *  `catalogKinds` is the wiki's per-kind index-cataloging policy (default
- *  `["concept"]` when the bot doesn't set `wikiAutoCommit.catalogKinds`). */
-function applyDepsFor(wikiDir: string, push: boolean, catalogKinds?: string[]): ApplyDeps {
+ *  `["concept"]` when the bot doesn't set `wikiAutoCommit.catalogKinds`).
+ *  `reindexCollections` overrides the default life/wiki mapping — passed for
+ *  wiki-keyed (standalone-wiki) applies so the reindex hits the wiki registry
+ *  entry's own collections instead of jarvis's hardcoded `wiki`/`wiki-life`. */
+function applyDepsFor(
+  wikiDir: string,
+  push: boolean,
+  catalogKinds?: string[],
+  reindexCollections?: string[],
+): ApplyDeps {
   return {
     wikiDir,
     catalogKinds,
+    ...(reindexCollections ? { reindexCollections } : {}),
     now: () => Date.now(),
     readFile: readFileOrNull,
     // Bun.write creates parent directories itself.
@@ -658,17 +674,19 @@ export function registerWikiGardenerRoutes(
 ): void {
   // Review page.
   app.get("/wiki/gardener", async (c) => {
-    const wikiBots = listWikis(getBotRegistry());
-    // Resolve against the FULL registry so a `?wiki=<extra>` (e.g. mimir) is
-    // recognized as a non-bot wiki and gets a clean "unavailable" state instead
-    // of a picker that mis-highlights the first bot while the body errors.
+    // The picker lists every gardener-capable wiki (bot wikis + consolidation-
+    // capable standalone wikis; see `isGardenerWiki`).
+    const wikiBots = listWikis(getGardenerRegistry());
+    // Resolve against the FULL registry so a `?wiki=<extra>` is recognized. An
+    // extra wiki WITHOUT collections still reads as "unavailable" (no consolidation
+    // corpus); one WITH collections is a valid consolidation gate scope.
     const { wiki: selected, envOverride, entry } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
-    const notBotWiki = !!entry && entry.source !== "bot";
+    const notBotWiki = !!entry && !isGardenerWiki(entry);
     return c.html(await renderWikiGardenerPage({ wikiBots, selected, envOverride, notBotWiki }));
   });
 
@@ -687,17 +705,32 @@ export function registerWikiGardenerRoutes(
     if (unknownWiki) {
       return c.json({ proposals: [], error: "no wiki configured for that name" });
     }
-    if (entry && entry.source !== "bot") {
-      return c.json({ proposals: [], error: "the gardener is only available for bot wikis" });
-    }
-    // The default wiki (bare request) resolves to a concrete bot entry, so `root`
-    // matches the bot the proposals are drawn from — previews + update-diffs read
-    // the same wiki the gardener writes into.
+    // `root` is the wiki the proposals are drawn from — previews + update-diffs
+    // read the same wiki the gardener writes into. A bot wiki draws bot-keyed
+    // rows; a standalone (extra) wiki draws its own wiki-keyed consolidation
+    // `synthesis` rows (see the wiki-scoped reads).
     const root = entry?.root;
-    const bot = entry ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir) : undefined;
-    if (!bot) return c.json({ proposals: [], error: "no wiki bot resolved" });
-
-    const rows = await listAllWikiProposals(bot.name);
+    let rows: WikiProposal[];
+    let catalogKinds: string[] | undefined;
+    if (entry && entry.source === "extra") {
+      // Same gate as the page route: a collection-less standalone wiki can't be
+      // semantically clustered, so it has no proposals surface at all.
+      if (!isGardenerWiki(entry)) {
+        return c.json({ proposals: [], error: "no gardener collections configured for this wiki" });
+      }
+      // Standalone wiki: consolidation-gardener rows keyed to the wiki name. No
+      // per-wiki catalog policy — default `["concept"]` (synthesis is never
+      // cataloged regardless, so the wiring preview always shows a skip).
+      rows = await listAllWikiProposalsByWiki(entry.name);
+      catalogKinds = undefined;
+    } else {
+      const bot = entry
+        ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)
+        : undefined;
+      if (!bot) return c.json({ proposals: [], error: "no wiki bot resolved" });
+      rows = await listAllWikiProposals(bot.name);
+      catalogKinds = bot.wikiAutoCommit?.catalogKinds;
+    }
     const index = await getWikiIndex({ root });
     const resolve = index ? index.resolve : () => undefined;
 
@@ -725,10 +758,10 @@ export function registerWikiGardenerRoutes(
         let wiring: WiringPreview | null = null;
         if (reviewable) {
           const domain: "ai" | "life" = p.targetPath.startsWith("life/") ? "life" : "ai";
-          // Thread the wiki's REAL cataloging policy so the preview matches what
-          // apply's wire stage will actually do (jarvis catalogs sources; a
-          // concept-only wiki doesn't) — never the old kind!=="concept" hardcode.
-          const catalogKinds = bot.wikiAutoCommit?.catalogKinds;
+          // `catalogKinds` (hoisted above) is the wiki's REAL cataloging policy so
+          // the preview matches what apply's wire stage will actually do (jarvis
+          // catalogs sources; a concept-only / standalone wiki doesn't) — never the
+          // old kind!=="concept" hardcode.
           const entry = buildIndexEntry(
             {
               title,
@@ -1261,22 +1294,40 @@ export function registerWikiGardenerRoutes(
       return c.json({ error: "proposal is not reviewable", status: existing.status }, 409);
     }
 
-    const bot = getBots().find((b) => b.name === claimed.botName);
-    if (!bot || !bot.wikiDir) {
-      await finishProposal(id, markWikiProposalError, "error");
-      log.error("Wiki-gardener approve: bot {bot} has no wikiDir — cannot apply proposal {id}", {
-        bot: claimed.botName,
-        id,
-      });
-      return c.json({ outcome: "error", error: "bot has no wikiDir configured" }, 500);
+    // Resolve the apply target. Wiki-keyed (consolidation) rows resolve their
+    // root + reindex collections from the WIKI REGISTRY entry — the drafting bot's
+    // `wikiDir` is a different wiki. Legacy bot-keyed rows keep the bot-config path.
+    let deps: ApplyDeps;
+    if (claimed.wikiName) {
+      const wikiEntry = findWiki(getWikiRegistry(), claimed.wikiName);
+      if (!wikiEntry) {
+        await finishProposal(id, markWikiProposalError, "error");
+        log.error("Wiki-gardener approve: wiki {wiki} is not registered — cannot apply proposal {id}", {
+          wiki: claimed.wikiName,
+          id,
+        });
+        return c.json({ outcome: "error", error: `wiki "${claimed.wikiName}" is not registered` }, 500);
+      }
+      // Standalone wikis carry no per-wiki commit config → commit defaults (push on
+      // upstream); reindex over the entry's own collections (empty ⇒ no reindex,
+      // NOT the jarvis wiki/wiki-life default).
+      deps = applyDepsFor(wikiEntry.root, true, undefined, wikiEntry.collections ?? []);
+    } else {
+      const bot = getBots().find((b) => b.name === claimed.botName);
+      if (!bot || !bot.wikiDir) {
+        await finishProposal(id, markWikiProposalError, "error");
+        log.error("Wiki-gardener approve: bot {bot} has no wikiDir — cannot apply proposal {id}", {
+          bot: claimed.botName,
+          id,
+        });
+        return c.json({ outcome: "error", error: "bot has no wikiDir configured" }, 500);
+      }
+      deps = applyDepsFor(bot.wikiDir, bot.wikiAutoCommit?.push ?? true, bot.wikiAutoCommit?.catalogKinds);
     }
 
     let result;
     try {
-      result = await applyWikiProposal(
-        claimed,
-        applyDepsFor(bot.wikiDir, bot.wikiAutoCommit?.push ?? true, bot.wikiAutoCommit?.catalogKinds),
-      );
+      result = await applyWikiProposal(claimed, deps);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await finishProposal(id, markWikiProposalError, "error");

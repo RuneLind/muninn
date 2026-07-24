@@ -11,8 +11,10 @@ import { getDb } from "./client.ts";
  * | error.
  *
  * Dedup model (see the plan):
- *  - a partial unique index on (bot_name, topic_key) WHERE status IN
- *    ('draft','approved') prevents concurrent duplicate live proposals;
+ *  - a partial unique index on (COALESCE(wiki_name, bot_name), topic_key) WHERE
+ *    status IN ('draft','approved') prevents concurrent duplicate live proposals;
+ *    legacy bot-keyed rows leave wiki_name NULL so the COALESCE collapses to
+ *    bot_name (byte-identical to the old (bot_name, topic_key) index);
  *  - `rejected` rows form a topic skip-list (negative memory) at cluster time;
  *  - `source_docs` of `applied` rows form the consumed-doc set at harvest time.
  */
@@ -48,7 +50,7 @@ export interface WikiProposalRelatedPage {
   relPath?: string;
 }
 
-export type WikiProposalKind = "concept" | "entity" | "source";
+export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis";
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
   | "draft"
@@ -61,6 +63,13 @@ export type WikiProposalStatus =
 export interface WikiProposal {
   id: string;
   botName: string;
+  /**
+   * The standalone wiki this proposal is keyed to, or NULL for a legacy bot-keyed
+   * row. Consolidation-gardener `synthesis` proposals set this to the wiki name
+   * (e.g. "mimir") while `botName` stays the truthful synthesis bot that drafted
+   * them; every legacy flow leaves it NULL and reads only bot-keyed rows.
+   */
+  wikiName: string | null;
   topicKey: string;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
@@ -78,6 +87,9 @@ export interface WikiProposal {
 
 export interface InsertWikiProposalParams {
   botName: string;
+  /** Standalone wiki key for consolidation `synthesis` proposals; omit/NULL for
+   *  legacy bot-keyed rows (see {@link WikiProposal.wikiName}). */
+  wikiName?: string | null;
   topicKey: string;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
@@ -104,9 +116,10 @@ export async function insertWikiProposal(
   const sql = getDb();
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
+      bot_name, wiki_name, topic_key, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
     ) VALUES (
       ${params.botName},
+      ${params.wikiName ?? null},
       ${params.topicKey},
       ${params.kind},
       ${params.mode},
@@ -119,13 +132,18 @@ export async function insertWikiProposal(
       ${params.relatedPages ? sql.json(params.relatedPages as any) : null},
       ${params.status ?? "draft"}
     )
-    ON CONFLICT (bot_name, topic_key) WHERE status IN ('draft', 'approved') DO NOTHING
+    ON CONFLICT (COALESCE(wiki_name, bot_name), topic_key) WHERE status IN ('draft', 'approved') DO NOTHING
     RETURNING *
   `;
   return row ? mapRow(row) : null;
 }
 
-/** List a bot's proposals in a given status, newest first. */
+/**
+ * List a bot's LEGACY (bot-keyed) proposals in a given status, newest first.
+ * `AND wiki_name IS NULL` excludes consolidation `synthesis` rows that carry this
+ * bot as their (truthful) synthesis bot — those surface only via the wiki-scoped
+ * reads below, so a wiki-keyed draft never contaminates a bot's own flows.
+ */
 export async function listWikiProposalsByStatus(
   botName: string,
   status: WikiProposalStatus,
@@ -133,7 +151,7 @@ export async function listWikiProposalsByStatus(
   const sql = getDb();
   const rows = await sql`
     SELECT * FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status = ${status}
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND status = ${status}
     ORDER BY created_at DESC
   `;
   return rows.map(mapRow);
@@ -145,23 +163,51 @@ export async function getWikiProposalById(id: string): Promise<WikiProposal | nu
   return row ? mapRow(row) : null;
 }
 
-/** All of a bot's proposals (every status), newest first — backs the review page. */
+/** All of a bot's LEGACY (bot-keyed) proposals (every status), newest first —
+ *  backs the bot-wiki review page. Wiki-keyed rows are excluded (see
+ *  {@link listAllWikiProposalsByWiki}). */
 export async function listAllWikiProposals(botName: string): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT * FROM wiki_proposals
-    WHERE bot_name = ${botName}
+    WHERE bot_name = ${botName} AND wiki_name IS NULL
     ORDER BY created_at DESC
   `;
   return rows.map(mapRow);
 }
 
-/** Count of a bot's proposals still awaiting review (status `draft`) — the /wiki header badge. */
+/** Count of a bot's LEGACY proposals still awaiting review (status `draft`) — the
+ *  /wiki header badge. Wiki-keyed drafts are counted per-wiki, not here. */
 export async function countDraftWikiProposals(botName: string): Promise<number> {
   const sql = getDb();
   const [row] = await sql`
     SELECT COUNT(*)::int AS n FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status = 'draft'
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND status = 'draft'
+  `;
+  return row ? (row.n as number) : 0;
+}
+
+/** All of a standalone wiki's proposals (every status), newest first — backs the
+ *  wiki-keyed review gate. The consolidation-gardener analogue of
+ *  {@link listAllWikiProposals}. */
+export async function listAllWikiProposalsByWiki(wikiName: string): Promise<WikiProposal[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT * FROM wiki_proposals
+    WHERE wiki_name = ${wikiName}
+    ORDER BY created_at DESC
+  `;
+  return rows.map(mapRow);
+}
+
+/** Count of a standalone wiki's proposals still awaiting review (status `draft`) —
+ *  the wiki-keyed gate badge. Wiki-scoped analogue of
+ *  {@link countDraftWikiProposals}. */
+export async function countDraftWikiProposalsByWiki(wikiName: string): Promise<number> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT COUNT(*)::int AS n FROM wiki_proposals
+    WHERE wiki_name = ${wikiName} AND status = 'draft'
   `;
   return row ? (row.n as number) : 0;
 }
@@ -241,7 +287,39 @@ export async function getLiveTopicKeys(botName: string): Promise<string[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT DISTINCT topic_key FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status IN ('draft', 'approved')
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND status IN ('draft', 'approved')
+  `;
+  return rows.map((r) => r.topic_key as string);
+}
+
+/**
+ * TopicKeys with a LIVE (draft/approved) proposal for this standalone wiki — the
+ * consolidation gardener's cluster-time skip list. Wiki-scoped analogue of
+ * {@link getLiveTopicKeys}.
+ */
+export async function getLiveTopicKeysByWiki(wikiName: string): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT topic_key FROM wiki_proposals
+    WHERE wiki_name = ${wikiName} AND status IN ('draft', 'approved')
+  `;
+  return rows.map((r) => r.topic_key as string);
+}
+
+/**
+ * TopicKeys with a live OR already-applied proposal for this standalone wiki —
+ * the consolidation gardener's PRIMARY dedup skip list. Unlike the weekly
+ * gardener (whose applied-doc harvest window retires re-proposals), the
+ * consolidation gardener re-clusters PERMANENT wiki pages every run and has no
+ * consumption window, so `applied` topic keys must be skipped EXPLICITLY or an
+ * already-synthesized cluster would be re-proposed forever. No bot-keyed query
+ * returns `applied` topic keys — this is the new query PR 3's dedup depends on.
+ */
+export async function getLiveOrAppliedTopicKeysByWiki(wikiName: string): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT topic_key FROM wiki_proposals
+    WHERE wiki_name = ${wikiName} AND status IN ('draft', 'approved', 'applied')
   `;
   return rows.map((r) => r.topic_key as string);
 }
@@ -258,7 +336,7 @@ export async function getLiveSourceDocUrls(botName: string): Promise<string[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT source_docs FROM wiki_proposals
-    WHERE bot_name = ${botName} AND kind = 'source' AND status IN ('draft', 'approved')
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND kind = 'source' AND status IN ('draft', 'approved')
   `;
   const urls: string[] = [];
   for (const row of rows) {
@@ -282,7 +360,7 @@ export async function getRejectedTopicKeys(botName: string): Promise<string[]> {
   const sql = getDb();
   const rows = await sql`
     SELECT DISTINCT topic_key FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status = 'rejected'
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND status = 'rejected'
   `;
   return rows.map((r) => r.topic_key as string);
 }
@@ -308,6 +386,26 @@ export async function getRecentlyRejectedTopicKeys(
   const rows = await sql`
     SELECT DISTINCT topic_key FROM wiki_proposals
     WHERE bot_name = ${botName}
+      AND wiki_name IS NULL
+      AND status = 'rejected'
+      AND resolved_at > now() - make_interval(days => ${days})
+  `;
+  return rows.map((r) => r.topic_key as string);
+}
+
+/**
+ * TopicKeys rejected WITHIN the last `days` for this standalone wiki — the
+ * consolidation gardener's TTL'd cluster-time SKIP set. Wiki-scoped analogue of
+ * {@link getRecentlyRejectedTopicKeys} (same NULL-`resolved_at`-excludes semantics).
+ */
+export async function getRecentlyRejectedTopicKeysByWiki(
+  wikiName: string,
+  days: number,
+): Promise<string[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT DISTINCT topic_key FROM wiki_proposals
+    WHERE wiki_name = ${wikiName}
       AND status = 'rejected'
       AND resolved_at > now() - make_interval(days => ${days})
   `;
@@ -335,11 +433,11 @@ export async function getConsumedDocIds(
     kinds && kinds.length > 0
       ? await sql`
           SELECT source_docs FROM wiki_proposals
-          WHERE bot_name = ${botName} AND status = 'applied' AND kind = ANY(${kinds})
+          WHERE bot_name = ${botName} AND wiki_name IS NULL AND status = 'applied' AND kind = ANY(${kinds})
         `
       : await sql`
           SELECT source_docs FROM wiki_proposals
-          WHERE bot_name = ${botName} AND status = 'applied'
+          WHERE bot_name = ${botName} AND wiki_name IS NULL AND status = 'applied'
         `;
   const consumed = new Set<string>();
   for (const row of rows) {
@@ -362,7 +460,7 @@ export async function getPendingDocIds(botName: string): Promise<Set<string>> {
   const sql = getDb();
   const rows = await sql`
     SELECT source_docs FROM wiki_proposals
-    WHERE bot_name = ${botName} AND status IN ('draft', 'approved')
+    WHERE bot_name = ${botName} AND wiki_name IS NULL AND status IN ('draft', 'approved')
   `;
   const pending = new Set<string>();
   for (const row of rows) {
@@ -394,6 +492,7 @@ function mapRow(r: Record<string, any>): WikiProposal {
   return {
     id: r.id,
     botName: r.bot_name,
+    wikiName: r.wiki_name ?? null,
     topicKey: r.topic_key,
     kind: r.kind as WikiProposalKind,
     mode: r.mode as WikiProposalMode,

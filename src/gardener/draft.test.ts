@@ -90,6 +90,39 @@ describe("isPathConfined", () => {
   test("a non-md/mdx extension is still rejected", () => {
     expect(isPathConfined({ targetPath: "sources/RAG.html", wikiDir: WIKI, domain: "ai", kind: "source" })).toBe(false);
   });
+
+  test("synthesis pages confine to blogs/*.mdx in BOTH ai and life domains (blogs isn't domain-split)", () => {
+    expect(
+      isPathConfined({ targetPath: "blogs/2026-07-24-corrective-rag.mdx", wikiDir: WIKI, domain: "ai", kind: "synthesis" }),
+    ).toBe(true);
+    // The life domain must ALSO accept the bare blogs/ path (expectedDir bypasses
+    // the life/ prefix for synthesis) — a naive life/blogs would reject here.
+    expect(
+      isPathConfined({ targetPath: "blogs/2026-07-24-sleep-and-focus.mdx", wikiDir: WIKI, domain: "life", kind: "synthesis" }),
+    ).toBe(true);
+    // A plain .md synthesis page under blogs/ is fine too.
+    expect(
+      isPathConfined({ targetPath: "blogs/note.md", wikiDir: WIKI, domain: "ai", kind: "synthesis" }),
+    ).toBe(true);
+  });
+
+  test("synthesis outside blogs/, and path escapes, are still rejected", () => {
+    // Wrong dir for the kind.
+    expect(
+      isPathConfined({ targetPath: "concepts/2026-07-24-x.mdx", wikiDir: WIKI, domain: "ai", kind: "synthesis" }),
+    ).toBe(false);
+    // A life-prefixed blogs path does NOT exist and must be rejected.
+    expect(
+      isPathConfined({ targetPath: "life/blogs/x.mdx", wikiDir: WIKI, domain: "life", kind: "synthesis" }),
+    ).toBe(false);
+    // Traversal + absolute escapes.
+    expect(
+      isPathConfined({ targetPath: "blogs/../../escape.mdx", wikiDir: WIKI, domain: "ai", kind: "synthesis" }),
+    ).toBe(false);
+    expect(
+      isPathConfined({ targetPath: "/etc/passwd.mdx", wikiDir: WIKI, domain: "ai", kind: "synthesis" }),
+    ).toBe(false);
+  });
 });
 
 describe("shapeGate", () => {

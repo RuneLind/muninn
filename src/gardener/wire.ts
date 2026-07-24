@@ -77,14 +77,18 @@ const ONE_LINER_MAX = 120;
 
 /**
  * Per-wiki cataloging policy decision: does a page of `kind` get an index.md
- * catalog line under this wiki's `catalogKinds` policy? Entities are ALWAYS
- * skipped — the Entities index is split People / Organizations / Products and
- * which one an entity is isn't derivable from the proposal — so even a wiki that
- * lists "entity" in its policy never catalogs one here. Every other kind is
- * cataloged iff it appears in `catalogKinds` (default `["concept"]`).
+ * catalog line under this wiki's `catalogKinds` policy? Two kinds are ALWAYS
+ * skipped regardless of policy:
+ *   - `entity` — the Entities index is split People / Organizations / Products and
+ *     which one an entity is isn't derivable from the proposal;
+ *   - `synthesis` — consolidation blog pages get no index.md catalog line in v1
+ *     (they'd have no natural home section — blogs/ isn't in the concept index),
+ *     so a wiki listing "synthesis" in its policy never catalogs one here either.
+ * Every other kind is cataloged iff it appears in `catalogKinds` (default
+ * `["concept"]`).
  */
 export function catalogPage(kind: WikiProposalKind, catalogKinds: string[] = DEFAULT_CATALOG_KINDS): boolean {
-  if (kind === "entity") return false;
+  if (kind === "entity" || kind === "synthesis") return false;
   return catalogKinds.includes(kind);
 }
 

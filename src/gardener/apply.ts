@@ -54,6 +54,15 @@ export interface ApplyDeps {
   /** Best-effort huginn reindex for a collection; must never throw. */
   reindex: (collection: string) => Promise<void>;
   /**
+   * Explicit huginn collections to reindex after the write, overriding the
+   * default `reindexCollectionFor` mapping (life/** → wiki-life, else wiki, which
+   * is hardcoded to jarvis's collections). Set for wiki-keyed (standalone-wiki)
+   * applies — the consolidation gardener passes the wiki registry entry's
+   * `collections` (e.g. `["mimir"]`). Absent ⇒ the legacy per-path mapping, so
+   * bot-wiki applies are byte-identical. Empty array ⇒ no reindex.
+   */
+  reindexCollections?: string[];
+  /**
    * Commit the just-written wiki files into their git repo (the page + log.md +
    * wired index/backlinks). Optional — absent in tests that don't exercise the
    * commit seam. Wired to `commitWikiChange` at the route; never throws.
@@ -71,12 +80,21 @@ export interface ApplyDeps {
 /**
  * The commit message for a proposal apply: `[<writer>] <verb>: <page>`. Gardener
  * concept/entity applies are `[gardener] apply: …`; auto-drafted source pages are
- * `[source-drafter] draft: …`.
+ * `[source-drafter] draft: …`; consolidation-gardener synthesis pages are
+ * `[consolidation] apply: …`.
  */
 export function commitMessageFor(proposal: WikiProposal): string {
+  if (proposal.kind === "synthesis") return `[consolidation] apply: ${proposal.targetPath}`;
   const writer = proposal.kind === "source" ? "source-drafter" : "gardener";
   const verb = proposal.kind === "source" ? "draft" : "apply";
   return `[${writer}] ${verb}: ${proposal.targetPath}`;
+}
+
+/** The `via <writer>` attribution in the apply-time log.md entry, keyed by kind:
+ *  consolidation `synthesis` applies say `via consolidation-gardener`; every other
+ *  kind keeps the historical `via wiki-gardener`. */
+export function logWriterFor(proposal: WikiProposal): string {
+  return proposal.kind === "synthesis" ? "consolidation-gardener" : "wiki-gardener";
 }
 
 /**
@@ -310,7 +328,7 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
   try {
     const logPath = path.join(deps.wikiDir, "log.md");
     const existingLog = await deps.readFile(logPath);
-    const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via wiki-gardener, ${proposal.sourceDocs.length} sources`;
+    const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via ${logWriterFor(proposal)}, ${proposal.sourceDocs.length} sources`;
     await deps.writeFile(logPath, insertLogEntry(existingLog, entry));
   } catch (err) {
     log.warn("Wiki-gardener apply: log.md update failed for {path}: {error}", {
@@ -451,13 +469,21 @@ async function runWireStage(
 }
 
 /**
- * Fire-and-forget huginn reindex for the UNION of the target's collection and
- * every collection the wire stage touched (life/** → wiki-life, else wiki),
- * deduped. Each POST is best-effort — a failure warns, never blocks the approve.
+ * Fire-and-forget huginn reindex. For a bot wiki (no `reindexCollections`): the
+ * UNION of the target's collection and every collection the wire stage touched
+ * (life/** → wiki-life, else wiki), deduped. For a wiki-keyed apply: exactly the
+ * injected `reindexCollections` (the wiki registry entry's collections — every
+ * wire-touched page is in the SAME standalone wiki, so the per-path split doesn't
+ * apply). Each POST is best-effort — a failure warns, never blocks the approve.
  */
 function reindexUnion(deps: ApplyDeps, targetPath: string, modified: Set<string>): void {
-  const collections = new Set<"wiki" | "wiki-life">([reindexCollectionFor(targetPath)]);
-  for (const rel of modified) collections.add(reindexCollectionFor(rel));
+  const collections: Set<string> = deps.reindexCollections
+    ? new Set(deps.reindexCollections)
+    : (() => {
+        const c = new Set<string>([reindexCollectionFor(targetPath)]);
+        for (const rel of modified) c.add(reindexCollectionFor(rel));
+        return c;
+      })();
   for (const collection of collections) {
     deps.reindex(collection).catch((err) => {
       log.warn("Wiki-gardener apply: reindex failed for {collection}: {error}", {

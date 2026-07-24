@@ -122,4 +122,11 @@ describe("expectedDir — folder layout per domain + kind", () => {
     expect(expectedDir("life", "entity")).toBe("life/entities");
     expect(expectedDir("life", "source")).toBe("life/sources");
   });
+
+  test("synthesis (consolidation) maps to blogs/ in BOTH domains — never life/blogs", () => {
+    // blogs/ is not domain-split; the life/ prefix must be bypassed or the target
+    // would resolve to a non-existent life/blogs and fail confinement.
+    expect(expectedDir("ai", "synthesis")).toBe("blogs");
+    expect(expectedDir("life", "synthesis")).toBe("blogs");
+  });
 });

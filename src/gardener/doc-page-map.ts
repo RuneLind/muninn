@@ -56,8 +56,9 @@ export interface MapMergeOutcome {
    * Synthesis suppressed because a DIFFERENT resolvedAll cluster already carries
    * the synthesized topicKey (e.g. a pass-0 create whose slug coincides). Drafting
    * both would waste a draft call — the pass-1 rescue always loses to the pass-0
-   * cluster's earlier `insertWikiProposal` `ON CONFLICT (bot_name, topic_key) DO
-   * NOTHING`. Not a `deduped` no-op (that's the mapped page's OWN update cluster);
+   * cluster's earlier `insertWikiProposal` `ON CONFLICT (COALESCE(wiki_name,
+   * bot_name), topic_key) DO NOTHING`. Not a `deduped` no-op (that's the mapped
+   * page's OWN update cluster);
    * a genuine topicKey collision with an unrelated cluster.
    */
   collision: number;
