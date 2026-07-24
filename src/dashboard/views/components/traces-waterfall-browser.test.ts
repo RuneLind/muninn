@@ -220,6 +220,37 @@ test("a model-only non-'claude' span appends just the model — no 'unknown'", a
   expect(label).not.toContain("unknown");
 });
 
+test("a router-backed span (haikuBackend, no connector) appends the friendly backend label", async () => {
+  // factcheck extract / gardener cluster/map stamp the Haiku backend on
+  // `haikuBackend` (never `connector`, to dodge the walk's mixed-collapse) —
+  // aiSpanLabel falls back to it, rendered friendly (cli → "Claude Code").
+  const label = await renderLabelFor({
+    id: "ex2",
+    name: "extract",
+    kind: "extract",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { model: "claude-haiku-4-5", haikuBackend: "cli" },
+  });
+  expect(label).toContain("extract");
+  expect(label).toContain("Claude Code, claude-haiku-4-5");
+});
+
+test("a span carrying ONLY haikuBackend (no model, no connector) is still an AI span labeled by its backend", async () => {
+  const label = await renderLabelFor({
+    id: "ex3",
+    name: "cluster",
+    kind: "span",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { haikuBackend: "copilot" },
+  });
+  expect(label).toContain("cluster");
+  expect(label).toContain("Copilot SDK");
+});
+
 test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () => {
   ctx.closeSpanDetails();
   ctx.closeWaterfall();

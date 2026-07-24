@@ -147,7 +147,13 @@ export async function refreshInterestProfile(
       ...(haiku.numTurns !== undefined ? { numTurns: haiku.numTurns } : {}),
     };
     model = haiku.model;
-    tracer.end("haiku", { ...usage, model });
+    // Stamp the ACTUAL backend as `connector` so the interest_profile ROOT row on
+    // /traces reads a real backend instead of a model-only blank. The `haiku` span
+    // is the SOLE ai-span in this trace (its own root), so getRecentTraces' walk
+    // reads its connector straight onto the row with no mixed-collapse risk (no
+    // co-resident bot-connector span to disagree with). Value is a HaikuBackend
+    // (cli/anthropic/copilot) — connectorLabel() maps it to a friendly label.
+    tracer.end("haiku", { ...usage, model, ...(haiku.backend ? { connector: haiku.backend } : {}) });
     if (model) agentStatus.setModel(reqId, model);
 
     const profile = result.trim();

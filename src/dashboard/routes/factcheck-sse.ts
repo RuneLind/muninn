@@ -461,6 +461,16 @@ async function runFactcheck(
       inputTokens: extraction.inputTokens,
       outputTokens: extraction.outputTokens,
       model: extraction.model,
+      // The ACTUAL Haiku backend under a DISTINCT `haikuBackend` attr — NOT
+      // `connector`. This extract span is co-resident with the claim/compose
+      // spans, which carry the bot's `connector` (claude-sdk). getRecentTraces'
+      // walk collapses DISTINCT `connector` values to 'mixed', so stamping the
+      // router backend as a second `connector` here would flip the whole factcheck
+      // row to connector='mixed'. `haikuBackend` is invisible to that collapse
+      // (the walk only reads `connector`/`model`), so the row keeps showing the
+      // verify connector while the waterfall label still surfaces the backend
+      // (aiSpanLabel falls back to `haikuBackend` when `connector` is absent).
+      ...(extraction.backend ? { haikuBackend: extraction.backend } : {}),
     });
 
     const parsed = parseClaimList(extraction.result ?? "");

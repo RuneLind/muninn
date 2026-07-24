@@ -115,6 +115,13 @@ export function tracesListScript(): string {
       if (type === 'copilot-sdk') return 'Copilot SDK';
       if (type === 'openai-compat') return 'OpenAI';
       if (type === 'mixed') return 'Mixed';
+      // Haiku-router backend values (cli/anthropic/copilot) — NOT ConnectorType
+      // values. Router-backed rows (interest_profile; goal runs stamp the real
+      // 'claude-cli') stamp these on the row's connector, so they need their own
+      // mapping. 'cli' already collapses to 'Claude Code' via the fallthrough, but
+      // 'anthropic'/'copilot' would otherwise mislabel as 'Claude Code'.
+      if (type === 'anthropic') return 'Anthropic API';
+      if (type === 'copilot') return 'Copilot SDK';
       return 'Claude Code';
     }
     function fmtBackend(attrs) {

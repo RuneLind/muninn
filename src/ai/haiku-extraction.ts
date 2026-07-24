@@ -100,6 +100,22 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
         model: haiku.model,
         inputTokens: haiku.inputTokens,
         outputTokens: haiku.outputTokens,
+        // The ACTUAL Haiku backend (cli/anthropic/copilot) as a `connector` attr,
+        // so this extractor span stops rendering a model-only, blank-backend row
+        // in the waterfall. The value is a HaikuBackend, NOT a ConnectorType —
+        // `connectorLabel()` (traces-list + waterfall) maps cli→"Claude Code",
+        // anthropic→"Anthropic API", copilot→"Copilot SDK".
+        //
+        // SAFE against the /traces walk's connector collapse: these extractor
+        // spans (memory_extraction/goal_detection/schedule_detection) only ever
+        // run as DIRECT children of a chat root (runExtractionPipelines is called
+        // solely from message-processor with the chat tracer's context), sibling
+        // to the chat's own `claude` span. That root is served by getRecentTraces'
+        // `c` fast path (direct `claude` child wins), so a distinct extractor
+        // connector can't flip the chat row to 'mixed'. Absent only if a fallback
+        // path somehow left backend unset — then the span stays blank-backend, as
+        // before, never fabricated.
+        ...(haiku.backend ? { connector: haiku.backend } : {}),
       };
       const baseFinish = tracer.finish.bind(tracer);
       tracer.finish = (status: "ok" | "error" = "ok", attributes?: Record<string, unknown>): void =>

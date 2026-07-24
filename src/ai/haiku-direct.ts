@@ -258,6 +258,7 @@ export async function callHaikuDirect(
     inputTokens,
     outputTokens,
     model: response.model,
+    backend: "anthropic",
   };
 }
 
@@ -315,6 +316,7 @@ export async function callHaikuViaCopilot(
       inputTokens,
       outputTokens,
       model: reportedModel,
+      backend: "copilot",
     };
   } finally {
     unsubscribe();
@@ -342,6 +344,12 @@ const NON_CLI_BACKENDS: Record<"anthropic" | "copilot", HaikuBackendHandler> = {
 /**
  * Drop-in replacement for `spawnHaiku` that routes through a backend picked
  * by `resolveBackend()`. Falls back to the CLI subprocess on any error.
+ *
+ * The returned `HaikuResult.backend` reports the backend that ACTUALLY ran, not
+ * the one requested: a NON_CLI handler tags its own result (`"anthropic"`/
+ * `"copilot"`), and both fallback paths below (no-auth skip, or a thrown
+ * NON_CLI handler) return `spawnHaiku`'s result, which is tagged `"cli"`. So a
+ * caller can honestly stamp the real backend on its span even after a fallback.
  */
 export async function callHaikuWithFallback(
   prompt: string,

@@ -13,6 +13,16 @@ export interface HaikuResult {
   inputTokens: number;
   outputTokens: number;
   model: string;
+  /**
+   * The backend that ACTUALLY produced this result — `"cli"` for every
+   * `spawnHaiku` path (including the router's error/no-auth fallback to CLI),
+   * `"anthropic"`/`"copilot"` for the direct-SDK backends. Lets a traced caller
+   * stamp the honest backend on its span (the router resolves cli/anthropic/
+   * copilot but callers otherwise couldn't tell which one ran, so router-backed
+   * spans rendered blank-backend rows). Typed inline (not `HaikuBackend` from
+   * `../ai/haiku-direct.ts`) to avoid an import cycle — that module imports this.
+   */
+  backend?: "cli" | "anthropic" | "copilot";
   /** Tool calls parsed from the stream (empty/undefined for tool-less Haiku prompts). */
   toolCalls?: ToolCall[];
   /** Number of assistant turns (from the CLI result event). Undefined for direct-SDK backends. */
@@ -218,6 +228,8 @@ function claudeResultToHaiku(r: ClaudeResult, effectiveModel: string): HaikuResu
     inputTokens: r.inputTokens,
     outputTokens: r.outputTokens,
     model: r.model && r.model !== "unknown" ? r.model : effectiveModel,
+    // spawnHaiku unconditionally spawns `claude -p` — the honest backend is CLI.
+    backend: "cli",
     toolCalls: r.toolCalls,
     numTurns: r.numTurns,
     costUsd: r.costUsd,
@@ -260,6 +272,8 @@ export function parseLegacyHaikuOutput(stdout: string, effectiveModel: string): 
     inputTokens,
     outputTokens,
     model,
+    // Legacy fallback is still a `claude -p` spawn — CLI backend.
+    backend: "cli",
     numTurns: parsed.num_turns ?? 1,
     costUsd: parsed.total_cost_usd ?? parsed.cost_usd ?? 0,
   };
