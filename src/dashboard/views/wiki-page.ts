@@ -362,6 +362,83 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-open { margin-top: 8px; font-size: 11.5px; color: var(--accent); border: 1px solid var(--accent); border-radius: 7px; padding: 5px 11px; cursor: pointer; background: none; font-family: inherit; }
     .wiki-atlas-open:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
+    /* ── Semantic overlay (Atlas) ────────────────────────────────────────────
+       Fixed Louvain community palette — 6 categorical slots + a neutral "Other"
+       (folded 7th+ communities and huginn isolates). Dark is the default (mirrors
+       shared-styles); light applies under the media query + html[data-theme].
+       stroke:var() resolves fine as a CSS PROPERTY (unlike an SVG fill=/stroke=
+       attribute), same as the existing .wiki-atlas-edge rule. */
+    .wiki-atlas {
+      --atlas-c0: #3987e5; --atlas-c1: #d95926; --atlas-c2: #199e70;
+      --atlas-c3: #c98500; --atlas-c4: #d55181; --atlas-c5: #008300;
+      --atlas-cx: #6b7280;
+    }
+    @media (prefers-color-scheme: light) {
+      .wiki-atlas {
+        --atlas-c0: #2a78d6; --atlas-c1: #eb6834; --atlas-c2: #1baf7a;
+        --atlas-c3: #eda100; --atlas-c4: #e87ba4; --atlas-c5: #008300;
+        --atlas-cx: #9aa0a6;
+      }
+    }
+    html[data-theme="light"] .wiki-atlas {
+      --atlas-c0: #2a78d6; --atlas-c1: #eb6834; --atlas-c2: #1baf7a;
+      --atlas-c3: #eda100; --atlas-c4: #e87ba4; --atlas-c5: #008300;
+      --atlas-cx: #9aa0a6;
+    }
+    html[data-theme="dark"] .wiki-atlas {
+      --atlas-c0: #3987e5; --atlas-c1: #d95926; --atlas-c2: #199e70;
+      --atlas-c3: #c98500; --atlas-c4: #d55181; --atlas-c5: #008300;
+      --atlas-cx: #6b7280;
+    }
+    /* Toolbar controls (right side of the head) */
+    .wiki-atlas-semctl { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
+    .wiki-atlas-semtoggle {
+      font-size: 11px; font-family: inherit; color: var(--text-dim); cursor: pointer;
+      border: 1px solid var(--border-primary); border-radius: 8px; padding: 4px 11px; background: var(--bg-surface);
+    }
+    .wiki-atlas-semtoggle:hover { color: var(--text-primary); border-color: var(--text-faint); }
+    .wiki-atlas-semtoggle.on { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border-color: var(--accent); }
+    .wiki-atlas-semthresh { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); }
+    .wiki-atlas-semthresh input { accent-color: var(--accent); width: 120px; }
+    .wiki-atlas-semval { font-family: ui-monospace, monospace; color: var(--text-secondary); font-size: 11px; min-width: 40px; }
+    .wiki-atlas-semcount { font-size: 11px; color: var(--text-faint); font-family: ui-monospace, monospace; }
+    /* Community legend (second head row, Types-only, shown only when overlay on) */
+    .wiki-atlas-semlegend { display: none; align-items: center; gap: 12px; flex-wrap: wrap; padding: 2px 2px 0; }
+    .wiki-atlas-semhdr { font-size: 10px; letter-spacing: .11em; text-transform: uppercase; color: var(--text-faint); }
+    .wiki-atlas-semhdr i { font-style: normal; color: var(--text-dim); opacity: .8; margin-left: 3px; }
+    .wiki-atlas-semrow {
+      display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-family: inherit;
+      color: var(--text-dim); cursor: pointer; border: 1px solid transparent; border-radius: 7px; padding: 3px 7px; background: none;
+    }
+    .wiki-atlas-semrow:hover { border-color: var(--border-primary); color: var(--text-secondary); }
+    .wiki-atlas-semrow.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text-secondary); }
+    .wiki-atlas-semrow em { font-style: normal; color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; }
+    /* Community dot — hidden until the overlay toggle is on. Absolute inside a node
+       pill (no layout shift ⇒ overlay-off markup is byte-identical); inline in the legend. */
+    .wiki-atlas-dot { display: none; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; box-sizing: border-box; }
+    .wiki-atlas.semantic-on .wiki-atlas-dot { display: inline-block; }
+    .wiki-atlas-semrow .wiki-atlas-dot { display: inline-block; }
+    .wiki-atlas-node .wiki-atlas-dot { position: absolute; top: 6px; right: 6px; }
+    .wiki-atlas-dot.s0 { background: var(--atlas-c0); }
+    .wiki-atlas-dot.s1 { background: var(--atlas-c1); }
+    .wiki-atlas-dot.s2 { background: var(--atlas-c2); }
+    .wiki-atlas-dot.s3 { background: var(--atlas-c3); }
+    .wiki-atlas-dot.s4 { background: var(--atlas-c4); }
+    .wiki-atlas-dot.s5 { background: var(--atlas-c5); }
+    .wiki-atlas-dot.sx { background: var(--atlas-cx); }
+    /* Dim-others community filter */
+    .wiki-atlas-node.semdim { opacity: .12; }
+    /* Dashed semantic-neighbour edges — stroked in the neighbour's community colour */
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge { fill: none; stroke-width: 1.6; stroke-opacity: .8; stroke-dasharray: 4 3; }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s0 { stroke: var(--atlas-c0); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s1 { stroke: var(--atlas-c1); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s2 { stroke: var(--atlas-c2); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s3 { stroke: var(--atlas-c3); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s4 { stroke: var(--atlas-c4); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.s5 { stroke: var(--atlas-c5); }
+    .wiki-atlas-canvas svg path.wiki-atlas-sedge.sx { stroke: var(--atlas-cx); }
+    .wiki-atlas-seminfo { margin: 8px 2px 0; padding-top: 8px; border-top: 1px dashed var(--border-primary); color: var(--text-dim); font-size: 11px; }
+
     /* Connections mini-graph (1-hop neighborhood) */
     .wiki-mini-graph { border-bottom: 1px solid var(--border-primary); padding: 6px 6px 2px; margin-bottom: 8px; }
     .wiki-mini-graph svg { width: 100%; height: auto; display: block; }

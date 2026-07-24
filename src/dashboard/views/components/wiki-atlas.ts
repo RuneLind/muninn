@@ -24,6 +24,17 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import {
+  computeColoring,
+  neighborsFor,
+  SEM_OTHER_SLOT,
+  SEM_THRESHOLD_DEFAULT,
+  SEM_THRESHOLD_MAX,
+  SEM_THRESHOLD_MIN,
+  SEM_THRESHOLD_STEP,
+  type SemanticOverlay,
+  type SemColoring,
+} from "./wiki-atlas-semantic.ts";
 
 // ── Payload shape (mirrors src/wiki/atlas.ts — redefined here to keep the
 //    client bundle free of the server module's filesystem imports) ──────────
@@ -65,6 +76,11 @@ interface AtlasPayload {
   topics: AtlasTopic[];
   trails: AtlasTrail[];
   omitted: { byType: Record<string, number>; byMonth: Record<string, number> };
+  /** Optional huginn semantic overlay — present only when the atlas was fetched
+   *  with `?semantic=1` AND the wiki has backing collections huginn could reach.
+   *  Absent ⇒ the whole overlay UI (toggle/slider/dots/legend/edges) is omitted
+   *  and the tab renders byte-identically to the pre-overlay behaviour. */
+  semantic?: SemanticOverlay | null;
   error?: string;
 }
 
@@ -88,6 +104,17 @@ let selection: Selection | null = null;
 let proj: Projection = "types";
 let resizeBound = false;
 
+// ── Semantic overlay state (all inert unless `payload.semantic` is present) ──
+/** Overlay toggle — defaults OFF; the `semantic=1` fetch is eager on tab open so
+ *  flipping this is instant (no refetch). */
+let semanticOn = false;
+/** Semantic-EDGE similarity gate (node colouring is fixed, never keyed off this). */
+let threshold = SEM_THRESHOLD_DEFAULT;
+/** Community colouring for the current build (recomputed per build; null off). */
+let coloring: SemColoring | null = null;
+/** Active dim-others community filter (legend click), by colour slot. */
+let dimSlot: number | null = null;
+
 /** Container markup for #startBody when the Atlas tab is active. */
 export function atlasBodyHtml(): string {
   return '<div class="wiki-atlas" id="wikiAtlasRoot"><div class="wiki-atlas-empty">Loading atlas…</div></div>';
@@ -101,7 +128,10 @@ export function initAtlas(deps: AtlasDeps): void {
     buildAtlas(root, payload, deps);
     return;
   }
-  fetch(deps.withWiki("/api/wiki/atlas"))
+  // Eager `semantic=1` on tab open so the overlay toggle is instant. The server
+  // omits `semantic` for collection-less wikis / when huginn is unreachable, so
+  // the field is simply absent there and the tab degrades to today's behaviour.
+  fetch(deps.withWiki("/api/wiki/atlas?semantic=1"))
     .then((r) => r.json())
     .then((data: AtlasPayload) => {
       payload = data;
@@ -129,6 +159,14 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   const keys = Object.keys(nodes);
   const hasTypes = data.types.length > 0 && keys.length > 0;
   const hasMonths = data.monthKeys.length > 0;
+
+  // Community colouring against the RENDERED node set (`data.nodes` IS the capped
+  // projection the columns draw). Legend gating + slot ranking key off this, so a
+  // community capped entirely out of the projection colours nothing and gets no
+  // legend row (its dim-others click would otherwise dim everything).
+  coloring = data.semantic ? computeColoring(data.semantic, keys) : null;
+  if (!coloring) semanticOn = false; // no overlay data ⇒ toggle inert + hidden
+  dimSlot = null; // els are rebuilt — any prior dim-others filter is stale
 
   if (data.error) {
     root.innerHTML = `<div class="wiki-atlas-empty">${esc(data.error)}</div>`;
@@ -169,6 +207,8 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   buildTopics(root, data);
 
   const activeEls = () => (proj === "types" ? elsTypes : elsMonths);
+  // The semantic legend + `.semantic-on` chrome are built here but populated only
+  // when the overlay exists; the calls are placed after the `render`/helper defs.
   const activeCanvas = () =>
     root.querySelector(`.wiki-atlas-canvas[data-view="${proj}"]`) as HTMLElement | null;
 
@@ -192,8 +232,106 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   const stepsEl = () => root.querySelector(".wiki-atlas-steps") as HTMLElement;
   const titleEl = () => root.querySelector(".wiki-atlas-story-title") as HTMLElement;
 
+  // ── Semantic overlay chrome (all no-ops when `coloring` is null) ──────────
+  const slotCls = (slot: number) => (slot === SEM_OTHER_SLOT ? "sx" : "s" + slot);
+
+  const setSemCount = (text: string) => {
+    const el = root.querySelector(".wiki-atlas-semcount") as HTMLElement | null;
+    if (el) el.textContent = text;
+  };
+
+  /** Fill the community legend from the (Types-gated) coloring. Rows come ONLY
+   *  from communities colouring ≥1 rendered pill (the gating invariant), so a
+   *  dim-others click can never dim everything. */
+  const buildSemLegend = () => {
+    const leg = root.querySelector(".wiki-atlas-semlegend") as HTMLElement | null;
+    if (!leg || !coloring) return;
+    const rows = coloring.legend
+      .map((r) => {
+        const c = slotCls(r.slot);
+        return (
+          `<button class="wiki-atlas-semrow" data-slotn="${r.slot}" title="${esc(r.label)} · ${r.count} page${r.count === 1 ? "" : "s"}">` +
+          `<i class="wiki-atlas-dot ${c}"></i><span>${esc(r.label)}</span><em>${r.count}</em></button>`
+        );
+      })
+      .join("");
+    leg.innerHTML = '<span class="wiki-atlas-semhdr">Communities <i>fixed</i></span>' + rows;
+  };
+
+  /** Apply / clear the dim-others community filter over the active view. */
+  const applyDim = () => {
+    const target = dimSlot === null ? null : slotCls(dimSlot);
+    for (const el of Object.values(activeEls())) {
+      el.classList.toggle("semdim", target !== null && el.getAttribute("data-slot") !== target);
+    }
+    root
+      .querySelectorAll(".wiki-atlas-semrow")
+      .forEach((b) =>
+        b.classList.toggle("on", dimSlot !== null && Number(b.getAttribute("data-slotn")) === dimSlot),
+      );
+  };
+
+  /** Root `.semantic-on` (drives dot visibility) + Types-only legend visibility. */
+  const updateSemChrome = () => {
+    root.classList.toggle("semantic-on", semanticOn && !!coloring);
+    const leg = root.querySelector(".wiki-atlas-semlegend") as HTMLElement | null;
+    if (leg) leg.style.display = semanticOn && coloring && proj === "types" ? "flex" : "none";
+  };
+
+  /** Draw dashed semantic-neighbour edges for a selected node (Types only),
+   *  APPENDING to the wikilink edges already in the svg. Neighbour pills are lit
+   *  so they escape the `.sel` dim; capped-out neighbours become "+N not shown". */
+  const drawSemanticEdges = (cv: HTMLElement, center: string, steps: HTMLElement) => {
+    if (!coloring || !data.semantic) return;
+    const rk = Object.keys(elsTypes);
+    const { rendered, hidden } = neighborsFor(
+      data.semantic,
+      center,
+      threshold,
+      rk,
+      coloring.slotByKey,
+    );
+    const svg = cv.querySelector("svg") as SVGSVGElement | null;
+    if (svg) {
+      const ar = cv.getBoundingClientRect();
+      const cEl = elsTypes[center];
+      const cr = cEl?.getBoundingClientRect();
+      let html = "";
+      if (cr) {
+        for (const nb of rendered) {
+          const el = elsTypes[nb.key];
+          if (!el) continue;
+          el.classList.add("on");
+          const r = el.getBoundingClientRect();
+          const ny = r.top - ar.top + r.height / 2;
+          const cy = cr.top - ar.top + cr.height / 2;
+          const leftOf = r.right < cr.left;
+          const x1 = leftOf ? r.right - ar.left : cr.right - ar.left;
+          const y1 = leftOf ? ny : cy;
+          const x2 = leftOf ? cr.left - ar.left : r.left - ar.left;
+          const y2 = leftOf ? cy : ny;
+          const mx = (x1 + x2) / 2;
+          html += `<path class="wiki-atlas-sedge ${slotCls(nb.slot)}" d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`;
+        }
+      }
+      svg.insertAdjacentHTML("beforeend", html);
+    }
+    setSemCount(
+      `${rendered.length} similar${hidden > 0 ? " · +" + hidden + " not shown" : ""}`,
+    );
+    if (rendered.length || hidden > 0) {
+      steps.insertAdjacentHTML(
+        "beforeend",
+        `<div class="wiki-atlas-seminfo">${rendered.length} semantic link${rendered.length === 1 ? "" : "s"} ≥ ${threshold.toFixed(3)} shown` +
+          (hidden > 0 ? ` · +${hidden} similar not shown (capped out of view)` : "") +
+          "</div>",
+      );
+    }
+  };
+
   const render = () => {
     clearHighlights();
+    applyDim();
     const steps = stepsEl();
     const title = titleEl();
     if (!steps || !title) return;
@@ -227,6 +365,13 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
         );
       }
     }
+
+    // Semantic dashed edges — a Types-view, node-selection feature. Drawn AFTER
+    // the wikilink edges (append), so the two edge kinds coexist in one svg.
+    setSemCount("");
+    if (semanticOn && coloring && proj === "types" && cv && selection.kind === "node") {
+      drawSemanticEdges(cv, selection.key, steps);
+    }
   };
 
   // ── Events (scoped to this Atlas root) ──────────────────────────────────
@@ -237,14 +382,35 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       const next = (projBtn.getAttribute("data-proj") as Projection) || "types";
       if (next !== proj && (next === "types" ? hasTypes : hasMonths)) {
         proj = next;
+        dimSlot = null; // the dim-others filter is driven from the Types-only legend
         root.querySelectorAll(".wiki-atlas-toggle button").forEach((b) =>
           b.classList.toggle("on", b.getAttribute("data-proj") === proj),
         );
         root.querySelectorAll(".wiki-atlas-canvas").forEach((c) =>
           c.classList.toggle("active", c.getAttribute("data-view") === proj),
         );
+        updateSemChrome(); // legend is Types-only
         render(); // redraw edges against the new projection's DOM positions
       }
+      return;
+    }
+    // Semantic overlay toggle — flips the overlay on/off (data is already loaded).
+    if (t.closest?.(".wiki-atlas-semtoggle")) {
+      semanticOn = !semanticOn && !!coloring;
+      if (!semanticOn) dimSlot = null;
+      (t.closest(".wiki-atlas-semtoggle") as HTMLElement).classList.toggle("on", semanticOn);
+      updateSemChrome();
+      render();
+      return;
+    }
+    // Community legend row — dim-others filter (mutually exclusive with a node
+    // selection, so the two dimming intents never fight).
+    const semRow = t.closest?.(".wiki-atlas-semrow") as HTMLElement | null;
+    if (semRow) {
+      const s = Number(semRow.getAttribute("data-slotn"));
+      dimSlot = dimSlot === s ? null : s;
+      if (dimSlot !== null) selection = null;
+      render();
       return;
     }
     if (t.closest?.(".wiki-atlas-clear")) {
@@ -279,6 +445,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     if (node) {
       const key = node.getAttribute("data-key");
       if (key) {
+        dimSlot = null; // a node selection supersedes any dim-others filter
         selection = selection?.kind === "node" && selection.key === key ? null : { kind: "node", key };
         render();
       }
@@ -307,12 +474,27 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   }
   root.addEventListener("wiki-atlas-redraw", () => render());
 
+  // Threshold slider — the semantic-EDGE gate (node colours are fixed). Live:
+  // updates the readout + redraws the selected node's dashed edges each tick.
+  root.addEventListener("input", (e) => {
+    const inp = (e.target as HTMLElement)?.closest?.(
+      ".wiki-atlas-semthresh input",
+    ) as HTMLInputElement | null;
+    if (!inp) return;
+    threshold = Number(inp.value);
+    const val = root.querySelector(".wiki-atlas-semval") as HTMLElement | null;
+    if (val) val.textContent = threshold.toFixed(3);
+    render();
+  });
+
+  buildSemLegend();
+  updateSemChrome();
   render();
 }
 
 // ── Shell + columns ───────────────────────────────────────────────────────
 
-function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: boolean): string {
+export function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: boolean): string {
   const legend = data.types
     .map((t) => `<span><i class="wiki-atlas-swatch type-${esc(t.key)}"></i>${esc(t.label)}</span>`)
     .join("");
@@ -321,11 +503,26 @@ function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: boolean): s
     : "";
   const typesBtn = `<button data-proj="types"${proj === "types" ? ' class="on"' : ""}${hasTypes ? "" : " disabled"}>Types</button>`;
   const monthsBtn = `<button data-proj="months"${proj === "months" ? ' class="on"' : ""}${hasMonths ? "" : " disabled"}>Months</button>`;
+  // Semantic overlay controls — rendered ONLY when the payload carries an overlay,
+  // so a no-overlay wiki's head is byte-identical to the pre-overlay markup.
+  const sem = data.semantic
+    ? '<div class="wiki-atlas-semctl">' +
+      `<button class="wiki-atlas-semtoggle${semanticOn ? " on" : ""}" title="Overlay huginn semantic communities + similarity edges">semantic</button>` +
+      '<label class="wiki-atlas-semthresh"><span>similar ≥</span>' +
+      `<input type="range" min="${SEM_THRESHOLD_MIN}" max="${SEM_THRESHOLD_MAX}" step="${SEM_THRESHOLD_STEP}" value="${threshold}">` +
+      `<b class="wiki-atlas-semval">${threshold.toFixed(3)}</b></label>` +
+      '<span class="wiki-atlas-semcount"></span>' +
+      "</div>"
+    : "";
+  // Community legend (second head row, Types-only, hidden until the toggle is on).
+  const semLegend = data.semantic ? '<div class="wiki-atlas-semlegend"></div>' : "";
   return (
     '<div class="wiki-atlas-head">' +
     `<div class="wiki-atlas-toggle">${typesBtn}${monthsBtn}</div>` +
     `<div class="wiki-atlas-legend">${hubSwatch}${legend}</div>` +
+    sem +
     "</div>" +
+    semLegend +
     '<div class="wiki-atlas-body">' +
     '<div class="wiki-atlas-canvas-wrap">' +
     `<div class="wiki-atlas-canvas${proj === "types" ? " active" : ""}" data-view="types"><svg></svg><div class="wiki-atlas-cols"></div></div>` +
@@ -343,11 +540,24 @@ function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: boolean): s
   );
 }
 
-function nodeHtml(key: string, n: AtlasNode, dataT: string): string {
+export function nodeHtml(key: string, n: AtlasNode, dataT: string): string {
   const sub = (n.tags || []).slice(0, 3).join(" · ") || n.date || "";
+  // Community dot + slot class (fixed Louvain colour; CSS-hidden unless the
+  // overlay toggle is on). Emitted only when the node carries a community, so a
+  // no-overlay payload produces byte-identical pill markup.
+  const slot = coloring ? coloring.slotByKey[key] : undefined;
+  let dot = "";
+  let slotCls = "";
+  if (slot !== undefined) {
+    const scls = slot === SEM_OTHER_SLOT ? "sx" : `s${slot}`;
+    const label = coloring!.labelByKey[key] ?? "";
+    dot = `<i class="wiki-atlas-dot ${scls}" title="${esc(label)}"></i>`;
+    slotCls = ` data-slot="${scls}"`;
+  }
   return (
-    `<div class="wiki-atlas-node" data-t="${esc(dataT)}" data-key="${esc(key)}" title="${esc(n.name)}">` +
+    `<div class="wiki-atlas-node" data-t="${esc(dataT)}"${slotCls} data-key="${esc(key)}" title="${esc(n.name)}">` +
     '<span class="wiki-atlas-badge"></span>' +
+    dot +
     `<b>${esc(n.name)}</b>` +
     `<small>${esc(sub)}</small>` +
     "</div>"
