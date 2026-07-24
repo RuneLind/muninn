@@ -72,7 +72,7 @@ export interface CollectionPatterns {
  * lowercase-then-NFC order is equivalent to NFC-then-lowercase for the wiki's
  * Latin+diacritic character set.
  */
-function coverageKey(p: string): string {
+export function coverageKey(p: string): string {
   return normalizeRelPath(p).normalize("NFC");
 }
 
