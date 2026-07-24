@@ -105,6 +105,7 @@ mock.module("../ai/haiku-direct.ts", () => ({
     callHaikuMsgCalls.push({ prompt, fallback, opts });
     return { text: "haiku text", usage: haikuReturnsUsage ? haikuMessageUsage : null };
   }),
+  backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
 }));
 
 // DB / telegram / observability — inert stubs.
@@ -218,19 +219,37 @@ describe("runScheduledTasksFromList — task tracing", () => {
     // Haiku paths stamp NO claude child span.
     expect(tt.span("claude")).toBeUndefined();
 
-    // The router received the tracer + the bot's routing fields (connector).
+    // The router received the tracer + the bot's routing fields (connector) + the
+    // persona as the system prompt (restored on the non-CLI backends).
     expect(callHaikuMsgCalls.length).toBe(1);
     const opts = callHaikuMsgCalls[0]!.opts;
     expect(opts.tracer).toBe(tt);
     expect(opts.connector).toBe("claude-cli");
+    expect(opts.system).toBe("P");
 
-    // Token totals + the REAL backend (as `connector`) rode onto the span's finish
-    // attrs — no longer the hardcoded "claude-cli".
+    // Token totals + the REAL backend rode onto the span's finish attrs, mapped
+    // into the connector vocabulary (cli→"claude-cli") so a claude-cli bot's
+    // reminder reads the SAME connector as its briefing/watcher spans (no "Mixed").
     expect(tt.finished?.status).toBe("ok");
     expect(tt.finished?.attrs.inputTokens).toBe(50);
     expect(tt.finished?.attrs.outputTokens).toBe(10);
-    expect(tt.finished?.attrs.connector).toBe("cli");
+    expect(tt.finished?.attrs.connector).toBe("claude-cli");
     expect(attachToolSpansCalls.length).toBe(0);
+  });
+
+  test("Fix 3: a non-CLI (anthropic) router backend propagates onto the task span's connector", async () => {
+    // Drive the router mock to report the anthropic backend actually ran — the
+    // task span's connector must land as "anthropic" (backendConnector passes
+    // non-cli backends through unchanged), the propagation coverage the suite lacked.
+    haikuMessageUsage = { model: "claude-haiku-test", inputTokens: 42, outputTokens: 9, numTurns: 1, backend: "anthropic" };
+
+    await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Take a break" })], CTX);
+
+    const tt = FakeTracer.instances[0]!;
+    expect(tt.name).toBe("task:reminder");
+    expect(tt.finished?.status).toBe("ok");
+    expect(tt.finished?.attrs.connector).toBe("anthropic");
+    expect(tt.finished?.attrs.inputTokens).toBe(42);
   });
 
   test("custom task with a prompt also traces via the Haiku router", async () => {

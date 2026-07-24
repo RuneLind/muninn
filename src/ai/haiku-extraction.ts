@@ -1,4 +1,4 @@
-import { callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
+import { backendConnector, callHaikuWithFallback, type HaikuBackend } from "./haiku-direct.ts";
 import { extractJson } from "./json-extract.ts";
 import { runTrackedExtraction } from "./extraction-tracker.ts";
 import { agentStatus } from "../observability/agent-status.ts";
@@ -102,10 +102,11 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
         outputTokens: haiku.outputTokens,
         // The ACTUAL Haiku backend (cli/anthropic/copilot) as a `connector` attr,
         // so this extractor span stops rendering a model-only, blank-backend row
-        // in the waterfall. The value is a HaikuBackend, NOT a ConnectorType — the
-        // traces-list `connectorLabel()` and the waterfall `aiSpanLabel()` (via
-        // `backendDisplay`) both map cli→"Claude Code", anthropic→"Anthropic API",
-        // copilot→"Copilot SDK".
+        // in the waterfall. Mapped through `backendConnector` into the connector
+        // vocabulary (cli→"claude-cli") so it reads identically to a bot's own
+        // `claude`/watcher spans — the traces-list `connectorLabel()` and the
+        // waterfall `aiSpanLabel()` (via `backendDisplay`) both render
+        // claude-cli→"Claude Code", anthropic→"Anthropic API", copilot→"Copilot SDK".
         //
         // SAFE against the /traces walk's connector collapse: these extractor
         // spans (memory_extraction/goal_detection/schedule_detection) only ever
@@ -116,7 +117,7 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
         // connector can't flip the chat row to 'mixed'. Absent only if a fallback
         // path somehow left backend unset — then the span stays blank-backend, as
         // before, never fabricated.
-        ...(haiku.backend ? { connector: haiku.backend } : {}),
+        ...(haiku.backend ? { connector: backendConnector(haiku.backend) } : {}),
       };
       const baseFinish = tracer.finish.bind(tracer);
       tracer.finish = (status: "ok" | "error" = "ok", attributes?: Record<string, unknown>): void =>

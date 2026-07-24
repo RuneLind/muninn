@@ -25,6 +25,21 @@ const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
 
 export type HaikuBackend = "cli" | "anthropic" | "copilot";
 
+/**
+ * Map a Haiku-router {@link HaikuBackend} to the connector vocabulary the trace
+ * read side speaks: `cli` → `"claude-cli"` (spawnHaiku IS the Claude CLI), and
+ * `anthropic`/`copilot` pass through unchanged. Stamped as a span's `connector`
+ * attr so a claude-cli bot's router-backed rows read `"claude-cli"` — the SAME
+ * value the briefing `claude` child + watcher spans stamp — instead of the bare
+ * `"cli"`. The /traces walk collapses DISTINCT connector values, so unifying the
+ * vocabulary stops a tick that carries both a briefing and a reminder from
+ * rendering a spurious "Mixed". Both the waterfall `backendDisplay` and the
+ * traces-list `connectorLabel` render `claude-cli` → "Claude Code".
+ */
+export function backendConnector(backend: HaikuBackend): string {
+  return backend === "cli" ? "claude-cli" : backend;
+}
+
 export interface HaikuRouterOptions extends SpawnHaikuOptions {
   /** Explicit backend override (top-priority in resolution). */
   backend?: HaikuBackend;
@@ -212,6 +227,11 @@ export async function callHaikuDirect(
       {
         model: effectiveModel,
         max_tokens: effectiveMaxTokens,
+        // Persona/system prompt for prose paths (goal + task reminders) — the
+        // CLI path auto-loads the bot's CLAUDE.md via cwd, so the prose callers
+        // pass `system` explicitly to restore that voice on this backend. Absent
+        // for extraction/JSON callers (persona is irrelevant there).
+        ...(opts.system ? { system: opts.system } : {}),
         messages: [{ role: "user", content: prompt }],
       },
       { timeout: timeoutMs },
@@ -280,6 +300,11 @@ export async function callHaikuViaCopilot(
   const session = await cl.createSession({
     model,
     streaming: false,
+    // Persona/system prompt for prose paths — mirrors the chat connector's
+    // `systemMessage: { mode: "replace", ... }`. The prose callers (goal + task
+    // reminders) pass `system` to restore the bot voice the CLI path gets free
+    // via cwd. Absent for extraction/JSON callers ⇒ Copilot's default system.
+    ...(opts.system ? { systemMessage: { mode: "replace" as const, content: opts.system } } : {}),
   });
 
   let inputTokens = 0;

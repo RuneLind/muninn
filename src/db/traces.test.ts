@@ -523,14 +523,16 @@ describe("traces", () => {
       // routes through the Haiku router (`callHaikuMessageWithFallback`), which runs
       // no tools and stamps no `claude` model span, so the honest backend + model
       // ride on the root's own attrs (goalRunMeta). The `connector` value is the
-      // ACTUAL router backend that ran ('cli'/'anthropic'/'copilot'), not the old
-      // hardcoded 'claude-cli'. No child spans ⇒ c/w/walk all miss; the row must
-      // still show the backend ('cli' → Claude Code) + the model.
+      // ACTUAL router backend that ran, mapped through `backendConnector` into the
+      // connector vocabulary — a cli backend stamps 'claude-cli' (SAME value as the
+      // bot's briefing/watcher spans, so a tick with both never renders 'Mixed');
+      // anthropic/copilot pass through. No child spans ⇒ c/w/walk all miss; the row
+      // must still show the backend ('claude-cli' → Claude Code) + the model.
       const root = makeRootSpan({ name: "goal_reminder", platform: "telegram" });
       await saveSpan(root);
       await updateSpan(root.id, {
         attributes: {
-          connector: "cli",
+          connector: "claude-cli",
           model: "claude-haiku-4-5-20251001",
           inputTokens: 640,
           outputTokens: 55,
@@ -539,7 +541,7 @@ describe("traces", () => {
 
       const traces = await getRecentTraces(20);
       const found = traces.find((t) => t.id === root.id)!;
-      expect(found.attributes.connector).toBe("cli");
+      expect(found.attributes.connector).toBe("claude-cli");
       expect(found.attributes.model).toBe("claude-haiku-4-5-20251001");
       expect(found.attributes.inputTokens).toBe(640);
       expect(found.attributes.outputTokens).toBe(55);

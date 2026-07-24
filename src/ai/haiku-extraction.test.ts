@@ -19,6 +19,7 @@ mock.module("./haiku-direct.ts", () => ({
     haikuOpts.push(opts);
     return { result: mockResult, ...mockUsage };
   },
+  backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
 }));
 
 // Fake Tracer capturing finish() attributes so we can assert the (b) usage

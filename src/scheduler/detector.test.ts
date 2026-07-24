@@ -14,6 +14,7 @@ const mockUpdateScheduledTask = mock(() => Promise.resolve(null as any));
 
 mock.module("../ai/haiku-direct.ts", () => ({
   callHaikuWithFallback: mockCallHaiku,
+  backendConnector: (b: string) => (b === "cli" ? "claude-cli" : b),
 }));
 
 mock.module("../db/scheduled-tasks.ts", () => ({

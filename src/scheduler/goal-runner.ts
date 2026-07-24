@@ -9,6 +9,7 @@ import {
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import {
+  backendConnector,
   callHaikuMessageWithFallback,
   type HaikuMessageResult,
   type HaikuMessageUsage,
@@ -32,7 +33,7 @@ const log = getLog("scheduler", "goal-runner");
 function goalRunMeta(usage: HaikuMessageUsage | null): Record<string, unknown> {
   if (!usage) return {};
   return {
-    ...(usage.backend ? { connector: usage.backend } : {}),
+    ...(usage.backend ? { connector: backendConnector(usage.backend) } : {}),
     model: usage.model,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
@@ -167,6 +168,9 @@ async function generateReminderMessage(
       botName: botConfig.name,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,
+      // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
+      // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+      system: botConfig.persona,
       ...(tracer ? { tracer } : {}),
     },
   );
@@ -191,6 +195,9 @@ async function generateCheckinMessage(
       botName: botConfig.name,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,
+      // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
+      // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+      system: botConfig.persona,
       ...(tracer ? { tracer } : {}),
     },
   );

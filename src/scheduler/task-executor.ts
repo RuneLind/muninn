@@ -5,7 +5,7 @@ import type { ScheduledTask } from "../types.ts";
 import { updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, createProgressCallback, setConnectorInfo } from "../observability/agent-status.ts";
-import { callHaikuMessageWithFallback } from "../ai/haiku-direct.ts";
+import { backendConnector, callHaikuMessageWithFallback } from "../ai/haiku-direct.ts";
 import { resolveConnector } from "../ai/connector.ts";
 import { buildBriefingPrompt } from "./briefing-prompt.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -153,6 +153,9 @@ async function runHaikuTask(
     botName: botConfig.name,
     connector: botConfig.connector,
     haikuBackend: botConfig.haikuBackend,
+    // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
+    // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+    system: botConfig.persona,
     ...(tracer ? { tracer } : {}),
   });
   return {
@@ -171,7 +174,7 @@ async function runHaikuTask(
           ...(usage.numTurns != null ? { numTurns: usage.numTurns } : {}),
           ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
           model: usage.model,
-          ...(usage.backend ? { connector: usage.backend } : {}),
+          ...(usage.backend ? { connector: backendConnector(usage.backend) } : {}),
         }
       : {},
   };
