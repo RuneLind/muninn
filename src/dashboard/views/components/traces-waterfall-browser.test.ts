@@ -152,6 +152,74 @@ test("loadWaterfall populates globals from a real-shape spans payload", async ()
   expect(ctx.waterfallSpans.map((s) => s.id)).toEqual(["root", "tool1", "stage1"]);
 });
 
+async function renderLabelFor(span: Record<string, unknown>): Promise<string> {
+  // Render a single AI span (no toolName ⇒ chip is null ⇒ the aiSpanLabel path
+  // runs) and pull its escaped label back out of the waterfall innerHTML.
+  nextFetchSpans = [span];
+  await ctx.loadWaterfall("label-trace");
+  const html = (ctx.document as unknown as {
+    getElementById: (id: string) => { innerHTML: string };
+  }).getElementById("waterfall").innerHTML;
+  const m = html.match(/waterfall-label"[^>]*>(.*?)<\/div>/s);
+  return m ? m[1]! : html;
+}
+
+test("a bare 'claude' span is labeled by connector + model, not its name", async () => {
+  const label = await renderLabelFor({
+    id: "c1",
+    name: "claude",
+    kind: "claude",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { connector: "claude-sdk", model: "claude-sonnet-5" },
+  });
+  expect(label).toContain("claude-sdk, claude-sonnet-5");
+});
+
+test("a connector-less 'claude' span reads 'unknown', never a fabricated claude-cli", async () => {
+  const label = await renderLabelFor({
+    id: "c2",
+    name: "claude",
+    kind: "claude",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { model: "claude-sonnet-5" },
+  });
+  expect(label).toContain("unknown, claude-sonnet-5");
+  expect(label).not.toContain("claude-cli");
+});
+
+test("a non-'claude' AI span KEEPS its name and appends connector + model", async () => {
+  const label = await renderLabelFor({
+    id: "cl0",
+    name: "claude:claim-0",
+    kind: "claude",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { connector: "claude-sdk", model: "claude-sonnet-5" },
+  });
+  expect(label).toContain("claude:claim-0");
+  expect(label).toContain("claude-sdk, claude-sonnet-5");
+});
+
+test("a model-only non-'claude' span appends just the model — no 'unknown'", async () => {
+  const label = await renderLabelFor({
+    id: "ex1",
+    name: "memory_extraction",
+    kind: "extract",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { model: "claude-haiku-4-5" },
+  });
+  expect(label).toContain("memory_extraction");
+  expect(label).toContain("claude-haiku-4-5");
+  expect(label).not.toContain("unknown");
+});
+
 test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () => {
   ctx.closeSpanDetails();
   ctx.closeWaterfall();

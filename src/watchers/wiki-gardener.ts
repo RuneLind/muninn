@@ -156,11 +156,17 @@ export function stampDraftClaudeSpan(
   tracer: Tracer | undefined,
   exec: Pick<ClaudeExecResult, "model" | "inputTokens" | "outputTokens">,
   durationMs: number,
+  connector?: string,
 ): void {
   tracer?.addChildSpan("draft", "claude", durationMs, {
     model: exec.model,
     inputTokens: exec.inputTokens,
     outputTokens: exec.outputTokens,
+    // Stopgap connector stamp — the draft runs the bot's connector via
+    // executeOneShot. This span is a CHILD of the "draft" stage span (never a
+    // direct root child), so getRecentTraces' `c`/`w` joins skip it and the walk
+    // aggregate reads it — un-blanking the gardener draft's connector on /traces.
+    ...(connector ? { connector } : {}),
   });
 }
 
@@ -246,7 +252,7 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
       // …and a `claude` child span under the "draft" stage span so /traces shows
       // the dominant per-draft cost. CHILD SPAN ONLY — see stampDraftClaudeSpan
       // (never stamps tokens on the watcher span's own attrs → no double-count).
-      stampDraftClaudeSpan(tracer, exec, durationMs);
+      stampDraftClaudeSpan(tracer, exec, durationMs, botConfig.connector ?? "claude-cli");
       return exec.result;
     },
     readWikiFile: async (absPath) => {

@@ -96,7 +96,7 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
  *  card's model comes from `setConnectorInfo`). */
 interface TaskResult {
   markdown: string;
-  meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string; costUsd?: number };
+  meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string; costUsd?: number; connector?: string };
 }
 
 async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string, tracer?: Tracer): Promise<TaskResult> {
@@ -152,6 +152,14 @@ async function runHaikuTask(
   });
   return {
     markdown,
+    // Reminder/custom tasks run via spawnHaiku (callHaiku), which ALWAYS spawns
+    // the Claude CLI — never the bot's chat connector or the Haiku router. So the
+    // connector here is honestly the literal "claude-cli", not
+    // `botConfig.connector`. It rides onto the task:<type> span's own attrs via
+    // the caller's `tt.finish(..., { ...meta })` (this path stamps no `claude`
+    // child span), so getRecentTraces' walk aggregate can read it. Stamped only
+    // when the call actually produced usage — a Haiku error yields empty meta and
+    // no fabricated connector (byte-identical to before).
     meta: usage
       ? {
           inputTokens: usage.inputTokens,
@@ -159,6 +167,7 @@ async function runHaikuTask(
           ...(usage.numTurns != null ? { numTurns: usage.numTurns } : {}),
           ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
           model: usage.model,
+          connector: "claude-cli",
         }
       : {},
   };
@@ -210,6 +219,10 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
 
     return {
       markdown: result.result.trim(),
+      // NB: do NOT add `connector` to this briefing task-span meta — the nested
+      // `claude` child span owns it. Stamping it here too would make the
+      // read-side walk's connector-bearing token sum double-count briefing
+      // tokens (parent + child both counted).
       meta: {
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,

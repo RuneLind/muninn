@@ -219,20 +219,42 @@ function toggleCollapse(spanId: string): void {
   renderWaterfall();
 }
 
-// The AI span is recorded internally as "claude" regardless of which
-// connector handled the call. Render the label as "{connector}, {model}"
-// (e.g. "copilot-sdk, claude-sonnet-4-6") so the waterfall reflects what
-// actually ran.
+// An AI span is any span carrying a connector or model attribute — mirrors the
+// server-side recognition in getRecentTraces' walk aggregate. The widened
+// recognition (connector OR model OR requestedModel) intentionally catches
+// factcheck's claude:claim-<i>/compose spans, task:briefing → claude, gardener
+// draft → claude, model-only extractor spans, and model-carrying ROOT spans
+// (capture:<source>, interest_profile, draft:source — they stamp `model` on
+// their own attrs at finish). But recognition MUST NOT erase span identity:
+// only a span named exactly "claude" gets its NAME replaced by the connector/
+// model pair. Every other AI-recognized span KEEPS its name as the primary
+// label and appends connector/model as secondary info — otherwise co-resident
+// chat extractors (memory_extraction/…), the claim index on claude:claim-<i>,
+// and per-source watchers all collapse to the same "{connector}, {model}"
+// string and become indistinguishable in the waterfall.
 function isAiSpan(s: WaterfallSpan): boolean {
-  if (!s || s.name !== "claude") return false;
+  if (!s) return false;
   const a = s.attributes ?? {};
   return !!(a.connector || a.model || a.requestedModel);
 }
+// For a bare "claude" span: "{connector}, {model}" — and "unknown" (never a
+// fabricated "claude-cli") for a truly connector-less claude span, the honesty
+// fix. For any other AI span: keep the name and append "{connector}, {model}"
+// (or just the model when connector is absent — NO "unknown" for named spans),
+// e.g. "claude:claim-0 · claude-sdk, claude-sonnet-5".
 function aiSpanLabel(s: WaterfallSpan): string {
   const a = s.attributes ?? {};
-  const conn = a.connector || "claude-cli";
   const model = a.model || a.requestedModel || "";
-  return model ? conn + ", " + model : conn;
+  if (s.name === "claude") {
+    const conn = a.connector || "unknown";
+    return model ? conn + ", " + model : conn;
+  }
+  const conn = a.connector || "";
+  let secondary = "";
+  if (conn && model) secondary = conn + ", " + model;
+  else if (conn) secondary = conn;
+  else secondary = model;
+  return secondary ? s.name + " · " + secondary : s.name;
 }
 
 function isToolSpan(s: WaterfallSpan): boolean {
