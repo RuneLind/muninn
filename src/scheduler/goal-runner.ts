@@ -64,11 +64,6 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
       });
       agentStatus.completeRequest(requestId, { traceId: tracer.traceId });
       agentStatus.set("idle");
-      // Stamp the honest connector + captured model/tokens onto the ROOT span so
-      // getRecentTraces renders a non-blank backend (mapRow gives root-own attrs
-      // precedence). `spawnHaiku` stamps no connector/model span of its own, so
-      // without this the new root row would be blank-backend.
-      tracer.finish("ok", goalRunMeta(usage));
       await updateGoalReminderSentAt(goal.id);
       activityLog.push(
         "system",
@@ -76,6 +71,14 @@ export async function runGoalRemindersFromList(api: Api, config: Config, botConf
         { userId: goal.userId, botName: tag },
       );
       log.info("Deadline reminder sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
+      // Stamp the honest connector + captured model/tokens onto the ROOT span so
+      // getRecentTraces renders a non-blank backend (mapRow gives root-own attrs
+      // precedence). `spawnHaiku` stamps no connector/model span of its own, so
+      // without this the new root row would be blank-backend. Settle LAST — after
+      // the post-send DB write + activity log — so a throw from those error-settles
+      // exactly ONCE via the catch, instead of a second settle flipping an
+      // already-ok root to error even though the user got the message.
+      tracer.finish("ok", goalRunMeta(usage));
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");
@@ -112,7 +115,6 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
       });
       agentStatus.completeRequest(requestId, { traceId: tracer.traceId });
       agentStatus.set("idle");
-      tracer.finish("ok", goalRunMeta(usage));
       await updateGoalCheckedAt(goal.id);
       activityLog.push(
         "system",
@@ -120,6 +122,10 @@ export async function runGoalCheckinsFromList(api: Api, config: Config, botConfi
         { userId: goal.userId, botName: tag },
       );
       log.info("Check-in sent: \"{title}\" to user {userId}", { botName: tag, title: goal.title, userId: goal.userId });
+      // Settle LAST (same rationale as the reminder path) so a post-send DB
+      // failure error-settles once via the catch instead of double-settling an
+      // already-ok root.
+      tracer.finish("ok", goalRunMeta(usage));
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       agentStatus.set("idle");

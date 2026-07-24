@@ -102,9 +102,10 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
         outputTokens: haiku.outputTokens,
         // The ACTUAL Haiku backend (cli/anthropic/copilot) as a `connector` attr,
         // so this extractor span stops rendering a model-only, blank-backend row
-        // in the waterfall. The value is a HaikuBackend, NOT a ConnectorType —
-        // `connectorLabel()` (traces-list + waterfall) maps cli→"Claude Code",
-        // anthropic→"Anthropic API", copilot→"Copilot SDK".
+        // in the waterfall. The value is a HaikuBackend, NOT a ConnectorType — the
+        // traces-list `connectorLabel()` and the waterfall `aiSpanLabel()` (via
+        // `backendDisplay`) both map cli→"Claude Code", anthropic→"Anthropic API",
+        // copilot→"Copilot SDK".
         //
         // SAFE against the /traces walk's connector collapse: these extractor
         // spans (memory_extraction/goal_detection/schedule_detection) only ever

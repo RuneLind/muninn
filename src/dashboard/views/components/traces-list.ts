@@ -113,6 +113,7 @@ export function tracesListScript(): string {
       // Mirrors getConnectorLabel() in src/observability/agent-status.ts so the
       // traces list reads the same as the live status header / progress overlay.
       if (type === 'copilot-sdk') return 'Copilot SDK';
+      if (type === 'claude-sdk') return 'Claude SDK';
       if (type === 'openai-compat') return 'OpenAI';
       if (type === 'mixed') return 'Mixed';
       // Haiku-router backend values (cli/anthropic/copilot) — NOT ConnectorType

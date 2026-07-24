@@ -251,6 +251,34 @@ test("a span carrying ONLY haikuBackend (no model, no connector) is still an AI 
   expect(label).toContain("Copilot SDK");
 });
 
+test("a bare backend token on connector renders friendly (anthropic → Anthropic API)", async () => {
+  const label = await renderLabelFor({
+    id: "ex2",
+    name: "memory_extraction",
+    kind: "extract",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { connector: "anthropic", model: "claude-haiku-4-5" },
+  });
+  expect(label).toContain("memory_extraction");
+  expect(label).toContain("Anthropic API");
+  expect(label).not.toContain("· anthropic,");
+});
+
+test("a real ConnectorType on connector passes through untouched (claude-sdk)", async () => {
+  const label = await renderLabelFor({
+    id: "ex3",
+    name: "claude:claim-0",
+    kind: "claude",
+    status: "ok",
+    startedAt: 1000,
+    durationMs: 100,
+    attributes: { connector: "claude-sdk", model: "claude-sonnet-5" },
+  });
+  expect(label).toContain("claude-sdk, claude-sonnet-5");
+});
+
 test("closeWaterfall + closeSpanDetails don't throw against the stub DOM", () => {
   ctx.closeSpanDetails();
   ctx.closeWaterfall();

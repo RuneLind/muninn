@@ -261,10 +261,17 @@ function aiSpanLabel(s: WaterfallSpan): string {
     const conn = a.connector || "unknown";
     return model ? conn + ", " + model : conn;
   }
-  // Router-backed spans (factcheck extract, gardener cluster/map) carry the
-  // backend on `haikuBackend`, not `connector` — fall back to it (rendered
-  // friendly) so their label shows the backend instead of just the model.
-  const conn = a.connector || (a.haikuBackend ? backendDisplay(a.haikuBackend) : "");
+  // Extractor / interest_profile spans stamp a bare Haiku-router backend token
+  // (cli/anthropic/copilot) as `connector`, so route `connector` through
+  // backendDisplay too — real ConnectorType values (claude-cli/claude-sdk/
+  // copilot-sdk/openai-compat) pass through untouched. Router-backed spans
+  // (factcheck extract, gardener cluster/map) carry the backend on `haikuBackend`
+  // instead — fall back to it (also rendered friendly).
+  const conn = a.connector
+    ? backendDisplay(a.connector)
+    : a.haikuBackend
+      ? backendDisplay(a.haikuBackend)
+      : "";
   let secondary = "";
   if (conn && model) secondary = conn + ", " + model;
   else if (conn) secondary = conn;
