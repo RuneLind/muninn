@@ -314,7 +314,13 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     if (clusterSel === null) return;
     const cluster = clustersNow.find((c) => c.id === clusterSel);
     const memberSet = new Set(cluster?.members ?? []);
-    for (const [k, el] of Object.entries(activeEls())) {
+    const els = Object.entries(activeEls());
+    // Same guard as the node/topic path: a cluster whose members are ALL capped
+    // out of the rendered projection would dim every visible pill with nothing
+    // lit, and a fully-greyed canvas with no anchor reads as broken. The story
+    // panel's "0 shown · N off-canvas" line carries the message instead.
+    if (!els.some(([k]) => memberSet.has(k))) return;
+    for (const [k, el] of els) {
       if (!memberSet.has(k)) el.classList.add("semdim");
     }
   };
