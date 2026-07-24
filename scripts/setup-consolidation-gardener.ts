@@ -67,6 +67,7 @@ async function main() {
       `No wiki registry entry for "${WIKI}". Standalone wikis are registered via ` +
         `WIKI_EXTRA (e.g. WIKI_EXTRA=mimir=../mimir=mimir=jarvis). Check your .env.`,
     );
+    await closeDb();
     process.exit(1);
   }
   if (!entry.collections || entry.collections.length === 0) {
@@ -74,12 +75,14 @@ async function main() {
       `Wiki "${WIKI}" has no backing search collections (the WIKI_EXTRA 3rd segment). ` +
         `The consolidation gardener needs collections to fetch the semantic overlay.`,
     );
+    await closeDb();
     process.exit(1);
   }
 
   const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
   if (!bot) {
     console.error(`No synthesis bot resolves for wiki "${WIKI}" — cannot own the watcher.`);
+    await closeDb();
     process.exit(1);
   }
   const botName = bot.name;

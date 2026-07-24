@@ -243,6 +243,22 @@ describe("wiki-keyed (consolidation) proposals — isolation from bot-keyed read
     expect(legacy!.wikiName).toBeNull();
   });
 
+  test("bot-owned wiki: a wiki-keyed row keyed to the bot's OWN name counts wiki-side but NOT bot-side (disjoint, no double-count)", async () => {
+    // Fix 3(b): the home-attention wiki-draft counter now counts synthesis drafts on
+    // BOT wikis too (wiki_name = the bot's own name, e.g. "jarvis"). The two counters
+    // must stay disjoint by their wiki_name predicate — the bot-keyed counter is
+    // `wiki_name IS NULL`, the wiki-keyed one is `wiki_name = <name>`.
+    const legacy = await insertWikiProposal(makeProposal({ topicKey: "jarvis-legacy-draft" }));
+    const synth = await insertWikiProposal(
+      mimirRow({ wikiName: "jarvis", topicKey: "jarvis-wiki-synth", targetPath: "blogs/j.mdx" }),
+    );
+    expect([legacy, synth].every((r) => r !== null)).toBe(true);
+    // bot-keyed counter (wiki_name IS NULL) sees ONLY the legacy draft.
+    expect(await countDraftWikiProposals("jarvis")).toBe(1);
+    // wiki-keyed counter (wiki_name = 'jarvis') sees ONLY the synthesis draft.
+    expect(await countDraftWikiProposalsByWiki("jarvis")).toBe(1);
+  });
+
   test("getLiveOrAppliedTopicKeysByWiki includes applied topic keys (the new consolidation skip-list)", async () => {
     const sql = getDb();
     const live = await insertWikiProposal(mimirRow({ topicKey: "co-live" }));

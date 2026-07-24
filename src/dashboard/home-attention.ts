@@ -64,14 +64,16 @@ async function defaultDraftCounts(): Promise<{ bot: string; count: number }[]> {
   );
 }
 
-/** Default wiki-keyed draft-count source: enumerate standalone (`WIKI_EXTRA`)
- *  wikis that have backing collections — the ones the consolidation gardener can
- *  draft `synthesis` proposals for — and count each wiki's pending wiki-keyed
- *  drafts. A wiki with no drafts returns 0 (dropped below). */
+/** Default wiki-keyed draft-count source: enumerate EVERY gardener-capable wiki
+ *  (any that has backing collections — standalone `WIKI_EXTRA` wikis AND bot-owned
+ *  wikis like jarvis, since the Atlas rail's Draft-synthesis button drafts wiki-keyed
+ *  `synthesis` proposals on bot wikis too) and count each wiki's pending wiki-keyed
+ *  drafts. Disjoint from `defaultDraftCounts` by construction: this counts
+ *  `wiki_name = <name>` rows (`countDraftWikiProposalsByWiki`), that counts
+ *  `wiki_name IS NULL` bot-keyed rows (`countDraftWikiProposals`) — no double count.
+ *  A wiki with no drafts returns 0 (dropped below). */
 async function defaultWikiDraftCounts(): Promise<{ wiki: string; count: number }[]> {
-  const wikis = getWikiRegistry().filter(
-    (e) => e.source === "extra" && (e.collections?.length ?? 0) > 0,
-  );
+  const wikis = getWikiRegistry().filter((e) => (e.collections?.length ?? 0) > 0);
   return Promise.all(
     wikis.map(async (w) => ({ wiki: w.name, count: await countDraftWikiProposalsByWiki(w.name) })),
   );

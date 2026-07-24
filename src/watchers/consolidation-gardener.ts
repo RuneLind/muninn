@@ -40,7 +40,11 @@ import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import { discoverAllBots, resolveWikiSynthesisBot } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { getSemanticOverlay } from "../wiki/atlas-semantic.ts";
-import { getLiveOrAppliedTopicKeysByWiki } from "../db/wiki-proposals.ts";
+import {
+  getLiveOrAppliedTopicKeysByWiki,
+  getRecentlyRejectedTopicKeysByWiki,
+} from "../db/wiki-proposals.ts";
+import { GARDENER_DEFAULTS } from "../gardener/types.ts";
 import {
   computeClusters,
   synthesisTopicKey,
@@ -74,6 +78,10 @@ export interface ConsolidationGardenerDeps {
   getIndex: typeof getWikiIndex;
   getOverlay: typeof getSemanticOverlay;
   getLiveOrAppliedTopics: (wikiName: string) => Promise<string[]>;
+  /** TopicKeys rejected within the TTL window — skipped so a human's reject on a
+   *  synthesis draft isn't re-drafted every weekly run (mirrors the concept
+   *  gardener's `getRecentlyRejectedTopicKeys` 7-day TTL). */
+  getRecentlyRejectedTopics: (wikiName: string) => Promise<string[]>;
   draft: typeof draftAndPersistSynthesis;
   knowledgeApiUrl: string;
   config: Config;
@@ -86,6 +94,8 @@ function defaultDeps(): ConsolidationGardenerDeps {
     getIndex: getWikiIndex,
     getOverlay: getSemanticOverlay,
     getLiveOrAppliedTopics: getLiveOrAppliedTopicKeysByWiki,
+    getRecentlyRejectedTopics: (wikiName) =>
+      getRecentlyRejectedTopicKeysByWiki(wikiName, GARDENER_DEFAULTS.rejectedSkipDays),
     draft: draftAndPersistSynthesis,
     knowledgeApiUrl: DEFAULT_API_URL,
     config: loadConfig(),
@@ -213,8 +223,16 @@ export async function checkConsolidationGardener(
     return [];
   }
 
-  // 5. PRIMARY dedup — skip clusters already drafted/approved/applied for this wiki.
-  const skip = new Set(await deps.getLiveOrAppliedTopics(entry.name));
+  // 5. PRIMARY dedup — skip clusters already drafted/approved/applied for this
+  //    wiki, PLUS clusters a human rejected within the TTL window. A rejection is a
+  //    verdict on one draft, not a permanent verdict on the topic (mirrors the
+  //    concept gardener's TTL), but without it a rejected synthesis passes dedup
+  //    every weekly run and re-drafts + re-alerts forever, ignoring the reject.
+  const [live, rejected] = await Promise.all([
+    deps.getLiveOrAppliedTopics(entry.name),
+    deps.getRecentlyRejectedTopics(entry.name),
+  ]);
+  const skip = new Set([...live, ...rejected]);
   const fresh = candidates.filter((c) => !skip.has(synthesisTopicKey(c.label)));
   if (fresh.length === 0) {
     log.info(

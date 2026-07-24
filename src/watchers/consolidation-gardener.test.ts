@@ -86,6 +86,7 @@ function deps(over: Partial<ConsolidationGardenerDeps> = {}): ConsolidationGarde
     getIndex: async () => fakeIndex,
     getOverlay: async () => candidateOverlay(),
     getLiveOrAppliedTopics: async () => [],
+    getRecentlyRejectedTopics: async () => [],
     draft: async () => drafted,
     knowledgeApiUrl: "http://localhost:8321",
     config: {} as Config,
@@ -142,6 +143,37 @@ test("PRIMARY dedup: a cluster already drafted/applied is SKIPPED (no draft, no 
   });
   expect(drafted).toBe(0);
   expect(alerts).toHaveLength(0);
+});
+
+test("dedup: a RECENTLY-rejected topic is SKIPPED (no re-draft, no re-alert)", async () => {
+  let drafted = 0;
+  const alerts = await checkConsolidationGardener(watcher(), bot, undefined, {
+    ...deps(),
+    // The human rejected this synthesis draft within the TTL window.
+    getRecentlyRejectedTopics: async () => [CANDIDATE_TOPIC],
+    draft: async () => {
+      drafted++;
+      return { ok: true, proposal: { id: "p1" } as never, topicKey: CANDIDATE_TOPIC };
+    },
+  });
+  expect(drafted).toBe(0);
+  expect(alerts).toHaveLength(0);
+});
+
+test("dedup: an OLD-rejected topic (past TTL) is eligible again — drafts + alerts", async () => {
+  const draftCalls: string[] = [];
+  const alerts = await checkConsolidationGardener(watcher(), bot, undefined, {
+    ...deps(),
+    // getRecentlyRejectedTopics only returns rejections INSIDE the TTL window; an
+    // aged-out rejection is absent from it, so the candidate is fresh again.
+    getRecentlyRejectedTopics: async () => [],
+    draft: async (opts) => {
+      draftCalls.push(opts.label);
+      return { ok: true, proposal: { id: "p1" } as never, topicKey: CANDIDATE_TOPIC };
+    },
+  });
+  expect(draftCalls).toHaveLength(1);
+  expect(alerts).toHaveLength(1);
 });
 
 test("no-alert on zero drafts (draft returns a swallowed dedup no-op)", async () => {
