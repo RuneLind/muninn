@@ -40,6 +40,10 @@ interface WaterfallSpan {
     connector?: string;
     model?: string;
     requestedModel?: string;
+    /** Haiku-router backend (cli/anthropic/copilot) on router-backed spans that
+     *  deliberately do NOT carry a `connector` (factcheck extract, gardener
+     *  cluster/map) — see aiSpanLabel. */
+    haikuBackend?: string;
     [k: string]: unknown;
   };
 }
@@ -235,7 +239,15 @@ function toggleCollapse(spanId: string): void {
 function isAiSpan(s: WaterfallSpan): boolean {
   if (!s) return false;
   const a = s.attributes ?? {};
-  return !!(a.connector || a.model || a.requestedModel);
+  return !!(a.connector || a.model || a.requestedModel || a.haikuBackend);
+}
+// Friendly display for a Haiku-router backend value (cli/anthropic/copilot);
+// leaves real ConnectorType values (claude-sdk/copilot-sdk/…) untouched.
+function backendDisplay(v: string): string {
+  if (v === "cli") return "Claude Code";
+  if (v === "anthropic") return "Anthropic API";
+  if (v === "copilot") return "Copilot SDK";
+  return v;
 }
 // For a bare "claude" span: "{connector}, {model}" — and "unknown" (never a
 // fabricated "claude-cli") for a truly connector-less claude span, the honesty
@@ -249,7 +261,17 @@ function aiSpanLabel(s: WaterfallSpan): string {
     const conn = a.connector || "unknown";
     return model ? conn + ", " + model : conn;
   }
-  const conn = a.connector || "";
+  // Extractor / interest_profile spans stamp a bare Haiku-router backend token
+  // (cli/anthropic/copilot) as `connector`, so route `connector` through
+  // backendDisplay too — real ConnectorType values (claude-cli/claude-sdk/
+  // copilot-sdk/openai-compat) pass through untouched. Router-backed spans
+  // (factcheck extract, gardener cluster/map) carry the backend on `haikuBackend`
+  // instead — fall back to it (also rendered friendly).
+  const conn = a.connector
+    ? backendDisplay(a.connector)
+    : a.haikuBackend
+      ? backendDisplay(a.haikuBackend)
+      : "";
   let secondary = "";
   if (conn && model) secondary = conn + ", " + model;
   else if (conn) secondary = conn;

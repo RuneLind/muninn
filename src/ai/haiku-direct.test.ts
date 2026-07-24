@@ -68,6 +68,9 @@ mock.module("../scheduler/executor.ts", () => ({
       inputTokens: 1,
       outputTokens: 2,
       model: "claude-haiku-4-5-20251001",
+      // Mirror production spawnHaiku, which tags every CLI result "cli" — the
+      // router's fallback path relies on this for an honest backend.
+      backend: "cli",
     };
   },
   trackUsage: (
@@ -579,16 +582,21 @@ describe("callHaikuWithFallback dispatch", () => {
     };
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("direct-result");
+    // A successful anthropic run reports the anthropic backend.
+    expect(result.backend).toBe("anthropic");
     expect(sdkCalls).toHaveLength(1);
     expect(spawnCalls).toHaveLength(0);
   });
 
-  test("anthropic backend falls back to CLI when SDK throws", async () => {
+  test("anthropic backend falls back to CLI when SDK throws — result.backend reports the FALLBACK backend (cli), not the requested one", async () => {
     process.env.HAIKU_DIRECT_ENABLED = "1";
     process.env.ANTHROPIC_API_KEY = "sk-test";
     sdkThrow = new Error("rate limited");
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("fallback-result");
+    // Gate (a): the primary (anthropic) threw → the CLI fallback ran → the
+    // returned backend is the one that ACTUALLY produced the result.
+    expect(result.backend).toBe("cli");
     expect(sdkCalls).toHaveLength(1);
     expect(spawnCalls).toHaveLength(1);
   });
@@ -596,14 +604,16 @@ describe("callHaikuWithFallback dispatch", () => {
   test("connector copilot-sdk routes to copilot backend", async () => {
     const result = await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk" });
     expect(result.result).toBe("copilot-result");
+    expect(result.backend).toBe("copilot");
     expect(copilotCalls).toHaveLength(1);
     expect(spawnCalls).toHaveLength(0);
   });
 
-  test("copilot backend falls back to CLI on error", async () => {
+  test("copilot backend falls back to CLI on error — result.backend is 'cli'", async () => {
     copilotSessionThrow = new Error("copilot unreachable");
     const result = await callHaikuWithFallback("hi", { source: "test", connector: "copilot-sdk" });
     expect(result.result).toBe("fallback-result");
+    expect(result.backend).toBe("cli");
     expect(copilotCalls).toHaveLength(1);
     expect(spawnCalls).toHaveLength(1);
   });

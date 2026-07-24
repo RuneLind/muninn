@@ -357,11 +357,13 @@ describe("traces", () => {
       });
       // The Haiku extract span carries a MODEL but no CONNECTOR (it runs through
       // the Haiku router, not the bot connector) — it must be excluded from the
-      // connector-set's mixed-collapse and token sum.
+      // connector-set's mixed-collapse and token sum. The router backend is
+      // stamped under `haikuBackend` (NOT `connector`) precisely so it stays
+      // invisible to the walk's connector collapse (see factcheck-sse.ts).
       await saveSpan({
         id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
         name: "extract", kind: "span" as const, startedAt: new Date(),
-        attributes: { model: "claude-haiku-4-5-20251001", inputTokens: 9999, outputTokens: 999 },
+        attributes: { model: "claude-haiku-4-5-20251001", haikuBackend: "cli", inputTokens: 9999, outputTokens: 999 },
       });
       // A WebFetch tool child span under a claim → depth-agnostic tool_count.
       await saveSpan({
@@ -377,7 +379,11 @@ describe("traces", () => {
       expect(found.attributes.outputTokens).toBe(50 + 80 + 20);
       // Single connector-bearing model despite the extract span's different model.
       expect(found.attributes.model).toBe("claude-sonnet-4-6");
+      // Gate (c): the extract span's `haikuBackend` attr does NOT participate in
+      // the connector collapse, so the row stays the verify connector — never
+      // flipped to 'mixed' by the router backend.
       expect(found.attributes.connector).toBe("claude-sdk");
+      expect(found.attributes.connector).not.toBe("mixed");
       expect(found.attributes.toolCount).toBe(1);
     });
 
@@ -510,6 +516,63 @@ describe("traces", () => {
       expect(found.attributes.model).toBe("claude-sonnet-4-6");
       expect(found.attributes.requestedModel).toBe("sonnet");
       expect(found.attributes.connector).toBe("claude-sdk");
+    });
+
+    test("goal-run root (Rec 5): connector + model stamped on the root's OWN attrs render non-blank (mapRow root precedence, no `claude` child, no walk)", async () => {
+      // A goal_reminder/goal_checkin trace is a bare root — `callHaiku` → spawnHaiku
+      // runs no tools and stamps no `claude` model span, so the honest backend +
+      // model ride on the root's own attrs (goalRunMeta). No child spans ⇒ c/w/walk
+      // all miss; the row must still show connector 'claude-cli' + the model.
+      const root = makeRootSpan({ name: "goal_reminder", platform: "telegram" });
+      await saveSpan(root);
+      await updateSpan(root.id, {
+        attributes: {
+          connector: "claude-cli",
+          model: "claude-haiku-4-5-20251001",
+          inputTokens: 640,
+          outputTokens: 55,
+        },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.connector).toBe("claude-cli");
+      expect(found.attributes.model).toBe("claude-haiku-4-5-20251001");
+      expect(found.attributes.inputTokens).toBe(640);
+      expect(found.attributes.outputTokens).toBe(55);
+    });
+
+    test("chat trace with co-resident extractor spans (Rec 4): a DISTINCT extractor `connector` does NOT flip the chat row to 'mixed' — the `c` fast path wins", async () => {
+      // Rec 4 stamps the Haiku router backend as `connector` (cli/anthropic/
+      // copilot) on the memory/goal/schedule extractor spans, which run as DIRECT
+      // children of the chat root, sibling to the chat's own `claude` span. The
+      // walk would collapse the two distinct connectors to 'mixed', but the chat
+      // root is served by the `c` fast path (direct `claude` child), so the row
+      // stays the chat connector + tokens — proving the extractor stamp is safe.
+      const root = makeRootSpan({ name: "telegram_message" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", requestedModel: "sonnet", inputTokens: 30000, outputTokens: 500 },
+      });
+      // Three extractor siblings on a DIFFERENT (Haiku-router) connector.
+      for (const spanName of ["memory_extraction", "goal_detection", "schedule_detection"]) {
+        await saveSpan({
+          id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+          name: spanName, kind: "span" as const, startedAt: new Date(),
+          attributes: { connector: "cli", model: "claude-haiku-4-5-20251001", inputTokens: 800, outputTokens: 40 },
+        });
+      }
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      // The chat `claude` child wins — NOT 'mixed', and the chat's own tokens/model.
+      expect(found.attributes.connector).toBe("claude-sdk");
+      expect(found.attributes.connector).not.toBe("mixed");
+      expect(found.attributes.model).toBe("claude-sonnet-4-6");
+      expect(found.attributes.inputTokens).toBe(30000);
+      expect(found.attributes.outputTokens).toBe(500);
     });
   });
 

@@ -204,7 +204,7 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       ),
     callCluster: async (prompt) => {
-      const { result } = await callHaikuWithFallback(prompt, {
+      const { result, backend } = await callHaikuWithFallback(prompt, {
         source: "wiki_gardener_cluster",
         entrypoint: `${name}-watcher`,
         botName: name,
@@ -216,13 +216,20 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
         // gardener cluster/triage rows too.
         tracer,
       });
+      // Surface the ACTUAL Haiku backend on the OPEN `cluster` stage span under a
+      // DISTINCT `haikuBackend` attr (not `connector`). The gardener trace also
+      // carries the draft's `claude` child span with the bot's `connector`; the
+      // walk collapses distinct `connector` values to 'mixed', so a second
+      // `connector` here would flip the scheduler_tick row. `haikuBackend` is
+      // invisible to that collapse but still renders in the waterfall label.
+      if (backend) tracer?.annotate("cluster", { haikuBackend: backend });
       return result;
     },
     callDocPageMap: async (prompt) => {
       // Pass-1 doc→page map — same backend + thinking conventions as `callCluster`
       // (a cheap Haiku call). Its `wiki_gardener_map` haiku_usage row joins the
       // trace via the threaded tracer, exactly like the cluster row.
-      const { result } = await callHaikuWithFallback(prompt, {
+      const { result, backend } = await callHaikuWithFallback(prompt, {
         source: "wiki_gardener_map",
         entrypoint: `${name}-watcher`,
         botName: name,
@@ -230,6 +237,9 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
         haikuBackend: botConfig.haikuBackend,
         tracer,
       });
+      // Same `haikuBackend`-not-`connector` reasoning as `callCluster` above —
+      // annotate the OPEN `map` stage span.
+      if (backend) tracer?.annotate("map", { haikuBackend: backend });
       return result;
     },
     loadInterestProfile: () =>

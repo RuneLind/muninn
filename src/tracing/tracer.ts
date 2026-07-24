@@ -130,6 +130,20 @@ export class Tracer {
     return durationMs;
   }
 
+  /** Merge attributes into an OPEN (already-started, not-yet-ended) span without
+   *  ending it or touching its duration/status. Use when a value becomes known
+   *  mid-span (e.g. the Haiku backend resolved inside a seam call, while the
+   *  enclosing stage span stays open). No-op if tracing is disabled or the span
+   *  isn't currently open; the later `end()` merges its own attrs on top. */
+  annotate(label: string, attributes: Record<string, unknown>): void {
+    const span = this.spans.get(label);
+    if (!this.enabled || !span) return;
+    // Chain on the INSERT so the attribute UPDATE can't race ahead of it.
+    span.insertPromise
+      .then(() => updateSpan(span.id, { attributes }))
+      .catch(logError);
+  }
+
   /** Create a completed child span under a named parent span (for pre-computed durations like tool calls).
    *  If startOffsetMs is provided, the span's start time is offset from the parent span's start.
    *  Status defaults to 'ok' in the DB schema.
