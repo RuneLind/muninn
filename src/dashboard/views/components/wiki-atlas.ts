@@ -29,6 +29,7 @@ import {
   computeColoring,
   neighborsFor,
   stemOf,
+  synthesisTopicKey,
   SEM_OTHER_SLOT,
   SEM_THRESHOLD_DEFAULT,
   SEM_THRESHOLD_MAX,
@@ -92,6 +93,8 @@ export interface AtlasDeps {
   withWiki(url: string): string;
   /** Open a wiki page in the reader by its normalized relPath (+ display name). */
   openPage(relPath: string, name: string): void;
+  /** Canonical wiki name — the draft-synthesis POST body + the gate deep-link. "" = default/env. */
+  wiki: string;
 }
 
 type Selection =
@@ -293,6 +296,11 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   };
 
   // ── Cluster rail (recomputed on threshold change; full-graph union-find) ────
+  // Topic_keys already synthesized (server: live/applied proposals) PLUS any this
+  // session just drafted — a candidate in this set renders the "→ gate" link, not
+  // the Draft button. The session additions survive the slider re-renders.
+  const pendingTopics = new Set<string>(data.semantic?.pendingSynthesisTopics ?? []);
+
   /** Recompute the components at the current threshold + repaint the rail body.
    *  Drops a stale cluster selection whose component no longer exists. */
   const buildClusterRail = () => {
@@ -301,7 +309,42 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     clustersNow = data.semantic ? computeClusters(data.semantic, threshold) : [];
     if (clusterSel && !clustersNow.some((c) => c.id === clusterSel)) clusterSel = null;
     const renderedSet = new Set(Object.keys(activeEls()));
-    body.innerHTML = clusterRailHtml(clustersNow, renderedSet);
+    body.innerHTML = clusterRailHtml(clustersNow, renderedSet, pendingTopics, deps.wiki);
+  };
+
+  /** Fire the draft-synthesis POST for a candidate cluster + flip the button in
+   *  place. On success (started) or a 409 (pending/running) the topic joins
+   *  `pendingTopics` and the rail re-renders to the gate link; a real failure shows
+   *  a quiet inline error and re-enables the button for a retry. */
+  const draftSynthesis = (cid: string, btn: HTMLButtonElement) => {
+    const cluster = clustersNow.find((x) => x.id === cid);
+    if (!cluster || !cluster.candidate) return;
+    btn.disabled = true;
+    btn.textContent = "drafting…";
+    fetch(deps.withWiki("/api/wiki/atlas/draft-synthesis"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: deps.wiki, members: cluster.members, label: cluster.label }),
+    })
+      .then((r) => r.json().then((j: { state?: string; error?: string }) => ({ status: r.status, j })))
+      .then(({ status, j }) => {
+        // started (200) or already pending/running (409) ⇒ it's in the gate now.
+        if (status === 200 || (status === 409 && (j.state === "pending" || j.state === "running"))) {
+          pendingTopics.add(synthesisTopicKey(cluster.label));
+          buildClusterRail();
+          return;
+        }
+        btn.disabled = false;
+        btn.textContent = "Draft synthesis";
+        btn.classList.add("err");
+        btn.title = j.error || "draft failed — try again";
+      })
+      .catch(() => {
+        btn.disabled = false;
+        btn.textContent = "Draft synthesis";
+        btn.classList.add("err");
+        btn.title = "draft failed — network error";
+      });
   };
 
   /** Dim non-members of the selected cluster in the active projection (reuses the
@@ -496,6 +539,15 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       if (btn) btn.textContent = collapsed ? "▸" : "▾";
       return;
     }
+    // Draft-synthesis button — POST the candidate cluster into the gardener gate.
+    const cdraft = t.closest?.(".wiki-atlas-cdraft") as HTMLButtonElement | null;
+    if (cdraft) {
+      const cid = cdraft.getAttribute("data-cid");
+      if (cid) draftSynthesis(cid, cdraft);
+      return;
+    }
+    // "proposal pending →" gate link — let the anchor navigate; don't toggle the cluster.
+    if (t.closest?.(".wiki-atlas-cgate")) return;
     // A cluster member row — deep-links to the reader page (rendered or not).
     const cmember = t.closest?.(".wiki-atlas-cmember") as HTMLElement | null;
     if (cmember) {
@@ -670,22 +722,41 @@ export function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: bool
  * is rendered on the canvas — off-canvas members are muted). A blob-guarded
  * cluster (> RAIL_BLOB_MAX) shows only a header + "raise the threshold" note.
  *
- * Follow-up seam (no code): a `candidate` cluster's `{ members, label }` is exactly
- * the input shape a future consolidation-gardener "Draft synthesis" button would
- * post into the `wiki_proposals` gate as one clustered proposal.
+ * A `candidate` cluster carries a **Draft synthesis** control in its head: a button
+ * that POSTs `{ wiki, members, label }` to `/api/wiki/atlas/draft-synthesis` (the
+ * consolidation gardener), OR — when its `synthesisTopicKey(label)` already has a
+ * live/applied proposal (`pendingTopics`) — a "proposal pending → gate" link
+ * instead. Non-candidate clusters are unchanged (no control), so the rail layout
+ * is untouched where the button is absent.
  */
-function clusterRailHtml(clusters: RailCluster[], renderedSet: Set<string>): string {
+function clusterRailHtml(
+  clusters: RailCluster[],
+  renderedSet: Set<string>,
+  pendingTopics: Set<string>,
+  wiki: string,
+): string {
   if (!clusters.length) {
     return '<div class="wiki-atlas-hint">No clusters at this threshold — lower the “similar ≥” slider.</div>';
   }
+  const gateUrl = "/wiki/gardener" + (wiki ? "?wiki=" + encodeURIComponent(wiki) : "");
   return clusters
     .map((c) => {
       const badge = c.candidate
         ? '<span class="wiki-atlas-cbadge" title="≥3 narrative-type pages and no synthesis page yet — a consolidation candidate">synthesis candidate</span>'
         : "";
+      // Draft-synthesis control — candidate clusters only. Pending (live/applied
+      // proposal) ⇒ a gate link; else the Draft button (topic_key derived client-
+      // side by the SAME slugger the server persists with).
+      let draftCtl = "";
+      if (c.candidate) {
+        const topic = synthesisTopicKey(c.label);
+        draftCtl = pendingTopics.has(topic)
+          ? `<a class="wiki-atlas-cgate" href="${esc(gateUrl)}" title="A synthesis proposal for this cluster is in the review gate">proposal pending →</a>`
+          : `<button class="wiki-atlas-cdraft" data-cid="${esc(c.id)}" title="Draft a synthesis page from these ${c.size} pages into the review gate">Draft synthesis</button>`;
+      }
       const head =
         '<div class="wiki-atlas-cluster-head">' +
-        `<b>${esc(c.label || "cluster")}</b><em>${c.size}</em>${badge}</div>`;
+        `<b>${esc(c.label || "cluster")}</b><em>${c.size}</em>${badge}${draftCtl}</div>`;
       if (c.tooBroad) {
         return (
           `<div class="wiki-atlas-cluster broad" data-cid="${esc(c.id)}">${head}` +
