@@ -24,6 +24,7 @@ import {
   type WikiIndex,
   type WikiPageMeta,
 } from "./store.ts";
+import type { SemanticOverlay } from "./atlas-semantic.ts";
 
 // ── Curation constants (mockup-calibrated) ──────────────────────────────────
 
@@ -113,6 +114,14 @@ export interface AtlasPayload {
     byType: Record<string, number>;
     byMonth: Record<string, number>;
   };
+  /**
+   * Semantic overlay (huginn similarity graph joined onto the index) — attached
+   * by the route ONLY when `?semantic=1` AND the wiki has backing `collections`.
+   * `projectAtlas` never sets it (it's a pure wikilink projection); the route
+   * spreads it in. Optional/absent (or explicit null) on degrade — huginn
+   * unreachable / no collections / nothing resolved. See `src/wiki/atlas-semantic.ts`.
+   */
+  semantic?: SemanticOverlay | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

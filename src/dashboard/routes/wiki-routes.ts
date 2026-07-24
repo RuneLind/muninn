@@ -4,6 +4,11 @@ import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
+import {
+  joinSemantic,
+  type SemanticOverlay,
+  type SimilarityGraph,
+} from "../../wiki/atlas-semantic.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
   listWikis,
@@ -103,6 +108,90 @@ export function __resetWikiDigestCacheForTest(): void {
 /** Test-only: seed the digest cache to exercise the cache-hit path. */
 export function __seedWikiDigestForTest(name: string, digest: WikiDigest): void {
   digestCache.set(name, digest);
+}
+
+/** Semantic-overlay TTL, same 5-min class as the wiki index TTL — avoids
+ *  re-joining per request (huginn caches the expensive similarity-graph part). */
+const SEMANTIC_TTL_MS = 5 * 60_000;
+/** ONE total wall-clock budget for the concurrent per-collection similarity-graph
+ *  fetches — not per collection. Each fetch is bounded by this and they run in
+ *  parallel, so the union is ready in ~this, not N× this. */
+const SEMANTIC_DEADLINE_MS = 2500;
+
+interface SemanticCacheEntry {
+  overlay: SemanticOverlay | null;
+  expiresAt: number;
+}
+/** Semantic overlay cache keyed by canonical wiki name. */
+const semanticCache = new Map<string, SemanticCacheEntry>();
+
+/** Test-only: clear the semantic overlay cache between cases. */
+export function __resetWikiSemanticCacheForTest(): void {
+  semanticCache.clear();
+}
+
+/**
+ * Fetch ONE collection's huginn similarity graph. Best-effort: an unreachable /
+ * non-200 huginn or a mis-shaped body resolves to null (the caller unions what it
+ * got). Never throws.
+ */
+async function fetchSimilarityGraph(
+  baseUrl: string,
+  collection: string,
+): Promise<SimilarityGraph | null> {
+  try {
+    const path =
+      `/api/collection/${encodeURIComponent(collection)}/similarity-graph` +
+      `?top_k=6&min_similarity=0.9`;
+    const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs: SEMANTIC_DEADLINE_MS });
+    if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) return null;
+    if (!Array.isArray(data.communities)) data.communities = [];
+    return data as SimilarityGraph;
+  } catch (err) {
+    log.warn("Atlas semantic: similarity-graph fetch failed for {collection}: {error}", {
+      collection,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Resolve a wiki's semantic overlay: TTL-cached per wiki name, else fetch every
+ * backing collection's similarity graph CONCURRENTLY under one deadline, union
+ * them, and join onto the full index (`joinSemantic`).
+ *
+ * Degrade contract (non-sticky): if EVERY fetch failed ⇒ return null WITHOUT
+ * caching (the next request retries). A partial union (some collections failed)
+ * is joined but NOT cached, so a transient single-collection failure doesn't
+ * stick for the TTL. Only a full-success union is cached.
+ */
+async function getSemanticOverlay(
+  baseUrl: string,
+  wikiName: string,
+  index: WikiIndex,
+  collections: string[],
+  refresh: boolean,
+): Promise<SemanticOverlay | null> {
+  const now = Date.now();
+  if (!refresh) {
+    const cached = semanticCache.get(wikiName);
+    if (cached && cached.expiresAt > now) return cached.overlay;
+  }
+  const results = await Promise.all(
+    collections.map(
+      async (name) => [name, await fetchSimilarityGraph(baseUrl, name)] as const,
+    ),
+  );
+  const graphs = new Map<string, SimilarityGraph>();
+  for (const [name, g] of results) if (g) graphs.set(name, g);
+  if (graphs.size === 0) return null; // total degrade — do NOT cache
+
+  const overlay = joinSemantic(index.pages, graphs, collections);
+  if (graphs.size === collections.length) {
+    semanticCache.set(wikiName, { overlay, expiresAt: now + SEMANTIC_TTL_MS });
+  }
+  return overlay;
 }
 
 /**
@@ -511,9 +600,27 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       process.env.WIKI_DIR,
     );
     if (unknownWiki) return emptyAtlas("no wiki configured for that name");
-    const index = await getWikiIndex({ root: entry?.root, refresh: c.req.query("refresh") === "1" });
+    const refresh = c.req.query("refresh") === "1";
+    const index = await getWikiIndex({ root: entry?.root, refresh });
     if (!index) return emptyAtlas("wiki directory not found");
-    return c.json(projectAtlas(index));
+    const payload = projectAtlas(index);
+
+    // Semantic overlay: opt-in via `?semantic=1`, and only when the wiki has
+    // backing collections. Absent flag ⇒ byte-identical to the pre-PR behavior.
+    // Degrade (huginn unreachable / no collections / nothing resolved) leaves the
+    // field absent — the rest of the payload is untouched, always HTTP 200.
+    const collections = entry?.collections ?? [];
+    if (c.req.query("semantic") === "1" && collections.length > 0) {
+      const overlay = await getSemanticOverlay(
+        config.knowledgeApiUrl,
+        entry!.name,
+        index,
+        collections,
+        refresh,
+      );
+      if (overlay) return c.json({ ...payload, semantic: overlay });
+    }
+    return c.json(payload);
   });
 
   // "What's new" digest — an AI summary of the wiki's recent `log.md` entries
