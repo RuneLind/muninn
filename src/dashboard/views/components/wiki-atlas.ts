@@ -332,6 +332,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   const render = () => {
     clearHighlights();
     applyDim();
+    setSemCount("");
     const steps = stepsEl();
     const title = titleEl();
     if (!steps || !title) return;
@@ -368,7 +369,6 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
 
     // Semantic dashed edges — a Types-view, node-selection feature. Drawn AFTER
     // the wikilink edges (append), so the two edge kinds coexist in one svg.
-    setSemCount("");
     if (semanticOn && coloring && proj === "types" && cv && selection.kind === "node") {
       drawSemanticEdges(cv, selection.key, steps);
     }
