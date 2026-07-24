@@ -16,8 +16,9 @@
 
 import type { Watcher } from "../types.ts";
 import { getAllWatchers } from "../db/watchers.ts";
-import { countDraftWikiProposals } from "../db/wiki-proposals.ts";
+import { countDraftWikiProposals, countDraftWikiProposalsByWiki } from "../db/wiki-proposals.ts";
 import { discoverAllBots } from "../bots/config.ts";
+import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import { getRecentAgentTraces, type RecentTraceRow } from "../db/agent-activity.ts";
 import { getLog } from "../logging.ts";
 
@@ -46,6 +47,10 @@ export interface AttentionDeps {
   getWatchers: () => Promise<Watcher[]>;
   /** Draft-proposal counts per bot (only bots with a wiki-gardener surface). */
   getDraftCounts: () => Promise<{ bot: string; count: number }[]>;
+  /** Wiki-keyed draft-proposal counts per gardener-capable standalone wiki
+   *  (consolidation-gardener `synthesis` proposals — keyed by wiki_name, invisible
+   *  to the bot-keyed `getDraftCounts`). Surfaced with a `?wiki=` review link. */
+  getWikiDraftCounts: () => Promise<{ wiki: string; count: number }[]>;
   /** Recent trace rows (chat roots + watcher spans) within the failure window. */
   getRecentTraces: () => Promise<RecentTraceRow[]>;
 }
@@ -59,9 +64,23 @@ async function defaultDraftCounts(): Promise<{ bot: string; count: number }[]> {
   );
 }
 
+/** Default wiki-keyed draft-count source: enumerate standalone (`WIKI_EXTRA`)
+ *  wikis that have backing collections — the ones the consolidation gardener can
+ *  draft `synthesis` proposals for — and count each wiki's pending wiki-keyed
+ *  drafts. A wiki with no drafts returns 0 (dropped below). */
+async function defaultWikiDraftCounts(): Promise<{ wiki: string; count: number }[]> {
+  const wikis = getWikiRegistry().filter(
+    (e) => e.source === "extra" && (e.collections?.length ?? 0) > 0,
+  );
+  return Promise.all(
+    wikis.map(async (w) => ({ wiki: w.name, count: await countDraftWikiProposalsByWiki(w.name) })),
+  );
+}
+
 export const DEFAULT_ATTENTION_DEPS: AttentionDeps = {
   getWatchers: () => getAllWatchers(),
   getDraftCounts: () => defaultDraftCounts(),
+  getWikiDraftCounts: () => defaultWikiDraftCounts(),
   // 24h failure window; the Recent trace source already excludes no-op skip spans.
   getRecentTraces: () => getRecentAgentTraces(40, 24),
 };
@@ -124,7 +143,7 @@ export async function assembleAttention(
 ): Promise<AttentionOverview> {
   const errors: string[] = [];
 
-  const [watchers, draftCounts, traces] = await Promise.all([
+  const [watchers, draftCounts, wikiDraftCounts, traces] = await Promise.all([
     deps.getWatchers().catch((err) => {
       errors.push(`watchers: ${err instanceof Error ? err.message : String(err)}`);
       return [] as Watcher[];
@@ -132,6 +151,10 @@ export async function assembleAttention(
     deps.getDraftCounts().catch((err) => {
       errors.push(`drafts: ${err instanceof Error ? err.message : String(err)}`);
       return [] as { bot: string; count: number }[];
+    }),
+    deps.getWikiDraftCounts().catch((err) => {
+      errors.push(`wiki-drafts: ${err instanceof Error ? err.message : String(err)}`);
+      return [] as { wiki: string; count: number }[];
     }),
     deps.getRecentTraces().catch((err) => {
       errors.push(`traces: ${err instanceof Error ? err.message : String(err)}`);
@@ -167,6 +190,20 @@ export async function assembleAttention(
       actionLabel: "Review →",
       // The gate is per-bot via `?bot=`; qualify the href only where the text is.
       actionHref: multiBot ? `/wiki/gardener?bot=${d.bot}` : "/wiki/gardener",
+    });
+  }
+
+  // 2b. Wiki-keyed gardener drafts (consolidation-gardener `synthesis` proposals) --
+  // These are keyed by wiki_name (a standalone WIKI_EXTRA wiki like mimir), so the
+  // bot-keyed `getDraftCounts` above never sees them. Always qualify the gate link
+  // with `?wiki=<name>` so the consolidation gate opens on the right wiki.
+  for (const w of wikiDraftCounts.filter((d) => d.count > 0)) {
+    items.push({
+      kind: "gardener_drafts",
+      tone: "info",
+      text: `${w.wiki} consolidation gardener has ${w.count} draft${w.count === 1 ? "" : "s"} waiting for review`,
+      actionLabel: "Review →",
+      actionHref: `/wiki/gardener?wiki=${encodeURIComponent(w.wiki)}`,
     });
   }
 
