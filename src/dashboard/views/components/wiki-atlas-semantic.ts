@@ -282,6 +282,11 @@ export interface RailCluster {
   candidate: boolean;
   /** Blob guard tripped (size > RAIL_BLOB_MAX): no member list, no badge. */
   tooBroad: boolean;
+  /** Client-only, set when a Draft-synthesis POST fires for this cluster: the
+   *  `synthesisTopicKey(label)` captured AT CLICK TIME, re-stamped onto the
+   *  recomputed cluster on each rail rebuild so a mid-draft label drift still maps
+   *  to the SAME in-flight/pending entry (never emitted by `computeClusters`). */
+  synthesisKey?: string;
 }
 
 /** Basename without a wiki extension — the display label for a rail member row and

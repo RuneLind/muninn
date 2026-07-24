@@ -1118,6 +1118,43 @@ describe("POST /api/wiki/atlas/draft-synthesis", () => {
     expect(((await res.json()) as { state: string }).state).toBe("pending");
     expect(drafted).toBe(false); // never reached the drafter
   });
+
+  test("409 (pending) when an APPLIED proposal already covers the topic (dedup includes applied)", async () => {
+    // The POST dedups on the applied-inclusive set (default getLiveOrAppliedTopicKeysByWiki),
+    // matching the GET's pending-mark — so a topic that was already APPLIED 409s a re-POST
+    // instead of silently re-drafting. Modeled here via the injected getLiveTopics.
+    let drafted = false;
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => candidateOverlay,
+      getLiveTopics: async () => [synthesisTopicKey("The Saga")], // an applied topic
+      draft: async () => {
+        drafted = true;
+        return { ok: true, proposal: null, topicKey: synthesisTopicKey("The Saga") };
+      },
+    });
+    const res = await post("?wiki=synthwiki", { label: "The Saga", members });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { state: string }).state).toBe("pending");
+    expect(drafted).toBe(false);
+  });
+
+  test("409 (running) when another draft is already in flight for the same wiki (single-flight)", async () => {
+    // Hang the first draft so its in-flight key stays in the set, then POST a
+    // DIFFERENT topic on the same wiki — the per-wiki single-flight guard rejects it
+    // even though the per-topic key differs (closes the label-drift double-spend).
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => candidateOverlay,
+      getLiveTopics: async () => [],
+      draft: () => new Promise(() => {}), // never settles ⇒ stays in flight
+    });
+    const first = await post("?wiki=synthwiki", { label: "The Saga", members });
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { state: string }).state).toBe("started");
+
+    const second = await post("?wiki=synthwiki", { label: "A Different Saga", members });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { state: string }).state).toBe("running");
+  });
 });
 
 describe("synthesis topic_key slug parity", () => {
