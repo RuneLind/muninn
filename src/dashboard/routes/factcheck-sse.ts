@@ -28,12 +28,11 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { StreamProgressEvent } from "../../ai/stream-parser.ts";
-import { executeOneShot } from "../../ai/one-shot.ts";
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { getToolProgress, rawUrlField } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
-import { attachToolSpans } from "../../core/tool-spans.ts";
+import { tracedOneShot } from "../../core/traced-one-shot.ts";
 import { locateExcerpt } from "../../wiki/explain-context.ts";
 import {
   stripFactcheckBlock,
@@ -538,29 +537,21 @@ async function runFactcheck(
         heading: opts.ctx,
       });
 
-      tracer.start(label, {
-        claimIndex: index,
-        model: botConfig.model,
-        // Stopgap connector stamp — each claim verify is an executeOneShot on the
-        // bot's connector. These spans are named claude:claim-<i> (never "claude"),
-        // so they deliberately fall through the getRecentTraces fast path to the
-        // walk aggregate, which sums their tokens + collapses model/connector.
-        connector: botConfig.connector ?? "claude-cli",
-      });
       try {
-        const claude = await executeOneShot(userPrompt, config, botConfig, {
+        // The shared seam owns the `claude:claim-<i>` span (start + end + tool
+        // child spans under `label`). These spans are named claude:claim-<i>
+        // (never "claude"), so they deliberately fall through the getRecentTraces
+        // fast path to the walk aggregate, which sums their tokens + collapses
+        // model/connector. Because the seam stamps `requestedModel` at start and
+        // `model` only on a resolved end, an errored claim carries NO `model` attr
+        // and so can no longer flip the /traces row to `model='mixed'`.
+        const claude = await tracedOneShot(tracer, label, userPrompt, config, botConfig, {
           systemPrompt,
           onProgress,
           timeoutMs: FACTCHECK_CLAIM_TIMEOUT_MS,
+          startAttrs: { claimIndex: index },
         });
         addUsage(claude);
-        tracer.end(label, {
-          inputTokens: claude.inputTokens,
-          outputTokens: claude.outputTokens,
-          model: claude.model,
-          toolCount: claude.toolCalls?.length ?? 0,
-        });
-        await attachToolSpans(tracer, claude.toolCalls, !!config.tracingCaptureToolOutputs, label);
         const result = (claude.result ?? "").trim();
         return result
           // A genuine model verdict (even a model-chosen ❓ ⇒ `unverifiable`).
@@ -569,7 +560,7 @@ async function runFactcheck(
           : { block: synthBlock(index, total, claim.title, "The verifier returned no verdict for this claim."), real: false, outcome: "error" };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        tracer.end(label, { error: message });
+        // The seam already ended the claim span with `{ error }`.
         log.warn("Fact check claim failed bot={bot} claim={index} error={error}", {
           bot: botConfig.name,
           index,
@@ -613,9 +604,6 @@ async function runFactcheck(
     // ── Phase 3: compose (multi-claim only) ────────────────────────────────
     let lede = "";
     if (total > 1) {
-      // Stopgap connector stamp — compose is an executeOneShot on the bot's
-      // connector, summed into the walk aggregate alongside the claim spans.
-      tracer.start("compose", { connector: botConfig.connector ?? "claude-cli" });
       try {
         const composePrompts = buildComposePrompt({
           title: opts.meta.title,
@@ -628,26 +616,24 @@ async function runFactcheck(
         const composeProgress = (event: StreamProgressEvent) => {
           if (event.type === "text_delta") safeWrite("delta", { type: "delta", text: event.text });
         };
-        // Only thinking is disabled (`thinkingMaxTokens: 0`); tools stay available.
-        // The compose prompt steers away from tool use, but a stray tool excursion
-        // just burns the COMPOSE_BUDGET_MS window and degrades to the neutral header
-        // below — we deliberately don't try to hard-disable tools here.
-        const compose = await executeOneShot(composePrompts.userPrompt, config, botConfig, {
+        // The shared seam owns the `compose` span (connector + requestedModel at
+        // start, model/tokens at end, `{ error }` on throw). It's named `compose`
+        // (never "claude"), so it too falls through to the walk aggregate alongside
+        // the claim spans. Only thinking is disabled (`thinkingMaxTokens: 0`); tools
+        // stay available — the compose prompt steers away from tool use, but a stray
+        // tool excursion just burns the COMPOSE_BUDGET_MS window and degrades to the
+        // neutral header below (we deliberately don't hard-disable tools here).
+        const compose = await tracedOneShot(tracer, "compose", composePrompts.userPrompt, config, botConfig, {
           systemPrompt: composePrompts.systemPrompt,
           thinkingMaxTokens: 0,
           timeoutMs: COMPOSE_BUDGET_MS,
           onProgress: composeProgress,
         });
         addUsage(compose, "compose");
-        tracer.end("compose", {
-          inputTokens: compose.inputTokens,
-          outputTokens: compose.outputTokens,
-          model: compose.model,
-        });
         lede = (compose.result ?? "").trim();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        tracer.end("compose", { error: message });
+        // The seam already ended the compose span with `{ error }`.
         log.warn("Fact check compose failed bot={bot} error={error} — degrading to header", {
           bot: botConfig.name,
           error: message,

@@ -20,6 +20,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
+import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
@@ -332,7 +333,6 @@ export async function generateWikiDigest(
   botConfig: BotConfig,
   opts: GenerateDigestOptions = {},
 ): Promise<WikiDigest | null> {
-  const oneShot = opts.oneShot ?? executeOneShot;
   const now = opts.now ?? Date.now;
   const timeoutMs = opts.timeoutMs ?? DIGEST_TIMEOUT_MS;
 
@@ -376,27 +376,20 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
   });
   agentStatus.setSourcePage(reqId, "/wiki");
   setConnectorInfo(reqId, botConfig, config.claudeModel);
-  tracer.start("claude", {
-    wiki: wikiName,
-    entries: entries.length,
-    fromDate,
-    toDate,
-    // Stopgap connector stamp — the digest runs the bot's connector via
-    // executeOneShot, so the `claude` span (a direct child of the wiki_digest
-    // root) can honestly report it. Un-blanks the connector on /traces; the
-    // model lands on tracer.end below.
-    connector: botConfig.connector ?? "claude-cli",
-  });
 
+  // The `claude` span (start/end + connector/requestedModel/model/tokens + tool
+  // child spans) is owned by the shared seam; this function keeps only the
+  // digest-specific `/agents` run mirror + the trace-root finish.
   let result: ClaudeExecResult;
   try {
-    result = await oneShot(userPrompt, config, botConfig, {
+    result = await tracedOneShot(tracer, "claude", userPrompt, config, botConfig, {
       systemPrompt: DIGEST_SYSTEM_PROMPT,
       timeoutMs,
+      ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
+      startAttrs: { wiki: wikiName, entries: entries.length, fromDate, toDate },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.end("claude", { error: message });
     tracer.finish("error", { wiki: wikiName, error: message });
     agentStatus.completeRequest(reqId, {});
     throw err; // the route already degrades this to `{ digest: null }`
@@ -408,7 +401,6 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     numTurns: result.numTurns,
     costUsd: result.costUsd,
   };
-  tracer.end("claude", { ...usage, model: result.model });
   if (result.model) agentStatus.setModel(reqId, result.model);
   tracer.finish("ok", { wiki: wikiName, entries: entries.length, ...usage });
   agentStatus.completeRequest(reqId, {

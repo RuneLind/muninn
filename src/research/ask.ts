@@ -12,7 +12,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
+import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { Tracer } from "../tracing/tracer.ts";
 import { researchKnowledge, type ResearchDecomposition, type SubQuestionTrace } from "../ai/research-knowledge.ts";
@@ -184,25 +184,20 @@ export async function streamResearchAnswer(
       }
     };
 
-    tracer.start("claude", {
-      sources: citations.length,
-      historyTurns: history.length,
-      model: botConfig.model,
-      connector: botConfig.connector ?? "claude-cli",
+    // The `claude` synthesis span (start/end + connector/requestedModel/model/
+    // tokens + tool child spans) is owned by the shared seam; this orchestration
+    // keeps only the trace-root finish (in the finally/catch below).
+    const claude = await tracedOneShot(tracer, "claude", userPrompt, config, botConfig, {
+      systemPrompt: opts.systemPrompt ?? SYNTHESIS_SYSTEM_PROMPT,
+      onProgress,
+      startAttrs: { sources: citations.length, historyTurns: history.length },
     });
-    const claude = await executeOneShot(
-      userPrompt,
-      config,
-      botConfig,
-      { systemPrompt: opts.systemPrompt ?? SYNTHESIS_SYSTEM_PROMPT, onProgress },
-    );
     usage = {
       inputTokens: claude.inputTokens,
       outputTokens: claude.outputTokens,
       numTurns: claude.numTurns,
       costUsd: claude.costUsd,
     };
-    tracer.end("claude", { ...usage, model: claude.model });
     if (claude.model) agentStatus.setModel(reqId, claude.model);
 
     const answer = (claude.result ?? "").trim();

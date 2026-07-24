@@ -5,7 +5,7 @@ import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
-import { attachToolSpans } from "../core/tool-spans.ts";
+import { tracedOneShot } from "../core/traced-one-shot.ts";
 import { getConnectorLabel } from "../observability/agent-status.ts";
 import type { RunMeta, SimilarArticle } from "./job-store.ts";
 
@@ -85,7 +85,6 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
     botName: botConfig.name,
     platform: "capture",
   });
-  const oneShot = opts.oneShot ?? executeOneShot;
 
   const connectorLabel = getConnectorLabel(botConfig.connector ?? "claude-cli");
   // Bind what's already known so the *in-flight* card is truthful; the model
@@ -109,23 +108,24 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       ? CAPTURE_THINKING_MAX_TOKENS
       : opts.thinkingMaxTokens;
 
-  tracer.start("claude", {
-    source,
-    title,
-    url,
-    connector: botConfig.connector ?? "claude-cli",
-    model: botConfig.model,
-    ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-    ...(opts.extraTraceAttrs ?? {}),
-  });
-
   try {
-    const result = await oneShot(opts.prompt, config, botConfig, {
+    // The `claude` span (start/end + tool child spans) is owned by the shared
+    // seam; this wrapper keeps only the capture-specific parts — the thinking cap
+    // above, the job-store `attachRun` mirror, and the trace-root finish.
+    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, botConfig, {
       systemPrompt: opts.systemPrompt,
       ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.extraDirs ? { extraDirs: opts.extraDirs } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+      ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
+      startAttrs: {
+        source,
+        title,
+        url,
+        ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
+        ...(opts.extraTraceAttrs ?? {}),
+      },
     });
 
     const usage = {
@@ -137,16 +137,12 @@ export async function runCaptureOneShot(opts: CaptureOneShotOptions): Promise<Cl
       costUsd: result.costUsd,
     };
 
-    tracer.end("claude", { ...usage, durationMs: result.durationMs });
-    // Tool child spans hang off the `claude` span, exactly as on the chat path.
-    await attachToolSpans(tracer, result.toolCalls, !!config.tracingCaptureToolOutputs);
     attachRun(jobId, usage);
     tracer.finish("ok", { source, ...usage });
 
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.end("claude", { error: message });
     tracer.finish("error", { source, error: message });
     captureLog.warn("Capture summarize failed for {source} job {jobId}: {error}", {
       source,
