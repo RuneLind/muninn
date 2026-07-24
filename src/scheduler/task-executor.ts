@@ -219,6 +219,10 @@ async function generateBriefing(task: ScheduledTask, config: Config, botConfig: 
 
     return {
       markdown: result.result.trim(),
+      // NB: do NOT add `connector` to this briefing task-span meta — the nested
+      // `claude` child span owns it. Stamping it here too would make the
+      // read-side walk's connector-bearing token sum double-count briefing
+      // tokens (parent + child both counted).
       meta: {
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,

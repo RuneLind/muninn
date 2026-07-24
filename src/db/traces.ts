@@ -96,6 +96,12 @@ export async function getRecentTraces(
   const rows = await sql`
     SELECT t.id, t.trace_id, t.parent_id, t.name, t.kind, t.status, t.bot_name, t.user_id, t.username, t.platform,
            t.started_at, t.duration_ms, t.attributes, t.created_at,
+           -- Caveat: w (the watcher aggregate) wins over walk here, so a
+           -- single scheduler tick that carries BOTH token-bearing watcher
+           -- spans AND gardener-draft (walk) tokens reports only the watcher
+           -- sum — the gardener tokens are shadowed. Pre-existing limitation,
+           -- deliberate (mixed-source ticks are rare and w's multi-watcher
+           -- collapse must keep precedence).
            COALESCE(c.input_tokens, w.input_tokens, walk.input_tokens)   AS input_tokens,
            COALESCE(c.output_tokens, w.output_tokens, walk.output_tokens) AS output_tokens,
            COALESCE(c.tool_count, w.tool_count, walk.tool_count)         AS tool_count,
