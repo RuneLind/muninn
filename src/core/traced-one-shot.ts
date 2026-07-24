@@ -39,6 +39,9 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import { attachToolSpans } from "./tool-spans.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("core", "traced-one-shot");
 
 export interface TracedOneShotOptions {
   /** System prompt passed through to the connector. */
@@ -114,12 +117,25 @@ export async function tracedOneShot(
       durationMs: result.durationMs,
     });
     // Tool child spans hang off the model span (or the caller's parentLabel).
-    await attachToolSpans(
-      tracer,
-      result.toolCalls,
-      opts.captureToolOutputs ?? !!config.tracingCaptureToolOutputs,
-      opts.parentLabel ?? spanLabel,
-    );
+    // Fail-soft decoration: attachToolSpans is pure trace ornamentation, and the
+    // span has ALREADY been end()ed above. A throw from here must never reach the
+    // outer catch — that would call `tracer.end(spanLabel, { error })` a SECOND
+    // time and `Timing.end` throws `No active mark` on the already-ended label,
+    // masking the real failure and finishing the trace root with the wrong
+    // message. So we swallow it (warn only) and never re-end the span or rethrow.
+    try {
+      await attachToolSpans(
+        tracer,
+        result.toolCalls,
+        opts.captureToolOutputs ?? !!config.tracingCaptureToolOutputs,
+        opts.parentLabel ?? spanLabel,
+      );
+    } catch (err) {
+      log.warn("attachToolSpans failed for {label} (span already ended, ignoring): {error}", {
+        label: spanLabel,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     return result;
   } catch (err) {

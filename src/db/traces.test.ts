@@ -341,18 +341,19 @@ describe("traces", () => {
       const claim0 = {
         id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
         name: "claude:claim-0", kind: "span" as const, startedAt: new Date(),
-        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 1000, outputTokens: 50 },
+        // requestedModel mirrors the seam's start stamp (every claim span now carries it).
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", model: "claude-sonnet-4-6", inputTokens: 1000, outputTokens: 50 },
       };
       await saveSpan(claim0);
       await saveSpan({
         id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
         name: "claude:claim-1", kind: "span" as const, startedAt: new Date(),
-        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 2000, outputTokens: 80 },
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", model: "claude-sonnet-4-6", inputTokens: 2000, outputTokens: 80 },
       });
       await saveSpan({
         id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
         name: "compose", kind: "span" as const, startedAt: new Date(),
-        attributes: { connector: "claude-sdk", model: "claude-sonnet-4-6", inputTokens: 500, outputTokens: 20 },
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", model: "claude-sonnet-4-6", inputTokens: 500, outputTokens: 20 },
       });
       // The Haiku extract span carries a MODEL but no CONNECTOR (it runs through
       // the Haiku router, not the bot connector) — it must be excluded from the
@@ -378,6 +379,48 @@ describe("traces", () => {
       expect(found.attributes.model).toBe("claude-sonnet-4-6");
       expect(found.attributes.connector).toBe("claude-sdk");
       expect(found.attributes.toolCount).toBe(1);
+    });
+
+    test("factcheck-shaped trace with an ERRORED claim: the errored span (connector + requestedModel, NO model) does NOT flip the row to 'mixed'; tokens sum over the connector-bearing set", async () => {
+      // Regression for the seam's central fix: a claim span stamps `requestedModel`
+      // (an ALIAS) at START but only stamps the resolved `model` at successful END.
+      // When the claim ERRORS, the span carries connector + requestedModel + error
+      // but NO `model` — so it contributes nothing to the walk's DISTINCT-model
+      // collapse (the row reports the single resolved model, never 'mixed') and its
+      // (absent) tokens drop out of the connector-bearing sum. Before the fix the
+      // errored span retained the model alias and flipped the row to 'mixed'.
+      const root = makeRootSpan({ name: "factcheck", userId: null, username: null, platform: null });
+      await saveSpan(root);
+
+      // claim-0 succeeded — resolved model + tokens.
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude:claim-0", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", model: "claude-sonnet-5", inputTokens: 1000, outputTokens: 50 },
+      });
+      // claim-1 ERRORED — start stamp only (connector + requestedModel alias + error),
+      // NO resolved `model`, NO tokens.
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "claude:claim-1", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", error: "verify call failed" },
+      });
+      // compose succeeded — same resolved model.
+      await saveSpan({
+        id: crypto.randomUUID(), traceId: root.traceId, parentId: root.id,
+        name: "compose", kind: "span" as const, startedAt: new Date(),
+        attributes: { connector: "claude-sdk", requestedModel: "sonnet", model: "claude-sonnet-5", inputTokens: 500, outputTokens: 20 },
+      });
+
+      const traces = await getRecentTraces(20);
+      const found = traces.find((t) => t.id === root.id)!;
+      // Single resolved model despite the errored claim — NOT 'mixed'.
+      expect(found.attributes.model).toBe("claude-sonnet-5");
+      expect(found.attributes.connector).toBe("claude-sdk");
+      // Tokens sum over the connector-bearing set; the errored span carries no
+      // tokens and so contributes 0 (claim-0 + compose only).
+      expect(found.attributes.inputTokens).toBe(1000 + 500);
+      expect(found.attributes.outputTokens).toBe(50 + 20);
     });
 
     test("task:briefing-shaped nested trace: reads the nested `claude` child, NOT the token-duplicating parent task span (no double count)", async () => {
