@@ -3,7 +3,6 @@ import { join, resolve } from "node:path";
 import { getLog } from "../logging.ts";
 import { parseHivemindConfig, type HivemindBotConfig } from "../hivemind/config.ts";
 import type { McpStatusConfig } from "../ai/mcp-status.ts";
-import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
@@ -182,9 +181,6 @@ export interface BotConfig {
   hivemind?: HivemindBotConfig;
   /** MCP status probing config — controls cache TTL and which servers are critical */
   mcpStatus?: McpStatusConfig;
-  /** Prompt-level corrective retrieval (Path C). See `resolveCorrectiveConfig`
-   *  + CLAUDE.md "Corrective Retrieval" section. */
-  correctiveRetrieval?: CorrectiveRetrievalBotConfig;
   /** True when the bot's .mcp.json registers a `research` MCP server (the
    *  muninn-side `research_knowledge` tool). Drives the one-line system-prompt
    *  nudge in `buildPrompt`. Detected once at discovery. */
@@ -200,10 +196,6 @@ export interface BotConfig {
   /** Auto-commit config for programmatic wiki writes (per-bot config.json
    *  `wikiAutoCommit` block). See `src/wiki/commit.ts`. */
   wikiAutoCommit?: WikiAutoCommitConfig;
-}
-
-export interface CorrectiveRetrievalBotConfig {
-  enabled?: boolean;
 }
 
 /** Per-bot auto-commit config for programmatic wiki writes (gardener apply,
@@ -643,7 +635,7 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       try {
         botSettings = JSON.parse(readFileSync(configJsonPath, "utf-8"));
         // Warn about unknown keys to catch typos
-        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "correctiveRetrieval", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener", "wikiAutoCommit"]);
+        const knownKeys = new Set(["connector", "haikuBackend", "model", "thinkingMaxTokens", "timeoutMs", "restrictedTools", "channelListening", "serena", "baseUrl", "showWaterfall", "componentAnswers", "contextWindow", "hivemind", "mcpStatus", "wikiDir", "wikiCollections", "wikiSynthesisBot", "gardener", "wikiAutoCommit"]);
         const unknownKeys = Object.keys(botSettings).filter((k) => !knownKeys.has(k));
         if (unknownKeys.length > 0) {
           const hint = unknownKeys.includes("prompts")
@@ -705,8 +697,6 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (hasTelegram) platforms.push("telegram");
     if (hasSlack) platforms.push("slack");
 
-    const correctiveRetrieval = botSettings.correctiveRetrieval as CorrectiveRetrievalBotConfig | undefined;
-
     bots.push({
       name,
       dir,
@@ -736,7 +726,6 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
       contextWindow: botSettings.contextWindow as number | undefined,
       hivemind: parseHivemindConfig(botSettings.hivemind) ?? undefined,
       mcpStatus: botSettings.mcpStatus as McpStatusConfig | undefined,
-      correctiveRetrieval,
       hasResearchKnowledge,
       defaultKnowledgeCollections,
       gardener: botSettings.gardener as GardenerConfig | undefined,
@@ -750,12 +739,6 @@ function discoverBotsInternal(opts: { requireTokens: boolean }): BotConfig[] {
     if (botSettings.thinkingMaxTokens !== undefined) configParts.push(`thinking: ${botSettings.thinkingMaxTokens}`);
     if (botSettings.timeoutMs !== undefined) configParts.push(`timeout: ${botSettings.timeoutMs}ms`);
     if (botSettings.baseUrl) configParts.push(`baseUrl: ${botSettings.baseUrl}`);
-    if (resolveCorrectiveConfig({ correctiveRetrieval }).enabled) {
-      configParts.push("correctiveRetrieval: on");
-    } else if (correctiveRetrieval) {
-      configParts.push("correctiveRetrieval: off (configured but disabled)");
-    }
-
     const channelListening = botSettings.channelListening as ChannelListeningConfig | undefined;
 
     log.info(

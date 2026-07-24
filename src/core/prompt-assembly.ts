@@ -3,7 +3,6 @@ import type { UserIdentity } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
 import { buildPrompt } from "../ai/prompt-builder.ts";
 import type { PromptBuildResult } from "../ai/prompt-builder.ts";
-import { resolveCorrectiveConfig } from "../ai/corrective-config.ts";
 import { savePromptSnapshot } from "../db/prompt-snapshots.ts";
 import { getLog } from "../logging.ts";
 import { slackPostCapability } from "./response-handler.ts";
@@ -53,7 +52,6 @@ export async function assemblePrompt(params: AssemblePromptParams): Promise<Asse
     restrictedTools: botConfig.restrictedTools,
     userIdentity: userIdentity ?? username,
     threadId,
-    correctiveRetrievalEnabled: resolveCorrectiveConfig(botConfig).enabled,
     researchKnowledgeAvailable: !!botConfig.hasResearchKnowledge,
     componentAnswersEnabled: !!botConfig.componentAnswers,
   });
