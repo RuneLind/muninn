@@ -7,6 +7,11 @@ function pg(relPath: string): WikiPageMeta {
   return { relPath } as unknown as WikiPageMeta;
 }
 
+/** WikiPageMeta with the `type`/`tags` the cluster-rail overlay fields read. */
+function pgT(relPath: string, type: string, tags: string[]): WikiPageMeta {
+  return { relPath, type, tags } as unknown as WikiPageMeta;
+}
+
 /** Terse similarity-graph builder. */
 function graph(
   nodes: { id: string; community?: number }[],
@@ -195,5 +200,32 @@ describe("joinSemantic", () => {
     expect(overlay!.nodeCommunity["lonely.md"]).toBe("wiki:5");
     // …but it contributes no communities row.
     expect(overlay!.communities.map((c) => c.id)).toEqual(["wiki:0"]);
+  });
+
+  test("nodeType/nodeTags populated for edge endpoints + community members (cluster rail)", () => {
+    const graphs = new Map<string, SimilarityGraph>([
+      [
+        "wiki",
+        graph(
+          [
+            { id: "plans/a.md", community: 0 },
+            { id: "plans/b.md", community: 0 },
+          ],
+          [{ source: "plans/a.md", target: "plans/b.md", similarity: 0.99 }],
+          [{ id: 0, size: 2, top_tags: [{ tag: "rag", count: 2 }] }],
+        ),
+      ],
+    ]);
+    const overlay = joinSemantic(
+      [pgT("plans/a.md", "plan", ["rag", "retrieval"]), pgT("plans/b.md", "report", ["rag"])],
+      graphs,
+      ["wiki"],
+    );
+    expect(overlay).not.toBeNull();
+    // Type + tags carried for every overlay node (both edge endpoint AND community member).
+    expect(overlay!.nodeType["plans/a.md"]).toBe("plan");
+    expect(overlay!.nodeType["plans/b.md"]).toBe("report");
+    expect(overlay!.nodeTags["plans/a.md"]).toEqual(["rag", "retrieval"]);
+    expect(overlay!.nodeTags["plans/b.md"]).toEqual(["rag"]);
   });
 });

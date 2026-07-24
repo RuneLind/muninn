@@ -26,6 +26,7 @@
  * row.
  */
 
+import { GENERIC_TAGS } from "../dashboard/views/components/wiki-atlas-semantic.ts";
 import { coverageKey } from "./index-coverage.ts";
 import { normalizeRelPath, type WikiPageMeta } from "./store.ts";
 
@@ -82,10 +83,14 @@ export interface SemanticOverlay {
   communities: SemanticCommunity[];
   /** emitKey → namespaced community id (isolate ids with no community row survive). */
   nodeCommunity: Record<string, string>;
+  /** emitKey → page type — for EVERY overlay node (edge endpoint or community
+   *  member), incl. pages capped out of the rendered columns and excluded types.
+   *  Feeds PR 3's client cluster rail (synthesis-candidate badge type-set map). */
+  nodeType: Record<string, string>;
+  /** emitKey → page tags, same population as `nodeType` — feeds the cluster rail's
+   *  top-2 informative-tag label over the FULL graph. */
+  nodeTags: Record<string, string[]>;
 }
-
-/** Tags too generic to make a useful community label. */
-const GENERIC_TAGS = new Set(["plan", "wiki", "blog"]);
 
 function stripExt(s: string): string {
   return s.replace(/\.(md|mdx|html)$/i, "");
@@ -131,8 +136,13 @@ export function joinSemantic(
 
   // Match key (NFC-folded) → emit key (bare normalizeRelPath, the atlas node key).
   const emitByMatch = new Map<string, string>();
+  // Emit key → its page's type + tags (for the client cluster rail — populated for
+  // every overlay node below, incl. capped-out + excluded-type pages).
+  const metaByEmit = new Map<string, WikiPageMeta>();
   for (const p of indexPages) {
-    emitByMatch.set(coverageKey(p.relPath), normalizeRelPath(p.relPath));
+    const emit = normalizeRelPath(p.relPath);
+    emitByMatch.set(coverageKey(p.relPath), emit);
+    metaByEmit.set(emit, p);
   }
   const resolve = (id: string): string | undefined => emitByMatch.get(coverageKey(id));
 
@@ -193,5 +203,24 @@ export function joinSemantic(
   const edges = [...edgeMax.values()];
   if (edges.length === 0 && Object.keys(nodeCommunity).length === 0) return null;
 
-  return { edges, communities, nodeCommunity };
+  // Per-node type + tags for every emitKey the overlay references (edge endpoints
+  // + community members). Bounded by the overlay, not the whole index. The rail's
+  // union-find only needs edge endpoints; community keys are included so a
+  // dim-others node still resolves its type/tags.
+  const nodeType: Record<string, string> = Object.create(null);
+  const nodeTags: Record<string, string[]> = Object.create(null);
+  const attach = (emit: string) => {
+    if (Object.hasOwn(nodeType, emit)) return;
+    const meta = metaByEmit.get(emit);
+    if (!meta) return;
+    nodeType[emit] = meta.type;
+    nodeTags[emit] = meta.tags;
+  };
+  for (const [lo, hi] of edges) {
+    attach(lo);
+    attach(hi);
+  }
+  for (const emit of Object.keys(nodeCommunity)) attach(emit);
+
+  return { edges, communities, nodeCommunity, nodeType, nodeTags };
 }
