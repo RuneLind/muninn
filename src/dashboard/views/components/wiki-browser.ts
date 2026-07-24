@@ -1005,7 +1005,7 @@ function renderStart(): void {
   if (startTab === "atlas") {
     // Atlas passes (relPath, name); drop the display name — the relPath is
     // authoritative and drives the collision-proof history round-trip.
-    initAtlas({ withWiki, openPage: (relPath) => loadPageByRelPath(relPath) });
+    initAtlas({ withWiki, openPage: (relPath) => loadPageByRelPath(relPath), wiki: WIKI });
   }
   document.getElementById("connBody")!.innerHTML =
     '<div class="wiki-conn-empty">Select a page to see its connections.</div>';

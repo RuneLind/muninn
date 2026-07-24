@@ -37,6 +37,32 @@ export interface SemanticOverlay {
   /** emitKey → page tags, same population as `nodeType` — feeds the cluster rail's
    *  top-2 informative-tag label over the FULL graph (not just rendered pills). */
   nodeTags?: Record<string, string[]>;
+  /** Consolidation-gardener topic_keys that already have a LIVE or APPLIED
+   *  synthesis proposal for this wiki (attached by the atlas route, NOT the pure
+   *  `joinSemantic` — it's a DB read). A cluster whose `synthesisTopicKey(label)`
+   *  is in this set renders the "→ gate" link instead of the "Draft synthesis"
+   *  button. Absent on legacy payloads / test fixtures ⇒ no pending marks. */
+  pendingSynthesisTopics?: string[];
+}
+
+/**
+ * Slug a cluster label into a stable consolidation-gardener `topic_key`. MUST stay
+ * byte-identical to the server's derivation (`src/gardener/synthesis-drafter.ts`
+ * imports THIS function) so the client's pending-state check and the persisted
+ * proposal's `topic_key` agree. Same kebab shape as the weekly gardener's
+ * `slugifyTopicKey` (`doc-page-map.ts`): NFKD-fold, lowercase, non-alphanumerics
+ * collapsed to single hyphens, edges trimmed; falls back to `"topic"` for a label
+ * with no alphanumerics. Lives in this import-safe module so BOTH the bundled
+ * client rail and server code share one definition (slug parity).
+ */
+export function synthesisTopicKey(label: string): string {
+  return (
+    label
+      .normalize("NFKD")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "topic"
+  );
 }
 
 /** Threshold slider bounds + default (semantic EDGE gate, not the node colouring). */
@@ -256,6 +282,11 @@ export interface RailCluster {
   candidate: boolean;
   /** Blob guard tripped (size > RAIL_BLOB_MAX): no member list, no badge. */
   tooBroad: boolean;
+  /** Client-only, set when a Draft-synthesis POST fires for this cluster: the
+   *  `synthesisTopicKey(label)` captured AT CLICK TIME, re-stamped onto the
+   *  recomputed cluster on each rail rebuild so a mid-draft label drift still maps
+   *  to the SAME in-flight/pending entry (never emitted by `computeClusters`). */
+  synthesisKey?: string;
 }
 
 /** Basename without a wiki extension — the display label for a rail member row and

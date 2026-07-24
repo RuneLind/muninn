@@ -29,6 +29,7 @@ import {
   computeColoring,
   neighborsFor,
   stemOf,
+  synthesisTopicKey,
   SEM_OTHER_SLOT,
   SEM_THRESHOLD_DEFAULT,
   SEM_THRESHOLD_MAX,
@@ -92,6 +93,8 @@ export interface AtlasDeps {
   withWiki(url: string): string;
   /** Open a wiki page in the reader by its normalized relPath (+ display name). */
   openPage(relPath: string, name: string): void;
+  /** Canonical wiki name — the draft-synthesis POST body + the gate deep-link. "" = default/env. */
+  wiki: string;
 }
 
 type Selection =
@@ -106,6 +109,12 @@ let payload: AtlasPayload | null = null;
 let selection: Selection | null = null;
 let proj: Projection = "types";
 let resizeBound = false;
+
+/** Reconcile-poll cadence + budget for a detached synthesis draft: re-check the
+ *  server's pending set every 5s, giving up after ~3 min (the detached draft's
+ *  one-shot budget). Past the deadline the topic drops to a "retry draft" button. */
+const DRAFT_POLL_INTERVAL_MS = 5000;
+const DRAFT_POLL_MAX_MS = 180000;
 
 // ── Semantic overlay state (all inert unless `payload.semantic` is present) ──
 /** Overlay toggle — defaults OFF; the `semantic=1` fetch is eager on tab open so
@@ -293,15 +302,145 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
   };
 
   // ── Cluster rail (recomputed on threshold change; full-graph union-find) ────
+  // Three data-driven per-topic states survive the slider/toggle re-renders (state
+  // lives here, NOT on the button DOM the rebuild wipes):
+  //  • pendingTopics  — a live/applied proposal exists (server) OR this session's
+  //    draft has been RECONCILED as persisted → renders the "→ gate" link.
+  //  • draftingTopics — a detached draft POST is in flight, awaiting reconciliation
+  //    → renders a disabled "drafting…" button.
+  //  • retryTopics    — the draft POST hard-failed or the reconcile poll timed out
+  //    → renders a "retry draft" button (a non-color a11y cue, plus the err class).
+  const pendingTopics = new Set<string>(data.semantic?.pendingSynthesisTopics ?? []);
+  const draftingTopics = new Set<string>();
+  const retryTopics = new Set<string>();
+  // clusterId → the topicKey captured at click time. computeClusters mints fresh
+  // cluster objects each rebuild, so we re-stamp `synthesisKey` from this by the
+  // stable cluster id (smallest member key) — a label drift can't strand the state.
+  const draftingKeyByClusterId = new Map<string, string>();
+  const draftDeadlines = new Map<string, number>(); // topicKey → poll deadline (ms)
+  let draftPollTimer: ReturnType<typeof setInterval> | undefined;
+
   /** Recompute the components at the current threshold + repaint the rail body.
    *  Drops a stale cluster selection whose component no longer exists. */
   const buildClusterRail = () => {
     const body = root.querySelector(".wiki-atlas-clusters-body") as HTMLElement | null;
     if (!body) return;
     clustersNow = data.semantic ? computeClusters(data.semantic, threshold) : [];
+    // Re-stamp the click-time topicKey onto any recomputed drafting cluster so a
+    // label drift mid-draft still resolves to the same in-flight entry.
+    for (const c of clustersNow) {
+      const k = draftingKeyByClusterId.get(c.id);
+      if (k) c.synthesisKey = k;
+    }
     if (clusterSel && !clustersNow.some((c) => c.id === clusterSel)) clusterSel = null;
     const renderedSet = new Set(Object.keys(activeEls()));
-    body.innerHTML = clusterRailHtml(clustersNow, renderedSet);
+    body.innerHTML = clusterRailHtml(
+      clustersNow,
+      renderedSet,
+      pendingTopics,
+      draftingTopics,
+      retryTopics,
+      deps.wiki,
+    );
+  };
+
+  /** One shared reconcile loop draining ALL drafting keys — never more than one
+   *  timer. Every {@link DRAFT_POLL_INTERVAL_MS} it re-reads the server's pending
+   *  set (cheap: the cached overlay + a fresh `pendingSynthesisTopics` DB read) and,
+   *  per drafting key, either promotes it to `pendingTopics` (proposal persisted) or,
+   *  once past its deadline, drops it to `retryTopics`. Stops itself when idle. */
+  const stopDraftPoll = () => {
+    if (draftPollTimer !== undefined) {
+      clearInterval(draftPollTimer);
+      draftPollTimer = undefined;
+    }
+  };
+  const startDraftPoll = () => {
+    if (draftPollTimer !== undefined) return; // one loop at a time
+    draftPollTimer = setInterval(async () => {
+      if (draftingTopics.size === 0) {
+        stopDraftPoll();
+        return;
+      }
+      let pending: string[] | null = null;
+      try {
+        // No `refresh=1`: the overlay stays cached, but pendingSynthesisTopics is a
+        // fresh per-request DB read — exactly what we reconcile against.
+        const r = await fetch(deps.withWiki("/api/wiki/atlas?semantic=1"));
+        if (r.ok) {
+          const j = (await r.json()) as { semantic?: { pendingSynthesisTopics?: string[] } };
+          pending = j.semantic?.pendingSynthesisTopics ?? null;
+        }
+      } catch {
+        /* transient — retry on the next tick, deadline still applies */
+      }
+      let changed = false;
+      const now = Date.now();
+      for (const key of [...draftingTopics]) {
+        if (pending && pending.includes(key)) {
+          draftingTopics.delete(key);
+          draftDeadlines.delete(key);
+          pendingTopics.add(key);
+          changed = true;
+        } else if ((draftDeadlines.get(key) ?? 0) <= now) {
+          draftingTopics.delete(key);
+          draftDeadlines.delete(key);
+          retryTopics.add(key);
+          changed = true;
+        }
+      }
+      if (changed) buildClusterRail();
+      if (draftingTopics.size === 0) stopDraftPoll();
+    }, DRAFT_POLL_INTERVAL_MS);
+  };
+
+  /** Fire the draft-synthesis POST for a candidate cluster. State is data-driven:
+   *  we flip the topic into `draftingTopics` and rebuild (a disabled "drafting…"
+   *  button that survives re-renders), start the reconcile poll, and DON'T
+   *  optimistically mark it pending — a detached draft can still fail. A 200
+   *  `started` / 409 `running` is left for the poll to confirm; a 409 `pending`
+   *  means the proposal already exists so we promote immediately; a hard error
+   *  drops it to `retryTopics`. Re-entry while already drafting is a no-op. */
+  const draftSynthesis = (cid: string) => {
+    const cluster = clustersNow.find((x) => x.id === cid);
+    if (!cluster || !cluster.candidate) return;
+    const key = cluster.synthesisKey ?? synthesisTopicKey(cluster.label);
+    if (draftingTopics.has(key)) return; // already in flight — no-op
+    cluster.synthesisKey = key;
+    draftingKeyByClusterId.set(cluster.id, key);
+    retryTopics.delete(key);
+    draftingTopics.add(key);
+    draftDeadlines.set(key, Date.now() + DRAFT_POLL_MAX_MS);
+    buildClusterRail();
+    startDraftPoll();
+
+    const settleRetry = () => {
+      draftingTopics.delete(key);
+      draftDeadlines.delete(key);
+      retryTopics.add(key);
+      buildClusterRail();
+    };
+    fetch(deps.withWiki("/api/wiki/atlas/draft-synthesis"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wiki: deps.wiki, members: cluster.members, label: cluster.label }),
+    })
+      .then((r) => r.json().then((j: { state?: string; error?: string }) => ({ status: r.status, j })))
+      .then(({ status, j }) => {
+        if (status === 409 && j.state === "pending") {
+          // The proposal already exists in the gate — promote now, skip the poll.
+          draftingTopics.delete(key);
+          draftDeadlines.delete(key);
+          pendingTopics.add(key);
+          buildClusterRail();
+          return;
+        }
+        // started (200) / running (409): leave drafting — the poll reconciles when
+        // the detached draft persists (or times out to retry).
+        if (status === 200 || (status === 409 && j.state === "running")) return;
+        settleRetry(); // 400/500 or an unexpected shape — offer a retry.
+      })
+      .catch(settleRetry);
   };
 
   /** Dim non-members of the selected cluster in the active projection (reuses the
@@ -496,6 +635,15 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
       if (btn) btn.textContent = collapsed ? "▸" : "▾";
       return;
     }
+    // Draft-synthesis button — POST the candidate cluster into the gardener gate.
+    const cdraft = t.closest?.(".wiki-atlas-cdraft") as HTMLButtonElement | null;
+    if (cdraft) {
+      const cid = cdraft.getAttribute("data-cid");
+      if (cid) draftSynthesis(cid);
+      return;
+    }
+    // "proposal pending →" gate link — let the anchor navigate; don't toggle the cluster.
+    if (t.closest?.(".wiki-atlas-cgate")) return;
     // A cluster member row — deep-links to the reader page (rendered or not).
     const cmember = t.closest?.(".wiki-atlas-cmember") as HTMLElement | null;
     if (cmember) {
@@ -670,22 +818,50 @@ export function shellHtml(data: AtlasPayload, hasTypes: boolean, hasMonths: bool
  * is rendered on the canvas — off-canvas members are muted). A blob-guarded
  * cluster (> RAIL_BLOB_MAX) shows only a header + "raise the threshold" note.
  *
- * Follow-up seam (no code): a `candidate` cluster's `{ members, label }` is exactly
- * the input shape a future consolidation-gardener "Draft synthesis" button would
- * post into the `wiki_proposals` gate as one clustered proposal.
+ * A `candidate` cluster carries a **Draft synthesis** control in its head: a button
+ * that POSTs `{ wiki, members, label }` to `/api/wiki/atlas/draft-synthesis` (the
+ * consolidation gardener), OR — when its `synthesisTopicKey(label)` already has a
+ * live/applied proposal (`pendingTopics`) — a "proposal pending → gate" link
+ * instead. Non-candidate clusters are unchanged (no control), so the rail layout
+ * is untouched where the button is absent.
  */
-function clusterRailHtml(clusters: RailCluster[], renderedSet: Set<string>): string {
+function clusterRailHtml(
+  clusters: RailCluster[],
+  renderedSet: Set<string>,
+  pendingTopics: Set<string>,
+  draftingTopics: Set<string>,
+  retryTopics: Set<string>,
+  wiki: string,
+): string {
   if (!clusters.length) {
     return '<div class="wiki-atlas-hint">No clusters at this threshold — lower the “similar ≥” slider.</div>';
   }
+  const gateUrl = "/wiki/gardener" + (wiki ? "?wiki=" + encodeURIComponent(wiki) : "");
   return clusters
     .map((c) => {
       const badge = c.candidate
         ? '<span class="wiki-atlas-cbadge" title="≥3 narrative-type pages and no synthesis page yet — a consolidation candidate">synthesis candidate</span>'
         : "";
+      // Draft-synthesis control — candidate clusters only, three data-driven states
+      // (never mutated in the DOM, so a re-render preserves them). The topicKey is
+      // the click-time `synthesisKey` if present (survives a label drift), else the
+      // SAME slugger the server persists with. Precedence: pending > drafting > retry.
+      let draftCtl = "";
+      if (c.candidate) {
+        const topic = c.synthesisKey ?? synthesisTopicKey(c.label);
+        if (pendingTopics.has(topic)) {
+          draftCtl = `<a class="wiki-atlas-cgate" href="${esc(gateUrl)}" title="A synthesis proposal for this cluster is in the review gate">proposal pending →</a>`;
+        } else if (draftingTopics.has(topic)) {
+          draftCtl = `<button class="wiki-atlas-cdraft" disabled aria-label="Drafting a synthesis page…" title="A synthesis draft is running — it will appear in the review gate">drafting…</button>`;
+        } else if (retryTopics.has(topic)) {
+          draftCtl = `<button class="wiki-atlas-cdraft err" data-cid="${esc(c.id)}" aria-label="Draft failed — retry" title="The synthesis draft didn't complete — click to try again">retry draft</button>`;
+        } else {
+          draftCtl = `<button class="wiki-atlas-cdraft" data-cid="${esc(c.id)}" title="Draft a synthesis page from these ${c.size} pages into the review gate">Draft synthesis</button>`;
+        }
+      }
       const head =
         '<div class="wiki-atlas-cluster-head">' +
-        `<b>${esc(c.label || "cluster")}</b><em>${c.size}</em>${badge}</div>`;
+        `<b>${esc(c.label || "cluster")}</b><em>${c.size}</em>${badge}${draftCtl}</div>`;
       if (c.tooBroad) {
         return (
           `<div class="wiki-atlas-cluster broad" data-cid="${esc(c.id)}">${head}` +

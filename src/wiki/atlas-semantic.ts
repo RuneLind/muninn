@@ -28,7 +28,11 @@
 
 import { GENERIC_TAGS } from "../dashboard/views/components/wiki-atlas-semantic.ts";
 import { coverageKey } from "./index-coverage.ts";
-import { normalizeRelPath, type WikiPageMeta } from "./store.ts";
+import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("wiki", "atlas-semantic");
 
 // ── Huginn similarity-graph shape (GET /api/collection/<c>/similarity-graph) ──
 
@@ -90,6 +94,12 @@ export interface SemanticOverlay {
   /** emitKey → page tags, same population as `nodeType` — feeds the cluster rail's
    *  top-2 informative-tag label over the FULL graph. */
   nodeTags: Record<string, string[]>;
+  /** Consolidation-gardener topic_keys with a LIVE/APPLIED synthesis proposal for
+   *  this wiki — attached by the atlas route (a DB read via
+   *  `getLiveOrAppliedTopicKeysByWiki`), NOT by the pure `joinSemantic` below. The
+   *  client marks matching clusters as "proposal pending". Absent on the pure join
+   *  output; only the route populates it. */
+  pendingSynthesisTopics?: string[];
 }
 
 function stripExt(s: string): string {
@@ -223,4 +233,97 @@ export function joinSemantic(
   for (const emit of Object.keys(nodeCommunity)) attach(emit);
 
   return { edges, communities, nodeCommunity, nodeType, nodeTags };
+}
+
+// ── Overlay orchestration (fetch + deadline + TTL cache) ─────────────────────
+//
+// Extracted here from `src/dashboard/routes/wiki-routes.ts` so BOTH the atlas
+// route AND the consolidation-gardener (the draft-synthesis route now, PR 3's
+// weekly watcher next) resolve a wiki's semantic overlay the same way. Depends
+// only on `fetchKnowledgeApi` + the pure `joinSemantic` above — no route/DB
+// coupling — so it stays a clean lower-layer helper. The atlas route's behaviour
+// is byte-identical to before the move (same TTL, deadline, degrade contract).
+
+/** Semantic-overlay TTL, same 5-min class as the wiki index TTL — avoids
+ *  re-joining per request (huginn caches the expensive similarity-graph part). */
+export const SEMANTIC_TTL_MS = 5 * 60_000;
+/** ONE total wall-clock budget for the concurrent per-collection similarity-graph
+ *  fetches — not per collection. Each fetch is bounded by this and they run in
+ *  parallel, so the union is ready in ~this, not N× this. */
+export const SEMANTIC_DEADLINE_MS = 2500;
+
+interface SemanticCacheEntry {
+  overlay: SemanticOverlay | null;
+  expiresAt: number;
+}
+/** Semantic overlay cache keyed by canonical wiki name. */
+const semanticCache = new Map<string, SemanticCacheEntry>();
+
+/** Test-only: clear the semantic overlay cache between cases. */
+export function __resetWikiSemanticCacheForTest(): void {
+  semanticCache.clear();
+}
+
+/**
+ * Fetch ONE collection's huginn similarity graph. Best-effort: an unreachable /
+ * non-200 huginn or a mis-shaped body resolves to null (the caller unions what it
+ * got). Never throws.
+ */
+export async function fetchSimilarityGraph(
+  baseUrl: string,
+  collection: string,
+): Promise<SimilarityGraph | null> {
+  try {
+    const apiPath =
+      `/api/collection/${encodeURIComponent(collection)}/similarity-graph` +
+      `?top_k=6&min_similarity=0.9`;
+    const data = await fetchKnowledgeApi(baseUrl, apiPath, { timeoutMs: SEMANTIC_DEADLINE_MS });
+    if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) return null;
+    if (!Array.isArray(data.communities)) data.communities = [];
+    return data as SimilarityGraph;
+  } catch (err) {
+    log.warn("Atlas semantic: similarity-graph fetch failed for {collection}: {error}", {
+      collection,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
+ * Resolve a wiki's semantic overlay: TTL-cached per wiki name, else fetch every
+ * backing collection's similarity graph CONCURRENTLY under one deadline, union
+ * them, and join onto the full index (`joinSemantic`).
+ *
+ * Degrade contract (non-sticky): if EVERY fetch failed ⇒ return null WITHOUT
+ * caching (the next request retries). A partial union (some collections failed)
+ * is joined but NOT cached, so a transient single-collection failure doesn't
+ * stick for the TTL. Only a full-success union is cached.
+ */
+export async function getSemanticOverlay(
+  baseUrl: string,
+  wikiName: string,
+  index: WikiIndex,
+  collections: string[],
+  refresh: boolean,
+): Promise<SemanticOverlay | null> {
+  const now = Date.now();
+  if (!refresh) {
+    const cached = semanticCache.get(wikiName);
+    if (cached && cached.expiresAt > now) return cached.overlay;
+  }
+  const results = await Promise.all(
+    collections.map(
+      async (name) => [name, await fetchSimilarityGraph(baseUrl, name)] as const,
+    ),
+  );
+  const graphs = new Map<string, SimilarityGraph>();
+  for (const [name, g] of results) if (g) graphs.set(name, g);
+  if (graphs.size === 0) return null; // total degrade — do NOT cache
+
+  const overlay = joinSemantic(index.pages, graphs, collections);
+  if (graphs.size === collections.length) {
+    semanticCache.set(wikiName, { overlay, expiresAt: now + SEMANTIC_TTL_MS });
+  }
+  return overlay;
 }

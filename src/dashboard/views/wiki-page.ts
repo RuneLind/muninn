@@ -449,10 +449,16 @@ export async function renderWikiPage(opts?: {
     .wiki-atlas-cluster:not(.broad):hover { border-color: var(--text-faint); }
     .wiki-atlas-cluster.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
     .wiki-atlas-cluster.broad { cursor: default; opacity: .8; }
-    .wiki-atlas-cluster-head { display: flex; align-items: center; gap: 6px; }
-    .wiki-atlas-cluster-head b { font-size: 12px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-atlas-cluster-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .wiki-atlas-cluster-head b { font-size: 12px; color: var(--text-secondary); flex: 1; min-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-atlas-cluster-head em { font-style: normal; color: var(--text-faint); font-size: 10px; font-family: ui-monospace, monospace; }
     .wiki-atlas-cbadge { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--status-warning); border: 1px solid var(--status-warning); border-radius: 6px; padding: 1px 5px; white-space: nowrap; }
+    .wiki-atlas-cdraft { font-size: 9.5px; letter-spacing: .02em; color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 1px 6px; background: transparent; cursor: pointer; white-space: nowrap; }
+    .wiki-atlas-cdraft:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    .wiki-atlas-cdraft:disabled { opacity: .6; cursor: default; }
+    .wiki-atlas-cdraft.err { color: var(--status-error); border-color: var(--status-error); }
+    .wiki-atlas-cgate { font-size: 9.5px; color: var(--text-dim); text-decoration: none; border-bottom: 1px dashed var(--text-faint); white-space: nowrap; }
+    .wiki-atlas-cgate:hover { color: var(--accent); border-color: var(--accent); }
     .wiki-atlas-cbroad { font-size: 10.5px; color: var(--text-faint); font-style: italic; margin-top: 3px; }
     .wiki-atlas-cluster-members { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
     .wiki-atlas-cmember { font-size: 10px; font-family: ui-monospace, Menlo, monospace; color: var(--text-dim); border: 1px solid var(--border-primary); border-radius: 6px; padding: 2px 6px; background: var(--bg-panel); cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

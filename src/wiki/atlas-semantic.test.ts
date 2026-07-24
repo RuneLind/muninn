@@ -1,6 +1,11 @@
 import { test, expect, describe } from "bun:test";
-import { joinSemantic, type SimilarityGraph } from "./atlas-semantic.ts";
-import { normalizeRelPath, type WikiPageMeta } from "./store.ts";
+import {
+  joinSemantic,
+  getSemanticOverlay,
+  __resetWikiSemanticCacheForTest,
+  type SimilarityGraph,
+} from "./atlas-semantic.ts";
+import { normalizeRelPath, type WikiIndex, type WikiPageMeta } from "./store.ts";
 
 /** Minimal WikiPageMeta — joinSemantic reads only `relPath`. */
 function pg(relPath: string): WikiPageMeta {
@@ -227,5 +232,21 @@ describe("joinSemantic", () => {
     expect(overlay!.nodeType["plans/b.md"]).toBe("report");
     expect(overlay!.nodeTags["plans/a.md"]).toEqual(["rag", "retrieval"]);
     expect(overlay!.nodeTags["plans/b.md"]).toEqual(["rag"]);
+  });
+});
+
+describe("getSemanticOverlay (extracted from wiki-routes — degrade contract)", () => {
+  test("returns null (uncached) when every collection fetch fails", async () => {
+    __resetWikiSemanticCacheForTest();
+    const index = { pages: [] } as unknown as WikiIndex;
+    // Port :0 → connection refused ⇒ fetchSimilarityGraph resolves null ⇒ overlay null.
+    const overlay = await getSemanticOverlay(
+      "http://127.0.0.1:0",
+      "somewiki",
+      index,
+      ["mimir"],
+      false,
+    );
+    expect(overlay).toBeNull();
   });
 });

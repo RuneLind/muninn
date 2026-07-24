@@ -4,11 +4,19 @@ import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
+import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
-  joinSemantic,
+  computeClusters,
+  synthesisTopicKey,
+  RAIL_MIN_MEMBERS,
+  RAIL_BLOB_MAX,
+  SEM_THRESHOLD_MIN,
+  SEM_THRESHOLD_MAX,
+  SEM_THRESHOLD_STEP,
   type SemanticOverlay,
-  type SimilarityGraph,
-} from "../../wiki/atlas-semantic.ts";
+} from "../views/components/wiki-atlas-semantic.ts";
+import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
+import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
 import { renderWikiHtml } from "../../wiki/render.ts";
 import {
   listWikis,
@@ -110,90 +118,6 @@ export function __seedWikiDigestForTest(name: string, digest: WikiDigest): void 
   digestCache.set(name, digest);
 }
 
-/** Semantic-overlay TTL, same 5-min class as the wiki index TTL — avoids
- *  re-joining per request (huginn caches the expensive similarity-graph part). */
-const SEMANTIC_TTL_MS = 5 * 60_000;
-/** ONE total wall-clock budget for the concurrent per-collection similarity-graph
- *  fetches — not per collection. Each fetch is bounded by this and they run in
- *  parallel, so the union is ready in ~this, not N× this. */
-const SEMANTIC_DEADLINE_MS = 2500;
-
-interface SemanticCacheEntry {
-  overlay: SemanticOverlay | null;
-  expiresAt: number;
-}
-/** Semantic overlay cache keyed by canonical wiki name. */
-const semanticCache = new Map<string, SemanticCacheEntry>();
-
-/** Test-only: clear the semantic overlay cache between cases. */
-export function __resetWikiSemanticCacheForTest(): void {
-  semanticCache.clear();
-}
-
-/**
- * Fetch ONE collection's huginn similarity graph. Best-effort: an unreachable /
- * non-200 huginn or a mis-shaped body resolves to null (the caller unions what it
- * got). Never throws.
- */
-async function fetchSimilarityGraph(
-  baseUrl: string,
-  collection: string,
-): Promise<SimilarityGraph | null> {
-  try {
-    const path =
-      `/api/collection/${encodeURIComponent(collection)}/similarity-graph` +
-      `?top_k=6&min_similarity=0.9`;
-    const data = await fetchKnowledgeApi(baseUrl, path, { timeoutMs: SEMANTIC_DEADLINE_MS });
-    if (!data || !Array.isArray(data.nodes) || !Array.isArray(data.edges)) return null;
-    if (!Array.isArray(data.communities)) data.communities = [];
-    return data as SimilarityGraph;
-  } catch (err) {
-    log.warn("Atlas semantic: similarity-graph fetch failed for {collection}: {error}", {
-      collection,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
-/**
- * Resolve a wiki's semantic overlay: TTL-cached per wiki name, else fetch every
- * backing collection's similarity graph CONCURRENTLY under one deadline, union
- * them, and join onto the full index (`joinSemantic`).
- *
- * Degrade contract (non-sticky): if EVERY fetch failed ⇒ return null WITHOUT
- * caching (the next request retries). A partial union (some collections failed)
- * is joined but NOT cached, so a transient single-collection failure doesn't
- * stick for the TTL. Only a full-success union is cached.
- */
-async function getSemanticOverlay(
-  baseUrl: string,
-  wikiName: string,
-  index: WikiIndex,
-  collections: string[],
-  refresh: boolean,
-): Promise<SemanticOverlay | null> {
-  const now = Date.now();
-  if (!refresh) {
-    const cached = semanticCache.get(wikiName);
-    if (cached && cached.expiresAt > now) return cached.overlay;
-  }
-  const results = await Promise.all(
-    collections.map(
-      async (name) => [name, await fetchSimilarityGraph(baseUrl, name)] as const,
-    ),
-  );
-  const graphs = new Map<string, SimilarityGraph>();
-  for (const [name, g] of results) if (g) graphs.set(name, g);
-  if (graphs.size === 0) return null; // total degrade — do NOT cache
-
-  const overlay = joinSemantic(index.pages, graphs, collections);
-  if (graphs.size === collections.length) {
-    semanticCache.set(wikiName, { overlay, expiresAt: now + SEMANTIC_TTL_MS });
-  }
-  return overlay;
-}
-
 /**
  * Injectable Huginn searcher for the `/api/wiki/similar` + `/api/wiki/explain`
  * routes. Defaults to the real `fetchKnowledgeApi`; tests override it to exercise
@@ -206,6 +130,89 @@ let similarSearchFn: SimilarSearchFn | null = null;
  *  Similar + Explain routes. */
 export function __setSimilarSearchForTest(fn: SimilarSearchFn | null): void {
   similarSearchFn = fn;
+}
+
+/**
+ * Injectable seams for `POST /api/wiki/atlas/draft-synthesis` (the consolidation
+ * gardener's Draft-synthesis button). Default to the real overlay/DB/drafter; tests
+ * override them to drive candidacy confirmation + dedup without a live huginn/DB.
+ */
+export interface SynthesisDraftDeps {
+  /** Fresh overlay fetch. Typed to the CLIENT overlay shape (`computeClusters`'s
+   *  input) — the server overlay is structurally assignable to it, so the real
+   *  `getSemanticOverlay` slots in while test fixtures stay concise. */
+  getOverlay: (
+    baseUrl: string,
+    wikiName: string,
+    index: WikiIndex,
+    collections: string[],
+    refresh: boolean,
+  ) => Promise<SemanticOverlay | null>;
+  /** Dedup source for the POST: live (draft/approved) AND applied topic keys, matching
+   *  the GET's pending-mark (`getLiveOrAppliedTopicKeysByWiki`) so an APPLIED topic that
+   *  hides the button also 409s a direct re-POST (applied-skip-is-primary dedup rule). */
+  getLiveTopics: (wikiName: string) => Promise<string[]>;
+  draft: typeof draftAndPersistSynthesis;
+}
+const defaultSynthesisDraftDeps: SynthesisDraftDeps = {
+  getOverlay: getSemanticOverlay,
+  getLiveTopics: getLiveOrAppliedTopicKeysByWiki,
+  draft: draftAndPersistSynthesis,
+};
+let synthesisDraftDeps: SynthesisDraftDeps = defaultSynthesisDraftDeps;
+
+/** Test-only: override (pass a partial) or reset (no arg) the synthesis-draft deps.
+ *  A bare reset also clears the module-level in-flight set so a test that hangs a
+ *  draft (to exercise the single-flight 409) can't leak an in-flight key into the
+ *  next test. */
+export function __setSynthesisDraftDepsForTest(over?: Partial<SynthesisDraftDeps>): void {
+  synthesisDraftDeps = over ? { ...defaultSynthesisDraftDeps, ...over } : defaultSynthesisDraftDeps;
+  if (!over) synthesisInFlight.clear();
+}
+
+/**
+ * In-flight guard for the detached draft launch, keyed `<wiki>\0<topicKey>`. A
+ * second POST for the same wiki+topic while one drafts gets a clean 409 instead of
+ * double-spending a model call. Also test-resettable via `__setSynthesisDraftDepsForTest`.
+ */
+const synthesisInFlight = new Set<string>();
+function inFlightKey(wiki: string, topicKey: string): string {
+  return `${wiki}\u0000${topicKey}`;
+}
+
+/**
+ * Server-side single-flight per wiki: is ANY synthesis draft currently in flight for
+ * `wiki` (regardless of topic)? The v1 contract is one concurrent synthesis draft per
+ * wiki — this hardens the narrow label-drift double-spend where a slider move shifts a
+ * cluster label to a different `topicKey`, slipping past the per-topic guard above.
+ */
+function wikiHasInFlightDraft(wiki: string): boolean {
+  const prefix = `${wiki}\u0000`;
+  for (const k of synthesisInFlight) if (k.startsWith(prefix)) return true;
+  return false;
+}
+
+/**
+ * Server-side candidacy re-validation: does `members` (normalized relPaths) form a
+ * synthesis CANDIDATE cluster at SOME threshold in the slider's range? Reuses the
+ * exact client heuristic (`computeClusters`, which drops < RAIL_MIN_MEMBERS, marks
+ * > RAIL_BLOB_MAX as non-candidate, and sets `candidate` from CLUSTER_ROLE_BY_TYPE),
+ * so the server never trusts the client's badge — it recomputes from the fresh
+ * overlay. Scans thresholds MAX→MIN; a candidate cluster whose member set exactly
+ * equals `members` at any threshold confirms it.
+ */
+export function confirmSynthesisCandidate(overlay: SemanticOverlay, members: string[]): boolean {
+  const wanted = [...members].sort();
+  const eq = (a: string[]): boolean =>
+    a.length === wanted.length && a.every((v, i) => v === wanted[i]);
+  // Step MAX→MIN; round to 3 decimals to keep the float steps aligned with the slider.
+  for (let t = SEM_THRESHOLD_MAX; t >= SEM_THRESHOLD_MIN - 1e-9; t -= SEM_THRESHOLD_STEP) {
+    const threshold = Math.round(t * 1000) / 1000;
+    for (const c of computeClusters(overlay, threshold)) {
+      if (c.candidate && eq(c.members)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -618,9 +625,157 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         collections,
         refresh,
       );
-      if (overlay) return c.json({ ...payload, semantic: overlay });
+      if (overlay) {
+        // Attach the consolidation-gardener pending-proposal topic_keys OUTSIDE the
+        // cached overlay object (a fresh DB read per request — pending state must
+        // not go 5-min stale like the cached similarity graph). Spread so the
+        // cached overlay is never mutated. Degrade-tolerant: a DB hiccup drops the
+        // marks (button just renders instead of the gate link), never 5xxs.
+        let pendingSynthesisTopics: string[] = [];
+        try {
+          pendingSynthesisTopics = await getLiveOrAppliedTopicKeysByWiki(entry!.name);
+        } catch (err) {
+          log.warn("Atlas pending-synthesis topics lookup failed for {wiki}: {error}", {
+            wiki: entry!.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return c.json({ ...payload, semantic: { ...overlay, pendingSynthesisTopics } });
+      }
     }
     return c.json(payload);
+  });
+
+  // Draft-synthesis (consolidation gardener): turn a badged Atlas-rail synthesis
+  // candidate into ONE `synthesis` proposal in the /wiki/gardener gate for a
+  // standalone wiki (mimir). Plain JSON route — the server NEVER trusts the client's
+  // badge: it resolves the members in the wiki index, rebuilds a FRESH semantic
+  // overlay, and re-runs `computeClusters` to confirm the members form a candidate
+  // at some threshold. Dedup (live topic_key) → 409; a second in-flight draft for
+  // the same wiki+topic → 409; the draft itself runs DETACHED (respond
+  // `{state:"started"}` immediately, /agents visibility via the traced one-shot).
+  // Never 5xx on an expected failure; the whole body is wrapped so an unexpected
+  // throw returns 500 JSON (mirrors POST /api/wiki/remember).
+  app.post("/api/wiki/atlas/draft-synthesis", async (c) => {
+    try {
+      type Body = { wiki?: string; members?: unknown; label?: unknown };
+      const body = await c.req.json<Body>().catch(() => ({}) as Body);
+      const label = typeof body.label === "string" ? body.label.trim() : "";
+      const members =
+        Array.isArray(body.members) && body.members.every((m) => typeof m === "string")
+          ? (body.members as string[])
+          : null;
+      if (!label) return c.json({ error: "label is required" }, 400);
+      if (!members || members.length === 0) {
+        return c.json({ error: "members[] is required" }, 400);
+      }
+      // Cheap upper guard BEFORE any index/huginn work — reject an oversized payload
+      // (the blob guard) without 40+ index lookups. Re-checked post-resolve below.
+      if (members.length > RAIL_BLOB_MAX) {
+        return c.json({ error: `cluster too large (> ${RAIL_BLOB_MAX} pages)` }, 400);
+      }
+
+      const { entry, unknownWiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? body.wiki,
+        c.req.query("bot"),
+        process.env.WIKI_DIR,
+      );
+      if (unknownWiki || !entry) {
+        return c.json({ error: "no wiki configured for that name" }, 404);
+      }
+      const collections = entry.collections ?? [];
+      if (collections.length === 0) {
+        return c.json({ error: "No search collection connected for this wiki" }, 400);
+      }
+
+      const index = await getWikiIndex({ root: entry.root });
+      if (!index) return c.json({ error: "wiki directory not found" }, 404);
+
+      // Members must resolve in the wiki index; normalize to emitKey form so the
+      // candidacy recompute (overlay keys) and dedup agree.
+      const normMembers: string[] = [];
+      for (const m of members) {
+        const page = index.resolveRelPath(m);
+        if (!page) return c.json({ error: `member "${m}" is not a page in this wiki` }, 400);
+        normMembers.push(normalizeRelPath(page.relPath));
+      }
+      if (normMembers.length < RAIL_MIN_MEMBERS) {
+        return c.json({ error: `a synthesis cluster needs ≥ ${RAIL_MIN_MEMBERS} members` }, 400);
+      }
+      if (normMembers.length > RAIL_BLOB_MAX) {
+        return c.json({ error: `cluster too large (> ${RAIL_BLOB_MAX} pages)` }, 400);
+      }
+
+      // Fresh overlay + candidacy re-check — never trust the client's badge.
+      const overlay = await synthesisDraftDeps.getOverlay(
+        config.knowledgeApiUrl,
+        entry.name,
+        index,
+        collections,
+        true,
+      );
+      if (!overlay) {
+        return c.json({ error: "semantic overlay unavailable — cannot confirm candidacy" }, 400);
+      }
+      if (!confirmSynthesisCandidate(overlay, normMembers)) {
+        return c.json({ error: "these pages do not form a synthesis candidate" }, 400);
+      }
+
+      const topicKey = synthesisTopicKey(label);
+
+      // Dedup: a live (draft/approved) OR applied proposal for this topic already
+      // exists — matches the GET's pending-mark, so an applied topic 409s a re-POST.
+      const live = await synthesisDraftDeps.getLiveTopics(entry.name);
+      if (live.includes(topicKey)) {
+        return c.json({ state: "pending", topicKey }, 409);
+      }
+
+      const key = inFlightKey(entry.name, topicKey);
+      if (synthesisInFlight.has(key)) {
+        return c.json({ state: "running", topicKey }, 409);
+      }
+      // Server-side single-flight per wiki: one concurrent synthesis draft per wiki
+      // (v1 contract). Catches the label-drift double-spend where a slider move maps
+      // to a different topicKey that slips past the per-topic guard above.
+      if (wikiHasInFlightDraft(entry.name)) {
+        return c.json({ state: "running", topicKey }, 409);
+      }
+
+      // Attribution bot — resolved like Ask/digest/remember. Guard before drafting.
+      const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      if (!bot) return c.json({ error: "No synthesis bot for this wiki" }, 409);
+
+      // Launch DETACHED — respond immediately; /agents shows the run via the traced
+      // one-shot. The in-flight guard is cleared on settle (success OR failure).
+      synthesisInFlight.add(key);
+      void synthesisDraftDeps
+        .draft({ wiki: entry, members: normMembers, label, index, config, botConfig: bot })
+        .then((res) => {
+          if (!res.ok) {
+            log.warn("Synthesis draft for wiki={wiki} topic={topic} rejected: {reason}", {
+              wiki: entry.name,
+              topic: topicKey,
+              reason: res.reason,
+            });
+          }
+        })
+        .catch((err) => {
+          log.error("Synthesis draft for wiki={wiki} topic={topic} threw: {error}", {
+            wiki: entry.name,
+            topic: topicKey,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => synthesisInFlight.delete(key));
+
+      return c.json({ state: "started", topicKey });
+    } catch (err) {
+      log.error("Draft-synthesis: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
   });
 
   // "What's new" digest — an AI summary of the wiki's recent `log.md` entries

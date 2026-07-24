@@ -9,6 +9,8 @@ import {
   __resetWikiDigestCacheForTest,
   __seedWikiDigestForTest,
   __setSimilarSearchForTest,
+  __setSynthesisDraftDepsForTest,
+  confirmSynthesisCandidate,
   digestCacheDecision,
   resolveExplainPreflight,
   fetchSavedNotes,
@@ -16,6 +18,11 @@ import {
   raceTimeout,
   type SavedNotesDeps,
 } from "./wiki-routes.ts";
+import {
+  synthesisTopicKey,
+  type SemanticOverlay,
+} from "../views/components/wiki-atlas-semantic.ts";
+import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
@@ -997,5 +1004,188 @@ describe("GET /api/wiki/digest", () => {
     expect(body.digest!.bullets).toBe("- Grew [[knowledge-graph]]");
     // The wikilink resolved to a real page ⇒ rendered as an in-reader anchor.
     expect(body.digest!.html).toContain('data-wiki-page="knowledge-graph"');
+  });
+});
+
+/**
+ * `POST /api/wiki/atlas/draft-synthesis` — the consolidation gardener's
+ * Draft-synthesis button. Server re-validates candidacy against a fresh overlay
+ * (never trusts the client badge), dedups on live topic_keys, and launches the
+ * draft detached. These cover the rejection + dedup branches (no bot/model call);
+ * the started-happy path is covered live in calibration + the drafter unit tests.
+ */
+describe("POST /api/wiki/atlas/draft-synthesis", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  // Three plan-type members forming a candidate cluster.
+  const members = ["plans/alpha.md", "plans/beta.md", "plans/gamma.md"];
+  const candidateOverlay: SemanticOverlay = {
+    edges: [
+      ["plans/alpha.md", "plans/beta.md", 0.99],
+      ["plans/beta.md", "plans/gamma.md", 0.99],
+    ],
+    communities: [],
+    nodeCommunity: {},
+    nodeType: { "plans/alpha.md": "plan", "plans/beta.md": "plan", "plans/gamma.md": "plan" },
+    nodeTags: {},
+  };
+
+  const post = (query: string, body: unknown) =>
+    app.request("/api/wiki/atlas/draft-synthesis" + query, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-synth-route-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    for (const [rel, title] of [
+      ["plans/alpha.md", "Alpha Plan"],
+      ["plans/beta.md", "Beta Plan"],
+      ["plans/gamma.md", "Gamma Plan"],
+    ] as const) {
+      await Bun.write(path.join(root, rel), `---\ntype: plan\ntitle: ${title}\n---\n\nBody.`);
+    }
+    prevExtra = process.env.WIKI_EXTRA;
+    // Standalone wiki WITH a backing collection (mimir-style).
+    process.env.WIKI_EXTRA = `synthwiki=${root}=mimir`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:0" } as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __setSynthesisDraftDepsForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("400 when label / members are missing", async () => {
+    expect((await post("?wiki=synthwiki", { members })).status).toBe(400);
+    expect((await post("?wiki=synthwiki", { label: "X" })).status).toBe(400);
+  });
+
+  test("404 for an unknown wiki", async () => {
+    const res = await post("?wiki=nope", { label: "Saga", members });
+    expect(res.status).toBe(404);
+  });
+
+  test("400 (blob guard) for an oversized member payload", async () => {
+    const many = Array.from({ length: 45 }, (_, i) => `plans/p${i}.md`);
+    const res = await post("?wiki=synthwiki", { label: "Saga", members: many });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("too large");
+  });
+
+  test("400 when a member is not a page in this wiki", async () => {
+    const res = await post("?wiki=synthwiki", {
+      label: "Saga",
+      members: ["plans/alpha.md", "plans/ghost.md", "plans/gamma.md"],
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("not a page");
+  });
+
+  test("400 when the members don't form a synthesis candidate", async () => {
+    // Overlay with no edges ⇒ no cluster ⇒ not a candidate.
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => ({ ...candidateOverlay, edges: [] }),
+    });
+    const res = await post("?wiki=synthwiki", { label: "Saga", members });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("candidate");
+  });
+
+  test("409 when a live proposal already exists for the topic (dedup)", async () => {
+    let drafted = false;
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => candidateOverlay,
+      getLiveTopics: async () => [synthesisTopicKey("The Saga")],
+      draft: async () => {
+        drafted = true;
+        return { ok: true, proposal: null, topicKey: synthesisTopicKey("The Saga") };
+      },
+    });
+    const res = await post("?wiki=synthwiki", { label: "The Saga", members });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { state: string }).state).toBe("pending");
+    expect(drafted).toBe(false); // never reached the drafter
+  });
+
+  test("409 (pending) when an APPLIED proposal already covers the topic (dedup includes applied)", async () => {
+    // The POST dedups on the applied-inclusive set (default getLiveOrAppliedTopicKeysByWiki),
+    // matching the GET's pending-mark — so a topic that was already APPLIED 409s a re-POST
+    // instead of silently re-drafting. Modeled here via the injected getLiveTopics.
+    let drafted = false;
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => candidateOverlay,
+      getLiveTopics: async () => [synthesisTopicKey("The Saga")], // an applied topic
+      draft: async () => {
+        drafted = true;
+        return { ok: true, proposal: null, topicKey: synthesisTopicKey("The Saga") };
+      },
+    });
+    const res = await post("?wiki=synthwiki", { label: "The Saga", members });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { state: string }).state).toBe("pending");
+    expect(drafted).toBe(false);
+  });
+
+  test("409 (running) when another draft is already in flight for the same wiki (single-flight)", async () => {
+    // Hang the first draft so its in-flight key stays in the set, then POST a
+    // DIFFERENT topic on the same wiki — the per-wiki single-flight guard rejects it
+    // even though the per-topic key differs (closes the label-drift double-spend).
+    __setSynthesisDraftDepsForTest({
+      getOverlay: async () => candidateOverlay,
+      getLiveTopics: async () => [],
+      draft: () => new Promise(() => {}), // never settles ⇒ stays in flight
+    });
+    const first = await post("?wiki=synthwiki", { label: "The Saga", members });
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { state: string }).state).toBe("started");
+
+    const second = await post("?wiki=synthwiki", { label: "A Different Saga", members });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { state: string }).state).toBe("running");
+  });
+});
+
+describe("synthesis topic_key slug parity", () => {
+  test("client synthesisTopicKey matches the server slugifyTopicKey shape", () => {
+    for (const s of [
+      "The Alpha-Gamma Story",
+      "Context Compaction & Retrieval",
+      "  Trailing / Slashes  ",
+      "Ünïcode Prøse",
+      "!!!",
+    ]) {
+      expect(synthesisTopicKey(s)).toBe(slugifyTopicKey(s));
+    }
+  });
+
+  test("confirmSynthesisCandidate recomputes candidacy from the overlay", () => {
+    const overlay: SemanticOverlay = {
+      edges: [
+        ["a.md", "b.md", 0.99],
+        ["b.md", "c.md", 0.99],
+      ],
+      communities: [],
+      nodeCommunity: {},
+      nodeType: { "a.md": "plan", "b.md": "report", "c.md": "plan" },
+      nodeTags: {},
+    };
+    expect(confirmSynthesisCandidate(overlay, ["a.md", "b.md", "c.md"])).toBe(true);
+    // A synthesis-type member disqualifies the candidate badge.
+    const withBlog: SemanticOverlay = { ...overlay, nodeType: { ...overlay.nodeType, "c.md": "blog" } };
+    expect(confirmSynthesisCandidate(withBlog, ["a.md", "b.md", "c.md"])).toBe(false);
+    // A subset that isn't itself a component doesn't confirm.
+    expect(confirmSynthesisCandidate(overlay, ["a.md", "b.md"])).toBe(false);
   });
 });
