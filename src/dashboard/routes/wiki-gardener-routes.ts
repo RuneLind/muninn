@@ -713,6 +713,11 @@ export function registerWikiGardenerRoutes(
     let rows: WikiProposal[];
     let catalogKinds: string[] | undefined;
     if (entry && entry.source === "extra") {
+      // Same gate as the page route: a collection-less standalone wiki can't be
+      // semantically clustered, so it has no proposals surface at all.
+      if (!isGardenerWiki(entry)) {
+        return c.json({ proposals: [], error: "no gardener collections configured for this wiki" });
+      }
       // Standalone wiki: consolidation-gardener rows keyed to the wiki name. No
       // per-wiki catalog policy — default `["concept"]` (synthesis is never
       // cataloged regardless, so the wiring preview always shows a skip).

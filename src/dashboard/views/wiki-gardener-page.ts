@@ -47,7 +47,7 @@ export async function renderWikiGardenerPage(opts?: {
         `</select>`
       : "";
   const gardListInit = notBotWiki
-    ? `<div class="gard-empty"><strong>${escHtml(selected)}</strong> is a standalone wiki — the gardener is only available for bot wikis. Pick a bot wiki above.</div>`
+    ? `<div class="gard-empty"><strong>${escHtml(selected)}</strong> has no backing search collections to cluster — the gardener needs a bot wiki or a collection-backed standalone wiki. Pick another wiki above.</div>`
     : `<div class="gard-empty">Loading proposals…</div>`;
 
   return `<!DOCTYPE html>
