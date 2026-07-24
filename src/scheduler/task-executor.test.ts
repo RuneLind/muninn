@@ -92,16 +92,18 @@ mock.module("./briefing-prompt.ts", () => ({
   }),
 }));
 
-// callHaiku — records the telemetry seam it receives and optionally fires onUsage.
-let haikuUsage: any = { model: "claude-haiku-test", inputTokens: 50, outputTokens: 10, numTurns: 1 };
-let haikuFiresUsage = true;
-const callHaikuCalls: Array<{ args: any[]; telemetry: any }> = [];
-mock.module("./executor.ts", () => ({
-  callHaiku: mock(async (...args: any[]) => {
-    const telemetry = args[6];
-    callHaikuCalls.push({ args, telemetry });
-    if (haikuFiresUsage && telemetry?.onUsage) telemetry.onUsage(haikuUsage);
-    return "haiku text";
+// Haiku router — reminder/custom tasks now route through
+// `callHaikuMessageWithFallback` (the connector-aware seam), not the raw
+// `spawnHaiku`-backed `callHaiku`. The mock records the opts it receives (tracer +
+// routing fields) and returns text + usage (incl. the real `backend`) the task
+// stamps onto its span.
+let haikuMessageUsage: any = { model: "claude-haiku-test", inputTokens: 50, outputTokens: 10, numTurns: 1, backend: "cli" };
+let haikuReturnsUsage = true;
+const callHaikuMsgCalls: Array<{ prompt: string; fallback: string; opts: any }> = [];
+mock.module("../ai/haiku-direct.ts", () => ({
+  callHaikuMessageWithFallback: mock(async (prompt: string, fallback: string, opts: any) => {
+    callHaikuMsgCalls.push({ prompt, fallback, opts });
+    return { text: "haiku text", usage: haikuReturnsUsage ? haikuMessageUsage : null };
   }),
 }));
 
@@ -150,11 +152,11 @@ const CTX = { traceId: "tick-1", parentId: "root-1" };
 beforeEach(() => {
   FakeTracer.reset();
   attachToolSpansCalls.length = 0;
-  callHaikuCalls.length = 0;
+  callHaikuMsgCalls.length = 0;
   connectorThrows = false;
   buildPromptThrows = false;
   sendThrows = false;
-  haikuFiresUsage = true;
+  haikuReturnsUsage = true;
   connectorResult = {
     result: "briefing body",
     model: "claude-sonnet-test",
@@ -164,7 +166,7 @@ beforeEach(() => {
     costUsd: 0.01,
     toolCalls: [{ id: "t1", name: "mcp__x__y", displayName: "y (x)", durationMs: 5 }],
   };
-  haikuUsage = { model: "claude-haiku-test", inputTokens: 50, outputTokens: 10, numTurns: 1 };
+  haikuMessageUsage = { model: "claude-haiku-test", inputTokens: 50, outputTokens: 10, numTurns: 1, backend: "cli" };
 });
 
 describe("runScheduledTasksFromList — task tracing", () => {
@@ -207,7 +209,7 @@ describe("runScheduledTasksFromList — task tracing", () => {
     expect(api.sendMessage).toHaveBeenCalled();
   });
 
-  test("reminder threads tracer + onUsage through callHaiku; span carries coarse tokens, no claude span", async () => {
+  test("reminder threads tracer through the Haiku router; span carries coarse tokens + real backend, no claude span", async () => {
     await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Take a break" })], CTX);
 
     expect(FakeTracer.instances.length).toBe(1);
@@ -216,26 +218,28 @@ describe("runScheduledTasksFromList — task tracing", () => {
     // Haiku paths stamp NO claude child span.
     expect(tt.span("claude")).toBeUndefined();
 
-    // callHaiku received the telemetry seam (7th positional arg).
-    expect(callHaikuCalls.length).toBe(1);
-    const telemetry = callHaikuCalls[0]!.telemetry;
-    expect(telemetry.tracer).toBe(tt);
-    expect(typeof telemetry.onUsage).toBe("function");
+    // The router received the tracer + the bot's routing fields (connector).
+    expect(callHaikuMsgCalls.length).toBe(1);
+    const opts = callHaikuMsgCalls[0]!.opts;
+    expect(opts.tracer).toBe(tt);
+    expect(opts.connector).toBe("claude-cli");
 
-    // Token totals from onUsage rode onto the span's finish attrs.
+    // Token totals + the REAL backend (as `connector`) rode onto the span's finish
+    // attrs — no longer the hardcoded "claude-cli".
     expect(tt.finished?.status).toBe("ok");
     expect(tt.finished?.attrs.inputTokens).toBe(50);
     expect(tt.finished?.attrs.outputTokens).toBe(10);
+    expect(tt.finished?.attrs.connector).toBe("cli");
     expect(attachToolSpansCalls.length).toBe(0);
   });
 
-  test("custom task with a prompt also traces via the Haiku path", async () => {
+  test("custom task with a prompt also traces via the Haiku router", async () => {
     await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "custom", prompt: "do the thing" })], CTX);
 
     const tt = FakeTracer.instances[0]!;
     expect(tt.name).toBe("task:custom");
     expect(tt.span("claude")).toBeUndefined();
-    expect(callHaikuCalls[0]!.telemetry.tracer).toBe(tt);
+    expect(callHaikuMsgCalls[0]!.opts.tracer).toBe(tt);
     expect(tt.finished?.status).toBe("ok");
   });
 

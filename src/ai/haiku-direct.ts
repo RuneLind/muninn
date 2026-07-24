@@ -371,3 +371,66 @@ export async function callHaikuWithFallback(
   }
   return spawnHaiku(prompt, opts);
 }
+
+/** Usage/backend for one {@link callHaikuMessageWithFallback} call. `backend` is
+ *  the backend that ACTUALLY ran (cli/anthropic/copilot), which the caller stamps
+ *  as the span's `connector` attr — the read side (`connectorLabel`) maps
+ *  cli→"Claude Code", anthropic→"Anthropic API", copilot→"Copilot SDK". */
+export interface HaikuMessageUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  backend?: HaikuBackend;
+  numTurns?: number;
+  costUsd?: number;
+}
+
+export interface HaikuMessageResult {
+  /** Trimmed model text, or the caller's `fallback` if the whole router chain threw. */
+  text: string;
+  /** Usage when a real result was produced; `null` when the fallback was returned. */
+  usage: HaikuMessageUsage | null;
+}
+
+/**
+ * Router-backed replacement for the scheduler's `callHaiku` string-or-fallback
+ * wrapper. Runs a TOOL-LESS Haiku prompt through {@link callHaikuWithFallback} so
+ * the backend is picked from the bot's connector/haikuBackend (a claude-sdk /
+ * copilot-sdk bot no longer pays a hardcoded `claude -p` cold-start, and an
+ * anthropic/copilot Haiku backend actually runs) instead of the old raw
+ * `spawnHaiku`, and surfaces the REAL backend + model back to the caller so the
+ * trace span stamps the honest connector (not a hardcoded `"claude-cli"`).
+ *
+ * On ANY error (the router already falls back CLI→…; this catches the case where
+ * even the CLI floor throws) it returns the caller's `fallback` text with
+ * `usage: null` — byte-identical to the old `callHaiku` contract, so the caller's
+ * meta stays empty on failure and no connector/model is fabricated. Pass `tracer`
+ * to tie the `haiku_usage` row back to the request trace (the backends' own
+ * `trackUsage` reads `opts.tracer?.traceId`).
+ */
+export async function callHaikuMessageWithFallback(
+  prompt: string,
+  fallback: string,
+  opts: HaikuRouterOptions,
+): Promise<HaikuMessageResult> {
+  try {
+    const haiku = await callHaikuWithFallback(prompt, opts);
+    return {
+      text: haiku.result.trim(),
+      usage: {
+        model: haiku.model,
+        inputTokens: haiku.inputTokens,
+        outputTokens: haiku.outputTokens,
+        ...(haiku.backend ? { backend: haiku.backend } : {}),
+        ...(haiku.numTurns != null ? { numTurns: haiku.numTurns } : {}),
+        ...(haiku.costUsd != null ? { costUsd: haiku.costUsd } : {}),
+      },
+    };
+  } catch (err) {
+    log.warn("haiku-router message call failed, returning fallback text: {error}", {
+      botName: opts.botName ?? "haiku",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { text: fallback, usage: null };
+  }
+}

@@ -5,7 +5,7 @@ import type { ScheduledTask } from "../types.ts";
 import { updateTaskLastRun } from "../db/scheduled-tasks.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, createProgressCallback, setConnectorInfo } from "../observability/agent-status.ts";
-import { callHaiku, type HaikuUsage } from "./executor.ts";
+import { callHaikuMessageWithFallback } from "../ai/haiku-direct.ts";
 import { resolveConnector } from "../ai/connector.ts";
 import { buildBriefingPrompt } from "./briefing-prompt.ts";
 import { saveMessage } from "../db/messages.ts";
@@ -91,24 +91,22 @@ export async function runScheduledTasksFromList(api: Api, config: Config, botCon
 /** Completion metadata threaded out of a task run so the caller can pass real
  *  token/turn counts to `completeRequest` and stamp them onto the `task:<type>`
  *  span. The briefing path has a full `ClaudeExecResult`; the reminder/custom
- *  Haiku paths surface their usage via {@link callHaiku}'s `onUsage` seam. `model`
- *  rides here only for the span attrs — `completeRequest` ignores it (the Recent
- *  card's model comes from `setConnectorInfo`). */
+ *  Haiku paths surface their usage via the router's {@link HaikuMessageResult}.
+ *  `model` rides here only for the span attrs — `completeRequest` ignores it (the
+ *  Recent card's model comes from `setConnectorInfo`). */
 interface TaskResult {
   markdown: string;
   meta: { inputTokens?: number; outputTokens?: number; numTurns?: number; toolCount?: number; model?: string; costUsd?: number; connector?: string };
 }
 
 async function executeTask(task: ScheduledTask, config: Config, botConfig: BotConfig, requestId: string, tracer?: Tracer): Promise<TaskResult> {
-  const cwd = botConfig.dir;
   switch (task.taskType) {
     case "reminder":
       return await runHaikuTask(
         `Generate a brief, natural reminder message (2-3 sentences max). Use markdown formatting (**bold**, *italic*). Be helpful, not pushy.\n\nReminder: "${task.title}"${task.prompt ? `\nContext: ${task.prompt}` : ""}`,
         `**Reminder:** ${task.title}`,
         "reminder",
-        cwd,
-        botConfig.name,
+        botConfig,
         tracer,
       );
 
@@ -121,45 +119,51 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
         `${task.prompt}\n\nRespond using markdown formatting (**bold**, *italic*). Keep it concise.`,
         `**${task.title}**`,
         "task",
-        cwd,
-        botConfig.name,
+        botConfig,
         tracer,
       );
   }
 }
 
 /**
- * Reminder / custom tasks call Haiku (no `ClaudeExecResult`). Thread the per-task
- * tracer so the `haiku_usage` row joins the trace (the `trace_id` column, #267)
- * and capture the call's token usage via `onUsage` so the coarse `task:<type>`
- * span + the `/agents` card carry real numbers. No `claude` child span is stamped
- * here — these paths run no tools, and the token totals ride on the task span's
- * own attrs (via the caller's `tt.finish`). On a Haiku error `callHaiku` returns
- * the fallback and `onUsage` never fires ⇒ empty meta (byte-identical to before).
+ * Reminder / custom tasks are short, TOOL-LESS Haiku prompts (no
+ * `ClaudeExecResult`) — routed through the Haiku router
+ * ({@link callHaikuMessageWithFallback}) rather than a raw `claude -p` spawn, so
+ * the backend is picked from the bot's connector/haikuBackend (a claude-sdk bot's
+ * reminders no longer pay a CLI cold-start; an anthropic/copilot Haiku backend
+ * actually runs) and the trace stamps the REAL backend, not a hardcoded
+ * `"claude-cli"`. Thread the per-task tracer so the `haiku_usage` row joins the
+ * trace (the `trace_id` column, #267) and read the call's token usage + backend
+ * back so the coarse `task:<type>` span + the `/agents` card carry real numbers.
+ * No `claude` child span is stamped here — these paths run no tools, and the
+ * totals ride on the task span's own attrs (via the caller's `tt.finish`). On a
+ * router error the fallback text comes back with `usage: null` ⇒ empty meta
+ * (byte-identical to before).
  */
 async function runHaikuTask(
   prompt: string,
   fallback: string,
   source: string,
-  cwd: string | undefined,
-  botName: string,
+  botConfig: BotConfig,
   tracer?: Tracer,
 ): Promise<TaskResult> {
-  let usage: HaikuUsage | undefined;
-  const markdown = await callHaiku(prompt, fallback, source, cwd, botName, undefined, {
-    tracer,
-    onUsage: (u) => { usage = u; },
+  const { text, usage } = await callHaikuMessageWithFallback(prompt, fallback, {
+    source,
+    cwd: botConfig.dir,
+    botName: botConfig.name,
+    connector: botConfig.connector,
+    haikuBackend: botConfig.haikuBackend,
+    ...(tracer ? { tracer } : {}),
   });
   return {
-    markdown,
-    // Reminder/custom tasks run via spawnHaiku (callHaiku), which ALWAYS spawns
-    // the Claude CLI — never the bot's chat connector or the Haiku router. So the
-    // connector here is honestly the literal "claude-cli", not
-    // `botConfig.connector`. It rides onto the task:<type> span's own attrs via
-    // the caller's `tt.finish(..., { ...meta })` (this path stamps no `claude`
-    // child span), so getRecentTraces' walk aggregate can read it. Stamped only
-    // when the call actually produced usage — a Haiku error yields empty meta and
-    // no fabricated connector (byte-identical to before).
+    markdown: text,
+    // The token totals ride onto the task:<type> span's own attrs via the caller's
+    // `tt.finish(..., { ...meta })` (this path stamps no `claude` child span), so
+    // getRecentTraces' walk aggregate can read them. `connector` is the ACTUAL
+    // Haiku backend that ran (cli/anthropic/copilot) — the read-side `connectorLabel`
+    // maps those to Claude Code / Anthropic API / Copilot SDK, so the row is honest
+    // after the flip. Stamped only when the call actually produced usage — a router
+    // error yields empty meta and no fabricated connector (byte-identical to before).
     meta: usage
       ? {
           inputTokens: usage.inputTokens,
@@ -167,7 +171,7 @@ async function runHaikuTask(
           ...(usage.numTurns != null ? { numTurns: usage.numTurns } : {}),
           ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
           model: usage.model,
-          connector: "claude-cli",
+          ...(usage.backend ? { connector: usage.backend } : {}),
         }
       : {},
   };
