@@ -7,6 +7,7 @@ import {
   resolveAmplificationConfig,
   DEFAULT_AMPLIFICATION_MIN_AUTHORS,
   DEFAULT_AMPLIFICATION_MAX_PROMOTIONS,
+  MAX_AMPLIFICATION_MAX_PROMOTIONS,
   type RankedDoc,
 } from "./x-amplification.ts";
 // The REAL 2026-07-25 two-day x-feed window (476 docs, 100% listing-score coverage),
@@ -52,6 +53,19 @@ describe("normalizeArticleUrl", () => {
       expect(normalizeArticleUrl(raw)).toBe(canonical);
     }
   });
+
+  test("http:// is upgraded to https:// so a scheme change can't split a group", () => {
+    const canonical = "https://x.com/trq212/article/2080710971228918066";
+    expect(normalizeArticleUrl("http://x.com/trq212/article/2080710971228918066")).toBe(canonical);
+    expect(normalizeArticleUrl("HTTP://X.com/trq212/article/2080710971228918066/?s=20")).toBe(canonical);
+    // Same group despite the mismatched schemes.
+    const groups = buildArticleGroups([
+      doc({ docId: "art.md", handle: "@trq212", rankScore: 0.6, docType: "article", articleUrl: canonical }),
+      doc({ docId: "amp.md", handle: "@alice", rankScore: 0.5, articleUrl: canonical.replace("https://", "http://") }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.docs).toHaveLength(2);
+  });
 });
 
 describe("articleOwnerHandle", () => {
@@ -82,8 +96,22 @@ describe("buildArticleGroups", () => {
     expect(groups[0]!.owner).toBe("owner");
     expect(groups[0]!.docs.map((d) => d.docId)).toEqual(["art.md", "amp1.md", "amp2.md"]);
     expect(groups[0]!.representative.docId).toBe("art.md");
+    expect(groups[0]!.articleDoc!.docId).toBe("art.md");
     expect(groups[0]!.collapsed.map((d) => d.docId)).toEqual(["amp1.md", "amp2.md"]);
     expect(groups[0]!.amplifierAuthors).toBe(2);
+  });
+
+  test("the representative is the HIGHEST-SCORING member, even when a lower article doc exists", () => {
+    // The real gippp69 shape: an amplifier note at 0.6122 and the article doc at 0.5502.
+    // Keeping the article doc would be an unforced content downgrade, so it never happens —
+    // the article doc is tracked separately as the promote leg's payload.
+    const groups = buildArticleGroups([
+      doc({ docId: "amp.md", handle: "@alice", rankScore: 0.6122, docType: "note", articleUrl: ART }),
+      doc({ docId: "art.md", handle: "@owner", rankScore: 0.5502, docType: "article", articleUrl: ART }),
+    ]);
+    expect(groups[0]!.representative.docId).toBe("amp.md");
+    expect(groups[0]!.articleDoc!.docId).toBe("art.md");
+    expect(groups[0]!.collapsed.map((d) => d.docId)).toEqual(["art.md"]);
   });
 
   test("the SAME article promoted twice (two discovery dates) is one group", () => {
@@ -123,6 +151,7 @@ describe("buildArticleGroups", () => {
       doc({ docId: "amp2.md", handle: "@bob", rankScore: 0.4, articleUrl: ART }),
     ]);
     expect(groups[0]!.representative.docId).toBe("amp1.md");
+    expect(groups[0]!.articleDoc).toBeNull();
     expect(groups[0]!.collapsed.map((d) => d.docId)).toEqual(["amp2.md"]);
     // Owner still comes off the permalink, so neither amplifier is mistaken for the author.
     expect(groups[0]!.owner).toBe("owner");
@@ -154,21 +183,9 @@ describe("applyAmplification — collapse", () => {
       doc({ docId: "plain.md", handle: "@carol", rankScore: 0.58 }),
     ];
     const out = applyAmplification(docs, 30, CFG);
-    // The ARTICLE doc is kept even though an amplifier outscored it.
-    expect(out.listing.map((d) => d.docId)).toEqual(["art.md", "plain.md"]);
-    expect(out.collapsed.map((d) => d.docId)).toEqual(["amp1.md", "amp2.md"]);
-  });
-
-  test("collapse keeps the best amplifier when the article doc is absent", () => {
-    const out = applyAmplification(
-      [
-        doc({ docId: "amp1.md", handle: "@alice", rankScore: 0.6, docType: "note", articleUrl: ART }),
-        doc({ docId: "amp2.md", handle: "@bob", rankScore: 0.5, docType: "note", articleUrl: ART }),
-      ],
-      30,
-      CFG,
-    );
-    expect(out.listing.map((d) => d.docId)).toEqual(["amp1.md"]);
+    // The HIGHEST-SCORING member is kept — collapse never downgrades to the article doc.
+    expect(out.listing.map((d) => d.docId)).toEqual(["amp1.md", "plain.md"]);
+    expect(out.collapsed.map((d) => d.docId)).toEqual(["art.md", "amp2.md"]);
   });
 
   test("collapse still runs with promotion disabled (maxPromotions 0)", () => {
@@ -222,12 +239,6 @@ function scenario(amplifiers: number, over: Partial<{ minAuthors: number; maxPro
 }
 
 describe("applyAmplification — threshold", () => {
-  test("ONE amplifier gets no boost", () => {
-    const { topN, out } = scenario(1);
-    expect(out.promotions).toEqual([]);
-    expect(out.listing.slice(0, topN).some((d) => d.docId === "art.md")).toBe(false);
-  });
-
   test("TWO amplifiers get no boost", () => {
     const { topN, out } = scenario(2);
     expect(out.promotions).toEqual([]);
@@ -237,21 +248,65 @@ describe("applyAmplification — threshold", () => {
   test("THREE distinct amplifiers earn the reserved slot", () => {
     const { topN, out } = scenario(3);
     expect(out.promotions).toHaveLength(1);
-    expect(out.promotions[0]).toMatchObject({ docId: "art.md", amplifierAuthors: 3, toRank: topN });
+    // The article doc WAS the group's representative here, so nothing is replaced.
+    expect(out.promotions[0]).toMatchObject({ docId: "art.md", amplifierAuthors: 3, toRank: topN, replacedDocId: null });
     expect(out.promotions[0]!.fromRank).toBeGreaterThan(topN);
     // It enters at the BOTTOM of the band, never as the lead.
     expect(out.listing[topN - 1]!.docId).toBe("art.md");
     expect(out.listing[0]!.docId).toBe("fill-000.md");
   });
 
-  test("three quote-tweets from ONE account do NOT reach the threshold", () => {
+  test("the promoted doc is the ARTICLE doc — it REPLACES the group's representative", () => {
     const topN = 30;
     const docs: RankedDoc[] = [
       ...filler(topN + 9),
-      doc({ docId: "art.md", handle: "@owner", rankScore: 0.4, docType: "article", articleUrl: ART }),
-      doc({ docId: "a1.md", handle: "@alice", rankScore: 0.31, articleUrl: ART }),
-      doc({ docId: "a2.md", handle: "@Alice", rankScore: 0.30, articleUrl: ART }),
-      doc({ docId: "a3.md", handle: "@ALICE", rankScore: 0.29, articleUrl: ART }),
+      // The amplifier outscores the article doc, so it is the representative.
+      doc({ docId: "amp-lead.md", handle: "@amp0", rankScore: 0.45, docType: "note", articleUrl: ART }),
+      doc({ docId: "art.md", handle: "@owner", rankScore: 0.40, docType: "article", articleUrl: ART }),
+      doc({ docId: "amp-1.md", handle: "@amp1", rankScore: 0.30, docType: "note", articleUrl: ART }),
+      doc({ docId: "amp-2.md", handle: "@amp2", rankScore: 0.29, docType: "note", articleUrl: ART }),
+    ];
+    const out = applyAmplification(docs, topN, CFG);
+    expect(out.promotions).toHaveLength(1);
+    expect(out.promotions[0]).toMatchObject({
+      docId: "art.md",
+      amplifierAuthors: 3,
+      toRank: topN,
+      replacedDocId: "amp-lead.md",
+    });
+    // ONE slot for the group, at the bottom of the band, and the representative is gone.
+    expect(out.listing[topN - 1]!.docId).toBe("art.md");
+    expect(out.listing.filter((d) => d.articleUrl)).toHaveLength(1);
+    expect(out.collapsed.map((d) => d.docId).sort()).toEqual(["amp-1.md", "amp-2.md", "amp-lead.md"]);
+    // Exactly one non-group doc was displaced out of the band.
+    expect(out.listing.slice(0, topN - 1).map((d) => d.docId)).toEqual(
+      filler(topN + 9).slice(0, topN - 1).map((d) => d.docId),
+    );
+  });
+
+  test("a group whose representative is INSIDE the band is never given a second entry", () => {
+    const topN = 3;
+    const docs: RankedDoc[] = [
+      // Amplifier note leads the band; its article doc scores far lower.
+      doc({ docId: "amp-lead.md", handle: "@amp0", rankScore: 0.9, docType: "note", articleUrl: ART }),
+      ...filler(10, 0.5),
+      doc({ docId: "art.md", handle: "@owner", rankScore: 0.2, docType: "article", articleUrl: ART }),
+      doc({ docId: "amp-1.md", handle: "@amp1", rankScore: 0.11, docType: "note", articleUrl: ART }),
+      doc({ docId: "amp-2.md", handle: "@amp2", rankScore: 0.10, docType: "note", articleUrl: ART }),
+    ];
+    const out = applyAmplification(docs, topN, CFG);
+    expect(out.promotions).toEqual([]);
+    expect(out.listing[0]!.docId).toBe("amp-lead.md");
+    expect(out.listing.filter((d) => d.articleUrl)).toHaveLength(1);
+  });
+
+  test("no article doc in the group ⇒ nothing to promote, however many amplifiers", () => {
+    const topN = 30;
+    const docs: RankedDoc[] = [
+      ...filler(topN + 9),
+      ...Array.from({ length: 5 }, (_, i) =>
+        doc({ docId: `amp-${i}.md`, handle: `@amp${i}`, rankScore: 0.3 - i * 0.001, docType: "note", articleUrl: ART }),
+      ),
     ];
     const out = applyAmplification(docs, topN, CFG);
     expect(out.promotions).toEqual([]);
@@ -346,6 +401,49 @@ describe("applyAmplification — boundedness", () => {
     expect(new Set(out.listing).size).toBe(out.listing.length);
   });
 
+  test("promotions are capped at topN — topN 1 / maxPromotions 3 promotes ONE, at slot 1", () => {
+    const topN = 1;
+    const mk = (name: string) => {
+      const url = `https://x.com/${name}/article/1`;
+      return [
+        doc({ docId: `${name}.md`, handle: `@${name}`, rankScore: 0.2, docType: "article", articleUrl: url }),
+        ...Array.from({ length: 3 }, (_, i) =>
+          doc({ docId: `${name}-amp-${i}.md`, handle: `@${name}a${i}`, rankScore: 0.01, articleUrl: url }),
+        ),
+      ];
+    };
+    const out = applyAmplification([...filler(5), ...mk("a"), ...mk("b"), ...mk("c")], topN, {
+      minAuthors: 3,
+      maxPromotions: 3,
+    });
+    // Without the min(maxPromotions, topN) clamp this promoted 3 docs into a 1-wide band.
+    expect(out.promotions).toHaveLength(1);
+    expect(out.listing[0]!.docId).toBe(out.promotions[0]!.docId);
+    expect(out.promotions[0]!.toRank).toBe(1);
+  });
+
+  test("topN 1 with a single filler doc: the promoted article lands at slot 1, never below", () => {
+    // The negative-slice case: `topN - promoted.length` was -0/-1 here, which put the promoted
+    // doc at the listing TAIL while the telemetry still logged a top-of-band `toRank`.
+    const topN = 1;
+    const url = "https://x.com/a/article/1";
+    const out = applyAmplification(
+      [
+        doc({ docId: "filler.md", handle: "@f", rankScore: 0.9 }),
+        doc({ docId: "art.md", handle: "@a", rankScore: 0.2, docType: "article", articleUrl: url }),
+        ...Array.from({ length: 3 }, (_, i) =>
+          doc({ docId: `amp-${i}.md`, handle: `@amp${i}`, rankScore: 0.01, articleUrl: url }),
+        ),
+      ],
+      topN,
+      { minAuthors: 3, maxPromotions: 3 },
+    );
+    expect(out.promotions).toHaveLength(1);
+    // Telemetry and reality agree: toRank 1 and the doc really is at index 0.
+    expect(out.promotions[0]!.toRank).toBe(1);
+    expect(out.listing[0]!.docId).toBe("art.md");
+  });
+
   test("empty input is safe", () => {
     expect(applyAmplification([], 30, CFG)).toMatchObject({ listing: [], promotions: [], collapsed: [] });
   });
@@ -379,11 +477,67 @@ describe("resolveAmplificationConfig", () => {
   test("minAuthors 0 is out of range (a zero-author threshold would promote every article)", () => {
     expect(resolveAmplificationConfig({ amplificationMinAuthors: 0 }).minAuthors).toBe(3);
   });
+
+  test("maxPromotions has an upper bound — the knob exists to CAP displacement", () => {
+    expect(resolveAmplificationConfig({ amplificationMaxPromotions: MAX_AMPLIFICATION_MAX_PROMOTIONS }).maxPromotions)
+      .toBe(MAX_AMPLIFICATION_MAX_PROMOTIONS);
+    for (const bad of [MAX_AMPLIFICATION_MAX_PROMOTIONS + 1, 1e9]) {
+      expect(resolveAmplificationConfig({ amplificationMaxPromotions: bad }).maxPromotions).toBe(1);
+    }
+  });
 });
 
-// ── Replay over the REAL 2026-07-25 two-day window ──────────────────
+// ── Replay: the PRODUCTION population (compacted = the top-`maxDocs` batch) ──
 
-describe("amplification replay — real x-feed corpus, 2026-07-25 2-day window", () => {
+/**
+ * The honest replay. Production never runs `applyAmplification` over the whole window — it
+ * runs it over `compacted`, the top-`maxDocs` (80) score-ordered batch. Every number in this
+ * block is that population's, and today it says: amplification is **live but inert**.
+ */
+describe("amplification replay — the PRODUCTION population (top-80 batch), 2026-07-25", () => {
+  const MAX_DOCS = 80; // DEFAULT_MAX_DOCS — the `compacted` batch amplification actually sees
+  const batch: RankedDoc[] = (xWindow as RankedDoc[]).slice(0, MAX_DOCS);
+  const TOP_N = 30; // DEFAULT_TOP_N
+
+  test("today's true output: collapse active, 0 collapsed, 0 promotions, digest unchanged", () => {
+    const groups = buildArticleGroups(batch);
+    // 7 article-footer docs, 7 groups — every group a singleton, so there is nothing to
+    // collapse and no group can reach `minAuthors` amplifiers.
+    expect(batch.filter((d) => d.articleUrl)).toHaveLength(7);
+    expect(groups).toHaveLength(7);
+    expect(groups.filter((g) => g.docs.length > 1)).toHaveLength(0);
+    expect(Math.max(...groups.map((g) => g.amplifierAuthors))).toBe(0);
+
+    const out = applyAmplification(batch, TOP_N, CFG);
+    expect(out.collapsed).toEqual([]);
+    expect(out.promotions).toEqual([]);
+    // The digest top-30 is byte-identical to the un-amplified baseline.
+    expect(out.listing).toEqual(batch);
+    expect(out.listing.slice(0, TOP_N)).toEqual(batch.slice(0, TOP_N));
+  });
+
+  test("the binding constraint: only 6 of the window's 25 article docs are inside the cap", () => {
+    const window = xWindow as RankedDoc[];
+    const articleRanks = window.map((d, i) => ({ d, rank: i + 1 })).filter((x) => x.d.docType === "article");
+    expect(articleRanks).toHaveLength(25);
+    expect(articleRanks.filter((x) => x.rank <= MAX_DOCS).map((x) => x.rank)).toEqual([1, 15, 26, 38, 57, 67]);
+    // Promotion needs the article doc AND >= minAuthors amplifier docs in this SAME batch.
+    expect(window[MAX_DOCS - 1]!.rankScore).toBeCloseTo(0.5777, 4); // the top-80 cut
+  });
+});
+
+// ── Census over the REAL 2026-07-25 two-day WINDOW (not the production population) ──
+
+/**
+ * Window-level census, NOT production behavior. The 476-doc fixture is the whole 2-day
+ * window; production only ever fetches (and amplifies over) its top-`maxDocs` 80. These
+ * numbers describe the corpus and the mechanism's reachability — see the production block
+ * above for what the digest actually does today. The `>= minAuthors` scenarios below are
+ * SYNTHETIC extensions of real groups, and their amplifiers carry PRE-parse-lift ranks
+ * (99–153); post-lift, measured amplifiers of AI-relevant articles re-scored at 0.59–0.65
+ * against the 0.5777 top-80 cut, which is what makes the mechanism reachable at all.
+ */
+describe("amplification census — real x-feed corpus, 2026-07-25 2-day window", () => {
   const window: RankedDoc[] = xWindow as RankedDoc[];
   const TOP_N = 30; // DEFAULT_TOP_N
 
@@ -411,15 +565,22 @@ describe("amplification replay — real x-feed corpus, 2026-07-25 2-day window",
     expect(Math.max(...groups.map((g) => g.amplifierAuthors))).toBe(1);
   });
 
-  test("organic window: collapse drops 7 duplicate slots, and NOTHING is promoted", () => {
+  test("window-level: collapse drops 7 duplicate slots, and NOTHING is promoted", () => {
+    // WINDOW-level figure only. On the production path (top-80 batch) this reads **0** —
+    // see the production block above; the `Collection: … article-collapsed` log line will
+    // likewise say 0 on today's data.
     const out = applyAmplification(window, TOP_N, CFG);
     expect(out.promotions).toEqual([]);
     expect(out.collapsed).toHaveLength(7);
     expect(out.listing).toHaveLength(window.length - 7);
-    // Every collapsed doc shares its article with a survivor that outranks it or is the
-    // article's own doc — no article lost its digest representation.
-    const keys = new Set(out.listing.filter((d) => d.articleUrl).map((d) => normalizeArticleUrl(d.articleUrl!)));
-    for (const c of out.collapsed) expect(keys.has(normalizeArticleUrl(c.articleUrl!))).toBe(true);
+    // Every collapsed doc shares its article with a survivor that OUTRANKS it — collapse
+    // never drops the higher-scoring doc, so no article loses its best representation.
+    const survivorScore = new Map(
+      out.listing.filter((d) => d.articleUrl).map((d) => [normalizeArticleUrl(d.articleUrl!), d.rankScore]),
+    );
+    for (const c of out.collapsed) {
+      expect(survivorScore.get(normalizeArticleUrl(c.articleUrl!))!).toBeGreaterThanOrEqual(c.rankScore);
+    }
   });
 
   test("collapse removes the near-identical adjacent pairs (the PR-1 reviewer's MED)", () => {
@@ -427,15 +588,17 @@ describe("amplification replay — real x-feed corpus, 2026-07-25 2-day window",
     // two ADJACENT, near-identical digest lines for one article. Same for @noisyb0y1's pair.
     const out = applyAmplification(window, TOP_N, CFG);
     const ids = new Set(out.listing.map((d) => d.docId));
-    expect(ids.has("2026-07-25_alex_prompter_2080926039421911276.md")).toBe(false);
-    expect(ids.has("2026-07-25_free_ai_guides_2073391903819608421.md")).toBe(true);
-    // ...and @DataChaz's amplifier of @MushtaqBilalPhD's article goes, the article stays.
+    // The HIGHER-scoring doc of the pair survives — here that is the amplifier note, not the
+    // article doc it quotes (the semantics fix: collapse is never an unforced downgrade).
+    expect(ids.has("2026-07-25_alex_prompter_2080926039421911276.md")).toBe(true);
+    expect(ids.has("2026-07-25_free_ai_guides_2073391903819608421.md")).toBe(false);
+    // ...and @DataChaz (0.3839) loses to @MushtaqBilalPhD's article (0.5903), which outscores it.
     const collapsedIds = new Set(out.collapsed.map((d) => d.docId));
     expect([...collapsedIds].some((id) => id.includes("_DataChaz_"))).toBe(true);
     expect(out.listing.some((d) => d.docId.includes("_MushtaqBilalPhD_") && d.docType === "article")).toBe(true);
     // alex_prompter's FOUR other (non-amplifier) docs are untouched — collapse is keyed on
     // the article group, never on the handle.
-    expect(out.listing.filter((d) => d.docId.includes("_alex_prompter_"))).toHaveLength(4);
+    expect(out.listing.filter((d) => d.docId.includes("_alex_prompter_"))).toHaveLength(5);
   });
 
   test("pre/post digest composition — a synthetically amplified mid-band article enters at slot 30", () => {
@@ -463,17 +626,6 @@ describe("amplification replay — real x-feed corpus, 2026-07-25 2-day window",
     expect(afterTop[TOP_N - 1]).toBe(article);
     expect(afterTop.slice(0, TOP_N - 1)).toEqual(beforeTop.slice(0, TOP_N - 1));
     expect(afterTop[0]!.docId).toBe(window[0]!.docId); // trq212 keeps the lead
-  });
-
-  test("the same article with only TWO distinct amplifiers stays out of the digest", () => {
-    const article = window.find((d) => d.docId.includes("_MushtaqBilalPhD_") && d.docType === "article")!;
-    const input = [
-      ...window,
-      doc({ docId: "synthetic-amp-0.md", handle: "@ampA", rankScore: 0.3, articleUrl: article.articleUrl! }),
-    ].sort((a, b) => b.rankScore - a.rankScore);
-    const out = applyAmplification(input, TOP_N, CFG);
-    expect(out.promotions).toEqual([]);
-    expect(out.listing.slice(0, TOP_N).includes(article)).toBe(false);
   });
 
   test("even the day's junkiest article, amplified sixfold, only reaches slot 30", () => {

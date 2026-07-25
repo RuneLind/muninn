@@ -1701,11 +1701,12 @@ describe("fetchFromCollection amplification wiring", () => {
     updatedAt: 0,
   });
 
-  test("the digest sees ONE line per article — the amplifiers are collapsed away", async () => {
+  test("the digest sees ONE line per article — the group's HIGHEST-scoring doc", async () => {
     await checkX(watcher({}));
-    // The article doc survives (even though @amp1 outscored it); both amplifiers are gone.
-    expect(lastGatePrompt).toContain("@owner: The new rules of context engineering");
-    expect(lastGatePrompt).not.toContain("@amp1:");
+    // @amp1 (0.61) outscores the article doc (0.60), so IT keeps the group's one slot —
+    // collapse never downgrades. The article doc and the weaker amplifier are gone.
+    expect(lastGatePrompt).toContain("@amp1: Everyone should read this article");
+    expect(lastGatePrompt).not.toContain("@owner:");
     expect(lastGatePrompt).not.toContain("@amp2:");
     // Non-article docs are untouched.
     expect(lastGatePrompt).toContain("@plain:");

@@ -596,16 +596,19 @@ export async function fetchFromCollection(
   // X-Article amplification, applied at the RANKING step (after fetch, before the topN
   // slice) — deliberately NOT in the maxDocs listing cap, which is listing-score based and
   // runs before any body (and therefore any articleUrl) exists. Two effects, both scoped to
-  // the DIGEST listing: one doc per article survives (collapse — an amplifier now carries
-  // the article's title+preview, so a popular article could otherwise take N+1 near-identical
-  // slots), and an article quoted by >= amplificationMinAuthors distinct authors earns one of
-  // at most amplificationMaxPromotions reserved slots at the BOTTOM of the top-N band.
+  // the DIGEST listing: each article group keeps exactly ONE slot (collapse — an amplifier now
+  // carries the article's title+preview, so a popular article could otherwise take N+1
+  // near-identical slots; the kept doc is the group's highest-scoring member, never a
+  // downgrade), and an article quoted by >= amplificationMinAuthors distinct authors takes
+  // over that one slot with its ARTICLE doc, moved to the BOTTOM of the top-N band, in one of
+  // at most amplificationMaxPromotions reserved slots.
   // `compacted` itself is untouched, so the capture batch and trackingIds are unaffected.
   const amplification = resolveAmplificationConfig(config, botName);
   const amplified = applyAmplification(compacted, topN, amplification);
   for (const p of amplified.promotions) {
-    log.info("Amplification: promoted {articleUrl} ({authors} distinct amplifiers) from rank {from} to {to}", {
-      botName, articleUrl: p.articleUrl, authors: p.amplifierAuthors, from: p.fromRank, to: p.toRank, docId: p.docId,
+    log.info("Amplification: promoted {articleUrl} ({authors} distinct amplifiers) into rank {to}, taking the group's slot at rank {from} (replacing {replaced})", {
+      botName, articleUrl: p.articleUrl, authors: p.amplifierAuthors, from: p.fromRank, to: p.toRank,
+      docId: p.docId, replaced: p.replacedDocId ?? "nothing (the article doc was the group's representative)",
     });
   }
   const ranked = amplified.listing.slice(0, topN);
@@ -615,6 +618,9 @@ export async function fetchFromCollection(
   // still leave a breadcrumb the user can use to calibrate the gate from log history.
   // `scored=` is the cap's honesty field: it says how much of the in-window set the
   // score-ordering could actually rank (the rest held their alphabetical slot).
+  // NB `article-collapsed` reads **0** on today's data: the 2026-07-25 top-80 batch — the real
+  // production population, not the 476-doc window — held 7 article-footer docs in 7 groups with
+  // NO multi-doc group. A nonzero value there is the first sign amplification has real surface.
   log.info("Collection: {total} docs, {recent} recent, {newCount} new, scored={scored}, {fetched} fetched, {collapsed} article-collapsed, {ranked} after ranking, topScore={topScore}", {
     botName,
     total: docs.length,
@@ -627,9 +633,11 @@ export async function fetchFromCollection(
     topScore: compacted[0]?.rankScore.toFixed(3) ?? "n/a",
   });
 
-  // `topScore` stays the FULL batch's top (not the collapsed listing's): it feeds the
-  // alert-path `minScore` gate, which must keep behaving exactly as it did — a collapsed
-  // amplifier is still a real, fetched tweet that the run considered.
+  // `topScore` stays the FULL batch's top (`compacted[0]`, which collapse may have dropped
+  // from the listing): it feeds the alert-path `minScore` gate, which must keep behaving
+  // exactly as it did — a collapsed amplifier is still a real, fetched tweet the run
+  // considered. Known + accepted; likewise on Highlights (`dedupByTweetId: true`) a collapsed
+  // amplifier is marked seen without having been shown, since `trackingIds` rides `compacted`.
   return { texts, trackingIds, topScore: compacted[0]?.rankScore, docs: tweetDocs };
 }
 
