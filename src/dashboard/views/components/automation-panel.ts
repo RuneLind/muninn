@@ -1,6 +1,7 @@
 import { DEFAULT_X_PROMPT } from "../../../watchers/x.ts";
 import { DEFAULT_EMAIL_PROMPT } from "../../../watchers/email.ts";
 import { DEFAULT_ANTHROPIC_GATE_PROMPT, DEFAULT_ANTHROPIC_DAILY_PROMPT } from "../../../watchers/anthropic.ts";
+import { escJsonScript } from "./escape.ts";
 
 /** Automation panel — combined scheduled tasks + watchers master-detail */
 export function automationPanelStyles(): string {
@@ -652,18 +653,25 @@ export function automationPanelScript(): string {
       if (atDetailTab === 'activity') loadJobActivity('watcher', w);
     }
 
+    // NOTE: the save path deletes a stored config.prompt that byte-matches its
+    // entry here (the unseed guard). Adding an entry that equals a row's SEEDED
+    // prompt (e.g. the Weekly digest's) would silently delete that override on
+    // the next unrelated save — only add defaults the runtime actually falls
+    // back to (the config.prompt fallback sites in src/watchers/).
     var WATCHER_DEFAULT_PROMPTS = {
-      x: ${JSON.stringify(DEFAULT_X_PROMPT)},
-      email: ${JSON.stringify(DEFAULT_EMAIL_PROMPT)},
+      x: ${escJsonScript(DEFAULT_X_PROMPT)},
+      email: ${escJsonScript(DEFAULT_EMAIL_PROMPT)},
       news: '',
-      anthropicGate: ${JSON.stringify(DEFAULT_ANTHROPIC_GATE_PROMPT)},
-      anthropicDigest: ${JSON.stringify(DEFAULT_ANTHROPIC_DAILY_PROMPT)},
+      anthropicGate: ${escJsonScript(DEFAULT_ANTHROPIC_GATE_PROMPT)},
+      anthropicDigest: ${escJsonScript(DEFAULT_ANTHROPIC_DAILY_PROMPT)},
     };
 
     function watcherDefaultPrompt(w) {
-      // The anthropic default is mode-dependent (mirrors runGate/runDigest fallbacks)
+      // The anthropic default is mode-dependent (mirrors runGate/runDigest fallbacks).
+      // A row with neither gate nor digest makes no model call — no prompt to show.
       if (w.type === 'anthropic') {
-        return w.config && w.config.digest
+        if (!w.config || (!w.config.gate && !w.config.digest)) return '';
+        return w.config.digest
           ? WATCHER_DEFAULT_PROMPTS.anthropicDigest
           : WATCHER_DEFAULT_PROMPTS.anthropicGate;
       }
