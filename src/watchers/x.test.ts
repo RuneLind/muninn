@@ -102,6 +102,8 @@ const {
   buildDateWindow,
   isSkipResult,
   compactTweetText,
+  parseDocType,
+  extractArticleUrl,
   isLongFormTweet,
   fetchFromCollection,
   checkX,
@@ -115,6 +117,12 @@ const {
   DEFAULT_X_PROMPT,
   DEFAULT_X_HIGHLIGHTS_PROMPT,
 } = await import("./x.ts");
+
+// The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
+// (`2026-07-24_trq212_2080710971228918066.md`, combined_score 0.7493). Its body is only
+// the article TITLE + a ~190-char preview — exactly why the 800-char long-form fallback
+// can't see this class and the `**Type:** article` marker must.
+const articleDoc = await Bun.file(`${import.meta.dir}/__fixtures__/x-feed-article-trq212.md`).text();
 
 // ── Score extraction from markdown (tests the real exported function) ─
 
@@ -298,7 +306,7 @@ It continues across several lines with substance.
     const c = compactTweetText(noteDoc, "https://x.com/karpathy/status/1");
     expect(c.handle).toBe("@karpathy");
     expect(c.firstLine).toBe("This is the first line of a long note.");
-    expect(c.isNote).toBe(true);
+    expect(c.docType).toBe("note");
     // bodyLength measures the joined body PRE-truncation, not the raw doc.
     expect(c.bodyLength).toBeGreaterThan(50);
     // The compact one-liner keeps the [ARTICLE/NOTE] marker + engagement + URL.
@@ -307,10 +315,29 @@ It continues across several lines with substance.
     expect(c.text).toContain("URL: https://x.com/karpathy/status/1");
   });
 
+  test("an X Article doc is typed `article`, keeps the [ARTICLE/NOTE] prefix, and yields the article permalink", () => {
+    const c = compactTweetText(articleDoc, "https://x.com/trq212/status/2080710971228918066");
+    expect(c.docType).toBe("article");
+    expect(c.articleUrl).toBe("https://x.com/trq212/article/2080710971228918066");
+    expect(c.handle).toBe("@trq212");
+    expect(c.firstLine).toBe("The new rules of context engineering for Claude 5 models");
+    expect(c.text).toContain("[ARTICLE/NOTE]");
+    // The measured reason the char floor can never rescue this class.
+    expect(c.bodyLength).toBeLessThan(800);
+    expect(c.bodyLength).toBeGreaterThan(200);
+    // The doc's `**Links:**` footer points at x.com/i/article/… — a SKIP_HOSTS host, so
+    // the fetched-link parser stays empty and enrichment can't hit X's login wall.
+    expect(c.links).toEqual([]);
+  });
+
+  test("a non-article doc has no articleUrl", () => {
+    expect(compactTweetText(noteDoc, "https://x.com/karpathy/status/1").articleUrl).toBeNull();
+  });
+
   test("a plain short tweet has no note marker and a small body length", () => {
     const doc = `# @someone — Name\n\nshort tweet\n\n---\n\n- **Engagement:** 3 likes`;
     const c = compactTweetText(doc, "https://x.com/someone/status/2");
-    expect(c.isNote).toBe(false);
+    expect(c.docType).toBeNull();
     expect(c.bodyLength).toBe("short tweet".length);
     expect(c.firstLine).toBe("short tweet");
   });
@@ -334,25 +361,91 @@ It continues across several lines with substance.
     const c = compactTweetText(doc, "https://x.com/writer/status/3");
     // Both halves counted — cutting at the FIRST --- would have dropped part two.
     expect(c.bodyLength).toBeGreaterThan(before.length + after.length);
-    expect(c.isNote).toBe(true);
+    expect(c.docType).toBe("note");
     // The gate excerpt carries the longer slice (up to its cap), not the 500-char text.
     expect(c.gateBody.length).toBeGreaterThan(500);
+  });
+});
+
+// ── parseDocType / extractArticleUrl (pure footer parsers) ──────────
+
+describe("parseDocType", () => {
+  test("recognizes both long-form species", () => {
+    expect(parseDocType("- **Type:** note")).toBe("note");
+    expect(parseDocType("- **Type:** article")).toBe("article");
+  });
+
+  test("a plain tweet or a missing line is not long-form", () => {
+    expect(parseDocType("- **Type:** tweet")).toBeNull();
+    expect(parseDocType("")).toBeNull();
+  });
+
+  test("the value is matched EXACTLY — a superstring is not a species", () => {
+    expect(parseDocType("- **Type:** notearticle")).toBeNull();
+    expect(parseDocType("- **Type:** article thread")).toBeNull();
+  });
+
+  test("the line must be anchored — an unanchored mention is not the footer field", () => {
+    expect(parseDocType("I wrote about this in **Type:** article form")).toBeNull();
+  });
+
+  test("`note` is checked first — a note that links an article stays a note", () => {
+    // Upstream deliberately keeps note-with-article typed `note`; either way it is
+    // long-form, so nothing is lost — but the value must not be re-read as `article`
+    // (which would also exempt it from the non-top capture raise).
+    expect(parseDocType("- **Type:** note")).toBe("note");
+  });
+});
+
+describe("compactTweetText: author-controlled body can't forge the Type marker", () => {
+  test("a body-injected `**Type:** article` line does NOT flip a plain tweet long-form", () => {
+    // Unanchored mentions in author-controlled body text — the shape the old
+    // `l.includes("**Type:**")` + substring parse would have read as long-form.
+    const doc = `# @spammer — Spam\n\nread my **Type:** article now, it is a real article\n\n---\n\n- **Engagement:** 3 likes`;
+    const c = compactTweetText(doc, "https://x.com/spammer/status/7");
+    expect(c.docType).toBeNull();
+    expect(isLongFormTweet({ docType: c.docType, bodyLength: c.bodyLength })).toBe(false);
+  });
+});
+
+describe("extractArticleUrl", () => {
+  test("reads the `- **Article:**` footer permalink", () => {
+    expect(extractArticleUrl(articleDoc)).toBe("https://x.com/trq212/article/2080710971228918066");
+  });
+
+  test("no `**Article:**` line ⇒ null", () => {
+    expect(extractArticleUrl("# @a — A\n\nplain\n\n---\n\n- **Link:** https://x.com/a/status/9")).toBeNull();
+  });
+
+  test("a body-injected Article line BEFORE the footer separator is ignored", () => {
+    const doc = `# @spammer — Spam\n\n- **Article:** https://spam.example/evil\n\n---\n\n- **Engagement:** 3 likes\n- **Link:** https://x.com/spammer/status/7`;
+    expect(extractArticleUrl(doc)).toBeNull();
+  });
+
+  test("a body-injected line does not beat the REAL footer field", () => {
+    const doc = `# @spammer — Spam\n\n- **Article:** https://spam.example/evil\n\n---\n\n- **Type:** article\n- **Article:** https://x.com/spammer/article/7`;
+    expect(extractArticleUrl(doc)).toBe("https://x.com/spammer/article/7");
   });
 });
 
 // ── isLongFormTweet: the capture pre-filter ─────────────────────────
 
 describe("isLongFormTweet", () => {
+  test("an article marker qualifies at a SHORT body (the whole point of the widening)", () => {
+    // Measured range for a real X Article doc body: ~280–460 chars, far under 800.
+    expect(isLongFormTweet({ docType: "article", bodyLength: 300 })).toBe(true);
+  });
+
   test("a note marker qualifies regardless of length", () => {
-    expect(isLongFormTweet({ isNote: true, bodyLength: 10 })).toBe(true);
+    expect(isLongFormTweet({ docType: "note", bodyLength: 10 })).toBe(true);
   });
 
   test("a body >= 800 chars qualifies without a note marker", () => {
-    expect(isLongFormTweet({ isNote: false, bodyLength: 800 })).toBe(true);
+    expect(isLongFormTweet({ docType: null, bodyLength: 800 })).toBe(true);
   });
 
   test("a short plain tweet is excluded", () => {
-    expect(isLongFormTweet({ isNote: false, bodyLength: 799 })).toBe(false);
+    expect(isLongFormTweet({ docType: null, bodyLength: 799 })).toBe(false);
   });
 });
 
@@ -411,12 +504,30 @@ describe("captureFloorForTier", () => {
     // Override beats candidateMinScore.
     expect(captureFloorForTier("top5", { candidateMinScore: 0.6, candidateMinScoreByKind: { "x-post": 0.8 } })).toBe(0.8);
   });
+
+  // The `docType === "article"` exemption — asserted against the LIVE X Highlights
+  // config (candidateMinScore 0.6, no other floor knobs set).
+  test("an `article` doc by a NON-TOP author keeps the 0.6 base — the 0.75 raise does NOT apply", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, "article")).toBe(0.6);
+  });
+
+  test("an `article` doc by a top author is unchanged at the base", () => {
+    expect(captureFloorForTier("top5", { candidateMinScore: 0.6 }, "article")).toBe(0.6);
+  });
+
+  test("the article exemption skips the non-top RAISE, it never undercuts a configured base", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.85 }, "article")).toBe(0.85);
+    expect(captureFloorForTier(null, { candidateMinScoreByKind: { "x-post": 0.8 } }, "article")).toBe(0.8);
+    // A `note` (or a null docType — a ≥800ch body) still takes the raise.
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, "note")).toBe(0.75);
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, null)).toBe(0.75);
+  });
 });
 
 // ── isLinkTweet: the pointer-tweet capture pre-filter ───────────────
 
 describe("isLinkTweet", () => {
-  const short = { bodyLength: 100, isNote: false }; // not long-form
+  const short = { bodyLength: 100, docType: null }; // not long-form
 
   test("eligible: not long-form + ≥1 link + top-author (tier set)", () => {
     expect(isLinkTweet({ ...short, links: ["https://youtu.be/x"] }, "top5")).toBe(true);
@@ -432,8 +543,8 @@ describe("isLinkTweet", () => {
   });
 
   test("a long-form tweet is never a link-tweet (captured as x-post instead)", () => {
-    expect(isLinkTweet({ bodyLength: 900, isNote: false, links: ["https://youtu.be/x"] }, "top1")).toBe(false);
-    expect(isLinkTweet({ bodyLength: 10, isNote: true, links: ["https://youtu.be/x"] }, "top1")).toBe(false);
+    expect(isLinkTweet({ bodyLength: 900, docType: null, links: ["https://youtu.be/x"] }, "top1")).toBe(false);
+    expect(isLinkTweet({ bodyLength: 10, docType: "note", links: ["https://youtu.be/x"] }, "top1")).toBe(false);
   });
 });
 
@@ -539,7 +650,7 @@ describe("fetchFromCollection + checkX capture", () => {
     const alice = result!.docs!.find((d) => d.handle === "@alice")!;
     expect(alice.docId).toBe(`${today}_alice_1.md`);
     expect(alice.url).toBe("https://x.com/alice/status/1");
-    expect(alice.isNote).toBe(true);
+    expect(alice.docType).toBe("note");
     expect(alice.firstLine).toContain("A sharp note on eval design");
     expect(typeof alice.bodyLength).toBe("number");
   });
@@ -1072,6 +1183,136 @@ describe("fetchFromCollection score-ordered cap wiring", () => {
     expect(warn).toBeDefined();
     expect(warn!.message).toContain("8/20");
     expect(warn!.message).toContain("40.0%");
+  });
+});
+
+// ── End-to-end replay: a REAL X Article doc through checkX ──────────
+// The whole shelf leg in one pass, on the live X Highlights config, against the
+// verbatim trq212 doc re-dated into today's window (on disk it is 2026-07-24, out of
+// a 1–2 day window today). Proves: article ⇒ long-form ⇒ x-post, the 0.6 floor applies
+// while the 0.75 non-top raise does not (trq212 is UNRANKED here — thresholds null ⇒
+// tier null, the strictest degrade), and the candidate row points at the ARTICLE url.
+
+describe("checkX: X Article capture (real-doc replay)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const docId = `${today}_trq212_2080710971228918066.md`;
+  const tweetUrl = "https://x.com/trq212/status/2080710971228918066";
+  const articleUrl = "https://x.com/trq212/article/2080710971228918066";
+  // The doc's own frontmatter score — the value huginn serves in the listing/metadata.
+  const combinedScore = "0.7493";
+  // The doc body the mocked huginn serves; swapped per test (see the amplifier case).
+  let servedDoc = articleDoc;
+
+  beforeEach(() => {
+    servedDoc = articleDoc;
+    gateResult = "[]";
+    gateThrow = false;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    upsertThrow = false;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    authorThresholds = null; // scores file unavailable ⇒ every author is non-top
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ documents: [{ id: docId, url: tweetUrl, combined_score: combinedScore }] }),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: servedDoc, metadata: { url: tweetUrl, combined_score: combinedScore } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const watcher = (): Watcher => ({
+    id: "xw-article",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    // The live X Highlights config (windowDays raised to the 2 this PR prepares).
+    config: {
+      collection: "x-feed",
+      windowDays: 2,
+      maxDocs: 80,
+      topN: 10,
+      minScore: 0.6,
+      quietMode: true,
+      dedupByTweetId: true,
+      captureCandidates: true,
+      candidateMinScore: 0.6,
+    },
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  test("an article by a non-top author is captured as x-post at the 0.6 floor, keyed on the ARTICLE url", async () => {
+    // 0.65: clears the x-post base (0.6) but NOT the non-top raise (0.75) — so this row
+    // only exists because `**Type:** article` exempts it from the raise.
+    gateResult = JSON.stringify([{ n: 1, score: 0.65, why: "context-engineering rules for Claude 5" }]);
+
+    await checkX(watcher(), undefined, "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    const row = upsertCalls[0]!;
+    expect(row.source).toBe("x");
+    expect(row.kind).toBe("x-post");
+    expect(row.author).toBe("trq212");
+    expect(row.url).toBe(articleUrl); // NOT the announcing tweet
+    expect(row.title).toBe("@trq212: The new rules of context engineering for Claude 5 models");
+    expect(row.candidateSrc).toBe("X (@trq212)");
+    expect(row.sourceDocId).toBe(docId); // how the summarizer resolves content
+    expect(row.score).toBe(0.65);
+
+    // It reached the gate as long-form, prefixed like a note.
+    expect(lastGatePrompt).toContain("[ARTICLE/NOTE] @trq212:");
+  });
+
+  // The AMPLIFIER shape: huginn writes the `- **Article:**` footer for any doc whose
+  // tweet OR quote target carries an article, so a `**Type:** note` doc can carry
+  // ANOTHER author's article permalink. Keying the candidate on it would collide with
+  // the promoted article doc on UNIQUE(source, url) and serve the wrong body.
+  test("a `note` doc carrying an `- **Article:**` footer keeps the TWEET url as candidate url", async () => {
+    servedDoc = [
+      "# @amplifier — Amp",
+      "",
+      "Great read from @trq212 — everyone building agents should study this one closely.",
+      "",
+      "---",
+      "",
+      "- **Engagement:** 900 likes · 120,000 views",
+      "- **Type:** note",
+      `- **Link:** ${tweetUrl}`,
+      `- **Article:** ${articleUrl}`,
+    ].join("\n");
+    // 0.8 clears the non-top raise (0.75) the note — unlike an article — still takes.
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "solid pointer" }]);
+
+    await checkX(watcher(), undefined, "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.url).toBe(tweetUrl); // NOT another author's article permalink
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.sourceDocId).toBe(docId);
   });
 });
 

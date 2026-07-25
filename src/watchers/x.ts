@@ -253,6 +253,18 @@ export function orderDocsForCap(docs: CollectionDoc[]): CollectionDoc[] {
   return alphabetical.map((d) => (listingScore(d.combined_score) === null ? d : scored[next++]!));
 }
 
+/**
+ * The two long-form species an x-feed doc's `**Type:**` footer can carry:
+ *   - `note` — an X long-form Note. Its full text IS the doc body.
+ *   - `article` — an X Article. The doc body is only the article TITLE plus a short
+ *     preview (~190 chars), so its body is SHORT (≈280–460 chars measured) and the
+ *     {@link LONGFORM_MIN_CHARS} fallback can never rescue it — the marker is the
+ *     only signal that it is long-form. The full article lives behind X's auth wall
+ *     at the `- **Article:**` footer URL.
+ * Anything else (`tweet`) is a plain post and maps to `null`.
+ */
+export type XDocType = "note" | "article";
+
 interface CompactedTweet {
   text: string;
   rankScore: number;
@@ -260,10 +272,20 @@ interface CompactedTweet {
   handle: string;
   /** Length of the extracted tweet body BEFORE truncation — the long-form capture signal. */
   bodyLength: number;
-  /** The doc carries a `**Type:** note` marker (a long-form X note/article). */
-  isNote: boolean;
+  /**
+   * The doc's `**Type:**` marker when it is one of the two long-form species
+   * (`note` / `article`), else null (a plain `tweet`). See {@link parseDocType}.
+   */
+  docType: XDocType | null;
   /** First body line of the tweet — used for the candidate title. */
   firstLine: string;
+  /**
+   * The X Article permalink from the doc's `- **Article:**` footer line, when present.
+   * huginn writes that footer on ANY doc whose tweet or quote target carries an article
+   * (amplifier notes included) — only `**Type:** article` docs use it as the candidate
+   * url downstream. See {@link extractArticleUrl}.
+   */
+  articleUrl: string | null;
   /** Body slice up to {@link GATE_EXCERPT_CHARS} for the capture gate (text caps at 500). */
   gateBody: string;
   /**
@@ -294,8 +316,16 @@ export interface TweetDoc {
   url: string;
   handle: string;
   bodyLength: number;
-  isNote: boolean;
+  /** The doc's long-form `**Type:**` marker (`note`/`article`), else null. */
+  docType: XDocType | null;
   firstLine: string;
+  /**
+   * The `- **Article:**` footer permalink when the doc carries one, else null. Present
+   * on amplifier docs too (a note quoting someone else's article), so the capture path
+   * only adopts it as the candidate `url` — so `/summaries` links to the ARTICLE rather
+   * than the announcing tweet — when `docType === "article"`. See {@link extractArticleUrl}.
+   */
+  articleUrl: string | null;
   /** The compact one-liner (same string sent to the digest LLM). */
   text: string;
   /** Longer body slice for the capture gate — see {@link GATE_EXCERPT_CHARS}. */
@@ -359,13 +389,16 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
 
   const rankScore = extractRankScore(rawText);
 
-  // Extract type
-  const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
-  const isNote = typeLine.includes("note");
+  // Extract type — `note` AND `article` are both long-form species (see XDocType).
+  const typeLine = lines.find((l) => l.startsWith("- **Type:**")) ?? "";
+  const docType = parseDocType(typeLine);
 
   let result = `${handle}: ${body}`;
   if (signals.length > 0) result += ` (${signals.join(", ")})`;
-  if (isNote) result = `[ARTICLE/NOTE] ${result}`;
+  // Both species SHARE the existing `[ARTICLE/NOTE]` prefix — it already names both,
+  // and the digest/gate prompts read it as one "this is long-form" hint, so a separate
+  // `[ARTICLE]` token would only add a second thing for the models to learn.
+  if (docType) result = `[ARTICLE/NOTE] ${result}`;
   result += `\n  URL: ${url}`;
   // bodyLength measures the extracted body PRE-truncation (x-feed docs carry ~350–450
   // chars of fixed scaffolding, so measuring the doc length would misclassify ordinary
@@ -378,7 +411,59 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
   // and `gateBody` slices don't carry the `**Links:**` footer line). Drives link-tweet
   // capture eligibility downstream.
   const links = extractDocLinks(rawText);
-  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, isNote, firstLine, gateBody, links };
+  // The article permalink is a DEDICATED footer field, deliberately kept out of `links`
+  // (which is fetched downstream) — see extractArticleUrl.
+  const articleUrl = extractArticleUrl(rawText);
+  return { text: result, rankScore, handle, bodyLength: bodyRaw.length, docType, firstLine, articleUrl, gateBody, links };
+}
+
+/**
+ * Read the long-form species off a doc's `- **Type:** <value>` footer line.
+ *
+ * The line must be ANCHORED (`- **Type:**` at line start) and its value matched
+ * EXACTLY — tweet bodies are author-controlled, so a substring scan would let a
+ * post whose text merely mentions "article" claim long-form eligibility, and
+ * `notearticle` would match too. `note` is checked first because upstream
+ * deliberately keeps a note that links an article typed as `note`, so it never
+ * loses its long-form eligibility either way.
+ *
+ * Case-sensitive on purpose: huginn's `x_fetcher.py` writes the value lowercase.
+ * That is an external contract — if huginn ever changes the casing, this returns
+ * null (fewer captures, the safe degrade) rather than silently widening.
+ */
+export function parseDocType(typeLine: string): XDocType | null {
+  const match = typeLine.match(/^- \*\*Type:\*\*\s*(.*)$/);
+  if (!match) return null;
+  const value = match[1]!.trim();
+  if (value === "note") return "note";
+  if (value === "article") return "article";
+  return null;
+}
+
+/**
+ * Extract the X Article permalink from a doc's `- **Article:** <url>` FOOTER line
+ * (huginn's `x_fetcher.py` writes it after the `---` separator, on any doc whose
+ * tweet OR quote target carries an article — NOT `**Type:** article` docs only).
+ *
+ * Scanning is confined to the FOOTER region (lines after the last `---`) and the
+ * line must start with `- **Article:**`: tweet body text is author-controlled, so
+ * an unanchored scan would let a body line reading `- **Article:** https://spam`
+ * win over the real footer field.
+ *
+ * This is deliberately a DEDICATED field rather than a widening of
+ * {@link extractDocLinks}: that parser feeds `pickEnrichmentLink`, which
+ * direct-FETCHES `links[0]` when summarizing — and an `x.com/…/article/…` URL
+ * behind X's auth wall would only ever return the login wall into the prompt.
+ * Here the URL is metadata (the candidate's `/summaries` link target), never fetched.
+ */
+export function extractArticleUrl(docText: string): string | null {
+  const lines = docText.split("\n");
+  const separatorIdx = lines.lastIndexOf("---");
+  for (const line of lines.slice(separatorIdx + 1)) {
+    const match = line.match(/^- \*\*Article:\*\*\s*(https?:\/\/\S+)/i);
+    if (match) return match[1]!;
+  }
+  return null;
 }
 
 function extractTweetId(docId: string): string {
@@ -494,8 +579,9 @@ export async function fetchFromCollection(
         url: r.url,
         handle: r.handle,
         bodyLength: r.bodyLength,
-        isNote: r.isNote,
+        docType: r.docType,
         firstLine: r.firstLine,
+        articleUrl: r.articleUrl,
         text: r.text,
         gateExcerpt: r.gateBody,
         links: r.links,
@@ -615,7 +701,8 @@ async function fetchFromPython(
     if (t.bookmarks && t.bookmarks > 10) signals.push(`${t.bookmarks} bookmarks`);
     if (signals.length > 0) line += ` (${signals.join(", ")})`;
 
-    if (t.tweet_type === "note") line = `[ARTICLE/NOTE] ${line}`;
+    // Same widening as the collection path's `parseDocType`: `article` is long-form too.
+    if (t.tweet_type === "note" || t.tweet_type === "article") line = `[ARTICLE/NOTE] ${line}`;
     if (t.quoted_tweet) line += `\n  > @${t.quoted_tweet.handle}: ${t.quoted_tweet.text}`;
     line += `\n  URL: ${t.url}`;
     return line;
@@ -657,17 +744,34 @@ export function resolveAuthorTier(
  * author keeps the base; every other author (incl. unknown / thresholds unavailable ⇒
  * tier `null`) must clear `max(base, candidateMinScoreNonTop)` — one knob, raise-only
  * (a raised base is never undercut). See {@link resolveAuthorTier}.
+ *
+ * A `docType` of `article` EXEMPTS a doc from the non-top raise. Full precedence table:
+ *
+ * | kind     | `**Type:**`      | author tier | floor                                    |
+ * |----------|------------------|-------------|------------------------------------------|
+ * | `x-post` | `article`        | any         | base (0.6)  ← non-top raise NEVER applies |
+ * | `x-post` | `note` / ≥800ch  | top1/top5   | base (0.6)                                |
+ * | `x-post` | `note` / ≥800ch  | null        | max(base, nonTop) (0.75)                  |
+ * | `x-link` | any              | top1/top5   | {@link captureFloorForXLink} (0.7)        |
+ *
+ * Why articles are exempt: the non-top raise exists to suppress SHORT hype posts from
+ * unknown authors that merely clear the 800-char body floor. An X Article is long-form
+ * BY CONSTRUCTION (a published article, not a thread), so the raise would be filtering
+ * on a signal that doesn't apply — and would silently kill the whole class, since
+ * articles from top-5% authors are rare. An explicitly RAISED base still applies (the
+ * exemption skips the non-top raise, it does not undercut a configured floor).
  */
 export function captureFloorForTier(
   tier: AuthorTier | null,
   config: Pick<XWatcherConfig, "candidateMinScore" | "candidateMinScoreNonTop" | "candidateMinScoreByKind">,
+  docType: XDocType | null = null,
 ): number {
   const base =
     config.candidateMinScoreByKind?.["x-post"] ??
     config.candidateMinScore ??
     DEFAULT_CANDIDATE_MIN_SCORE;
   const nonTop = config.candidateMinScoreNonTop ?? DEFAULT_CANDIDATE_MIN_SCORE_NONTOP;
-  return tier != null ? base : Math.max(base, nonTop);
+  return tier != null || docType === "article" ? base : Math.max(base, nonTop);
 }
 
 /**
@@ -689,8 +793,9 @@ function authorTierLabel(tier: AuthorTier | null): string | null {
 }
 /**
  * A tweet body must reach this many chars (measured PRE-truncation on the extracted
- * body, not the raw doc) to count as long-form, unless the doc already carries the
- * `**Type:** note` marker. Below it the tweet is its own summary — never captured.
+ * body, not the raw doc) to count as long-form, unless the doc already carries a
+ * long-form `**Type:**` marker (`note`/`article`). Below it the tweet is its own
+ * summary — never captured.
  */
 const LONGFORM_MIN_CHARS = 800;
 /** Capture-gate model-call timeout — Haiku over one small (dedupByTweetId) batch. */
@@ -722,14 +827,19 @@ Return ONLY a JSON array of these objects, no prose and no markdown fences. If n
 
 /**
  * Long-form pre-filter (mirror of the anthropic watcher's `isShelfWorthy`): capture
- * eligibility for the inbox. A long-form note/article — either the explicit `**Type:**
- * note` marker or an extracted body ≥ {@link LONGFORM_MIN_CHARS} — is worth summarizing;
- * a short plain tweet is its own summary and is deliberately excluded. Link-tweets are
- * NOT captured either: the summarizer would only see the tweet's own (short) text, not
- * the linked article, so they'd yield short-tweet summaries.
+ * eligibility for the inbox. A long-form note/article — either a long-form `**Type:**`
+ * marker ({@link XDocType}: `note` OR `article`) or an extracted body ≥
+ * {@link LONGFORM_MIN_CHARS} — is worth summarizing; a short plain tweet is its own
+ * summary and is deliberately excluded. Link-tweets are NOT captured either: the
+ * summarizer would only see the tweet's own (short) text, not the linked article, so
+ * they'd yield short-tweet summaries.
+ *
+ * The marker branch is load-bearing for `article`: an X Article doc's body is only the
+ * title + a ~190-char preview (≈280–460 chars measured), so the char floor can never
+ * rescue it — without the marker the whole class is invisible to capture.
  */
-export function isLongFormTweet(doc: Pick<TweetDoc, "bodyLength" | "isNote">): boolean {
-  return doc.isNote || doc.bodyLength >= LONGFORM_MIN_CHARS;
+export function isLongFormTweet(doc: Pick<TweetDoc, "bodyLength" | "docType">): boolean {
+  return doc.docType != null || doc.bodyLength >= LONGFORM_MIN_CHARS;
 }
 
 /**
@@ -747,7 +857,7 @@ export function isLongFormTweet(doc: Pick<TweetDoc, "bodyLength" | "isNote">): b
  *      the PR-1 per-run resolution, reused here.
  */
 export function isLinkTweet(
-  doc: Pick<TweetDoc, "bodyLength" | "isNote" | "links">,
+  doc: Pick<TweetDoc, "bodyLength" | "docType" | "links">,
   tier: AuthorTier | null,
 ): boolean {
   return !isLongFormTweet(doc) && doc.links.length >= 1 && tier != null;
@@ -808,7 +918,7 @@ async function runCaptureGate(
         kind === "x-link" && doc.links[0]
           ? `\n   links to: ${linkDomain(doc.links[0])} — ${doc.links[0]}`
           : "";
-      return `${i + 1}. ${doc.isNote ? "[ARTICLE/NOTE] " : ""}${doc.handle}: ${doc.gateExcerpt}${linkPart}${priorPart}\n   URL: ${doc.url}`;
+      return `${i + 1}. ${doc.docType ? "[ARTICLE/NOTE] " : ""}${doc.handle}: ${doc.gateExcerpt}${linkPart}${priorPart}\n   URL: ${doc.url}`;
     })
     .join("\n\n");
   const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
@@ -900,17 +1010,31 @@ async function captureXCandidates(
     if (!score) continue;
     const { doc, author, authorScore, tier, kind } = eligible[i]!;
     // Per-kind floor (single source of truth): x-post → per-tier floor (non-top raise
-    // applies); x-link → the pointer-tweet floor (already top-author-only by eligibility,
-    // so no non-top raise).
-    const floor = kind === "x-link" ? captureFloorForXLink(config) : captureFloorForTier(tier, config);
+    // applies, EXCEPT for `**Type:** article` — long-form by construction, see the
+    // precedence table on captureFloorForTier); x-link → the pointer-tweet floor
+    // (already top-author-only by eligibility, so no non-top raise).
+    const floor =
+      kind === "x-link"
+        ? captureFloorForXLink(config)
+        : captureFloorForTier(tier, config, doc.docType);
     if (score.score < floor) continue;
     const firstLine = doc.firstLine.trim() || doc.text;
+    // An X Article's own permalink is the thing worth opening from /summaries — the
+    // announcing tweet is just the pointer. Gated on `docType === "article"`, NOT on
+    // `articleUrl` being present: huginn writes the `- **Article:**` footer on amplifier
+    // docs too (a note/tweet whose QUOTE target is someone else's article), so a
+    // capture-eligible non-article doc would otherwise key its row on another author's
+    // article URL — and collide with the real article doc on UNIQUE(source, url), which
+    // resolves content by `sourceDocId` and would serve the wrong body under that title.
+    // Non-article docs keep the tweet URL. (Content resolution is unaffected either way:
+    // the summarizer reads `sourceDocId`, never this URL.)
+    const candidateUrl = doc.docType === "article" ? (doc.articleUrl ?? doc.url) : doc.url;
     // Author transparency: the normalized handle keys huginn's ranking; the score is a
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
     try {
       await upsertCandidate({
         source: "x",
-        url: doc.url,
+        url: candidateUrl,
         title: truncateTitle(`${doc.handle}: ${firstLine}`),
         candidateSrc: `X (${doc.handle})`,
         score: score.score,
@@ -926,7 +1050,7 @@ async function captureXCandidates(
     } catch (err) {
       log.error("Failed to capture X candidate {url}: {error}", {
         botName,
-        url: doc.url,
+        url: candidateUrl,
         error: err instanceof Error ? err.message : String(err),
       });
     }
