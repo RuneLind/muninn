@@ -1,5 +1,8 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 import type { Watcher } from "../types.ts";
+// Captured from huginn's `GET /api/collection/x-feed/documents?include_scores=1` over the
+// real corpus (the 2026-07-24 1-day window); every in-window doc carries a combined_score.
+import xFeedListing from "./__fixtures__/x-feed-2026-07-24-listing.json";
 
 // --- Module mocks (registered before the dynamic import below) ---
 // The capture gate spawns Haiku and the capture writer hits the candidate DB; both
@@ -78,6 +81,22 @@ mock.module("../db/summary-candidates.ts", () => ({
   setCandidateStatus: async () => {},
 }));
 
+// Log capture — the coverage warn and the `Collection: … scored=` info line are the
+// only signal that tells an operator how much of the window the score-ordered cap
+// could actually rank, so they're asserted directly rather than trusted.
+// (mock.module leaks across src/watchers/*.test.ts in one process; sibling files
+// assert nothing about logs, so a capturing stand-in logger is harmless there.)
+const logLines: Array<{ level: string; message: string; props: Record<string, unknown> }> = [];
+mock.module("../logging.ts", () => {
+  const record = (level: string) => (message: string, props: Record<string, unknown> = {}) => {
+    logLines.push({ level, message, props });
+  };
+  return {
+    getLog: () => ({ info: record("info"), warn: record("warn"), error: record("error"), debug: record("debug") }),
+    setupLogging: async () => {},
+  };
+});
+
 const {
   extractRankScore,
   buildDateWindow,
@@ -90,6 +109,9 @@ const {
   captureFloorForTier,
   isLinkTweet,
   captureFloorForXLink,
+  orderDocsForCap,
+  listingCoverage,
+  coverageWarning,
   DEFAULT_X_PROMPT,
   DEFAULT_X_HIGHLIGHTS_PROMPT,
 } = await import("./x.ts");
@@ -919,6 +941,342 @@ describe("fetchFromCollection rank read (metadata-preferred)", () => {
     const r = await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
     // Number("n/a") is NaN ⇒ not finite ⇒ fall back to extractRankScore (engagement 0.42).
     expect(r!.topScore).toBe(0.42);
+  });
+});
+
+// ── fetchFromCollection wiring for the score-ordered cap ────────────
+
+describe("fetchFromCollection score-ordered cap wiring", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  let listingUrl = "";
+  let listing: Array<{ id: string; url: string; combined_score?: number | string }> = [];
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        listingUrl = url;
+        return { ok: true, status: 200, json: async () => ({ documents: listing }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          text: `# @x — X\n\nbody\n\n---\n\n- **Engagement:** 5 likes`,
+          metadata: { url: `https://x.com/x/status/${id}` },
+        }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  const dayOffset = (n: number) =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Oslo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(Date.now() - n * 86_400_000));
+
+  beforeEach(() => {
+    listingUrl = "";
+    listing = [];
+    logLines.length = 0;
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("asks huginn for include_scores", async () => {
+    listing = [{ id: `${today}_a_1.md`, url: "https://x.com/a/status/1", combined_score: "0.5" }];
+    await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    expect(listingUrl).toContain("include_scores=1");
+  });
+
+  test("maxDocs keeps the TOP-scoring docs, not the alphabetically-first ones", async () => {
+    listing = [
+      { id: `${today}_aaa_1.md`, url: "https://x.com/aaa/status/1", combined_score: "0.10" },
+      { id: `${today}_bbb_2.md`, url: "https://x.com/bbb/status/2", combined_score: "0.20" },
+      { id: `${today}_zzz_3.md`, url: "https://x.com/zzz/status/3", combined_score: "0.90" },
+    ];
+    const r = await fetchFromCollection(
+      { collection: "x-feed", windowDays: 1, maxDocs: 1, captureCandidates: true },
+      new Set<string>(),
+      "jarvis",
+    );
+    // Alphabetically the cap would have taken aaa; by score it takes zzz.
+    expect(r!.docs!.map((d) => d.docId)).toEqual([`${today}_zzz_3.md`]);
+  });
+
+  test("the Collection info line reports the scored FRACTION of the window", async () => {
+    listing = [
+      { id: `${today}_aaa_1.md`, url: "https://x.com/aaa/status/1", combined_score: "0.10" },
+      { id: `${today}_bbb_2.md`, url: "https://x.com/bbb/status/2" },
+      { id: `${today}_ccc_3.md`, url: "https://x.com/ccc/status/3", combined_score: "0.90" },
+    ];
+    await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    const info = logLines.find((l) => l.level === "info" && l.message.startsWith("Collection:"));
+    expect(info).toBeDefined();
+    expect(info!.message).toContain("scored={scored}");
+    expect(info!.props.scored).toBe("2/3");
+  });
+
+  test("healthy coverage logs no degrade warn", async () => {
+    listing = [
+      { id: `${today}_aaa_1.md`, url: "https://x.com/aaa/status/1", combined_score: "0.10" },
+      { id: `${today}_bbb_2.md`, url: "https://x.com/bbb/status/2", combined_score: "0.90" },
+    ];
+    await fetchFromCollection({ collection: "x-feed", windowDays: 1 }, new Set<string>(), "jarvis");
+    expect(logLines.filter((l) => l.level === "warn")).toEqual([]);
+  });
+
+  // ── B7: partial coverage, date-major listing ──────────────────────
+  // Ids are date-major and localeCompare puts the OLDEST date first, so a block of
+  // unscored docs at the alphabetical HEAD occupies the cap outright — the scored docs
+  // behind them never make the cut. That is the positional hold working as specified
+  // (each unscored doc keeps exactly its old cap odds), not a bug — but it means the
+  // score-ordering did nothing this run, which is precisely what the warn is for.
+  test("an unscored date-block at the alphabetical HEAD consumes the cap, and the low-coverage warn fires", async () => {
+    const older = dayOffset(5);
+    const newer = dayOffset(0);
+    const unscored = Array.from({ length: 12 }, (_, i) => ({
+      id: `${older}_h${String(i).padStart(2, "0")}_${i}.md`,
+      url: `https://x.com/h/status/${i}`,
+    }));
+    const scored = Array.from({ length: 8 }, (_, i) => ({
+      id: `${newer}_s${String(i).padStart(2, "0")}_${100 + i}.md`,
+      url: `https://x.com/s/status/${100 + i}`,
+      combined_score: (0.9 - i * 0.01).toFixed(3),
+    }));
+    listing = [...scored, ...unscored]; // deliberately not pre-sorted
+
+    const r = await fetchFromCollection(
+      { collection: "x-feed", windowDays: 7, maxDocs: 10, captureCandidates: true },
+      new Set<string>(),
+      "jarvis",
+    );
+
+    // 8/20 = 40% coverage ⇒ every cap slot is a pinned unscored doc; not one scored
+    // doc is even fetched. This is the positional hold working as specified.
+    expect(r!.docs!.map((d) => d.docId)).toEqual(unscored.slice(0, 10).map((d) => d.id));
+
+    const warn = logLines.find((l) => l.level === "warn" && l.message.includes("carry a listing score"));
+    expect(warn).toBeDefined();
+    expect(warn!.message).toContain("8/20");
+    expect(warn!.message).toContain("40.0%");
+  });
+});
+
+// ── Listing-score coverage reporting ────────────────────────────────
+
+describe("listingCoverage / coverageWarning", () => {
+  const d = (id: string, combined_score?: unknown) =>
+    ({ id, url: `https://x.com/${id}`, combined_score } as unknown as { id: string; url: string });
+
+  test("counts only docs with a usable score", () => {
+    expect(listingCoverage([d("a", 0.5), d("b"), d("c", "0.25"), d("d", " ")])).toEqual({ scored: 2, total: 4 });
+  });
+
+  test("an empty listing warns about nothing", () => {
+    expect(coverageWarning({ scored: 0, total: 0 })).toBeNull();
+  });
+
+  test("ZERO scored docs reads as missing enrichment, not as a lagging scorer", () => {
+    const msg = coverageWarning({ scored: 0, total: 389 })!;
+    expect(msg).toContain("No listing scores on any of 389 docs");
+    expect(msg).toContain("include_scores");
+  });
+
+  test("the live 38.6%-coverage Weekly window warns with counts", () => {
+    const msg = coverageWarning({ scored: 291, total: 754 })!;
+    expect(msg).toContain("291/754");
+    expect(msg).toContain("38.6%");
+    expect(msg).toContain("mostly alphabetical");
+  });
+
+  test("coverage at or above 50% is not warned about", () => {
+    expect(coverageWarning({ scored: 5, total: 10 })).toBeNull();
+    expect(coverageWarning({ scored: 1936, total: 1936 })).toBeNull();
+  });
+
+  test("just under half still warns", () => {
+    expect(coverageWarning({ scored: 4, total: 10 })).toContain("4/10");
+  });
+});
+
+// ── Score-ordered document cap (orderDocsForCap) ────────────────────
+
+describe("orderDocsForCap", () => {
+  const doc = (id: string, combined_score?: number | string | null) =>
+    ({ id, url: `https://x.com/${id}`, ...(combined_score === undefined ? {} : { combined_score }) });
+
+  test("sorts score-descending, not alphabetically", () => {
+    const out = orderDocsForCap([doc("2026-07-24_aaa_1.md", 0.2), doc("2026-07-24_zzz_2.md", 0.9)]);
+    expect(out.map((d) => d.id)).toEqual(["2026-07-24_zzz_2.md", "2026-07-24_aaa_1.md"]);
+  });
+
+  test("coerces STRING scores — a lexicographic sort would rank 0.9 below 0.1234", () => {
+    const out = orderDocsForCap([doc("2026-07-24_a_1.md", "0.1234"), doc("2026-07-24_b_2.md", "0.9")]);
+    expect(out.map((d) => d.id)).toEqual(["2026-07-24_b_2.md", "2026-07-24_a_1.md"]);
+  });
+
+  test("ties break on localeCompare so the cap is deterministic", () => {
+    const forward = orderDocsForCap([doc("2026-07-24_b_2.md", 0.5), doc("2026-07-24_a_1.md", 0.5)]);
+    const reverse = orderDocsForCap([doc("2026-07-24_a_1.md", 0.5), doc("2026-07-24_b_2.md", 0.5)]);
+    expect(forward.map((d) => d.id)).toEqual(["2026-07-24_a_1.md", "2026-07-24_b_2.md"]);
+    expect(reverse.map((d) => d.id)).toEqual(forward.map((d) => d.id));
+  });
+
+  test("an unscored doc HOLDS its alphabetical index — it neither rises nor sinks", () => {
+    // Alphabetical: [a(0.1), b(none), c(0.9)]. b sits at index 1 and stays at index 1;
+    // a and c are score-sorted into the leftover slots 0 and 2.
+    const out = orderDocsForCap([
+      doc("2026-07-24_a_1.md", 0.1),
+      doc("2026-07-24_b_2.md"),
+      doc("2026-07-24_c_3.md", 0.9),
+    ]);
+    expect(out.map((d) => d.id)).toEqual([
+      "2026-07-24_c_3.md", // highest score → first free slot
+      "2026-07-24_b_2.md", // pinned at its alphabetical index
+      "2026-07-24_a_1.md",
+    ]);
+  });
+
+  test("a freshly-ingested unscored doc is not cap-dropped by the reordering", () => {
+    // The real transient: huginn's fetch and score phases are separate, so the newest
+    // docs are briefly scoreless. `fresh` sits alphabetically inside a cap of 3.
+    const docs = [
+      doc("2026-07-24_aaa_1.md", 0.9),
+      doc("2026-07-24_fresh_2.md"), // unscored
+      doc("2026-07-24_mmm_3.md", 0.8),
+      doc("2026-07-24_zzz_4.md", 0.7),
+    ];
+    const capped = orderDocsForCap(docs).slice(0, 3).map((d) => d.id);
+    expect(capped).toContain("2026-07-24_fresh_2.md");
+    // ...and it kept exactly the slot it had alphabetically (index 1), no promotion.
+    expect(capped[1]).toBe("2026-07-24_fresh_2.md");
+  });
+
+  test("null/empty scores count as missing, not as 0 (Number(null) === 0 would sink them)", () => {
+    const out = orderDocsForCap([
+      doc("2026-07-24_a_1.md", 0.1),
+      doc("2026-07-24_b_2.md", null),
+      doc("2026-07-24_c_3.md", ""),
+      doc("2026-07-24_d_4.md", "not-a-number"),
+      doc("2026-07-24_e_5.md", 0.9),
+    ]);
+    // b, c and d hold alphabetical indices 1, 2, 3; e (0.9) and a (0.1) fill 0 and 4.
+    expect(out.map((d) => d.id)).toEqual([
+      "2026-07-24_e_5.md",
+      "2026-07-24_b_2.md",
+      "2026-07-24_c_3.md",
+      "2026-07-24_d_4.md",
+      "2026-07-24_a_1.md",
+    ]);
+  });
+
+  // A bare `Number()` would make every one of these finite and mis-rank the doc:
+  // `true` → 1 (tops the whole listing), `false`/`" "` → 0 (sinks it below every real
+  // score), `"0x10"` → 16 (tops it even harder). huginn's server-side guard accepts
+  // none of them, so neither does the listing read — all four count as UNSCORED and
+  // hold their alphabetical slot.
+  test("booleans, whitespace-only and hex strings are NOT scores", () => {
+    const rawDoc = (id: string, combined_score: unknown) =>
+      ({ id, url: `https://x.com/${id}`, combined_score }) as unknown as { id: string; url: string };
+    const out = orderDocsForCap([
+      rawDoc("2026-07-24_a_1.md", true),
+      rawDoc("2026-07-24_b_2.md", false),
+      rawDoc("2026-07-24_c_3.md", " "),
+      rawDoc("2026-07-24_d_4.md", "0x10"),
+      rawDoc("2026-07-24_e_5.md", 0.9),
+      rawDoc("2026-07-24_f_6.md", 0.1),
+    ]);
+    // a–d pinned at 0–3; only e and f are ranked, into the leftover slots 4 and 5.
+    expect(out.map((d) => d.id)).toEqual([
+      "2026-07-24_a_1.md",
+      "2026-07-24_b_2.md",
+      "2026-07-24_c_3.md",
+      "2026-07-24_d_4.md",
+      "2026-07-24_e_5.md",
+      "2026-07-24_f_6.md",
+    ]);
+  });
+
+  test("padded and exponent decimal strings ARE scores", () => {
+    const out = orderDocsForCap([doc("2026-07-24_a_1.md", "  0.75  "), doc("2026-07-24_b_2.md", "9e-1")]);
+    expect(out.map((d) => d.id)).toEqual(["2026-07-24_b_2.md", "2026-07-24_a_1.md"]);
+  });
+
+  // The all-unscored fallback is covered end-to-end by the real-corpus replay below
+  // ("with the listing UNSCORED the cap is byte-identical to the old behavior").
+
+  test("empty input is safe", () => {
+    expect(orderDocsForCap([])).toEqual([]);
+  });
+
+  test("is a permutation — no doc is dropped or duplicated", () => {
+    const docs = [doc("d", 0.4), doc("a"), doc("c", 0.9), doc("b"), doc("e", 0.1)];
+    const out = orderDocsForCap(docs);
+    expect(out.length).toBe(docs.length);
+    expect(new Set(out.map((d) => d.id))).toEqual(new Set(docs.map((d) => d.id)));
+  });
+});
+
+// ── Replay over the REAL 2026-07-24 x-feed listing (389 in-window docs) ──
+
+describe("orderDocsForCap replay — real x-feed corpus, 2026-07-24 1-day window", () => {
+  const listing: Array<{ id: string; url: string; combined_score?: number }> = xFeedListing;
+  const MAX_DOCS = 80; // DEFAULT_MAX_DOCS
+
+  test("fixture is the full in-window day", () => {
+    expect(listing.length).toBe(389);
+    expect(listing.every((d) => d.id.startsWith("2026-07-24_"))).toBe(true);
+  });
+
+  test("the capped set IS the in-window score top-80", () => {
+    const capped = orderDocsForCap(listing).slice(0, MAX_DOCS);
+    const expected = [...listing]
+      .sort((a, b) => b.combined_score! - a.combined_score! || a.id.localeCompare(b.id))
+      .slice(0, MAX_DOCS);
+    expect(capped.map((d) => d.id)).toEqual(expected.map((d) => d.id));
+  });
+
+  test("thdxr's 0.604 doc makes the cap (it is rank 39 by score)", () => {
+    const capped = orderDocsForCap(listing).slice(0, MAX_DOCS);
+    const thdxr = capped.find((d) => d.id.includes("_thdxr_"));
+    expect(thdxr).toBeDefined();
+    expect(thdxr!.combined_score).toBe(0.604);
+    expect(capped.indexOf(thdxr!)).toBe(38); // 0-indexed rank 39
+  });
+
+  test("the 80th-place score is the real cut bar (~0.56)", () => {
+    const capped = orderDocsForCap(listing).slice(0, MAX_DOCS);
+    // The set-equality test above already proves everything kept clears this bar.
+    expect(capped[MAX_DOCS - 1]!.combined_score!).toBe(0.5598);
+  });
+
+  test("the OLD alphabetical cap stopped in the B's and dropped thdxr", () => {
+    const alphabetical = [...listing].sort((a, b) => a.id.localeCompare(b.id));
+    const oldCap = alphabetical.slice(0, MAX_DOCS);
+    // The cut lands mid-alphabet by handle — the whole defect this PR fixes.
+    expect(oldCap[MAX_DOCS - 1]!.id).toBe("2026-07-24_ben_burtenshaw_2080661125822030164.md");
+    expect(alphabetical[MAX_DOCS]!.id).toBe("2026-07-24_BharukaShraddha_2080630911889297858.md");
+    expect(oldCap.some((d) => d.id.includes("_thdxr_"))).toBe(false);
+  });
+
+  test("with the listing UNSCORED the cap is byte-identical to the old behavior", () => {
+    const unscored = listing.map((d) => ({ id: d.id, url: d.url }));
+    const out = orderDocsForCap(unscored).slice(0, MAX_DOCS);
+    const alphabetical = [...unscored].sort((a, b) => a.id.localeCompare(b.id)).slice(0, MAX_DOCS);
+    expect(out.map((d) => d.id)).toEqual(alphabetical.map((d) => d.id));
   });
 });
 
