@@ -280,8 +280,10 @@ interface CompactedTweet {
   /** First body line of the tweet — used for the candidate title. */
   firstLine: string;
   /**
-   * The X Article permalink from the doc's `- **Article:**` footer line, when present
-   * (`**Type:** article` docs only). See {@link extractArticleUrl}.
+   * The X Article permalink from the doc's `- **Article:**` footer line, when present.
+   * huginn writes that footer on ANY doc whose tweet or quote target carries an article
+   * (amplifier notes included) — only `**Type:** article` docs use it as the candidate
+   * url downstream. See {@link extractArticleUrl}.
    */
   articleUrl: string | null;
   /** Body slice up to {@link GATE_EXCERPT_CHARS} for the capture gate (text caps at 500). */
@@ -318,9 +320,10 @@ export interface TweetDoc {
   docType: XDocType | null;
   firstLine: string;
   /**
-   * The `- **Article:**` footer permalink (`**Type:** article` docs only), else null.
-   * Used as the candidate `url` so `/summaries` links to the ARTICLE rather than the
-   * announcing tweet. See {@link extractArticleUrl}.
+   * The `- **Article:**` footer permalink when the doc carries one, else null. Present
+   * on amplifier docs too (a note quoting someone else's article), so the capture path
+   * only adopts it as the candidate `url` — so `/summaries` links to the ARTICLE rather
+   * than the announcing tweet — when `docType === "article"`. See {@link extractArticleUrl}.
    */
   articleUrl: string | null;
   /** The compact one-liner (same string sent to the digest LLM). */
@@ -387,7 +390,7 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
   const rankScore = extractRankScore(rawText);
 
   // Extract type — `note` AND `article` are both long-form species (see XDocType).
-  const typeLine = lines.find((l) => l.includes("**Type:**")) ?? "";
+  const typeLine = lines.find((l) => l.startsWith("- **Type:**")) ?? "";
   const docType = parseDocType(typeLine);
 
   let result = `${handle}: ${body}`;
@@ -416,21 +419,36 @@ export function compactTweetText(rawText: string, url: string): CompactedTweet {
 
 /**
  * Read the long-form species off a doc's `- **Type:** <value>` footer line.
- * `article` is checked first so a hypothetical "article note" can never be
- * misread as a plain note; anything that is neither (`tweet`, missing line) is
- * null. Matching stays substring-based, mirroring the original `note` check —
- * the line is huginn-generated and its exact shape is `- **Type:** article`.
+ *
+ * The line must be ANCHORED (`- **Type:**` at line start) and its value matched
+ * EXACTLY — tweet bodies are author-controlled, so a substring scan would let a
+ * post whose text merely mentions "article" claim long-form eligibility, and
+ * `notearticle` would match too. `note` is checked first because upstream
+ * deliberately keeps a note that links an article typed as `note`, so it never
+ * loses its long-form eligibility either way.
+ *
+ * Case-sensitive on purpose: huginn's `x_fetcher.py` writes the value lowercase.
+ * That is an external contract — if huginn ever changes the casing, this returns
+ * null (fewer captures, the safe degrade) rather than silently widening.
  */
 export function parseDocType(typeLine: string): XDocType | null {
-  if (typeLine.includes("article")) return "article";
-  if (typeLine.includes("note")) return "note";
+  const match = typeLine.match(/^- \*\*Type:\*\*\s*(.*)$/);
+  if (!match) return null;
+  const value = match[1]!.trim();
+  if (value === "note") return "note";
+  if (value === "article") return "article";
   return null;
 }
 
 /**
  * Extract the X Article permalink from a doc's `- **Article:** <url>` FOOTER line
- * (huginn's `x_fetcher.py` writes it, after the `---` separator, for `**Type:**
- * article` docs only).
+ * (huginn's `x_fetcher.py` writes it after the `---` separator, on any doc whose
+ * tweet OR quote target carries an article — NOT `**Type:** article` docs only).
+ *
+ * Scanning is confined to the FOOTER region (lines after the last `---`) and the
+ * line must start with `- **Article:**`: tweet body text is author-controlled, so
+ * an unanchored scan would let a body line reading `- **Article:** https://spam`
+ * win over the real footer field.
  *
  * This is deliberately a DEDICATED field rather than a widening of
  * {@link extractDocLinks}: that parser feeds `pickEnrichmentLink`, which
@@ -439,12 +457,11 @@ export function parseDocType(typeLine: string): XDocType | null {
  * Here the URL is metadata (the candidate's `/summaries` link target), never fetched.
  */
 export function extractArticleUrl(docText: string): string | null {
-  for (const line of docText.split("\n")) {
-    const idx = line.indexOf("**Article:**");
-    if (idx === -1) continue;
-    for (const token of line.slice(idx + "**Article:**".length).split(/\s+/)) {
-      if (/^https?:\/\//i.test(token)) return token;
-    }
+  const lines = docText.split("\n");
+  const separatorIdx = lines.lastIndexOf("---");
+  for (const line of lines.slice(separatorIdx + 1)) {
+    const match = line.match(/^- \*\*Article:\*\*\s*(https?:\/\/\S+)/i);
+    if (match) return match[1]!;
   }
   return null;
 }
@@ -728,7 +745,7 @@ export function resolveAuthorTier(
  * tier `null`) must clear `max(base, candidateMinScoreNonTop)` — one knob, raise-only
  * (a raised base is never undercut). See {@link resolveAuthorTier}.
  *
- * `isArticle` EXEMPTS a doc from the non-top raise. Full precedence table:
+ * A `docType` of `article` EXEMPTS a doc from the non-top raise. Full precedence table:
  *
  * | kind     | `**Type:**`      | author tier | floor                                    |
  * |----------|------------------|-------------|------------------------------------------|
@@ -747,14 +764,14 @@ export function resolveAuthorTier(
 export function captureFloorForTier(
   tier: AuthorTier | null,
   config: Pick<XWatcherConfig, "candidateMinScore" | "candidateMinScoreNonTop" | "candidateMinScoreByKind">,
-  isArticle = false,
+  docType: XDocType | null = null,
 ): number {
   const base =
     config.candidateMinScoreByKind?.["x-post"] ??
     config.candidateMinScore ??
     DEFAULT_CANDIDATE_MIN_SCORE;
   const nonTop = config.candidateMinScoreNonTop ?? DEFAULT_CANDIDATE_MIN_SCORE_NONTOP;
-  return tier != null || isArticle ? base : Math.max(base, nonTop);
+  return tier != null || docType === "article" ? base : Math.max(base, nonTop);
 }
 
 /**
@@ -999,14 +1016,19 @@ async function captureXCandidates(
     const floor =
       kind === "x-link"
         ? captureFloorForXLink(config)
-        : captureFloorForTier(tier, config, doc.docType === "article");
+        : captureFloorForTier(tier, config, doc.docType);
     if (score.score < floor) continue;
     const firstLine = doc.firstLine.trim() || doc.text;
     // An X Article's own permalink is the thing worth opening from /summaries — the
-    // announcing tweet is just the pointer. Non-article docs keep the tweet URL, so the
-    // table's UNIQUE(source,url) dedup is unchanged for them. (Content resolution is
-    // unaffected either way: the summarizer reads `sourceDocId`, never this URL.)
-    const candidateUrl = doc.articleUrl ?? doc.url;
+    // announcing tweet is just the pointer. Gated on `docType === "article"`, NOT on
+    // `articleUrl` being present: huginn writes the `- **Article:**` footer on amplifier
+    // docs too (a note/tweet whose QUOTE target is someone else's article), so a
+    // capture-eligible non-article doc would otherwise key its row on another author's
+    // article URL — and collide with the real article doc on UNIQUE(source, url), which
+    // resolves content by `sourceDocId` and would serve the wrong body under that title.
+    // Non-article docs keep the tweet URL. (Content resolution is unaffected either way:
+    // the summarizer reads `sourceDocId`, never this URL.)
+    const candidateUrl = doc.docType === "article" ? (doc.articleUrl ?? doc.url) : doc.url;
     // Author transparency: the normalized handle keys huginn's ranking; the score is a
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
     try {

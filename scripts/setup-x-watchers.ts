@@ -97,7 +97,9 @@ async function main() {
   // 2. X Highlights — quiet daytime alerts
   const highlightsConfig = {
     ...shared,
-    windowDays: 1,
+    // 2, not 1: Highlights is quiet-hours gated, so an evening arrival must still be
+    // in window on the first morning run — see src/watchers/CLAUDE.md.
+    windowDays: 2,
     dedupByTweetId: true,
     minScore: 0.85,
     quietMode: true,

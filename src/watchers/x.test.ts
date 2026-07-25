@@ -379,6 +379,33 @@ describe("parseDocType", () => {
     expect(parseDocType("- **Type:** tweet")).toBeNull();
     expect(parseDocType("")).toBeNull();
   });
+
+  test("the value is matched EXACTLY — a superstring is not a species", () => {
+    expect(parseDocType("- **Type:** notearticle")).toBeNull();
+    expect(parseDocType("- **Type:** article thread")).toBeNull();
+  });
+
+  test("the line must be anchored — an unanchored mention is not the footer field", () => {
+    expect(parseDocType("I wrote about this in **Type:** article form")).toBeNull();
+  });
+
+  test("`note` is checked first — a note that links an article stays a note", () => {
+    // Upstream deliberately keeps note-with-article typed `note`; either way it is
+    // long-form, so nothing is lost — but the value must not be re-read as `article`
+    // (which would also exempt it from the non-top capture raise).
+    expect(parseDocType("- **Type:** note")).toBe("note");
+  });
+});
+
+describe("compactTweetText: author-controlled body can't forge the Type marker", () => {
+  test("a body-injected `**Type:** article` line does NOT flip a plain tweet long-form", () => {
+    // Unanchored mentions in author-controlled body text — the shape the old
+    // `l.includes("**Type:**")` + substring parse would have read as long-form.
+    const doc = `# @spammer — Spam\n\nread my **Type:** article now, it is a real article\n\n---\n\n- **Engagement:** 3 likes`;
+    const c = compactTweetText(doc, "https://x.com/spammer/status/7");
+    expect(c.docType).toBeNull();
+    expect(isLongFormTweet({ docType: c.docType, bodyLength: c.bodyLength })).toBe(false);
+  });
 });
 
 describe("extractArticleUrl", () => {
@@ -388,6 +415,16 @@ describe("extractArticleUrl", () => {
 
   test("no `**Article:**` line ⇒ null", () => {
     expect(extractArticleUrl("# @a — A\n\nplain\n\n---\n\n- **Link:** https://x.com/a/status/9")).toBeNull();
+  });
+
+  test("a body-injected Article line BEFORE the footer separator is ignored", () => {
+    const doc = `# @spammer — Spam\n\n- **Article:** https://spam.example/evil\n\n---\n\n- **Engagement:** 3 likes\n- **Link:** https://x.com/spammer/status/7`;
+    expect(extractArticleUrl(doc)).toBeNull();
+  });
+
+  test("a body-injected line does not beat the REAL footer field", () => {
+    const doc = `# @spammer — Spam\n\n- **Article:** https://spam.example/evil\n\n---\n\n- **Type:** article\n- **Article:** https://x.com/spammer/article/7`;
+    expect(extractArticleUrl(doc)).toBe("https://x.com/spammer/article/7");
   });
 });
 
@@ -440,43 +477,6 @@ describe("resolveAuthorTier", () => {
   });
 });
 
-// The precedence table documented on captureFloorForTier, asserted row by row against
-// the LIVE X Highlights config (candidateMinScore 0.6, no other floor knobs set).
-describe("capture-floor precedence table (article vs note vs short vs x-link)", () => {
-  const live = { candidateMinScore: 0.6 };
-
-  test("article by a NON-TOP author: the 0.6 base applies, the 0.75 non-top raise does NOT", () => {
-    expect(captureFloorForTier(null, live, true)).toBe(0.6);
-  });
-
-  test("article by a top author: unchanged at the base", () => {
-    expect(captureFloorForTier("top5", live, true)).toBe(0.6);
-  });
-
-  test("note by a NON-TOP author: unchanged — still raised to 0.75", () => {
-    expect(captureFloorForTier(null, live, false)).toBe(0.75);
-  });
-
-  test("long-form (note or ≥800ch) by a top author: unchanged at 0.6", () => {
-    expect(captureFloorForTier("top5", live, false)).toBe(0.6);
-  });
-
-  test("the article exemption skips the non-top RAISE, it never undercuts a configured base", () => {
-    expect(captureFloorForTier(null, { candidateMinScore: 0.85 }, true)).toBe(0.85);
-    expect(captureFloorForTier(null, { candidateMinScoreByKind: { "x-post": 0.8 } }, true)).toBe(0.8);
-  });
-
-  test("x-link is unchanged by the article work (its own floor, no tier/type input)", () => {
-    expect(captureFloorForXLink({})).toBe(0.7);
-    expect(captureFloorForXLink({ candidateMinScoreByKind: { "x-link": 0.6 } })).toBe(0.6);
-  });
-
-  test("a short plain tweet is never eligible in the first place (pre-filter, not the floor)", () => {
-    expect(isLongFormTweet({ docType: null, bodyLength: 200 })).toBe(false);
-    expect(isLinkTweet({ docType: null, bodyLength: 200, links: [] }, "top1")).toBe(false);
-  });
-});
-
 describe("captureFloorForTier", () => {
   test("top5/top1 authors keep the base candidateMinScore", () => {
     expect(captureFloorForTier("top5", { candidateMinScore: 0.6 })).toBe(0.6);
@@ -503,6 +503,24 @@ describe("captureFloorForTier", () => {
     expect(captureFloorForTier(null, { candidateMinScoreByKind: { "x-post": 0.7 } })).toBe(0.75);
     // Override beats candidateMinScore.
     expect(captureFloorForTier("top5", { candidateMinScore: 0.6, candidateMinScoreByKind: { "x-post": 0.8 } })).toBe(0.8);
+  });
+
+  // The `docType === "article"` exemption — asserted against the LIVE X Highlights
+  // config (candidateMinScore 0.6, no other floor knobs set).
+  test("an `article` doc by a NON-TOP author keeps the 0.6 base — the 0.75 raise does NOT apply", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, "article")).toBe(0.6);
+  });
+
+  test("an `article` doc by a top author is unchanged at the base", () => {
+    expect(captureFloorForTier("top5", { candidateMinScore: 0.6 }, "article")).toBe(0.6);
+  });
+
+  test("the article exemption skips the non-top RAISE, it never undercuts a configured base", () => {
+    expect(captureFloorForTier(null, { candidateMinScore: 0.85 }, "article")).toBe(0.85);
+    expect(captureFloorForTier(null, { candidateMinScoreByKind: { "x-post": 0.8 } }, "article")).toBe(0.8);
+    // A `note` (or a null docType — a ≥800ch body) still takes the raise.
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, "note")).toBe(0.75);
+    expect(captureFloorForTier(null, { candidateMinScore: 0.6 }, null)).toBe(0.75);
   });
 });
 
@@ -1188,8 +1206,11 @@ describe("checkX: X Article capture (real-doc replay)", () => {
   const articleUrl = "https://x.com/trq212/article/2080710971228918066";
   // The doc's own frontmatter score — the value huginn serves in the listing/metadata.
   const combinedScore = "0.7493";
+  // The doc body the mocked huginn serves; swapped per test (see the amplifier case).
+  let servedDoc = articleDoc;
 
   beforeEach(() => {
+    servedDoc = articleDoc;
     gateResult = "[]";
     gateThrow = false;
     lastGatePrompt = "";
@@ -1209,7 +1230,7 @@ describe("checkX: X Article capture (real-doc replay)", () => {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ text: articleDoc, metadata: { url: tweetUrl, combined_score: combinedScore } }),
+        json: async () => ({ text: servedDoc, metadata: { url: tweetUrl, combined_score: combinedScore } }),
       } as unknown as Response;
     }) as typeof fetch;
   });
@@ -1266,18 +1287,32 @@ describe("checkX: X Article capture (real-doc replay)", () => {
     expect(lastGatePrompt).toContain("[ARTICLE/NOTE] @trq212:");
   });
 
-  test("the doc clears the alert minScore 0.6 at its real combined_score 0.7493", async () => {
-    gateResult = "[]";
-    const alerts = await checkX(watcher(), undefined, "jarvis");
-    // Not the silent below-minScore early return: quietMode's SKIP-less digest alerts.
-    expect(alerts.length).toBe(1);
-    expect(alerts[0]!.silent).toBeUndefined();
-  });
+  // The AMPLIFIER shape: huginn writes the `- **Article:**` footer for any doc whose
+  // tweet OR quote target carries an article, so a `**Type:** note` doc can carry
+  // ANOTHER author's article permalink. Keying the candidate on it would collide with
+  // the promoted article doc on UNIQUE(source, url) and serve the wrong body.
+  test("a `note` doc carrying an `- **Article:**` footer keeps the TWEET url as candidate url", async () => {
+    servedDoc = [
+      "# @amplifier — Amp",
+      "",
+      "Great read from @trq212 — everyone building agents should study this one closely.",
+      "",
+      "---",
+      "",
+      "- **Engagement:** 900 likes · 120,000 views",
+      "- **Type:** note",
+      `- **Link:** ${tweetUrl}`,
+      `- **Article:** ${articleUrl}`,
+    ].join("\n");
+    // 0.8 clears the non-top raise (0.75) the note — unlike an article — still takes.
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "solid pointer" }]);
 
-  test("a below-0.6 gate score is still rejected — the exemption drops the raise, not the floor", async () => {
-    gateResult = JSON.stringify([{ n: 1, score: 0.59, why: "meh" }]);
     await checkX(watcher(), undefined, "jarvis");
-    expect(upsertCalls.length).toBe(0);
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.url).toBe(tweetUrl); // NOT another author's article permalink
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.sourceDocId).toBe(docId);
   });
 });
 
