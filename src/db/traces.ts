@@ -1,5 +1,14 @@
 import { getDb } from "./client.ts";
 
+// The work-unit child spans a scheduler tick mints directly under its root
+// (src/scheduler/runner.ts): task:<type>, watcher:<type>, goal_reminders and
+// goal_checkins. Three sites must agree on this set — getRecentTraces' `u`
+// naming lateral, its name filter, and getTraceFilterOptions' union — so it
+// lives here once and composes in as a postgres.js sql`` fragment. All three
+// sites alias the traces table as `us` so the fragment drops in unchanged.
+const workUnitNamePredicate = (sql: ReturnType<typeof getDb>) =>
+  sql`(us.name LIKE 'watcher:%' OR us.name LIKE 'task:%' OR us.name IN ('goal_reminders', 'goal_checkins'))`;
+
 export interface SpanRow {
   id: string;
   traceId: string;
@@ -205,11 +214,10 @@ export async function getRecentTraces(
     -- Work-unit naming: a scheduler tick root is always called 'scheduler_tick',
     -- so the list can't tell an email-watcher tick from a briefing task. Roll up
     -- the names of the tick's work-unit child spans (in start order) so the row
-    -- can name what actually ran. The set mirrors the four kinds the scheduler
-    -- mints directly under the tick root (src/scheduler/runner.ts): task:<type>,
-    -- watcher:<type>, goal_reminders and goal_checkins — a goal-only tick would
-    -- otherwise stay unnamed, and a goal+watcher tick would misleadingly rename
-    -- to just the watcher instead of taking the multi-unit branch.
+    -- can name what actually ran. The set is workUnitNamePredicate (top of file):
+    -- all four kinds, because a goal-only tick would otherwise stay unnamed, and a
+    -- goal+watcher tick would misleadingly rename to just the watcher instead of
+    -- taking the multi-unit branch.
     -- Gated on the root actually being a tick, so the "every other root renders
     -- byte-identically" guarantee is structural (and the extra index scan is
     -- skipped for the majority of listed rows). Ordering is (started_at, name)
@@ -221,8 +229,7 @@ export async function getRecentTraces(
       FROM traces us
       WHERE us.trace_id = t.trace_id AND us.parent_id = t.id
         AND t.name = 'scheduler_tick'
-        AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%'
-             OR us.name IN ('goal_reminders', 'goal_checkins'))
+        AND ${workUnitNamePredicate(sql)}
     ) u ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
@@ -234,11 +241,10 @@ export async function getRecentTraces(
       -- the IS NULL guard, so the unfiltered listing never pays for it.
       AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null} OR (
         t.name = 'scheduler_tick' AND EXISTS (
-          SELECT 1 FROM traces fs
-          WHERE fs.trace_id = t.trace_id AND fs.parent_id = t.id
-            AND fs.name = ${name ?? null}
-            AND (fs.name LIKE 'watcher:%' OR fs.name LIKE 'task:%'
-                 OR fs.name IN ('goal_reminders', 'goal_checkins'))
+          SELECT 1 FROM traces us
+          WHERE us.trace_id = t.trace_id AND us.parent_id = t.id
+            AND us.name = ${name ?? null}
+            AND ${workUnitNamePredicate(sql)}
         )
       ))
     ORDER BY t.started_at DESC
@@ -296,15 +302,14 @@ export async function getTraceFilterOptions(): Promise<{ bots: string[]; types: 
     // after in the list (same predicate as getRecentTraces' u lateral) — without
     // the union the dropdown couldn't offer 'watcher:email' at all.
     sql`
-      SELECT DISTINCT name FROM (
+      SELECT name FROM (
         SELECT name FROM traces WHERE parent_id IS NULL
         UNION
         SELECT us.name
         FROM traces us
         JOIN traces r ON r.id = us.parent_id AND r.trace_id = us.trace_id
         WHERE r.parent_id IS NULL AND r.name = 'scheduler_tick'
-          AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%'
-               OR us.name IN ('goal_reminders', 'goal_checkins'))
+          AND ${workUnitNamePredicate(sql)}
       ) n
       ORDER BY name
     `,
