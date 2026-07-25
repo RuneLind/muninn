@@ -226,7 +226,21 @@ export async function getRecentTraces(
     ) u ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
-      AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})
+      -- Name filter matches the row as the LIST RENDERS it: either the root's own
+      -- name, or — for scheduler ticks renamed after their work unit by the u
+      -- lateral above — the name of a work-unit child span. So filtering by
+      -- 'watcher:email' finds the ticks that ran the email watcher, while
+      -- 'scheduler_tick' still returns every tick. The EXISTS branch sits inside
+      -- the IS NULL guard, so the unfiltered listing never pays for it.
+      AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null} OR (
+        t.name = 'scheduler_tick' AND EXISTS (
+          SELECT 1 FROM traces fs
+          WHERE fs.trace_id = t.trace_id AND fs.parent_id = t.id
+            AND fs.name = ${name ?? null}
+            AND (fs.name LIKE 'watcher:%' OR fs.name LIKE 'task:%'
+                 OR fs.name IN ('goal_reminders', 'goal_checkins'))
+        )
+      ))
     ORDER BY t.started_at DESC
     LIMIT ${limit} OFFSET ${offset}
   `;
@@ -278,7 +292,22 @@ export async function getTraceFilterOptions(): Promise<{ bots: string[]; types: 
   const sql = getDb();
   const [bots, types] = await Promise.all([
     sql`SELECT DISTINCT bot_name FROM traces WHERE bot_name IS NOT NULL ORDER BY bot_name`,
-    sql`SELECT DISTINCT name FROM traces WHERE parent_id IS NULL ORDER BY name`,
+    // Root names, plus the work-unit child names scheduler ticks are renamed
+    // after in the list (same predicate as getRecentTraces' u lateral) — without
+    // the union the dropdown couldn't offer 'watcher:email' at all.
+    sql`
+      SELECT DISTINCT name FROM (
+        SELECT name FROM traces WHERE parent_id IS NULL
+        UNION
+        SELECT us.name
+        FROM traces us
+        JOIN traces r ON r.id = us.parent_id AND r.trace_id = us.trace_id
+        WHERE r.parent_id IS NULL AND r.name = 'scheduler_tick'
+          AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%'
+               OR us.name IN ('goal_reminders', 'goal_checkins'))
+      ) n
+      ORDER BY name
+    `,
   ]);
   return {
     bots: bots.map((r) => r.bot_name),
