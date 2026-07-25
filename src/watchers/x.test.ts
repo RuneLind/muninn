@@ -1611,3 +1611,114 @@ describe("runAlertPath framing wrapper (fronts Daily/Highlights/Weekly)", () => 
     expect(lastGatePrompt.toLowerCase()).not.toContain("highest engagement first");
   });
 });
+
+// ── Amplification is wired into the collection path's ranking step ──
+
+describe("fetchFromCollection amplification wiring", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const ARTICLE = "https://x.com/owner/article/999";
+
+  /** An x-feed doc body with the footer fields the amplification parse reads. */
+  function body(handle: string, text: string, type: string | null, article: string | null): string {
+    const footer = [
+      "- **Engagement:** 100 likes",
+      type ? `- **Type:** ${type}` : "",
+      `- **Link:** https://x.com/${handle}/status/1`,
+      article ? `- **Article:** ${article}` : "",
+    ].filter(Boolean).join("\n");
+    return `# @${handle} — ${handle}\n\n${text}\n\n---\n\n${footer}`;
+  }
+
+  const docs: Record<string, { text: string; url: string; metadata: Record<string, unknown> }> = {
+    [`${today}_amp1_1.md`]: {
+      url: "https://x.com/amp1/status/1",
+      text: body("amp1", "Everyone should read this article", "note", ARTICLE),
+      metadata: { url: "https://x.com/amp1/status/1", combined_score: "0.61" },
+    },
+    [`${today}_owner_2.md`]: {
+      url: "https://x.com/owner/status/2",
+      text: body("owner", "The new rules of context engineering", "article", ARTICLE),
+      metadata: { url: "https://x.com/owner/status/2", combined_score: "0.60" },
+    },
+    [`${today}_amp2_3.md`]: {
+      url: "https://x.com/amp2/status/3",
+      text: body("amp2", "This article is a must-read", "note", ARTICLE),
+      metadata: { url: "https://x.com/amp2/status/3", combined_score: "0.59" },
+    },
+    [`${today}_plain_4.md`]: {
+      url: "https://x.com/plain/status/4",
+      text: body("plain", "an unrelated tweet about eval design", null, null),
+      metadata: { url: "https://x.com/plain/status/4", combined_score: "0.58" },
+    },
+  };
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return { ok: true, status: 200, json: async () => ({ text: d.text, metadata: d.metadata }) } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    authorThresholds = null;
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const watcher = (config: Record<string, unknown>): Watcher => ({
+    id: "xw-amp",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Daily Digest",
+    type: "x",
+    config: { collection: "x-feed", windowDays: 1, ...config },
+    intervalMs: 86_400_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  test("the digest sees ONE line per article — the group's HIGHEST-scoring doc", async () => {
+    await checkX(watcher({}));
+    // @amp1 (0.61) outscores the article doc (0.60), so IT keeps the group's one slot —
+    // collapse never downgrades. The article doc and the weaker amplifier are gone.
+    expect(lastGatePrompt).toContain("@amp1: Everyone should read this article");
+    expect(lastGatePrompt).not.toContain("@owner:");
+    expect(lastGatePrompt).not.toContain("@amp2:");
+    // Non-article docs are untouched.
+    expect(lastGatePrompt).toContain("@plain:");
+    expect(lastGatePrompt).toContain("Here are 2 tweets");
+  });
+
+  test("collapse does NOT shrink the capture batch — every fetched doc is still gated", async () => {
+    gateResult = "[]";
+    await checkX(watcher({ captureCandidates: true }));
+    // The capture gate's numbered list carries all four fetched docs, amplifiers included.
+    expect(lastGatePrompt).toContain("@amp1:");
+    expect(lastGatePrompt).toContain("@amp2:");
+    expect(lastGatePrompt).toContain("@owner:");
+  });
+});

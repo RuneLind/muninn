@@ -151,6 +151,106 @@ even fetched. Second-order effect worth naming: the capture batch (`captureCandi
 the score-top-80 rather than an alphabetical sample — an implicit engagement pre-filter
 *upstream* of the capture gate. That is a stated, accepted direction, not an accident.
 
+### X-Article amplification signal (`x-amplification.ts`)
+
+huginn writes the `- **Article:** <permalink>` footer on **every** doc whose tweet or quote
+target carries an X Article — the article's own (promoted, discovery-dated) doc AND each
+amplifier doc that quote-tweeted it — so `TweetDoc.articleUrl` is a group key. Applied at the
+**ranking step** in `fetchFromCollection` (after fetch, before the `topN` slice), it does two
+things, both scoped to the **digest listing only** (`compacted` itself is untouched, so the
+capture batch, `trackingIds` and the `minScore` gate's `topScore` are byte-identical):
+
+1. **Collapse** — exactly one doc per article reaches the digest. The representative is the
+   group's **highest-scoring member, whatever its `docType`** — collapse is never an unforced
+   content downgrade. (An earlier cut preferred the article doc regardless of rank; measured
+   on the real window that made **5 of 7** multi-doc groups keep a LOWER-scoring doc — worst
+   case an amplifier note at rank 40 / 0.6122 dropped for the article doc at rank 112 / 0.5502,
+   a self-quote no promotion could ever rescue, so collapse deleted an in-band doc and put
+   nothing in the band. 5 of the 7 collapsible carriers are substantive `note` docs of the
+   amplifier's own, not near-duplicates.) This also dedups **the same article promoted twice**
+   (two discovery dates a week apart are two docs, one group). Without collapse a popular
+   article takes N+1 near-identical digest slots — amplifier docs now carry the article's title
+   + preview in their quote block (the PR-1 reviewer MED; measured as three adjacent
+   near-identical scores).
+2. **Promote** — an article referenced by ≥ `amplificationMinAuthors` (3) **distinct
+   amplifying authors** takes one of at most `amplificationMaxPromotions` (1) **reserved
+   digest slots**, entered at the **bottom** of the top-N band. What gets promoted is the
+   group's **article doc**, and it **replaces** the group's representative in the listing.
+   Distinct authors are normalized handles (one account quote-tweeting three times is ONE
+   author) **excluding the article's owner**, parsed from the permalink
+   (`x.com/<owner>/article/<id>`) — an author posting or self-quoting their own article is not
+   amplification.
+
+**The one-slot invariant.** An article group occupies exactly ONE listing slot, always. By
+default that is the representative at its own rank; on promotion the article doc takes over
+that same slot and moves to the band bottom, and the representative leaves the listing (it
+joins `collapsed`). Promotion is only *considered* for a group whose representative sits
+**outside** the top-N band — a group already represented inside the band needs nothing, and a
+second entry would break the invariant. So each promotion pushes exactly one non-group doc out
+of the band, and displacement is bounded by `min(maxPromotions, topN)` (the effective cap is
+clamped both ways: the insert index never goes negative, and `amplificationMaxPromotions` is
+itself validated `0..20`). When the article doc IS the representative, promotion is a pure move
+and nothing is replaced.
+
+**Why a reserved slot and not a calibrated score boost.** Measured over the real 2026-07-25
+two-day window (476 docs, 100% listing-score coverage): top-30 bar **0.6201**, top-10 bar
+**0.6535**, top-80 cut **0.5777**, max **0.7493**. The whole usable band is 0.13 wide, so a
+multiplier big enough to lift a mid-band article (rank 67, 0.5903) over the bar (≈ ×1.051)
+applied to the day's top article (0.7493) yields 0.7874 — a permanent, unassailable digest
+lead for whatever the amplifiers liked. And a multiplier's **displacement is unbounded**: N
+qualifying articles push N docs out. A reserved slot inverts both: worst case is exactly
+`maxPromotions` displaced docs no matter how junk or how widely quoted the article is, the
+promoted doc lands at slot 30 (never the lead), and no score is ever multiplied, so every
+other doc's ordering is unchanged.
+
+**Calibration (2026-07-25, real corpus) — window census vs the production population.** The
+committed fixture is the 476-doc **2-day window**; production runs `applyAmplification` on
+`compacted`, the top-`maxDocs` (80) score-ordered batch. Both numbers matter, and they differ:
+
+- *Window census (476 docs):* 32 article-footer docs in **25 groups**, 7 of them multi-doc, max
+  group size **2**, max distinct amplifiers **1** — i.e. **no organically-amplified article
+  exists yet** (the fetcher's footer change is days old; the trq212 six-amplifier case predates
+  it). The ≥3-author cases in the replay tests are therefore SYNTHETIC extensions of real
+  groups, and are labelled as such. The window holds **25 article docs**, of which only **6**
+  sit inside the 80-doc cap (ranks 1 / 15 / 26 / 38 / 57 / 67, 0.7493 → 0.5903) — an earlier
+  version of this note wrongly said article-class docs "all sat at ranks 1–67".
+- *Production population (top-80 batch) — today's real behavior:* **7** article-footer docs in
+  **7 groups**, **0 multi-doc groups**, hence **0 collapsed and 0 promotions**, and the digest
+  top-30 is identical to the un-amplified baseline. The "collapse drops 7 duplicate slots"
+  figure is **window-level only**; on the production path it is 0, and the `Collection: …
+  article-collapsed` log field reads **0** on today's data. A nonzero value there is the first
+  sign the mechanism has real surface.
+
+**Known v1 limitation — the BINDING constraint.** Amplification cannot rescue an article that
+missed the `maxDocs` listing cap (that cap is listing-score based and runs *before* bodies, and
+therefore before any `articleUrl`, exist). Concretely: **promotion requires the article doc AND
+≥ `amplificationMinAuthors` amplifier docs inside the same 80-doc score-ordered batch.** Not a
+dead letter, though — with PR 1's parse lift, amplifiers of AI-relevant articles re-scored at
+**0.59–0.65** (pvncher 0.6457, startupideaspod 0.6420, AnatoliKopadze 0.5950) against the 2-day
+top-80 cut of **0.5777**, i.e. three of four measured amplifiers clear the cap post-lift. The
+fixture still carries their PRE-lift ranks (99–153). Accepted; see the `maxDocs` row for why 80
+stays.
+
+**Also known + accepted:**
+- **Collapse is NOT bounded by `maxPromotions`** — that knob bounds promotion displacement
+  only; a degenerate group of N amplifiers collapses N−1 docs out of the listing. Measured max
+  group size today is **2**, so this is theory, and collapse is a de-duplication fix rather
+  than a ranking preference.
+- **The `minScore` gate's `topScore` still reads `compacted[0]`**, which collapse may have
+  dropped from the listing. A deliberate behavioral-parity choice: a collapsed amplifier is
+  still a real, fetched tweet the run considered, so the gate keeps behaving exactly as before.
+- **On Highlights (`dedupByTweetId: true`) a collapsed amplifier is marked seen without having
+  been shown** — `trackingIds` rides `compacted`, not the listing. Accepted: the capture path
+  still sees the doc; only the digest listing loses it.
+
+Pure + unit-tested in `x-amplification.test.ts` (grouping, threshold, collapse semantics,
+promote-replaces-representative, boundedness incl. the `topN`-clamp cases, config validation,
+plus two replays over the committed `__fixtures__/x-feed-2026-07-25-window.json`: the
+**production** top-80 slice asserting today's inert output, and the **window** census asserting
+pre/post digest composition on synthetic amplification). A promotion logs one line
+(`Amplification: promoted <url> (N distinct amplifiers) into rank Y, taking the group's slot at
+rank X (replacing <docId>)`); the `Collection: …` info line carries `N article-collapsed`.
+
 ### Prompt size is critical
 
 Sonnet times out at 60s with large prompts. The collection path must send **compact one-liners** (`compactTweetText`), not full markdown documents. Full docs caused 180s timeouts even with increased limits. The compact format matches what the direct fetcher produces: `@handle: text (likes, views)\n  URL: url`.
@@ -187,6 +287,8 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `captureCandidates` | `false` | Persist high-value **long-form** tweets into the `summary_candidates` inbox (Candidates → Summaries). Collection path only. Runs on the FULL fetched batch, BEFORE and independent of the `minScore`/`quietMode` silencing — a run that alerts nothing can still capture. See "Candidate capture" below. |
 | `candidateMinScore` | 0.6 | Inbox capture floor for **top-5%-author** long-form (`x-post`) tweets — long-form tweets scored ≥ this by the capture gate are queued. Independent of the alert `minScore`. |
 | `candidateMinScoreNonTop` | 0.75 | Stricter capture floor for **non-top-5%-author** long-form (`x-post`) tweets (unknown authors, and — deliberately — EVERY author when the author-scores file is unavailable). Effective floor is `max(x-post base, candidateMinScoreNonTop)`, raise-only. **Never applies to `**Type:** article` docs** (long-form by construction — see the precedence table below, under "Candidate capture"). Author tier is resolved once per run from huginn's `x-feed-author-scores.json` percentile cuts (`getAuthorTierThresholds`); the tier (top 1% / top 5%, never the raw score) is also injected into the capture-gate prompt as an author-rank prior. Degrade direction is safe — scores-file outage ⇒ fewer captures, never a silent widening. **Never applies to `x-link`** (link-tweets are already top-author-only by eligibility). |
+| `amplificationMinAuthors` | 3 | Distinct **amplifying** authors (normalized handles, the article's own owner excluded) required before an article earns a reserved digest slot. See "X-Article amplification signal". Validated at read time — a non-integer / `< 1` value is warned about and dropped back to the default. |
+| `amplificationMaxPromotions` | 1 | Reserved digest slots per run — the **bound** on promotion displacement (at most this many docs can ever be pushed out of the digest by a promotion; collapse is separately unbounded). `0` disables promotion; **collapse still runs** (it is a de-duplication fix, not a ranking preference). Validated like the field above, as an integer in **`0..20`** — the upper bound exists because the knob's whole job is to CAP displacement, so a fat-fingered `1e9` must not silently uncap it. At run time the effective value is further clamped to `min(maxPromotions, topN)`. |
 | `candidateMinScoreByKind` | — | Per-kind capture-floor overrides `{ "x-post"?, "x-link"? }` (name + semantics mirror the anthropic vertical). `"x-post"` overrides the long-form base floor (else `candidateMinScore`, 0.6) — the non-top raise still stacks on top; `"x-link"` sets the pointer-tweet floor (else 0.7). |
 
 ### Silent alerts and the quality-gate pattern
