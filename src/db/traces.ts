@@ -204,14 +204,25 @@ export async function getRecentTraces(
     ) q ON true
     -- Work-unit naming: a scheduler tick root is always called 'scheduler_tick',
     -- so the list can't tell an email-watcher tick from a briefing task. Roll up
-    -- the names of the tick's watcher:/task: child spans (in start order) so the
-    -- row can name what actually ran. DISPLAY ONLY — never feed tokens, model or
-    -- connector from this rollup (the c/w/walk precedence above owns those).
+    -- the names of the tick's work-unit child spans (in start order) so the row
+    -- can name what actually ran. The set mirrors the four kinds the scheduler
+    -- mints directly under the tick root (src/scheduler/runner.ts): task:<type>,
+    -- watcher:<type>, goal_reminders and goal_checkins — a goal-only tick would
+    -- otherwise stay unnamed, and a goal+watcher tick would misleadingly rename
+    -- to just the watcher instead of taking the multi-unit branch.
+    -- Gated on the root actually being a tick, so the "every other root renders
+    -- byte-identically" guarantee is structural (and the extra index scan is
+    -- skipped for the majority of listed rows). Ordering is (started_at, name)
+    -- because watcher children run under Promise.allSettled and routinely tie on
+    -- the same millisecond. DISPLAY ONLY — never feed tokens, model or connector
+    -- from this rollup (the c/w/walk precedence above owns those).
     LEFT JOIN LATERAL (
-      SELECT array_agg(us.name ORDER BY us.started_at) AS work_units
+      SELECT array_agg(us.name ORDER BY us.started_at, us.name) AS work_units
       FROM traces us
       WHERE us.trace_id = t.trace_id AND us.parent_id = t.id
-        AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%')
+        AND t.name = 'scheduler_tick'
+        AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%'
+             OR us.name IN ('goal_reminders', 'goal_checkins'))
     ) u ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})

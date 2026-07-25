@@ -449,6 +449,54 @@ describe("traces", () => {
       const found = traces.find((t) => t.id === root.id)!;
       expect(found.attributes.workUnits).toBeUndefined();
     });
+
+    test("multi-watcher tick lists every unit, tie-broken by name", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      // Watchers run under Promise.allSettled and routinely tie at the same
+      // millisecond — the identical startedAt makes the name tiebreak load-bearing.
+      const tie = new Date();
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:x",
+        kind: "span" as const,
+        startedAt: tie,
+        attributes: { type: "x" },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: tie,
+        attributes: { type: "email" },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toEqual(["watcher:email", "watcher:x"]);
+    });
+
+    test("goal-only tick is named by its goal span", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "goal_checkins",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { count: 1 },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toEqual(["goal_checkins"]);
+    });
   });
 
   // ── Rec 1: the walk aggregate (the deterministic connector/model-bearing

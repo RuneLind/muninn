@@ -47,7 +47,7 @@ export function tracesListStyles(): string {
     .badge-quiet { background: color-mix(in srgb, var(--text-muted) 12%, transparent); color: var(--text-muted); font-weight: 400; }
     /* Work-unit naming on scheduler ticks */
     .badge-unit { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text-muted); font-weight: 400; margin-left: 4px; }
-    .tick-hint { color: var(--text-faint); font-size: 10px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .tick-hint { color: var(--text-muted); font-size: 11px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
 
     .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
   `;
@@ -150,15 +150,27 @@ export function tracesListScript(): string {
       // Only scheduler ticks are renamed — every other root (chat, capture,
       // factcheck, goal_*) renders exactly as before.
       if (t.name !== 'scheduler_tick') return nameBadge;
-      const units = t.attributes?.workUnits;
-      if (!Array.isArray(units) || units.length === 0) return nameBadge;
+      const raw = t.attributes?.workUnits;
+      if (!Array.isArray(raw) || raw.length === 0) return nameBadge;
+      // Dedupe client-side — the SQL rollup stays a faithful per-span list, and
+      // a tick can legitimately run two spans of the same name.
+      const units = [];
+      for (const u of raw) if (!units.includes(u)) units.push(u);
       if (units.length === 1) {
         // The overwhelmingly common case: one work unit per tick. Name the row
         // after it, keeping a muted hint that it was scheduler-born.
         return '<span class="badge badge-name" title="scheduler_tick">' + esc(units[0]) + '</span>' +
           '<span class="tick-hint">tick</span>';
       }
-      return nameBadge + units.map(u => '<span class="badge badge-unit">' + esc(u) + '</span>').join('');
+      // Cap the chip run so a busy tick can't blow out the Name column.
+      const MAX_UNIT_CHIPS = 3;
+      const shown = units.slice(0, MAX_UNIT_CHIPS);
+      const overflow = units.length - shown.length;
+      return nameBadge +
+        shown.map(u => '<span class="badge badge-unit">' + esc(u) + '</span>').join('') +
+        (overflow > 0
+          ? '<span class="tick-hint" title="' + esc(units.join(', ')) + '">+' + overflow + '</span>'
+          : '');
     }
 
     function renderTraceList(traces) {
