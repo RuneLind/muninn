@@ -107,7 +107,8 @@ export async function getRecentTraces(
            COALESCE(c.tool_count, w.tool_count, walk.tool_count)         AS tool_count,
            COALESCE(c.model, w.model, walk.model)                        AS model,
            c.requested_model,
-           COALESCE(c.connector, w.connector, walk.connector)            AS connector
+           COALESCE(c.connector, w.connector, walk.connector)            AS connector,
+           q.quiet_skips
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -189,6 +190,17 @@ export async function getRecentTraces(
         WHERE ns.trace_id = t.trace_id AND ns.parent_id IS NOT NULL
       ) agg
     ) walk ON true
+    -- Quiet-hours legibility: a scheduler tick whose due watchers were all
+    -- skipped by quiet hours finishes in ~20ms with no model call — count the
+    -- skipped watcher child spans so the list can label the row instead of
+    -- rendering an ambiguous blank backend cell.
+    LEFT JOIN LATERAL (
+      SELECT NULLIF(COUNT(*), 0)::int AS quiet_skips
+      FROM traces qs
+      WHERE qs.trace_id = t.trace_id AND qs.parent_id = t.id
+        AND qs.name LIKE 'watcher:%'
+        AND qs.attributes->>'quietHoursSkipped' = 'true'
+    ) q ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
       AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})
@@ -313,6 +325,7 @@ function mapRow(r: Record<string, any>): SpanRow {
   if (r.model != null && !attrs.model) delta.model = String(r.model);
   if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
   if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);
+  if (r.quiet_skips != null && !attrs.quietSkips) delta.quietSkips = Number(r.quiet_skips);
   if (Object.keys(delta).length > 0) attrs = { ...attrs, ...delta };
 
   return {

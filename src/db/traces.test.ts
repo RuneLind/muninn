@@ -326,6 +326,54 @@ describe("traces", () => {
       expect(found.attributes.model).toBe("mixed");
       expect(found.attributes.connector).toBe("claude-cli");
     });
+
+    test("tick whose watchers were all quiet-hours skipped carries quietSkips (and no backend)", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "email", quietHoursSkipped: true },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.quietSkips).toBe(1);
+      expect(found.attributes.connector).toBeUndefined();
+      expect(found.attributes.model).toBeUndefined();
+    });
+
+    test("tick with a real model run does NOT lose backend to a sibling quiet skip", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 100, outputTokens: 10, model: "claude-haiku-4-5-20251001", connector: "claude-cli" },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:x",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "x", quietHoursSkipped: true },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.connector).toBe("claude-cli");
+      expect(found.attributes.quietSkips).toBe(1);
+    });
   });
 
   // ── Rec 1: the walk aggregate (the deterministic connector/model-bearing

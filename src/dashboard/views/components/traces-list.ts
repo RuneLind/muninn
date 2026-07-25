@@ -44,6 +44,7 @@ export function tracesListStyles(): string {
     .backend-cell { font-size: 12px; color: var(--text-muted); }
     .backend-connector { color: var(--accent-light); font-weight: 500; }
     .backend-model { color: var(--text-dim); }
+    .badge-quiet { background: color-mix(in srgb, var(--text-muted) 12%, transparent); color: var(--text-muted); font-weight: 400; }
 
     .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
   `;
@@ -129,7 +130,12 @@ export function tracesListScript(): string {
     function fmtBackend(attrs) {
       const connector = attrs?.connector;
       const model = attrs?.model ?? attrs?.requestedModel;
-      if (!connector && !model) return '<span style="color:var(--text-disabled)">-</span>';
+      if (!connector && !model) {
+        // No model ran. If the tick's due watchers were all quiet-hours
+        // skipped, say so — a blank cell reads as "something went wrong".
+        if (attrs?.quietSkips) return '<span class="badge badge-quiet" title="' + attrs.quietSkips + ' due watcher(s) skipped by quiet hours — no model call ran">quiet hours</span>';
+        return '<span style="color:var(--text-disabled)">-</span>';
+      }
       const parts = [];
       if (connector) parts.push('<span class="backend-connector">' + esc(connectorLabel(connector)) + '</span>');
       if (model) parts.push('<span class="backend-model">(' + esc(model) + ')</span>');
