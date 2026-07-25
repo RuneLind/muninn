@@ -141,19 +141,77 @@ interface CollectionDoc {
 }
 
 /**
+ * Strict DECIMAL numeric literal — optional sign, digits with an optional
+ * fraction (or a bare `.5`), optional exponent. Deliberately narrower than
+ * `Number()`: it rejects hex (`"0x10"`), `Infinity`, and whitespace-only or
+ * empty strings, mirroring huginn's server-side `float(raw)` + `isfinite`
+ * guard set rather than JS's much looser string→number coercion.
+ */
+const DECIMAL_LITERAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+/**
  * Read a listing doc's `combined_score` as a usable number, or null.
  *
- * `Number(...)` is LOAD-BEARING even though huginn now coerces server-side: a
+ * The parse is LOAD-BEARING even though huginn now coerces server-side: a
  * lexicographic sort over `"0.9"` vs `"0.1234"` fails SILENTLY (it just ranks
- * wrong), so the belt-and-braces parse stays. `null`/`undefined`/`""` are
- * rejected explicitly because `Number(null)` and `Number("")` are both `0` —
- * which is finite, and would sink a scoreless doc to the bottom instead of
- * letting the missing-score rule below hold its place.
+ * wrong), so the belt-and-braces read stays.
+ *
+ * Accepted: a finite `number`, or a string that trims to a decimal literal
+ * (huginn's `read_frontmatter` serves frontmatter numerics as strings).
+ * Rejected — every one of these would otherwise become a finite number under a
+ * bare `Number()` and mis-rank the doc:
+ *  - `null` / `undefined` / `""` / `"   "` → `Number()` gives `0`, sinking a
+ *    scoreless doc instead of letting it hold its place (see `orderDocsForCap`);
+ *  - `false` → `0`, `true` → `1` (a boolean would top the whole listing);
+ *  - `[]` → `0`, and hex/`Infinity` strings, which huginn's own guard rejects.
  */
 function listingScore(raw: unknown): number | null {
-  if (raw === null || raw === undefined || raw === "") return null;
-  const n = Number(raw);
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!DECIMAL_LITERAL.test(trimmed)) return null;
+  const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
+}
+
+/** How much of a listing actually carries a usable `combined_score`. */
+export interface ListingCoverage {
+  scored: number;
+  total: number;
+}
+
+export function listingCoverage(docs: CollectionDoc[]): ListingCoverage {
+  return {
+    scored: docs.filter((d) => listingScore(d.combined_score) !== null).length,
+    total: docs.length,
+  };
+}
+
+/**
+ * Coverage below which the score-ordered cap is mostly a no-op — under half the
+ * window scored, the pinned (unscored) docs still occupy most cap slots, so the
+ * cut is effectively still alphabetical.
+ */
+export const LOW_COVERAGE_FRACTION = 0.5;
+
+/**
+ * The one-line degrade complaint for a listing's score coverage, or null when
+ * coverage is healthy (or the listing is empty).
+ *
+ * Two distinct failures, deliberately worded differently: ZERO scored docs means
+ * the enrichment isn't there at all (old huginn ignoring `include_scores`), while
+ * a nonzero minority means the enrichment works but the scorer is behind.
+ */
+export function coverageWarning({ scored, total }: ListingCoverage): string | null {
+  if (total === 0) return null;
+  if (scored === 0) {
+    return `No listing scores on any of ${total} docs — capping alphabetically (huginn without include_scores?)`;
+  }
+  if (scored / total < LOW_COVERAGE_FRACTION) {
+    const pct = ((scored / total) * 100).toFixed(1);
+    return `Only ${scored}/${total} docs (${pct}%) carry a listing score — the maxDocs cap is still mostly alphabetical for the unscored majority`;
+  }
+  return null;
 }
 
 /**
@@ -171,37 +229,28 @@ function listingScore(raw: unknown): number | null {
  *     id, so the cap stays deterministic) and poured back into the unpinned slots in
  *     that order.
  *
- * Pinning rather than sinking is deliberate. huginn's x-feed fetch and score phases
- * are separate steps and the scorer skips already-scored files, so the NEWEST docs are
- * transiently unscored. Sinking them to the bottom would make them exactly the docs the
- * cap drops — inverting the recency the alphabetical sort provides by accident. Holding
- * their position gives an unscored doc precisely the cap odds it has today: no better,
- * no worse.
+ * Why pin rather than sink: **kept-set identity with the old behavior**. An unscored
+ * doc keeps exactly the cap odds it had before this change — if it was inside the old
+ * alphabetical cap it is still inside, if it was outside it is still outside. No more,
+ * no less. (Note the old `// oldest first for deterministic cap` comment was CORRECT:
+ * `localeCompare` on `YYYY-MM-DD_…` ids is oldest-first, so the newest docs already sat
+ * at the tail — sinking unscored docs would NOT have "inverted recency", it would simply
+ * have moved them, changing which docs the cap keeps for reasons unrelated to their
+ * quality. Pinning is the change that touches only the scored docs' ordering.)
  *
  * When NO doc has a finite score (an older huginn with no `include_scores` support)
  * every doc is pinned, so this returns the alphabetical order unchanged.
  */
 export function orderDocsForCap(docs: CollectionDoc[]): CollectionDoc[] {
   const alphabetical = [...docs].sort((a, b) => a.id.localeCompare(b.id));
-  const scored: CollectionDoc[] = [];
-  const pinned = new Map<number, CollectionDoc>();
-  alphabetical.forEach((doc, index) => {
-    if (listingScore(doc.combined_score) === null) pinned.set(index, doc);
-    else scored.push(doc);
-  });
+  const scored = alphabetical.filter((d) => listingScore(d.combined_score) !== null);
   if (scored.length === 0) return alphabetical;
 
-  scored.sort((a, b) => {
-    const diff = listingScore(b.combined_score)! - listingScore(a.combined_score)!;
-    return diff !== 0 ? diff : a.id.localeCompare(b.id);
-  });
+  scored.sort((a, b) =>
+    (listingScore(b.combined_score)! - listingScore(a.combined_score)!) || a.id.localeCompare(b.id));
 
-  const ordered: CollectionDoc[] = [];
   let next = 0;
-  for (let i = 0; i < alphabetical.length; i++) {
-    ordered.push(pinned.get(i) ?? scored[next++]!);
-  }
-  return ordered;
+  return alphabetical.map((d) => (listingScore(d.combined_score) === null ? d : scored[next++]!));
 }
 
 interface CompactedTweet {
@@ -385,12 +434,12 @@ export async function fetchFromCollection(
   // Daily/weekly digests disable this to re-rank the full window on every run
   const dedupByTweetId = config.dedupByTweetId ?? true;
   const candidateDocs = recentDocs.filter((d) => !dedupByTweetId || !known.has(`tw:${extractTweetId(d.id)}`));
-  if (candidateDocs.length > 0 && !candidateDocs.some((d) => listingScore(d.combined_score) !== null)) {
-    log.warn("No listing scores on any of {n} docs — capping alphabetically (huginn without include_scores?)", {
-      botName,
-      n: candidateDocs.length,
-    });
-  }
+  // Coverage is the honest measure of how much the score-ordering actually did. A
+  // partially-scored window (huginn's scorer running behind its fetcher) leaves the
+  // cap mostly alphabetical, so it warns — not just the all-or-nothing zero case.
+  const coverage = listingCoverage(candidateDocs);
+  const coverageComplaint = coverageWarning(coverage);
+  if (coverageComplaint) log.warn(coverageComplaint, { botName, ...coverage });
   // Score-descending so the maxDocs cap keeps the BEST docs, not the alphabetically
   // first ones; unscored docs hold their alphabetical slot. See orderDocsForCap.
   const newDocs = orderDocsForCap(candidateDocs);
@@ -416,15 +465,10 @@ export async function fetchFromCollection(
           const data = await resp.json() as { text: string; metadata?: { url?: string; combined_score?: string | number } };
           const resolvedUrl = data.metadata?.url || doc.url;
           const compact = compactTweetText(data.text, resolvedUrl);
-          // Prefer huginn's whitelisted `combined_score` metadata over the text-regex
-          // fallback. `Number(...)` is LOAD-BEARING, not defensive style: huginn's
-          // read_frontmatter serves frontmatter values as STRINGS (e.g. "0.5991"), which
-          // would sort lexicographically if used raw. `Number.isFinite` rejects absent
-          // (undefined ⇒ NaN) metadata, so pre-whitelist docs fall back to
-          // `compact.rankScore` (extractRankScore, which returns 0 for those) — never
-          // worse than today.
-          const metaScore = Number(data.metadata?.combined_score);
-          const rankScore = Number.isFinite(metaScore) ? metaScore : compact.rankScore;
+          // Same read as the listing cap (see `listingScore`): prefer huginn's
+          // whitelisted `combined_score` metadata, fall back to the text-regex
+          // `compact.rankScore` (0 for pre-whitelist docs) when it isn't usable.
+          const rankScore = listingScore(data.metadata?.combined_score) ?? compact.rankScore;
           return { docId: doc.id, url: resolvedUrl, ...compact, rankScore };
         } catch (err) {
           log.warn("Failed to fetch doc {docId}: {error}", { botName, docId: doc.id, error: err instanceof Error ? err.message : String(err) });
@@ -464,11 +508,14 @@ export async function fetchFromCollection(
 
   // Always emit the top score alongside counts so silent runs (minScore / quietMode)
   // still leave a breadcrumb the user can use to calibrate the gate from log history.
-  log.info("Collection: {total} docs, {recent} recent, {newCount} new, {fetched} fetched, {ranked} after ranking, topScore={topScore}", {
+  // `scored=` is the cap's honesty field: it says how much of the in-window set the
+  // score-ordering could actually rank (the rest held their alphabetical slot).
+  log.info("Collection: {total} docs, {recent} recent, {newCount} new, scored={scored}, {fetched} fetched, {ranked} after ranking, topScore={topScore}", {
     botName,
     total: docs.length,
     recent: recentDocs.length,
     newCount: newDocs.length,
+    scored: `${coverage.scored}/${coverage.total}`,
     fetched: compacted.length,
     ranked: ranked.length,
     topScore: compacted[0]?.rankScore.toFixed(3) ?? "n/a",
