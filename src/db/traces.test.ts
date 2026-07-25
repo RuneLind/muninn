@@ -497,6 +497,63 @@ describe("traces", () => {
       const found = traces.find((t) => t.id === root.id)!;
       expect(found.attributes.workUnits).toEqual(["goal_checkins"]);
     });
+
+    test("name filter matches the work unit the tick is renamed after", async () => {
+      const emailTick = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(emailTick);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: emailTick.traceId,
+        parentId: emailTick.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "email" },
+      });
+
+      const xTick = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(xTick);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: xTick.traceId,
+        parentId: xTick.id,
+        name: "watcher:x",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "x" },
+      });
+
+      const chat = makeRootSpan({ name: "web_message" });
+      await saveSpan(chat);
+
+      const byUnit = await getRecentTraces(10, 0, undefined, "watcher:email");
+      expect(byUnit.map((t) => t.id)).toEqual([emailTick.id]);
+
+      // Filtering by the root name still returns every tick, renamed or not.
+      const byRoot = await getRecentTraces(10, 0, undefined, "scheduler_tick");
+      expect(byRoot.map((t) => t.id).sort()).toEqual([emailTick.id, xTick.id].sort());
+
+      // Non-tick roots are unaffected by the EXISTS branch.
+      const byChat = await getRecentTraces(10, 0, undefined, "web_message");
+      expect(byChat.map((t) => t.id)).toEqual([chat.id]);
+    });
+
+    test("name filter ignores non-work-unit child spans", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { model: "sonnet", connector: "claude-cli" },
+      });
+
+      const traces = await getRecentTraces(10, 0, undefined, "claude");
+      expect(traces).toHaveLength(0);
+    });
   });
 
   // ── Rec 1: the walk aggregate (the deterministic connector/model-bearing
@@ -836,6 +893,40 @@ describe("traces", () => {
       const options = await getTraceFilterOptions();
       expect(options.bots).toEqual(["jarvis"]);
       expect(options.types.sort()).toEqual(["scheduler_tick", "telegram_text"]);
+    });
+
+    test("includes scheduler_tick work-unit names alongside root names", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick", botName: "jarvis" });
+      await saveSpan(root);
+      for (const name of ["watcher:email", "task:briefing", "goal_checkins"]) {
+        await saveSpan({
+          id: crypto.randomUUID(),
+          traceId: root.traceId,
+          parentId: root.id,
+          name,
+          kind: "span" as const,
+          startedAt: new Date(),
+        });
+      }
+      // Non-work-unit child of a tick — must not reach the dropdown.
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+      });
+      await saveSpan(makeRootSpan({ name: "telegram_text", botName: "jarvis" }));
+
+      const options = await getTraceFilterOptions();
+      expect(options.types.sort()).toEqual([
+        "goal_checkins",
+        "scheduler_tick",
+        "task:briefing",
+        "telegram_text",
+        "watcher:email",
+      ]);
     });
 
     test("returns empty arrays when no traces exist", async () => {

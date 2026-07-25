@@ -469,7 +469,7 @@ export const spec = {
           limitQuery(50, 200),
           { name: "offset", in: "query", schema: { type: "integer", default: 0 }, description: "Pagination offset", required: false },
           botQuery,
-          { name: "name", in: "query", schema: { type: "string" }, description: "Filter by trace name", required: false },
+          { name: "name", in: "query", schema: { type: "string" }, description: "Filter by trace name. Also matches a scheduler tick's work-unit child names (task:*, watcher:*, goal_reminders, goal_checkins) — the names such ticks are renamed after in the list — so 'watcher:email' returns the ticks that ran the email watcher, while 'scheduler_tick' still returns every tick.", required: false },
         ],
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { traces: { type: "array", items: { type: "object" } } } } } } },
@@ -525,7 +525,7 @@ export const spec = {
       get: {
         tags: ["Traces"],
         summary: "Trace filter options",
-        description: "Available filter values for the traces UI (bot names, trace names).",
+        description: "Available filter values for the traces UI (bot names, trace names — including the work-unit child names scheduler ticks are renamed after).",
         operationId: "getTraceFilters",
         responses: {
           "200": { description: "Filter options" },
