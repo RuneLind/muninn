@@ -108,7 +108,8 @@ export async function getRecentTraces(
            COALESCE(c.model, w.model, walk.model)                        AS model,
            c.requested_model,
            COALESCE(c.connector, w.connector, walk.connector)            AS connector,
-           q.quiet_skips
+           q.quiet_skips,
+           u.work_units
     FROM traces t
     LEFT JOIN LATERAL (
       SELECT
@@ -201,6 +202,17 @@ export async function getRecentTraces(
         AND qs.name LIKE 'watcher:%'
         AND qs.attributes->>'quietHoursSkipped' = 'true'
     ) q ON true
+    -- Work-unit naming: a scheduler tick root is always called 'scheduler_tick',
+    -- so the list can't tell an email-watcher tick from a briefing task. Roll up
+    -- the names of the tick's watcher:/task: child spans (in start order) so the
+    -- row can name what actually ran. DISPLAY ONLY — never feed tokens, model or
+    -- connector from this rollup (the c/w/walk precedence above owns those).
+    LEFT JOIN LATERAL (
+      SELECT array_agg(us.name ORDER BY us.started_at) AS work_units
+      FROM traces us
+      WHERE us.trace_id = t.trace_id AND us.parent_id = t.id
+        AND (us.name LIKE 'watcher:%' OR us.name LIKE 'task:%')
+    ) u ON true
     WHERE t.parent_id IS NULL
       AND (${botName ?? null}::text IS NULL OR t.bot_name = ${botName ?? null})
       AND (${name ?? null}::text IS NULL OR t.name = ${name ?? null})
@@ -326,6 +338,9 @@ function mapRow(r: Record<string, any>): SpanRow {
   if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
   if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);
   if (r.quiet_skips != null && !attrs.quietSkips) delta.quietSkips = Number(r.quiet_skips);
+  if (Array.isArray(r.work_units) && r.work_units.length > 0 && !attrs.workUnits) {
+    delta.workUnits = r.work_units.map((n: unknown) => String(n));
+  }
   if (Object.keys(delta).length > 0) attrs = { ...attrs, ...delta };
 
   return {

@@ -374,6 +374,81 @@ describe("traces", () => {
       expect(found.attributes.connector).toBe("claude-cli");
       expect(found.attributes.quietSkips).toBe(1);
     });
+
+    test("single-watcher tick carries its work unit name", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 100, outputTokens: 10, model: "claude-haiku-4-5-20251001", connector: "claude-cli" },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toEqual(["watcher:email"]);
+      // Display-only: the backend aggregate is untouched by the rollup.
+      expect(found.attributes.connector).toBe("claude-cli");
+    });
+
+    test("briefing tick carries its task work unit (and quiet skips still compose)", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "task:briefing",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "task" },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toEqual(["task:briefing"]);
+    });
+
+    test("quiet-hours-skipped watcher tick still names its work unit", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "email", quietHoursSkipped: true },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toEqual(["watcher:email"]);
+      expect(found.attributes.quietSkips).toBe(1);
+    });
+
+    test("non-tick root (chat) carries no workUnits", async () => {
+      const root = makeRootSpan();
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "claude",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 10, outputTokens: 1, model: "sonnet", connector: "claude-cli" },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.workUnits).toBeUndefined();
+    });
   });
 
   // ── Rec 1: the walk aggregate (the deterministic connector/model-bearing

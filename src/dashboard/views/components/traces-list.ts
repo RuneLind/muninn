@@ -45,6 +45,9 @@ export function tracesListStyles(): string {
     .backend-connector { color: var(--accent-light); font-weight: 500; }
     .backend-model { color: var(--text-dim); }
     .badge-quiet { background: color-mix(in srgb, var(--text-muted) 12%, transparent); color: var(--text-muted); font-weight: 400; }
+    /* Work-unit naming on scheduler ticks */
+    .badge-unit { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text-muted); font-weight: 400; margin-left: 4px; }
+    .tick-hint { color: var(--text-faint); font-size: 10px; margin-left: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
 
     .empty { color: var(--text-faint); text-align: center; padding: 40px; font-size: 14px; }
   `;
@@ -142,6 +145,22 @@ export function tracesListScript(): string {
       return '<span class="backend-cell">' + parts.join(' ') + '</span>';
     }
 
+    function fmtName(t) {
+      const nameBadge = '<span class="badge badge-name">' + esc(t.name) + '</span>';
+      // Only scheduler ticks are renamed — every other root (chat, capture,
+      // factcheck, goal_*) renders exactly as before.
+      if (t.name !== 'scheduler_tick') return nameBadge;
+      const units = t.attributes?.workUnits;
+      if (!Array.isArray(units) || units.length === 0) return nameBadge;
+      if (units.length === 1) {
+        // The overwhelmingly common case: one work unit per tick. Name the row
+        // after it, keeping a muted hint that it was scheduler-born.
+        return '<span class="badge badge-name" title="scheduler_tick">' + esc(units[0]) + '</span>' +
+          '<span class="tick-hint">tick</span>';
+      }
+      return nameBadge + units.map(u => '<span class="badge badge-unit">' + esc(u) + '</span>').join('');
+    }
+
     function renderTraceList(traces) {
       const tbody = document.getElementById('traceList');
       // The waterfall panel may currently be docked inside a row we're about
@@ -164,7 +183,7 @@ export function tracesListScript(): string {
           : '<span style="color:var(--text-disabled)">-</span>';
         return '<tr onclick="loadWaterfall(\\'' + t.traceId + '\\')" data-trace="' + t.traceId + '">' +
           '<td>' + fmtDate(t.startedAt) + '</td>' +
-          '<td><span class="badge badge-name">' + esc(t.name) + '</span></td>' +
+          '<td>' + fmtName(t) + '</td>' +
           '<td>' + (t.botName ? '<span class="badge badge-bot">' + esc(t.botName) + '</span>' : '-') + '</td>' +
           '<td>' + (t.username || t.userId || '-') + '</td>' +
           '<td>' + fmtBackend(t.attributes) + '</td>' +
