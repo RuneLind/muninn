@@ -1023,7 +1023,7 @@ bug) drops to a legacy single-JSON parse (`parseLegacyHaikuOutput`), mirroring
 `costUsd` (the latter two optional — direct-SDK Haiku backends leave them unset).
 
 `SpawnHaikuOptions` extends an optional `HaikuTelemetry` seam
-(`{ onProgress?, tracer?, captureToolOutputs?, onUsage? }`). The runner builds it per run —
+(`{ onProgress?, tracer?, captureToolOutputs?, onUsage?, onModelError? }`). The runner builds it per run —
 `onProgress = createProgressCallback(requestId, "running_watcher")` fills the
 `/agents` Running card's tool mini-log live (and now routes `usage_progress` events
 into the run's live token counts), and `tracer = wt` receives tool child
@@ -1045,6 +1045,23 @@ per-draft `claude` child span attach directly under `watcher:wiki-gardener`, one
 connected `scheduler_tick → watcher:wiki-gardener → stage → claude` tree (see
 "Token totals" below). Checkers invoked outside the runner keep working with the
 seam absent (`tracer` undefined ⇒ every tracer call is a null-guarded no-op).
+
+**Model-call legibility on `/traces` (#381).** `onModelError` is `onUsage`'s
+failure counterpart — fired once per FAILED `spawnHaiku` call (timeout / nonzero
+exit / parse error) at the single choke point in `executor.ts`, then rethrown as
+before. The runner counts failures in the usage accumulator (`errors` next to
+`calls`) and stamps `modelCalls`/`modelErrors` onto the `watcher:<type>` span at
+finish, so a run that made no model call (quiet anthropic tick, wiki-committer
+git sweep) or whose gate/digest call failed-and-was-swallowed is durably
+distinguishable from missing telemetry. A `getRecentTraces` rollup lateral
+(mirroring the quiet-skips one) exposes `noModelCall`/`modelErrors` on the tick
+row; `fmtBackend`'s blank-cell branch renders a red `model call failed` badge
+(beats the quiet-hours label) or a muted `no model call` badge instead of a
+dash. The gardener types (`wiki-gardener`/`consolidation-gardener`) are
+deliberately NOT stamped — their models run outside spawnHaiku (`executeOneShot`
+/ `callHaikuWithFallback` never fire `onUsage`/`onModelError`), so a stamped 0
+would lie; their backend surfaces via the depth-agnostic walk lateral over
+their `claude` child spans, and their unstamped ticks stay an ambiguous dash.
 
 **Token totals on `/agents` (PR3).** `onUsage` sums a checker's spawnHaiku token
 usage across its (possibly multiple, for x/anthropic) calls; the runner stamps the
