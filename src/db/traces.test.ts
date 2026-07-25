@@ -347,6 +347,92 @@ describe("traces", () => {
       expect(found.attributes.model).toBeUndefined();
     });
 
+    test("tick whose watcher stamped modelCalls=0 carries noModelCall", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:anthropic",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "anthropic", alertsFound: 0, modelCalls: 0 },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.noModelCall).toBe(true);
+      expect(found.attributes.modelErrors).toBeUndefined();
+      expect(found.attributes.connector).toBeUndefined();
+    });
+
+    test("tick whose watcher stamped modelErrors carries modelErrors, not noModelCall", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:anthropic",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "anthropic", modelCalls: 0, modelErrors: 1 },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.modelErrors).toBe(1);
+      expect(found.attributes.noModelCall).toBeUndefined();
+    });
+
+    test("tick with a successful model call does NOT carry noModelCall from a model-free sibling", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:email",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { inputTokens: 100, outputTokens: 10, model: "claude-haiku-4-5-20251001", connector: "claude-cli", modelCalls: 1 },
+      });
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:wiki-committer",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "wiki-committer", modelCalls: 0 },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.connector).toBe("claude-cli");
+      expect(found.attributes.noModelCall).toBeUndefined();
+    });
+
+    test("gardener tick with no modelCalls stamp stays ambiguous (no noModelCall)", async () => {
+      const root = makeRootSpan({ name: "scheduler_tick" });
+      await saveSpan(root);
+      await saveSpan({
+        id: crypto.randomUUID(),
+        traceId: root.traceId,
+        parentId: root.id,
+        name: "watcher:wiki-gardener",
+        kind: "span" as const,
+        startedAt: new Date(),
+        attributes: { type: "wiki-gardener", alertsFound: 0 },
+      });
+
+      const traces = await getRecentTraces(10);
+      const found = traces.find((t) => t.id === root.id)!;
+      expect(found.attributes.noModelCall).toBeUndefined();
+      expect(found.attributes.modelErrors).toBeUndefined();
+    });
+
     test("tick with a real model run does NOT lose backend to a sibling quiet skip", async () => {
       const root = makeRootSpan({ name: "scheduler_tick" });
       await saveSpan(root);

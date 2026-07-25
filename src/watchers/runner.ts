@@ -37,12 +37,17 @@ export interface WatcherUsageAcc {
   outputTokens: number;
   numTurns: number;
   calls: number;
+  /** Failed spawnHaiku attempts (timeout / exit / parse) — fired via
+   *  `onModelError`, the failure counterpart to `calls` (which only counts
+   *  successes). Lets the span record "attempted a model call that failed"
+   *  even though checkers swallow gate/digest errors and finish `ok`. */
+  errors: number;
   model: string | undefined;
   costUsd: number | undefined;
 }
 
 export function newWatcherUsage(): WatcherUsageAcc {
-  return { inputTokens: 0, outputTokens: 0, numTurns: 0, calls: 0, model: undefined, costUsd: undefined };
+  return { inputTokens: 0, outputTokens: 0, numTurns: 0, calls: 0, errors: 0, model: undefined, costUsd: undefined };
 }
 
 /** Fold one `spawnHaiku` call's usage into the accumulator (mutates in place). */
@@ -436,6 +441,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         tracer: wt,
         captureToolOutputs,
         onUsage: (u) => accumulateWatcherUsage(usage, u),
+        onModelError: () => { usage.errors++; },
       };
 
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
@@ -576,11 +582,26 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
             connector: "claude-cli",
           }
         : {};
+      // Model-call legibility: stamp how many model calls the run made (and how
+      // many failed) so a blank Backend cell on /traces can honestly read
+      // "no model call" / "model call failed" instead of an ambiguous "-".
+      // The gardeners run their models OUTSIDE spawnHaiku (executeOneShot /
+      // callHaikuWithFallback never fire onUsage/onModelError), so a 0 here
+      // would be a lie for them — skip the stamp entirely; their backend
+      // surfaces via the walk lateral over their claude child spans instead.
+      const modelCallsBlind =
+        watcher.type === "wiki-gardener" || watcher.type === "consolidation-gardener";
+      const callMeta = modelCallsBlind
+        ? {}
+        : {
+            modelCalls: usage.calls,
+            ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}),
+          };
       // `wt` is a child span sharing the scheduler_tick trace id, so the card's
       // trace link opens the whole tick — coarser than chat's per-request link,
       // but the only handle in scope here.
       agentStatus.completeRequest(requestId, { traceId: wt?.traceId, ...usageMeta });
-      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...usageMeta, ...(forced && { manualTrigger: true }) });
+      wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...usageMeta, ...callMeta, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
       wt?.error(err instanceof Error ? err : String(err));
