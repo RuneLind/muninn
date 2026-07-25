@@ -1,5 +1,6 @@
 import { DEFAULT_X_PROMPT } from "../../../watchers/x.ts";
 import { DEFAULT_EMAIL_PROMPT } from "../../../watchers/email.ts";
+import { DEFAULT_ANTHROPIC_GATE_PROMPT, DEFAULT_ANTHROPIC_DAILY_PROMPT } from "../../../watchers/anthropic.ts";
 
 /** Automation panel — combined scheduled tasks + watchers master-detail */
 export function automationPanelStyles(): string {
@@ -655,10 +656,22 @@ export function automationPanelScript(): string {
       x: ${JSON.stringify(DEFAULT_X_PROMPT)},
       email: ${JSON.stringify(DEFAULT_EMAIL_PROMPT)},
       news: '',
+      anthropicGate: ${JSON.stringify(DEFAULT_ANTHROPIC_GATE_PROMPT)},
+      anthropicDigest: ${JSON.stringify(DEFAULT_ANTHROPIC_DAILY_PROMPT)},
     };
 
+    function watcherDefaultPrompt(w) {
+      // The anthropic default is mode-dependent (mirrors runGate/runDigest fallbacks)
+      if (w.type === 'anthropic') {
+        return w.config && w.config.digest
+          ? WATCHER_DEFAULT_PROMPTS.anthropicDigest
+          : WATCHER_DEFAULT_PROMPTS.anthropicGate;
+      }
+      return WATCHER_DEFAULT_PROMPTS[w.type] || '';
+    }
+
     function getWatcherPrompt(w) {
-      return (w.config && w.config.prompt) || WATCHER_DEFAULT_PROMPTS[w.type] || '';
+      return (w.config && w.config.prompt) || watcherDefaultPrompt(w);
     }
 
     function renderWatcherDetailsTab(w) {
@@ -795,7 +808,12 @@ export function automationPanelScript(): string {
         if (slackBotVal.value.trim()) { config.slackBot = slackBotVal.value.trim(); } else { delete config.slackBot; }
       }
       var promptVal = document.getElementById('atEditPrompt');
-      if (promptVal) config.prompt = promptVal.value || undefined;
+      if (promptVal) {
+        // A prompt equal to the code default is stored as "no override" so the
+        // row keeps tracking future default improvements (never seed a frozen copy)
+        var isCodeDefault = promptVal.value === watcherDefaultPrompt(w);
+        config.prompt = (promptVal.value && !isCodeDefault) ? promptVal.value : undefined;
+      }
       body.config = config;
 
       try {
