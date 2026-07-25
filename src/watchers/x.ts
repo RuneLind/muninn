@@ -136,6 +136,72 @@ export function buildDateWindow(windowDays: number, now: Date = new Date()): Set
 interface CollectionDoc {
   id: string;
   url: string;
+  /** huginn's `include_scores` listing enrichment. Absent on pre-`include_scores` huginn. */
+  combined_score?: number | string | null;
+}
+
+/**
+ * Read a listing doc's `combined_score` as a usable number, or null.
+ *
+ * `Number(...)` is LOAD-BEARING even though huginn now coerces server-side: a
+ * lexicographic sort over `"0.9"` vs `"0.1234"` fails SILENTLY (it just ranks
+ * wrong), so the belt-and-braces parse stays. `null`/`undefined`/`""` are
+ * rejected explicitly because `Number(null)` and `Number("")` are both `0` —
+ * which is finite, and would sink a scoreless doc to the bottom instead of
+ * letting the missing-score rule below hold its place.
+ */
+function listingScore(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Order a collection listing so the `maxDocs` cap keeps the HIGHEST-scoring docs.
+ *
+ * The cap used to slice an id-sorted list, and ids are `YYYY-MM-DD_<handle>_<id>.md`
+ * — so within a day the cap was alphabetical by handle, and a 389-doc day was cut at
+ * the B's. Ranking happened only AFTER the cap, on the survivors.
+ *
+ * Exact semantics — **positional hold** (per-doc degrade, not all-or-nothing):
+ *  1. The alphabetical (`localeCompare` on id) order is the baseline — today's order.
+ *  2. A doc with no finite `combined_score` is PINNED to the index it holds in that
+ *     baseline. It neither rises nor sinks.
+ *  3. Every scored doc is sorted `combined_score` DESC (tie-break `localeCompare` on
+ *     id, so the cap stays deterministic) and poured back into the unpinned slots in
+ *     that order.
+ *
+ * Pinning rather than sinking is deliberate. huginn's x-feed fetch and score phases
+ * are separate steps and the scorer skips already-scored files, so the NEWEST docs are
+ * transiently unscored. Sinking them to the bottom would make them exactly the docs the
+ * cap drops — inverting the recency the alphabetical sort provides by accident. Holding
+ * their position gives an unscored doc precisely the cap odds it has today: no better,
+ * no worse.
+ *
+ * When NO doc has a finite score (an older huginn with no `include_scores` support)
+ * every doc is pinned, so this returns the alphabetical order unchanged.
+ */
+export function orderDocsForCap(docs: CollectionDoc[]): CollectionDoc[] {
+  const alphabetical = [...docs].sort((a, b) => a.id.localeCompare(b.id));
+  const scored: CollectionDoc[] = [];
+  const pinned = new Map<number, CollectionDoc>();
+  alphabetical.forEach((doc, index) => {
+    if (listingScore(doc.combined_score) === null) pinned.set(index, doc);
+    else scored.push(doc);
+  });
+  if (scored.length === 0) return alphabetical;
+
+  scored.sort((a, b) => {
+    const diff = listingScore(b.combined_score)! - listingScore(a.combined_score)!;
+    return diff !== 0 ? diff : a.id.localeCompare(b.id);
+  });
+
+  const ordered: CollectionDoc[] = [];
+  let next = 0;
+  for (let i = 0; i < alphabetical.length; i++) {
+    ordered.push(pinned.get(i) ?? scored[next++]!);
+  }
+  return ordered;
 }
 
 interface CompactedTweet {
@@ -296,7 +362,10 @@ export async function fetchFromCollection(
   // Get all document IDs from the collection
   let docs: CollectionDoc[];
   try {
-    const resp = await fetch(`${apiUrl}/api/collection/${encodeURIComponent(collection)}/documents`);
+    // `include_scores` lets the cap below keep the top-scoring docs instead of the
+    // alphabetically-first ones. Older huginn ignores the unknown param and returns
+    // the plain listing — `orderDocsForCap` then degrades to alphabetical.
+    const resp = await fetch(`${apiUrl}/api/collection/${encodeURIComponent(collection)}/documents?include_scores=1`);
     if (!resp.ok) {
       log.error("Failed to list collection documents: HTTP {status}", { botName, status: resp.status });
       return null;
@@ -315,9 +384,16 @@ export async function fetchFromCollection(
 
   // Daily/weekly digests disable this to re-rank the full window on every run
   const dedupByTweetId = config.dedupByTweetId ?? true;
-  const newDocs = recentDocs
-    .filter((d) => !dedupByTweetId || !known.has(`tw:${extractTweetId(d.id)}`))
-    .sort((a, b) => a.id.localeCompare(b.id)); // oldest first for deterministic cap
+  const candidateDocs = recentDocs.filter((d) => !dedupByTweetId || !known.has(`tw:${extractTweetId(d.id)}`));
+  if (candidateDocs.length > 0 && !candidateDocs.some((d) => listingScore(d.combined_score) !== null)) {
+    log.warn("No listing scores on any of {n} docs — capping alphabetically (huginn without include_scores?)", {
+      botName,
+      n: candidateDocs.length,
+    });
+  }
+  // Score-descending so the maxDocs cap keeps the BEST docs, not the alphabetically
+  // first ones; unscored docs hold their alphabetical slot. See orderDocsForCap.
+  const newDocs = orderDocsForCap(candidateDocs);
 
   if (newDocs.length === 0) {
     log.info("No new recent tweets ({recent} recent, all seen)", { botName, recent: recentDocs.length });

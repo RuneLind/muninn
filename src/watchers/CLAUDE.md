@@ -104,6 +104,36 @@ values as **strings** (e.g. `"0.5991"`), which would sort lexicographically if u
 > real. Absent metadata ⇒ byte-identical to the old (0-valued) behavior, so the change is
 > safe to land before the huginn whitelist PR.
 
+### Score-ordered document cap (`orderDocsForCap`)
+
+`fetchFromCollection` caps the window at `maxDocs` (80) **before** fetching bodies. That
+cap used to slice an id-sorted list — and ids are `YYYY-MM-DD_<handle>_<id>.md`, so within
+a day it was **alphabetical by handle**. On 2026-07-24 the 1-day window held 389 docs and
+the cut landed in the B's; ranking then ran only over those survivors. The Weekly row fed
+80 of ~2,100 week docs, chosen alphabetically.
+
+The listing is now requested with huginn's opt-in **`include_scores`**
+(`GET /api/collection/<c>/documents?include_scores=1` — attaches `combined_score` plus its
+`relevance_score`/`engagement_score` inputs, coerced to floats server-side) and ordered by
+`orderDocsForCap` before the slice. `Number(...)` + `Number.isFinite` are re-applied
+muninn-side regardless of the server coercion — a lexicographic sort over `"0.9"` vs
+`"0.1234"` fails **silently**. `null`/`""` are rejected explicitly (both `Number()` to a
+finite `0`).
+
+**Per-doc degrade — positional hold, not all-or-nothing.** The alphabetical order is the
+baseline; a doc with no finite score is **pinned to the index it holds there**, and the
+scored docs are sorted `combined_score` DESC (tie-break `localeCompare`) into the remaining
+slots. huginn's x-feed fetch and score phases are separate steps and the scorer skips
+already-scored files, so the NEWEST docs are transiently unscored — sinking them to the
+bottom would make them exactly the docs the cap drops, inverting the recency the old sort
+provided by accident. Pinning gives an unscored doc precisely the cap odds it had before.
+When **no** doc has a finite score (older huginn, which ignores the unknown query param)
+every doc is pinned ⇒ the order is byte-identical to the old alphabetical behavior, with
+one warn log.
+
+Consequence: `compacted` is re-sorted by the same `combined_score` after fetch, so
+top-80-then-top-30 ≡ top-30 — `maxDocs` no longer shapes digest content.
+
 ### Prompt size is critical
 
 Sonnet times out at 60s with large prompts. The collection path must send **compact one-liners** (`compactTweetText`), not full markdown documents. Full docs caused 180s timeouts even with increased limits. The compact format matches what the direct fetcher produces: `@handle: text (likes, views)\n  URL: url`.
@@ -129,7 +159,7 @@ Sonnet times out at 60s with large prompts. The collection path must send **comp
 | `collection` | `"x-feed"` | Collection name. Required for the active collection path. |
 | `model` | Haiku | Model for summarization (e.g. "claude-sonnet-4-6") |
 | `timeoutMs` | 300000 | Model call timeout (ms). Set 600000+ for Sonnet with large backlogs. |
-| `maxDocs` | 80 | Max documents to fetch from collection per run |
+| `maxDocs` | 80 | Max documents to fetch from collection per run. The cap is **score-ordered** (see "Score-ordered document cap"), so it no longer shapes digest content — only fetch cost and the capture batch. |
 | `topN` | 30 | Max tweets sent to LLM after engagement ranking |
 | `prompt` | `DEFAULT_X_PROMPT` | Custom prompt (overrides default two-tier format) |
 | `apiUrl` | `KNOWLEDGE_API_URL` env | Knowledge API URL |
