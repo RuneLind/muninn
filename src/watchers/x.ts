@@ -4,6 +4,7 @@ import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.t
 import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
+import { applyAmplification, resolveAmplificationConfig, type AmplificationConfig } from "./x-amplification.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -51,7 +52,7 @@ Otherwise, produce a short alert with 1–3 items maximum:
 
 Err on the side of SKIP. The user will get a full digest later today anyway.`;
 
-interface XWatcherConfig {
+interface XWatcherConfig extends AmplificationConfig {
   pages?: number;
   prompt?: string;
   model?: string;
@@ -103,6 +104,9 @@ interface XWatcherConfig {
    *     applies here — link-tweets are already top-author-only by eligibility.
    */
   candidateMinScoreByKind?: { "x-post"?: number; "x-link"?: number };
+  // --- X-Article amplification (digest leg) ---
+  // `amplificationMinAuthors` / `amplificationMaxPromotions` are inherited from
+  // {@link AmplificationConfig}; see `x-amplification.ts` for the mechanism + its bound.
 }
 
 // --- Collection path (queries huginn's indexed x-feed collection) ---
@@ -589,24 +593,43 @@ export async function fetchFromCollection(
     : undefined;
 
   const topN = config.topN ?? DEFAULT_TOP_N;
-  const ranked = compacted.slice(0, topN);
+  // X-Article amplification, applied at the RANKING step (after fetch, before the topN
+  // slice) — deliberately NOT in the maxDocs listing cap, which is listing-score based and
+  // runs before any body (and therefore any articleUrl) exists. Two effects, both scoped to
+  // the DIGEST listing: one doc per article survives (collapse — an amplifier now carries
+  // the article's title+preview, so a popular article could otherwise take N+1 near-identical
+  // slots), and an article quoted by >= amplificationMinAuthors distinct authors earns one of
+  // at most amplificationMaxPromotions reserved slots at the BOTTOM of the top-N band.
+  // `compacted` itself is untouched, so the capture batch and trackingIds are unaffected.
+  const amplification = resolveAmplificationConfig(config, botName);
+  const amplified = applyAmplification(compacted, topN, amplification);
+  for (const p of amplified.promotions) {
+    log.info("Amplification: promoted {articleUrl} ({authors} distinct amplifiers) from rank {from} to {to}", {
+      botName, articleUrl: p.articleUrl, authors: p.amplifierAuthors, from: p.fromRank, to: p.toRank, docId: p.docId,
+    });
+  }
+  const ranked = amplified.listing.slice(0, topN);
   const texts = ranked.map((r) => r.text);
 
   // Always emit the top score alongside counts so silent runs (minScore / quietMode)
   // still leave a breadcrumb the user can use to calibrate the gate from log history.
   // `scored=` is the cap's honesty field: it says how much of the in-window set the
   // score-ordering could actually rank (the rest held their alphabetical slot).
-  log.info("Collection: {total} docs, {recent} recent, {newCount} new, scored={scored}, {fetched} fetched, {ranked} after ranking, topScore={topScore}", {
+  log.info("Collection: {total} docs, {recent} recent, {newCount} new, scored={scored}, {fetched} fetched, {collapsed} article-collapsed, {ranked} after ranking, topScore={topScore}", {
     botName,
     total: docs.length,
     recent: recentDocs.length,
     newCount: newDocs.length,
     scored: `${coverage.scored}/${coverage.total}`,
     fetched: compacted.length,
+    collapsed: amplified.collapsed.length,
     ranked: ranked.length,
     topScore: compacted[0]?.rankScore.toFixed(3) ?? "n/a",
   });
 
+  // `topScore` stays the FULL batch's top (not the collapsed listing's): it feeds the
+  // alert-path `minScore` gate, which must keep behaving exactly as it did — a collapsed
+  // amplifier is still a real, fetched tweet that the run considered.
   return { texts, trackingIds, topScore: compacted[0]?.rankScore, docs: tweetDocs };
 }
 
