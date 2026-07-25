@@ -118,6 +118,8 @@ export async function getRecentTraces(
            c.requested_model,
            COALESCE(c.connector, w.connector, walk.connector)            AS connector,
            q.quiet_skips,
+           m.model_errors,
+           m.model_calls,
            u.work_units
     FROM traces t
     LEFT JOIN LATERAL (
@@ -211,6 +213,21 @@ export async function getRecentTraces(
         AND qs.name LIKE 'watcher:%'
         AND qs.attributes->>'quietHoursSkipped' = 'true'
     ) q ON true
+    -- Model-call legibility: watcher runs stamp modelCalls (successful spawnHaiku
+    -- calls) and modelErrors (failed attempts) onto their watcher:<type> span.
+    -- Roll them up so a blank Backend cell can honestly say "no model call"
+    -- (every stamped watcher made 0 calls) or "model call failed" (≥1 failed
+    -- attempt). model_calls is NULL when NO child stamped the attr (gardener
+    -- ticks, pre-stamp rows) so the client can't confuse "unstamped" with "0".
+    LEFT JOIN LATERAL (
+      SELECT
+        NULLIF(SUM(COALESCE((ms.attributes->>'modelErrors')::int, 0)), 0)::int AS model_errors,
+        SUM(COALESCE((ms.attributes->>'modelCalls')::int, 0))::int             AS model_calls
+      FROM traces ms
+      WHERE ms.trace_id = t.trace_id AND ms.parent_id = t.id
+        AND ms.name LIKE 'watcher:%'
+        AND (ms.attributes ? 'modelCalls' OR ms.attributes ? 'modelErrors')
+    ) m ON true
     -- Work-unit naming: a scheduler tick root is always called 'scheduler_tick',
     -- so the list can't tell an email-watcher tick from a briefing task. Roll up
     -- the names of the tick's work-unit child spans (in start order) so the row
@@ -383,6 +400,12 @@ function mapRow(r: Record<string, any>): SpanRow {
   if (r.requested_model != null && !attrs.requestedModel) delta.requestedModel = String(r.requested_model);
   if (r.connector != null && !attrs.connector) delta.connector = String(r.connector);
   if (r.quiet_skips != null && !attrs.quietSkips) delta.quietSkips = Number(r.quiet_skips);
+  if (r.model_errors != null && !attrs.modelErrors) delta.modelErrors = Number(r.model_errors);
+  // noModelCall only when the run EXPLICITLY stamped modelCalls and the sum is 0
+  // with no failed attempts — an aggregate NULL (unstamped) must stay ambiguous.
+  if (r.model_calls != null && Number(r.model_calls) === 0 && r.model_errors == null && !attrs.noModelCall) {
+    delta.noModelCall = true;
+  }
   if (Array.isArray(r.work_units) && r.work_units.length > 0 && !attrs.workUnits) {
     delta.workUnits = r.work_units.map((n: unknown) => String(n));
   }

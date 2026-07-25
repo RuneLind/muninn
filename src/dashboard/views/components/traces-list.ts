@@ -137,6 +137,10 @@ export function tracesListScript(): string {
         // No model ran. If the tick's due watchers were all quiet-hours
         // skipped, say so — a blank cell reads as "something went wrong".
         if (attrs?.quietSkips) return '<span class="badge badge-quiet" title="' + attrs.quietSkips + ' due watcher(s) skipped by quiet hours — no model call ran">quiet hours</span>';
+        // Model-call legibility (stamped by the watcher runner): a failed
+        // attempt is louder than a quiet run; both beat an ambiguous dash.
+        if (attrs?.modelErrors) return '<span class="badge badge-error" title="' + attrs.modelErrors + ' model call(s) failed (timeout / crash / unparseable output) — the run completed without a usable model response">model call failed</span>';
+        if (attrs?.noModelCall) return '<span class="badge badge-quiet" title="Run completed without invoking a model — nothing new to score/summarize this tick">no model call</span>';
         return '<span style="color:var(--text-disabled)">-</span>';
       }
       const parts = [];

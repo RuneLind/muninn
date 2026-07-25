@@ -53,6 +53,15 @@ export interface HaikuTelemetry {
    * outside the watcher runner.
    */
   onUsage?: (usage: HaikuUsage) => void;
+  /**
+   * Fired once when a `spawnHaiku` call FAILS (timeout, nonzero exit, stream/parse
+   * error) — the counterpart to `onUsage`, which only fires on success. Lets the
+   * watcher runner distinguish "made no model call" from "attempted a model call
+   * that failed" on the `watcher:<type>` span (checkers swallow gate/digest errors,
+   * so the span otherwise finishes `ok` with no telemetry either way). Fired
+   * BEFORE the error is rethrown; the throw is still the caller's to handle.
+   */
+  onModelError?: (message: string) => void;
 }
 
 /** Final token usage for one Haiku call, delivered to {@link HaikuTelemetry.onUsage}. */
@@ -125,6 +134,7 @@ export async function spawnHaiku(
     tracer,
     captureToolOutputs,
     onUsage,
+    onModelError,
   } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
   const wallStart = performance.now();
@@ -223,6 +233,9 @@ export async function spawnHaiku(
 
   try {
     return await Promise.race([resultPromise, timeoutPromise]);
+  } catch (err) {
+    onModelError?.(err instanceof Error ? err.message : String(err));
+    throw err;
   } finally {
     clearTimeout(timeoutTimer!);
   }
