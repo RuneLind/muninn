@@ -10,6 +10,7 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
 
 setupTestDb();
@@ -440,7 +441,7 @@ describe("summary-candidates", () => {
       score: number,
       kind: "doc" | "commit" | "release" | "blog" | "x-post",
       status: "summarized" | "dismissed" | "error",
-      reason?: "manual" | "expired",
+      reason?: "manual" | "expired" | typeof HYPE_DEDUP_SWEEP_REASON,
       source = "anthropic",
     ) {
       const url = "https://o/" + slug;
@@ -473,6 +474,33 @@ describe("summary-candidates", () => {
       expect(doc.total).toBe(5);
       // acceptance = summarized / (summarized + manual) = 2/3; expired + unknown are OUT.
       expect(doc.acceptanceRate).toBeCloseTo(2 / 3, 3);
+    });
+
+    test("hype-dedup-sweep rows get their own bucket: counted in total, OUT of the acceptance denominator", async () => {
+      await seedOutcome("hs1", 0.9, "x-post", "summarized", undefined, "x");
+      await seedOutcome("hm1", 0.9, "x-post", "dismissed", "manual", "x");
+      // The one-shot backlog sweep bulk-dismisses a pre-calibration shelf.
+      await seedOutcome("hw1", 0.9, "x-post", "dismissed", HYPE_DEDUP_SWEEP_REASON, "x");
+      await seedOutcome("hw2", 0.9, "x-post", "dismissed", HYPE_DEDUP_SWEEP_REASON, "x");
+
+      const stats = await candidateOutcomeStats();
+      const x = stats.byKind.find((k) => k.source === "x" && k.kind === "x-post")!;
+      expect(x).toBeDefined();
+      expect(x.dismissedSwept).toBe(2);
+      // Swept rows land in NEITHER manual nor unknown.
+      expect(x.dismissedManual).toBe(1);
+      expect(x.dismissedUnknown).toBe(0);
+      expect(x.dismissedExpired).toBe(0);
+      // total includes them …
+      expect(x.total).toBe(4);
+      // … but the rate is still summarized / (summarized + manual) = 1/2, untouched.
+      expect(x.acceptanceRate).toBeCloseTo(0.5, 3);
+
+      // Same honesty in the score-band histogram.
+      const band = stats.byBand.find((b) => b.band === 0.9)!;
+      expect(band.dismissedSwept).toBe(2);
+      expect(band.total).toBe(4);
+      expect(band.acceptanceRate).toBeCloseTo(0.5, 3);
     });
 
     test("acceptanceRate is null when there are no accept/reject decisions", async () => {

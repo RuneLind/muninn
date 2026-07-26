@@ -346,6 +346,16 @@ export async function setCandidateStatus(
 /** Acceptance rate the suggested-floor heuristic targets. */
 const ACCEPTANCE_TARGET = 0.5;
 
+/**
+ * `dismissed_reason` written by the one-shot `scripts/sweep-x-hype-backlog.ts` backlog
+ * sweep (X hype-dedup, 2026-07). Rows dismissed under this reason are BULK bookkeeping —
+ * a pre-calibration shelf cleared in one go, never a per-item human judgement — so they
+ * are counted (their own bucket + `total`) but kept OUT of the acceptance denominator,
+ * exactly like `expired`. Folding hundreds of swept rows into `manual` would tank the
+ * very metric the post-sweep gate is calibrated against.
+ */
+export const HYPE_DEDUP_SWEEP_REASON = "hype-dedup-sweep";
+
 const round3 = (x: number): number => Math.round(x * 1000) / 1000;
 /** Snap a 0.1-band boundary to 1 decimal, shedding REAL/float noise (0.7000001 → 0.7). */
 const round1 = (x: number): number => Math.round(x * 10) / 10;
@@ -360,12 +370,17 @@ export interface OutcomeCounts {
   dismissedManual: number;
   /** Auto-dismissed stale (dismissed_reason = 'expired') — NOT a quality judgement. */
   dismissedExpired: number;
+  /**
+   * Bulk-dismissed by the one-shot hype-dedup backlog sweep
+   * (dismissed_reason = {@link HYPE_DEDUP_SWEEP_REASON}) — NOT a quality judgement.
+   */
+  dismissedSwept: number;
   /** Dismissed before migration 051 (dismissed_reason NULL) — origin unknown. */
   dismissedUnknown: number;
   error: number;
   /**
-   * summarized / (summarized + dismissedManual). Expired + unknown dismissals and
-   * errors are deliberately OUT of the denominator (they aren't accept/reject
+   * summarized / (summarized + dismissedManual). Expired, swept + unknown dismissals
+   * and errors are deliberately OUT of the denominator (they aren't accept/reject
    * judgements). null when the denominator is 0 (no labeled decisions yet).
    */
   acceptanceRate: number | null;
@@ -409,6 +424,7 @@ interface RawCell {
   summarized: number;
   dismissedManual: number;
   dismissedExpired: number;
+  dismissedSwept: number;
   dismissedUnknown: number;
   error: number;
 }
@@ -419,6 +435,7 @@ function emptyCounts(): OutcomeCounts {
     summarized: 0,
     dismissedManual: 0,
     dismissedExpired: 0,
+    dismissedSwept: 0,
     dismissedUnknown: 0,
     error: 0,
     acceptanceRate: null,
@@ -429,13 +446,19 @@ function accumulate(acc: OutcomeCounts, c: RawCell): void {
   acc.summarized += c.summarized;
   acc.dismissedManual += c.dismissedManual;
   acc.dismissedExpired += c.dismissedExpired;
+  acc.dismissedSwept += c.dismissedSwept;
   acc.dismissedUnknown += c.dismissedUnknown;
   acc.error += c.error;
 }
 
 function finalize(acc: OutcomeCounts): void {
   acc.total =
-    acc.summarized + acc.dismissedManual + acc.dismissedExpired + acc.dismissedUnknown + acc.error;
+    acc.summarized +
+    acc.dismissedManual +
+    acc.dismissedExpired +
+    acc.dismissedSwept +
+    acc.dismissedUnknown +
+    acc.error;
   const denom = acc.summarized + acc.dismissedManual;
   acc.acceptanceRate = denom > 0 ? round3(acc.summarized / denom) : null;
 }
@@ -459,6 +482,7 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
       count(*) FILTER (WHERE status = 'summarized')::int AS summarized,
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = 'manual')::int AS dismissed_manual,
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = 'expired')::int AS dismissed_expired,
+      count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = ${HYPE_DEDUP_SWEEP_REASON})::int AS dismissed_swept,
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason IS NULL)::int AS dismissed_unknown,
       count(*) FILTER (WHERE status = 'error')::int AS error
     FROM summary_candidates
@@ -473,6 +497,7 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
     summarized: Number(r.summarized),
     dismissedManual: Number(r.dismissed_manual),
     dismissedExpired: Number(r.dismissed_expired),
+    dismissedSwept: Number(r.dismissed_swept),
     dismissedUnknown: Number(r.dismissed_unknown),
     error: Number(r.error),
   }));

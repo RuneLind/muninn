@@ -8,8 +8,9 @@
  *  - a 0.1-wide score-band histogram of outcomes,
  *  - suggested per-kind capture floors + a copyable `candidateMinScoreByKind` JSON snippet.
  *
- * Acceptance rate = summarized / (summarized + manually-dismissed) — auto-expired and
- * pre-migration ("unknown") dismissals are shown as separate columns but kept OUT of the
+ * Acceptance rate = summarized / (summarized + manually-dismissed) — auto-expired,
+ * bulk-swept (the one-shot X hype-dedup backlog sweep) and pre-migration ("unknown")
+ * dismissals are shown as separate columns but kept OUT of the
  * denominator (they aren't accept/reject judgements). This tab NEVER writes watcher config;
  * the operator hand-copies the suggested floors into a bot's config.json. Uses the shared
  * esc() + getJson() helpers (all summaries component scripts share one page scope). */
@@ -142,7 +143,7 @@ export function sumOutcomesHtml(): string {
       <h2>Calibration</h2>
       <p class="outcomes-subtitle">
         Capture-gate quality from the labeled candidate history. Acceptance = summarized ÷ (summarized + manually dismissed);
-        auto-expired and pre-tracking dismissals are shown separately and excluded from that rate. Display only — copy the
+        auto-expired, bulk-swept and pre-tracking dismissals are shown separately and excluded from that rate. Display only — copy the
         suggested floors into a bot's <code>candidateMinScoreByKind</code> yourself.
       </p>
       <div id="outcomesBody"></div>
@@ -176,6 +177,7 @@ export function sumOutcomesScript(): string {
         '<td>' + o.summarized + '</td>' +
         '<td>' + o.dismissedManual + '</td>' +
         '<td class="dim">' + o.dismissedExpired + '</td>' +
+        '<td class="dim">' + (o.dismissedSwept || 0) + '</td>' +
         '<td class="dim">' + o.dismissedUnknown + '</td>' +
         '<td class="dim">' + o.error + '</td>' +
         '<td>' + outcomeAcc(o) + '</td>';
@@ -185,7 +187,9 @@ export function sumOutcomesScript(): string {
       return '<thead><tr>' +
         '<th>' + firstLabel + '</th>' +
         '<th>Total</th><th>Summ.</th><th>Dismiss</th>' +
-        '<th>Expired</th><th>Unknown</th><th>Error</th><th>Accept</th>' +
+        '<th title="Auto-dismissed stale after 14 idle days — excluded from Accept">Expired</th>' +
+        '<th title="Bulk-dismissed by the one-shot hype-dedup backlog sweep — excluded from Accept">Swept</th>' +
+        '<th>Unknown</th><th>Error</th><th>Accept</th>' +
         '</tr></thead>';
     }
 
