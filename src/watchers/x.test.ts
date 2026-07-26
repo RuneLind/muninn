@@ -76,6 +76,9 @@ let upsertThrow = false;
 // higher score wins, non-`new` rows are never touched.
 interface StoredCandidate extends UpsertParams {
   status: "new" | "dismissed" | "summarized" | "summarizing" | "error";
+  /** 'manual' (terminal) vs 'expired' (re-admittable) — mirrors the real column. */
+  dismissedReason?: string | null;
+  updatedAt?: number;
 }
 const candidateRows = new Map<string, StoredCandidate>();
 const rowKey = (source: string, url: string) => `${source}|${url}`;
@@ -112,20 +115,30 @@ mock.module("../db/summary-candidates.ts", () => ({
     upsertCalls.push({ ...p, writer: "shared" });
   },
   // Destination-keyed writer (pointer candidates). Mirrors the real SQL: insert if
-  // absent; on conflict replace the WHOLE set from the incoming member, but only while
-  // the row is still `new` AND the incoming score strictly beats the stored one.
+  // absent; on conflict, RE-ADMITTABLE rows (`new`, `error`, and auto-expired
+  // dismissals) take the WHOLE set from the incoming member when it strictly beats the
+  // stored score — and always bump `updatedAt` even when they don't, so a destination
+  // under continuous hype keeps refreshing its expiry clock. Manual dismissals and
+  // summarized/summarizing rows are terminal.
   upsertDestinationCandidate: async (p: UpsertParams) => {
     if (upsertThrow) throw new Error("db down");
     upsertCalls.push({ ...p, writer: "destination" });
     const key = rowKey(p.source, p.url);
     const existing = candidateRows.get(key);
     if (!existing) {
-      candidateRows.set(key, { ...p, status: "new" });
+      candidateRows.set(key, { ...p, status: "new", updatedAt: Date.now() });
       return;
     }
-    if (existing.status !== "new") return;
-    if (!(p.score > existing.score)) return;
-    candidateRows.set(key, { ...p, status: "new" });
+    const readmittable =
+      existing.status === "new" ||
+      existing.status === "error" ||
+      (existing.status === "dismissed" && existing.dismissedReason === "expired");
+    if (!readmittable) return;
+    if (!(p.score > existing.score)) {
+      candidateRows.set(key, { ...existing, updatedAt: Date.now() });
+      return;
+    }
+    candidateRows.set(key, { ...p, status: "new", dismissedReason: null, updatedAt: Date.now() });
   },
   listCandidates: async () => [],
   getCandidateById: async () => null,
@@ -1191,8 +1204,9 @@ describe("link-tweet (x-link) capture", () => {
     // Only dave (the pointer tweet) is eligible; erin has no link, is not long-form.
     expect(upsertCalls).toHaveLength(1);
     // Keyed on the DESTINATION, not the tweet permalink (the wave-collapse mechanism),
-    // and written through the coherent-set destination writer.
-    expect(upsertCalls[0]!.url).toBe("https://youtu.be/AGENTvid001");
+    // and written through the coherent-set destination writer. The youtu.be short form
+    // canonicalizes onto the one key per video (see `normalizeDestinationUrl`).
+    expect(upsertCalls[0]!.url).toBe("https://youtube.com/watch?v=AGENTvid001");
     expect(upsertCalls[0]!.writer).toBe("destination");
     expect(upsertCalls[0]!.kind).toBe("x-link");
     expect(upsertCalls[0]!.sourceDocId).toBe(`${today}_dave_10.md`);
@@ -1339,7 +1353,7 @@ describe("destination-URL keying (x-link wave collapse)", () => {
     expect(row.kind).toBe("x-link");
   });
 
-  test("a dismissed destination row is never resurrected by a later wave member", async () => {
+  test("a MANUALLY dismissed destination row is never resurrected by a later wave member", async () => {
     authorScoreByHandle["dave"] = 0.7;
     candidateRows.set(`x|${DEST}`, {
       source: "x",
@@ -1347,6 +1361,7 @@ describe("destination-URL keying (x-link wave collapse)", () => {
       title: "@earlier: old pointer",
       score: 0.7,
       status: "dismissed",
+      dismissedReason: "manual",
     });
 
     await runWith(pointerDoc("dave", "10", DEST), 0.95, "loud new pointer");
@@ -1355,6 +1370,44 @@ describe("destination-URL keying (x-link wave collapse)", () => {
     expect(row.status).toBe("dismissed");
     expect(row.score).toBe(0.7);
     expect(row.title).toBe("@earlier: old pointer");
+  });
+
+  test("an AUTO-EXPIRED destination row is re-admitted (it would otherwise poison the key)", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    candidateRows.set(`x|${DEST}`, {
+      source: "x",
+      url: DEST,
+      title: "@earlier: old pointer",
+      score: 0.7,
+      status: "dismissed",
+      dismissedReason: "expired",
+    });
+
+    await runWith(pointerDoc("dave", "10", DEST), 0.95, "loud new pointer");
+
+    const row = storedRow("x", DEST)!;
+    expect(row.status).toBe("new");
+    expect(row.dismissedReason).toBeNull();
+    expect(row.score).toBe(0.95);
+    expect(row.title).toContain("@dave:");
+  });
+
+  test("the queued-count log counts DISTINCT rows, not admissions, on in-batch collapse", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    authorScoreByHandle["erin"] = 0.7;
+    logLines.length = 0;
+    docs = { ...pointerDoc("dave", "10", DEST), ...pointerDoc("erin", "11", DEST) };
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.8, why: "dave" },
+      { n: 2, score: 0.9, why: "erin" },
+    ]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+
+    // Two admissions onto ONE key — the metric that watches wave collapse must say 1.
+    expect(upsertCalls).toHaveLength(2);
+    expect(candidateRows.size).toBe(1);
+    const queued = logLines.find((l) => l.message.startsWith("Capture: queued"));
+    expect(queued?.props.n).toBe(1);
   });
 
   test("a multi-link pointer keys on links[0] only", async () => {

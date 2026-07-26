@@ -108,7 +108,7 @@ describe("summary-candidates", () => {
     expect(row.sourceDocId).toBe("f1.md");
   });
 
-  test("upsertDestinationCandidate never resurrects a dismissed destination row", async () => {
+  test("upsertDestinationCandidate never resurrects a MANUALLY dismissed destination row", async () => {
     await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
     const first = (await getCandidateBySourceUrl("x", destUrl))!;
     await setCandidateStatus(first.id, "dismissed", null, "manual");
@@ -119,6 +119,71 @@ describe("summary-candidates", () => {
     expect(after.status).toBe("dismissed");
     expect(after.score).toBeCloseTo(0.7, 5);
     expect(after.why).toBe("first");
+  });
+
+  test("a summarized destination row stays terminal", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "summarized", "ai/x/doc.md");
+
+    await upsertDestinationCandidate(member({ score: 0.99, why: "later member" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("summarized");
+    expect(after.score).toBeCloseTo(0.7, 5);
+    expect(after.docId).toBe("ai/x/doc.md");
+  });
+
+  test("an `error` row is re-admitted by a better later member (its only recovery path)", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first", sourceDocId: "d1.md" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "error");
+
+    await upsertDestinationCandidate(
+      member({ score: 0.9, why: "second wave member", sourceDocId: "d2.md" }),
+    );
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("new");
+    expect(after.score).toBeCloseTo(0.9, 5);
+    expect(after.why).toBe("second wave member");
+    expect(after.sourceDocId).toBe("d2.md");
+  });
+
+  test("an AUTO-EXPIRED row is re-admitted — expiry is bookkeeping, not a judgement", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    // Age it past the 14-day floor, then run the real expiry sweep.
+    const sql = getDb();
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '30 days', updated_at = now() - interval '30 days' WHERE id = ${first.id}`;
+    expect(await expireStaleCandidates(14)).toBeGreaterThan(0);
+    expect((await getCandidateById(first.id))!.dismissedReason).toBe("expired");
+
+    await upsertDestinationCandidate(member({ score: 0.97, why: "the 0.97 wave" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("new");
+    expect(after.dismissedReason).toBeNull();
+    expect(after.score).toBeCloseTo(0.97, 5);
+    expect(after.why).toBe("the 0.97 wave");
+  });
+
+  test("a tie bumps updated_at (expiry clock) without touching any content column", async () => {
+    await upsertDestinationCandidate(member({ score: 0.9, why: "winner", sourceDocId: "f1.md" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    // Backdate so the bump is unambiguous even on a fast clock.
+    const sql = getDb();
+    await sql`UPDATE summary_candidates SET updated_at = now() - interval '10 days' WHERE id = ${first.id}`;
+    const stale = (await getCandidateById(first.id))!;
+
+    await upsertDestinationCandidate(member({ score: 0.9, why: "exact tie", sourceDocId: "h1.md" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.updatedAt).toBeGreaterThan(stale.updatedAt);
+    expect(after.score).toBeCloseTo(0.9, 5);
+    expect(after.why).toBe("winner");
+    expect(after.sourceDocId).toBe("f1.md");
+    expect(after.status).toBe("new");
   });
 
   test("listCandidates filters by status and orders by score desc", async () => {

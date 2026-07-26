@@ -101,6 +101,12 @@ interface ResolvedContent {
   date?: string;
   /** Link-enrichment outcome for the X path (see {@link EnrichmentOutcome}). */
   enrichment?: EnrichmentOutcome;
+  /**
+   * True when the body is PURE destination content (the destination-keyed stale-doc
+   * fallback fired — the representative tweet's x-feed doc was unresolvable, so there
+   * is no tweet text in here at all). Drives the framing choice: article, not tweet.
+   */
+  destinationOnly?: boolean;
 }
 
 interface DocMeta {
@@ -247,13 +253,28 @@ async function resolveContent(
     // The no-URL-fallback rule above exists for x.com login walls; a destination-keyed
     // row's `url` is a non-x.com artifact by construction, so fetching it is safe and
     // is exactly the content the row promises.
+    //
+    // Routed through the ENRICHMENT machinery rather than `directFetchContent`, because
+    // the destination class is the same one enrichment already handles: a bare fetch of
+    // a YouTube destination returns the raw JS shell, which would be "summarized" into
+    // the terminal `summarized` status. `pickEnrichmentLink` routes YouTube to huginn's
+    // transcript endpoint and everything else to a direct article fetch.
     if (destinationKeyed) {
-      log.info("{collection} doc {docId} unresolvable — direct-fetching the keyed destination {url}", {
+      log.info("{collection} doc {docId} unresolvable — fetching the keyed destination {url}", {
         collection: X_FEED_COLLECTION,
         docId: sourceDocId,
         url,
       });
-      return directFetchContent(url);
+      const picked = pickEnrichmentLink([url]);
+      const linked = picked ? await fetchEnrichmentContent(baseUrl, picked) : null;
+      if (linked) {
+        // `destinationOnly` marks a body that is PURE destination content — no tweet
+        // text at all — so the caller picks article framing over the tweet framing that
+        // `sourceDocId` alone would imply.
+        return { text: capContent(linked), enrichment: picked!.kind, destinationOnly: true };
+      }
+      const direct = await directFetchContent(url);
+      return direct ? { ...direct, destinationOnly: true } : null;
     }
     return null;
   }
@@ -405,7 +426,10 @@ async function fetchEnrichmentContent(
  * the PRIMARY subject; every other kind (`x-post`, the pre-PR-3 long-form
  * population) treats it as SUPPORTING CONTEXT only, keeping the post the subject.
  */
-function enrichmentFraming(kind: string | null | undefined): string {
+function enrichmentFraming(kind: string | null | undefined, destinationOnly = false): string {
+  if (destinationOnly) {
+    return "The content below is the destination artifact itself, fetched directly — the pointer post that surfaced it could not be resolved and is NOT included. Summarize the destination on its own terms; do not refer to a post.";
+  }
   if (kind === "x-link") {
     return "The content below includes a `--- LINKED CONTENT ---` section fetched from the link this tweet points to. Treat that linked content as the PRIMARY subject — summarize what the destination says; the tweet itself is just the pointer and context.";
   }
@@ -446,11 +470,16 @@ export async function summarizeCandidate(
     updateStatus(jobId, "summarizing");
 
     const enriched = content.enrichment === "youtube" || content.enrichment === "article";
-    const basePrompt = sourceDocId ? X_SUMMARIZE_SYSTEM_PROMPT : SUMMARIZE_SYSTEM_PROMPT;
+    // `sourceDocId` normally means "this is an X post" ⇒ tweet framing. The ONE exception
+    // is the destination-keyed stale-doc fallback: the body is pure article/transcript
+    // content with no tweet in it, so the tweet framing ("one author's note/thread")
+    // would misdescribe what the model is reading.
+    const basePrompt =
+      sourceDocId && !content.destinationOnly ? X_SUMMARIZE_SYSTEM_PROMPT : SUMMARIZE_SYSTEM_PROMPT;
     const systemPrompt = `${basePrompt}
 
 Title: ${title}
-URL: ${url}${enriched ? `\n\n${enrichmentFraming(kind)}` : ""}`;
+URL: ${url}${enriched ? `\n\n${enrichmentFraming(kind, content.destinationOnly)}` : ""}`;
 
     const onProgress: StreamProgressCallback = (event) => {
       if (event.type === "text_delta") {

@@ -174,6 +174,16 @@ export function sumCandidatesStyles(): string {
       color: var(--status-warning);
     }
     .candidate-author-badge[data-tier="top1"] { color: var(--status-success); }
+    /* "post ↗" — the announcing tweet on a destination-keyed x-link row, whose title
+       anchor points at the destination instead. Secondary by design. */
+    .candidate-post-link {
+      color: var(--text-dim);
+      text-decoration: none;
+      text-transform: none;
+      letter-spacing: normal;
+      font-weight: 500;
+    }
+    .candidate-post-link:hover { color: var(--accent-light); }
     .candidate-title {
       font-size: 14px;
       color: var(--text-primary);
@@ -459,6 +469,22 @@ export function sumCandidatesScript(): string {
         '<button class="candidate-icon-btn candidate-icon-dismiss" data-act="dismiss" title="Dismiss">\\u2715</button>';
     }
 
+    // Destination-keyed pointer rows (X hype-dedup step 2a): the title anchor opens the
+    // DESTINATION while the title still reads "@handle: …", so the announcing post would
+    // otherwise be unreachable from the inbox. The x-feed doc id encodes it —
+    // <yyyy-mm-dd>_<handle>_<tweetid>.md — and handles may contain an underscore, so anchor on
+    // the trailing all-digits segment rather than splitting. Any other doc-id shape
+    // (or a still-tweet-keyed row, where the title anchor IS the post) renders nothing.
+    function candidatePostLinkHtml(c) {
+      if (c.kind !== 'x-link' || !c.sourceDocId || !c.url) return '';
+      if (c.url.indexOf('https://x.com/') === 0) return '';
+      var m = /^\\d{4}-\\d{2}-\\d{2}_(.+)_(\\d+)\\.md$/.exec(c.sourceDocId);
+      if (!m) return '';
+      var href = 'https://x.com/' + encodeURIComponent(m[1]) + '/status/' + m[2];
+      return '<a class="candidate-post-link" href="' + esc(href) + '" target="_blank" rel="noopener"' +
+        ' title="Open the announcing post on X">post \\u2197</a>';
+    }
+
     function renderCandidateRow(c) {
       // Band off the rounded value the user actually sees, so the pill text and its
       // color never disagree on a boundary score (e.g. 0.895 → "0.90").
@@ -482,6 +508,7 @@ export function sumCandidatesScript(): string {
             candidateAuthorBadgeHtml(c) +
             (c.candidateSrc ? '<span>' + esc(c.candidateSrc) + '</span>' : '') +
             candidateAgeHtml(c) +
+            candidatePostLinkHtml(c) +
           '</div>' +
           '<div class="candidate-title">' + titleInner + '</div>' +
           (c.why ? '<div class="candidate-why">' + esc(c.why) + '</div>' : '') +

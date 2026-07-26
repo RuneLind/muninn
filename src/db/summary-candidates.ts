@@ -151,12 +151,35 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
  * is taken from EXCLUDED under a single condition, so the persisted row is always one
  * member's fields, whole.
  *
+ * **Re-admittable vs terminal statuses.** A destination key is long-lived (a hype wave
+ * runs for days and the same artifact can resurface months later), so "never touch a
+ * non-`new` row" would let a row POISON its key forever. Two classes are re-admittable:
+ *  - `error` — a transient fetch/summarize failure. There is no retry path for it other
+ *    than a human clicking Retry, so a wave member arriving after one is the only
+ *    automatic recovery.
+ *  - `dismissed` WITH `dismissed_reason = 'expired'` — auto-dismissed stale by
+ *    {@link expireStaleCandidates} after 14 days of no activity. That is bookkeeping,
+ *    not a judgement; an empirically observed case had an auto-expired row silently
+ *    swallow a later 0.97 wave.
+ *
+ * MANUAL dismissal (`dismissed_reason = 'manual'`) and `summarized`/`summarizing` stay
+ * **terminal** — that's the plan's intended dismiss-once bonus (dismissing the topic
+ * once suppresses every later wave member) and the "don't re-open finished work" rule.
+ *
  * Semantics:
  *  - no row yet ⇒ INSERT (the incoming member becomes the representative);
- *  - a `new` row whose score the incoming member BEATS ⇒ replace the whole set;
- *  - a `new` row that wins (or ties) ⇒ untouched (stable: first arrival keeps the tie);
- *  - a `dismissed`/`summarized`/`summarizing`/`error` row ⇒ **never** touched — dismissing
- *    the topic once permanently suppresses later wave members.
+ *  - a re-admittable row whose score the incoming member strictly BEATS ⇒ replace the
+ *    whole content set AND reset `status = 'new'`, `dismissed_reason = NULL`;
+ *  - a re-admittable row that wins (or ties) ⇒ content untouched (stable: first arrival
+ *    keeps the tie), but `updated_at` is still bumped. That bump is load-bearing: a
+ *    destination under continuous hype would otherwise never refresh its 14-day expiry
+ *    clock, expire mid-wave, and start poisoning its own key;
+ *  - a terminal row ⇒ not touched at all.
+ *
+ * **One-coherent-set invariant.** Every content column moves together under ONE shared
+ * predicate (`EXCLUDED.score > summary_candidates.score`) — never per-column differing
+ * precedence — so the persisted row is always one wave member's fields, whole. Only
+ * `updated_at` sits outside that predicate.
  *
  * Expressed as a conflict-path write rather than SELECT-then-UPDATE so the
  * read-compare-write is atomic against two concurrent watcher runs.
@@ -170,19 +193,26 @@ export async function upsertDestinationCandidate(p: UpsertCandidateParams): Prom
       ${p.score}, ${p.why ?? null}, ${p.kind ?? null}, ${p.author ?? null}, ${p.authorScore ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
     )
     ON CONFLICT (source, url) DO UPDATE
-      SET score = EXCLUDED.score,
-          why = EXCLUDED.why,
-          title = EXCLUDED.title,
-          candidate_src = EXCLUDED.candidate_src,
-          kind = EXCLUDED.kind,
-          author = EXCLUDED.author,
-          author_score = EXCLUDED.author_score,
-          source_doc_id = EXCLUDED.source_doc_id,
-          watcher_id = EXCLUDED.watcher_id,
-          bot_name = EXCLUDED.bot_name,
+      -- Every content column carries the SAME predicate — one wave member's fields,
+      -- whole, or the stored representative untouched. updated_at is deliberately
+      -- unconditional so a tie/loss still refreshes the 14-day expiry clock.
+      SET score = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.score ELSE summary_candidates.score END,
+          why = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.why ELSE summary_candidates.why END,
+          title = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.title ELSE summary_candidates.title END,
+          candidate_src = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.candidate_src ELSE summary_candidates.candidate_src END,
+          kind = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.kind ELSE summary_candidates.kind END,
+          author = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.author ELSE summary_candidates.author END,
+          author_score = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.author_score ELSE summary_candidates.author_score END,
+          source_doc_id = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.source_doc_id ELSE summary_candidates.source_doc_id END,
+          watcher_id = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.watcher_id ELSE summary_candidates.watcher_id END,
+          bot_name = CASE WHEN EXCLUDED.score > summary_candidates.score THEN EXCLUDED.bot_name ELSE summary_candidates.bot_name END,
+          -- Re-admission: an error / auto-expired row that LOSES stays where it is;
+          -- one that wins comes back as a fresh 'new' candidate with a clean reason.
+          status = CASE WHEN EXCLUDED.score > summary_candidates.score THEN 'new' ELSE summary_candidates.status END,
+          dismissed_reason = CASE WHEN EXCLUDED.score > summary_candidates.score THEN NULL ELSE summary_candidates.dismissed_reason END,
           updated_at = now()
-      WHERE summary_candidates.status = 'new'
-        AND EXCLUDED.score > summary_candidates.score
+      WHERE summary_candidates.status IN ('new', 'error')
+         OR (summary_candidates.status = 'dismissed' AND summary_candidates.dismissed_reason = 'expired')
   `;
 }
 

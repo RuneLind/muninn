@@ -1310,7 +1310,11 @@ async function captureXCandidates(
 
   const byN = indexScoresByN(scored, eligible.length);
 
-  let captured = 0;
+  // DISTINCT candidate urls written, not admissions attempted: since destination keying
+  // (step 2a) several eligible pointer tweets in ONE batch can collapse onto the same
+  // key, and counting admissions would over-report exactly the number this metric exists
+  // to watch ("did the wave collapse?").
+  const capturedUrls = new Set<string>();
   for (let i = 0; i < eligible.length; i++) {
     const score = byN.get(i + 1);
     if (!score) continue;
@@ -1334,7 +1338,8 @@ async function captureXCandidates(
     // (`destinationGroupKey`), so a wave of N pointer tweets at the same artifact —
     // arriving ≈1 per 2h batch over days, which in-batch dedup can never catch —
     // collapses to ONE row across runs. Null (no/unparseable/self-host link, or a PDF
-    // destination) ⇒ today's tweet-URL keying, unchanged. Long-form is NEVER re-keyed:
+    // destination — a conservative v1 scope decision, see `destinationGroupKey`, NOT a
+    // content-degradation guard) ⇒ today's tweet-URL keying, unchanged. Long-form is NEVER re-keyed:
     // long-form wins the kind resolution outright, so `kind === "x-link"` implies
     // `docType === null` and the two branches can't overlap.
     const destinationKey = kind === "x-link" ? destinationGroupKey(doc.links) : null;
@@ -1363,7 +1368,7 @@ async function captureXCandidates(
         watcherId: watcher.id,
         botName: botName ?? null,
       });
-      captured++;
+      capturedUrls.add(candidateUrl);
     } catch (err) {
       log.error("Failed to capture X candidate {url}: {error}", {
         botName,
@@ -1372,8 +1377,8 @@ async function captureXCandidates(
       });
     }
   }
-  if (captured > 0) {
-    log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: captured });
+  if (capturedUrls.size > 0) {
+    log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: capturedUrls.size });
   }
 }
 
