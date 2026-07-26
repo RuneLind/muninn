@@ -3,6 +3,7 @@ import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
   upsertCandidate,
+  upsertDestinationCandidate,
   listCandidates,
   getCandidateById,
   getCandidateBySourceUrl,
@@ -63,6 +64,126 @@ describe("summary-candidates", () => {
     const after = await getCandidateById(row!.id);
     expect(after!.status).toBe("dismissed");
     expect(after!.score).toBeCloseTo(0.72, 5);
+  });
+
+  // --- Destination-keyed pointer rows (X hype-dedup step 2a) ---
+
+  const destUrl = "https://example.com/announce";
+  const member = (over: Record<string, unknown>) => ({
+    ...base,
+    source: "x",
+    url: destUrl,
+    kind: "x-link" as const,
+    ...over,
+  });
+
+  test("upsertDestinationCandidate replaces the WHOLE set when a better member arrives", async () => {
+    await upsertDestinationCandidate(
+      member({ score: 0.75, why: "dave says watch", title: "@dave: drop", candidateSrc: "X (@dave)", author: "dave", authorScore: 0.6, sourceDocId: "d1.md" }),
+    );
+    await upsertDestinationCandidate(
+      member({ score: 0.9, why: "frank: the source", title: "@frank: drop", candidateSrc: "X (@frank)", author: "frank", authorScore: 0.8, sourceDocId: "f1.md" }),
+    );
+
+    const row = (await getCandidateBySourceUrl("x", destUrl))!;
+    // Every field belongs to the SAME (winning) member — no mixed precedence.
+    expect(row.score).toBeCloseTo(0.9, 5);
+    expect(row.why).toBe("frank: the source");
+    expect(row.title).toBe("@frank: drop");
+    expect(row.candidateSrc).toBe("X (@frank)");
+    expect(row.author).toBe("frank");
+    expect(row.authorScore).toBeCloseTo(0.8, 5);
+    expect(row.sourceDocId).toBe("f1.md");
+    expect(await listCandidates({ source: "x" })).toHaveLength(1);
+  });
+
+  test("upsertDestinationCandidate leaves the stored representative alone when it wins or ties", async () => {
+    await upsertDestinationCandidate(member({ score: 0.9, why: "winner", sourceDocId: "f1.md" }));
+    await upsertDestinationCandidate(member({ score: 0.72, why: "late arrival", sourceDocId: "g1.md" }));
+    await upsertDestinationCandidate(member({ score: 0.9, why: "exact tie", sourceDocId: "h1.md" }));
+
+    const row = (await getCandidateBySourceUrl("x", destUrl))!;
+    expect(row.score).toBeCloseTo(0.9, 5);
+    expect(row.why).toBe("winner");
+    expect(row.sourceDocId).toBe("f1.md");
+  });
+
+  test("upsertDestinationCandidate never resurrects a MANUALLY dismissed destination row", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "dismissed", null, "manual");
+
+    await upsertDestinationCandidate(member({ score: 0.98, why: "loud new wave member" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("dismissed");
+    expect(after.score).toBeCloseTo(0.7, 5);
+    expect(after.why).toBe("first");
+  });
+
+  test("a summarized destination row stays terminal", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "summarized", "ai/x/doc.md");
+
+    await upsertDestinationCandidate(member({ score: 0.99, why: "later member" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("summarized");
+    expect(after.score).toBeCloseTo(0.7, 5);
+    expect(after.docId).toBe("ai/x/doc.md");
+  });
+
+  test("an `error` row is re-admitted by a better later member (its only recovery path)", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first", sourceDocId: "d1.md" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "error");
+
+    await upsertDestinationCandidate(
+      member({ score: 0.9, why: "second wave member", sourceDocId: "d2.md" }),
+    );
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("new");
+    expect(after.score).toBeCloseTo(0.9, 5);
+    expect(after.why).toBe("second wave member");
+    expect(after.sourceDocId).toBe("d2.md");
+  });
+
+  test("an AUTO-EXPIRED row is re-admitted — expiry is bookkeeping, not a judgement", async () => {
+    await upsertDestinationCandidate(member({ score: 0.7, why: "first" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    // Age it past the 14-day floor, then run the real expiry sweep.
+    const sql = getDb();
+    await sql`UPDATE summary_candidates SET created_at = now() - interval '30 days', updated_at = now() - interval '30 days' WHERE id = ${first.id}`;
+    expect(await expireStaleCandidates(14)).toBeGreaterThan(0);
+    expect((await getCandidateById(first.id))!.dismissedReason).toBe("expired");
+
+    await upsertDestinationCandidate(member({ score: 0.97, why: "the 0.97 wave" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("new");
+    expect(after.dismissedReason).toBeNull();
+    expect(after.score).toBeCloseTo(0.97, 5);
+    expect(after.why).toBe("the 0.97 wave");
+  });
+
+  test("a tie bumps updated_at (expiry clock) without touching any content column", async () => {
+    await upsertDestinationCandidate(member({ score: 0.9, why: "winner", sourceDocId: "f1.md" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    // Backdate so the bump is unambiguous even on a fast clock.
+    const sql = getDb();
+    await sql`UPDATE summary_candidates SET updated_at = now() - interval '10 days' WHERE id = ${first.id}`;
+    const stale = (await getCandidateById(first.id))!;
+
+    await upsertDestinationCandidate(member({ score: 0.9, why: "exact tie", sourceDocId: "h1.md" }));
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.updatedAt).toBeGreaterThan(stale.updatedAt);
+    expect(after.score).toBeCloseTo(0.9, 5);
+    expect(after.why).toBe("winner");
+    expect(after.sourceDocId).toBe("f1.md");
+    expect(after.status).toBe("new");
   });
 
   test("listCandidates filters by status and orders by score desc", async () => {

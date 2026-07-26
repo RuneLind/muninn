@@ -1,9 +1,10 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
-import { upsertCandidate } from "../db/summary-candidates.ts";
+import { upsertCandidate, upsertDestinationCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
+import { destinationGroupKey } from "../summaries/destination-url.ts";
 import { applyAmplification, resolveAmplificationConfig, type AmplificationConfig } from "./x-amplification.ts";
 import { WATCHER_TIMEOUT_MARGIN_MS, TICK_TIMEOUT_MS } from "./timeout.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
@@ -1309,7 +1310,11 @@ async function captureXCandidates(
 
   const byN = indexScoresByN(scored, eligible.length);
 
-  let captured = 0;
+  // DISTINCT candidate urls written, not admissions attempted: since destination keying
+  // (step 2a) several eligible pointer tweets in ONE batch can collapse onto the same
+  // key, and counting admissions would over-report exactly the number this metric exists
+  // to watch ("did the wave collapse?").
+  const capturedUrls = new Set<string>();
   for (let i = 0; i < eligible.length; i++) {
     const score = byN.get(i + 1);
     if (!score) continue;
@@ -1328,11 +1333,28 @@ async function captureXCandidates(
     // resolves content by `sourceDocId` and would serve the wrong body under that title.
     // Non-article docs keep the tweet URL. (Content resolution is unaffected either way:
     // the summarizer reads `sourceDocId`, never this URL.)
-    const candidateUrl = doc.docType === "article" ? (doc.articleUrl ?? doc.url) : doc.url;
+    //
+    // POINTER (x-link) candidates are keyed on the normalized DESTINATION URL instead
+    // (`destinationGroupKey`), so a wave of N pointer tweets at the same artifact —
+    // arriving ≈1 per 2h batch over days, which in-batch dedup can never catch —
+    // collapses to ONE row across runs. Null (no/unparseable/self-host link, or a PDF
+    // destination — a conservative v1 scope decision, see `destinationGroupKey`, NOT a
+    // content-degradation guard) ⇒ today's tweet-URL keying, unchanged. Long-form is NEVER re-keyed:
+    // long-form wins the kind resolution outright, so `kind === "x-link"` implies
+    // `docType === null` and the two branches can't overlap.
+    const destinationKey = kind === "x-link" ? destinationGroupKey(doc.links) : null;
+    const candidateUrl =
+      destinationKey ?? (doc.docType === "article" ? (doc.articleUrl ?? doc.url) : doc.url);
+    // A destination-keyed row is written as ONE COHERENT SET (see
+    // upsertDestinationCandidate): each admission either replaces every field from the
+    // incoming member or leaves the stored representative alone — never a mix of two
+    // wave members' score/why and doc id. Tweet-keyed rows keep the shared upsert, whose
+    // identity-derived COALESCE precedence is correct when the url IS the tweet.
+    const writeCandidate = destinationKey ? upsertDestinationCandidate : upsertCandidate;
     // Author transparency: the normalized handle keys huginn's ranking; the score is a
     // capture-time snapshot the /summaries page tiers against current percentile cuts.
     try {
-      await upsertCandidate({
+      await writeCandidate({
         source: "x",
         url: candidateUrl,
         title: truncateTitle(`${doc.handle}: ${firstLine}`),
@@ -1346,7 +1368,7 @@ async function captureXCandidates(
         watcherId: watcher.id,
         botName: botName ?? null,
       });
-      captured++;
+      capturedUrls.add(candidateUrl);
     } catch (err) {
       log.error("Failed to capture X candidate {url}: {error}", {
         botName,
@@ -1355,8 +1377,8 @@ async function captureXCandidates(
       });
     }
   }
-  if (captured > 0) {
-    log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: captured });
+  if (capturedUrls.size > 0) {
+    log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: capturedUrls.size });
   }
 }
 

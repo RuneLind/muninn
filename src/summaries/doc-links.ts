@@ -24,8 +24,12 @@ const SKIP_HOSTS = ["x.com", "twitter.com", "t.co"];
 /** Matches the plural `**Links:**` footer marker (NOT the singular `**Link:**`). */
 const LINKS_MARKER = "**Links:**";
 
-/** Is `host` one of the skip hosts, or a subdomain of one? */
-function isSkippedHost(host: string): boolean {
+/**
+ * Is `host` one of the skip hosts, or a subdomain of one? Exported so the
+ * destination-URL keying (`./destination-url.ts`) applies the SAME self-link
+ * definition the footer parser does — two lists would drift.
+ */
+export function isSkippedHost(host: string): boolean {
   const h = host.toLowerCase();
   return SKIP_HOSTS.some((skip) => h === skip || h.endsWith(`.${skip}`));
 }
