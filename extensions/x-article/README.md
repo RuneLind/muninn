@@ -1,15 +1,23 @@
 # X Article Summarizer Extension
 
-Chrome extension that sends X/Twitter articles to Muninn for AI-powered summarization.
+Chrome extension that sends X/Twitter articles **and video posts** to Muninn for AI-powered summarization.
 
 ## What it does
 
+**Articles:**
 1. Navigate to an X article page (e.g. `x.com/user/article/123...`)
 2. Click the extension icon
 3. Click "Summarize"
 4. Muninn dashboard opens in a new tab with the summary streaming in real-time
 
 The extension extracts the article text from the page, sends it to Muninn for summarization with Claude, categorizes it, and indexes it in the knowledge base for later search.
+
+**Videos:**
+1. Open a tweet that contains a video (e.g. `x.com/user/status/123...` — clicking the video works too, that just adds `/video/1` to the URL)
+2. Click the extension icon — it detects the video player and shows "Summarize video"
+3. Click it — Muninn downloads the video server-side (yt-dlp), transcribes the audio (whisper), extracts keyframes, and Claude summarizes both speech and visuals
+
+Video summaries land in the same X shelf (`/summaries?source=x-article`) as articles, deduped per tweet. Max video length 20 minutes; requires `yt-dlp` on the server's PATH.
 
 ## Install
 
@@ -53,7 +61,7 @@ Caches article info per tab. Handles the `SUMMARIZE` action:
 
 ## API
 
-The extension talks to one endpoint:
+The extension talks to two endpoints:
 
 ```
 POST /api/x-articles/summarize
@@ -66,4 +74,12 @@ POST /api/x-articles/summarize
 }
 ```
 
-Response: `{ job_id, dashboard_url }` — the extension opens the dashboard URL in a new tab.
+```
+POST /api/x-articles/summarize-video
+{
+  title: "Tweet title (page title)",
+  url: "https://x.com/user/status/123..."
+}
+```
+
+Response for both: `{ job_id, dashboard_url }` — the extension opens the dashboard URL in a new tab. The video endpoint may instead return `{ duplicate: true, dashboard_url }` when the tweet was already summarized; the dashboard URL then shows the existing summary.

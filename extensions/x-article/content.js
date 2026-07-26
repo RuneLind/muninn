@@ -232,8 +232,45 @@ function deduplicateBlocks(blocks) {
   return blocks.filter((block, i) => i === 0 || block !== blocks[i - 1]);
 }
 
+/**
+ * Parse a tweet status URL (with or without a trailing /video/N media-slot
+ * segment). Used for the video-summarize path.
+ */
+function parseStatusUrl() {
+  const match = window.location.pathname.match(/^\/([^/]+)\/status\/(\d+)/);
+  if (!match) return null;
+  return {
+    author: match[1],
+    statusId: match[2],
+    url: `${window.location.origin}/${match[1]}/status/${match[2]}`,
+  };
+}
+
+/** Does the current status page's main column contain a video player? */
+function hasVideoPlayer() {
+  const main = document.querySelector('[data-testid="primaryColumn"]')
+    || document.querySelector('main[role="main"]')
+    || document.querySelector('main');
+  if (!main) return !!document.querySelector('video');
+  return !!main.querySelector('video, [data-testid="videoPlayer"]');
+}
+
 // Handle messages from popup/background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'GET_VIDEO_INFO') {
+    const info = parseStatusUrl();
+    if (!info) {
+      sendResponse({ error: 'Not on an X status page' });
+      return;
+    }
+    sendResponse({
+      ...info,
+      title: cleanPageTitle(),
+      hasVideo: hasVideoPlayer(),
+    });
+    return;
+  }
+
   if (message.type === 'GET_ARTICLE_INFO') {
     const info = parseArticleUrl();
     if (!info) {

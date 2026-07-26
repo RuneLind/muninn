@@ -1,11 +1,13 @@
 const $ = (sel) => document.querySelector(sel);
 
 let articleInfo = null;
+let videoInfo = null;
 
 document.addEventListener('DOMContentLoaded', async () => {
   fetchFreshInfo();
 
   $('#btn-summarize').addEventListener('click', handleSummarize);
+  $('#btn-summarize-video').addEventListener('click', handleSummarizeVideo);
   $('#open-options').addEventListener('click', (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
@@ -24,6 +26,19 @@ function fetchFreshInfo() {
     const isArticleUrl = /x\.com\/[^/]+\/article\/\d+/.test(tab.url) ||
                          /twitter\.com\/[^/]+\/article\/\d+/.test(tab.url);
     if (!isArticleUrl) {
+      // Not an article — a status (tweet) page with a video gets the video path.
+      const isStatusUrl = /(x|twitter)\.com\/[^/]+\/status\/\d+/.test(tab.url);
+      if (isStatusUrl) {
+        chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEO_INFO' }, (info) => {
+          if (chrome.runtime.lastError || !info || info.error || !info.hasVideo) {
+            showNotArticle();
+            return;
+          }
+          videoInfo = info;
+          showVideoPage(info);
+        });
+        return;
+      }
       showNotArticle();
       return;
     }
@@ -42,6 +57,48 @@ function fetchFreshInfo() {
 function showNotArticle() {
   $('#not-article').classList.remove('hidden');
   $('#article-info').classList.add('hidden');
+  $('#video-info').classList.add('hidden');
+}
+
+function showVideoPage(info) {
+  $('#not-article').classList.add('hidden');
+  $('#article-info').classList.add('hidden');
+  $('#video-info').classList.remove('hidden');
+  $('#video-title').textContent = info.title || info.url;
+  $('#video-author').textContent = info.author ? `@${info.author}` : '';
+}
+
+async function handleSummarizeVideo() {
+  const btn = $('#btn-summarize-video');
+  const status = $('#vstatus');
+
+  btn.disabled = true;
+  status.className = '';
+  status.innerHTML = '<span class="spinner"></span>Submitting to dashboard...';
+  status.classList.remove('hidden');
+
+  try {
+    await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({
+        type: 'SUMMARIZE_VIDEO',
+        title: videoInfo.title,
+        url: videoInfo.url,
+      }, (response) => {
+        if (response?.error) {
+          reject(new Error(response.error));
+          return;
+        }
+        resolve(response);
+      });
+    });
+
+    // Close popup — dashboard tab is now open
+    window.close();
+  } catch (err) {
+    status.className = 'error';
+    status.textContent = err.message;
+    btn.disabled = false;
+  }
 }
 
 function deriveTitle(info) {
