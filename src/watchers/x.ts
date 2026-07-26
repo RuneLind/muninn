@@ -1049,6 +1049,16 @@ export function isLinkTweet(
 export const DEFAULT_CAPTURE_AMPLIFY_MIN = 3;
 
 /**
+ * Watchers that already warned about an invalid `captureAmplifyMin` this process.
+ *
+ * The knob is read on EVERY capture run (every 2h, forever), and a mistyped value is a
+ * static config defect — repeating the same warn ~12×/day buries the one-off signal it
+ * exists to give. Keyed `<watcherId>:<raw>` so **correcting** a bad value to a different
+ * bad value warns again (a genuinely new defect), while the same bad value stays quiet.
+ */
+const warnedAmplifyMin = new Set<string>();
+
+/**
  * Resolve the step-2b amplifier threshold, or `null` when the whole any-tier path is OFF.
  *
  * There is no separate boolean: the config field IS the flag. **Absent ⇒ off** (the
@@ -1057,15 +1067,28 @@ export const DEFAULT_CAPTURE_AMPLIFY_MIN = 3;
  * `< 1`, non-number) is warned about and also treated as OFF rather than silently
  * substituting a default: the degrade direction for a mistyped knob must be "no batch
  * growth", never "captured everything".
+ *
+ * The invalid-value warn is emitted **once per process per watcher** (see
+ * {@link warnedAmplifyMin}) — this runs on every capture run, and a static config defect
+ * repeated every 2h is noise, not signal. Pass `watcherId` to scope the dedup to one
+ * row; without it the dedup falls back to the bot (pure-function callers, e.g. tests).
  */
-export function resolveCaptureAmplifyMin(config: XWatcherConfig, botName?: string): number | null {
+export function resolveCaptureAmplifyMin(
+  config: XWatcherConfig,
+  botName?: string,
+  watcherId?: string,
+): number | null {
   const raw = config.captureAmplifyMin;
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
-    log.warn("Ignoring invalid captureAmplifyMin {raw} — the any-tier amplifier path stays OFF", {
-      botName,
-      raw: String(raw),
-    });
+    const key = `${watcherId ?? botName ?? "-"}:${String(raw)}`;
+    if (!warnedAmplifyMin.has(key)) {
+      warnedAmplifyMin.add(key);
+      log.warn("Ignoring invalid captureAmplifyMin {raw} — the any-tier amplifier path stays OFF", {
+        botName,
+        raw: String(raw),
+      });
+    }
     return null;
   }
   return raw;
@@ -1365,7 +1388,10 @@ async function admitAmplifiedDestination(
   const best = group.best;
   if (!best || best.score < captureFloorForXLink(config)) return false;
   try {
-    await upsertDestinationCandidate({
+    // The writer's terminality guard (manually dismissed / summarizing / summarized) can
+    // silently no-op the write, so the log — and this function's return value, which
+    // feeds the run's distinct-captured-urls count — follow what the DB actually did.
+    const written = await upsertDestinationCandidate({
       source: "x",
       url: groupKey,
       title: best.title ?? groupKey,
@@ -1379,14 +1405,19 @@ async function admitAmplifiedDestination(
       watcherId: watcher.id,
       botName: botName ?? null,
     });
-    log.info("Capture: {n} pointer authors amplified {url} — admitted from @{author} ({score})", {
-      botName,
-      n: group.pointerAuthors,
-      url: groupKey,
-      author: best.author,
-      score: best.score,
-    });
-    return true;
+    log.info(
+      written
+        ? "Capture: {n} pointer authors amplified {url} — admitted from @{author} ({score})"
+        : "Capture: {n} pointer authors amplified {url} — suppressed by candidate status (best was @{author} at {score})",
+      {
+        botName,
+        n: group.pointerAuthors,
+        url: groupKey,
+        author: best.author,
+        score: best.score,
+      },
+    );
+    return written;
   } catch (err) {
     log.error("Failed to capture amplified X destination {url}: {error}", {
       botName,
@@ -1449,7 +1480,7 @@ async function captureXCandidates(
   // loop and `passesCaptureFloor` read to keep them out of the direct-admission path.
   // This is the ONLY batch growth in step 2b: with the flag unset the eligible set is
   // byte-identical to step 2a's.
-  const amplifyMin = resolveCaptureAmplifyMin(config, botName);
+  const amplifyMin = resolveCaptureAmplifyMin(config, botName, watcher.id);
   const eligible: EligibleTweet[] = [];
   for (const r of resolved) {
     if (isLongFormTweet(r.doc)) eligible.push({ ...r, kind: "x-post" });
@@ -1480,9 +1511,16 @@ async function captureXCandidates(
   // key, and counting admissions would over-report exactly the number this metric exists
   // to watch ("did the wave collapse?").
   const capturedUrls = new Set<string>();
-  // At most ONE wave-admission check per destination per run — several sub-tier pointers
-  // in one batch share a group, and the check is two DB round trips.
-  const waveChecked = new Set<string>();
+  // Destination groups whose wave-admission must be checked, collected during the loop and
+  // drained AFTER it. Checking INLINE (at the first non-directly-admitted pointer of a
+  // group) misses a threshold crossed by a LATER member of the SAME batch: votes are
+  // written per item as the loop walks, so the group's third distinct author may not have
+  // voted yet when the first member is checked — and the group is never re-checked because
+  // members one and two are consumed and marked seen. Empirically: alice in run 1, then
+  // bob + carol in ONE run-2 batch ⇒ 3 distinct authors, best 0.9, and ZERO rows written.
+  // A Set also keeps this at ONE check per destination per run (the check is two DB round
+  // trips, and several pointers in a batch share a group).
+  const waveKeys = new Set<string>();
   for (let i = 0; i < eligible.length; i++) {
     const item = eligible[i]!;
     const { doc, author, authorScore, kind } = item;
@@ -1534,13 +1572,9 @@ async function captureXCandidates(
     if (!directlyAdmitted) {
       // A pointer that did NOT directly admit may still be the vote that pushes its
       // destination over the cross-run threshold — including a top-tier pointer that
-      // fell below the floor, whose vote is just as real as a sub-tier one.
-      if (amplifyMin !== null && isPointer && groupKey && !waveChecked.has(groupKey)) {
-        waveChecked.add(groupKey);
-        if (await admitAmplifiedDestination(groupKey, amplifyMin, config, watcher, botName)) {
-          capturedUrls.add(groupKey);
-        }
-      }
+      // fell below the floor, whose vote is just as real as a sub-tier one. Queued, not
+      // checked here: every vote in THIS batch must be recorded first (see `waveKeys`).
+      if (amplifyMin !== null && isPointer && groupKey) waveKeys.add(groupKey);
       continue;
     }
     // `directlyAdmitted` implies a non-null score; TS can't see that through the boolean.
@@ -1598,6 +1632,20 @@ async function captureXCandidates(
       });
     }
   }
+
+  // --- Step 2b: drain the queued wave checks, AFTER every vote in this batch landed ---
+  // A destination already written by a DIRECT admission this run is skipped: the row
+  // exists, and a wave admission would only re-run the same coherent-set writer with the
+  // recorded (possibly older, lower) representative.
+  if (amplifyMin !== null) {
+    for (const key of waveKeys) {
+      if (capturedUrls.has(key)) continue;
+      if (await admitAmplifiedDestination(key, amplifyMin, config, watcher, botName)) {
+        capturedUrls.add(key);
+      }
+    }
+  }
+
   if (capturedUrls.size > 0) {
     log.info("Capture: queued {n} X candidate(s) to the inbox", { botName, n: capturedUrls.size });
   }

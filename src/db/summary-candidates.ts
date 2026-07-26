@@ -183,10 +183,17 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
  *
  * Expressed as a conflict-path write rather than SELECT-then-UPDATE so the
  * read-compare-write is atomic against two concurrent watcher runs.
+ *
+ * **Returns whether a row was actually written** (inserted, replaced, or `updated_at`-
+ * bumped). `false` means the terminality guard in the conflict `WHERE` no-op'd the write
+ * — a manually dismissed / summarizing / summarized row. Callers that ANNOUNCE the write
+ * (the step-2b wave admission logs "admitted from @author") must not claim success on a
+ * suppressed write; the `RETURNING` row count is the only honest signal, since an
+ * ON CONFLICT … DO UPDATE whose `WHERE` fails raises nothing.
  */
-export async function upsertDestinationCandidate(p: UpsertCandidateParams): Promise<void> {
+export async function upsertDestinationCandidate(p: UpsertCandidateParams): Promise<boolean> {
   const sql = getDb();
-  await sql`
+  const rows = await sql`
     INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, kind, author, author_score, source_doc_id, watcher_id, bot_name)
     VALUES (
       ${p.source}, ${p.url}, ${p.title}, ${p.candidateSrc ?? null},
@@ -213,7 +220,9 @@ export async function upsertDestinationCandidate(p: UpsertCandidateParams): Prom
           updated_at = now()
       WHERE summary_candidates.status IN ('new', 'error')
          OR (summary_candidates.status = 'dismissed' AND summary_candidates.dismissed_reason = 'expired')
+    RETURNING id
   `;
+  return rows.length > 0;
 }
 
 export async function listCandidates(

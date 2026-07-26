@@ -119,7 +119,8 @@ mock.module("../db/summary-candidates.ts", () => ({
   // dismissals) take the WHOLE set from the incoming member when it strictly beats the
   // stored score — and always bump `updatedAt` even when they don't, so a destination
   // under continuous hype keeps refreshing its expiry clock. Manual dismissals and
-  // summarized/summarizing rows are terminal.
+  // summarized/summarizing rows are terminal. Returns whether a row was actually
+  // written (the real writer's `RETURNING id` row count) — false on a terminal row.
   upsertDestinationCandidate: async (p: UpsertParams) => {
     if (upsertThrow) throw new Error("db down");
     upsertCalls.push({ ...p, writer: "destination" });
@@ -127,18 +128,19 @@ mock.module("../db/summary-candidates.ts", () => ({
     const existing = candidateRows.get(key);
     if (!existing) {
       candidateRows.set(key, { ...p, status: "new", updatedAt: Date.now() });
-      return;
+      return true;
     }
     const readmittable =
       existing.status === "new" ||
       existing.status === "error" ||
       (existing.status === "dismissed" && existing.dismissedReason === "expired");
-    if (!readmittable) return;
+    if (!readmittable) return false;
     if (!(p.score > existing.score)) {
       candidateRows.set(key, { ...existing, updatedAt: Date.now() });
-      return;
+      return true;
     }
     candidateRows.set(key, { ...p, status: "new", dismissedReason: null, updatedAt: Date.now() });
+    return true;
   },
   listCandidates: async () => [],
   getCandidateById: async () => null,
@@ -1694,6 +1696,31 @@ describe("any-tier amplifier admission (step 2b)", () => {
     expect(row.sourceDocId).toBe(`${today}_bob_11.md`);
   });
 
+  test("the threshold is crossed by a LATER member of the SAME batch: one row, from the best recorded pointer", async () => {
+    // Regression: the check used to run INLINE at the first non-directly-admitted pointer
+    // of a group, but votes are written per item as the loop walks — so bob's and carol's
+    // votes did not exist yet when bob (n=1) was checked, and the group was never
+    // re-checked (alice's and bob's docs are consumed + marked seen). Result was ZERO rows
+    // despite 3 distinct authors and a 0.9 best. The drain now runs AFTER the loop.
+    await run(pointerDoc("alice", "10"), [{ n: 1, score: 0.75, why: "alice points" }]);
+    expect(candidateRows.size).toBe(0);
+
+    // ONE batch carrying the wave's 2nd AND 3rd distinct authors.
+    await run({ ...pointerDoc("bob", "11"), ...pointerDoc("carol", "12") }, [
+      { n: 1, score: 0.9, why: "bob: the primary source" },
+      { n: 2, score: 0.72, why: "carol, late to it" },
+    ]);
+    expect(amplifierRows.size).toBe(3);
+    // Exactly ONE admission for the group, despite two queued pointers in the batch.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.writer).toBe("destination");
+    expect(candidateRows.size).toBe(1);
+    const row = storedRow("x", DEST)!;
+    expect(row.author).toBe("bob");
+    expect(row.score).toBe(0.9);
+    expect(row.why).toBe("bob: the primary source");
+  });
+
   test("the wave still has to clear the x-link floor — three 0.65 pointers admit nothing", async () => {
     await run(pointerDoc("alice", "10"), [{ n: 1, score: 0.65, why: "meh" }]);
     await run(pointerDoc("bob", "11"), [{ n: 1, score: 0.68, why: "meh" }]);
@@ -1745,6 +1772,29 @@ describe("any-tier amplifier admission (step 2b)", () => {
     expect(upsertCalls).toHaveLength(0);
     // Zero batch growth: nothing was eligible, so the capture gate was never called at all.
     expect(lastGatePrompt).toBe("");
+  });
+
+  test("flag UNSET on a MIXED batch ⇒ the gate sees only the long-form item, and nothing votes", async () => {
+    // The byte-identity claim ("flag unset ⇒ the eligible set is exactly step 2a's") is
+    // only really tested when something IS eligible: the flag-off test above asserts an
+    // empty prompt, which an unconditionally-broken gate would also produce.
+    const off = { collection: "x-feed", windowDays: 1, captureCandidates: true, minScore: 0.6, quietMode: true };
+    await run({ ...pointerDoc("alice", "10"), ...longFormDoc("dave", "13") }, [
+      { n: 1, score: 0.95, why: "dave's own analysis" },
+    ], off);
+    // Exactly one numbered item, and it is dave's long-form post.
+    const posts = lastGatePrompt.split("\n\nPosts:\n\n")[1]!;
+    expect(posts).toContain("1. [ARTICLE/NOTE] @dave:");
+    expect(posts).not.toContain("2. ");
+    expect(posts).not.toContain("@alice");
+    // No pointer line at all — the sub-tier pointer never entered the batch.
+    expect(posts).not.toContain("links to:");
+    // No votes at all — the amplifier table is untouched with the flag off.
+    expect(amplifierRows.size).toBe(0);
+    // dave still captures normally through the shared (tweet-keyed) writer.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.writer).toBe("shared");
   });
 
   test("a sub-tier .pdf pointer is not promoted — and never even enters the gate batch", async () => {
