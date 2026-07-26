@@ -9,6 +9,9 @@ const log = getLog("x-article", "state");
 
 export type JobStatus =
   | "pending"
+  | "downloading"
+  | "transcribing"
+  | "extracting_frames"
   | "summarizing"
   | "ingesting"
   | "complete"
@@ -20,10 +23,15 @@ export type JobEvent = GenericJobEvent<JobStatus>;
 
 // --- Store ---
 
+// Video jobs stream multi-turn frame-reading chatter (same as TikTok), so the
+// complete event overwrites the accumulated text with the parsed summary. For
+// text-article jobs this is a no-op-equivalent (the streamed text IS the
+// summary, minus the CATEGORY header line).
 const store = createJobStore<JobStatus, { articleId: string; author: string }>({
   subsystem: "x-article",
   label: "X article",
   initialStatus: "pending",
+  completeReplacesText: true,
 });
 
 export const {

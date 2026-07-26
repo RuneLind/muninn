@@ -4,7 +4,7 @@ import { Glob } from "bun";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
 
-const log = getLog("tiktok", "media");
+const log = getLog("video", "media");
 
 // Per-step process timeouts. yt-dlp does network I/O against an anti-bot-happy
 // host and whisper/ffmpeg can stall, so every spawn is bounded (stt.ts has no
@@ -46,6 +46,9 @@ export interface KeyframeOptions {
   durationSeconds?: number;
   /** Override the computed frame budget (still hard-capped at 30). */
   maxFrames?: number;
+  /** Override the per-pass ffmpeg timeout — longer videos need more than the
+   * 60s default to decode for scene detection. */
+  frameTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,9 +59,44 @@ export interface KeyframeOptions {
  * Extract the numeric TikTok video id from a canonical URL. Returns null for
  * photo-mode URLs (`/photo/<id>`), short links (`vm.tiktok.com`, `vt.tiktok.com`
  * — resolution happens elsewhere), and anything without a `/video/<id>` segment.
+ * TikTok-host-gated: an X status URL also ends in `/video/1` (the tweet's media
+ * slot index, not an id), so a bare `/video/(\d+)` match would misfire on it.
  */
 export function extractTikTokVideoId(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    if (!host.endsWith("tiktok.com")) return null;
+  } catch {
+    return null;
+  }
   const match = url.match(/\/video\/(\d+)/);
+  return match ? match[1]! : null;
+}
+
+/**
+ * Extract the numeric status id from an X/Twitter URL (`/status/<id>`, with or
+ * without a trailing `/video/N` media-slot suffix). Null for non-X hosts.
+ */
+export function extractXStatusId(url: string): string | null {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    if (host !== "x.com" && host !== "twitter.com") return null;
+  } catch {
+    return null;
+  }
+  const match = url.match(/\/status\/(\d+)/);
+  return match ? match[1]! : null;
+}
+
+/**
+ * Canonical bare status URL for an X video — strips the `/video/N` media-slot
+ * suffix (and query/fragment) so dedup and ingest key on the tweet itself.
+ * Returns null when the URL carries no `/status/<id>`.
+ */
+export function canonicalXStatusUrl(url: string): string | null {
+  const id = extractXStatusId(url);
+  if (!id) return null;
+  const match = url.match(/^(https?:\/\/[^/]+\/[^/]+\/status\/\d+)/);
   return match ? match[1]! : null;
 }
 
@@ -212,15 +250,22 @@ async function globAbsolute(dir: string, pattern: string): Promise<string[]> {
 // 1. Download
 // ---------------------------------------------------------------------------
 
+export interface DownloadOptions {
+  /** Pre-download duration cap in seconds (yt-dlp match-filter). Default 600. */
+  maxDurationSeconds?: number;
+}
+
 /**
- * Download a TikTok video with yt-dlp into `workDir`. Rejects videos longer
- * than 10 minutes pre-download (exit 101). Returns the resolved on-disk path
- * plus metadata from the `--print-json` output.
+ * Download a video with yt-dlp into `workDir` (TikTok, X, or any yt-dlp-supported
+ * host). Rejects videos longer than the duration cap pre-download (exit 101).
+ * Returns the resolved on-disk path plus metadata from the `--print-json` output.
  */
 export async function downloadVideo(
   url: string,
   workDir: string,
+  opts: DownloadOptions = {},
 ): Promise<DownloadResult> {
+  const maxDuration = opts.maxDurationSeconds ?? 600;
   const outputTemplate = join(workDir, "video.%(ext)s");
   const args = [
     "yt-dlp",
@@ -231,7 +276,7 @@ export async function downloadVideo(
     outputTemplate,
     "--print-json",
     "--break-match-filters",
-    "duration <= 600",
+    `duration <= ${maxDuration}`,
     url,
   ];
 
@@ -242,11 +287,11 @@ export async function downloadVideo(
   );
 
   if (exitCode === YTDLP_BREAK_EXIT_CODE) {
-    throw new Error("video too long (max 10 min)");
+    throw new Error(`video too long (max ${Math.round(maxDuration / 60)} min)`);
   }
   if (exitCode !== 0) {
     throw new Error(
-      `yt-dlp failed (exit ${exitCode}). TikTok may have changed — try 'brew upgrade yt-dlp'.\n${stderr.slice(-500)}`,
+      `yt-dlp failed (exit ${exitCode}). The site may have changed — try 'brew upgrade yt-dlp'.\n${stderr.slice(-500)}`,
     );
   }
 
@@ -280,7 +325,7 @@ export async function downloadVideo(
     );
   }
 
-  log.info("Downloaded TikTok video {id} ({duration}s) to {videoPath}", {
+  log.info("Downloaded video {id} ({duration}s) to {videoPath}", {
     id: info.id,
     duration: info.duration,
     videoPath,
@@ -305,9 +350,16 @@ export async function downloadVideo(
  * Unlike stt.ts, an empty transcript is NOT an error — music-only TikToks are
  * common, so we return "" and let the summary lean on the frames.
  */
+export interface TranscribeOptions {
+  /** Override the whisper-cli timeout — longer videos (X allows 20 min vs
+   * TikTok's 10) need more than the 120s default. */
+  whisperTimeoutMs?: number;
+}
+
 export async function transcribeVideo(
   videoPath: string,
   config: Config,
+  opts: TranscribeOptions = {},
 ): Promise<string> {
   const workDir = dirname(videoPath);
   const wavPath = join(workDir, "audio.wav");
@@ -358,7 +410,7 @@ export async function transcribeVideo(
       "--no-timestamps",
       wavPath,
     ],
-    WHISPER_TIMEOUT_MS,
+    opts.whisperTimeoutMs ?? WHISPER_TIMEOUT_MS,
     "whisper-cli",
   );
   if (whisper.exitCode !== 0) {
@@ -400,6 +452,7 @@ async function runFrameExtraction(
   videoPath: string,
   workDir: string,
   vf: string,
+  timeoutMs: number = FRAMES_TIMEOUT_MS,
 ): Promise<Keyframe[]> {
   // Remove any frames from a previous pass so the glob only sees this run's.
   for (const stale of await globAbsolute(workDir, "frame_*.jpg")) {
@@ -417,7 +470,7 @@ async function runFrameExtraction(
       "vfr",
       join(workDir, "frame_%03d.jpg"),
     ],
-    FRAMES_TIMEOUT_MS,
+    timeoutMs,
     "ffmpeg keyframes",
   );
   if (exitCode !== 0) {
@@ -476,6 +529,7 @@ export async function extractKeyframes(
     videoPath,
     workDir,
     `select='gt(scene,0.3)',${FRAME_VF_TAIL}`,
+    opts.frameTimeoutMs,
   );
 
   if (frames.length < 4) {
@@ -490,6 +544,7 @@ export async function extractKeyframes(
         videoPath,
         workDir,
         `fps=${fps},${FRAME_VF_TAIL}`,
+        opts.frameTimeoutMs,
       );
     } else {
       log.warn(

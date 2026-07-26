@@ -31,7 +31,7 @@ let lastOpts: { systemPrompt?: string; timeoutMs?: number; extraDirs?: string[] 
 let ingestOk = true;
 let ingestPayload: Record<string, unknown> | undefined;
 
-mock.module("./media.ts", () => ({
+mock.module("../video/media.ts", () => ({
   downloadVideo: async (url: string, workDir: string) => {
     downloadCalls.push({ url, workDir });
     return {

@@ -1,6 +1,8 @@
 import { test, expect } from "bun:test";
 import {
   extractTikTokVideoId,
+  extractXStatusId,
+  canonicalXStatusUrl,
   frameBudgetFor,
   parseYtDlpJson,
   parseShowinfoTimestamps,
@@ -36,6 +38,49 @@ test("extractTikTokVideoId returns null for garbage input", () => {
   expect(extractTikTokVideoId("not a url")).toBeNull();
   expect(extractTikTokVideoId("https://example.com/video/")).toBeNull();
   expect(extractTikTokVideoId("https://www.tiktok.com/@user")).toBeNull();
+});
+
+test("extractTikTokVideoId does NOT misfire on X status URLs ending in /video/1", () => {
+  // X media-slot URLs end in /video/<slot-index> — without the host gate this
+  // would extract "1" as a TikTok id and poison dedup.
+  expect(
+    extractTikTokVideoId("https://x.com/Kenjatina_og/status/2081279674966044799/video/1"),
+  ).toBeNull();
+});
+
+// -- extractXStatusId / canonicalXStatusUrl ---------------------------------
+
+test("extractXStatusId parses status URLs with and without /video/N suffix", () => {
+  expect(
+    extractXStatusId("https://x.com/Kenjatina_og/status/2081279674966044799/video/1"),
+  ).toBe("2081279674966044799");
+  expect(extractXStatusId("https://x.com/user/status/123456")).toBe("123456");
+  expect(extractXStatusId("https://twitter.com/user/status/123456?s=20")).toBe("123456");
+  expect(extractXStatusId("https://www.x.com/user/status/123456")).toBe("123456");
+});
+
+test("extractXStatusId returns null for non-X hosts and non-status URLs", () => {
+  expect(extractXStatusId("https://www.tiktok.com/@u/video/12345")).toBeNull();
+  expect(extractXStatusId("https://x.com/user")).toBeNull();
+  expect(extractXStatusId("not a url")).toBeNull();
+  expect(extractXStatusId("")).toBeNull();
+});
+
+test("canonicalXStatusUrl strips the /video/N suffix and query strings", () => {
+  expect(
+    canonicalXStatusUrl("https://x.com/Kenjatina_og/status/2081279674966044799/video/1"),
+  ).toBe("https://x.com/Kenjatina_og/status/2081279674966044799");
+  expect(canonicalXStatusUrl("https://x.com/user/status/123?s=20")).toBe(
+    "https://x.com/user/status/123",
+  );
+  expect(canonicalXStatusUrl("https://x.com/user/status/123")).toBe(
+    "https://x.com/user/status/123",
+  );
+});
+
+test("canonicalXStatusUrl returns null when there is no status id", () => {
+  expect(canonicalXStatusUrl("https://x.com/user")).toBeNull();
+  expect(canonicalXStatusUrl("https://www.tiktok.com/@u/video/123")).toBeNull();
 });
 
 // -- frameBudgetFor ---------------------------------------------------------

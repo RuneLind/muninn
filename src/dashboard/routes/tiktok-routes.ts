@@ -3,7 +3,7 @@ import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { createJob, getJob, getRecentJobs, subscribe } from "../../tiktok/state.ts";
 import { summarizeTikTok } from "../../tiktok/summarizer.ts";
-import { extractTikTokVideoId } from "../../tiktok/media.ts";
+import { extractTikTokVideoId } from "../../video/media.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";

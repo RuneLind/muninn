@@ -12,6 +12,8 @@ import {
   downloadVideo,
   transcribeVideo,
   extractKeyframes,
+  canonicalXStatusUrl,
+  extractXStatusId,
   type Keyframe,
 } from "../video/media.ts";
 import {
@@ -24,16 +26,20 @@ import {
   failJob,
 } from "./state.ts";
 
-const log = getLog("tiktok", "summarizer");
+const log = getLog("x-article", "video");
 
-// The summarizer reads each frame image before it writes the CATEGORY/SUMMARY —
-// a multi-turn agentic session. The "no commentary" line is load-bearing: without
-// it the model narrates ("let me look at frame 3…") between Read calls and that
-// chatter leaks into the streamed shelf card.
-const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following TikTok video, using BOTH its speech transcript and the extracted keyframe images.
+// X allows longer clips than TikTok (interview excerpts, talk recordings), so
+// the cap is 20 min rather than TikTok's 10. Whisper/ffmpeg timeouts scale with
+// duration below instead of riding the media module's short-clip defaults.
+const MAX_DURATION_SECONDS = 1200;
+
+// Mirrors the TikTok prompt — the "no commentary" line is load-bearing (see
+// src/tiktok/summarizer.ts): without it the model narrates between frame Reads
+// and the chatter leaks into the streamed shelf card.
+const SUMMARIZE_SYSTEM_PROMPT = `You are a video content analyst. Summarize the following X/Twitter video, using BOTH its speech transcript and the extracted keyframe images.
 
 Instructions:
-1. Read ALL the frame images listed below (with the Read tool) FIRST, batching many Read tool calls into one turn (parallel tool calls) — do NOT read one frame per message. TikToks often carry most of their information on screen — capture diagrams, code, on-screen text, and visual demos.
+1. Read ALL the frame images listed below (with the Read tool) FIRST, batching many Read tool calls into one turn (parallel tool calls) — do NOT read one frame per message. X videos often carry key information on screen — capture slides, charts, code, captions, and visual demos.
 2. Note explicitly when key information is visual-only (not spoken).
 3. Start your response with EXACTLY this line: CATEGORY: <category>
    Choose from: ${VALID_CATEGORIES.join(", ")}
@@ -42,7 +48,7 @@ Instructions:
    ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}
 6. CRITICAL: produce NO commentary — your only text output is the final CATEGORY/SUMMARY response. Do not narrate the frames as you read them.`;
 
-export interface SummarizeOptions {
+export interface SummarizeVideoOptions {
   /** When false, skip keyframe extraction (transcript-only summary). Default true. */
   frames?: boolean;
 }
@@ -61,47 +67,49 @@ function frameListBlock(frames: Keyframe[]): string {
 }
 
 /**
- * Cheap heuristic: did a frames-on summary actually mention any visual content?
- * If not, the frame Reads likely silently degraded (permissions / --add-dir
- * regression) and we lost the whole visual-summary value — surface a warning.
+ * Summarize an X/Twitter video post: yt-dlp download → whisper transcript →
+ * keyframes → frame-reading Claude one-shot → ingest into the `x-articles`
+ * collection (so it shelves under the X badge next to article captures).
  */
-function mentionsVisualContent(summary: string): boolean {
-  return /\b(frame|image|visual|screen|on-screen|diagram|slide|chart|shown|display|graphic|caption|text overlay)\b/i.test(
-    summary,
-  );
-}
-
-export async function summarizeTikTok(
+export async function summarizeXVideo(
   jobId: string,
   url: string,
   title: string,
   config: Config,
   botConfig: BotConfig,
-  opts: SummarizeOptions = {},
+  opts: SummarizeVideoOptions = {},
 ): Promise<void> {
   const framesEnabled = opts.frames !== false;
-  const workDir = join(tmpdir(), `muninn-tiktok-${jobId}`);
+  const workDir = join(tmpdir(), `muninn-x-video-${jobId}`);
 
   try {
     await mkdir(workDir, { recursive: true });
 
-    // 1. Download the video (yt-dlp). Gives the canonical /video/<id> URL,
-    //    uploader, duration and title.
+    // 1. Download (yt-dlp supports X natively). Gives duration, uploader, title.
     updateStatus(jobId, "downloading");
-    const dl = await downloadVideo(url, workDir);
+    const dl = await downloadVideo(url, workDir, {
+      maxDurationSeconds: MAX_DURATION_SECONDS,
+    });
 
-    // 2. Transcribe (empty transcript is fine — music/visual-only TikToks).
+    // Key ingest + dedup on the bare status URL, not yt-dlp's /video/1-suffixed
+    // webpage_url (media-slot suffixes would defeat URL dedup on the shelf).
+    const canonicalUrl = canonicalXStatusUrl(dl.canonicalUrl) ?? canonicalXStatusUrl(url) ?? url;
+
+    // 2. Transcribe. Empty transcript is fine (music/caption-only clips) —
+    //    whisper gets ~3× realtime headroom for clips beyond the 120s default.
     updateStatus(jobId, "transcribing");
-    const transcript = await transcribeVideo(dl.videoPath, config);
+    const transcript = await transcribeVideo(dl.videoPath, config, {
+      whisperTimeoutMs: Math.max(120_000, Math.round(dl.duration * 1000)),
+    });
 
-    // 3. Extract keyframes (unless disabled). A failure here degrades to a
-    //    transcript-only summary rather than killing a job whose speech is good.
+    // 3. Keyframes (unless disabled) — a failure degrades to transcript-only.
     let frames: Keyframe[] = [];
     if (framesEnabled) {
       updateStatus(jobId, "extracting_frames");
       try {
         frames = await extractKeyframes(dl.videoPath, workDir, {
           durationSeconds: dl.duration,
+          frameTimeoutMs: Math.max(60_000, Math.round(dl.duration * 500)),
         });
       } catch (err) {
         log.warn("Keyframe extraction failed for job {jobId} — falling back to transcript-only: {error}", {
@@ -111,7 +119,6 @@ export async function summarizeTikTok(
       }
     }
 
-    // Nothing to summarize: no speech AND no frames.
     if (!transcript && frames.length === 0) {
       failJob(
         jobId,
@@ -122,21 +129,17 @@ export async function summarizeTikTok(
       return;
     }
 
-    // 4. Summarize with Claude. Via executeOneShot's opts we (a) grant Read
-    //    access to the tmp frame dir via `extraDirs` → CLI `--add-dir`
-    //    (non-interactive claude auto-denies paths outside the bot dir
-    //    otherwise), and (b) raise the timeout — the multi-turn frame-reading
-    //    session easily outruns the default 120s. `extraDirs` is CLI-only; the
-    //    tiktok route pre-flights the connector's supportsExtraDirs capability
-    //    before kicking this expensive job.
+    // 4. Summarize. Same seam + knobs as TikTok: extraDirs grants frame Read
+    //    access, the 600s floor covers the multi-turn frame session, and the
+    //    bot's own thinking budget is kept (frame reading IS the reasoning).
     updateStatus(jobId, "summarizing");
 
-    const ingestTitle = title !== url ? title : dl.title || dl.canonicalUrl;
+    const ingestTitle = title !== url ? title : dl.title || canonicalUrl;
 
     const systemPrompt = `${SUMMARIZE_SYSTEM_PROMPT}
 
 Video title: ${ingestTitle}
-Video URL: ${dl.canonicalUrl}
+Video URL: ${canonicalUrl}
 Author: ${dl.uploader}`;
 
     const transcriptSection = transcript
@@ -155,10 +158,10 @@ Author: ${dl.uploader}`;
     };
 
     const result = await runCaptureOneShot({
-      source: "tiktok",
+      source: "x-video",
       jobId,
       title: ingestTitle,
-      url: dl.canonicalUrl,
+      url: canonicalUrl,
       prompt: userPrompt,
       systemPrompt,
       config,
@@ -166,12 +169,7 @@ Author: ${dl.uploader}`;
       attachRun,
       onProgress,
       extraDirs: [workDir],
-      // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
-      // (opus + thinking) — this is a background job, nothing blocks on it.
       timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
-      // Keep the bot's own thinking budget (the other verticals cap it): reading
-      // 25 keyframes IS the reasoning here, and as a background job with no
-      // reader waiting on the first token there's no dead-air to buy back.
       thinkingMaxTokens: null,
     });
 
@@ -179,36 +177,28 @@ Author: ${dl.uploader}`;
     const { category, summary } = parseSummaryResponse(result.result);
     setCategory(jobId, category);
 
-    if (frames.length > 0 && !mentionsVisualContent(summary)) {
-      log.warn("Frames-on TikTok summary for job {jobId} mentions no visual content — frame Reads may have degraded", {
-        jobId,
-        videoId: dl.id,
-      });
-    }
-
-    log.info("Summarized TikTok {videoId}: category={category}, {frames} frames, {tokens} output tokens", {
-      videoId: dl.id,
+    log.info("Summarized X video {statusId}: category={category}, {frames} frames, {tokens} output tokens", {
+      statusId: extractXStatusId(canonicalUrl) ?? dl.id,
       category,
       frames: frames.length,
       tokens: result.outputTokens,
     });
 
-    // 6. Ingest into the knowledge base (best-effort). Always use the canonical
-    //    /video/<id> URL — a raw short link stored here yields no id and silently
-    //    defeats dedup.
+    // 6. Ingest into the x-articles collection (best-effort) under the bare
+    //    status URL so it dedups against future captures of the same post.
     updateStatus(jobId, "ingesting");
 
     let ingestedDocId: string | undefined;
     await ingestSummary({
       knowledgeApiUrl: config.knowledgeApiUrl,
-      ingestPath: "/api/tiktok/ingest",
+      ingestPath: "/api/x-articles/ingest",
       body: {
         title: ingestTitle,
-        url: dl.canonicalUrl,
+        url: canonicalUrl,
+        author: dl.uploader,
         summary,
         category,
         date: new Date().toISOString().split("T")[0],
-        author: dl.uploader,
       },
       onSimilar: (similar) => setSimilar(jobId, similar),
       onIngested: (info) => {
@@ -219,24 +209,21 @@ Author: ${dl.uploader}`;
     // 7. Complete.
     completeJob(jobId, summary, category);
 
-    // 8. Fire-and-forget: draft a per-article source page from this summary. Prefer
-    //    huginn's stored doc id; fall back to the videoId when ingest returned no
-    //    file_path. Skips silently when the bot has no wikiDir; never fails the job.
+    // 8. Fire-and-forget source-page draft, same as the article path.
     triggerSourceDraftFromCapture(botConfig, {
-      collection: "tiktok-summaries",
+      collection: "x-articles",
       docId: ingestedDocId ?? dl.id,
-      url: dl.canonicalUrl,
+      url: canonicalUrl,
       body: summary,
       sourceTitle: ingestTitle,
       category,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log.error("TikTok summarization failed for job {jobId}: {error}", { jobId, error: msg });
+    log.error("X video summarization failed for job {jobId}: {error}", { jobId, error: msg });
     failJob(jobId, msg);
   } finally {
-    // Frames must outlive the Claude call (unlike stt.ts's immediate cleanup),
-    // so the work dir is only removed here, after summarization.
+    // Frames must outlive the Claude call — clean up only after summarization.
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
 }
