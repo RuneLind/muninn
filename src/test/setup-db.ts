@@ -10,6 +10,7 @@ const ALL_TABLES = [
   "traces",
   "haiku_usage",
   "summary_candidates",
+  "x_link_amplifiers",
   "watchers",
   "scheduled_tasks",
   "goals",

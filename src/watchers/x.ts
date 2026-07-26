@@ -2,6 +2,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { upsertCandidate, upsertDestinationCandidate } from "../db/summary-candidates.ts";
+import { recordAmplifierVote, getAmplifierGroup } from "../db/x-link-amplifiers.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
 import { destinationGroupKey } from "../summaries/destination-url.ts";
@@ -106,6 +107,25 @@ interface XWatcherConfig extends AmplificationConfig {
    *     applies here — link-tweets are already top-author-only by eligibility.
    */
   candidateMinScoreByKind?: { "x-post"?: number; "x-link"?: number };
+  /**
+   * **Step 2b flag — UNSET ⇒ the whole any-tier amplifier path is OFF** (no gate-batch
+   * growth, no votes, zero behavior change from step 2a).
+   *
+   * When set to an integer ≥ 1 it is the number of DISTINCT POINTER authors a
+   * destination needs before SUB-TIER pointers (authors outside huginn's top-5%, which
+   * `isLinkTweet` excludes and which therefore vanish today) can earn it a candidate row
+   * — admitted from the best RECORDED pointer member, which must still clear the normal
+   * `x-link` floor. Recommended value {@link DEFAULT_CAPTURE_AMPLIFY_MIN} (3); that
+   * ≥3-distinct-authors bar is the compensating control for relaxing the top-author-only
+   * gate, so lowering it to 1 effectively captures every pointer tweet on X.
+   *
+   * **Enablement is gated on gate-duration headroom**, not just on wanting the feature:
+   * turning it on grows the capture-gate batch by up to +26 items (`maxDocs` 80 minus
+   * today's ~54 eligible floor), and the gate is the leg that was timing out for ~18h on
+   * 07-25. Enable only once the `x-capture-gate ok` outcome log shows ≥2× duration
+   * headroom at current n, or once chunking has shipped.
+   */
+  captureAmplifyMin?: number;
   // --- X-Article amplification (digest leg) ---
   // `amplificationMinAuthors` / `amplificationMaxPromotions` are inherited from
   // {@link AmplificationConfig}; see `x-amplification.ts` for the mechanism + its bound.
@@ -1025,6 +1045,55 @@ export function isLinkTweet(
   return !isLongFormTweet(doc) && doc.links.length >= 1 && tier != null;
 }
 
+/** Recommended (and documented) value for `captureAmplifyMin` — see the config field. */
+export const DEFAULT_CAPTURE_AMPLIFY_MIN = 3;
+
+/**
+ * Resolve the step-2b amplifier threshold, or `null` when the whole any-tier path is OFF.
+ *
+ * There is no separate boolean: the config field IS the flag. **Absent ⇒ off** (the
+ * shipped default — enabling grows the capture-gate batch, so it is a deliberate later
+ * decision gated on gate-duration headroom). A present-but-invalid value (non-integer,
+ * `< 1`, non-number) is warned about and also treated as OFF rather than silently
+ * substituting a default: the degrade direction for a mistyped knob must be "no batch
+ * growth", never "captured everything".
+ */
+export function resolveCaptureAmplifyMin(config: XWatcherConfig, botName?: string): number | null {
+  const raw = config.captureAmplifyMin;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1) {
+    log.warn("Ignoring invalid captureAmplifyMin {raw} — the any-tier amplifier path stays OFF", {
+      botName,
+      raw: String(raw),
+    });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * **Step 2b** sub-tier pointer eligibility — the batch growth the `captureAmplifyMin`
+ * flag buys. A pointer tweet that {@link isLinkTweet} rejects purely because its author
+ * is outside the tracked top-5% (`tier == null`): NOT long-form, carries ≥1 external
+ * link, and — crucially — that link yields a destination GROUP KEY.
+ *
+ * The group-key requirement is not cosmetic: a sub-tier pointer can only ever reach the
+ * inbox by accumulating votes on a shared key, so one without a key (no parseable
+ * external link, an x.com self-link, or a **PDF** destination, which step 2a
+ * deliberately keeps tweet-keyed) can never be admitted and would be pure gate-batch
+ * cost. Excluding it here is also what satisfies "sub-tier `.pdf` pointers are simply
+ * not promoted" — they vanish exactly as today, without even growing the batch.
+ */
+export function isAmplifierPointer(
+  doc: Pick<TweetDoc, "bodyLength" | "docType" | "links">,
+  tier: AuthorTier | null,
+): boolean {
+  if (isLongFormTweet(doc)) return false;
+  if (tier != null) return false;
+  if (doc.links.length < 1) return false;
+  return destinationGroupKey(doc.links) != null;
+}
+
 /** Truncate a candidate title at a word boundary near `max` chars. */
 function truncateTitle(s: string, max = 140): string {
   const clean = s.replace(/\s+/g, " ").trim();
@@ -1060,6 +1129,13 @@ function linkDomain(url: string): string {
  * `aboveFloor` can never drift from what actually gets captured.
  */
 function passesCaptureFloor(item: EligibleTweet, score: GateScore, config: XWatcherConfig): boolean {
+  // Step 2b: a SUB-TIER pointer (in the batch only because `captureAmplifyMin` is set) is
+  // NEVER admitted by the floor path, whatever it scores — its only route to the inbox is
+  // the cross-run amplifier threshold. Returning false here keeps the gate's `aboveFloor`
+  // field meaning exactly "would be captured by this loop", which is what the chunking /
+  // volume mining reads; a sub-tier pointer's contribution shows up as a wave admission
+  // instead.
+  if (item.kind === "x-link" && item.tier == null) return false;
   // x-post → per-tier floor (non-top raise applies, EXCEPT for `**Type:** article` —
   // long-form by construction, see the precedence table on captureFloorForTier);
   // x-link → the pointer-tweet floor (already top-author-only by eligibility, so no raise).
@@ -1241,6 +1317,87 @@ async function runCaptureGate(
 }
 
 /**
+ * **Step 2b wave admission** — the only route a SUB-TIER pointer has into the inbox.
+ *
+ * Admits a destination-keyed candidate row when BOTH hold:
+ *  1. `count(DISTINCT POINTER author) >= amplifyMin` on the group. Long-form voters are
+ *     excluded by {@link getAmplifierGroup} (CAPPED item 3) — counting them would let two
+ *     footnote links plus one pointer admit a destination row alongside the two x-post
+ *     rows, i.e. re-introduce exactly the duplication step 2 removes, and would hollow out
+ *     the distinct-author bar that compensates for relaxing the top-author-only gate;
+ *  2. the BEST RECORDED POINTER member clears the normal `x-link` floor
+ *     ({@link captureFloorForXLink}, 0.7). The quality bar does not move — three cheerleaders
+ *     at 0.65 admit nothing.
+ *
+ * The row is built from that best recorded member (its score / why / title / doc id /
+ * author), NOT from the pointer that happened to cross the threshold: members one and two
+ * of a wave were consumed in earlier runs, so the recorded snapshot is the only place the
+ * top-scoring member still exists. Written through step 2a's coherent-set writer
+ * ({@link upsertDestinationCandidate}), so dismissal terminality, error/expired
+ * re-admission and the one-member-whole invariant are inherited rather than re-decided.
+ *
+ * `authorScore` is deliberately written as null: the amplifier table records no
+ * capture-time PageRank snapshot (transparency-only column, and a sub-tier member's
+ * defining property is that it has none worth ranking on).
+ *
+ * Returns whether a row was written. Best-effort throughout — every failure warns and
+ * returns false, never breaks the capture loop.
+ */
+async function admitAmplifiedDestination(
+  groupKey: string,
+  amplifyMin: number,
+  config: XWatcherConfig,
+  watcher: Watcher,
+  botName: string | undefined,
+): Promise<boolean> {
+  let group;
+  try {
+    group = await getAmplifierGroup(groupKey);
+  } catch (err) {
+    log.warn("Failed to read X amplifier group {url}: {error}", {
+      botName,
+      url: groupKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+  if (group.pointerAuthors < amplifyMin) return false;
+  const best = group.best;
+  if (!best || best.score < captureFloorForXLink(config)) return false;
+  try {
+    await upsertDestinationCandidate({
+      source: "x",
+      url: groupKey,
+      title: best.title ?? groupKey,
+      candidateSrc: `X (@${best.author})`,
+      score: best.score,
+      why: best.why,
+      kind: "x-link",
+      author: best.author,
+      authorScore: null,
+      sourceDocId: best.sourceDocId,
+      watcherId: watcher.id,
+      botName: botName ?? null,
+    });
+    log.info("Capture: {n} pointer authors amplified {url} — admitted from @{author} ({score})", {
+      botName,
+      n: group.pointerAuthors,
+      url: groupKey,
+      author: best.author,
+      score: best.score,
+    });
+    return true;
+  } catch (err) {
+    log.error("Failed to capture amplified X destination {url}: {error}", {
+      botName,
+      url: groupKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/**
  * Persist high-value tweets into the `summary_candidates` inbox — two capture classes fed
  * to ONE gate call: long-form tweets (`x-post`) and top-author pointer tweets (`x-link`).
  * Runs on the FULL fetched batch, INDEPENDENT of the alert `minScore`/`quietMode`
@@ -1286,10 +1443,18 @@ async function captureXCandidates(
 
   // Build the eligible list with a per-doc kind. Long-form wins outright (captured as
   // x-post regardless of any links); otherwise a top-author link-tweet is x-link.
+  //
+  // Step 2b (FLAG-GATED, off unless `captureAmplifyMin` is set): SUB-TIER pointers join
+  // the batch too — same `x-link` kind, but `tier == null`, which is what the persist
+  // loop and `passesCaptureFloor` read to keep them out of the direct-admission path.
+  // This is the ONLY batch growth in step 2b: with the flag unset the eligible set is
+  // byte-identical to step 2a's.
+  const amplifyMin = resolveCaptureAmplifyMin(config, botName);
   const eligible: EligibleTweet[] = [];
   for (const r of resolved) {
     if (isLongFormTweet(r.doc)) eligible.push({ ...r, kind: "x-post" });
     else if (isLinkTweet(r.doc, r.tier)) eligible.push({ ...r, kind: "x-link" });
+    else if (amplifyMin !== null && isAmplifierPointer(r.doc, r.tier)) eligible.push({ ...r, kind: "x-link" });
   }
   if (eligible.length === 0) {
     log.info("Capture: no eligible tweets after author-tier gating in the batch of {n}", { botName, n: docs.length });
@@ -1315,15 +1480,71 @@ async function captureXCandidates(
   // key, and counting admissions would over-report exactly the number this metric exists
   // to watch ("did the wave collapse?").
   const capturedUrls = new Set<string>();
+  // At most ONE wave-admission check per destination per run — several sub-tier pointers
+  // in one batch share a group, and the check is two DB round trips.
+  const waveChecked = new Set<string>();
   for (let i = 0; i < eligible.length; i++) {
-    const score = byN.get(i + 1);
-    if (!score) continue;
     const item = eligible[i]!;
     const { doc, author, authorScore, kind } = item;
-    // Per-kind floor — shared with the gate's outcome log so `aboveFloor` there always
-    // means exactly "would be captured here".
-    if (!passesCaptureFloor(item, score, config)) continue;
+    // Step 2b: an item with NO gate score still votes (votes and admission are
+    // decoupled — a pointer the gate omitted is still evidence that its author pointed
+    // here), so the score lookup can no longer `continue` before the vote is recorded.
+    const score = byN.get(i + 1) ?? null;
     const firstLine = doc.firstLine.trim() || doc.text;
+    const title = truncateTitle(`${doc.handle}: ${firstLine}`);
+    // The destination group key is computed for EVERY kind here, but only a POINTER ever
+    // uses it as its candidate `url`. Long-form computes it purely to record its
+    // observability-only vote (see below).
+    const groupKey = destinationGroupKey(doc.links);
+    const isPointer = kind === "x-link";
+
+    // --- Step 2b: record the vote (flag-gated; OFF ⇒ this block never runs) ---
+    // Null-author items are SKIPPED: `author` is null exactly when the doc heading had no
+    // usable handle, and an unattributable vote cannot be a DISTINCT author — counting it
+    // would let one unparseable-handle class fake a whole wave.
+    if (amplifyMin !== null && groupKey && author) {
+      try {
+        await recordAmplifierVote({
+          urlKey: groupKey,
+          author,
+          // CAPPED item 3: only pointers hold the admission franchise. A long-form post
+          // carrying the same URL keeps its own tweet-keyed x-post row (judged under
+          // step 1's repackaging cap) and is recorded here for OBSERVABILITY ONLY.
+          pointer: isPointer,
+          tweetPermalink: doc.url,
+          sourceDocId: doc.docId,
+          score: score?.score ?? null,
+          title,
+          why: score?.why ?? null,
+        });
+      } catch (err) {
+        log.warn("Failed to record X amplifier vote for {url}: {error}", {
+          botName,
+          url: groupKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // --- Direct admission (step 2a semantics, unchanged) ---
+    // Per-kind floor — shared with the gate's outcome log so `aboveFloor` there always
+    // means exactly "would be captured here". Sub-tier pointers are rejected by it
+    // unconditionally; their only route is the wave admission below.
+    const directlyAdmitted = score != null && passesCaptureFloor(item, score, config);
+    if (!directlyAdmitted) {
+      // A pointer that did NOT directly admit may still be the vote that pushes its
+      // destination over the cross-run threshold — including a top-tier pointer that
+      // fell below the floor, whose vote is just as real as a sub-tier one.
+      if (amplifyMin !== null && isPointer && groupKey && !waveChecked.has(groupKey)) {
+        waveChecked.add(groupKey);
+        if (await admitAmplifiedDestination(groupKey, amplifyMin, config, watcher, botName)) {
+          capturedUrls.add(groupKey);
+        }
+      }
+      continue;
+    }
+    // `directlyAdmitted` implies a non-null score; TS can't see that through the boolean.
+    const admittedScore = score!;
     // An X Article's own permalink is the thing worth opening from /summaries — the
     // announcing tweet is just the pointer. Gated on `docType === "article"`, NOT on
     // `articleUrl` being present: huginn writes the `- **Article:**` footer on amplifier
@@ -1342,7 +1563,7 @@ async function captureXCandidates(
     // content-degradation guard) ⇒ today's tweet-URL keying, unchanged. Long-form is NEVER re-keyed:
     // long-form wins the kind resolution outright, so `kind === "x-link"` implies
     // `docType === null` and the two branches can't overlap.
-    const destinationKey = kind === "x-link" ? destinationGroupKey(doc.links) : null;
+    const destinationKey = kind === "x-link" ? groupKey : null;
     const candidateUrl =
       destinationKey ?? (doc.docType === "article" ? (doc.articleUrl ?? doc.url) : doc.url);
     // A destination-keyed row is written as ONE COHERENT SET (see
@@ -1357,10 +1578,10 @@ async function captureXCandidates(
       await writeCandidate({
         source: "x",
         url: candidateUrl,
-        title: truncateTitle(`${doc.handle}: ${firstLine}`),
+        title,
         candidateSrc: `X (${doc.handle})`,
-        score: score.score,
-        why: score.why,
+        score: admittedScore.score,
+        why: admittedScore.why,
         kind,
         author,
         authorScore,
