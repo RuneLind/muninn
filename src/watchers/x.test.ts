@@ -13,11 +13,43 @@ import xFeedListing from "./__fixtures__/x-feed-2026-07-24-listing.json";
 let gateResult = "[]";
 let gateThrow = false;
 let lastGatePrompt = "";
+// Retry/budget observability: every spawnHaiku call records the timeoutMs it was handed,
+// and `gateThrowFirstN` fails exactly the first N calls so the retry path is testable
+// without disturbing the always-throw `gateThrow` the older tests use.
+const gateCalls: Array<{ timeoutMs?: number; source?: string }> = [];
+/** Capture-gate calls only — `checkX` also spawns the digest call on the alert path. */
+const captureGateCalls = () => gateCalls.filter((c) => c.source === "watcher-x-capture");
+let gateThrowFirstN = 0;
+// Injected clock for the budget tests: a capture-gate call advances the offset by
+// `gateClockAdvanceMs`, so an attempt can "take" minutes without the test waiting for
+// them (and without any wall-clock-dependent assertion). `Date.now` is patched ONLY for
+// the duration of the test that needs it (`withInjectedClock`) — a process-wide patch
+// leaks across describes AND across sibling watcher test files in the same run.
+let gateClockAdvanceMs = 0;
+let clockOffsetMs = 0;
+const realDateNow = Date.now.bind(Date);
+async function withInjectedClock(advanceMs: number, fn: () => Promise<void>): Promise<void> {
+  gateClockAdvanceMs = advanceMs;
+  clockOffsetMs = 0;
+  Date.now = () => realDateNow() + clockOffsetMs;
+  try {
+    await fn();
+  } finally {
+    Date.now = realDateNow;
+    gateClockAdvanceMs = 0;
+    clockOffsetMs = 0;
+  }
+}
 mock.module("../scheduler/executor.ts", () => ({
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  spawnHaiku: async (prompt: string) => {
+  spawnHaiku: async (prompt: string, opts?: { timeoutMs?: number; source?: string }) => {
     lastGatePrompt = prompt;
+    gateCalls.push({ timeoutMs: opts?.timeoutMs, source: opts?.source });
+    if (opts?.source === "watcher-x-capture") clockOffsetMs += gateClockAdvanceMs;
     if (gateThrow) throw new Error("haiku down");
+    if (opts?.source === "watcher-x-capture" && captureGateCalls().length <= gateThrowFirstN) {
+      throw new Error("haiku timed out");
+    }
     return { result: gateResult, inputTokens: 0, outputTokens: 0, model: "claude-haiku-4-5-20251001" };
   },
 }));
@@ -111,6 +143,9 @@ const {
   captureFloorForTier,
   isLinkTweet,
   captureFloorForXLink,
+  captureBudgetDeadline,
+  captureBudgetMs,
+  captureAttemptTimeoutMs,
   orderDocsForCap,
   listingCoverage,
   coverageWarning,
@@ -610,6 +645,10 @@ describe("fetchFromCollection + checkX capture", () => {
     gateResult = "[]";
     gateThrow = false;
     lastGatePrompt = "";
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
+    gateClockAdvanceMs = 0;
+    clockOffsetMs = 0;
     upsertCalls.length = 0;
     upsertThrow = false;
     for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
@@ -860,6 +899,185 @@ describe("fetchFromCollection + checkX capture", () => {
     );
     expect(lastGatePrompt).not.toContain("author rank:");
   });
+
+  // ── Capture-gate retry + completion budget (2026-07-26 outage fix) ──
+  //
+  // The fixture batch yields two eligible docs (alice's note + bob's ~950-char
+  // long-form); carol's short tweet is never eligible.
+
+  const captureWatcher = (over: Record<string, unknown> = {}) =>
+    baseWatcher({
+      config: {
+        collection: "x-feed",
+        windowDays: 1,
+        captureCandidates: true,
+        candidateMinScore: 0.6,
+        candidateMinScoreNonTop: 0.6,
+        ...over,
+      },
+    });
+
+  // The outcome log is THE measurement surface for this gate — nothing else records a
+  // duration (haiku_usage has no duration column and only writes on success, spawnHaiku
+  // emits no span here, and `Capture: queued` only fires when captured > 0). So it is
+  // asserted, not assumed.
+  const gateOutcomeLines = () => logLines.filter((l) => l.message.startsWith("x-capture-gate"));
+
+  test("outcome log fires on the success path with n / scored / aboveFloor / duration / attempt", async () => {
+    logLines.length = 0;
+    // Two eligible docs; the model scores both but only one clears the 0.6 floor.
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.9, why: "yes" },
+      { n: 2, score: 0.3, why: "meh" },
+    ]);
+    await checkX(captureWatcher());
+    const lines = gateOutcomeLines();
+    expect(lines.length).toBe(1);
+    const p = lines[0]!.props;
+    expect(lines[0]!.level).toBe("info");
+    expect(p.outcome).toBe("ok");
+    expect(p.n).toBe(2);
+    expect(p.scored).toBe(2);
+    expect(p.aboveFloor).toBe(1); // matches what actually gets captured, below
+    expect(p.attempt).toBe(1);
+    expect(typeof p.durationMs).toBe("number");
+    expect(typeof p.promptChars).toBe("number");
+    expect(upsertCalls.length).toBe(1);
+  });
+
+  test("outcome log fires on EVERY failed attempt, carrying n and the error", async () => {
+    logLines.length = 0;
+    gateThrowFirstN = 99;
+    await checkX(captureWatcher());
+    const lines = gateOutcomeLines();
+    expect(lines.length).toBe(2); // one per attempt — failures are logged, not swallowed
+    for (const [i, line] of lines.entries()) {
+      expect(line.level).toBe("warn");
+      expect(line.props.outcome).toBe("failed");
+      expect(line.props.n).toBe(2);
+      expect(line.props.attempt).toBe(i + 1);
+      expect(typeof line.props.durationMs).toBe("number");
+      expect(String(line.props.error)).toContain("haiku timed out");
+    }
+  });
+
+  test("gate retries once and the retry's result is captured", async () => {
+    gateThrowFirstN = 1; // first attempt times out, second succeeds
+    gateResult = JSON.stringify([{ n: 1, score: 0.9, why: "worth it" }]);
+    await checkX(captureWatcher());
+    expect(captureGateCalls().length).toBe(2);
+    expect(upsertCalls.length).toBe(1);
+  });
+
+  test("gate gives up after exactly one retry and the alert path still returns", async () => {
+    gateThrowFirstN = 99; // every attempt fails
+    const alerts = await checkX(captureWatcher());
+    expect(captureGateCalls().length).toBe(2); // one try + one retry, never more
+    expect(upsertCalls.length).toBe(0);
+    expect(Array.isArray(alerts)).toBe(true); // capture failure never breaks the run
+  });
+
+  test("attempt timeout is capped at the 180s per-attempt cap when budget allows", async () => {
+    // config.timeoutMs 600000 ⇒ runner net 630s ⇒ capture budget ~570s ⇒ the 180s
+    // per-attempt cap binds, not the budget.
+    await checkX(captureWatcher({ timeoutMs: 600_000 }));
+    expect(captureGateCalls().length).toBe(1);
+    expect(captureGateCalls()[0]!.timeoutMs).toBe(180_000);
+  });
+
+  test("attempt timeout falls back to the remaining budget when that is tighter", async () => {
+    // config.timeoutMs 180000 ⇒ net 210s ⇒ budget 150s, below the 180s per-attempt cap.
+    // Upper bound only — the exact value carries the (real) elapsed fetch time, so a
+    // lower bound here would be a wall-clock-dependent flake.
+    await checkX(captureWatcher({ timeoutMs: 180_000 }));
+    expect(captureGateCalls().length).toBe(1);
+    expect(captureGateCalls()[0]!.timeoutMs!).toBeLessThanOrEqual(150_000);
+  });
+
+  test("budget exhaustion suppresses the retry and is named in the outer failure", async () => {
+    logLines.length = 0;
+    gateThrowFirstN = 99; // every attempt fails …
+    // … and attempt 1 burns 240s of the 270s default budget (injected clock, no waiting).
+    await withInjectedClock(240_000, async () => {
+      await checkX(captureWatcher());
+    });
+
+    // Attempt 2 is never started — 30s left is under the 45s minimum attempt window.
+    expect(captureGateCalls().length).toBe(1);
+    const lines = gateOutcomeLines();
+    expect(lines.map((l) => l.props.outcome)).toEqual(["failed", "budget-exhausted"]);
+
+    const exhausted = lines[1]!.props;
+    expect(exhausted.attempt).toBe(1); // attempts MADE, not the phantom one declined
+    expect(exhausted.scored).toBeUndefined(); // non-ok lines never claim "scored 0"
+    expect(exhausted.aboveFloor).toBeUndefined();
+
+    // The rethrown error must carry the budget, not just attempt 1's raw message —
+    // otherwise the outer log makes a budget kill look like a plain model failure.
+    const outer = logLines.find((l) => l.message.startsWith("Capture gate failed"));
+    expect(outer).toBeDefined();
+    expect(String(outer!.props.error)).toContain("budget exhausted");
+    expect(String(outer!.props.error)).toContain("haiku timed out");
+    expect(upsertCalls.length).toBe(0);
+  });
+});
+
+// ── Capture budget math (pure) ───────────────────────────────────────
+
+describe("capture completion budget", () => {
+  const w = (timeoutMs?: number): Watcher => ({
+    id: "xw-budget",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    config: { collection: "x-feed", ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  test("budget is min(watcher net, scheduler tick) minus the safety margin", () => {
+    // X Highlights: 600s configured ⇒ 630s net, but the 600s scheduler tick is the TRUE
+    // ceiling ⇒ 540s, not 570s.
+    expect(captureBudgetMs(w(600_000))).toBe(540_000);
+    expect(captureBudgetDeadline(w(600_000), 1_000)).toBe(1_000 + 540_000);
+    // No configured timeout ⇒ the SAME 300s default the digest leg reads ⇒ 330s net ⇒
+    // 270s budget (NOT the 60s that computeWatcherTimeoutMs's 120s floor used to give).
+    expect(captureBudgetMs(w())).toBe(270_000);
+    expect(captureBudgetDeadline(w(), 1_000)).toBe(1_000 + 270_000);
+  });
+
+  test("the un-configured default leaves room for a full attempt AND a retry", () => {
+    // Regression guard for the default-budget bug: the old derivation gave 60s — worse
+    // than the pre-retry flat 90s, with attempt 2 permanently budget-dead.
+    const budget = captureBudgetMs(w());
+    expect(budget).toBeGreaterThanOrEqual(90_000);
+    // After one full-cap attempt there is still enough left to START the retry.
+    expect(captureAttemptTimeoutMs(budget, 180_000)).not.toBeNull();
+  });
+
+  test("deadline never goes backwards past the run start", () => {
+    // Even a pathological net below the margin clamps at the run start (budget 0),
+    // which the attempt guard then reads as "don't start".
+    expect(captureBudgetDeadline(w(1), 5_000)).toBe(5_000);
+  });
+
+  test("attempt timeout is min(per-attempt cap, remaining budget)", () => {
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_000 - 500_000)).toBe(180_000);
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_000 - 100_000)).toBe(100_000);
+  });
+
+  test("no attempt is started when the remaining budget can't cover one", () => {
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_000 - 45_000)).toBe(45_000); // exactly at the floor
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_000 - 44_999)).toBeNull();
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_000)).toBeNull();
+    expect(captureAttemptTimeoutMs(1_000_000, 1_000_001)).toBeNull(); // already past
+  });
 });
 
 // ── Link-tweet (x-link) capture: pointer tweets by top authors ───────
@@ -907,6 +1125,8 @@ describe("link-tweet (x-link) capture", () => {
   beforeEach(() => {
     gateResult = "[]";
     gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
     upsertThrow = false;
@@ -1213,6 +1433,8 @@ describe("checkX: X Article capture (real-doc replay)", () => {
     servedDoc = articleDoc;
     gateResult = "[]";
     gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
     upsertThrow = false;
@@ -1575,6 +1797,8 @@ describe("runAlertPath framing wrapper (fronts Daily/Highlights/Weekly)", () => 
   beforeEach(() => {
     gateResult = "[]";
     gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
     lastGatePrompt = "";
     stub();
   });
@@ -1676,6 +1900,8 @@ describe("fetchFromCollection amplification wiring", () => {
   beforeEach(() => {
     gateResult = "[]";
     gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
     authorThresholds = null;
