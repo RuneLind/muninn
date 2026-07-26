@@ -922,6 +922,42 @@ export function captureAttemptTimeoutMs(deadline: number, now: number): number |
  * it: long-form notes/articles (judged on their own content) and top-author pointer tweets
  * (`x-link`, judged on the linked destination — marked by the per-item `links to:` line
  * `runCaptureGate` appends). The prompt teaches the model to tell them apart off that line.
+ *
+ * **Code-only** — `runCaptureGate` reads this constant unconditionally; the watcher row's
+ * `config.prompt` reaches ONLY the alert/digest path (`runAlertPath`), so calibration
+ * changes here ship without a seeded-prompt migration.
+ *
+ * Calibrated 2026-07-26 (X hype-dedup, step 1): the shelf was wall-to-wall engagement-farm
+ * pointer content at 0.9–0.95 because the only anchors were ~1.0/~0.7/~0.6 — nothing
+ * separated 0.9 from 0.95, and corr(gate score, author_score) measured −0.001 over 659
+ * candidates. Three edits: (a) a **repackaging cap** at ~0.8 for secondhand long-form,
+ * (b) real 0.8/0.9 anchors reserving ≥0.9 for **primary sources only** so the UI's "high"
+ * band biases toward artifacts, (c) an in-list topic dedup instruction, (d) an explicit
+ * anti-clustering line so 0.85 doesn't become the new pile-up bucket.
+ *
+ * **Author rank is never a positive prior.** An earlier cut also licensed ≥0.9 for "material
+ * from a top-tier author" — but every eligible pointer item carries an `(author rank: top
+ * 1%/5%)` line BY CONSTRUCTION (`isLinkTweet` requires `tier != null`), and that rank is farm
+ * PageRank (measured corr −0.001 with quality). The disjunct therefore re-authorized exactly
+ * the farm pointers being calibrated away, so the prompt now names the rank line as a reach
+ * statistic and not a credibility signal.
+ *
+ * Both ceilings (0.85 without primary-source standing, 0.8 for repackaging) are phrased
+ * **topic-independently** inside the prompt, because `withInterestProfile` appends its
+ * "can RAISE relevance" block LAST — after this ladder — and that shared block
+ * (`src/profile/inject.ts`, used by other watchers) must not be edited for an x-only fix.
+ *
+ * No code-side clamp is applied to the returned scores: compliance is best-effort (an
+ * identical item scored 0.85 then 0.9 on a straight re-run). A deterministic post-gate clamp
+ * is the plan's stated fallback if the first week of `x-capture-gate ok` lines shows poor
+ * cap compliance.
+ *
+ * The cap's **pointer carve-out is load-bearing, not politeness**: pointer items are scored
+ * on their DESTINATION and stay uncapped. A blanket ≤0.8 cap would suppress exactly the
+ * artifacts the later destination-URL keying promotes — destination rows inherit the
+ * representative pointer's gate score, so capping every pointer would pin every promoted
+ * artifact below the 0.85 the inbox's `LIMIT 200` currently cuts at, while uncapped hype
+ * threads sat above them.
  */
 export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of X posts. For EACH one, decide whether a written summary is worth saving to read later.
 
@@ -932,11 +968,21 @@ The list mixes two kinds of item:
 For long-form notes:
   Weight HIGHEST: substantive technical insight, original analysis, research findings, agent/LLM/retrieval engineering lessons, thoughtful essays.
   Weight LOW (omit): hot takes, self-promotion, threads that are mostly links, engagement bait, news the engineer would already know, anything where the tweet already says everything.
-For pointer tweets (a "links to:" line), the "mostly links" / "already says everything" down-weights do NOT apply — a bare pointer to a substantive destination is exactly what we want. Omit one only when the destination itself looks like self-promotion, engagement bait, or something the engineer would already know.
+  REPACKAGING CAP — applies ONLY to long-form notes, NEVER to pointer items: if a long-form note's value is mostly a secondhand repackaging of someone else's artifact (a course, paper, article, video, release) — a recap, a "here is what it says" breakdown, a summary of an announcement — score it BY THAT ARTIFACT and cap the score at 0.8. This ceiling binds regardless of the author's rank or standing; it lifts only when the post adds original analysis, benchmarks, or first-hand experience of its own. The ceiling is also topic-independent: it is not lifted by how well the item matches the reader's interests.
+For pointer tweets (a "links to:" line), the "mostly links" / "already says everything" down-weights do NOT apply — a bare pointer to a substantive destination is exactly what we want, and the repackaging cap above does NOT apply either: a pointer is scored on its DESTINATION with no cap, so a pointer to a primary source can score 0.9 or above. Omit one only when the destination itself looks like self-promotion, engagement bait, or something the engineer would already know.
+
+If several posts in this list point at, cover, or announce the same resource or announcement, keep only the one whose content (or destination) is most worth reading — score that one and omit the rest.
 
 For EACH item worth saving, output one object:
   {"n": <the post number>, "score": <0.0-1.0>, "why": "<one short line on what reading it (or the linked content) would teach>"}
-Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT items that aren't worth a summary — do not output them at all.
+Calibration anchors — use the whole range, and judge a pointer item's destination against these same anchors:
+  ~1.0 must-read.
+  ~0.9 and above is RESERVED for a primary source — the artifact itself: the author's (or destination's) OWN work, paper, repo, release, or announcement — never coverage of one. Loud framing, ALL-CAPS, and engagement volume are NOT evidence of this. The "author rank" line is a reach statistic from the scraped feed, NOT a credibility signal: a high author rank never by itself justifies 0.9 or above. Without primary-source standing, do not go above 0.85 — this ceiling is absolute and is not lifted by how well the item matches the reader's interests.
+  ~0.8 strong secondhand coverage — also the ceiling for repackaged long-form (see the cap above).
+  ~0.7 clearly worthwhile.
+  ~0.6 borderline.
+Do not cluster scores at a ceiling: 0.85 is a maximum for items without primary-source standing, not their default. Below it, separate items — 0.8 strong secondhand coverage, 0.7 clearly worthwhile, 0.6 borderline — and use intermediate values (0.75, 0.65) freely.
+OMIT items that aren't worth a summary — do not output them at all.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
 

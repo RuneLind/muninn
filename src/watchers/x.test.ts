@@ -151,6 +151,7 @@ const {
   coverageWarning,
   DEFAULT_X_PROMPT,
   DEFAULT_X_HIGHLIGHTS_PROMPT,
+  DEFAULT_X_CAPTURE_PROMPT,
 } = await import("./x.ts");
 
 // The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
@@ -1758,6 +1759,93 @@ describe("default prompt topic constraints", () => {
   test("DEFAULT_X_HIGHLIGHTS_PROMPT scopes 'exceptional' to the baseline topics + off-topic exclusion", () => {
     expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain(TOPIC_BASELINE);
     expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain("regardless of how high its engagement is");
+  });
+});
+
+// ── Capture-gate calibration (X hype-dedup, step 1) ────────────────
+//
+// The displayed candidate score IS this prompt's output, so these are the only
+// deterministic assertions available on it — the shelf's 0.9–0.95 pile-up came from a
+// prompt whose only anchors were ~1.0/~0.7/~0.6. Guarded here because a later edit that
+// drops the pointer carve-out would silently pin every destination-keyed row (which
+// inherits its representative pointer's gate score) below the inbox's 0.85 cut.
+
+describe("DEFAULT_X_CAPTURE_PROMPT calibration", () => {
+  test("caps secondhand repackaging at 0.8 and scopes the cap to long-form only", () => {
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("REPACKAGING CAP");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("applies ONLY to long-form notes");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("cap the score at 0.8");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("adds original analysis");
+    // The cap is unconditional — author rank/standing never lifts it.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "This ceiling binds regardless of the author's rank or standing",
+    );
+    // …and topic-independent, because withInterestProfile appends its "can RAISE
+    // relevance" block AFTER this ladder (see src/profile/inject.ts, shared — not edited).
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "not lifted by how well the item matches the reader's interests",
+    );
+  });
+
+  test("pointer items are explicitly carved out of the cap and scored on the destination", () => {
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("NEVER to pointer items");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("the repackaging cap above does NOT apply either");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("scored on its DESTINATION with no cap");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("a pointer to a primary source can score 0.9 or above");
+  });
+
+  test("anchors the 0.8 and 0.9 bands and reserves >=0.9 for primary sources ONLY", () => {
+    for (const anchor of ["~1.0", "~0.9", "~0.8", "~0.7", "~0.6"]) {
+      expect(DEFAULT_X_CAPTURE_PROMPT).toContain(anchor);
+    }
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("RESERVED for a primary source");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("the artifact itself");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("never coverage of one");
+    // Loud framing is not evidence of primary-source standing — the farm-pointer failure mode.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("do not go above 0.85");
+  });
+
+  test("author rank is never a positive prior for the >=0.9 band", () => {
+    // Every eligible pointer carries an "(author rank: top 1%/5%)" line BY CONSTRUCTION
+    // (isLinkTweet requires tier != null) and that rank is farm PageRank (corr −0.001 with
+    // quality), so a top-tier-author license would re-authorize the very farm pointers this
+    // calibration removes.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      'The "author rank" line is a reach statistic from the scraped feed, NOT a credibility signal',
+    );
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "a high author rank never by itself justifies 0.9 or above",
+    );
+    expect(DEFAULT_X_CAPTURE_PROMPT).not.toContain("top-tier author");
+  });
+
+  test("warns against clustering scores at the 0.85 ceiling", () => {
+    // The shelf's LIMIT 200 cut sits at 0.85 and 0.85 is already the largest histogram
+    // bucket (×140) — a named ceiling invites a pile-up.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("Do not cluster scores at a ceiling");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "0.85 is a maximum for items without primary-source standing, not their default",
+    );
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("use intermediate values (0.75, 0.65) freely");
+  });
+
+  test("instructs in-list dedup across every species that carries the same resource", () => {
+    // "point at" alone read pointer-only; long-form recap waves escaped it.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "If several posts in this list point at, cover, or announce the same resource or announcement, keep only the one whose content (or destination) is most worth reading — score that one and omit the rest.",
+    );
+  });
+
+  test("the anchor ladder precedes the JSON output contract, and no legacy ladder survives", () => {
+    const ladder = DEFAULT_X_CAPTURE_PROMPT.indexOf("Calibration anchors");
+    const contract = DEFAULT_X_CAPTURE_PROMPT.indexOf("Return ONLY a JSON array");
+    expect(ladder).toBeGreaterThan(-1);
+    expect(contract).toBeGreaterThan(-1);
+    // A ladder appended AFTER the output contract reads as commentary on the JSON shape.
+    expect(ladder).toBeLessThan(contract);
+    // Exactly one ladder: a re-introduced old anchor block would duplicate the mid-band rungs.
+    expect(DEFAULT_X_CAPTURE_PROMPT.split("~0.7").length - 1).toBe(1);
+    expect(DEFAULT_X_CAPTURE_PROMPT.split("~1.0").length - 1).toBe(1);
   });
 });
 
