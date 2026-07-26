@@ -133,6 +133,59 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
   `;
 }
 
+/**
+ * Insert-or-replace a **destination-keyed** candidate as ONE COHERENT SET.
+ *
+ * Used by the X watcher for pointer (`x-link`) candidates re-keyed from the tweet
+ * permalink onto the normalized destination URL, so a "X just dropped …" wave —
+ * N pointer tweets landing across N different watcher runs over days — collapses to
+ * ONE row instead of N rows at 0.95.
+ *
+ * **Why not {@link upsertCandidate}.** Its conflict path has MIXED precedence:
+ * `why`/`title`/`candidate_src` follow the winning score, but `source_doc_id`/`author`/
+ * `author_score` are `COALESCE(EXCLUDED…, existing)` — newest-non-null-wins. That is
+ * right for a row whose `url` IS its identity (re-captures of the SAME tweet), but on a
+ * destination key each upsert comes from a DIFFERENT wave member: repeated upserts would
+ * pair one member's score/why with another member's doc, and the summary body (resolved
+ * from `source_doc_id`) would come from the member that LOST. Here every mutable column
+ * is taken from EXCLUDED under a single condition, so the persisted row is always one
+ * member's fields, whole.
+ *
+ * Semantics:
+ *  - no row yet ⇒ INSERT (the incoming member becomes the representative);
+ *  - a `new` row whose score the incoming member BEATS ⇒ replace the whole set;
+ *  - a `new` row that wins (or ties) ⇒ untouched (stable: first arrival keeps the tie);
+ *  - a `dismissed`/`summarized`/`summarizing`/`error` row ⇒ **never** touched — dismissing
+ *    the topic once permanently suppresses later wave members.
+ *
+ * Expressed as a conflict-path write rather than SELECT-then-UPDATE so the
+ * read-compare-write is atomic against two concurrent watcher runs.
+ */
+export async function upsertDestinationCandidate(p: UpsertCandidateParams): Promise<void> {
+  const sql = getDb();
+  await sql`
+    INSERT INTO summary_candidates (source, url, title, candidate_src, score, why, kind, author, author_score, source_doc_id, watcher_id, bot_name)
+    VALUES (
+      ${p.source}, ${p.url}, ${p.title}, ${p.candidateSrc ?? null},
+      ${p.score}, ${p.why ?? null}, ${p.kind ?? null}, ${p.author ?? null}, ${p.authorScore ?? null}, ${p.sourceDocId ?? null}, ${p.watcherId ?? null}, ${p.botName ?? null}
+    )
+    ON CONFLICT (source, url) DO UPDATE
+      SET score = EXCLUDED.score,
+          why = EXCLUDED.why,
+          title = EXCLUDED.title,
+          candidate_src = EXCLUDED.candidate_src,
+          kind = EXCLUDED.kind,
+          author = EXCLUDED.author,
+          author_score = EXCLUDED.author_score,
+          source_doc_id = EXCLUDED.source_doc_id,
+          watcher_id = EXCLUDED.watcher_id,
+          bot_name = EXCLUDED.bot_name,
+          updated_at = now()
+      WHERE summary_candidates.status = 'new'
+        AND EXCLUDED.score > summary_candidates.score
+  `;
+}
+
 export async function listCandidates(
   opts: {
     /** One source ("anthropic") or several (["anthropic","x"]) — mirrors `status`. */

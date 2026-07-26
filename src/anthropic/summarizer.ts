@@ -8,6 +8,7 @@ import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summar
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
+import { isDestinationUrl } from "../summaries/destination-url.ts";
 import {
   pickEnrichmentLink,
   youTubeVideoId,
@@ -163,12 +164,20 @@ async function resolveContent(
   url: string,
   title: string,
   sourceDocId?: string | null,
+  kind?: SummaryCandidateKind | null,
 ): Promise<ResolvedContent | null> {
   const baseUrl = config.knowledgeApiUrl;
 
+  // A DESTINATION-KEYED pointer row: the X watcher re-keyed this `x-link` candidate from
+  // the tweet permalink onto the normalized destination URL, so `url` is a non-x.com
+  // artifact BY CONSTRUCTION (`extractDocLinks` filters x.com/twitter.com/t.co). Kind-
+  // guarded so every other candidate class keeps today's behavior byte-for-byte.
+  const destinationKeyed = kind === "x-link" && isDestinationUrl(url);
+
   // 0. Source-doc-id path (X): the candidate carries its huginn `x-feed` doc id, and
   //    tweet URLs aren't fetchable, so resolve content straight from that doc. No URL
-  //    fallback here — a direct fetch of x.com would just yield the login wall.
+  //    fallback here — a direct fetch of x.com would just yield the login wall (the
+  //    ONE exception is a destination-keyed row, see below).
   if (sourceDocId) {
     try {
       const doc = await fetchKnowledgeApi(
@@ -183,7 +192,12 @@ async function resolveContent(
         // article) so the summary reflects the linked content, not just the tweet
         // text. Single-link by design; any failure degrades to tweet-only content
         // (byte-identical to pre-enrichment behavior) — a dead link never fails the job.
-        const picked = pickEnrichmentLink(extractDocLinks(text));
+        // On a destination-keyed row the candidate `url` IS the group key — prefer it
+        // over `links[0]`, which for a multi-link representative would be a DIFFERENT
+        // destination than the one the row is keyed (and titled) on.
+        const picked = destinationKeyed
+          ? pickEnrichmentLink([url])
+          : pickEnrichmentLink(extractDocLinks(text));
         let combined = text;
         let enrichment: EnrichmentOutcome = "none";
         if (picked) {
@@ -227,6 +241,20 @@ async function resolveContent(
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    // Stale-doc fallback — destination-keyed rows ONLY. The representative tweet's
+    // x-feed doc can evict (the collection caps at 5000 docs) or be re-indexed under a
+    // fresh id, which would otherwise land the candidate in `error` with nothing tried.
+    // The no-URL-fallback rule above exists for x.com login walls; a destination-keyed
+    // row's `url` is a non-x.com artifact by construction, so fetching it is safe and
+    // is exactly the content the row promises.
+    if (destinationKeyed) {
+      log.info("{collection} doc {docId} unresolvable — direct-fetching the keyed destination {url}", {
+        collection: X_FEED_COLLECTION,
+        docId: sourceDocId,
+        url,
+      });
+      return directFetchContent(url);
+    }
     return null;
   }
 
@@ -263,9 +291,16 @@ async function resolveContent(
     });
   }
 
-  // 2. Fallback — fetch the candidate URL directly. Clean `.md` for doc URLs;
-  //    raw HTML otherwise (the summarizer prompt copes with either, and the cap
-  //    keeps a heavy HTML page from overflowing the model context).
+  // 2. Fallback — fetch the candidate URL directly.
+  return directFetchContent(url);
+}
+
+/**
+ * Fetch a candidate URL directly. Clean `.md` for doc URLs; raw HTML otherwise (the
+ * summarizer prompt copes with either, and the cap keeps a heavy HTML page from
+ * overflowing the model context). Null on any failure — never throws.
+ */
+async function directFetchContent(url: string): Promise<ResolvedContent | null> {
   try {
     const fetchUrl = directFetchUrl(url);
     const controller = new AbortController();
@@ -398,7 +433,7 @@ export async function summarizeCandidate(
     // 1. Resolve full content (still `pending` — no separate UI step, per plan). For X
     //    the candidate carries a source doc id; anthropic resolves by URL (sourceDocId
     //    null). The X path may fold in the tweet's linked content (see resolveContent).
-    const content = await resolveContent(config, url, title, sourceDocId);
+    const content = await resolveContent(config, url, title, sourceDocId, kind);
     if (!content) {
       failJob(jobId, "Could not resolve candidate content from its source doc or URL");
       await setCandidateStatus(candidateId, "error");

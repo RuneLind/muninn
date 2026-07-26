@@ -405,6 +405,78 @@ test("X candidate: a failed link fetch degrades to tweet-only content, job still
   expect(statusCalls[0]!.status).toBe("summarized");
 });
 
+// --- Destination-keyed pointer rows (x-link wave collapse) ---
+
+// A destination-keyed row's `url` IS the group key, and the representative doc may list
+// a DIFFERENT link first (multi-link footers, or a link that normalization rewrote).
+const DEST_URL = "https://article.test/deep-dive";
+
+test("x-link destination-keyed row enriches the CANDIDATE url, not the doc's links[0]", async () => {
+  docText = [
+    "# @karpathy — Andrej Karpathy",
+    "",
+    "this is the one to read",
+    "",
+    "---",
+    "",
+    "- **Link:** https://x.com/karpathy/status/1789",
+    `- **Links:** ${YT_LINK} ${DEST_URL}`,
+  ].join("\n");
+  const jobId = createJob("x-dest", "@karpathy: read this", DEST_URL);
+  await summarizeCandidate(jobId, "x-dest", "@karpathy: read this", DEST_URL, config, bot, X_DOC_ID, "x-link");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  // The group URL was fetched — NOT the doc's first link (the YouTube transcript).
+  expect(lastPrompt).toContain(`--- LINKED CONTENT (${DEST_URL}) ---`);
+  expect(lastPrompt).toContain("ARTICLE BODY: the linked long-form write-up.");
+  expect(lastPrompt).not.toContain("TRANSCRIPT: the linked 28-minute video");
+  // x-link framing: the destination is the PRIMARY subject.
+  expect(lastSystemPrompt).toContain("PRIMARY subject");
+});
+
+test("x-link kind-guard: an x-post row keeps enriching the doc's links[0]", async () => {
+  docText = [
+    "# @karpathy — Andrej Karpathy",
+    "",
+    "a long-form note that also links out",
+    "",
+    "---",
+    "",
+    "- **Type:** note",
+    `- **Links:** ${YT_LINK} ${DEST_URL}`,
+  ].join("\n");
+  // Same candidate url, but kind x-post ⇒ the preference must NOT fire.
+  const jobId = createJob("x-post-guard", "@karpathy: note", DEST_URL);
+  await summarizeCandidate(jobId, "x-post-guard", "@karpathy: note", DEST_URL, config, bot, X_DOC_ID, "x-post");
+
+  expect(getJob(jobId)!.status).toBe("complete");
+  expect(lastPrompt).toContain(`--- LINKED CONTENT (${YT_LINK}) ---`);
+  expect(lastPrompt).toContain("TRANSCRIPT: the linked 28-minute video");
+});
+
+test("x-link destination-keyed row falls back to a direct fetch when the x-feed doc is gone", async () => {
+  docText = ""; // the representative tweet's doc evicted / re-indexed under a fresh id
+  const jobId = createJob("x-stale", "@karpathy: read this", DEST_URL);
+  await summarizeCandidate(jobId, "x-stale", "@karpathy: read this", DEST_URL, config, bot, X_DOC_ID, "x-link");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  // Content came from the destination itself (non-x.com by construction), not nothing.
+  expect(lastPrompt).toContain("ARTICLE BODY: the linked long-form write-up.");
+  expect(statusCalls[0]!.status).toBe("summarized");
+});
+
+test("a tweet-keyed x-link row keeps the no-url-fallback rule (x.com login wall)", async () => {
+  docText = "";
+  directOk = true;
+  const jobId = createJob("x-tweetkeyed", "@someone: pointer", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-tweetkeyed", "@someone: pointer", X_TWEET_URL, config, bot, X_DOC_ID, "x-link");
+
+  expect(getJob(jobId)!.status).toBe("error");
+  expect(statusCalls[0]).toEqual({ id: "x-tweetkeyed", status: "error", docId: null });
+});
+
 test("X candidate: a doc with no external link is byte-identical tweet-only content", async () => {
   docText = "# @someone\n\nA long-form note with no links at all.\n\n- **Type:** note";
   const jobId = createJob("x-nolink", "@someone: note", X_TWEET_URL);

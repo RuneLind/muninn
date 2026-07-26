@@ -54,18 +54,32 @@ mock.module("../scheduler/executor.ts", () => ({
   },
 }));
 
-const upsertCalls: Array<{
+interface UpsertParams {
   source: string;
   url: string;
   title: string;
   candidateSrc?: string | null;
   score: number;
+  why?: string | null;
   kind?: string | null;
   author?: string | null;
   authorScore?: number | null;
   sourceDocId?: string | null;
-}> = [];
+}
+/** Every write, in order, tagged with WHICH writer the capture path chose. */
+const upsertCalls: Array<UpsertParams & { writer?: "shared" | "destination" }> = [];
 let upsertThrow = false;
+
+// A tiny stand-in for the `summary_candidates` table, so the destination-keying tests
+// can assert the row that SURVIVES across runs (not just the calls made). Only the
+// destination writer's semantics are modelled — one coherent set per admission,
+// higher score wins, non-`new` rows are never touched.
+interface StoredCandidate extends UpsertParams {
+  status: "new" | "dismissed" | "summarized" | "summarizing" | "error";
+}
+const candidateRows = new Map<string, StoredCandidate>();
+const rowKey = (source: string, url: string) => `${source}|${url}`;
+const storedRow = (source: string, url: string) => candidateRows.get(rowKey(source, url));
 
 // Author-scores loader — mocked so capture doesn't depend on the real huginn JSON file.
 // normalizeHandle keeps its real behavior (so candidateSrc/author normalization is
@@ -93,19 +107,25 @@ mock.module("../summaries/author-scores.ts", () => ({
 // setCandidateStatus / getCandidateBySourceUrl, and a partial mock would break their
 // module load. Only upsertCandidate is exercised here; the rest are inert stand-ins.
 mock.module("../db/summary-candidates.ts", () => ({
-  upsertCandidate: async (p: {
-    source: string;
-    url: string;
-    title: string;
-    candidateSrc?: string | null;
-    score: number;
-    kind?: string | null;
-    author?: string | null;
-    authorScore?: number | null;
-    sourceDocId?: string | null;
-  }) => {
+  upsertCandidate: async (p: UpsertParams) => {
     if (upsertThrow) throw new Error("db down");
-    upsertCalls.push(p);
+    upsertCalls.push({ ...p, writer: "shared" });
+  },
+  // Destination-keyed writer (pointer candidates). Mirrors the real SQL: insert if
+  // absent; on conflict replace the WHOLE set from the incoming member, but only while
+  // the row is still `new` AND the incoming score strictly beats the stored one.
+  upsertDestinationCandidate: async (p: UpsertParams) => {
+    if (upsertThrow) throw new Error("db down");
+    upsertCalls.push({ ...p, writer: "destination" });
+    const key = rowKey(p.source, p.url);
+    const existing = candidateRows.get(key);
+    if (!existing) {
+      candidateRows.set(key, { ...p, status: "new" });
+      return;
+    }
+    if (existing.status !== "new") return;
+    if (!(p.score > existing.score)) return;
+    candidateRows.set(key, { ...p, status: "new" });
   },
   listCandidates: async () => [],
   getCandidateById: async () => null,
@@ -651,6 +671,7 @@ describe("fetchFromCollection + checkX capture", () => {
     gateClockAdvanceMs = 0;
     clockOffsetMs = 0;
     upsertCalls.length = 0;
+    candidateRows.clear();
     upsertThrow = false;
     for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
     authorThresholds = null;
@@ -1130,6 +1151,7 @@ describe("link-tweet (x-link) capture", () => {
     gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
+    candidateRows.clear();
     upsertThrow = false;
     for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
     authorThresholds = null;
@@ -1168,7 +1190,10 @@ describe("link-tweet (x-link) capture", () => {
     await checkX(baseWatcher({ config: { ...captureOnly } }));
     // Only dave (the pointer tweet) is eligible; erin has no link, is not long-form.
     expect(upsertCalls).toHaveLength(1);
-    expect(upsertCalls[0]!.url).toBe("https://x.com/dave/status/10");
+    // Keyed on the DESTINATION, not the tweet permalink (the wave-collapse mechanism),
+    // and written through the coherent-set destination writer.
+    expect(upsertCalls[0]!.url).toBe("https://youtu.be/AGENTvid001");
+    expect(upsertCalls[0]!.writer).toBe("destination");
     expect(upsertCalls[0]!.kind).toBe("x-link");
     expect(upsertCalls[0]!.sourceDocId).toBe(`${today}_dave_10.md`);
     // Gate line names the destination for the x-link, so the model weighs the linked video.
@@ -1194,6 +1219,179 @@ describe("link-tweet (x-link) capture", () => {
     gateResult = JSON.stringify([{ n: 1, score: 0.65, why: "borderline" }]);
     await checkX(baseWatcher({ config: { ...captureOnly } }));
     expect(upsertCalls).toHaveLength(0);
+  });
+});
+
+// ── Destination-URL keying: a pointer wave collapses to ONE row ACROSS runs ──
+
+describe("destination-URL keying (x-link wave collapse)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const DEST = "https://example.com/announce";
+  let docs: Record<string, { text: string; url: string }> = {};
+
+  /** A short pointer tweet from `handle` at `link` (plural **Links:** footer). */
+  function pointerDoc(handle: string, id: string, ...links: string[]) {
+    return {
+      [`${today}_${handle}_${id}.md`]: {
+        url: `https://x.com/${handle}/status/${id}`,
+        text: `# @${handle} — ${handle}\n\n${handle.toUpperCase()} JUST DROPPED THIS\n\n---\n\n- **Engagement:** 800 likes\n- **Link:** https://x.com/${handle}/status/${id}\n- **Links:** ${links.join(" ")}`,
+      },
+    };
+  }
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: d.text, metadata: { url: d.url } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    candidateRows.clear();
+    upsertThrow = false;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    // Every pointer author is top-5% (x-link eligibility requires a tier).
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    docs = {};
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const baseWatcher = (over: Partial<Watcher>): Watcher => ({
+    id: "xw3",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    config: { collection: "x-feed", windowDays: 1 },
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+    ...over,
+  });
+
+  const captureOnly = { collection: "x-feed", windowDays: 1, captureCandidates: true, minScore: 0.6, quietMode: true } as const;
+
+  /** One watcher run over exactly `runDocs`, with the gate scoring item 1 as given. */
+  async function runWith(runDocs: typeof docs, score: number, why: string) {
+    docs = runDocs;
+    gateResult = JSON.stringify([{ n: 1, score, why }]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+  }
+
+  test("a wave across separate runs yields ONE destination-keyed row with coherent representative fields", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    authorScoreByHandle["frank"] = 0.7;
+    authorScoreByHandle["grace"] = 0.7;
+
+    // Run 1 — dave points at the destination with tracking params + a fragment.
+    await runWith(pointerDoc("dave", "10", `${DEST}?utm_source=twitter&si=abc#top`), 0.75, "dave says watch this");
+    // Run 2 — frank points at the same destination over http:// with a trailing slash,
+    // and scores HIGHER, so he takes over as representative.
+    await runWith(pointerDoc("frank", "11", `http://Example.com/announce/`), 0.9, "frank: the primary source");
+    // Run 3 — grace, same destination, LOWER score: the stored representative wins.
+    await runWith(pointerDoc("grace", "12", DEST), 0.72, "grace, late to it");
+
+    // Three admissions, all onto ONE key.
+    expect(upsertCalls).toHaveLength(3);
+    expect(new Set(upsertCalls.map((c) => c.url))).toEqual(new Set([DEST]));
+    expect(upsertCalls.every((c) => c.writer === "destination")).toBe(true);
+
+    // …and ONE surviving row, whose fields ALL belong to the same (best) member.
+    expect(candidateRows.size).toBe(1);
+    const row = storedRow("x", DEST)!;
+    expect(row.score).toBe(0.9);
+    expect(row.why).toBe("frank: the primary source");
+    expect(row.title).toContain("@frank:");
+    expect(row.candidateSrc).toBe("X (@frank)");
+    expect(row.author).toBe("frank");
+    expect(row.sourceDocId).toBe(`${today}_frank_11.md`);
+    expect(row.kind).toBe("x-link");
+  });
+
+  test("a dismissed destination row is never resurrected by a later wave member", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    candidateRows.set(`x|${DEST}`, {
+      source: "x",
+      url: DEST,
+      title: "@earlier: old pointer",
+      score: 0.7,
+      status: "dismissed",
+    });
+
+    await runWith(pointerDoc("dave", "10", DEST), 0.95, "loud new pointer");
+
+    const row = storedRow("x", DEST)!;
+    expect(row.status).toBe("dismissed");
+    expect(row.score).toBe(0.7);
+    expect(row.title).toBe("@earlier: old pointer");
+  });
+
+  test("a multi-link pointer keys on links[0] only", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    await runWith(pointerDoc("dave", "10", DEST, "https://other.test/second"), 0.8, "first link wins");
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.url).toBe(DEST);
+  });
+
+  test("a top-tier .pdf pointer keeps TODAY'S tweet-URL-keyed row", async () => {
+    authorScoreByHandle["dave"] = 0.7;
+    await runWith(pointerDoc("dave", "10", "https://arxiv.org/pdf/2401.00001v1.pdf"), 0.9, "the paper itself");
+    expect(upsertCalls).toHaveLength(1);
+    // The article content path is `res.text()` with zero PDF handling, so a
+    // destination-keyed .pdf row would summarize raw bytes — this class stays as-is.
+    expect(upsertCalls[0]!.url).toBe("https://x.com/dave/status/10");
+    expect(upsertCalls[0]!.writer).toBe("shared");
+    expect(upsertCalls[0]!.kind).toBe("x-link");
+    expect(candidateRows.size).toBe(0);
+  });
+
+  test("long-form is never re-keyed, even when it carries links", async () => {
+    authorScoreByHandle["heidi"] = 0.7;
+    const longBody = "insight ".repeat(120).trim();
+    docs = {
+      [`${today}_heidi_20.md`]: {
+        url: "https://x.com/heidi/status/20",
+        text: `# @heidi — Heidi\n\n${longBody}\n\n---\n\n- **Type:** note\n- **Links:** ${DEST}`,
+      },
+    };
+    gateResult = JSON.stringify([{ n: 1, score: 0.9, why: "long-form with a link" }]);
+    await checkX(baseWatcher({ config: { ...captureOnly } }));
+
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.url).toBe("https://x.com/heidi/status/20");
+    expect(upsertCalls[0]!.writer).toBe("shared");
   });
 });
 
@@ -1438,6 +1636,7 @@ describe("checkX: X Article capture (real-doc replay)", () => {
     gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
+    candidateRows.clear();
     upsertThrow = false;
     for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
     authorThresholds = null; // scores file unavailable ⇒ every author is non-top
@@ -1992,6 +2191,7 @@ describe("fetchFromCollection amplification wiring", () => {
     gateThrowFirstN = 0;
     lastGatePrompt = "";
     upsertCalls.length = 0;
+    candidateRows.clear();
     authorThresholds = null;
     stub();
   });
