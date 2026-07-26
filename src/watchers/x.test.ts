@@ -119,7 +119,8 @@ mock.module("../db/summary-candidates.ts", () => ({
   // dismissals) take the WHOLE set from the incoming member when it strictly beats the
   // stored score — and always bump `updatedAt` even when they don't, so a destination
   // under continuous hype keeps refreshing its expiry clock. Manual dismissals and
-  // summarized/summarizing rows are terminal.
+  // summarized/summarizing rows are terminal. Returns whether a row was actually
+  // written (the real writer's `RETURNING id` row count) — false on a terminal row.
   upsertDestinationCandidate: async (p: UpsertParams) => {
     if (upsertThrow) throw new Error("db down");
     upsertCalls.push({ ...p, writer: "destination" });
@@ -127,23 +128,87 @@ mock.module("../db/summary-candidates.ts", () => ({
     const existing = candidateRows.get(key);
     if (!existing) {
       candidateRows.set(key, { ...p, status: "new", updatedAt: Date.now() });
-      return;
+      return true;
     }
     const readmittable =
       existing.status === "new" ||
       existing.status === "error" ||
       (existing.status === "dismissed" && existing.dismissedReason === "expired");
-    if (!readmittable) return;
+    if (!readmittable) return false;
     if (!(p.score > existing.score)) {
       candidateRows.set(key, { ...existing, updatedAt: Date.now() });
-      return;
+      return true;
     }
     candidateRows.set(key, { ...p, status: "new", dismissedReason: null, updatedAt: Date.now() });
+    return true;
   },
   listCandidates: async () => [],
   getCandidateById: async () => null,
   getCandidateBySourceUrl: async () => null,
   setCandidateStatus: async () => {},
+}));
+
+// --- Step 2b: cross-run amplifier votes (stateful, mirrors the real SQL) ---
+// A STATEFUL stand-in is required, not a spy: the whole feature is "the 3rd distinct
+// author across 3 SEPARATE runs admits a row", which can only be asserted against
+// accumulated state. Exports the FULL public surface — mock.module leaks across
+// src/watchers/*.test.ts, and a partial mock would break a sibling file's module load.
+interface AmplifierRow {
+  urlKey: string;
+  author: string;
+  pointer: boolean;
+  tweetPermalink?: string | null;
+  sourceDocId?: string | null;
+  score?: number | null;
+  title?: string | null;
+  why?: string | null;
+}
+/** Keyed `urlKey|author` — the real PRIMARY KEY (url_key, author). */
+const amplifierRows = new Map<string, AmplifierRow>();
+const amplifierKey = (urlKey: string, author: string) => `${urlKey}|${author}`;
+let amplifierThrow = false;
+mock.module("../db/x-link-amplifiers.ts", () => ({
+  recordAmplifierVote: async (raw: AmplifierRow) => {
+    if (amplifierThrow) throw new Error("amplifier db down");
+    // Content columns are POINTER-ONLY (mirrors the real module): a long-form vote
+    // records its existence, never content that could later represent the group.
+    const p: AmplifierRow = raw.pointer
+      ? raw
+      : { urlKey: raw.urlKey, author: raw.author, pointer: false, tweetPermalink: null, sourceDocId: null, score: null, title: null, why: null };
+    const key = amplifierKey(p.urlKey, p.author);
+    const existing = amplifierRows.get(key);
+    if (!existing) {
+      amplifierRows.set(key, { ...p });
+      return;
+    }
+    // `pointer` is sticky-TRUE (an author who has pointed keeps the franchise); the
+    // content set moves only on a strictly better POINTER member.
+    const pointer = existing.pointer || p.pointer;
+    const wins = p.pointer && p.score != null && p.score > (existing.score ?? -1);
+    amplifierRows.set(key, wins ? { ...p, pointer } : { ...existing, pointer });
+  },
+  getAmplifierGroup: async (urlKey: string) => {
+    if (amplifierThrow) throw new Error("amplifier db down");
+    const members = [...amplifierRows.values()].filter((r) => r.urlKey === urlKey && r.pointer);
+    const scored = members
+      .filter((r) => r.score != null)
+      .sort((a, b) => b.score! - a.score! || a.author.localeCompare(b.author));
+    const best = scored[0];
+    return {
+      pointerAuthors: new Set(members.map((r) => r.author)).size,
+      best: best
+        ? {
+            author: best.author,
+            tweetPermalink: best.tweetPermalink ?? null,
+            sourceDocId: best.sourceDocId ?? null,
+            score: best.score!,
+            title: best.title ?? null,
+            why: best.why ?? null,
+          }
+        : null,
+    };
+  },
+  pruneXLinkAmplifiers: async () => 0,
 }));
 
 // Log capture — the coverage warn and the `Collection: … scored=` info line are the
@@ -175,6 +240,9 @@ const {
   resolveAuthorTier,
   captureFloorForTier,
   isLinkTweet,
+  isAmplifierPointer,
+  resolveCaptureAmplifyMin,
+  DEFAULT_CAPTURE_AMPLIFY_MIN,
   captureFloorForXLink,
   captureBudgetDeadline,
   captureBudgetMs,
@@ -1445,6 +1513,326 @@ describe("destination-URL keying (x-link wave collapse)", () => {
     expect(upsertCalls[0]!.kind).toBe("x-post");
     expect(upsertCalls[0]!.url).toBe("https://x.com/heidi/status/20");
     expect(upsertCalls[0]!.writer).toBe("shared");
+  });
+});
+
+// ── Step 2b: any-tier amplifier admission (flag-gated, OFF by default) ──
+
+describe("resolveCaptureAmplifyMin", () => {
+  test("absent ⇒ null (the whole 2b path is OFF by default)", () => {
+    expect(resolveCaptureAmplifyMin({})).toBeNull();
+  });
+
+  test("a valid integer ≥ 1 is the threshold", () => {
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: DEFAULT_CAPTURE_AMPLIFY_MIN })).toBe(3);
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: 1 })).toBe(1);
+  });
+
+  test("an invalid value degrades to OFF, never to a default (no silent batch growth)", () => {
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: 0 })).toBeNull();
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: 2.5 })).toBeNull();
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: -1 })).toBeNull();
+    expect(resolveCaptureAmplifyMin({ captureAmplifyMin: "3" as unknown as number })).toBeNull();
+  });
+});
+
+describe("isAmplifierPointer", () => {
+  const short = { bodyLength: 100, docType: null };
+
+  test("a sub-tier short tweet with a groupable link qualifies", () => {
+    expect(isAmplifierPointer({ ...short, links: ["https://example.com/x"] }, null)).toBe(true);
+  });
+
+  test("a TOP-tier pointer does not (isLinkTweet already admits it)", () => {
+    expect(isAmplifierPointer({ ...short, links: ["https://example.com/x"] }, "top5")).toBe(false);
+  });
+
+  test("long-form never qualifies", () => {
+    expect(isAmplifierPointer({ bodyLength: 100, docType: "note", links: ["https://example.com/x"] }, null)).toBe(false);
+  });
+
+  test("no link, and a PDF destination (no group key), are both excluded — they could never be admitted", () => {
+    expect(isAmplifierPointer({ ...short, links: [] }, null)).toBe(false);
+    expect(isAmplifierPointer({ ...short, links: ["https://arxiv.org/pdf/2401.00001v1.pdf"] }, null)).toBe(false);
+  });
+});
+
+describe("any-tier amplifier admission (step 2b)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const DEST = "https://example.com/wave";
+  let docs: Record<string, { text: string; url: string }> = {};
+
+  /** A SHORT pointer tweet — sub-tier because no author score is registered for `handle`. */
+  function pointerDoc(handle: string, id: string, link = DEST) {
+    return {
+      [`${today}_${handle}_${id}.md`]: {
+        url: `https://x.com/${handle}/status/${id}`,
+        text: `# @${handle} — ${handle}\n\n${handle} POINTS AT IT\n\n---\n\n- **Engagement:** 20 likes\n- **Link:** https://x.com/${handle}/status/${id}\n- **Links:** ${link}`,
+      },
+    };
+  }
+
+  /** A LONG-FORM note that happens to carry the same destination in its footnotes. */
+  function longFormDoc(handle: string, id: string, link = DEST) {
+    return {
+      [`${today}_${handle}_${id}.md`]: {
+        url: `https://x.com/${handle}/status/${id}`,
+        text: `# @${handle} — ${handle}\n\n${"original analysis ".repeat(60).trim()}\n\n---\n\n- **Type:** note\n- **Links:** ${link}`,
+      },
+    };
+  }
+
+  function stub() {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        const documents = Object.entries(docs).map(([id, d]) => ({ id, url: d.url }));
+        return { ok: true, status: 200, json: async () => ({ documents }) } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop()!);
+      const d = docs[id];
+      if (!d) return { ok: false, status: 404 } as unknown as Response;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: d.text, metadata: { url: d.url } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    candidateRows.clear();
+    amplifierRows.clear();
+    amplifierThrow = false;
+    upsertThrow = false;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    // Thresholds exist, but none of these handles is in the scores file ⇒ tier null ⇒
+    // every pointer below is SUB-TIER (invisible to capture before step 2b).
+    authorThresholds = { top1: 0.9, top5: 0.5 };
+    docs = {};
+    stub();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const captureOn = {
+    collection: "x-feed",
+    windowDays: 1,
+    captureCandidates: true,
+    minScore: 0.6,
+    quietMode: true,
+    captureAmplifyMin: 3,
+  } as const;
+
+  const baseWatcher = (config: Record<string, unknown>): Watcher => ({
+    id: "xw4",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    config,
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  /** One watcher run over exactly `runDocs`, with the gate returning `scores`. */
+  async function run(
+    runDocs: typeof docs,
+    scores: Array<{ n: number; score: number; why: string }>,
+    config: Record<string, unknown> = { ...captureOn },
+  ) {
+    docs = runDocs;
+    gateResult = JSON.stringify(scores);
+    await checkX(baseWatcher(config));
+  }
+
+  test("three runs, three distinct sub-tier authors: NO row until the third, then ONE built from the BEST recorded pointer", async () => {
+    // Run 1 — alice alone. One vote, no admission (1 < 3).
+    await run(pointerDoc("alice", "10"), [{ n: 1, score: 0.75, why: "alice points" }]);
+    expect(upsertCalls).toHaveLength(0);
+    expect(candidateRows.size).toBe(0);
+    expect(amplifierRows.size).toBe(1);
+
+    // Run 2 — bob, the HIGHEST-scoring member of the wave. Still no admission (2 < 3).
+    await run(pointerDoc("bob", "11"), [{ n: 1, score: 0.9, why: "bob: the primary source" }]);
+    expect(upsertCalls).toHaveLength(0);
+    expect(candidateRows.size).toBe(0);
+    expect(amplifierRows.size).toBe(2);
+
+    // Run 3 — carol crosses the threshold with the LOWEST score of the three. The row is
+    // built from bob's RECORDED snapshot, not from the pointer that happened to trip it
+    // (alice's and bob's docs are long gone from this run's batch).
+    await run(pointerDoc("carol", "12"), [{ n: 1, score: 0.72, why: "carol, late to it" }]);
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.writer).toBe("destination");
+    expect(upsertCalls[0]!.url).toBe(DEST);
+    expect(upsertCalls[0]!.kind).toBe("x-link");
+
+    expect(candidateRows.size).toBe(1);
+    const row = storedRow("x", DEST)!;
+    expect(row.author).toBe("bob");
+    expect(row.score).toBe(0.9);
+    expect(row.why).toBe("bob: the primary source");
+    expect(row.candidateSrc).toBe("X (@bob)");
+    expect(row.sourceDocId).toBe(`${today}_bob_11.md`);
+  });
+
+  test("the threshold is crossed by a LATER member of the SAME batch: one row, from the best recorded pointer", async () => {
+    // Regression: the check used to run INLINE at the first non-directly-admitted pointer
+    // of a group, but votes are written per item as the loop walks — so bob's and carol's
+    // votes did not exist yet when bob (n=1) was checked, and the group was never
+    // re-checked (alice's and bob's docs are consumed + marked seen). Result was ZERO rows
+    // despite 3 distinct authors and a 0.9 best. The drain now runs AFTER the loop.
+    await run(pointerDoc("alice", "10"), [{ n: 1, score: 0.75, why: "alice points" }]);
+    expect(candidateRows.size).toBe(0);
+
+    // ONE batch carrying the wave's 2nd AND 3rd distinct authors.
+    await run({ ...pointerDoc("bob", "11"), ...pointerDoc("carol", "12") }, [
+      { n: 1, score: 0.9, why: "bob: the primary source" },
+      { n: 2, score: 0.72, why: "carol, late to it" },
+    ]);
+    expect(amplifierRows.size).toBe(3);
+    // Exactly ONE admission for the group, despite two queued pointers in the batch.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.writer).toBe("destination");
+    expect(candidateRows.size).toBe(1);
+    const row = storedRow("x", DEST)!;
+    expect(row.author).toBe("bob");
+    expect(row.score).toBe(0.9);
+    expect(row.why).toBe("bob: the primary source");
+  });
+
+  test("the wave still has to clear the x-link floor — three 0.65 pointers admit nothing", async () => {
+    await run(pointerDoc("alice", "10"), [{ n: 1, score: 0.65, why: "meh" }]);
+    await run(pointerDoc("bob", "11"), [{ n: 1, score: 0.68, why: "meh" }]);
+    await run(pointerDoc("carol", "12"), [{ n: 1, score: 0.6, why: "meh" }]);
+    expect(amplifierRows.size).toBe(3);
+    expect(upsertCalls).toHaveLength(0);
+    expect(candidateRows.size).toBe(0);
+  });
+
+  test("a long-form post carrying the URL keeps its own x-post row and votes for OBSERVABILITY ONLY", async () => {
+    // Run 1 — alice (pointer) + dave (long-form, scored HIGHER than any pointer).
+    // Alphabetical doc-id order ⇒ alice is n=1, dave n=2.
+    await run({ ...pointerDoc("alice", "10"), ...longFormDoc("dave", "13") }, [
+      { n: 1, score: 0.75, why: "alice points" },
+      { n: 2, score: 0.99, why: "dave's own analysis" },
+    ]);
+    // dave keeps his own TWEET-keyed x-post row through the shared writer — never re-keyed.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.url).toBe("https://x.com/dave/status/13");
+    expect(upsertCalls[0]!.writer).toBe("shared");
+    // Both voted, but dave's vote is non-pointer.
+    expect(amplifierRows.size).toBe(2);
+    expect(amplifierRows.get(`${DEST}|dave`)!.pointer).toBe(false);
+
+    // Run 2 — bob. Two POINTER authors + dave = 3 rows, but only 2 count ⇒ no admission.
+    // This is the invariant that stops footnote links admitting a duplicate destination
+    // row alongside the long-form posts' own rows.
+    await run(pointerDoc("bob", "11"), [{ n: 1, score: 0.8, why: "bob points" }]);
+    expect(amplifierRows.size).toBe(3);
+    expect(storedRow("x", DEST)).toBeUndefined();
+
+    // Run 3 — carol is the third POINTER author. Now it admits — from bob (0.8), the best
+    // recorded POINTER, never from dave (0.99), who is not eligible to represent.
+    await run(pointerDoc("carol", "12"), [{ n: 1, score: 0.7, why: "carol points" }]);
+    const row = storedRow("x", DEST)!;
+    expect(row.author).toBe("bob");
+    expect(row.score).toBe(0.8);
+  });
+
+  test("flag UNSET ⇒ sub-tier pointers vanish exactly as today: no votes, no batch growth", async () => {
+    const off = { collection: "x-feed", windowDays: 1, captureCandidates: true, minScore: 0.6, quietMode: true };
+    await run({ ...pointerDoc("alice", "10"), ...pointerDoc("bob", "11"), ...pointerDoc("carol", "12") }, [
+      { n: 1, score: 0.95, why: "loud" },
+      { n: 2, score: 0.95, why: "loud" },
+      { n: 3, score: 0.95, why: "loud" },
+    ], off);
+    expect(amplifierRows.size).toBe(0);
+    expect(upsertCalls).toHaveLength(0);
+    // Zero batch growth: nothing was eligible, so the capture gate was never called at all.
+    expect(lastGatePrompt).toBe("");
+  });
+
+  test("flag UNSET on a MIXED batch ⇒ the gate sees only the long-form item, and nothing votes", async () => {
+    // The byte-identity claim ("flag unset ⇒ the eligible set is exactly step 2a's") is
+    // only really tested when something IS eligible: the flag-off test above asserts an
+    // empty prompt, which an unconditionally-broken gate would also produce.
+    const off = { collection: "x-feed", windowDays: 1, captureCandidates: true, minScore: 0.6, quietMode: true };
+    await run({ ...pointerDoc("alice", "10"), ...longFormDoc("dave", "13") }, [
+      { n: 1, score: 0.95, why: "dave's own analysis" },
+    ], off);
+    // Exactly one numbered item, and it is dave's long-form post.
+    const posts = lastGatePrompt.split("\n\nPosts:\n\n")[1]!;
+    expect(posts).toContain("1. [ARTICLE/NOTE] @dave:");
+    expect(posts).not.toContain("2. ");
+    expect(posts).not.toContain("@alice");
+    // No pointer line at all — the sub-tier pointer never entered the batch.
+    expect(posts).not.toContain("links to:");
+    // No votes at all — the amplifier table is untouched with the flag off.
+    expect(amplifierRows.size).toBe(0);
+    // dave still captures normally through the shared (tweet-keyed) writer.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.writer).toBe("shared");
+  });
+
+  test("a sub-tier .pdf pointer is not promoted — and never even enters the gate batch", async () => {
+    const pdf = "https://arxiv.org/pdf/2401.00001v1.pdf";
+    await run(pointerDoc("alice", "10", pdf), [{ n: 1, score: 0.95, why: "the paper" }]);
+    await run(pointerDoc("bob", "11", pdf), [{ n: 1, score: 0.95, why: "the paper" }]);
+    await run(pointerDoc("carol", "12", pdf), [{ n: 1, score: 0.95, why: "the paper" }]);
+    expect(amplifierRows.size).toBe(0);
+    expect(upsertCalls).toHaveLength(0);
+    expect(candidateRows.size).toBe(0);
+    expect(lastGatePrompt).toBe("");
+  });
+
+  test("a pointer the gate OMITTED still votes (votes and admission are decoupled)", async () => {
+    // alice is scored, bob is omitted from the gate output entirely.
+    await run({ ...pointerDoc("alice", "10"), ...pointerDoc("bob", "11") }, [
+      { n: 1, score: 0.9, why: "alice points" },
+    ]);
+    expect(amplifierRows.size).toBe(2);
+    expect(amplifierRows.get(`${DEST}|bob`)!.score).toBeNull();
+    // …but an unscored member can never be the representative, so the third author
+    // admits from alice.
+    await run(pointerDoc("carol", "12"), [{ n: 1, score: 0.72, why: "carol points" }]);
+    const row = storedRow("x", DEST)!;
+    expect(row.author).toBe("alice");
+    expect(row.score).toBe(0.9);
+  });
+
+  test("an amplifier DB failure never breaks the capture path", async () => {
+    amplifierThrow = true;
+    authorScoreByHandle["dave"] = 0.7; // top-5% ⇒ dave admits directly, as in step 2a
+    await run({ ...pointerDoc("alice", "10"), ...pointerDoc("dave", "13") }, [
+      { n: 1, score: 0.9, why: "alice points" },
+      { n: 2, score: 0.9, why: "dave points" },
+    ]);
+    // dave's direct (top-tier) admission still lands despite every vote/read throwing.
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.sourceDocId).toBe(`${today}_dave_13.md`);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   expireStaleCandidates,
   candidateOutcomeStats,
 } from "../../db/summary-candidates.ts";
+import { pruneXLinkAmplifiers } from "../../db/x-link-amplifiers.ts";
 import {
   getJob,
   getRecentJobs,
@@ -65,6 +66,17 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
         await expireStaleCandidates(14);
       } catch (err) {
         log.warn("expireStaleCandidates failed: {error}", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // Same shape, same call site: the step-2b amplifier votes age out at 30 days (a
+      // wave that never reached its threshold in a month is not a wave). Cleanup
+      // therefore depends on dashboard visits — accepted; the miss is unbounded growth
+      // of a tiny table, never incorrectness.
+      try {
+        await pruneXLinkAmplifiers(30);
+      } catch (err) {
+        log.warn("pruneXLinkAmplifiers failed: {error}", {
           error: err instanceof Error ? err.message : String(err),
         });
       }

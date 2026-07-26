@@ -403,6 +403,33 @@ CREATE TABLE summary_candidates (
 CREATE INDEX idx_summary_candidates_status ON summary_candidates (status, score DESC);
 
 -- ============================================================================
+-- X link amplifiers: cross-run pointer votes per destination (hype-dedup step 2b).
+-- Each pointer tweet at an external destination records one vote; a destination
+-- earns a candidate row only once `captureAmplifyMin` DISTINCT POINTER authors have
+-- voted, admitted FROM the best recorded pointer member. `pointer = FALSE` rows are
+-- long-form posts carrying the same URL — observability only, never counted toward
+-- the threshold and never the representative. The score/title/why/doc columns exist
+-- because earlier wave members are consumed in earlier runs, so the top-scoring
+-- member is unrecoverable without them. ⚠️ Mirror of
+-- db/migrations/067-x-link-amplifiers.sql: identical columns + constraints + index
+-- or schema-drift.test.ts reds.
+-- ============================================================================
+CREATE TABLE x_link_amplifiers (
+  url_key         TEXT NOT NULL,
+  author          TEXT NOT NULL,
+  pointer         BOOLEAN NOT NULL DEFAULT TRUE,
+  tweet_permalink TEXT,
+  source_doc_id   TEXT,
+  score           REAL,
+  title           TEXT,
+  why             TEXT,
+  first_seen      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (url_key, author)
+);
+
+CREATE INDEX idx_x_link_amplifiers_first_seen ON x_link_amplifiers (first_seen);
+
+-- ============================================================================
 -- User settings: quiet hours, timezone preferences
 -- ============================================================================
 CREATE TABLE user_settings (

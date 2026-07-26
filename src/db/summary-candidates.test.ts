@@ -134,6 +134,20 @@ describe("summary-candidates", () => {
     expect(after.docId).toBe("ai/x/doc.md");
   });
 
+  test("upsertDestinationCandidate reports whether a row was ACTUALLY written", async () => {
+    // Load-bearing for the step-2b wave admission, which logs "admitted from @author" and
+    // counts the destination as captured — both would be lies on a suppressed write, since
+    // an ON CONFLICT … DO UPDATE whose WHERE fails raises nothing.
+    expect(await upsertDestinationCandidate(member({ score: 0.7, why: "insert" }))).toBe(true);
+    expect(await upsertDestinationCandidate(member({ score: 0.9, why: "replace" }))).toBe(true);
+    // A tie/loss still bumps updated_at ⇒ a row IS written.
+    expect(await upsertDestinationCandidate(member({ score: 0.5, why: "loser" }))).toBe(true);
+
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "dismissed", null, "manual");
+    expect(await upsertDestinationCandidate(member({ score: 0.99, why: "suppressed" }))).toBe(false);
+  });
+
   test("an `error` row is re-admitted by a better later member (its only recovery path)", async () => {
     await upsertDestinationCandidate(member({ score: 0.7, why: "first", sourceDocId: "d1.md" }));
     const first = (await getCandidateBySourceUrl("x", destUrl))!;
