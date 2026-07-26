@@ -161,6 +161,9 @@ export async function upsertCandidate(p: UpsertCandidateParams): Promise<void> {
  *    {@link expireStaleCandidates} after 14 days of no activity. That is bookkeeping,
  *    not a judgement; an empirically observed case had an auto-expired row silently
  *    swallow a later 0.97 wave.
+ *  - `dismissed` WITH `dismissed_reason = {@link HYPE_DEDUP_SWEEP_REASON}` — bulk-cleared
+ *    by the one-shot pre-calibration backlog sweep. Same rationale as `expired`: bulk
+ *    bookkeeping, explicitly NOT a per-item judgement, so it must not poison its key.
  *
  * MANUAL dismissal (`dismissed_reason = 'manual'`) and `summarized`/`summarizing` stay
  * **terminal** — that's the plan's intended dismiss-once bonus (dismissing the topic
@@ -219,7 +222,10 @@ export async function upsertDestinationCandidate(p: UpsertCandidateParams): Prom
           dismissed_reason = CASE WHEN EXCLUDED.score > summary_candidates.score THEN NULL ELSE summary_candidates.dismissed_reason END,
           updated_at = now()
       WHERE summary_candidates.status IN ('new', 'error')
-         OR (summary_candidates.status = 'dismissed' AND summary_candidates.dismissed_reason = 'expired')
+         OR (
+           summary_candidates.status = 'dismissed'
+           AND summary_candidates.dismissed_reason IN ('expired', ${HYPE_DEDUP_SWEEP_REASON})
+         )
     RETURNING id
   `;
   return rows.length > 0;
@@ -377,11 +383,19 @@ export interface OutcomeCounts {
   dismissedSwept: number;
   /** Dismissed before migration 051 (dismissed_reason NULL) — origin unknown. */
   dismissedUnknown: number;
+  /**
+   * CATCH-ALL: dismissed with a non-NULL reason that is none of manual/expired/swept.
+   * `dismissed_reason` is free text, so a future one-shot sweep or a new auto-dismisser
+   * would otherwise fall out of every bucket and silently shrink `total`. Counted in
+   * `total`, kept OUT of the acceptance denominator (an unclassified reason is not a
+   * demonstrated human accept/reject judgement).
+   */
+  dismissedOther: number;
   error: number;
   /**
-   * summarized / (summarized + dismissedManual). Expired, swept + unknown dismissals
-   * and errors are deliberately OUT of the denominator (they aren't accept/reject
-   * judgements). null when the denominator is 0 (no labeled decisions yet).
+   * summarized / (summarized + dismissedManual). Expired, swept, other + unknown
+   * dismissals and errors are deliberately OUT of the denominator (they aren't
+   * accept/reject judgements). null when the denominator is 0 (no labeled decisions yet).
    */
   acceptanceRate: number | null;
 }
@@ -426,6 +440,7 @@ interface RawCell {
   dismissedExpired: number;
   dismissedSwept: number;
   dismissedUnknown: number;
+  dismissedOther: number;
   error: number;
 }
 
@@ -437,6 +452,7 @@ function emptyCounts(): OutcomeCounts {
     dismissedExpired: 0,
     dismissedSwept: 0,
     dismissedUnknown: 0,
+    dismissedOther: 0,
     error: 0,
     acceptanceRate: null,
   };
@@ -448,6 +464,7 @@ function accumulate(acc: OutcomeCounts, c: RawCell): void {
   acc.dismissedExpired += c.dismissedExpired;
   acc.dismissedSwept += c.dismissedSwept;
   acc.dismissedUnknown += c.dismissedUnknown;
+  acc.dismissedOther += c.dismissedOther;
   acc.error += c.error;
 }
 
@@ -458,6 +475,7 @@ function finalize(acc: OutcomeCounts): void {
     acc.dismissedExpired +
     acc.dismissedSwept +
     acc.dismissedUnknown +
+    acc.dismissedOther +
     acc.error;
   const denom = acc.summarized + acc.dismissedManual;
   acc.acceptanceRate = denom > 0 ? round3(acc.summarized / denom) : null;
@@ -484,6 +502,12 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = 'expired')::int AS dismissed_expired,
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason = ${HYPE_DEDUP_SWEEP_REASON})::int AS dismissed_swept,
       count(*) FILTER (WHERE status = 'dismissed' AND dismissed_reason IS NULL)::int AS dismissed_unknown,
+      -- Catch-all so a future free-text reason cannot fall out of the total.
+      count(*) FILTER (
+        WHERE status = 'dismissed'
+          AND dismissed_reason IS NOT NULL
+          AND dismissed_reason NOT IN ('manual', 'expired', ${HYPE_DEDUP_SWEEP_REASON})
+      )::int AS dismissed_other,
       count(*) FILTER (WHERE status = 'error')::int AS error
     FROM summary_candidates
     WHERE status IN ('summarized', 'dismissed', 'error')
@@ -499,6 +523,7 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
     dismissedExpired: Number(r.dismissed_expired),
     dismissedSwept: Number(r.dismissed_swept),
     dismissedUnknown: Number(r.dismissed_unknown),
+    dismissedOther: Number(r.dismissed_other),
     error: Number(r.error),
   }));
 

@@ -178,6 +178,7 @@ export function sumOutcomesScript(): string {
         '<td>' + o.dismissedManual + '</td>' +
         '<td class="dim">' + o.dismissedExpired + '</td>' +
         '<td class="dim">' + (o.dismissedSwept || 0) + '</td>' +
+        '<td class="dim">' + (o.dismissedOther || 0) + '</td>' +
         '<td class="dim">' + o.dismissedUnknown + '</td>' +
         '<td class="dim">' + o.error + '</td>' +
         '<td>' + outcomeAcc(o) + '</td>';
@@ -189,6 +190,7 @@ export function sumOutcomesScript(): string {
         '<th>Total</th><th>Summ.</th><th>Dismiss</th>' +
         '<th title="Auto-dismissed stale after 14 idle days — excluded from Accept">Expired</th>' +
         '<th title="Bulk-dismissed by the one-shot hype-dedup backlog sweep — excluded from Accept">Swept</th>' +
+        '<th title="Dismissed with some other recorded reason — counted in Total, excluded from Accept">Other</th>' +
         '<th>Unknown</th><th>Error</th><th>Accept</th>' +
         '</tr></thead>';
     }
