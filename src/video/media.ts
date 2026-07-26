@@ -253,6 +253,9 @@ async function globAbsolute(dir: string, pattern: string): Promise<string[]> {
 export interface DownloadOptions {
   /** Pre-download duration cap in seconds (yt-dlp match-filter). Default 600. */
   maxDurationSeconds?: number;
+  /** Override the yt-dlp process timeout — hour-plus videos (X workshops) are
+   * gigabyte-scale downloads that outrun the 120s short-clip default. */
+  timeoutMs?: number;
 }
 
 /**
@@ -282,7 +285,7 @@ export async function downloadVideo(
 
   const { stdout, stderr, exitCode } = await runProc(
     args,
-    DOWNLOAD_TIMEOUT_MS,
+    opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS,
     "yt-dlp download",
   );
 
@@ -351,9 +354,12 @@ export async function downloadVideo(
  * common, so we return "" and let the summary lean on the frames.
  */
 export interface TranscribeOptions {
-  /** Override the whisper-cli timeout — longer videos (X allows 20 min vs
-   * TikTok's 10) need more than the 120s default. */
+  /** Override the whisper-cli timeout — longer videos (X allows hours vs
+   * TikTok's 10 min) need more than the 120s default. */
   whisperTimeoutMs?: number;
+  /** Override the ffmpeg audio-extraction timeout — decoding an hour-plus
+   * video's audio track outruns the 60s short-clip default. */
+  audioTimeoutMs?: number;
 }
 
 export async function transcribeVideo(
@@ -391,7 +397,7 @@ export async function transcribeVideo(
   // Convert to 16kHz mono WAV (whisper-cli's required input format).
   const ffmpeg = await runProc(
     ["ffmpeg", "-i", videoPath, "-ar", "16000", "-ac", "1", "-y", wavPath],
-    FFMPEG_AUDIO_TIMEOUT_MS,
+    opts.audioTimeoutMs ?? FFMPEG_AUDIO_TIMEOUT_MS,
     "ffmpeg audio extract",
   );
   if (ffmpeg.exitCode !== 0) {

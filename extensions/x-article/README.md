@@ -17,7 +17,7 @@ The extension extracts the article text from the page, sends it to Muninn for su
 2. Click the extension icon — it detects the video player and shows "Summarize video"
 3. Click it — Muninn downloads the video server-side (yt-dlp), transcribes the audio (whisper), extracts keyframes, and Claude summarizes both speech and visuals
 
-Video summaries land in the same X shelf (`/summaries?source=x-article`) as articles, deduped per tweet. Max video length 20 minutes; requires `yt-dlp` on the server's PATH.
+Video summaries land in the same X shelf (`/summaries?source=x-article`) as articles, deduped per tweet. Max video length 3 hours; requires `yt-dlp` on the server's PATH.
 
 ## Install
 

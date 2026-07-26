@@ -14,8 +14,8 @@ const BARE_STATUS_URL = "https://x.com/coolcoder/status/2081279674966044799";
 let transcript = "Elon lays out the AI timeline.";
 let framesResult: Array<{ path: string; tSeconds: number }> = [];
 let extractShouldThrow = false;
-let downloadCalls: Array<{ url: string; workDir: string; opts?: { maxDurationSeconds?: number } }> = [];
-let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number } }> = [];
+let downloadCalls: Array<{ url: string; workDir: string; opts?: { maxDurationSeconds?: number; timeoutMs?: number } }> = [];
+let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
 let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
 
 let claudeResult =
@@ -32,7 +32,7 @@ mock.module("../video/media.ts", () => ({
   downloadVideo: async (
     url: string,
     workDir: string,
-    opts?: { maxDurationSeconds?: number },
+    opts?: { maxDurationSeconds?: number; timeoutMs?: number },
   ) => {
     downloadCalls.push({ url, workDir, opts });
     return {
@@ -48,7 +48,7 @@ mock.module("../video/media.ts", () => ({
   transcribeVideo: async (
     _videoPath: string,
     _config: unknown,
-    opts?: { whisperTimeoutMs?: number },
+    opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number },
   ) => {
     transcribeCalls.push({ opts });
     return transcript;
@@ -175,13 +175,15 @@ test("happy path: completes the job and ingests under the BARE status URL", asyn
   expect(ingestPayload!.category).toBe("ai/claude-code");
 });
 
-test("passes the 20-min duration cap and duration-scaled timeouts to the media pipeline", async () => {
+test("passes the 3-hour duration cap and duration-scaled timeouts to the media pipeline", async () => {
   const jobId = createJob("2081279674966044799", "My X video", SLOT_URL, "");
   await summarizeXVideo(jobId, SLOT_URL, "My X video", config, bot);
 
-  expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(1200);
-  // 636s video ⇒ whisper timeout scales past the 120s default.
+  expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(10800);
+  expect(downloadCalls[0]!.opts?.timeoutMs).toBe(600_000);
+  // 636s video ⇒ whisper/ffmpeg timeouts scale past the short-clip defaults.
   expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(636_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(127_200);
   expect(extractOpts?.durationSeconds).toBe(636);
   expect(extractOpts?.frameTimeoutMs).toBe(318_000);
 });

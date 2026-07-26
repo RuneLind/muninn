@@ -28,10 +28,15 @@ import {
 
 const log = getLog("x-article", "video");
 
-// X allows longer clips than TikTok (interview excerpts, talk recordings), so
-// the cap is 20 min rather than TikTok's 10. Whisper/ffmpeg timeouts scale with
-// duration below instead of riding the media module's short-clip defaults.
-const MAX_DURATION_SECONDS = 1200;
+// X carries genuinely long recordings (2h+ workshop uploads, talks, interviews)
+// and those are exactly the high-value captures, so the cap is 3 hours rather
+// than TikTok's 10 min. Every subprocess timeout scales with duration below
+// instead of riding the media module's short-clip defaults; the first real
+// capture (a 2:21h Anthropic workshop) tripped the original 20-min cap.
+const MAX_DURATION_SECONDS = 10800;
+
+// Gigabyte-scale downloads outrun the 120s short-clip default.
+const DOWNLOAD_TIMEOUT_MS = 600_000;
 
 // Mirrors the TikTok prompt — the "no commentary" line is load-bearing (see
 // src/tiktok/summarizer.ts): without it the model narrates between frame Reads
@@ -89,17 +94,20 @@ export async function summarizeXVideo(
     updateStatus(jobId, "downloading");
     const dl = await downloadVideo(url, workDir, {
       maxDurationSeconds: MAX_DURATION_SECONDS,
+      timeoutMs: DOWNLOAD_TIMEOUT_MS,
     });
 
     // Key ingest + dedup on the bare status URL, not yt-dlp's /video/1-suffixed
     // webpage_url (media-slot suffixes would defeat URL dedup on the shelf).
     const canonicalUrl = canonicalXStatusUrl(dl.canonicalUrl) ?? canonicalXStatusUrl(url) ?? url;
 
-    // 2. Transcribe. Empty transcript is fine (music/caption-only clips) —
-    //    whisper gets ~3× realtime headroom for clips beyond the 120s default.
+    // 2. Transcribe. Empty transcript is fine (music/caption-only clips).
+    //    Timeouts scale with the clip: whisper gets ~1× realtime (base.en runs
+    //    ~10×, so this is generous headroom), the wav extract ~0.2× realtime.
     updateStatus(jobId, "transcribing");
     const transcript = await transcribeVideo(dl.videoPath, config, {
       whisperTimeoutMs: Math.max(120_000, Math.round(dl.duration * 1000)),
+      audioTimeoutMs: Math.max(60_000, Math.round(dl.duration * 200)),
     });
 
     // 3. Keyframes (unless disabled) — a failure degrades to transcript-only.
