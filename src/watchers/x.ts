@@ -5,6 +5,7 @@ import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
 import { applyAmplification, resolveAmplificationConfig, type AmplificationConfig } from "./x-amplification.ts";
+import { computeWatcherTimeoutMs } from "./timeout.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -829,8 +830,61 @@ function authorTierLabel(tier: AuthorTier | null): string | null {
  * summary — never captured.
  */
 const LONGFORM_MIN_CHARS = 800;
-/** Capture-gate model-call timeout — Haiku over one small (dedupByTweetId) batch. */
-const CAPTURE_GATE_TIMEOUT_MS = 90_000;
+/**
+ * Capture-gate model-call timeout, PER ATTEMPT. Raised 90s → 180s after 2026-07-26,
+ * when the gate produced ZERO successful runs for a day: the 90s cap was hit at
+ * n=64/57/54/61/54 but ALSO at n=6/14/19, so the tail is spawn + model latency, not
+ * only batch size. There is real headroom for it — the capturing X Highlights row runs
+ * `config.timeoutMs: 600000`, i.e. a 630s runner net (`computeWatcherTimeoutMs`) — and
+ * the hard completion budget below is what keeps the raise from ever eating that net.
+ */
+const CAPTURE_GATE_TIMEOUT_MS = 180_000;
+
+/** Attempts per gate call: the first try plus ONE retry (the tail is transient). */
+const CAPTURE_GATE_MAX_ATTEMPTS = 2;
+
+/**
+ * Never start a gate attempt with less than this much budget left. An attempt that
+ * can't plausibly finish is worse than not trying: it burns the remaining budget and
+ * still returns nothing, and the 2026-07-26 sample shows successful passes taking tens
+ * of seconds. Below the floor the gate gives up immediately and logs a
+ * `budget-exhausted` outcome instead.
+ */
+const CAPTURE_GATE_MIN_ATTEMPT_MS = 20_000;
+
+/**
+ * Safety margin subtracted from the runner's per-watcher net to get the capture leg's
+ * hard completion budget (630s net − 60s ⇒ ~570s for X Highlights).
+ *
+ * Blowing the net is CATASTROPHIC, not soft: `withWatcherTimeout` rejects, the runner's
+ * catch re-saves the OLD `lastNotifiedIds` (`runner.ts`), so the whole batch is
+ * re-fetched next run and the bulge grows. Capture runs CONCURRENTLY with the digest
+ * call (started early in `checkX`, awaited in its `finally`), so the run's wall clock is
+ * `max(capture, alert)` — no alert reserve is subtracted here, only this margin for the
+ * surrounding fetch/persist/send work.
+ */
+const CAPTURE_BUDGET_SAFETY_MARGIN_MS = 60_000;
+
+/**
+ * Absolute wall-clock deadline the capture leg must finish by, derived from the RUNNER'S
+ * clock. `runStartedAt` must be sampled at `checkX` entry — i.e. BEFORE
+ * `fetchFromCollection`, which does up to `maxDocs` (80) per-doc HTTP fetches. A deadline
+ * anchored at capture START would silently grant the gate that whole fetch duration on
+ * top of the net and overshoot it.
+ */
+export function captureBudgetDeadline(watcher: Watcher, runStartedAt: number): number {
+  return runStartedAt + Math.max(0, computeWatcherTimeoutMs(watcher) - CAPTURE_BUDGET_SAFETY_MARGIN_MS);
+}
+
+/**
+ * Timeout for the next gate attempt: `min(per-attempt cap, remaining budget)`, or `null`
+ * when the remaining budget can't cover a plausible attempt (⇒ don't start one).
+ */
+export function captureAttemptTimeoutMs(deadline: number, now: number): number | null {
+  const remaining = deadline - now;
+  if (remaining < CAPTURE_GATE_MIN_ATTEMPT_MS) return null;
+  return Math.min(CAPTURE_GATE_TIMEOUT_MS, remaining);
+}
 
 /**
  * Capture-gate prompt (mirrors the anthropic watcher's `{n,score,why}` contract). Scores
@@ -924,15 +978,70 @@ function linkDomain(url: string): string {
 }
 
 /**
+ * Does this eligible item's gate score clear its per-kind capture floor? Single source of
+ * truth shared by the persist loop and the gate's outcome log, so the logged
+ * `aboveFloor` can never drift from what actually gets captured.
+ */
+function passesCaptureFloor(item: EligibleTweet, score: GateScore, config: XWatcherConfig): boolean {
+  // x-post → per-tier floor (non-top raise applies, EXCEPT for `**Type:** article` —
+  // long-form by construction, see the precedence table on captureFloorForTier);
+  // x-link → the pointer-tweet floor (already top-author-only by eligibility, so no raise).
+  const floor =
+    item.kind === "x-link"
+      ? captureFloorForXLink(config)
+      : captureFloorForTier(item.tier, config, item.doc.docType);
+  return score.score >= floor;
+}
+
+/** One gate attempt's outcome — the measurement surface, logged unconditionally. */
+interface GateOutcome {
+  outcome: "ok" | "failed" | "budget-exhausted";
+  /** Items fed to THIS call. Load-bearing: the duration-vs-n correlation is what decides
+   *  whether the batch needs chunking, and later batch-growth work must be able to split
+   *  pre/post populations off this field. */
+  n: number;
+  scored: number;
+  aboveFloor: number;
+  durationMs: number;
+  attempt: number;
+  attemptTimeoutMs: number;
+  promptChars: number;
+  error?: string;
+}
+
+/**
+ * THE capture-gate measurement surface — emitted for EVERY gate call, success and
+ * failure alike. Nothing else records gate duration: `haiku_usage` has no duration column
+ * and is written only on success, `spawnHaiku` emits no `claude` span for this call, and
+ * the `Capture: queued` line only fires when something was actually captured. One
+ * grep-stable prefix (`x-capture-gate`) so the log history can be mined directly.
+ */
+function logGateOutcome(o: GateOutcome, botName: string | undefined): void {
+  const msg =
+    "x-capture-gate {outcome}: n={n} scored={scored} aboveFloor={aboveFloor} durationMs={durationMs} attempt={attempt}/{maxAttempts} timeoutMs={attemptTimeoutMs} promptChars={promptChars}";
+  const props = { botName, maxAttempts: CAPTURE_GATE_MAX_ATTEMPTS, ...o };
+  if (o.outcome === "ok") log.info(msg, props);
+  else log.warn(`${msg} error={error}`, props);
+}
+
+/**
  * Score the eligible subset (long-form `x-post` + pointer `x-link` tweets) with one Haiku
- * call. Returns the parsed `{n,score,why}` array (model omits the not-worth-saving).
- * Throws on a model error or unparseable output so the caller can log + fall back to the
- * alert path.
+ * call, retried once. Returns the parsed `{n,score,why}` array (model omits the
+ * not-worth-saving). Throws on a model error or unparseable output that survives the
+ * retry, so the caller can log + fall back to the alert path.
+ *
+ * Bounded by `deadline` (an absolute epoch-ms instant off the RUNNER'S clock): each
+ * attempt gets `min(CAPTURE_GATE_TIMEOUT_MS, remaining)` and no attempt is started that
+ * the remaining budget can't cover. Overrunning the runner's net doesn't just lose the
+ * capture — it re-saves the OLD `lastNotifiedIds` and re-fetches the whole batch next
+ * run, so the invariant is hard.
  */
 async function runCaptureGate(
   eligible: EligibleTweet[],
+  config: XWatcherConfig,
   botName: string | undefined,
   interestProfile: string | null,
+  deadline: number,
   telemetry?: HaikuTelemetry,
 ): Promise<GateScore[]> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
@@ -955,16 +1064,65 @@ async function runCaptureGate(
   const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
   const prompt = `${criteria}\n\nPosts:\n\n${list}`;
 
-  const { result } = await spawnHaiku(prompt, {
-    source: "watcher-x-capture",
-    entrypoint: `${botName ?? "jarvis"}-watcher`,
-    botName,
-    model: DEFAULT_MODEL,
-    timeoutMs: CAPTURE_GATE_TIMEOUT_MS,
-    ...telemetry,
-  });
+  const base = {
+    n: eligible.length,
+    promptChars: prompt.length,
+    scored: 0,
+    aboveFloor: 0,
+  };
 
-  return parseGateScores(result);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= CAPTURE_GATE_MAX_ATTEMPTS; attempt++) {
+    const attemptTimeoutMs = captureAttemptTimeoutMs(deadline, Date.now());
+    if (attemptTimeoutMs === null) {
+      // Hard budget invariant: never start an attempt the remaining budget can't cover.
+      logGateOutcome(
+        { ...base, outcome: "budget-exhausted", durationMs: 0, attempt, attemptTimeoutMs: 0, error: "capture budget exhausted" },
+        botName,
+      );
+      break;
+    }
+    const startedAt = Date.now();
+    try {
+      const { result } = await spawnHaiku(prompt, {
+        source: "watcher-x-capture",
+        entrypoint: `${botName ?? "jarvis"}-watcher`,
+        botName,
+        model: DEFAULT_MODEL,
+        timeoutMs: attemptTimeoutMs,
+        ...telemetry,
+      });
+      const scores = parseGateScores(result);
+      const byN = indexScoresByN(scores, eligible.length);
+      let aboveFloor = 0;
+      for (let i = 0; i < eligible.length; i++) {
+        const s = byN.get(i + 1);
+        if (s && passesCaptureFloor(eligible[i]!, s, config)) aboveFloor++;
+      }
+      logGateOutcome(
+        { ...base, outcome: "ok", scored: scores.length, aboveFloor, durationMs: Date.now() - startedAt, attempt, attemptTimeoutMs },
+        botName,
+      );
+      return scores;
+    } catch (err) {
+      lastError = err;
+      logGateOutcome(
+        {
+          ...base,
+          outcome: "failed",
+          durationMs: Date.now() - startedAt,
+          attempt,
+          attemptTimeoutMs,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        botName,
+      );
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(lastError ? String(lastError) : "capture gate budget exhausted before any attempt");
 }
 
 /**
@@ -981,6 +1139,8 @@ async function captureXCandidates(
   docs: TweetDoc[],
   config: XWatcherConfig,
   watcher: Watcher,
+  /** Absolute instant the capture leg must be done by — see {@link captureBudgetDeadline}. */
+  deadline: number,
   botName?: string,
   interestProfile: string | null = null,
   telemetry?: HaikuTelemetry,
@@ -1023,7 +1183,7 @@ async function captureXCandidates(
 
   let scored: GateScore[];
   try {
-    scored = await runCaptureGate(eligible, botName, interestProfile, telemetry);
+    scored = await runCaptureGate(eligible, config, botName, interestProfile, deadline, telemetry);
   } catch (err) {
     log.error("Capture gate failed, proceeding with alert path ({n} eligible tweet(s) lost to inbox): {error}", {
       botName,
@@ -1039,16 +1199,11 @@ async function captureXCandidates(
   for (let i = 0; i < eligible.length; i++) {
     const score = byN.get(i + 1);
     if (!score) continue;
-    const { doc, author, authorScore, tier, kind } = eligible[i]!;
-    // Per-kind floor (single source of truth): x-post → per-tier floor (non-top raise
-    // applies, EXCEPT for `**Type:** article` — long-form by construction, see the
-    // precedence table on captureFloorForTier); x-link → the pointer-tweet floor
-    // (already top-author-only by eligibility, so no non-top raise).
-    const floor =
-      kind === "x-link"
-        ? captureFloorForXLink(config)
-        : captureFloorForTier(tier, config, doc.docType);
-    if (score.score < floor) continue;
+    const item = eligible[i]!;
+    const { doc, author, authorScore, kind } = item;
+    // Per-kind floor — shared with the gate's outcome log so `aboveFloor` there always
+    // means exactly "would be captured here".
+    if (!passesCaptureFloor(item, score, config)) continue;
     const firstLine = doc.firstLine.trim() || doc.text;
     // An X Article's own permalink is the thing worth opening from /summaries — the
     // announcing tweet is just the pointer. Gated on `docType === "article"`, NOT on
@@ -1108,6 +1263,12 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   const config = watcher.config as XWatcherConfig;
   const known = new Set(watcher.lastNotifiedIds);
 
+  // Capture's hard completion budget is anchored HERE — `checkX` entry is effectively the
+  // runner's clock (`runChecker` awaits this call immediately after starting
+  // `withWatcherTimeout`). Anchoring it after the fetch below would silently grant the
+  // gate up to 80 per-doc HTTP fetches' worth of extra time and overshoot the net.
+  const captureDeadline = captureBudgetDeadline(watcher, Date.now());
+
   const data = config.collection
     ? await fetchFromCollection(config, known, botName)
     : await fetchFromPython(config, known, botName);
@@ -1131,7 +1292,7 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   // never rejects and the alert path is never broken.
   const capturePromise: Promise<void> =
     config.captureCandidates && data.docs && data.docs.length > 0
-      ? captureXCandidates(data.docs, config, watcher, botName, interestProfile, telemetry).catch((err) => {
+      ? captureXCandidates(data.docs, config, watcher, captureDeadline, botName, interestProfile, telemetry).catch((err) => {
           log.error("Candidate capture failed (alert path unaffected): {error}", {
             botName,
             error: err instanceof Error ? err.message : String(err),
