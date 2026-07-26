@@ -10,6 +10,7 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
 
 setupTestDb();
@@ -180,6 +181,25 @@ describe("summary-candidates", () => {
     expect(after.dismissedReason).toBeNull();
     expect(after.score).toBeCloseTo(0.97, 5);
     expect(after.why).toBe("the 0.97 wave");
+  });
+
+  test("a SWEPT row is re-admitted — the backlog sweep is bulk bookkeeping, not a judgement", async () => {
+    // The one-shot hype-dedup sweep clears a pre-calibration shelf in bulk. If that reason
+    // were terminal, a swept destination key would be poisoned forever and silently swallow
+    // every later wave member — exactly the failure the 'expired' carve-out exists to stop.
+    await upsertDestinationCandidate(member({ score: 0.7, why: "pre-calibration capture" }));
+    const first = (await getCandidateBySourceUrl("x", destUrl))!;
+    await setCandidateStatus(first.id, "dismissed", null, HYPE_DEDUP_SWEEP_REASON);
+
+    expect(
+      await upsertDestinationCandidate(member({ score: 0.96, why: "post-sweep 0.96 wave" })),
+    ).toBe(true);
+
+    const after = (await getCandidateById(first.id))!;
+    expect(after.status).toBe("new");
+    expect(after.dismissedReason).toBeNull();
+    expect(after.score).toBeCloseTo(0.96, 5);
+    expect(after.why).toBe("post-sweep 0.96 wave");
   });
 
   test("a tie bumps updated_at (expiry clock) without touching any content column", async () => {
@@ -440,7 +460,7 @@ describe("summary-candidates", () => {
       score: number,
       kind: "doc" | "commit" | "release" | "blog" | "x-post",
       status: "summarized" | "dismissed" | "error",
-      reason?: "manual" | "expired",
+      reason?: "manual" | "expired" | typeof HYPE_DEDUP_SWEEP_REASON,
       source = "anthropic",
     ) {
       const url = "https://o/" + slug;
@@ -473,6 +493,60 @@ describe("summary-candidates", () => {
       expect(doc.total).toBe(5);
       // acceptance = summarized / (summarized + manual) = 2/3; expired + unknown are OUT.
       expect(doc.acceptanceRate).toBeCloseTo(2 / 3, 3);
+    });
+
+    test("hype-dedup-sweep rows get their own bucket: counted in total, OUT of the acceptance denominator", async () => {
+      await seedOutcome("hs1", 0.9, "x-post", "summarized", undefined, "x");
+      await seedOutcome("hm1", 0.9, "x-post", "dismissed", "manual", "x");
+      // The one-shot backlog sweep bulk-dismisses a pre-calibration shelf.
+      await seedOutcome("hw1", 0.9, "x-post", "dismissed", HYPE_DEDUP_SWEEP_REASON, "x");
+      await seedOutcome("hw2", 0.9, "x-post", "dismissed", HYPE_DEDUP_SWEEP_REASON, "x");
+
+      const stats = await candidateOutcomeStats();
+      const x = stats.byKind.find((k) => k.source === "x" && k.kind === "x-post")!;
+      expect(x).toBeDefined();
+      expect(x.dismissedSwept).toBe(2);
+      // Swept rows land in NEITHER manual nor unknown.
+      expect(x.dismissedManual).toBe(1);
+      expect(x.dismissedUnknown).toBe(0);
+      expect(x.dismissedExpired).toBe(0);
+      // total includes them …
+      expect(x.total).toBe(4);
+      // … but the rate is still summarized / (summarized + manual) = 1/2, untouched.
+      expect(x.acceptanceRate).toBeCloseTo(0.5, 3);
+
+      // Same honesty in the score-band histogram.
+      const band = stats.byBand.find((b) => b.band === 0.9)!;
+      expect(band.dismissedSwept).toBe(2);
+      expect(band.total).toBe(4);
+      expect(band.acceptanceRate).toBeCloseTo(0.5, 3);
+    });
+
+    test("an UNCLASSIFIED dismissed_reason lands in the catch-all bucket, still counted in total", async () => {
+      // dismissed_reason is free text: a future sweep/auto-dismisser must not silently
+      // fall out of `total` (which would make the shelf accounting quietly wrong).
+      await seedOutcome("os1", 0.7, "doc", "summarized");
+      await seedOutcome("om1", 0.7, "doc", "dismissed", "manual");
+      const other = await seedOutcome("oo1", 0.7, "doc", "dismissed");
+      const sql = getDb();
+      await sql`UPDATE summary_candidates SET dismissed_reason = 'some-future-sweep' WHERE id = ${other.id}`;
+
+      const stats = await candidateOutcomeStats();
+      const doc = stats.byKind.find((k) => k.source === "anthropic" && k.kind === "doc")!;
+      expect(doc.dismissedOther).toBe(1);
+      // It is NOT miscounted as any of the known buckets.
+      expect(doc.dismissedManual).toBe(1);
+      expect(doc.dismissedExpired).toBe(0);
+      expect(doc.dismissedSwept).toBe(0);
+      expect(doc.dismissedUnknown).toBe(0);
+      // Counted in total …
+      expect(doc.total).toBe(3);
+      // … but OUT of the acceptance denominator: 1/(1+1).
+      expect(doc.acceptanceRate).toBeCloseTo(0.5, 3);
+
+      const band = stats.byBand.find((b) => b.band === 0.7)!;
+      expect(band.dismissedOther).toBe(1);
+      expect(band.total).toBe(3);
     });
 
     test("acceptanceRate is null when there are no accept/reject decisions", async () => {
