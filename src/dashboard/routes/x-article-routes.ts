@@ -125,6 +125,19 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
     return c.json({ job_id: jobId, dashboard_url: `/summaries?source=x-article&job=${jobId}` });
   });
 
+  // The shared vertical only preflights `<apiBase>/summarize` — the video
+  // endpoint needs its own OPTIONS for cross-origin (Chrome extension) POSTs.
+  app.options("/api/x-articles/summarize-video", () => {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  });
+
   app.post("/api/x-articles/summarize-video", async (c) => {
     c.header("Access-Control-Allow-Origin", "*");
 
