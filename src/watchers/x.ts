@@ -5,7 +5,7 @@ import { upsertCandidate } from "../db/summary-candidates.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
 import { applyAmplification, resolveAmplificationConfig, type AmplificationConfig } from "./x-amplification.ts";
-import { computeWatcherTimeoutMs } from "./timeout.ts";
+import { WATCHER_TIMEOUT_MARGIN_MS, TICK_TIMEOUT_MS } from "./timeout.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -830,6 +830,15 @@ function authorTierLabel(tier: AuthorTier | null): string | null {
  * summary — never captured.
  */
 const LONGFORM_MIN_CHARS = 800;
+
+/**
+ * Default model-call timeout for an X row that configures none — the ONE default both
+ * legs read: the digest call (`runAlertPath`) and the capture budget
+ * ({@link captureBudgetMs}). Previously only the digest leg had it, while capture derived
+ * its budget from `computeWatcherTimeoutMs`'s unrelated 120s floor.
+ */
+const DEFAULT_X_TIMEOUT_MS = 300_000;
+
 /**
  * Capture-gate model-call timeout, PER ATTEMPT. Raised 90s → 180s after 2026-07-26,
  * when the gate produced ZERO successful runs for a day: the 90s cap was hit at
@@ -846,15 +855,17 @@ const CAPTURE_GATE_MAX_ATTEMPTS = 2;
 /**
  * Never start a gate attempt with less than this much budget left. An attempt that
  * can't plausibly finish is worse than not trying: it burns the remaining budget and
- * still returns nothing, and the 2026-07-26 sample shows successful passes taking tens
- * of seconds. Below the floor the gate gives up immediately and logs a
- * `budget-exhausted` outcome instead.
+ * still returns nothing. **45s is calibrated from the observed floor** — the fastest
+ * empirically observed SUCCESSFUL gate call is 22.9s, so a 20s window (the first cut of
+ * this constant) was near-certain waste. Re-cut it from the first week of
+ * `x-capture-gate` `ok` lines (a low percentile of `durationMs`) once they exist. Below
+ * the floor the gate gives up immediately and logs a `budget-exhausted` outcome instead.
  */
-const CAPTURE_GATE_MIN_ATTEMPT_MS = 20_000;
+const CAPTURE_GATE_MIN_ATTEMPT_MS = 45_000;
 
 /**
- * Safety margin subtracted from the runner's per-watcher net to get the capture leg's
- * hard completion budget (630s net − 60s ⇒ ~570s for X Highlights).
+ * Safety margin subtracted from `min(watcher net, scheduler tick)` to get the capture
+ * leg's hard completion budget (X Highlights: 630s net capped by the 600s tick ⇒ 540s).
  *
  * Blowing the net is CATASTROPHIC, not soft: `withWatcherTimeout` rejects, the runner's
  * catch re-saves the OLD `lastNotifiedIds` (`runner.ts`), so the whole batch is
@@ -866,6 +877,25 @@ const CAPTURE_GATE_MIN_ATTEMPT_MS = 20_000;
 const CAPTURE_BUDGET_SAFETY_MARGIN_MS = 60_000;
 
 /**
+ * The capture leg's hard completion budget, in ms from the run's start.
+ *
+ * Ceiling is `min(watcher net, scheduler tick)`, minus the safety margin:
+ *   - **watcher net** = `(config.timeoutMs ?? DEFAULT_X_TIMEOUT_MS) + WATCHER_TIMEOUT_MARGIN_MS`.
+ *     The default is read from the SAME `?? DEFAULT_X_TIMEOUT_MS` the digest leg uses, not
+ *     from `computeWatcherTimeoutMs`'s 120s no-config FLOOR — that floor is a safety net for
+ *     watcher types with no model call worth speaking of, and deriving the capture budget
+ *     from it gave an un-configured X row a 60s budget, i.e. WORSE than the pre-retry flat
+ *     90s and with the retry permanently dead. One field, one default, both legs.
+ *   - **scheduler tick** ({@link TICK_TIMEOUT_MS}, 600s) is the TRUE ceiling: the tick race
+ *     fires before a 630s net ever would.
+ */
+export function captureBudgetMs(watcher: Watcher): number {
+  const configured = (watcher.config as XWatcherConfig | undefined)?.timeoutMs;
+  const net = (configured ?? DEFAULT_X_TIMEOUT_MS) + WATCHER_TIMEOUT_MARGIN_MS;
+  return Math.max(0, Math.min(net, TICK_TIMEOUT_MS) - CAPTURE_BUDGET_SAFETY_MARGIN_MS);
+}
+
+/**
  * Absolute wall-clock deadline the capture leg must finish by, derived from the RUNNER'S
  * clock. `runStartedAt` must be sampled at `checkX` entry — i.e. BEFORE
  * `fetchFromCollection`, which does up to `maxDocs` (80) per-doc HTTP fetches. A deadline
@@ -873,7 +903,7 @@ const CAPTURE_BUDGET_SAFETY_MARGIN_MS = 60_000;
  * top of the net and overshoot it.
  */
 export function captureBudgetDeadline(watcher: Watcher, runStartedAt: number): number {
-  return runStartedAt + Math.max(0, computeWatcherTimeoutMs(watcher) - CAPTURE_BUDGET_SAFETY_MARGIN_MS);
+  return runStartedAt + captureBudgetMs(watcher);
 }
 
 /**
@@ -1000,9 +1030,16 @@ interface GateOutcome {
    *  whether the batch needs chunking, and later batch-growth work must be able to split
    *  pre/post populations off this field. */
   n: number;
-  scored: number;
-  aboveFloor: number;
+  /** USABLE parsed scores (`indexScoresByN` size — out-of-range/duplicate `n`s dropped),
+   *  not the raw parsed-entry count. **`ok` outcomes only** — on a failed/exhausted call
+   *  there is nothing scored, and emitting `0` there is indistinguishable from "ran and
+   *  scored nothing", which would poison any mining of the acceptance rate. */
+  scored?: number;
+  /** Items that would actually be captured (`passesCaptureFloor`). `ok` only, same reason. */
+  aboveFloor?: number;
   durationMs: number;
+  /** Attempts actually MADE (so a `budget-exhausted` line before attempt k reports k−1,
+   *  never a phantom attempt that never ran). */
   attempt: number;
   attemptTimeoutMs: number;
   promptChars: number;
@@ -1015,10 +1052,16 @@ interface GateOutcome {
  * and is written only on success, `spawnHaiku` emits no `claude` span for this call, and
  * the `Capture: queued` line only fires when something was actually captured. One
  * grep-stable prefix (`x-capture-gate`) so the log history can be mined directly.
+ *
+ * The rendered placeholders and the structured props in the JSONL sink carry the SAME
+ * names (notably `attemptTimeoutMs`, never a rendered-only `timeoutMs` alias) — a mining
+ * script written off the rendered line must find the same field in the sink.
  */
 function logGateOutcome(o: GateOutcome, botName: string | undefined): void {
+  // `scored`/`aboveFloor` are omitted entirely on non-ok outcomes (see GateOutcome).
+  const counts = o.outcome === "ok" ? " scored={scored} aboveFloor={aboveFloor}" : "";
   const msg =
-    "x-capture-gate {outcome}: n={n} scored={scored} aboveFloor={aboveFloor} durationMs={durationMs} attempt={attempt}/{maxAttempts} timeoutMs={attemptTimeoutMs} promptChars={promptChars}";
+    `x-capture-gate {outcome}: n={n}${counts} durationMs={durationMs} attempt={attempt}/{maxAttempts} attemptTimeoutMs={attemptTimeoutMs} promptChars={promptChars}`;
   const props = { botName, maxAttempts: CAPTURE_GATE_MAX_ATTEMPTS, ...o };
   if (o.outcome === "ok") log.info(msg, props);
   else log.warn(`${msg} error={error}`, props);
@@ -1067,21 +1110,32 @@ async function runCaptureGate(
   const base = {
     n: eligible.length,
     promptChars: prompt.length,
-    scored: 0,
-    aboveFloor: 0,
   };
 
   let lastError: unknown;
+  let attemptsMade = 0;
+  let budgetExhausted = false;
   for (let attempt = 1; attempt <= CAPTURE_GATE_MAX_ATTEMPTS; attempt++) {
     const attemptTimeoutMs = captureAttemptTimeoutMs(deadline, Date.now());
     if (attemptTimeoutMs === null) {
       // Hard budget invariant: never start an attempt the remaining budget can't cover.
+      // `attempt` here is the one we're DECLINING to start, so the log reports the
+      // attempts actually made (`attemptsMade`), never a phantom.
+      budgetExhausted = true;
       logGateOutcome(
-        { ...base, outcome: "budget-exhausted", durationMs: 0, attempt, attemptTimeoutMs: 0, error: "capture budget exhausted" },
+        {
+          ...base,
+          outcome: "budget-exhausted",
+          durationMs: 0,
+          attempt: attemptsMade,
+          attemptTimeoutMs: 0,
+          error: "capture budget exhausted",
+        },
         botName,
       );
       break;
     }
+    attemptsMade = attempt;
     const startedAt = Date.now();
     try {
       const { result } = await spawnHaiku(prompt, {
@@ -1092,6 +1146,10 @@ async function runCaptureGate(
         timeoutMs: attemptTimeoutMs,
         ...telemetry,
       });
+      // Read the clock the instant the model call returns — `durationMs` must be MODEL
+      // latency (the number the chunking decision correlates against n), not model +
+      // parse + floor loop.
+      const durationMs = Date.now() - startedAt;
       const scores = parseGateScores(result);
       const byN = indexScoresByN(scores, eligible.length);
       let aboveFloor = 0;
@@ -1100,7 +1158,9 @@ async function runCaptureGate(
         if (s && passesCaptureFloor(eligible[i]!, s, config)) aboveFloor++;
       }
       logGateOutcome(
-        { ...base, outcome: "ok", scored: scores.length, aboveFloor, durationMs: Date.now() - startedAt, attempt, attemptTimeoutMs },
+        // `scored` is the USABLE count (byN.size), not scores.length — `indexScoresByN`
+        // drops out-of-range/duplicate `n`s, and those never reach the persist loop.
+        { ...base, outcome: "ok", scored: byN.size, aboveFloor, durationMs, attempt, attemptTimeoutMs },
         botName,
       );
       return scores;
@@ -1120,9 +1180,17 @@ async function runCaptureGate(
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(lastError ? String(lastError) : "capture gate budget exhausted before any attempt");
+  // Budget termination must survive into the caller's `Capture gate failed` line —
+  // rethrowing attempt 1's raw error there would hide the fact that the retry never ran.
+  const raw = lastError instanceof Error ? lastError.message : lastError ? String(lastError) : null;
+  if (budgetExhausted) {
+    throw new Error(
+      raw
+        ? `capture budget exhausted after attempt ${attemptsMade}: ${raw}`
+        : "capture budget exhausted before any attempt was started",
+    );
+  }
+  throw lastError instanceof Error ? lastError : new Error(raw ?? "capture gate failed");
 }
 
 /**
@@ -1267,7 +1335,17 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   // runner's clock (`runChecker` awaits this call immediately after starting
   // `withWatcherTimeout`). Anchoring it after the fetch below would silently grant the
   // gate up to 80 per-doc HTTP fetches' worth of extra time and overshoot the net.
-  const captureDeadline = captureBudgetDeadline(watcher, Date.now());
+  const captureBudget = captureBudgetMs(watcher);
+  const captureDeadline = Date.now() + captureBudget;
+  // A budget under one full per-attempt timeout means the gate can't even run one
+  // uncapped attempt, let alone the retry — a degraded config, so say so out loud rather
+  // than silently shipping a gate that can only ever half-try.
+  if (config.captureCandidates && captureBudget < CAPTURE_GATE_TIMEOUT_MS) {
+    log.warn(
+      "Capture budget {budgetMs}ms is below the per-attempt gate timeout {attemptMs}ms — raise config.timeoutMs (gate attempts will be truncated and the retry may not fit)",
+      { botName, budgetMs: captureBudget, attemptMs: CAPTURE_GATE_TIMEOUT_MS },
+    );
+  }
 
   const data = config.collection
     ? await fetchFromCollection(config, known, botName)
@@ -1345,7 +1423,7 @@ ${texts.join(separator)}
 ${userPrompt}`;
 
   const model = config.model || DEFAULT_MODEL;
-  const timeoutMs = config.timeoutMs ?? 300_000;
+  const timeoutMs = config.timeoutMs ?? DEFAULT_X_TIMEOUT_MS;
   log.info("Summarizing {count} tweets with {model} (timeout {timeout}s)", {
     botName, count: texts.length, model, timeout: Math.round(timeoutMs / 1000),
   });

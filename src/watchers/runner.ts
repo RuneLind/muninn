@@ -86,9 +86,11 @@ export function isQuietHoursRunExempt(type: Watcher["type"]): boolean {
 
 /**
  * Per-watcher safety-net timeout — see `./timeout.ts` for the rationale and the
- * formula. Re-exported here because `runner.ts` has always been its import site
- * (and `checkX` now needs the same number to derive its capture budget, which
- * would close a `runner → x → runner` cycle if it lived here).
+ * formula. Re-exported here only for backwards compatibility with this module's
+ * long-standing import site: **new importers should take it from `./timeout.ts`
+ * directly** (as `checkX` does — importing it from here would close a
+ * `runner → x → runner` cycle). `TICK_TIMEOUT_MS` and `WATCHER_TIMEOUT_MARGIN_MS`
+ * live there too and are deliberately NOT re-exported here.
  */
 export { computeWatcherTimeoutMs };
 

@@ -7,6 +7,7 @@ import {
 } from "../db/goals.ts";
 import { getTasksDueNow } from "../db/scheduled-tasks.ts";
 import { runWatchers, getDueWatchers } from "../watchers/runner.ts";
+import { TICK_TIMEOUT_MS } from "../watchers/timeout.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
@@ -21,7 +22,8 @@ const log = getLog("scheduler");
 const intervals = new Map<string, ReturnType<typeof setInterval>>();
 const tickRunning = new Map<string, boolean>();
 let lastCleanupAt = 0;
-const TICK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per tick
+// TICK_TIMEOUT_MS lives in ../watchers/timeout.ts — checkers derive completion budgets
+// from `min(watcher net, tick)` and importing it from here would close an import cycle.
 
 // Store scheduler contexts so the dashboard can trigger manual runs
 const schedulerContexts = new Map<string, { api: Api; config: Config; botConfig: BotConfig }>();
