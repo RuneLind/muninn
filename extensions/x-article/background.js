@@ -32,6 +32,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ error: err.message });
       });
       return true;
+
+    case 'SUMMARIZE_VIDEO':
+      handleSummarizeVideo(message).then(sendResponse).catch(err => {
+        sendResponse({ error: err.message });
+      });
+      return true;
   }
 });
 
@@ -73,6 +79,31 @@ async function handleSummarize({ title, url, articleId, author, articleText }) {
 
   // Open dashboard in new tab to see streaming progress
   const dashboardUrl = `${settings.muninnUrl}${result.dashboard_url || `/x-articles?job=${result.job_id}`}`;
+  chrome.tabs.create({ url: dashboardUrl });
+
+  return result;
+}
+
+async function handleSummarizeVideo({ title, url }) {
+  const settings = await getSettings();
+
+  const response = await fetch(`${settings.muninnUrl}/api/x-articles/summarize-video`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, url }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    let msg = `Muninn error: ${response.status}`;
+    if (typeof err.error === 'string') msg = err.error;
+    throw new Error(msg);
+  }
+
+  const result = await response.json();
+
+  // Duplicate or fresh job — either way the dashboard URL shows the summary.
+  const dashboardUrl = `${settings.muninnUrl}${result.dashboard_url || `/summaries?source=x-article`}`;
   chrome.tabs.create({ url: dashboardUrl });
 
   return result;

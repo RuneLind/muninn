@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "X Article Summarizer",
-  "version": "1.0.0",
-  "description": "Summarize X/Twitter articles with Claude AI, store and find similar content",
+  "version": "1.1.0",
+  "description": "Summarize X/Twitter articles and video posts with Claude AI, store and find similar content",
   "permissions": [
     "storage",
     "activeTab"
