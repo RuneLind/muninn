@@ -922,6 +922,24 @@ export function captureAttemptTimeoutMs(deadline: number, now: number): number |
  * it: long-form notes/articles (judged on their own content) and top-author pointer tweets
  * (`x-link`, judged on the linked destination — marked by the per-item `links to:` line
  * `runCaptureGate` appends). The prompt teaches the model to tell them apart off that line.
+ *
+ * **Code-only** — `runCaptureGate` reads this constant unconditionally; the watcher row's
+ * `config.prompt` reaches ONLY the alert/digest path (`runAlertPath`), so calibration
+ * changes here ship without a seeded-prompt migration.
+ *
+ * Calibrated 2026-07-26 (X hype-dedup, step 1): the shelf was wall-to-wall engagement-farm
+ * pointer content at 0.9–0.95 because the only anchors were ~1.0/~0.7/~0.6 — nothing
+ * separated 0.9 from 0.95, and corr(gate score, author_score) measured −0.001 over 659
+ * candidates. Three edits: (a) a **repackaging cap** at ~0.8 for secondhand long-form,
+ * (b) real 0.8/0.9 anchors reserving ≥0.9 for primary sources / top-tier authors so the
+ * UI's "high" band means something, (c) an in-list topic dedup instruction.
+ *
+ * The cap's **pointer carve-out is load-bearing, not politeness**: pointer items are scored
+ * on their DESTINATION and stay uncapped. A blanket ≤0.8 cap would suppress exactly the
+ * artifacts the later destination-URL keying promotes — destination rows inherit the
+ * representative pointer's gate score, so capping every pointer would pin every promoted
+ * artifact below the 0.85 the inbox's `LIMIT 200` currently cuts at, while uncapped hype
+ * threads sat above them.
  */
 export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of X posts. For EACH one, decide whether a written summary is worth saving to read later.
 
@@ -932,11 +950,20 @@ The list mixes two kinds of item:
 For long-form notes:
   Weight HIGHEST: substantive technical insight, original analysis, research findings, agent/LLM/retrieval engineering lessons, thoughtful essays.
   Weight LOW (omit): hot takes, self-promotion, threads that are mostly links, engagement bait, news the engineer would already know, anything where the tweet already says everything.
-For pointer tweets (a "links to:" line), the "mostly links" / "already says everything" down-weights do NOT apply — a bare pointer to a substantive destination is exactly what we want. Omit one only when the destination itself looks like self-promotion, engagement bait, or something the engineer would already know.
+  REPACKAGING CAP — applies ONLY to long-form notes, NEVER to pointer items: if a long-form note's value is mostly a secondhand repackaging of someone else's artifact (a course, paper, article, video, release) — a recap, a "here is what it says" breakdown, a summary of an announcement — score it BY THAT ARTIFACT and cap the score at 0.8. The cap lifts only when the post adds original analysis, benchmarks, or first-hand experience of its own.
+For pointer tweets (a "links to:" line), the "mostly links" / "already says everything" down-weights do NOT apply — a bare pointer to a substantive destination is exactly what we want, and the repackaging cap above does NOT apply either: a pointer is scored on its DESTINATION with no cap, so a pointer to a primary source can score 0.9 or above. Omit one only when the destination itself looks like self-promotion, engagement bait, or something the engineer would already know.
+
+If several posts in this list point at the same resource/announcement, score only the strongest one and omit the rest.
 
 For EACH item worth saving, output one object:
   {"n": <the post number>, "score": <0.0-1.0>, "why": "<one short line on what reading it (or the linked content) would teach>"}
-Use ~1.0 for must-read, ~0.7 for clearly worthwhile, ~0.6 for borderline. OMIT items that aren't worth a summary — do not output them at all.
+Calibration anchors — use the whole range, and judge a pointer item's destination against these same anchors:
+  ~1.0 must-read.
+  ~0.9 and above is RESERVED for a primary source — the author's (or destination's) OWN work, paper, release, or announcement — or material from a top-tier author. Loud framing, ALL-CAPS, and engagement volume are NOT evidence of this; without primary-source or top-tier-author standing, do not go above 0.85.
+  ~0.8 strong secondhand coverage — also the ceiling for repackaged long-form (see the cap above).
+  ~0.7 clearly worthwhile.
+  ~0.6 borderline.
+OMIT items that aren't worth a summary — do not output them at all.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
 

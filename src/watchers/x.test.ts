@@ -151,6 +151,7 @@ const {
   coverageWarning,
   DEFAULT_X_PROMPT,
   DEFAULT_X_HIGHLIGHTS_PROMPT,
+  DEFAULT_X_CAPTURE_PROMPT,
 } = await import("./x.ts");
 
 // The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
@@ -1758,6 +1759,46 @@ describe("default prompt topic constraints", () => {
   test("DEFAULT_X_HIGHLIGHTS_PROMPT scopes 'exceptional' to the baseline topics + off-topic exclusion", () => {
     expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain(TOPIC_BASELINE);
     expect(DEFAULT_X_HIGHLIGHTS_PROMPT).toContain("regardless of how high its engagement is");
+  });
+});
+
+// ── Capture-gate calibration (X hype-dedup, step 1) ────────────────
+//
+// The displayed candidate score IS this prompt's output, so these are the only
+// deterministic assertions available on it — the shelf's 0.9–0.95 pile-up came from a
+// prompt whose only anchors were ~1.0/~0.7/~0.6. Guarded here because a later edit that
+// drops the pointer carve-out would silently pin every destination-keyed row (which
+// inherits its representative pointer's gate score) below the inbox's 0.85 cut.
+
+describe("DEFAULT_X_CAPTURE_PROMPT calibration", () => {
+  test("caps secondhand repackaging at 0.8 and scopes the cap to long-form only", () => {
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("REPACKAGING CAP");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("applies ONLY to long-form notes");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("cap the score at 0.8");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("adds original analysis");
+  });
+
+  test("pointer items are explicitly carved out of the cap and scored on the destination", () => {
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("NEVER to pointer items");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("the repackaging cap above does NOT apply either");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("scored on its DESTINATION with no cap");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("a pointer to a primary source can score 0.9 or above");
+  });
+
+  test("anchors the 0.8 and 0.9 bands and reserves >=0.9 for primary sources / top-tier authors", () => {
+    for (const anchor of ["~1.0", "~0.9", "~0.8", "~0.7", "~0.6"]) {
+      expect(DEFAULT_X_CAPTURE_PROMPT).toContain(anchor);
+    }
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("RESERVED for a primary source");
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("top-tier author");
+    // Loud framing is not evidence of primary-source standing — the farm-pointer failure mode.
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain("do not go above 0.85");
+  });
+
+  test("instructs in-list dedup across posts pointing at the same resource", () => {
+    expect(DEFAULT_X_CAPTURE_PROMPT).toContain(
+      "If several posts in this list point at the same resource/announcement, score only the strongest one and omit the rest.",
+    );
   });
 });
 
